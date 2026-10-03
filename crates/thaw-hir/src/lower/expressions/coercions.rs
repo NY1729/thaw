@@ -1901,12 +1901,15 @@ impl<'a> FnLowerer<'a> {
                 vec![value],
             )))),
             HirType::Object(fields) => {
-                // A `Date` is `{ timestamp }`; `ToNumber(date)` is its
-                // `valueOf()` (the timestamp), so `date1 < date2` and
-                // `date1 - date2` order by time.
-                if fields.len() == 1 && fields[0].0 == "timestamp" && fields[0].1 == HirType::F64 {
+                // Only the private Date layout follows Date valueOf
+                // semantics. A user object with a timestamp property
+                // must use ordinary object-to-primitive conversion.
+                if HirType::Object(fields.clone()) == date_object_type() {
                     return Ok(HirExpr::PropAccess(
-                        Box::new(value),
+                        Box::new(HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_date_assert_native_identity".into())),
+                            vec![value],
+                        )),
                         HirType::Object(fields),
                         "timestamp".to_string(),
                     ));

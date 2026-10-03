@@ -51,7 +51,13 @@ impl<'ctx> HirCompiler<'ctx> {
         backend_symbol: &str,
         extra: &[BasicMetadataValueEnum<'ctx>],
     ) -> Result<BasicValueEnum<'ctx>, String> {
-        let stringify_fn = self.module.get_function("thaw_json_stringify").unwrap();
+        let stringify_fn = self.module.get_function(
+            if backend_symbol.ends_with("_graph_result") {
+                "thaw_json_graph_encode"
+            } else {
+                "thaw_json_stringify"
+            }
+        ).unwrap();
         let args_json_str = self
             .builder
             .build_call(
@@ -63,6 +69,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .try_as_basic_value()
             .basic()
             .ok_or("thaw_json_stringify did not return a value")?;
+        let args_json_str = self.compile_check_json_stringify_error_with_cleanup(args_json_str, &[args_json_val])?;
 
         let call_fn = self.module.get_function(backend_symbol).unwrap();
         let mut call_args = vec![name_val.into(), args_json_str.into()];
@@ -110,21 +117,19 @@ impl<'ctx> HirCompiler<'ctx> {
         self.mark_pending_native_text(error)?;
         self.branch_on_pending_exception()?;
 
-        let parse_fn = self.module.get_function("thaw_json_parse").unwrap();
-        let parsed = self
-            .builder
-            .build_call(parse_fn, &[result_json_str.into()], "call_dynamic_result")
-            .map_err(|e| e.to_string())?
-            .try_as_basic_value()
-            .basic()
-            .ok_or_else(|| "thaw_json_parse did not return a value".to_string())?;
-        self.builder
-            .build_call(
-                self.module.get_function("thaw_cstring_destroy").unwrap(),
-                &[result_json_str.into()],
-                "destroy_call_dynamic_result_string",
-            )
-            .map_err(|error| error.to_string())?;
+        let parsed = if backend_symbol.ends_with("_graph_result") {
+            self.compile_decode_quickjs_graph(result_json_str.into())?
+        } else {
+            let parse_fn = self.module.get_function("thaw_json_parse").unwrap();
+            let parsed = self.builder.build_call(parse_fn, &[result_json_str.into()], "call_dynamic_result")
+                .map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                .ok_or_else(|| "thaw_json_parse did not return a value".to_string())?;
+            self.builder.build_call(self.module.get_function("thaw_cstring_destroy").unwrap(),
+                &[result_json_str.into()], "destroy_call_dynamic_result_string")
+                .map_err(|error| error.to_string())?;
+            parsed
+        };
+
         Ok(parsed)
     }
 
@@ -133,7 +138,7 @@ impl<'ctx> HirCompiler<'ctx> {
         json: BasicValueEnum<'ctx>,
         symbol: &str,
     ) -> Result<BasicValueEnum<'ctx>, String> {
-        self.builder
+        let value = self.builder
             .build_call(
                 self.module.get_function(symbol).unwrap(),
                 &[json.into()],
@@ -142,7 +147,9 @@ impl<'ctx> HirCompiler<'ctx> {
             .map_err(|error| error.to_string())?
             .try_as_basic_value()
             .basic()
-            .ok_or_else(|| format!("{symbol} returned no value"))
+            .ok_or_else(|| format!("{symbol} returned no value"))?;
+        self.compile_check_json_host_error(value,
+            (symbol == "thaw_json_as_string").then_some("thaw_cstring_destroy"))
     }
 
     fn compile_json_as_bool_value(
@@ -256,6 +263,23 @@ impl<'ctx> HirCompiler<'ctx> {
             .try_as_basic_value()
             .basic()
             .unwrap();
+        // Only ClassAlloc records this native Date identity. An ordinary
+        // object with the same fields is still serialized as ordinary data.
+        let date_identity = if fields.len() == 2
+            && fields[0].0 == "__thaw_class_identity_\u{1e}Date"
+            && fields[0].1 == HirType::Bool
+            && fields[1].0 == "timestamp"
+            && fields[1].1 == HirType::F64
+        {
+            let date_name = self.builder.build_global_string_ptr("Date", "native_date_identity_name")
+                .map_err(|error| error.to_string())?;
+            Some(self.builder.build_call(
+                self.module.get_function("thaw_object_has_class_identity").unwrap(),
+                &[object.into(), date_name.as_pointer_value().into()],
+                "has_native_date_identity",
+            ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                .ok_or("native Date identity query returned no value")?.into_int_value())
+        } else { None };
         // Snapshot all present own keys before a getter can mutate a later
         // marker. The physical field layout is static; the creation order is
         // per allocation and can differ after a fixed spread or rest copy.
@@ -336,9 +360,24 @@ impl<'ctx> HirCompiler<'ctx> {
                 self.builder.build_conditional_branch(chosen, write, next)
                     .map_err(|error| error.to_string())?;
                 self.builder.position_at_end(write);
+            let skip_marker = if index == 0 {
+                if let Some(identity) = date_identity {
+                    let function = self.current_function();
+                    let write = self.context.append_basic_block(function, "write_untrusted_date_marker");
+                    let done = self.context.append_basic_block(function, "date_marker_done");
+                    self.builder.build_conditional_branch(identity, done, write)
+                        .map_err(|error| error.to_string())?;
+                    self.builder.position_at_end(write);
+                    Some(done)
+                } else { None }
+            } else { None };
                 self.compile_native_object_json_field(
                     object, ty, fields, index, json, preserve_undefined,
                 )?;
+            if let Some(done) = skip_marker {
+                self.builder.build_unconditional_branch(done).map_err(|error| error.to_string())?;
+                self.builder.position_at_end(done);
+            }
                 self.builder.build_store(
                     *slot, i64_type.const_int(i64::MAX as u64, false),
                 ).map_err(|error| error.to_string())?;
@@ -350,6 +389,13 @@ impl<'ctx> HirCompiler<'ctx> {
                 .map_err(|error| error.to_string())?;
             self.builder.position_at_end(done);
         }
+        }
+        if let Some(identity) = date_identity {
+            self.builder.build_call(
+                self.module.get_function("thaw_json_brand_wrapper_if").unwrap(),
+                &[json.into(), identity.into()],
+                "brand_native_date_json",
+            ).map_err(|error| error.to_string())?;
         }
         // Carries `object`'s own frozen/sealed/non-extensible state (if
         // any -- a no-op otherwise) across onto the freshly built `json`
@@ -589,6 +635,7 @@ impl<'ctx> HirCompiler<'ctx> {
                         &abi_params,
                         ret,
                         has_rest,
+                        false,
                     )?;
                     value = self.compile_dynamic_value_placeholder(value)?;
                     "thaw_json_object_set_json"
@@ -605,6 +652,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 "set_dynamic_object_field",
             )
             .map_err(|error| error.to_string())?;
+        self.compile_check_json_host_error(json, None)?;
         Ok(())
     }
 
@@ -684,7 +732,12 @@ impl<'ctx> HirCompiler<'ctx> {
                 "dynamic_handle_placeholder_id",
             )
             .map_err(|error| error.to_string())?;
-        Ok(placeholder)
+        let branded = self.builder.build_call(
+            self.module.get_function("thaw_json_brand_wrapper").unwrap(),
+            &[placeholder.into()], "brand_dynamic_handle_placeholder",
+        ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+            .ok_or("thaw_json_brand_wrapper returned no value")?;
+        Ok(branded)
     }
 
     /// Sets a `Union`-typed object field's JSON value -- the same

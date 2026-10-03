@@ -898,7 +898,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 let args_json = self
                     .builder
                     .build_call(
-                        self.module.get_function("thaw_json_stringify").unwrap(),
+                        self.module.get_function("thaw_json_graph_encode").unwrap(),
                         &[array.into()],
                         "napi_handle_args",
                     )
@@ -906,13 +906,14 @@ impl<'ctx> HirCompiler<'ctx> {
                     .try_as_basic_value()
                     .basic()
                     .unwrap();
+                let args_json = self.compile_check_json_stringify_error_with_cleanup(args_json, &[array])?;
                 let result = if !function_argument.is_empty() {
                     let functions =
                         self.compile_napi_function_arguments(&callback_values, &function_argument)?;
                     self.builder.build_call(
                         self.module
                             .get_function(
-                                "thaw_napi_call_export_handle_with_functions_typed_result",
+                                "thaw_napi_call_export_handle_with_functions_typed_graph_args_result",
                             )
                             .unwrap(),
                         &[
@@ -929,7 +930,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 } else {
                     self.builder.build_call(
                         self.module
-                            .get_function("thaw_napi_call_export_handle_typed_result")
+                            .get_function("thaw_napi_call_export_handle_typed_graph_args_result")
                             .unwrap(),
                         &[name.as_pointer_value().into(), args_json.into()],
                         "napi_export_handle_result",
@@ -965,7 +966,7 @@ impl<'ctx> HirCompiler<'ctx> {
             let args_json = self
                 .builder
                 .build_call(
-                    self.module.get_function("thaw_json_stringify").unwrap(),
+                    self.module.get_function("thaw_json_graph_encode").unwrap(),
                     &[array.into()],
                     "napi_constructor_args",
                 )
@@ -973,11 +974,12 @@ impl<'ctx> HirCompiler<'ctx> {
                 .try_as_basic_value()
                 .basic()
                 .unwrap();
+            let args_json = self.compile_check_json_stringify_error_with_cleanup(args_json, &[array])?;
             let result = self
                 .builder
                 .build_call(
                     self.module
-                        .get_function("thaw_napi_construct_handle_typed_result")
+                        .get_function("thaw_napi_construct_handle_typed_graph_args_result")
                         .unwrap(),
                     &[constructor.into(), args_json.into()],
                     "napi_construct_result",
@@ -1031,7 +1033,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 let args_json = self
                     .builder
                     .build_call(
-                        self.module.get_function("thaw_json_stringify").unwrap(),
+                        self.module.get_function("thaw_json_graph_encode").unwrap(),
                         &[array.into()],
                         "typed_dynamic_construct_args",
                     )
@@ -1039,11 +1041,12 @@ impl<'ctx> HirCompiler<'ctx> {
                     .try_as_basic_value()
                     .basic()
                     .unwrap();
+                let args_json = self.compile_check_json_stringify_error_with_cleanup(args_json, &[array])?;
                 let result = self
                     .builder
                     .build_call(
                         self.module
-                            .get_function("thaw_js_construct_handle_result")
+                            .get_function("thaw_js_construct_handle_graph_args_result")
                             .unwrap(),
                         &[constructor.into(), args_json.into()],
                         "typed_dynamic_construct_result",
@@ -1089,7 +1092,7 @@ impl<'ctx> HirCompiler<'ctx> {
             let args_json = self
                 .builder
                 .build_call(
-                    self.module.get_function("thaw_json_stringify").unwrap(),
+                    self.module.get_function("thaw_json_graph_encode").unwrap(),
                     &[array.into()],
                     "typed_dynamic_callable_args",
                 )
@@ -1097,11 +1100,12 @@ impl<'ctx> HirCompiler<'ctx> {
                 .try_as_basic_value()
                 .basic()
                 .unwrap();
+            let args_json = self.compile_check_json_stringify_error_with_cleanup(args_json, &[array])?;
             let result = self
                 .builder
                 .build_call(
                     self.module
-                        .get_function("thaw_js_call_handle_handle_result")
+                        .get_function("thaw_js_call_handle_handle_graph_args_result")
                         .unwrap(),
                     &[
                         callable.into(),
@@ -1146,15 +1150,15 @@ impl<'ctx> HirCompiler<'ctx> {
             let json = self.compile_json_backend_values_with_extra(
                 name.as_pointer_value().into(),
                 array,
-                "thaw_napi_call_with_functions_typed_result",
+                "thaw_napi_call_with_functions_typed_graph_result",
                 &[functions.into(), count.into()],
             )?;
             return self.compile_typed_dynamic_result(json, &signature.ret);
         }
         let backend = match signature.backend {
             DynamicBackend::Jit => unreachable!("JIT calls return before JSON marshalling"),
-            DynamicBackend::QuickJs => "thaw_js_call_result",
-            DynamicBackend::Napi => "thaw_napi_call_typed_result",
+            DynamicBackend::QuickJs => "thaw_js_call_graph_result",
+            DynamicBackend::Napi => "thaw_napi_call_typed_graph_result",
         };
         let json =
             self.compile_json_backend_values(name.as_pointer_value().into(), array, backend)?;

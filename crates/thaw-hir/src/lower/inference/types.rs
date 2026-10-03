@@ -489,6 +489,16 @@ impl<'a> FnLowerer<'a> {
                         }
                         return Ok(HirType::Bool);
                     }
+                    "__thaw_date_assert_native_identity" => {
+                        let [value] = args.as_slice() else { return Err("Date identity assertion expects one operand".into()); };
+                        self.expect_type(&date_object_type(), value, "Date identity operand")?;
+                        return Ok(date_object_type());
+                    }
+                    "__thaw_date_has_native_identity" => {
+                        let [value] = args.as_slice() else { return Err("Date identity check expects one operand".into()); };
+                        self.expect_type(&date_object_type(), value, "Date identity operand")?;
+                        return Ok(HirType::Bool);
+                    }
 
                     "__thaw_assert_class_identity" => {
                         let [object, HirExpr::Lit(HirLit::Str(_))] = args.as_slice() else {
@@ -1891,7 +1901,11 @@ impl<'a> FnLowerer<'a> {
                                 "Object.keys expected a JSON value or dictionary, got {ty:?}"
                             ));
                         }
-                        return Ok(HirType::Array(Box::new(HirType::Str)));
+                        return Ok(HirType::Array(Box::new(if name == "__thaw_json_own_keys" {
+                            HirType::Json
+                        } else {
+                            HirType::Str
+                        })));
                     }
                     "__thaw_array_keys" => {
                         let [value, include_length] = args.as_slice() else {
@@ -2081,6 +2095,8 @@ impl<'a> FnLowerer<'a> {
                     "__thaw_json_is_date_shape" => return Ok(HirType::Bool),
                     "__thaw_json_is_buffer_shape" => return Ok(HirType::Bool),
                     "__thaw_json_date_timestamp" => return Ok(HirType::F64),
+                    "__thaw_json_date_set_timestamp" => return Ok(HirType::F64),
+                    "__thaw_json_brand_wrapper" => return Ok(HirType::Json),
                     "__thaw_json_has_wrapper_key" => return Ok(HirType::Bool),
                     "__thaw_json_map_or_set_entries"
                     | "__thaw_json_map_or_set_get"
@@ -2304,17 +2320,20 @@ impl<'a> FnLowerer<'a> {
                     | "deleteDynamicProperty" | "hasDynamicProperty" => {
                         return Ok(HirType::Bool)
                     }
-                    "callDynamicMethod" => return Ok(HirType::Json),
+                    "callDynamicMethod" | "__thaw_call_selected_dynamic_method" => return Ok(HirType::Json),
                     // Sibling of `callDynamicMethod` for a method whose
                     // own result is itself a `JsValue` rather than plain
                     // data -- see `lower_dynamic_value_method_call`'s doc
                     // comment for how a call chooses between the two.
-                    "callDynamicMethodHandle" | "callDynamicMethodHandleRaw" => {
+                    "callDynamicMethodHandle" | "callDynamicMethodHandleRaw"
+                    | "__thaw_call_selected_dynamic_method_handle"
+                    | "__thaw_call_selected_dynamic_method_raw" => {
                         return Ok(HirType::JsValue)
                     }
                     "readDynamicValue" => return Ok(HirType::Json),
                     "retainDynamicJson" => return Ok(HirType::JsValue),
                     "callDynamicValueMixed" => return Ok(HirType::Json),
+                    "callDynamicValueMixedNativeJson" => return Ok(HirType::Json),
                     "callDynamicValueMixedHandle" => return Ok(HirType::JsValue),
                     "constructDynamicValue" => return Ok(HirType::JsValue),
                     "loadNativeAddon" => return Ok(HirType::Bool),
@@ -2331,7 +2350,7 @@ impl<'a> FnLowerer<'a> {
                     // `coerce_to_declared`'s own doc comment for why this
                     // is built here instead of a bare pass-through the
                     // way `JsValue`/`Undefined` are.
-                    "registerNativeCallback" => return Ok(HirType::JsValue),
+                    "registerNativeCallback" | "registerNativeCallbackGraph" => return Ok(HirType::JsValue),
                     _ => {}
                 }
                 if let Some(HirType::Function(params, ret)) = self.scope.get(name) {

@@ -341,10 +341,10 @@ impl<'a> FnLowerer<'a> {
             ));
         }
         let intrinsic = match (property, expected) {
-            ("toString", _) => "callDynamicMethod",
-            (_, Some(HirType::Dynamic)) => "callDynamicMethodHandleRaw",
-            (_, Some(HirType::JsValue)) => "callDynamicMethodHandle",
-            _ => "callDynamicMethod",
+            ("toString", _) => "__thaw_call_selected_dynamic_method",
+            (_, Some(HirType::Dynamic)) => "__thaw_call_selected_dynamic_method_raw",
+            (_, Some(HirType::JsValue)) => "__thaw_call_selected_dynamic_method_handle",
+            _ => "__thaw_call_selected_dynamic_method",
         };
         // The receiver must always come back as a genuine handle here,
         // never a JSON-decoded snapshot -- it's about to be fed straight

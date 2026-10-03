@@ -91,6 +91,8 @@ type NapiBridgeCallback = unsafe extern "C" fn(*const c_char, *const c_char) -> 
 type NapiBridgeExports = unsafe extern "C" fn() -> *const c_char;
 type NapiBridgePoll = extern "C" fn() -> usize;
 type NapiBridgePending = extern "C" fn() -> u8;
+type NapiBridgeOwner = unsafe extern "C" fn(u64) -> *mut c_char;
+type NapiBridgeLeaseRelease = extern "C" fn(u64) -> u8;
 type NapiBridgeHandle = unsafe extern "C" fn(
     *const c_char,
     *const c_char,
@@ -103,6 +105,8 @@ type NapiBridge = (
     NapiBridgeHandle,
     NapiBridgePoll,
     NapiBridgePending,
+    NapiBridgeOwner,
+    NapiBridgeLeaseRelease,
 );
 static NAPI_BRIDGE: Mutex<Option<NapiBridge>> = Mutex::new(None);
 // The worker's thread-local native Host must retire before its QuickJS Ctx.
@@ -155,19 +159,44 @@ pub fn register_napi_bridge(
     handle: NapiBridgeHandle,
     poll: NapiBridgePoll,
     pending: NapiBridgePending,
+    owner: NapiBridgeOwner,
+    release: NapiBridgeLeaseRelease,
 ) {
-    *NAPI_BRIDGE.lock().unwrap() = Some((exports, call, handle, poll, pending));
+    *NAPI_BRIDGE.lock().unwrap() = Some((exports, call, handle, poll, pending, owner, release));
 }
 
 fn install_napi_bridge(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
-    let Some((exports, call, handle, _, _)) = *NAPI_BRIDGE.lock().unwrap() else {
-        return Ok(());
-    };
-    let exports = Function::new(ctx.clone(), move || unsafe { to_str(exports()) })?;
+    // PLATFORM_GLOBALS captures these functions before the first addon may load.
+    // Resolve the registered bridge when called, so an earlier Ctx stays usable.
+    let owner = Function::new(ctx.clone(), move |handle: String| {
+        let Ok(handle) = handle.parse::<u64>() else { return String::new(); };
+        let owner = NAPI_BRIDGE.lock().unwrap().as_ref().map(|bridge| bridge.5);
+        let Some(owner) = owner else { return String::new(); };
+        let result = unsafe { owner(handle) };
+        if result.is_null() { return String::new(); }
+        let text = unsafe { CStr::from_ptr(result) }.to_string_lossy().into_owned();
+        unsafe { thaw_arena::destroy_string(result) };
+        text
+    })?;
+    ctx.globals().set("__thaw_napi_graph_owner", owner)?;
+    let release = Function::new(ctx.clone(), move |token: String| {
+        let Ok(token) = token.parse::<u64>() else { return false; };
+        let release = NAPI_BRIDGE.lock().unwrap().as_ref().map(|bridge| bridge.6);
+        release.is_some_and(|release| release(token) != 0)
+    })?;
+    ctx.globals().set("__thaw_napi_graph_release", release)?;
+    let available = Function::new(ctx.clone(), || NAPI_BRIDGE.lock().unwrap().is_some())?;
+    ctx.globals().set("__thaw_napi_bridge_available", available)?;
+    let exports = Function::new(ctx.clone(), move || {
+        let exports = NAPI_BRIDGE.lock().unwrap().as_ref().map(|bridge| bridge.0);
+        exports.map_or_else(String::new, |exports| unsafe { to_str(exports()) })
+    })?;
     let call = Function::new(
         ctx.clone(),
         move |ctx: Ctx<'_>, name: String, args: String| unsafe {
             let _active = ActiveNapiContext::enter(&ctx);
+            let call = NAPI_BRIDGE.lock().unwrap().as_ref().map(|bridge| bridge.1);
+            let Some(call) = call else { return String::new(); };
             let name = CString::new(name).unwrap_or_default();
             let args = CString::new(args).unwrap_or_default();
             to_str(call(name.as_ptr(), args.as_ptr()))
@@ -179,6 +208,8 @@ fn install_napi_bridge(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
         ctx.clone(),
         move |ctx: Ctx<'_>, operation: String, target: String, name: String, args: String| unsafe {
             let _active = ActiveNapiContext::enter(&ctx);
+            let handle = NAPI_BRIDGE.lock().unwrap().as_ref().map(|bridge| bridge.2);
+            let Some(handle) = handle else { return String::new(); };
             let operation = CString::new(operation).unwrap_or_default();
             let target = CString::new(target).unwrap_or_default();
             let name = CString::new(name).unwrap_or_default();

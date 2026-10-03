@@ -27,6 +27,9 @@ impl<'ctx> HirCompiler<'ctx> {
             "setDynamicProperty" => self.compile_set_dynamic_property(args),
             "setDynamicPropertyJson" => self.compile_set_dynamic_property_json(args),
             "callDynamicMethod" => self.compile_call_dynamic_method(args),
+            "__thaw_call_selected_dynamic_method" => self.compile_selected_call_dynamic_method(args),
+            "__thaw_call_selected_dynamic_method_handle" => self.compile_selected_call_dynamic_method_handle(args, false),
+            "__thaw_call_selected_dynamic_method_raw" => self.compile_selected_call_dynamic_method_handle(args, true),
             "callDynamicMethodHandle" => self.compile_call_dynamic_method_handle(args, false),
             "callDynamicMethodHandleRaw" => self.compile_call_dynamic_method_handle(args, true),
             "readDynamicValue" => self.compile_read_dynamic_value(args),
@@ -36,6 +39,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 args,
             ),
             "callDynamicValueMixed" => self.compile_call_dynamic_value_mixed(args),
+            "callDynamicValueMixedNativeJson" => self.compile_call_dynamic_value_mixed_native_json(args),
             "callDynamicValueMixedHandle" => {
                 self.compile_call_dynamic_value_mixed_handle(args)
             }
@@ -49,7 +53,8 @@ impl<'ctx> HirCompiler<'ctx> {
             "callNativeAddon" => self.compile_call_native_addon(args),
             "callNativeAddonWithCallback" => self.compile_call_native_addon_with_callback(args),
             "pollNativeAddonEvents" => self.compile_poll_native_addon_events(args),
-            "registerNativeCallback" => self.compile_register_native_callback(args),
+            "registerNativeCallback" => self.compile_register_native_callback(args, false),
+            "registerNativeCallbackGraph" => self.compile_register_native_callback(args, true),
             _ => return None,
         })
     }
@@ -125,6 +130,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .try_as_basic_value()
             .basic()
             .unwrap();
+        let json = self.compile_check_json_stringify_error(json)?;
         let result = self
             .builder
             .build_call(
@@ -197,7 +203,7 @@ impl<'ctx> HirCompiler<'ctx> {
         let args_json = self
             .builder
             .build_call(
-                self.module.get_function("thaw_json_stringify").unwrap(),
+                self.module.get_function("thaw_json_graph_encode").unwrap(),
                 &[array.into()],
                 "dynamic_set_args_json",
             )
@@ -205,11 +211,12 @@ impl<'ctx> HirCompiler<'ctx> {
             .try_as_basic_value()
             .basic()
             .unwrap();
+        let args_json = self.compile_check_json_stringify_error_with_cleanup(args_json, &[array])?;
         let result = self
             .builder
             .build_call(
                 self.module
-                    .get_function("thaw_js_set_property_json_result")
+                    .get_function("thaw_js_set_property_json_graph_result")
                     .unwrap(),
                 &[receiver.into(), name.into(), args_json.into()],
                 "dynamic_property_json_set",
@@ -234,6 +241,14 @@ impl<'ctx> HirCompiler<'ctx> {
             .builder
             .build_extract_value(result, 1, "dynamic_property_json_set_error")
             .map_err(|error| error.to_string())?;
+        self.builder.build_call(
+            self.module.get_function("thaw_cstring_destroy").unwrap(),
+            &[args_json.into()], "destroy_dynamic_set_args_string",
+        ).map_err(|error| error.to_string())?;
+        self.builder.build_call(
+            self.module.get_function("thaw_json_destroy").unwrap(),
+            &[array.into()], "destroy_dynamic_set_args_json",
+        ).map_err(|error| error.to_string())?;
         self.builder
             .build_store(self.pending_exception().as_pointer_value(), error)
             .map_err(|error| error.to_string())?;

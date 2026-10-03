@@ -1,4 +1,82 @@
 impl<'ctx> HirCompiler<'ctx> {
+    fn compile_decode_quickjs_graph(
+        &mut self,
+        text: BasicValueEnum<'ctx>,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        self.compile_decode_graph(text, true)
+    }
+
+    fn compile_decode_graph(
+        &mut self,
+        text: BasicValueEnum<'ctx>,
+        owned_text: bool,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let decoded = self.builder.build_call(
+            self.module.get_function("thaw_json_graph_decode").unwrap(),
+            &[text.into()], "decode_quickjs_graph",
+        ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+            .ok_or("QuickJS graph decode returned no value")?;
+        if owned_text {
+            self.builder.build_call(self.module.get_function("thaw_cstring_destroy").unwrap(),
+                &[text.into()], "destroy_quickjs_graph_text")
+                .map_err(|error| error.to_string())?;
+        }
+        let status = self.builder.build_call(
+            self.module.get_function("thaw_json_take_graph_error").unwrap(),
+            &[], "quickjs_graph_error",
+        ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+            .ok_or("QuickJS graph status returned no value")?.into_int_value();
+        let failed = self.builder.build_int_compare(
+            inkwell::IntPredicate::NE, status, self.context.i8_type().const_zero(),
+            "quickjs_graph_failed",
+        ).map_err(|error| error.to_string())?;
+        let invalid = self.context.append_basic_block(self.current_function(), "quickjs_graph_invalid");
+        let valid = self.context.append_basic_block(self.current_function(), "quickjs_graph_valid");
+        self.builder.build_conditional_branch(failed, invalid, valid)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(invalid);
+        self.builder.build_call(self.module.get_function("thaw_json_destroy").unwrap(),
+            &[decoded.into()], "destroy_invalid_quickjs_graph")
+            .map_err(|error| error.to_string())?;
+        self.compile_throw_type_error("Invalid JavaScript result graph")?;
+        self.builder.position_at_end(valid);
+        Ok(decoded)
+    }
+    /// A live QuickJS-backed Json operation can execute a getter or coercion.
+    /// Consume its error immediately, while the owned result is still in
+    /// scope, and use the same pending-exception channel as dynamic calls.
+    fn compile_check_json_host_error(
+        &mut self,
+        result: BasicValueEnum<'ctx>,
+        destroy_result: Option<&str>,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let error = self.builder.build_call(
+            self.module.get_function("thaw_json_take_host_error").unwrap(),
+            &[], "json_host_error",
+        ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+            .ok_or("host error query returned no value")?.into_pointer_value();
+        let function = self.current_function();
+        let failed = self.context.append_basic_block(function, "json_host_failed");
+        let succeeded = self.context.append_basic_block(function, "json_host_succeeded");
+        let has_error = self.builder.build_is_not_null(error, "json_host_has_error")
+            .map_err(|error| error.to_string())?;
+        self.builder.build_conditional_branch(has_error, failed, succeeded)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(failed);
+        if let Some(symbol) = destroy_result {
+            self.builder.build_call(self.module.get_function(symbol).unwrap(),
+                &[result.into()], "destroy_failed_json_host_result")
+                .map_err(|error| error.to_string())?;
+        }
+        self.builder.build_store(self.pending_exception().as_pointer_value(), error)
+            .map_err(|error| error.to_string())?;
+        self.clear_pending_native_text()?;
+        self.mark_pending_native_text(error)?;
+        self.branch_on_pending_exception()?;
+        self.builder.position_at_end(succeeded);
+        Ok(result)
+    }
+
     /// `json.field`, via thaw-std's `thaw_json_get`.
     fn compile_json_get(
         &mut self,
@@ -26,9 +104,10 @@ impl<'ctx> HirCompiler<'ctx> {
                 "json_get",
             )
             .map_err(|e| e.to_string())?;
-        call.try_as_basic_value()
+        let value = call.try_as_basic_value()
             .basic()
-            .ok_or_else(|| "thaw_json_get did not return a value".to_string())
+            .ok_or_else(|| "thaw_json_get did not return a value".to_string())?;
+        self.compile_check_json_host_error(value, Some("thaw_json_destroy"))
     }
 
     fn compile_json_key(
@@ -38,7 +117,7 @@ impl<'ctx> HirCompiler<'ctx> {
     ) -> Result<BasicValueEnum<'ctx>, String> {
         let obj = self.compile_expr(obj)?;
         let key = self.compile_expr(key)?;
-        self.builder
+        let value = self.builder
             .build_call(
                 self.module.get_function("thaw_json_get").unwrap(),
                 &[obj.into(), key.into()],
@@ -47,7 +126,8 @@ impl<'ctx> HirCompiler<'ctx> {
             .map_err(|error| error.to_string())?
             .try_as_basic_value()
             .basic()
-            .ok_or_else(|| "thaw_json_get did not return a value".to_string())
+            .ok_or_else(|| "thaw_json_get did not return a value".to_string())?;
+        self.compile_check_json_host_error(value, Some("thaw_json_destroy"))
     }
 
     fn compile_json_set(
@@ -211,6 +291,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .basic()
             .ok_or("thaw_json_object_delete did not return a value")?
             .into_int_value();
+        self.compile_check_json_host_error(deleted.into(), None)?;
         let succeeded = self.builder
             .build_int_compare(
                 inkwell::IntPredicate::NE,
@@ -290,9 +371,10 @@ impl<'ctx> HirCompiler<'ctx> {
                 "json_index",
             )
             .map_err(|e| e.to_string())?;
-        call.try_as_basic_value()
+        let value = call.try_as_basic_value()
             .basic()
-            .ok_or_else(|| "thaw_json_index did not return a value".to_string())
+            .ok_or_else(|| "thaw_json_index did not return a value".to_string())?;
+        self.compile_check_json_host_error(value, Some("thaw_json_destroy"))
     }
 
     fn compile_json_index_set(
@@ -316,7 +398,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .ok_or("thaw_number_to_string returned no value")?;
         let value = self.compile_expr(value)?;
         self.compile_guard_json_write(object, key.into_pointer_value())?;
-        self.builder
+        let result = self.builder
             .build_call(
                 self.module.get_function("thaw_json_index_set").unwrap(),
                 &[object.into(), index.into(), key.into(), value.into()],
@@ -325,7 +407,8 @@ impl<'ctx> HirCompiler<'ctx> {
             .map_err(|error| error.to_string())?
             .try_as_basic_value()
             .basic()
-            .ok_or_else(|| "thaw_json_index_set did not return a value".to_string())
+            .ok_or_else(|| "thaw_json_index_set did not return a value".to_string())?;
+        self.compile_check_json_host_error(result, None)
     }
 
     /// `Number(json)`/`String(json)`/`Boolean(json)`.
@@ -340,9 +423,11 @@ impl<'ctx> HirCompiler<'ctx> {
             .builder
             .build_call(function, &[val.into()], "json_as")
             .map_err(|e| e.to_string())?;
-        call.try_as_basic_value()
+        let value = call.try_as_basic_value()
             .basic()
-            .ok_or_else(|| format!("`{fn_name}` did not return a value"))
+            .ok_or_else(|| format!("`{fn_name}` did not return a value"))?;
+        self.compile_check_json_host_error(value, (fn_name == "thaw_json_as_string")
+            .then_some("thaw_cstring_destroy"))
     }
 
     /// `Boolean(json)`. Separate from `compile_json_as`: `thaw_json_as_bool`
@@ -360,6 +445,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .basic()
             .ok_or("thaw_json_as_bool did not return a value")?
             .into_int_value();
+        self.compile_check_json_host_error(u8_val.into(), None)?;
         let zero = self.context.i8_type().const_int(0, false);
         self.builder
             .build_int_compare(inkwell::IntPredicate::NE, u8_val, zero, "json_as_bool")

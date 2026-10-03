@@ -46,6 +46,9 @@ type NapiCallback = unsafe extern "C" fn(NapiEnv, NapiCallbackInfo) -> NapiValue
 
 thread_local! {
     static FOREIGN_CALLBACK_DEPTH: Cell<usize> = const { Cell::new(0) };
+    // A graph callback may return an nh value into a still-running addon
+    // invocation. Its wire reference must outlive the callback trampoline.
+    static NAPI_RECIPIENT_GRAPH_PINS: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
 }
 
 struct ForeignCallbackGuard(bool);
@@ -63,7 +66,18 @@ impl ForeignCallbackGuard {
 impl Drop for ForeignCallbackGuard {
     fn drop(&mut self) {
         if self.0 {
-            let _ = FOREIGN_CALLBACK_DEPTH.try_with(|depth| depth.set(depth.get() - 1));
+            let _ = FOREIGN_CALLBACK_DEPTH.try_with(|depth| {
+                if depth.get() == 1 {
+                    // Keep this guard active while finalizers can reenter.
+                    loop {
+                        let pending = NAPI_RECIPIENT_GRAPH_PINS.try_with(|pins|
+                            std::mem::take(&mut *pins.borrow_mut())).unwrap_or_default();
+                        if pending.is_empty() { break; }
+                        for reference in pending { release_napi_graph_reference(reference); }
+                    }
+                }
+                depth.set(depth.get() - 1);
+            });
         }
     }
 }
@@ -408,9 +422,12 @@ struct ThawCallbackBridge {
     context: usize,
 }
 
+#[derive(Clone, Copy)]
 enum ThawCallback {
     Event(ThawNativeCallback),
+    EventGraph(ThawNativeCallback),
     Value(ThawNativeValueCallback),
+    ValueGraph(ThawNativeValueCallback),
     #[cfg(feature = "quickjs")]
     QuickJs(ThawNativeValueCallback),
 }
@@ -553,9 +570,13 @@ pub struct NapiTypeTag {
     upper: u64,
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum NapiGraphWrapperKind { Map, Set, RegExp }
+
 pub struct Env {
     owner: std::thread::ThreadId,
     values: Vec<NapiValue>,
+    graph_wrappers: HashMap<usize, NapiGraphWrapperKind>,
     global: NapiValue,
     exception: Option<NapiValue>,
     wraps: HashMap<usize, WrapRecord>,
@@ -590,6 +611,18 @@ pub struct Env {
     quickjs_references: HashMap<u64, NapiValue>,
     #[cfg(feature = "quickjs")]
     released_handles: HashSet<usize>,
+    // Positive references held by native Json graph nodes postpone proxy
+    // finalization and Env cleanup until their last shared Rc owner drops.
+    native_graph_pins: usize,
+    // Only references created for graph transport may be consumed by a
+    // graph wire's lease list. An arbitrary positive N-API reference is not
+    // interchangeable with one of these transfer tokens.
+    graph_reference_tokens: HashSet<usize>,
+    // A raw u64 handle returned to compiled code has no proxy finalizer of
+    // its own. Root each escaped instance once until this Env shuts down.
+    escaped_native_handles: HashSet<usize>,
+    finalized_handles: HashSet<usize>,
+    graph_owner_id: u64,
     module_file_name: CString,
     last_error_info: NapiExtendedErrorInfo,
     // Box keeps the opaque C handle stable when the owning vector grows.
@@ -662,6 +695,7 @@ impl Env {
         Self {
             owner: std::thread::current().id(),
             values: Vec::new(),
+            graph_wrappers: HashMap::new(),
             global: ptr::null_mut(),
             exception: None,
             wraps: HashMap::new(),
@@ -694,6 +728,11 @@ impl Env {
             quickjs_references: HashMap::new(),
             #[cfg(feature = "quickjs")]
             released_handles: HashSet::new(),
+            native_graph_pins: 0,
+            graph_reference_tokens: HashSet::new(),
+            escaped_native_handles: HashSet::new(),
+            finalized_handles: HashSet::new(),
+            graph_owner_id: 0,
             module_file_name: CString::new("").unwrap(),
             last_error_info: NapiExtendedErrorInfo {
                 error_message: ptr::null(),
@@ -1050,7 +1089,7 @@ struct Host {
     functions: HashMap<String, Function>,
     exports: HashMap<String, (usize, NapiValue)>,
     qualified_packages: HashSet<String>,
-    compiled_callbacks: HashMap<(usize, usize, usize), NapiValue>,
+    compiled_callbacks: HashMap<(usize, usize, usize, bool), NapiValue>,
     libraries: Vec<*mut c_void>,
     // Each thread-local Host owns its own loop; Worker's callback context must
     // never run callbacks from the process-global uv_default_loop.
@@ -1129,7 +1168,8 @@ impl Drop for Host {
             || self.owned_uv_loop.is_some()
             || self.main_default_uv_loop.is_some()
             || self.module_envs.iter().chain(&self.pending_call_envs)
-                .any(|env| !env.async_cleanup_hooks.is_empty() || env.async_cleanup_dispatching
+                .any(|env| env.native_graph_pins != 0
+                    || !env.async_cleanup_hooks.is_empty() || env.async_cleanup_dispatching
                     || env.shutdown_requested)
         {
             // ponytail: At process exit the OS reclaims these environments; running
@@ -1187,6 +1227,7 @@ fn retire_owned_envs() {
         let next = retiring.into_iter().find(|env| unsafe {
             !(*(*env)).finalized && !(*(*env)).async_cleanup_dispatching
                 && !(*(*env)).finalizing && !(*(*env)).async_cleanup_pending()
+                && (*(*env)).native_graph_pins == 0
                 && (*(*env)).async_cleanup_hooks.is_empty()
         });
         let Some(env) = next else { break };

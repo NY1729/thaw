@@ -1243,18 +1243,13 @@ fn assigns_a_native_value_into_a_json_indexed_slot() {
 /// | Json` at first, catching a `Json` case it was never meant to
 /// touch -- found via glob's own async `glob(...)` resolving to a
 /// plain JSON array, see `[[project_npm_interop_gaps_20]]`).
-/// A `Json`-typed value shaped `{"timestamp": N}` -- the shape a real
-/// `Date` survives the QuickJS boundary as (`Date.prototype.toJSON` is
-/// overridden globally, see `platform_globals/dates.js`) -- must be
-/// recognized by `instanceof Date`, not hit the "not a known class"
-/// error every other unrecognized class gets. Real trigger: js-yaml's
-/// `load(input): unknown` (classified `Json`) with `YAML11_SCHEMA`,
-/// yielding a real `Date`, see `[[project_npm_interop_gaps_19]]`.
+/// A real native Date that crosses into `any` retains its private Date
+/// identity through the JSON bridge, so `instanceof Date` can recognize it.
 #[test]
-fn instanceof_date_recognizes_the_timestamp_shape_on_a_json_value() {
+fn instanceof_date_uses_trusted_json_origin_for_a_real_date() {
     let module = thaw_parser::parse_typescript(
         r#"function main(): boolean {
-            const data = JSON.parse('{"timestamp": 1579046400000}');
+            const data: any = new Date(1579046400000);
             return data instanceof Date;
         }"#,
     )
@@ -1262,16 +1257,13 @@ fn instanceof_date_recognizes_the_timestamp_shape_on_a_json_value() {
     assert!(lower_module(&module).is_ok());
 }
 
-/// The same `{"timestamp": N}`-shaped `Json` value calling a Date-
-/// prototype-named method (`toISOString`) must be promoted to a real
-/// native Date object and dispatch through the existing native Date
-/// method machinery, rather than hitting `lower_native_instance_
-/// builtin`'s own "receiver has type Json, expected Object(...)" error.
+/// A real Date in an `any` slot can dispatch Date prototype methods
+/// after the native-to-JSON bridge preserves its origin.
 #[test]
-fn date_method_call_promotes_a_json_timestamp_shape_to_native() {
+fn date_method_call_promotes_a_real_date_through_json() {
     let module = thaw_parser::parse_typescript(
         r#"function main(): string {
-            const data = JSON.parse('{"timestamp": 1579046400000}');
+            const data: any = new Date(1579046400000);
             return data.toISOString();
         }"#,
     )

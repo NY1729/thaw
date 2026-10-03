@@ -512,26 +512,14 @@ impl<'a> FnLowerer<'a> {
                         return self.lower_static_builtin_call(object, property, call);
                     }
                 }
-                // A `Json`-typed receiver calling a Date-prototype-named
-                // method (real trigger: js-yaml's `load(): unknown`
-                // yielding a real `Date`, classified `Json`, see
-                // `[[project_npm_interop_gaps_19]]`) still survives the
-                // JSON boundary as a structurally-recognizable
-                // `{"timestamp": N}` shape (`Date.prototype.toJSON` is
-                // overridden globally). Rather than reimplementing every
-                // Date method's own logic for a `Json` receiver, extract
-                // the timestamp and promote it to a synthetic *native*
-                // Date object (the same `HirType::Object([("timestamp",
-                // F64)])` shape `new Date()` already produces), then
-                // dispatch through the existing, fully-tested
-                // `lower_native_date_method` completely unmodified --
-                // exactly the "promote to a fully native representation,
-                // then reuse the native path as-is" shape this project
-                // used for round 17's generic-alias-to-class promotion.
+                // A live Json host receiver retains its original method lookup
+                // and this binding. Native Date values keep the timestamp path.
+                // Ordinary native Json method storage is a separate boundary.
                 if matches!(
                     property.sym.as_ref(),
                     "getTime"
                         | "setTime"
+                        | "setYear"
                         | "toISOString"
                         | "getFullYear"
                         | "getMonth"
@@ -569,37 +557,132 @@ impl<'a> FnLowerer<'a> {
                     Some(HirType::Json)
                 ) {
                     let json_receiver = self.lower_expr(&member.obj)?;
+                    let json_name = format!("__thaw_date_json_receiver_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope.insert(json_name.clone(), HirType::Json);
+                    // Keep each spread source inside its selected branch.
+                    let (arguments, spread_bindings) = self.lower_native_spread_values(
+                        &call.args, &format!("Date.{}", property.sym),
+                    )?;
+                    // The live branch builds its argument expression separately:
+                    // the dynamic call's selected-property lookup runs before
+                    // this expression evaluates any source or tuple spread.
+                    let live_elements = arguments.iter().cloned()
+                        .map(|value| self.coerce_to_declared(&HirType::Json, value))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let live_array = self.coerce_to_declared(
+                        &HirType::Json, HirExpr::ArrayLit(live_elements),
+                    )?;
+                    let live_array = self.wrap_call_argument_bindings(live_array, &spread_bindings)?;
+                    let mut bindings = spread_bindings;
+                    let mut synthetic_call = call.clone();
+                    synthetic_call.args.clear();
+                    for argument in arguments {
+                        let ty = self.infer_expr_type(&argument)?;
+                        let name = format!("__thaw_date_json_arg_{}", self.next_binding);
+                        self.next_binding += 1;
+                        self.scope.insert(name.clone(), ty.clone());
+                        bindings.push((name.clone(), ty, argument));
+                        synthetic_call.args.push(swc_ecma_ast::ExprOrSpread {
+                            spread: None,
+                            expr: Box::new(Expr::Ident(swc_ecma_ast::Ident::new_no_ctxt(
+                                name.into(), member.span,
+                            ))),
+                        });
+                    }
                     let timestamp_name =
                         format!("__thaw_json_date_timestamp_{}", self.next_binding);
                     self.next_binding += 1;
                     self.scope.insert(timestamp_name.clone(), HirType::F64);
-                    let extract = HirExpr::Call(
-                        Box::new(HirExpr::Var("__thaw_json_date_timestamp".to_string())),
-                        vec![json_receiver],
-                    );
+                    bindings.push((
+                        timestamp_name.clone(),
+                        HirType::F64,
+                        HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_json_date_timestamp".to_string())),
+                            vec![HirExpr::Var(json_name.clone())],
+                        ),
+                    ));
                     let promoted_name = format!("__thaw_promoted_date_{}", self.next_binding);
                     self.next_binding += 1;
                     let date_type = date_object_type();
                     self.scope.insert(promoted_name.clone(), date_type.clone());
-                    let promoted_object = HirExpr::ObjectLit(vec![(
-                        "timestamp".to_string(),
-                        HirExpr::Var(timestamp_name.clone()),
-                    )]);
+                    let local_date = format!("__thaw_promoted_date_alloc_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope.insert(local_date.clone(), date_type.clone());
+                    let promoted_object = HirExpr::Block(vec![
+                        HirStmt::Let(local_date.clone(), date_type.clone(), HirExpr::ClassAlloc(date_type.clone())),
+                        HirStmt::Expr(HirExpr::PropAssign(
+                            Box::new(HirExpr::Var(local_date.clone())),
+                            date_type.clone(),
+                            "timestamp".to_string(),
+                            Box::new(HirExpr::Var(timestamp_name)),
+                        )),
+                        HirStmt::Return(Some(HirExpr::Var(local_date))),
+                    ]);
+                    bindings.push((promoted_name.clone(), date_type, promoted_object));
                     let promoted_ident =
-                        swc_ecma_ast::Ident::new_no_ctxt(promoted_name.clone().into(), member.span);
+                        swc_ecma_ast::Ident::new_no_ctxt(promoted_name.into(), member.span);
                     let synthetic_member = MemberExpr {
                         obj: Box::new(Expr::Ident(promoted_ident)),
                         ..member.clone()
                     };
-                    let method_call =
-                        self.lower_native_date_method(&synthetic_member, property, call)?;
-                    return self.wrap_call_argument_bindings(
-                        method_call,
-                        &[
-                            (timestamp_name, HirType::F64, extract),
-                            (promoted_name, date_type, promoted_object),
+                    let method_call = self.lower_native_instance_builtin(
+                        &synthetic_member, property, &synthetic_call,
+                    )?;
+                    let result = if matches!(property.sym.as_ref(),
+                        "setTime" | "setYear" | "setFullYear" | "setMonth"
+                        | "setDate" | "setHours" | "setMinutes" | "setSeconds"
+                        | "setMilliseconds" | "setUTCFullYear" | "setUTCMonth"
+                        | "setUTCDate" | "setUTCHours" | "setUTCMinutes"
+                        | "setUTCSeconds" | "setUTCMilliseconds") {
+                        HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_json_date_set_timestamp".into())),
+                            vec![HirExpr::Var(json_name.clone()), method_call],
+                        )
+                    } else {
+                        method_call
+                    };
+                    let native = self.wrap_call_argument_bindings(result, &bindings)?;
+                    let wants_handle = matches!(expected_return_hint.as_ref(),
+                        Some(HirType::JsValue | HirType::Dynamic));
+                    let native_json = self.coerce_to_declared(&HirType::Json, native)?;
+                    let native = if wants_handle {
+                        HirExpr::Call(Box::new(HirExpr::Var("retainDynamicJson".into())),
+                            vec![native_json])
+                    } else {
+                        native_json
+                    };
+                    let handle_name = format!("__thaw_date_live_method_handle_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope.insert(handle_name.clone(), HirType::I64);
+                    let live_intrinsic = match expected_return_hint.as_ref() {
+                        Some(HirType::Dynamic) => "__thaw_call_selected_dynamic_method_raw",
+                        Some(HirType::JsValue) => "__thaw_call_selected_dynamic_method_handle",
+                        _ => "__thaw_call_selected_dynamic_method",
+                    };
+                    let live = HirExpr::Call(
+                        Box::new(HirExpr::Var(live_intrinsic.into())),
+                        vec![
+                            HirExpr::TypedClosure(HirType::JsValue,
+                                Box::new(HirExpr::Var(handle_name.clone()))),
+                            HirExpr::Lit(HirLit::Str(property.sym.to_string())),
+                            live_array.clone(),
                         ],
                     );
+                    let result_type = if wants_handle { HirType::JsValue } else { HirType::Json };
+                    let branch = HirExpr::Conditional(
+                        Box::new(HirExpr::BinOp(BinOp::EqEqEq,
+                            Box::new(HirExpr::Var(handle_name.clone())),
+                            Box::new(HirExpr::Lit(HirLit::I64(0))))),
+                        Box::new(native), Box::new(live), result_type,
+                    );
+                    return self.wrap_call_argument_bindings(branch, &[
+                        (json_name.clone(), HirType::Json, json_receiver),
+                        (handle_name, HirType::I64, HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_json_borrowed_handle_id".into())),
+                            vec![HirExpr::Var(json_name)],
+                        )),
+                    ]);
                 }
                 // A confirmed `JsValue` receiver (real trigger: a Date-
                 // valued Fallback return, see `[[project_npm_interop_
@@ -2460,7 +2543,10 @@ impl<'a> FnLowerer<'a> {
                     _ => None,
                 };
                 let timestamp = HirExpr::PropAccess(
-                    Box::new(receiver),
+                    Box::new(HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_date_assert_native_identity".into())),
+                        vec![receiver],
+                    )),
                     receiver_type,
                     "timestamp".to_string(),
                 );

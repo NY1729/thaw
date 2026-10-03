@@ -3645,3 +3645,25 @@ fn fixed_marker_copy_preserves_order_across_awaited_field() {
     assert_eq!(compile_and_run(source, "fixed_marker_copy_awaited_field"),
         "2 true true 1\n");
 }
+
+#[test]
+fn non_arrow_implicit_json_receiver_preserves_bigint_scalar() {
+    let source = r#"
+        function main(): void {
+            const echo = function(): Json { return this; };
+            const zero = echo.call(0n);
+            const large = echo.call(9007199254740993n);
+            console.log(typeof zero, Boolean(zero), String(zero));
+            console.log(typeof large, String(large), large === echo.call(9007199254740993n));
+            try { console.log(JSON.stringify(large)); }
+            catch (error) { console.log("TypeError"); }
+            const nested: Json = { value: large };
+            try { console.log(JSON.stringify(nested)); }
+            catch (error) { console.log("TypeError"); }
+            try { console.log(JSON.stringify(nested, ["value"])); }
+            catch (error) { console.log("TypeError"); }
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "non_arrow_bigint_this"),
+        "bigint false 0\nbigint 9007199254740993 true\nTypeError\nTypeError\nTypeError\n");
+}

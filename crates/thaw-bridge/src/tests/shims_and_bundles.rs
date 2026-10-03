@@ -436,6 +436,70 @@ fn native_class_proxies_use_native_properties_and_release_native_handles() {
     assert!(wrapped.contains("__thaw_addon.QueryEngine"));
 }
 
+#[test]
+fn commonjs_addon_bridge_can_become_available_after_earlier_bundle() {
+    use std::ffi::{CStr, CString};
+
+    let wrapped = wrap_as_commonjs_module("module.exports = {};", &[], &[], &[], "");
+    let script = format!(r#"
+        globalThis.__thaw_napi_bridge_available = () => false;
+        globalThis.bridgeExportsRead = 0;
+        globalThis.__thaw_napi_bridge_exports = () => {{ bridgeExportsRead++; throw new Error('too early'); }};
+        {wrapped}
+        globalThis.bridgeReadBeforeLoad = bridgeExportsRead;
+        globalThis.__thaw_napi_bridge_available = () => true;
+        globalThis.__thaw_napi_bridge_exports = () => {{ bridgeExportsRead++; return JSON.stringify({{names:['direct'],qualifiedPackages:[]}}); }};
+        globalThis.__thaw_napi_bridge_call = () => JSON.stringify({{kind:'value',value:7}});
+        {wrapped}
+        globalThis.checkLateAddonBridge = () => [bridgeReadBeforeLoad, bridgeExportsRead, require.addon().direct()];
+    "#);
+    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
+    let result = thaw_quickjs::thaw_js_call(c"checkLateAddonBridge".as_ptr(), c"[]".as_ptr());
+    assert_eq!(unsafe { CStr::from_ptr(result) }.to_str().unwrap(), "[0,1,7]");
+}
+
+#[test]
+fn native_addon_export_filter_uses_captured_intrinsics() {
+    use std::ffi::{CStr, CString};
+
+    let source = CString::new(
+        r#"
+        globalThis.checkNativeAddonExportFilter = function () {
+          const forEach = Array.prototype.forEach;
+          const indexOf = Array.prototype.indexOf;
+          const startsWith = String.prototype.startsWith;
+          const slice = String.prototype.slice;
+          try {
+            Array.prototype.forEach = Array.prototype.indexOf = function () { throw Error('array replaced'); };
+            String.prototype.startsWith = String.prototype.slice = function () { throw Error('string replaced'); };
+            const info = { names: ['a::one', 'b::two', 'plain'], qualifiedPackages: ['a'] };
+            const qualified = [];
+            const bare = [];
+            __thaw_json_graph_napi_each_export(info, 'a::', 'a', (name, alias) => {
+              qualified[qualified.length] = [name, alias];
+            });
+            __thaw_json_graph_napi_each_export(info, 'c::', 'c', (name, alias) => {
+              bare[bare.length] = [name, alias];
+            });
+            return [qualified, bare];
+          } finally {
+            Array.prototype.forEach = forEach;
+            Array.prototype.indexOf = indexOf;
+            String.prototype.startsWith = startsWith;
+            String.prototype.slice = slice;
+          }
+        };
+        "#,
+    )
+    .unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let result = thaw_quickjs::thaw_js_call(c"checkNativeAddonExportFilter".as_ptr(), c"[]".as_ptr());
+    assert_eq!(
+        unsafe { CStr::from_ptr(result) }.to_str().unwrap(),
+        "[[[\"a::one\",\"one\"]],[[\"plain\",\"plain\"]]]"
+    );
+}
+
 /// The exact shape thaw-registry's ESM rewrite produces for a real
 /// ESM package (`escape-string-regexp`'s `export default function
 /// escapeStringRegexp(){}`): `module.exports.default = <fn>`, not

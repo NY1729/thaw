@@ -2906,6 +2906,18 @@ fn embedded_nuls_survive_native_strings_and_json_boundaries() {
 }
 
 #[test]
+fn compiled_quickjs_graph_result_keeps_cycle_identity() {
+    let source = r#"
+        function main(): void {
+            loadScript("globalThis.returnCycle = () => { const value = {}; value.self = value; return value; };");
+            const result: Json = callDynamic("returnCycle", JSON.parse("[]"));
+            console.log(result === result.self);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "quickjs_graph_cycle_result"), "true\n");
+}
+
+#[test]
 fn generated_main_uses_result_reporters_and_destroys_listener_errors() {
     let module = thaw_parser::parse_typescript("function main(): void { const value: JsValue = getDynamicValue('x'); }").unwrap();
     let program = thaw_hir::lower_module(&module).unwrap();
