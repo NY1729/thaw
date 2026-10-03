@@ -17,6 +17,7 @@ struct ModuleAnalysis {
     attribute_error: Option<String>,
     has_nonliteral_module_load: bool,
     uses_global_fetch: bool,
+    uses_legacy_bundle_globals: bool,
     _commonjs_exports: Vec<String>,
 }
 
@@ -86,6 +87,7 @@ fn analyze_module_named(source: &str, source_name: &thaw_parser::common::FileNam
         module_namespaces: Vec<String>,
         uses_global_fetch: bool,
         uses_import_meta: bool,
+        uses_legacy_bundle_globals: bool,
     }
 
     struct TopLevelAwait {
@@ -219,6 +221,9 @@ fn analyze_module_named(source: &str, source_name: &thaw_parser::common::FileNam
             if identifier.sym == "fetch" {
                 self.uses_global_fetch = true;
             }
+            if matches!(identifier.sym.as_ref(), "require" | "module" | "exports" | "__filename" | "__dirname" | "Worker") {
+                self.uses_legacy_bundle_globals = true;
+            }
         }
 
         // A bare `fetch` reference (`visit_ident` above) misses the very
@@ -232,10 +237,14 @@ fn analyze_module_named(source: &str, source_name: &thaw_parser::common::FileNam
         // `fetch`, so it silently got no fetch shim and no bundled
         // `node:https`/`node:http` to back one.
         fn visit_member_expr(&mut self, member: &MemberExpr) {
-            if property_name(&member.prop).as_deref() == Some("fetch")
-                && matches!(member.obj.as_ref(), Expr::Ident(identifier) if matches!(identifier.sym.as_ref(), "globalThis" | "self" | "window" | "global"))
-            {
-                self.uses_global_fetch = true;
+            if matches!(member.obj.as_ref(), Expr::Ident(identifier) if matches!(identifier.sym.as_ref(), "globalThis" | "self" | "window" | "global")) {
+                match property_name(&member.prop).as_deref() {
+                    Some("fetch") => self.uses_global_fetch = true,
+                    Some("Worker" | "require" | "module" | "exports" | "__filename" | "__dirname") =>
+                        self.uses_legacy_bundle_globals = true,
+                    None => self.uses_legacy_bundle_globals = true,
+                    _ => {}
+                }
             }
             member.visit_children_with(self);
         }
@@ -421,6 +430,7 @@ fn analyze_module_named(source: &str, source_name: &thaw_parser::common::FileNam
         module_namespaces,
         uses_global_fetch: false,
         uses_import_meta: false,
+        uses_legacy_bundle_globals: false,
     };
     module.visit_with(&mut calls);
     let mut top_level_await = TopLevelAwait { found: false };
@@ -477,6 +487,7 @@ fn analyze_module_named(source: &str, source_name: &thaw_parser::common::FileNam
         attribute_error,
         has_nonliteral_module_load: calls.has_nonliteral_module_load,
         uses_global_fetch: calls.uses_global_fetch,
+        uses_legacy_bundle_globals: calls.uses_legacy_bundle_globals,
         _commonjs_exports: calls.commonjs_exports,
     }
 }

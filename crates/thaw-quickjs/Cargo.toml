@@ -77,7 +77,7 @@ x25519-dalek = { version = "2", features = ["static_secrets"] }
 pkcs1 = { version = "0.7", features = ["pem"] }
 pkcs8 = { version = "0.10", features = ["pem", "encryption"] }
 rand_core = { version = "0.6", features = ["getrandom"] }
-rquickjs = "0.12.2"
+rquickjs = { version = "0.12.2", features = ["loader"] }
 url = "=2.5.8"
 rsa = { version = "0.9", features = ["sha2", "pem", "getrandom"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"], optional = true }

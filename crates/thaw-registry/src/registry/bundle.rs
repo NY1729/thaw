@@ -18,6 +18,10 @@ struct BundledModule {
     has_esm: bool,
     has_top_level_await: bool,
     commonjs_context: bool,
+    native_esm_context: bool,
+    uses_legacy_bundle_globals: bool,
+    has_nonliteral_module_load: bool,
+    uses_import_meta: bool,
     async_module: bool,
     /// The file this module was read from, when it is a real file (a Node
     /// builtin polyfill has none). Keys the shared ESM->CommonJS rewrite
