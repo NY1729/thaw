@@ -187,7 +187,7 @@ static LIVE_THREADSAFE_FUNCTIONS: AtomicUsize = AtomicUsize::new(0);
 static FATAL_EXCEPTION_PENDING: AtomicBool = AtomicBool::new(false);
 static ACTIVE_ASYNC_CLEANUP_HOOKS: AtomicUsize = AtomicUsize::new(0);
 static NEXT_SYMBOL_ID: AtomicU64 = AtomicU64::new(1);
-static GLOBAL_SYMBOLS: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
+static GLOBAL_SYMBOLS: OnceLock<Mutex<HashMap<Vec<u16>, u64>>> = OnceLock::new();
 #[allow(clippy::vec_box)]
 static THREADSAFE_FUNCTIONS: OnceLock<Mutex<Vec<Box<ThreadsafeFunction>>>> = OnceLock::new();
 #[allow(clippy::vec_box)]
@@ -397,11 +397,15 @@ pub struct Function {
     data: *mut c_void,
     properties: HashMap<PropertyKey, NapiValue>,
     _thaw_bridge: Option<Arc<ThawCallbackBridge>>,
+    // A reflected native accessor remains callable after its property is
+    // replaced or deleted. Its copied descriptor also pins JS callback roots.
+    _accessor_owner: Option<Arc<Accessor>>,
 }
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum PropertyKey {
     String(String),
+    Utf16(Vec<u16>),
     Symbol(u64),
 }
 
@@ -482,6 +486,8 @@ pub enum Value {
         byte_offset: usize,
     },
     External(*mut c_void),
+    // One independently retained QuickJS handle, owned by this Env.
+    QuickJsHandle { handle: u64, object_like: bool },
     Symbol {
         id: u64,
         description: String,
@@ -581,6 +587,9 @@ pub struct Env {
     exception: Option<NapiValue>,
     wraps: HashMap<usize, WrapRecord>,
     instances: HashMap<usize, usize>,
+    // Explicit object/Array constructor returns are live native objects,
+    // without acquiring the constructor's nominal instance identity.
+    live_constructor_returns: HashSet<usize>,
     prototypes: HashMap<usize, usize>,
     accessors: HashMap<(usize, PropertyKey), Accessor>,
     finalizers: Vec<FinalizeRecord>,
@@ -600,6 +609,7 @@ pub struct Env {
     finalized: bool,
     external_memory: i64,
     sealed_objects: HashSet<usize>,
+    nonextensible_objects: HashSet<usize>,
     frozen_objects: HashSet<usize>,
     property_attributes: HashMap<(usize, PropertyKey), u32>,
     property_order: HashMap<usize, Vec<PropertyKey>>,
@@ -608,7 +618,16 @@ pub struct Env {
     symbols: HashMap<u64, NapiValue>,
     type_tags: HashMap<usize, NapiTypeTag>,
     property_keys: HashMap<String, NapiValue>,
+    utf16_property_keys: HashMap<Vec<u16>, NapiValue>,
+    // Malformed UTF-16 needs exact code units alongside the ordinary display string.
+    utf16_strings: HashMap<usize, Vec<u16>>,
+    utf16_symbols: HashMap<usize, Vec<u16>>,
+    // A live QuickJS Symbol uses the same identity in native PropertyKey maps.
+    // The Env-owned QuickJsHandle keeps the source Symbol alive until teardown.
+    #[cfg(feature = "quickjs")]
+    quickjs_symbol_ids: HashMap<u64, u64>,
     quickjs_references: HashMap<u64, NapiValue>,
+    quickjs_live_values: HashMap<u64, NapiValue>,
     #[cfg(feature = "quickjs")]
     released_handles: HashSet<usize>,
     // Positive references held by native Json graph nodes postpone proxy
@@ -683,11 +702,36 @@ struct WrapRecord {
     hint: *mut c_void,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct Accessor {
     getter: Option<NapiCallback>,
     setter: Option<NapiCallback>,
-    data: *mut c_void,
+    getter_data: *mut c_void,
+    setter_data: *mut c_void,
+    getter_reflection: Option<NapiValue>,
+    setter_reflection: Option<NapiValue>,
+    #[cfg(feature = "quickjs")]
+    js_owner: Option<Arc<QuickJsAccessorRoots>>,
+}
+
+#[cfg(feature = "quickjs")]
+struct QuickJsAccessorRoots {
+    getter: u64,
+    setter: u64,
+    getter_native: NapiValue,
+    setter_native: NapiValue,
+}
+
+#[cfg(feature = "quickjs")]
+impl Drop for QuickJsAccessorRoots {
+    fn drop(&mut self) {
+        // Releasing the last callback handle may run a JS finalizer that
+        // reenters this addon. Keep Env retirement deferred until both
+        // independent roots have been returned to the QuickJS registry.
+        let _dispatch = ForeignCallbackGuard::new();
+        if self.getter != 0 { thaw_quickjs::thaw_js_release_handle(self.getter); }
+        if self.setter != 0 { thaw_quickjs::thaw_js_release_handle(self.setter); }
+    }
 }
 
 impl Env {
@@ -700,6 +744,7 @@ impl Env {
             exception: None,
             wraps: HashMap::new(),
             instances: HashMap::new(),
+            live_constructor_returns: HashSet::new(),
             prototypes: HashMap::new(),
             accessors: HashMap::new(),
             finalizers: Vec::new(),
@@ -717,6 +762,7 @@ impl Env {
             finalized: false,
             external_memory: 0,
             sealed_objects: HashSet::new(),
+            nonextensible_objects: HashSet::new(),
             frozen_objects: HashSet::new(),
             property_attributes: HashMap::new(),
             property_order: HashMap::new(),
@@ -725,7 +771,13 @@ impl Env {
             symbols: HashMap::new(),
             type_tags: HashMap::new(),
             property_keys: HashMap::new(),
+            utf16_property_keys: HashMap::new(),
+            utf16_strings: HashMap::new(),
+            utf16_symbols: HashMap::new(),
+            #[cfg(feature = "quickjs")]
+            quickjs_symbol_ids: HashMap::new(),
             quickjs_references: HashMap::new(),
+            quickjs_live_values: HashMap::new(),
             #[cfg(feature = "quickjs")]
             released_handles: HashSet::new(),
             native_graph_pins: 0,
@@ -1059,6 +1111,20 @@ impl Env {
         // lookups reject this finalized owner below.
         (*env).finalized = true;
         (*env).finalizing = false;
+        // Accessor callbacks can own independent JS handles. Invalidate the
+        // native descriptor table before their final release can reenter.
+        let accessors = std::mem::take(&mut (*env).accessors);
+        drop(accessors);
+        // A QuickJS release can invoke a JS finalizer and reenter N-API.
+        // Invalidate this Env's cache first, then release outside any HOST
+        // borrow or reference into an Env value. The Box remains pinned.
+        #[cfg(feature = "quickjs")]
+        let quickjs_handles = std::mem::take(&mut (*env).quickjs_live_values)
+            .into_keys().collect::<Vec<_>>();
+        #[cfg(feature = "quickjs")]
+        for handle in quickjs_handles {
+            thaw_quickjs::thaw_js_release_handle(handle);
+        }
     }
 }
 
@@ -1397,6 +1463,7 @@ fn is_object_value(value: &Value) -> bool {
             | Value::TypedArray { .. }
             | Value::DataView { .. }
             | Value::Function(_)
+            | Value::QuickJsHandle { object_like: true, .. }
             | Value::Promise(_)
             | Value::Error(_)
             | Value::Date(_)

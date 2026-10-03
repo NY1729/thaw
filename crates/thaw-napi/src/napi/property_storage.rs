@@ -447,27 +447,13 @@ unsafe fn set_own_property(
         if matches!(value_ref(object), Ok(Value::Array(_)))
             && matches!(key, PropertyKey::String(name) if name == "length")
         {
-            let number = match value_ref(value).and_then(number_for_typedarray) {
-                Ok(number)
-                    if number.is_finite()
-                        && number >= 0.0
-                        && number <= u32::MAX as f64
-                        && number.fract() == 0.0 =>
-                {
-                    number as usize
-                }
-                _ => {
-                    let error = env.alloc(Value::Error("invalid array length".into()));
-                    env.exception = Some(error);
-                    return NAPI_PENDING_EXCEPTION;
-                }
-            };
-            let Some(Value::Array(values)) = object.as_mut() else {
-                unreachable!();
-            };
-            values.resize(number, None);
-            return NAPI_OK;
+            // Callers route length through set_array_length so removed
+            // accessor roots can be dropped after the Env mutation borrow.
+            return NAPI_GENERIC_FAILURE;
         }
+        return NAPI_GENERIC_FAILURE;
+    }
+    if array_index_exceeds_readonly_length_in_env(env, object, key) {
         return NAPI_GENERIC_FAILURE;
     }
     match object.as_mut() {
@@ -533,6 +519,122 @@ unsafe fn set_own_property(
         _ => return NAPI_OBJECT_EXPECTED,
     }
     NAPI_OK
+}
+
+unsafe fn is_array_length_property(object: NapiValue, key: &PropertyKey) -> bool {
+    matches!(value_ref(object), Ok(Value::Array(_)))
+        && matches!(key, PropertyKey::String(name) if name == "length")
+}
+
+unsafe fn extend_array_for_own_index(object: NapiValue, key: &PropertyKey) {
+    if let (Some(index), Some(Value::Array(values))) = (property_array_index(key), object.as_mut()) {
+        if values.len() <= index {
+            values.resize(index + 1, None);
+        }
+    }
+}
+
+unsafe fn array_index_exceeds_readonly_length(
+    env: NapiEnv, object: NapiValue, key: &PropertyKey,
+) -> bool {
+    let (Some(index), Ok(Value::Array(values))) = (property_array_index(key), value_ref(object))
+        else { return false };
+    index >= values.len()
+        && property_attributes_for(env, object as usize,
+            &PropertyKey::String("length".into())) & NAPI_WRITABLE == 0
+}
+
+// set_own_property already holds an exclusive Env reference. Inspect that
+// Env directly instead of rebuilding a shared reference to it from its raw
+// pointer. Cross-Env objects still use the same Host fallback as
+// property_attributes_for, excluding the currently borrowed Env.
+unsafe fn array_index_exceeds_readonly_length_in_env(
+    env: &Env, object: NapiValue, key: &PropertyKey,
+) -> bool {
+    let (Some(index), Ok(Value::Array(values))) = (property_array_index(key), value_ref(object))
+        else { return false };
+    if index < values.len() { return false; }
+    let length_key = PropertyKey::String("length".into());
+    let stored = env.property_attributes.get(&(object as usize, length_key.clone())).copied()
+        .or_else(|| HOST.with(|host| {
+            host.borrow().module_envs.iter()
+                .filter(|candidate| !std::ptr::eq(
+                    std::ptr::addr_of!(***candidate), env as *const Env)
+                    && !candidate.finalized)
+                .find_map(|candidate| candidate.property_attributes
+                    .get(&(object as usize, length_key.clone())).copied())
+        }));
+    stored.unwrap_or(NAPI_WRITABLE) & NAPI_WRITABLE == 0
+}
+
+// ArraySetLength must remove configurable indexed properties in descending
+// order and stop above the first nonconfigurable index. Dropping an accessor
+// can run a QuickJS finalizer, so the removed roots leave the Env borrow
+// before their final strong reference is released.
+unsafe fn set_array_length(
+    env: NapiEnv, object: NapiValue, value: NapiValue, make_readonly: bool,
+) -> NapiStatus {
+    let number = match value_ref(value).and_then(number_for_typedarray) {
+        Ok(number) if number.is_finite() && number >= 0.0
+            && number <= u32::MAX as f64 && number.fract() == 0.0 => number as usize,
+        _ => {
+            let Ok(owner) = env_mut(env) else { return NAPI_INVALID_ARG };
+            let error = owner.alloc(Value::Error("invalid array length".into()));
+            owner.exception = Some(error);
+            return NAPI_PENDING_EXCEPTION;
+        }
+    };
+    let old_length = match value_ref(object) {
+        Ok(Value::Array(values)) => values.len(),
+        _ => return NAPI_OBJECT_EXPECTED,
+    };
+    let (status, removed) = {
+        let Ok(owner) = env_mut(env) else { return NAPI_INVALID_ARG };
+        let identity = object as usize;
+        let mut removed = Vec::new();
+        let mut final_length = number;
+        let mut status = NAPI_OK;
+        for index in (number..old_length).rev() {
+            let key = PropertyKey::String(index.to_string());
+            let data = matches!(value_ref(object), Ok(Value::Array(values))
+                if values.get(index).is_some_and(Option::is_some));
+            let accessor = owner.accessors.contains_key(&(identity, key.clone()));
+            let hosted = owner.host_properties.get(&identity)
+                .is_some_and(|properties| properties.contains_key(&key));
+            if data || accessor || hosted {
+                let flags = owner.property_attributes.get(&(identity, key.clone()))
+                    .copied().unwrap_or(NAPI_DEFAULT_PROPERTY_ATTRIBUTES);
+                if owner.sealed_objects.contains(&identity) || flags & NAPI_CONFIGURABLE == 0 {
+                    final_length = index + 1;
+                    status = NAPI_GENERIC_FAILURE;
+                    break;
+                }
+            }
+            if let Some(Value::Array(values)) = object.as_mut() {
+                values[index] = None;
+            }
+            if let Some(accessor) = owner.accessors.remove(&(identity, key.clone())) {
+                removed.push(accessor);
+            }
+            if let Some(properties) = owner.host_properties.get_mut(&identity) {
+                properties.remove(&key);
+            }
+            owner.property_attributes.remove(&(identity, key.clone()));
+            remove_property_order(owner, identity, &key);
+        }
+        if let Some(Value::Array(values)) = object.as_mut() {
+            values.resize(final_length, None);
+        }
+        // A removed accessor's final root can reenter on drop. Publish the
+        // requested readonly transition before releasing any such root.
+        if make_readonly {
+            owner.property_attributes.insert((identity,
+                PropertyKey::String("length".into())), 0);
+        }
+        (status, removed)
+    };
+    drop(removed);
+    status
 }
 
 unsafe fn uint8_from_value(value: NapiValue) -> Result<u8, NapiStatus> {
@@ -618,14 +720,14 @@ unsafe fn find_accessor(env: NapiEnv, object: NapiValue, name: &PropertyKey) -> 
 
 unsafe fn accessor_for_owner(env: NapiEnv, owner: usize, key: &PropertyKey) -> Option<Accessor> {
     env.as_ref().filter(|env| !env.finalized)
-        .and_then(|env| env.accessors.get(&(owner, key.clone())).copied())
+        .and_then(|env| env.accessors.get(&(owner, key.clone())).cloned())
         .or_else(|| {
             HOST.with(|host| {
                 host.borrow()
                     .module_envs
                     .iter()
                     .filter(|module_env| !module_env.finalized)
-                    .find_map(|module_env| module_env.accessors.get(&(owner, key.clone())).copied())
+                    .find_map(|module_env| module_env.accessors.get(&(owner, key.clone())).cloned())
             })
         })
 }
@@ -670,10 +772,7 @@ unsafe fn accessors_for_owner(env: NapiEnv, owner: usize) -> Vec<PropertyKey> {
 }
 
 unsafe fn property_attributes_for(env: NapiEnv, owner: usize, key: &PropertyKey) -> u32 {
-    if let Some(attributes) = intrinsic_property_attributes(owner as NapiValue, key) {
-        return attributes;
-    }
-    env.as_ref().filter(|env| !env.finalized)
+    let stored = env.as_ref().filter(|env| !env.finalized)
         .and_then(|env| env.property_attributes.get(&(owner, key.clone())).copied())
         .or_else(|| {
             HOST.with(|host| {
@@ -684,8 +783,18 @@ unsafe fn property_attributes_for(env: NapiEnv, owner: usize, key: &PropertyKey)
                         .copied()
                 })
             })
-        })
-        .unwrap_or(NAPI_DEFAULT_PROPERTY_ATTRIBUTES)
+        });
+    if let Some(intrinsic) = intrinsic_property_attributes(owner as NapiValue, key) {
+        // Array length is intrinsically nonenumerable and nonconfigurable,
+        // but its writable bit can transition to false through a descriptor
+        // or Object.freeze. Its explicit state must outlive a proxy shadow.
+        if matches!(value_ref(owner as NapiValue), Ok(Value::Array(_)))
+            && matches!(key, PropertyKey::String(name) if name == "length") {
+            return stored.unwrap_or(intrinsic) & NAPI_WRITABLE;
+        }
+        return intrinsic;
+    }
+    stored.unwrap_or(NAPI_DEFAULT_PROPERTY_ATTRIBUTES)
 }
 
 unsafe fn symbol_for(env: NapiEnv, id: u64) -> Option<NapiValue> {

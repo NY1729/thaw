@@ -327,9 +327,14 @@ pub unsafe extern "C" fn napi_create_string_utf16(
     } else {
         length
     };
-    let string = String::from_utf16_lossy(std::slice::from_raw_parts(value, length));
-    let value = env.alloc(Value::String(string));
-    write_value(out, value)
+    let units = std::slice::from_raw_parts(value, length);
+    let exact = String::from_utf16(units);
+    let string = exact.as_ref().cloned().unwrap_or_else(|_| String::from_utf16_lossy(units));
+    let result = env.alloc(Value::String(string));
+    if exact.is_err() {
+        env.utf16_strings.insert(result as usize, units.to_vec());
+    }
+    write_value(out, result)
 }
 
 fn intern_property_key(env: &mut Env, key: String) -> NapiValue {
@@ -407,8 +412,17 @@ pub unsafe extern "C" fn node_api_create_property_key_utf16(
     } else {
         length
     };
-    let key = String::from_utf16_lossy(std::slice::from_raw_parts(value, length));
-    write_value(out, intern_property_key(env, key))
+    let units = std::slice::from_raw_parts(value, length);
+    if let Ok(key) = String::from_utf16(units) {
+        return write_value(out, intern_property_key(env, key));
+    }
+    if let Some(key) = env.utf16_property_keys.get(units).copied() {
+        return write_value(out, key);
+    }
+    let key = env.alloc(Value::String(String::from_utf16_lossy(units)));
+    env.utf16_strings.insert(key as usize, units.to_vec());
+    env.utf16_property_keys.insert(units.to_vec(), key);
+    write_value(out, key)
 }
 
 #[no_mangle]
@@ -471,6 +485,9 @@ pub unsafe extern "C" fn napi_create_symbol(
     {
         return record_status(env, NAPI_INVALID_ARG);
     }
+    let description_units = if description.is_null() { None }
+        else { env.as_ref().and_then(|owner|
+            owner.utf16_strings.get(&(description as usize))).cloned() };
     let description = if description.is_null() {
         String::new()
     } else {
@@ -484,6 +501,7 @@ pub unsafe extern "C" fn napi_create_symbol(
     };
     let id = NEXT_SYMBOL_ID.fetch_add(1, Ordering::Relaxed);
     let value = env.alloc(Value::Symbol { id, description });
+    if let Some(units) = description_units { env.utf16_symbols.insert(value as usize, units); }
     env.symbols.insert(id, value);
     write_value(out, value)
 }
@@ -511,7 +529,7 @@ pub unsafe extern "C" fn node_api_symbol_for(
         .get_or_init(|| Mutex::new(HashMap::new()))
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .entry(description.clone())
+        .entry(description.encode_utf16().collect())
         .or_insert_with(|| NEXT_SYMBOL_ID.fetch_add(1, Ordering::Relaxed));
     let value = if let Some(value) = env.symbols.get(&id).copied() {
         value
@@ -612,7 +630,7 @@ pub unsafe extern "C" fn node_api_create_object_with_properties(
     for (&name, &value) in names.iter().zip(values) {
         if !value_belongs_to_environment(env, name)
             || !value_belongs_to_environment(env, value)
-            || property_key(name).is_err()
+            || property_key(env, name).is_err()
         {
             return record_status(env, NAPI_INVALID_ARG);
         }
@@ -684,7 +702,7 @@ pub unsafe extern "C" fn napi_create_function(
         callback,
         data,
         properties: HashMap::new(),
-        _thaw_bridge: None,
+        _thaw_bridge: None, _accessor_owner: None,
     }));
     let name_value = env.alloc(Value::String(function_name));
     let length_value = env.alloc(Value::Number(0.0));

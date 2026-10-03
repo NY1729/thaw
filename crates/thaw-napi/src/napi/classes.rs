@@ -33,28 +33,148 @@ pub unsafe extern "C" fn napi_define_properties(
         let Ok(key) = key else {
             return record_status(env, NAPI_INVALID_ARG);
         };
-        let Ok(key_name) = property_key(key) else {
+        #[cfg(feature = "quickjs")]
+        if let Some(handle) = qjs_handle(object) {
+            let attributes = descriptor.attributes & NAPI_DEFAULT_PROPERTY_ATTRIBUTES;
+            let status = if descriptor.method.is_some() || descriptor.getter.is_some()
+                || descriptor.setter.is_some() {
+                qjs_define_callback_property(env, handle, key,
+                    descriptor.getter, descriptor.setter,
+                    if descriptor.getter.is_some() || descriptor.setter.is_some() {
+                        None
+                    } else { descriptor.method },
+                    descriptor.data, attributes)
+            } else {
+                let value = if descriptor.value.is_null() {
+                    let mut undefined = ptr::null_mut();
+                    let status = napi_get_undefined(env, &mut undefined);
+                    if status != NAPI_OK { return record_status(env, status); }
+                    undefined
+                } else { descriptor.value };
+                qjs_define_data_property(env, handle, key, value, attributes)
+            };
+            if status != NAPI_OK { return status; }
+            continue;
+        }
+        let Ok(key_name) = property_key(env, key) else {
             return record_status(env, NAPI_INVALID_ARG);
         };
         let attributes = descriptor.attributes & NAPI_DEFAULT_PROPERTY_ATTRIBUTES;
-        if descriptor.getter.is_some() || descriptor.setter.is_some() {
-            let Ok(env) = env_mut(env) else {
-                return NAPI_INVALID_ARG;
-            };
-            if env.sealed_objects.contains(&(object as usize)) {
+        if is_array_length_property(object, &key_name) {
+            // The intrinsic descriptor is always nonenumerable and
+            // nonconfigurable. A definition may omit its value and only make
+            // it readonly; an ordinary property setter cannot express that.
+            if descriptor.method.is_some() || descriptor.getter.is_some()
+                || descriptor.setter.is_some()
+                || attributes & (NAPI_ENUMERABLE | NAPI_CONFIGURABLE) != 0 {
                 return record_status(env, NAPI_GENERIC_FAILURE);
             }
-            env.accessors.insert(
-                (object as usize, key_name.clone()),
-                Accessor {
-                    getter: descriptor.getter,
-                    setter: descriptor.setter,
-                    data: descriptor.data,
-                },
-            );
-            record_property_order(env, object as usize, &key_name);
-            env.property_attributes
-                .insert((object as usize, key_name), attributes);
+            let writable = property_attributes_for(env, object as usize, &key_name)
+                & NAPI_WRITABLE != 0;
+            let old_length = match value_ref(object) {
+                Ok(Value::Array(values)) => values.len(),
+                _ => return record_status(env, NAPI_OBJECT_EXPECTED),
+            };
+            if !writable && attributes & NAPI_WRITABLE != 0 {
+                return record_status(env, NAPI_GENERIC_FAILURE);
+            }
+            let status = if descriptor.value.is_null() {
+                NAPI_OK
+            } else if !writable {
+                match value_ref(descriptor.value).and_then(number_for_typedarray) {
+                    Ok(number) if number == old_length as f64 => NAPI_OK,
+                    _ => NAPI_GENERIC_FAILURE,
+                }
+            } else {
+                set_array_length(env, object, descriptor.value,
+                    attributes & NAPI_WRITABLE == 0)
+            };
+            if status != NAPI_OK && !(status == NAPI_GENERIC_FAILURE
+                && writable && attributes & NAPI_WRITABLE == 0) {
+                return record_status(env, status);
+            }
+            if descriptor.value.is_null() {
+                if let Ok(owner) = env_mut(env) {
+                    owner.property_attributes.insert((object as usize, key_name),
+                        attributes & NAPI_WRITABLE);
+                }
+            }
+            if status != NAPI_OK { return record_status(env, status); }
+            continue;
+        }
+        if descriptor.getter.is_some() || descriptor.setter.is_some() {
+            let old_value = own_property_value(env, object, &key_name);
+            let old_accessor = accessor_for_owner(env, object as usize, &key_name);
+            let exists = old_value.is_some() || old_accessor.is_some();
+            let old_attributes = property_attributes_for(env, object as usize, &key_name);
+            if fixed_index_exists(object, &key_name) {
+                return record_status(env, NAPI_GENERIC_FAILURE);
+            }
+            if exists && old_attributes & NAPI_CONFIGURABLE == 0 {
+                // A nonconfigurable descriptor cannot switch data/accessor
+                // kind, change its enumerable bit, or replace either native
+                // callback. An identical definition is a no-op.
+                let same = old_accessor.as_ref().is_some_and(|old| {
+                    #[cfg(feature = "quickjs")]
+                    let native_only = old.js_owner.is_none();
+                    #[cfg(not(feature = "quickjs"))]
+                    let native_only = true;
+                    old.getter.map(|callback| callback as usize)
+                        == descriptor.getter.map(|callback| callback as usize)
+                        && old.setter.map(|callback| callback as usize)
+                            == descriptor.setter.map(|callback| callback as usize)
+                        && old.getter_data == descriptor.data
+                        && old.setter_data == descriptor.data
+                        && native_only
+                });
+                if !same || attributes & (NAPI_ENUMERABLE | NAPI_CONFIGURABLE)
+                    != old_attributes & (NAPI_ENUMERABLE | NAPI_CONFIGURABLE) {
+                    return record_status(env, NAPI_GENERIC_FAILURE);
+                }
+                continue;
+            }
+            // Resolve the old slot and length guard before taking the Env's
+            // mutable borrow.  own_property_value may allocate for an indexed
+            // native view, so it must not reborrow the Env from inside that
+            // mutation scope.
+            let had_data = old_value.is_some();
+            let beyond_readonly_length =
+                array_index_exceeds_readonly_length(env, object, &key_name);
+            let replaced = {
+                let Ok(owner) = env_mut(env) else { return NAPI_INVALID_ARG; };
+                if owner.sealed_objects.contains(&(object as usize))
+                    || (owner.nonextensible_objects.contains(&(object as usize)) && !exists) {
+                    return record_status(env, NAPI_GENERIC_FAILURE);
+                }
+                if beyond_readonly_length {
+                    return record_status(env, NAPI_GENERIC_FAILURE);
+                }
+                if had_data {
+                    let status = remove_own_property(owner, object, &key_name);
+                    if status != NAPI_OK { return record_status(env, status); }
+                }
+                extend_array_for_own_index(object, &key_name);
+                let replaced = owner.accessors.insert(
+                    (object as usize, key_name.clone()),
+                    Accessor {
+                        getter: descriptor.getter,
+                        setter: descriptor.setter,
+                        getter_data: descriptor.data,
+                        setter_data: descriptor.data,
+                        getter_reflection: None,
+                        setter_reflection: None,
+                        #[cfg(feature = "quickjs")]
+                        js_owner: None,
+                    },
+                );
+                record_property_order(owner, object as usize, &key_name);
+                owner.property_attributes
+                    .insert((object as usize, key_name), attributes);
+                replaced
+            };
+            // A replaced JS accessor may release its last QuickJS handle and
+            // run a finalizer. Do so after the Env mutation borrow ends.
+            drop(replaced);
             continue;
         }
         let value = if let Some(method) = descriptor.method {
@@ -74,13 +194,14 @@ pub unsafe extern "C" fn napi_define_properties(
         } else {
             descriptor.value
         };
-        let status = napi_set_property(env, object, key, value);
+        // Definition writes an own descriptor directly. A property setter
+        // must not run, and a nonconfigurable predecessor must pass the same
+        // compatibility checks as the trusted graph descriptor route.
+        let status = qjs_install_native_data_property(env, object, key_name,
+            value, descriptor.method.is_some() || !descriptor.value.is_null(),
+            attributes);
         if status != NAPI_OK {
             return record_status(env, status);
-        }
-        if let Ok(env) = env_mut(env) {
-            env.property_attributes
-                .insert((object as usize, key_name), attributes);
         }
     }
     NAPI_OK
@@ -521,20 +642,57 @@ pub unsafe extern "C" fn napi_new_instance(
     argv: *const NapiValue,
     result: *mut NapiValue,
 ) -> NapiStatus {
+    napi_new_instance_with_target(env, constructor, constructor,
+        ptr::null_mut(), argc, argv, result)
+}
+
+// The ordinary N-API entry uses its constructor as new.target. A trusted
+// QuickJS Proxy construct trap may supply a different engine new.target;
+// keep that extension private so the public N-API ABI remains unchanged.
+unsafe fn napi_new_instance_with_target(
+    env: NapiEnv,
+    constructor: NapiValue,
+    new_target: NapiValue,
+    fallback_prototype: NapiValue,
+    argc: usize,
+    argv: *const NapiValue,
+    result: *mut NapiValue,
+) -> NapiStatus {
     if result.is_null() || (argc != 0 && argv.is_null()) {
         return record_status(env, NAPI_INVALID_ARG);
     }
-    let Ok(host_env) = env_mut(env) else {
-        return NAPI_INVALID_ARG;
-    };
+    if !value_belongs_to_environment(env, new_target) {
+        return record_status(env, NAPI_INVALID_ARG);
+    }
+    if !fallback_prototype.is_null()
+        && (!value_belongs_to_environment(env, fallback_prototype)
+            || !matches!(value_ref(fallback_prototype), Ok(value) if is_object_value(value))) {
+        return record_status(env, NAPI_INVALID_ARG);
+    }
+    #[cfg(feature = "quickjs")]
+    if !value_belongs_to_environment(env, constructor) {
+        return record_status(env, NAPI_INVALID_ARG);
+    }
+    #[cfg(feature = "quickjs")]
+    if let Some(handle) = qjs_handle(constructor) {
+        let args = if argc == 0 { Vec::new() }
+            else { std::slice::from_raw_parts(argv, argc).to_vec() };
+        if args.iter().any(|arg| !value_belongs_to_environment(env, *arg)) {
+            return record_status(env, NAPI_INVALID_ARG);
+        }
+        if env.as_ref().is_some_and(|owner| owner.exception.is_some()) {
+            return record_status(env, NAPI_PENDING_EXCEPTION);
+        }
+        return qjs_construct_function(env, handle, &args, result);
+    }
     if !value_belongs_to_environment(env, constructor)
         || (argc != 0
             && std::slice::from_raw_parts(argv, argc)
                 .iter()
                 .any(|value| !value_belongs_to_environment(env, *value)))
-        || host_env.exception.is_some()
+        || env.as_ref().is_some_and(|owner| owner.exception.is_some())
     {
-        let status = if host_env.exception.is_some() {
+        let status = if env.as_ref().is_some_and(|owner| owner.exception.is_some()) {
             NAPI_PENDING_EXCEPTION
         } else {
             NAPI_INVALID_ARG
@@ -545,10 +703,26 @@ pub unsafe extern "C" fn napi_new_instance(
         Ok(Value::Function(function)) => function.clone(),
         _ => return record_status(env, NAPI_FUNCTION_EXPECTED),
     };
-    let prototype = function
-        .properties
-        .get(&PropertyKey::String("prototype".into()))
-        .copied();
+    // A property accessor is callable but is never a constructor. Its
+    // reflection Function owns a descriptor snapshot solely for call-time
+    // receiver dispatch; do not run it as a class initializer.
+    if function._accessor_owner.is_some() {
+        return record_status(env, NAPI_FUNCTION_EXPECTED);
+    }
+    // Get(new.target, "prototype") may invoke user code even when the
+    // constructor itself is new.target. Snapshot the callback first, then
+    // perform this read before taking an Env mutation borrow.
+    let prototype = {
+        let mut prototype = ptr::null_mut();
+        let status = napi_get_named_property(env, new_target,
+            c"prototype".as_ptr(), &mut prototype);
+        if status != NAPI_OK { return record_status(env, status); }
+        match value_ref(prototype) {
+            Ok(value) if is_object_value(value) => Some(prototype),
+            _ => (!fallback_prototype.is_null()).then_some(fallback_prototype),
+        }
+    };
+    let Ok(host_env) = env_mut(env) else { return NAPI_INVALID_ARG; };
     let instance = host_env.alloc(Value::Object(HashMap::new()));
     host_env
         .instances
@@ -566,7 +740,7 @@ pub unsafe extern "C" fn napi_new_instance(
     let mut info = CallbackInfo {
         args,
         this_arg: instance,
-        new_target: constructor,
+        new_target,
         data: function.data,
     };
     let returned = invoke_napi_callback(env, function.callback, &mut info);
@@ -579,11 +753,15 @@ pub unsafe extern "C" fn napi_new_instance(
     if !returned.is_null() && !value_belongs_to_environment(env, returned) {
         return NAPI_INVALID_ARG;
     }
-    *result = if matches!(returned.as_ref(), Some(value) if is_object_value(value)) {
-        returned
-    } else {
-        instance
-    };
+    let explicit_object = matches!(returned.as_ref(), Some(value) if is_object_value(value));
+    if explicit_object && matches!(value_ref(returned), Ok(Value::Object(_) | Value::Array(_))) {
+        // A constructor's explicit return must remain that same object on
+        // later graph transfers. Do not register it as a class instance:
+        // its own prototype and instanceof identity are independent.
+        let Ok(owner) = env_mut(env) else { return NAPI_INVALID_ARG; };
+        owner.live_constructor_returns.insert(returned as usize);
+    }
+    *result = if explicit_object { returned } else { instance };
     NAPI_OK
 }
 
@@ -600,6 +778,17 @@ pub unsafe extern "C" fn napi_instanceof(
     if !value_belongs_to_environment(env, object) || !value_belongs_to_environment(env, constructor)
     {
         return NAPI_INVALID_ARG;
+    }
+    #[cfg(feature = "quickjs")]
+    if let (Some(object), Some(constructor)) = (qjs_handle(object), qjs_handle(constructor)) {
+        return qjs_instanceof_handles(env, object, constructor, result);
+    }
+    #[cfg(feature = "quickjs")]
+    if qjs_handle(object).is_some() || qjs_handle(constructor).is_some() {
+        if !matches!(value_ref(constructor), Ok(Value::QuickJsHandle { .. } | Value::Function(_))) {
+            return record_status(env, NAPI_FUNCTION_EXPECTED);
+        }
+        return qjs_instanceof(env, object, constructor, result);
     }
     if !matches!(value_ref(constructor), Ok(Value::Function(_))) {
         return record_status(env, NAPI_FUNCTION_EXPECTED);
@@ -650,6 +839,13 @@ pub unsafe extern "C" fn napi_get_prototype(
     if result.is_null() || !value_belongs_to_environment(env, object) {
         return record_status(env, NAPI_INVALID_ARG);
     }
+    #[cfg(feature = "quickjs")]
+    if let Some(handle) = qjs_handle(object) {
+        if matches!(value_ref(object), Ok(Value::QuickJsHandle { object_like: false, .. })) {
+            return record_status(env, NAPI_OBJECT_EXPECTED);
+        }
+        return qjs_get_prototype(env, handle, result);
+    }
     if !matches!(value_ref(object), Ok(value) if is_object_value(value)) {
         return record_status(env, NAPI_OBJECT_EXPECTED);
     }
@@ -677,6 +873,16 @@ pub unsafe extern "C" fn node_api_set_prototype(
     if !value_belongs_to_environment(env, object) || !value_belongs_to_environment(env, prototype) {
         return NAPI_INVALID_ARG;
     }
+    #[cfg(feature = "quickjs")]
+    if let Some(handle) = qjs_handle(object) {
+        if matches!(value_ref(object), Ok(Value::QuickJsHandle { object_like: false, .. })) {
+            return record_status(env, NAPI_OBJECT_EXPECTED);
+        }
+        if !matches!(value_ref(prototype), Ok(value) if is_object_value(value) || matches!(value, Value::Null)) {
+            return record_status(env, NAPI_OBJECT_EXPECTED);
+        }
+        return qjs_set_prototype(env, handle, prototype);
+    }
     if !matches!(value_ref(object), Ok(value) if is_object_value(value)) {
         return record_status(env, NAPI_OBJECT_EXPECTED);
     }
@@ -687,17 +893,18 @@ pub unsafe extern "C" fn node_api_set_prototype(
 
     let object_id = object as usize;
     let prototype_id = prototype as usize;
+    let prototype_is_null = matches!(value_ref(prototype), Ok(Value::Null));
     let Ok(env) = env_mut(env) else {
         return NAPI_INVALID_ARG;
     };
     if env.prototypes.get(&object_id).copied() == Some(prototype_id) {
         return NAPI_OK;
     }
-    if env.sealed_objects.contains(&object_id) {
+    if env.nonextensible_objects.contains(&object_id) {
         return record_status(env, NAPI_GENERIC_FAILURE);
     }
 
-    if !matches!(value_ref(prototype), Ok(Value::Null)) {
+    if !prototype_is_null {
         let mut ancestor = Some(prototype_id);
         let mut visited = HashSet::new();
         while let Some(current) = ancestor {
@@ -727,11 +934,45 @@ pub unsafe extern "C" fn napi_strict_equals(
     if !value_belongs_to_environment(env, left) || !value_belongs_to_environment(env, right) {
         return record_status(env, NAPI_INVALID_ARG);
     }
+    #[cfg(feature = "quickjs")]
+    if let (Some(left), Some(right)) = (qjs_handle(left), qjs_handle(right)) {
+        return qjs_strict_equals(env, left, right, result);
+    }
+    #[cfg(feature = "quickjs")]
+    if let Some(handle) = qjs_handle(left) {
+        if matches!(value_ref(right), Ok(Value::Symbol { .. })) {
+            return qjs_strict_equals_native_symbol(env, handle, right, result);
+        }
+        if matches!(value_ref(right), Ok(Value::Undefined | Value::Null | Value::Bool(_)
+            | Value::Number(_) | Value::String(_) | Value::BigInt { .. })) {
+            return qjs_strict_equals_scalar(env, handle, right, result);
+        }
+    }
+    #[cfg(feature = "quickjs")]
+    if let Some(handle) = qjs_handle(right) {
+        if matches!(value_ref(left), Ok(Value::Symbol { .. })) {
+            return qjs_strict_equals_native_symbol(env, handle, left, result);
+        }
+        if matches!(value_ref(left), Ok(Value::Undefined | Value::Null | Value::Bool(_)
+            | Value::Number(_) | Value::String(_) | Value::BigInt { .. })) {
+            return qjs_strict_equals_scalar(env, handle, left, result);
+        }
+    }
     *result = match (value_ref(left), value_ref(right)) {
         (Ok(Value::Undefined), Ok(Value::Undefined)) | (Ok(Value::Null), Ok(Value::Null)) => true,
         (Ok(Value::Bool(left)), Ok(Value::Bool(right))) => left == right,
         (Ok(Value::Number(left)), Ok(Value::Number(right))) => left == right,
-        (Ok(Value::String(left)), Ok(Value::String(right))) => left == right,
+        (Ok(Value::String(left_text)), Ok(Value::String(right_text))) => {
+            let left_units = env.as_ref().and_then(|owner| owner.utf16_strings.get(&(left as usize)));
+            let right_units = env.as_ref().and_then(|owner| owner.utf16_strings.get(&(right as usize)));
+            if left_units.is_none() && right_units.is_none() {
+                left_text == right_text
+            } else {
+                let left = left_units.cloned().unwrap_or_else(|| left_text.encode_utf16().collect());
+                let right = right_units.cloned().unwrap_or_else(|| right_text.encode_utf16().collect());
+                left == right
+            }
+        },
         (Ok(Value::Symbol { id: left, .. }), Ok(Value::Symbol { id: right, .. })) => left == right,
         (
             Ok(Value::BigInt {

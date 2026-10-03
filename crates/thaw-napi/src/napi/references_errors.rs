@@ -135,6 +135,14 @@ pub unsafe extern "C" fn napi_call_function(
     {
         return record_status(env, NAPI_INVALID_ARG);
     }
+    #[cfg(feature = "quickjs")]
+    if let Some(handle) = qjs_handle(function) {
+        // The foreign call may reenter this Env and invalidate the caller's
+        // callback-info argv storage. Snapshot handles before crossing it.
+        let args = if argc == 0 { Vec::new() }
+            else { std::slice::from_raw_parts(argv, argc).to_vec() };
+        return qjs_call_function(env, handle, this_arg, &args, out);
+    }
     let function = match value_ref(function) {
         Ok(Value::Function(function)) => function.clone(),
         _ => return record_status(env, NAPI_FUNCTION_EXPECTED),
