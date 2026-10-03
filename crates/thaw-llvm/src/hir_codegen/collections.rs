@@ -993,11 +993,35 @@ impl<'ctx> HirCompiler<'ctx> {
         fields: &[(String, HirType)],
         index: usize,
     ) -> Result<PointerValue<'ctx>, String> {
-        let offset = self
-            .context
-            .i64_type()
+        let static_offset = self.context.i64_type()
             .const_int(object_field_offset(fields, index)?, false);
-
+        if !self.tracks_physical_object_layouts {
+            return unsafe { self.builder.build_in_bounds_gep(
+                self.context.i8_type(), object, &[static_offset], "field_ptr",
+            ) }.map_err(|error| error.to_string());
+        }
+        let field_hex = fields[index].0.as_bytes().iter()
+            .map(|byte| format!("{byte:02x}")).collect::<String>();
+        let field_hex = self.builder.build_global_string_ptr(&field_hex, "native_field_name_hex")
+            .map_err(|error| error.to_string())?;
+        let offset = self.builder.build_call(
+            self.module.get_function("thaw_object_field_offset").unwrap(),
+            &[object.into(), field_hex.as_pointer_value().into(), static_offset.into()],
+            "native_physical_field_offset",
+        ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+            .ok_or("native field offset returned no value")?.into_int_value();
+        let missing = self.builder.build_int_compare(
+            IntPredicate::EQ, offset, self.context.i64_type().const_all_ones(),
+            "native_physical_field_missing",
+        ).map_err(|error| error.to_string())?;
+        let function = self.current_function();
+        let invalid = self.context.append_basic_block(function, "native_field_invalid");
+        let valid = self.context.append_basic_block(function, "native_field_valid");
+        self.builder.build_conditional_branch(missing, invalid, valid)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(invalid);
+        self.compile_throw_builtin_error("TypeError", "Incompatible native object field layout")?;
+        self.builder.position_at_end(valid);
         unsafe {
             self.builder
                 .build_in_bounds_gep(self.context.i8_type(), object, &[offset], "field_ptr")

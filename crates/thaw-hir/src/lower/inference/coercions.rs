@@ -33,11 +33,11 @@ fn absent_after(value: HirExpr, absent: HirExpr) -> HirExpr {
 }
 
 impl<'a> FnLowerer<'a> {
-    /// Preserve the allocation's wider typed view before a prefix coercion
-    /// erases its trailing fields. Registration is lazy at codegen when this
-    /// program never projects a native object into QuickJS.
+    /// Preserve the allocation's full typed view before structural narrowing.
+    /// Nonprefix views also record physical field offsets before type erasure;
+    /// the QuickJS factory itself remains lazy in native-only programs.
     fn retain_full_native_object_projection(
-        &mut self, value: HirExpr, fields: &[(Symbol, HirType)],
+        &mut self, value: HirExpr, fields: &[(Symbol, HirType)], nonprefix: bool,
     ) -> Result<HirExpr, String> {
         let full_type = HirType::Object(fields.to_vec());
         let owner = format!("__thaw_full_native_owner_{}", self.next_binding);
@@ -55,6 +55,15 @@ impl<'a> FnLowerer<'a> {
             vec![HirExpr::Var(owner.clone()),
                 HirExpr::Lit(HirLit::Str(crate::native_object_layout_token(fields))), factory],
         );
+        // The first view is still the allocation's physical layout, even
+        // when it happens to be a prefix. A later reordered alias must not
+        // seed the offset map from that earlier apparent view. A borrowed
+        // external prefix stays usable natively; it simply cannot acquire
+        // an arena-owned live projection.
+        let register = HirExpr::EvalThen(Box::new(HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_register_native_object_layout".into())),
+            vec![HirExpr::Var(owner.clone()), HirExpr::Lit(HirLit::Bool(nonprefix))],
+        )), Box::new(register));
         let result = self.wrap_call_argument_bindings(
             HirExpr::EvalThen(Box::new(register), Box::new(HirExpr::Var(owner.clone()))),
             &[(owner.clone(), full_type, value)],
@@ -311,28 +320,37 @@ impl<'a> FnLowerer<'a> {
                     .iter()
                     .filter(|(name, _)| !is_hidden_accessor_field(name))
                     .collect::<Vec<_>>();
-                if visible
-                    .iter()
-                    .zip(declared_fields)
-                    .all(|((name, actual), (declared, expected))| {
-                        name == declared && actual == expected
-                    })
-                    && visible.len() == declared_fields.len()
-                {
+                if visible.len() == declared_fields.len()
+                    && visible.iter().zip(declared_fields).all(|((name, actual), (declared, expected))|
+                        name == declared && actual == expected) {
                     return Ok(value);
                 }
-                return Err("cannot reorder a non-literal accessor object layout".into());
+                let compatible = declared_fields.iter().all(|(declared, expected)|
+                    visible.iter().any(|(name, actual)| name == declared && actual == expected));
+                if compatible && Self::fixed_object_supports_live_projection(
+                    &HirType::Object(actual_fields.clone())) {
+                    let prefix = actual_fields.starts_with(declared_fields);
+                    return self.retain_full_native_object_projection(value, &actual_fields, !prefix);
+                }
+                return Err("cannot reinterpret a non-literal accessor object layout".into());
             }
             if actual_fields.starts_with(declared_fields) {
                 if actual_fields.len() > declared_fields.len()
                     && Self::fixed_object_supports_live_projection(
                         &HirType::Object(actual_fields.clone())) {
-                    return self.retain_full_native_object_projection(value, &actual_fields);
+                    return self.retain_full_native_object_projection(value, &actual_fields, false);
                 }
                 return Ok(value);
             }
             if HirType::Object(actual_fields.clone()) == date_object_type() {
                 return Err("native Date cannot be reinterpreted as a different fixed object layout".into());
+            }
+            let same_fields = declared_fields.iter().all(|(declared, expected)|
+                actual_fields.iter().any(|(name, actual)| name == declared && actual == expected));
+            if same_fields && !matches!(value, HirExpr::ObjectLit(_))
+                && Self::fixed_object_supports_live_projection(
+                    &HirType::Object(actual_fields.clone())) {
+                return self.retain_full_native_object_projection(value, &actual_fields, true);
             }
             if let Some(class) = class_name_from_type(&HirType::Object(actual_fields.clone())) {
                 let compatible = declared_fields.iter().all(|(name, expected)| {

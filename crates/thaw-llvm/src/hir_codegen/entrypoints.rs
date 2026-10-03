@@ -18,7 +18,8 @@ impl<'ctx> HirCompiler<'ctx> {
         // Projection wrappers and owned Json receivers can outlive a call
         // through a global or captured arena cell. Start tracing before
         // module initialization creates either kind of value.
-        if self.projects_native_objects || self.tracks_owned_json_roots {
+        if self.projects_native_objects || self.tracks_owned_json_roots
+            || self.tracks_physical_object_layouts {
             let pointer = self.context.ptr_type(AddressSpace::default());
             let enable = self.module.add_function("thaw_arena_enable_tracing",
                 self.context.void_type().fn_type(&[], false), Some(Linkage::External));

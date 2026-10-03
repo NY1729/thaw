@@ -294,6 +294,9 @@ pub struct HirCompiler<'ctx> {
     /// Compile full-layout native projection adapters only in modules whose
     /// completed HIR actually crosses a fixed object into QuickJS.
     projects_native_objects: bool,
+    /// Nonprefix structural aliases need tracked owner identities even in
+    /// modules that never start QuickJS.
+    tracks_physical_object_layouts: bool,
     /// Non-arrow Json receivers and live Json literals create owned boxes
     /// that may escape through generated globals or captured arena cells.
     tracks_owned_json_roots: bool,
@@ -438,6 +441,7 @@ impl<'ctx> HirCompiler<'ctx> {
             uses_quickjs: false,
             uses_quickjs_handles: false,
             projects_native_objects: false,
+            tracks_physical_object_layouts: false,
             tracks_owned_json_roots: false,
             compiling_quickjs_dynamic_arguments: false,
         }
@@ -445,6 +449,8 @@ impl<'ctx> HirCompiler<'ctx> {
 
     pub fn compile_program(&mut self, program: &HirProgram) -> Result<(), String> {
         self.projects_native_objects = hir_contains_named_call(program, "__thaw_build_native_object_wrapper");
+        self.tracks_physical_object_layouts =
+            hir_contains_named_call(program, "__thaw_register_native_object_layout");
         self.declare_runtime_builtins();
         self.declare_exception_state();
         self.declare_globals(program)?;
