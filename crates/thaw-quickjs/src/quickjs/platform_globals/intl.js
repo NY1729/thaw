@@ -276,6 +276,47 @@
     'halfCeil', 'halfFloor', 'halfTrunc', 'halfEven', 'halfExpand',
   ];
 
+  function intlIncrementDecimal(digits) {
+    let index = digits.length - 1;
+    while (index >= 0 && digits[index] === '9') index--;
+    return index < 0 ? `1${'0'.repeat(digits.length)}`
+      : `${digits.slice(0, index)}${String.fromCharCode(digits.charCodeAt(index) + 1)}${'0'.repeat(digits.length - index - 1)}`;
+  }
+
+  function intlNativeRangeInputFits(value) {
+    if (typeof value === 'bigint') return value.toString().length <= 32000;
+    if (typeof value !== 'string') return true;
+    if (value.length > 32000) return false;
+    const exponent = /[eE]([+-]?\d+)$/.exec(value);
+    return !exponent || (BigInt(exponent[1]) >= -32000n && BigInt(exponent[1]) <= 32000n);
+  }
+
+  // Round an ASCII coefficient without constructing 10 ** discardedPlaces.
+  // Only the guard digit, sticky bit, sign, and retained parity affect the
+  // nine supported rounding modes, even for a very long input.
+  function intlRoundDecimalDigits(digits, discardedPlaces, negative, mode) {
+    if (discardedPlaces <= 0n) return digits;
+    const length = BigInt(digits.length);
+    const kept = discardedPlaces >= length ? '0' : digits.slice(0, digits.length - Number(discardedPlaces));
+    const guardIndex = discardedPlaces > length ? -1 : digits.length - Number(discardedPlaces);
+    const guard = guardIndex < 0 ? 0 : Number(digits[guardIndex]);
+    const sticky = guardIndex < 0 ? digits !== '0' : /[1-9]/.test(digits.slice(guardIndex + 1));
+    const nonzero = guard !== 0 || sticky;
+    const aboveHalf = guard > 5 || (guard === 5 && sticky);
+    const tie = guard === 5 && !sticky;
+    const increment = nonzero && (
+      mode === 'expand' ||
+      (mode === 'ceil' && !negative) ||
+      (mode === 'floor' && negative) ||
+      (mode === 'halfExpand' && (aboveHalf || tie)) ||
+      (mode === 'halfTrunc' && aboveHalf) ||
+      (mode === 'halfEven' && (aboveHalf || (tie && Number(kept[kept.length - 1]) % 2 !== 0))) ||
+      (mode === 'halfCeil' && (aboveHalf || (tie && !negative))) ||
+      (mode === 'halfFloor' && (aboveHalf || (tie && negative)))
+    );
+    return increment ? intlIncrementDecimal(kept) : kept;
+  }
+
   // Rounds a *signed* value to the nearest multiple of `increment` under
   // the requested ECMA-402 `roundingMode` (default `halfExpand`).
   function intlRound(value, increment, mode) {
@@ -1050,13 +1091,14 @@
     // Real `SetNumberFormatDigitOptions`' `signDisplay` handling: `-0`
     // counts as negative for `auto`/`always` (so `-0` renders `"-0"`)
     // but not for `negative`/`exceptZero` (which treat it as zero).
-    _signFor(number) {
-      const negative = number < 0 || Object.is(number, -0);
+    _signFor(number, exact = null) {
+      const negative = exact === null ? number < 0 || Object.is(number, -0) : exact.negative;
+      const nonzero = exact === null ? number !== 0 : exact.nonzero;
       switch (this._signDisplay) {
         case 'never': return '';
         case 'always': return negative ? '-' : '+';
-        case 'exceptZero': return number === 0 ? '' : (negative ? '-' : '+');
-        case 'negative': return number < 0 ? '-' : '';
+        case 'exceptZero': return nonzero ? (negative ? '-' : '+') : '';
+        case 'negative': return negative && nonzero ? '-' : '';
         default: return negative ? '-' : '';
       }
     }
@@ -1072,9 +1114,8 @@
     _formatScientific(number, original) {
       const exact = this._exactScientificDigits(original);
       if (exact !== null) {
-        const render = digits => this._useRealLocaleData
-          ? String(__thaw_intl_number_format(this.locale, digits, false)) : digits;
-        return `${render(exact.mantissa)}E${exact.exponent < 0 ? '-' : ''}${render(String(Math.abs(exact.exponent)))}`;
+        const render = digits => this._renderDigits(digits, false);
+        return `${render(exact.mantissa)}E${exact.exponent < 0n ? '-' : ''}${render(String(exact.exponent < 0n ? -exact.exponent : exact.exponent))}`;
       }
       const magnitude = Math.abs(number);
       const minFrac = this._minimumFractionDigits === undefined ? 0 : this._minimumFractionDigits;
@@ -1107,36 +1148,45 @@
 
     _exactScientificDigits(value) {
       const text = typeof value === 'bigint' ? value.toString()
-        : typeof value === 'string' ? value.trim() : null;
-      if (text === null || text.length > 10000) return null;
+        : typeof value === 'string' ? value.trim()
+        : typeof value === 'number' && Number.isFinite(value) && this._style === 'percent' &&
+            !Number.isFinite(value * 100) ? String(value) : null;
+      if (text === null) return null;
       const match = /^([+-]?)(?:(\d+)(?:\.(\d*))?|\.(\d+))(?:[eE]([+-]?\d+))?$/.exec(text);
       if (!match) return null;
-      const power = Number(match[5] || 0);
-      if (!Number.isSafeInteger(power)) return null;
+      const power = BigInt(match[5] || 0);
       const coefficient = `${match[2] || '0'}${match[3] === undefined ? match[4] || '' : match[3]}`;
       const leading = /^0*/.exec(coefficient)[0].length;
       const significant = coefficient.slice(leading);
-      const exponent10 = significant ? (match[2] || '0').length - leading - 1 + power : 0;
-      if (!Number.isSafeInteger(exponent10)) return null;
+      const exponent10 = significant ? BigInt((match[2] || '0').length - leading - 1) + power +
+        (this._style === 'percent' ? 2n : 0n) : 0n;
       let exponent = significant && this._notation === 'engineering'
-        ? Math.floor(exponent10 / 3) * 3 : exponent10;
-      const width = significant ? exponent10 - exponent + 1 : 1;
+        ? exponent10 - ((exponent10 % 3n) + 3n) % 3n : exponent10;
+      const width = significant ? Number(exponent10 - exponent + 1n) : 1;
       const padded = (significant || '0').padEnd(width, '0');
       const signed = match[1] === '-' ? '-' : '';
       const raw = `${signed}${padded.slice(0, width)}${padded.length > width ? `.${padded.slice(width)}` : ''}`;
-      let rounded = this._exactStandardDigits(raw);
+      // Percent's two decimal places are already reflected in exponent10;
+      // rounding this mantissa must not scale it again, including on carry.
+      let rounded = this._exactStandardDigits(raw, false);
       if (rounded === null) return null;
       const carryWidth = this._notation === 'engineering' ? 3 : 1;
       if (rounded.intPart.length > carryWidth) {
-        exponent += carryWidth;
+        exponent += BigInt(carryWidth);
         const shifted = `${signed}${rounded.intPart.slice(0, -carryWidth)}.${rounded.intPart.slice(-carryWidth)}${rounded.fracPart}`;
-        rounded = this._exactStandardDigits(shifted);
+        rounded = this._exactStandardDigits(shifted, false);
         if (rounded === null) return null;
       }
-      return { mantissa: rounded.fracPart ? `${rounded.intPart}.${rounded.fracPart}` : rounded.intPart, exponent };
+      return { mantissa: rounded.fracPart ? `${rounded.intPart}.${rounded.fracPart}` : rounded.intPart,
+        exponent, negative: signed === '-', nonzero: significant !== '' };
     }
 
     _exactNotationDigits(value) {
+      // Compact notation has its own ICU rounding/formatting route. Retain
+      // its existing input ceiling until that separate route is repaired.
+      if (this._notation === 'compact' &&
+          ((typeof value === 'string' && value.trim().length > 10000) ||
+           (typeof value === 'bigint' && value.toString().length > 10000))) return null;
       return this._notation === 'scientific' || this._notation === 'engineering'
         ? this._exactScientificDigits(value) : this._exactStandardDigits(value);
     }
@@ -1183,57 +1233,47 @@
     // The standard-notation digit computation (significant- or
     // fraction-digit rounding, integer zero-padding, effective grouping),
     // shared by `format` and `formatToParts`.
-    _exactStandardDigits(value) {
+    _exactStandardDigits(value, applyPercentScale = true) {
       const text = typeof value === 'bigint' ? value.toString()
-        : typeof value === 'string' ? value.trim() : null;
+        : typeof value === 'string' ? value.trim()
+        : typeof value === 'number' && Number.isFinite(value) && this._style === 'percent' &&
+            !Number.isFinite(value * 100) ? String(value) : null;
       if (text === null) return null;
       const match = /^([+-]?)(?:(\d+)(?:\.(\d*))?|\.(\d+))(?:[eE]([+-]?\d+))?$/.exec(text);
       if (!match) return null;
-      const exponent = Number(match[5] || 0);
+      const exponent = BigInt(match[5] || 0);
       const fraction = match[3] === undefined ? (match[4] || '') : match[3];
-      let scale = fraction.length - exponent - (this._style === 'percent' ? 2 : 0);
-      if (!Number.isSafeInteger(scale) || Math.abs(scale) > 10000 || text.length > 10000) return null;
-      let digits = BigInt(`${match[2] || '0'}${fraction}`);
+      let scale = BigInt(fraction.length) - exponent - (applyPercentScale && this._style === 'percent' ? 2n : 0n);
+      let digits = `${match[2] || '0'}${fraction}`.replace(/^0+/, '') || '0';
       const cut = this._significant
-        ? Math.max(0, digits.toString().length - this._maximumSignificantDigits)
-        : Math.max(0, scale - this._maximumFractionDigits);
-      if (cut > 0) {
-        const divisor = 10n ** BigInt(cut);
-        const quotient = digits / divisor;
-        const remainder = digits % divisor;
-        const twice = remainder * 2n;
-        const negative = match[1] === '-';
-        const mode = this._roundingMode;
-        const increment = remainder !== 0n && (
-          mode === 'expand' ||
-          (mode === 'ceil' && !negative) ||
-          (mode === 'floor' && negative) ||
-          (mode === 'halfExpand' && twice >= divisor) ||
-          (mode === 'halfTrunc' && twice > divisor) ||
-          (mode === 'halfEven' && (twice > divisor || (twice === divisor && quotient % 2n !== 0n))) ||
-          (mode === 'halfCeil' && (twice > divisor || (twice === divisor && !negative))) ||
-          (mode === 'halfFloor' && (twice > divisor || (twice === divisor && negative)))
-        );
-        digits = quotient + (increment ? 1n : 0n);
+        ? BigInt(Math.max(0, digits.length - this._maximumSignificantDigits))
+        : scale > BigInt(this._maximumFractionDigits) ? scale - BigInt(this._maximumFractionDigits) : 0n;
+      if (cut > 0n) {
+        digits = intlRoundDecimalDigits(digits, cut, match[1] === '-', this._roundingMode);
         scale -= cut;
       }
       if (this._significant) {
-        if (digits === 0n) {
-          scale = this._minimumSignificantDigits - 1;
-        } else if (digits.toString().length < this._minimumSignificantDigits) {
-          const padding = this._minimumSignificantDigits - digits.toString().length;
-          digits *= 10n ** BigInt(padding);
-          scale += padding;
+        if (digits === '0') {
+          scale = BigInt(this._minimumSignificantDigits - 1);
+        } else if (digits.length < this._minimumSignificantDigits) {
+          const padding = this._minimumSignificantDigits - digits.length;
+          digits += '0'.repeat(padding);
+          scale += BigInt(padding);
         }
+      } else if (digits === '0') {
+        scale = 0n;
       }
-      let significantDigits = digits.toString().length;
-      if (scale < 0) {
-        digits *= 10n ** BigInt(-scale);
-        scale = 0;
+      let significantDigits = digits.length;
+      // A standard-notation result of this size cannot be materialized as a
+      // JS string. Never turn its finite input into binary64 Infinity.
+      if (scale > BigInt(Number.MAX_SAFE_INTEGER) || scale < -BigInt(Number.MAX_SAFE_INTEGER)) {
+        throw new RangeError('Intl numeric output is too large');
       }
-      const padded = digits.toString().padStart(scale + 1, '0');
-      const intPart = scale ? padded.slice(0, -scale) : padded;
-      let fracPart = scale ? padded.slice(-scale) : '';
+      const places = Number(scale);
+      const intPart = places < 0 ? digits + '0'.repeat(-places)
+        : places >= digits.length ? '0' : digits.slice(0, -places) || digits;
+      let fracPart = places <= 0 ? '' : places >= digits.length
+        ? '0'.repeat(places - digits.length) + digits : digits.slice(-places);
       while (fracPart.endsWith('0') && (this._significant
         ? significantDigits > this._minimumSignificantDigits
         : fracPart.length > this._minimumFractionDigits)) {
@@ -1241,7 +1281,7 @@
         significantDigits -= 1;
       }
       if (!this._significant) fracPart = fracPart.padEnd(this._minimumFractionDigits, '0');
-      return { intPart, fracPart };
+      return { intPart, fracPart, negative: match[1] === '-', nonzero: /[1-9]/.test(`${match[2] || '0'}${fraction}`) };
     }
 
     _standardDigits(number, original) {
@@ -1310,7 +1350,8 @@
     format(value) {
       const input = Number(value);
       const number = this._style === 'percent' ? input * 100 : input;
-      const sign = this._signFor(number);
+      const exact = this._exactNotationDigits(value);
+      const sign = this._signFor(number, exact);
       if (this._notation === 'compact' && typeof __thaw_intl_compact_number === 'function') {
         // The compact pattern itself chooses the mantissa's precision, so
         // the raw number is passed through rather than `intl.js`'s own
@@ -1328,7 +1369,10 @@
       const digits = fracPart ? `${intPart}.${fracPart}` : intPart;
       const signedDigits = `${sign}${digits}`;
       if (this._style === 'percent' && typeof __thaw_intl_percent_format === 'function') {
-        const result = __thaw_intl_percent_format(this.locale, signedDigits, groupDigits);
+        const result = digits.length > 32000 && typeof __thaw_intl_percent_format_large === 'function'
+          ? __thaw_intl_percent_format_large(this.locale, this._styleProbeRepresentative(signedDigits),
+              this._renderDigits(digits, groupDigits), groupDigits)
+          : __thaw_intl_percent_format(this.locale, signedDigits, groupDigits);
         if (result) return result;
       }
       if (this._style === 'currency') {
@@ -1337,7 +1381,11 @@
         const accounting = this._currencySign === 'accounting' && sign === '-';
         const value = accounting ? digits : signedDigits;
         if (typeof __thaw_intl_currency_format === 'function') {
-          const result = __thaw_intl_currency_format(this.locale, value, this._currency, this._currencyDisplay, groupDigits);
+          const result = digits.length > 32000 && typeof __thaw_intl_currency_format_large === 'function'
+            ? __thaw_intl_currency_format_large(this.locale,
+                this._currencyDisplay === 'name' ? this._styleRepresentative(value) : this._styleProbeRepresentative(value),
+                this._renderDigits(digits, groupDigits), this._currency, this._currencyDisplay, groupDigits)
+            : __thaw_intl_currency_format(this.locale, value, this._currency, this._currencyDisplay, groupDigits);
           if (result) {
             return accounting ? `(${result})` : result;
           }
@@ -1346,16 +1394,16 @@
         return accounting ? `(${text})` : text;
       }
       if (this._style === 'unit' && typeof __thaw_intl_unit_format === 'function') {
-        const result = __thaw_intl_unit_format(this.locale, signedDigits, this._unit, this._unitDisplay, groupDigits);
+        const result = digits.length > 32000 && typeof __thaw_intl_unit_format_large === 'function'
+          ? __thaw_intl_unit_format_large(this.locale, this._styleRepresentative(signedDigits),
+              this._renderDigits(digits, groupDigits), this._unit, this._unitDisplay, groupDigits)
+          : __thaw_intl_unit_format(this.locale, signedDigits, this._unit, this._unitDisplay, groupDigits);
         if (result) return result;
       }
       // Sign is handled here, not passed to the native call: it's
       // applied identically across every curated locale (confirmed),
       // so there's no need to push it through a locale-data lookup.
-      const rendered = this._useRealLocaleData
-        ? __thaw_intl_number_format(this.locale, digits, groupDigits)
-        : (groupDigits ? intPart.replace(/\B(?=(\d{3})+(?!\d))/g, ',') : intPart) +
-          (fracPart ? `.${fracPart}` : '');
+      const rendered = this._renderDigits(digits, groupDigits);
       const signed = `${sign}${rendered}`;
       if (this._style === 'percent') return `${signed}%`;
       if (this._style === 'currency') return `${this._currency} ${signed}`;
@@ -1371,13 +1419,93 @@
     }
 
     _renderDigits(text, grouping) {
-      return this._useRealLocaleData
-        ? String(__thaw_intl_number_format(this.locale, text, grouping))
-        : (grouping ? text.replace(/\B(?=(\d{3})+(?!\d))/g, ',') : text);
+      if (!this._useRealLocaleData) {
+        return grouping ? text.replace(/\B(?=(\d{3})+(?!\d))/g, ',') : text;
+      }
+      // fixed_decimal has an i16 magnitude. The common path stays native;
+      // long exact input uses symbols sampled from that same locale.
+      if (text.length <= 32000) return String(__thaw_intl_number_format(this.locale, text, grouping));
+      const { glyphs, group, primary, secondary, decimal } = this._largeLocaleSymbols();
+      const sign = text.startsWith('-') || text.startsWith('+') ? text[0] : '';
+      const unsigned = sign ? text.slice(1) : text;
+      const [integer, fraction] = unsigned.split('.');
+      const localize = digits => [...digits].map(digit => glyphs[digit.charCodeAt(0) - 48]).join('');
+      let whole = localize(integer);
+      if (grouping && group && integer.length > primary) {
+        const pieces = [];
+        let end = integer.length;
+        let width = primary;
+        while (end > width) {
+          pieces.unshift(localize(integer.slice(end - width, end)));
+          end -= width;
+          width = secondary;
+        }
+        pieces.unshift(localize(integer.slice(0, end)));
+        whole = pieces.join(group);
+      }
+      return `${sign}${whole}${fraction === undefined ? '' : decimal + localize(fraction)}`;
+    }
+
+    // icu_plurals only observes the low 18 integer digits, plus a high-
+    // magnitude flag, and the first 18 visible fraction digits. Keep those
+    // operands while asking ICU for the original style's affixes.
+    _styleRepresentative(text) {
+      const sign = text.startsWith('-') || text.startsWith('+') ? text[0] : '';
+      const [integer, fraction = ''] = (sign ? text.slice(1) : text).split('.');
+      const significant = integer.replace(/^0+/, '') || '0';
+      const reduced = significant.length > 18 ? `1${significant.slice(-18)}` : significant;
+      return `${sign}${reduced}${fraction ? `.${fraction.slice(0, 18)}` : ''}`;
+    }
+
+    // Percent and currency symbol/code patterns are independent of numeric
+    // plural category. A fixed high-magnitude pair keeps their first-digit
+    // probe valid even when significant-digit formatting yields 40k leading
+    // fractional zeros and the true value's integer part is zero.
+    _styleProbeRepresentative(text) {
+      const sign = text.startsWith('-') || text.startsWith('+') ? text[0] : '';
+      return `${sign}1${'0'.repeat(18)}`;
+    }
+
+    _largeLocaleSymbols() {
+      if (this._cachedLargeLocaleSymbols) return this._cachedLargeLocaleSymbols;
+      const glyphs = Array.from({ length: 10 }, (_, digit) =>
+        String(__thaw_intl_number_format(this.locale, String(digit), false)));
+      const decimal = String(__thaw_intl_number_format(this.locale, '1.5', false))
+        .slice(glyphs[1].length, -glyphs[5].length);
+      // Some locales leave 1000 ungrouped but group larger numbers. Probe
+      // enough digits to see both primary and secondary group widths, then
+      // count digit glyphs rather than Unicode scalars in each segment.
+      const probe = String(__thaw_intl_number_format(this.locale, '1234567890123', true));
+      let offset = 0;
+      let segment = 0;
+      let group = '';
+      const widths = [];
+      for (const digit of '1234567890123') {
+        const glyph = glyphs[digit.charCodeAt(0) - 48];
+        if (!probe.startsWith(glyph, offset)) {
+          const next = probe.indexOf(glyph, offset);
+          if (next < 0) throw new RangeError('Cannot identify Intl grouping symbols');
+          const separator = probe.slice(offset, next);
+          if (group && separator !== group) throw new RangeError('Inconsistent Intl grouping symbols');
+          group = separator;
+          widths.push(segment);
+          segment = 0;
+          offset = next;
+        }
+        offset += glyph.length;
+        segment++;
+      }
+      if (offset !== probe.length) throw new RangeError('Cannot identify Intl grouping symbols');
+      widths.push(segment);
+      const primary = widths.length > 1 ? widths[widths.length - 1] : 3;
+      const secondary = widths.length > 2 ? widths[widths.length - 2] : primary;
+      this._cachedLargeLocaleSymbols = { glyphs, decimal, group, primary, secondary };
+      return this._cachedLargeLocaleSymbols;
     }
 
     _groupSeparator() {
       if (!this._useRealLocaleData) return ',';
+      if (this._cachedLargeLocaleSymbols) return this._cachedLargeLocaleSymbols.group;
       const probe = String(__thaw_intl_number_format(this.locale, '1000', true));
       return probe.length > 4 ? probe.slice(1, probe.length - 3) : ',';
     }
@@ -1532,7 +1660,7 @@
       const number = this._style === 'percent' ? Number(input) * 100 : Number(input);
       if (!Number.isFinite(number) && exact === null) {
         const type = Number.isNaN(number) ? 'nan' : 'infinity';
-        const sign = this._signFor(number);
+        const sign = this._signFor(number, exact);
         const marker = type === 'nan' ? 'NaN' : 'Infinity';
         const index = full.indexOf(marker);
         if (index < 0) return [{ type, value: full }];
@@ -1549,7 +1677,7 @@
         parts.push(...this._affixParts(full.slice(index + marker.length)));
         return parts;
       }
-      const sign = this._signFor(number);
+      const sign = this._signFor(number, exact);
       if (this._notation === 'compact') {
         const parts = [];
         let text = full;
@@ -1659,13 +1787,13 @@
         throw new RangeError('Invalid value');
       }
       const scientific = this._notation === 'scientific' || this._notation === 'engineering';
-      const nativeExact = !scientific ||
-        (this._exactStandardDigits(start) !== null && this._exactStandardDigits(end) !== null);
+      const nativeExact = intlNativeRangeInputFits(start) && intlNativeRangeInputFits(end) &&
+        (!scientific || (this._exactStandardDigits(start) !== null && this._exactStandardDigits(end) !== null));
       if (nativeExact && typeof __thaw_intl_number_range_icu4c === 'function') {
-        const asText = (number, { intPart, fracPart }) =>
-          `${number < 0 || Object.is(number, -0) ? '-' : ''}${intPart}${fracPart ? `.${fracPart}` : ''}`;
-        const startText = asText(startNumber, this._standardDigits(startNumber, start));
-        const endText = asText(endNumber, this._standardDigits(endNumber, end));
+        const asText = (number, exact, { intPart, fracPart }) =>
+          `${(exact ? exact.negative : number < 0 || Object.is(number, -0)) ? '-' : ''}${intPart}${fracPart ? `.${fracPart}` : ''}`;
+        const startText = asText(startNumber, startExact, this._standardDigits(startNumber, start));
+        const endText = asText(endNumber, endExact, this._standardDigits(endNumber, end));
         const formatted = __thaw_intl_number_range_icu4c(
           this.locale,
           this._rangeSkeleton(),
@@ -1678,7 +1806,7 @@
         ? (scientific
           ? startExact.mantissa === endExact.mantissa && startExact.exponent === endExact.exponent
           : startExact.intPart === endExact.intPart && startExact.fracPart === endExact.fracPart) &&
-          this._signFor(startNumber) === this._signFor(endNumber)
+          this._signFor(startNumber, startExact) === this._signFor(endNumber, endExact)
         : startNumber === endNumber;
       if (same) return `~${this.format(start)}`;
       const separator = this._numberRangeSeparator();
@@ -1723,17 +1851,17 @@
         throw new RangeError('Invalid value');
       }
       const scientific = this._notation === 'scientific' || this._notation === 'engineering';
-      const nativeExact = !scientific ||
-        (this._exactStandardDigits(start) !== null && this._exactStandardDigits(end) !== null);
+      const nativeExact = intlNativeRangeInputFits(start) && intlNativeRangeInputFits(end) &&
+        (!scientific || (this._exactStandardDigits(start) !== null && this._exactStandardDigits(end) !== null));
       if (nativeExact && typeof __thaw_intl_number_range_parts_icu4c === 'function') {
-        const asText = (number, { intPart, fracPart }) =>
-          `${number < 0 || Object.is(number, -0) ? '-' : ''}${intPart}${fracPart ? `.${fracPart}` : ''}`;
+        const asText = (number, exact, { intPart, fracPart }) =>
+          `${(exact ? exact.negative : number < 0 || Object.is(number, -0)) ? '-' : ''}${intPart}${fracPart ? `.${fracPart}` : ''}`;
         const parts = JSON.parse(
           __thaw_intl_number_range_parts_icu4c(
             this.locale,
             this._rangeSkeleton(),
-            asText(startNumber, this._standardDigits(startNumber, start)),
-            asText(endNumber, this._standardDigits(endNumber, end)),
+            asText(startNumber, startExact, this._standardDigits(startNumber, start)),
+            asText(endNumber, endExact, this._standardDigits(endNumber, end)),
           ),
         );
         if (parts.length) return parts;
@@ -1742,7 +1870,7 @@
         ? (scientific
           ? startExact.mantissa === endExact.mantissa && startExact.exponent === endExact.exponent
           : startExact.intPart === endExact.intPart && startExact.fracPart === endExact.fracPart) &&
-          this._signFor(startNumber) === this._signFor(endNumber)
+          this._signFor(startNumber, startExact) === this._signFor(endNumber, endExact)
         : startNumber === endNumber;
       if (same) {
         return [
