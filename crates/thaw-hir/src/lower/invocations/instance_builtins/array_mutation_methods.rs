@@ -1510,22 +1510,11 @@ impl<'a> FnLowerer<'a> {
                             self.scope.insert(receiver_name.clone(), array_type.clone());
                             self.scope.insert(separator_name.clone(), HirType::Str);
                             let result = if let HirType::Json = element.as_ref() {
-                                // No native `__thaw_..._array_join` intrinsic
-                                // exists for a generic `Json` element (real
-                                // trigger: `Array.from(cache.keys())` on a
-                                // real npm class's `Generator<K>`-returning
-                                // method, e.g. `lru-cache`) -- built directly
-                                // out of existing HIR nodes instead of adding
-                                // a new one: a native `while` loop that reads
-                                // each element out via `TypedIndex`, converts
-                                // it the same way a template literal already
-                                // does (`coerce_primitive_to_string`, which
-                                // already handles `Json` via `JsonAsString`
-                                // -- real JS `String()` semantics, not just
-                                // "this JSON value happens to already be a
-                                // string"), and concatenates via the same
-                                // `__thaw_string_concat` a template literal's
-                                // own lowering already uses.
+                                // A native Array<Json> uses this HIR loop. Its slots
+                                // have join semantics: null and undefined become empty,
+                                // while present values keep ordinary String conversion.
+                                // Reuse the shared join slot conversion to bind each
+                                // loaded Json value once before testing nullishness.
                                 let result_name =
                                     format!("__thaw_join_result_{}", self.next_binding);
                                 self.next_binding += 1;
@@ -1534,12 +1523,13 @@ impl<'a> FnLowerer<'a> {
                                 self.next_binding += 1;
                                 self.scope.insert(result_name.clone(), HirType::Str);
                                 self.scope.insert(index_name.clone(), HirType::F64);
-                                let element_str = self.coerce_primitive_to_string(
+                                let element_str = self.coerce_join_slot_to_string(
                                     HirExpr::TypedIndex(
                                         Box::new(HirExpr::Var(receiver_name.clone())),
                                         Box::new(HirExpr::Var(index_name.clone())),
                                         HirType::Json,
                                     ),
+                                    &HirType::Json,
                                 )?;
                                 let concat = |lhs: HirExpr, rhs: HirExpr| {
                                     HirExpr::Call(

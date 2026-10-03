@@ -935,7 +935,7 @@ impl<'a> FnLowerer<'a> {
                             vec![result, HirExpr::Lit(HirLit::Str(",".to_string()))],
                         );
                     }
-                    let part = self.coerce_tuple_join_slot_to_string(HirExpr::TypedIndex(
+                    let part = self.coerce_join_slot_to_string(HirExpr::TypedIndex(
                         Box::new(tuple.clone()),
                         Box::new(HirExpr::Lit(HirLit::F64(index as f64))),
                         element.clone(),
@@ -956,9 +956,9 @@ impl<'a> FnLowerer<'a> {
         }
     }
 
-    /// Tuple joins use the empty string for absent elements, while
+    /// Join slots use the empty string for absent elements, while
     /// ordinary `String(value)` keeps "null" and "undefined".
-    fn coerce_tuple_join_slot_to_string(
+    fn coerce_join_slot_to_string(
         &mut self,
         value: HirExpr,
         ty: &HirType,
@@ -979,7 +979,7 @@ impl<'a> FnLowerer<'a> {
                 };
                 let is_none = self.absence_is_none(kind, bound.clone(), payload.as_ref().clone());
                 let present = self.absence_value(kind, bound, payload.as_ref().clone());
-                let text = self.coerce_tuple_join_slot_to_string(present, payload)?;
+                let text = self.coerce_join_slot_to_string(present, payload)?;
                 let result = HirExpr::Conditional(
                     Box::new(is_none),
                     Box::new(empty()),
@@ -994,7 +994,7 @@ impl<'a> FnLowerer<'a> {
                 self.scope.insert(name.clone(), ty.clone());
                 let mut statements = Vec::with_capacity(members.len());
                 for (index, member) in members.iter().enumerate() {
-                    let part = self.coerce_tuple_join_slot_to_string(
+                    let part = self.coerce_join_slot_to_string(
                         HirExpr::UnionValue(
                             Box::new(HirExpr::Var(name.clone())),
                             index,
@@ -1073,7 +1073,7 @@ impl<'a> FnLowerer<'a> {
                     vec![result, separator_var.clone()],
                 );
             }
-            let part = self.coerce_tuple_join_slot_to_string(HirExpr::TypedIndex(
+            let part = self.coerce_join_slot_to_string(HirExpr::TypedIndex(
                 Box::new(tuple.clone()),
                 Box::new(HirExpr::Lit(HirLit::F64(index as f64))),
                 element.clone(),
