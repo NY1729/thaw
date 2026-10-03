@@ -2445,6 +2445,15 @@ impl<'a> FnLowerer<'a> {
                         }
                         .map(Ok)
                         .unwrap_or_else(|| self.infer_expr_type(&value))?;
+                        if Self::contains_function_value(&operand_type) {
+                            let name = format!("__thaw_typeof_function_tagged_{}", self.next_binding);
+                            self.next_binding += 1;
+                            self.scope.insert(name.clone(), operand_type.clone());
+                            let observed = self.function_observable_typeof(
+                                HirExpr::Var(name.clone()), &operand_type)?;
+                            return self.wrap_call_argument_bindings(
+                                observed, &[(name, operand_type, value)]);
+                        }
                         if operand_type == HirType::Json {
                             return Ok(HirExpr::Call(
                                 Box::new(HirExpr::Var("__thaw_json_typeof".into())),

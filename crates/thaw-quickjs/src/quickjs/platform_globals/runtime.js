@@ -36,7 +36,17 @@
     }
     return bound;
   };
-  globalThis.__thaw_strict_equal_dynamic = (left, right) => left === right;
+  const nativeBigInt = BigInt;
+  globalThis.__thaw_native_loose_equal = (left, right, leftKind, rightKind) => {
+    const decode = (value, kind) => kind === 1 ? nativeBigInt(value)
+      : kind === 2 ? globalThis.__thaw_property_key(value) : value;
+    if ((leftKind === 3 || rightKind === 3) &&
+        globalThis.__thaw_same_native_callback(left, right)) return true;
+    return decode(left, leftKind) == decode(right, rightKind);
+  };
+  globalThis.__thaw_strict_equal_dynamic = (left, right, leftKind, rightKind) =>
+    ((leftKind === 3 || rightKind === 3) &&
+      globalThis.__thaw_same_native_callback(left, right)) || left === right;
   globalThis.__thaw_strict_equal_bigint_dynamic = (digits, value) =>
     typeof value === 'bigint' && value === BigInt(digits);
   globalThis.__thaw_strict_equal_number_dynamic = (text, value) =>

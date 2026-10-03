@@ -431,7 +431,7 @@ impl<'a> FnLowerer<'a> {
                     "cannot coerce a Generator to a dynamic (any) value".into(),
                 );
             }
-            if let HirType::Function(_, _) = &actual {
+            if matches!(&actual, HirType::Function(_, _) | HirType::CallableFunction(..)) {
                 // `registerNativeCallback`'s own inferred type is always
                 // `HirType::JsValue` (`inference/types.rs`'s hardcoded
                 // intrinsic-name case) -- a raw `i64` handle, not the

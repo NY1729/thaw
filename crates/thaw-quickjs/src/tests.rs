@@ -3006,6 +3006,28 @@ fn property_key_bridge_distinguishes_registered_symbols() {
 }
 
 #[test]
+fn native_loose_equality_helper_preserves_primitive_order_and_identity() {
+    assert_eq!(load(r#"function nativeLooseEquality() {
+      const effects = [];
+      const left = function () {};
+      const right = function () {};
+      left[Symbol.toPrimitive] = () => { effects.push('left'); return 42; };
+      right[Symbol.toPrimitive] = () => { effects.push('right'); return 42; };
+      const number = __thaw_native_loose_equal(left, 42, 0, 0);
+      const reversed = __thaw_native_loose_equal(42, right, 0, 0);
+      const bigint = __thaw_native_loose_equal(left, '42', 0, 1);
+      const large = function () {};
+      large[Symbol.toPrimitive] = () => 9223372036854775807n;
+      const largeBigint = __thaw_native_loose_equal(large, '9223372036854775807', 0, 1);
+      const registered = function () {};
+      registered[Symbol.toPrimitive] = () => Symbol.for('tag');
+      const symbol = __thaw_native_loose_equal(registered, '\u0003R100:tag', 0, 2);
+      return [number, reversed, bigint, largeBigint, symbol, effects.join(',')];
+    }"#), 1);
+    assert_eq!(call("nativeLooseEquality", "[]"), "[true,true,true,true,true,\"left,right,left\"]");
+}
+
+#[test]
 fn property_key_bridge_preserves_symbol_identity() {
     assert_eq!(
         load(
@@ -6286,4 +6308,73 @@ fn atomics_notify_nonshared_waitable_arrays_delegate_to_native() {
         call("notifyNonsharedWaitable", "[]"),
         r#"[0,0,1,true,true,true,0,"not-equal"]"#
     );
+}
+
+#[test]
+fn native_callback_cross_mode_identity_survives_released_handle() {
+    unsafe extern "C" fn callback(
+        _context: *const c_void,
+        _arguments: *const c_char,
+    ) -> *const c_char {
+        c"null".as_ptr()
+    }
+    let first_context = &1u8 as *const u8 as *const c_void;
+    let other_context = &2u8 as *const u8 as *const c_void;
+    let ordinary = thaw_js_register_native_callback(
+        callback as *const c_void, first_context, 0, 0, 0,
+        std::ptr::null(), 0,
+    );
+    let graph = thaw_js_register_native_callback_graph(
+        callback as *const c_void, first_context, 0, 0, 0,
+        std::ptr::null(), 0,
+    );
+    let unrelated = thaw_js_register_native_callback(
+        callback as *const c_void, other_context, 0, 0, 0,
+        std::ptr::null(), 0,
+    );
+    assert!(ordinary.error.is_null() && graph.error.is_null() && unrelated.error.is_null());
+    assert_ne!(ordinary.value, graph.value);
+    with_context(|ctx| {
+        let first = value_for_handle(&ctx, ordinary.value).unwrap();
+        let graph_value = value_for_handle(&ctx, graph.value).unwrap();
+        let other = value_for_handle(&ctx, unrelated.value).unwrap();
+        let query: Function = ctx.globals().get("__thaw_same_native_callback").unwrap();
+        assert!(query.call::<_, bool>((first.clone(), graph_value.clone())).unwrap());
+        assert!(query.call::<_, bool>((graph_value.clone(), first.clone())).unwrap());
+        let strict: Function = ctx.globals().get("__thaw_strict_equal_dynamic").unwrap();
+        let loose: Function = ctx.globals().get("__thaw_native_loose_equal").unwrap();
+        assert!(strict.call::<_, bool>((first.clone(), graph_value.clone(), 3.0, 0.0)).unwrap());
+        assert!(loose.call::<_, bool>((graph_value.clone(), first.clone(), 0.0, 3.0)).unwrap());
+        assert!(!query.call::<_, bool>((first.clone(), other)).unwrap());
+        let holder = Object::new(ctx.clone()).unwrap();
+        holder.set("saved", graph_value).unwrap();
+        ctx.globals().set("__thaw_saved_callback_holder", holder).unwrap();
+    });
+    assert_eq!(thaw_js_release_handle(graph.value), 1);
+    let replacement = thaw_js_register_native_callback_graph(
+        callback as *const c_void, other_context, 0, 0, 0,
+        std::ptr::null(), 0,
+    );
+    assert!(replacement.error.is_null());
+    // The freed numeric slot can be reused for another closure; the saved
+    // JS function retains its original private identity independently.
+    assert_eq!(replacement.value, graph.value);
+    with_context(|ctx| {
+        let first = value_for_handle(&ctx, ordinary.value).unwrap();
+        let replacement_value = value_for_handle(&ctx, replacement.value).unwrap();
+        let holder: Object = ctx.globals().get("__thaw_saved_callback_holder").unwrap();
+        let saved: Value = holder.get("saved").unwrap();
+        let reacquired = retain_value(&ctx, saved.clone()).unwrap();
+        let query: Function = ctx.globals().get("__thaw_same_native_callback").unwrap();
+        assert!(query.call::<_, bool>((first.clone(), saved.clone())).unwrap());
+        assert!(!query.call::<_, bool>((first, replacement_value)).unwrap());
+        assert!(query.call::<_, bool>((saved.clone(), value_for_handle(&ctx, reacquired).unwrap())).unwrap());
+        assert!(!query.call::<_, bool>((saved.clone(), Value::new_undefined(ctx.clone()))).unwrap());
+        let descriptor: Object = ctx.globals().get::<_, Object>("Object").unwrap()
+            .get::<_, Function>("getOwnPropertyDescriptor").unwrap()
+            .call((ctx.globals(), "__thaw_same_native_callback")).unwrap();
+        assert!(!descriptor.get::<_, bool>("writable").unwrap());
+        assert!(!descriptor.get::<_, bool>("configurable").unwrap());
+        ctx.globals().set("__thaw_saved_callback_holder", Value::new_undefined(ctx)).unwrap();
+    });
 }

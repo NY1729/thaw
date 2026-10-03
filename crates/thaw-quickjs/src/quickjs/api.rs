@@ -1723,6 +1723,14 @@ pub extern "C" fn thaw_js_register_native_callback(
         let wrapper: Value = ctx
             .eval(wrapper_source.as_str())
             .map_err(|error| error.to_string())?;
+        if closure != 0 {
+            let bridge = ctx.userdata::<NativeCallbackIdentityBridge<'_>>()
+                .ok_or("native callback identity bridge is unavailable")?;
+            let register = bridge.register.clone();
+            drop(bridge);
+            register.call::<_, ()>((wrapper.clone(), format!("{closure:x}")))
+                .map_err(|error| error.to_string())?;
+        }
         let handle = retain_value(&ctx, wrapper)?;
         NATIVE_CALLBACK_HANDLES.with(|handles| {
             handles.borrow_mut().insert(cache_key, handle);
@@ -1838,7 +1846,11 @@ pub extern "C" fn thaw_js_release_handle(handle: u64) -> u8 {
             return 0;
         }
         let _ = refs.set(index, 0u64);
-        u8::from(handles.set(index, Value::new_undefined(ctx)).is_ok())
+        let cleared = handles.set(index, Value::new_undefined(ctx)).is_ok();
+        if cleared {
+            NATIVE_CALLBACK_HANDLES.with(|cache| cache.borrow_mut().retain(|_, cached| *cached != handle));
+        }
+        u8::from(cleared)
     })
 }
 
@@ -1861,6 +1873,7 @@ pub extern "C" fn thaw_js_release_all_handles() -> u64 {
         {
             return 0;
         }
+        NATIVE_CALLBACK_HANDLES.with(|cache| cache.borrow_mut().clear());
         count as u64
     })
 }
