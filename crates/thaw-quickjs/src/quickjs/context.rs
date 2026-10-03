@@ -183,44 +183,171 @@ fn install_shared_array_buffer_functions(ctx: &Ctx<'_>) {
     unsafe { rquickjs::qjs::JS_SetSharedArrayBufferFunctions(runtime, &functions) };
 }
 
-// Native modules use QuickJS's own per-runtime module cache. Retaining a
-// Persistent<Module> inside Runtime's loader is unsafe: RawRuntime frees the
-// engine before dropping its LoaderHolder.
+// Source graphs and completion promises are owned by the QuickJS context.
+// QuickJS itself owns declared/evaluated modules in its per-runtime cache.
+struct NativeBundleSource {
+    source: String,
+    imports: std::collections::HashMap<String, String>,
+    sequence: u64,
+}
+
+struct NativeBundleOwner<'js> {
+    next_sequence: Cell<u64>,
+    sources: RefCell<HashMap<String, NativeBundleSource>>,
+    entries: RefCell<HashMap<String, rquickjs::Promise<'js>>>,
+    then: Function<'js>,
+}
+
+unsafe impl<'js> rquickjs::JsLifetime<'js> for NativeBundleOwner<'js> {
+    type Changed<'to> = NativeBundleOwner<'to>;
+}
+
+fn native_bundle_error(message: &str) -> rquickjs::Error {
+    rquickjs::Error::new_from_js_message("native bundle", "valid bundle", message)
+}
+
+fn register_native_bundle<'js>(ctx: Ctx<'js>, payload: String) -> rquickjs::Result<Function<'js>> {
+    let data: serde_json::Value = serde_json::from_str(&payload)
+        .map_err(|_| native_bundle_error("invalid JSON"))?;
+    let main = data.get("main").and_then(serde_json::Value::as_str)
+        .ok_or_else(|| native_bundle_error("missing main"))?;
+    let modules = data.get("modules").and_then(serde_json::Value::as_array)
+        .ok_or_else(|| native_bundle_error("missing modules"))?;
+    let mut records = HashMap::<String, (String, HashMap<String, String>)>::new();
+    for module in modules {
+        let key = module.get("key").and_then(serde_json::Value::as_str)
+            .ok_or_else(|| native_bundle_error("missing module key"))?;
+        if key.contains('\0') { return Err(native_bundle_error("NUL in module key")); }
+        let source = module.get("source").and_then(serde_json::Value::as_str)
+            .ok_or_else(|| native_bundle_error("missing module source"))?;
+        let imports = module.get("imports").and_then(serde_json::Value::as_object)
+            .ok_or_else(|| native_bundle_error("missing module imports"))?;
+        let mut edges = HashMap::new();
+        for (specifier, target) in imports {
+            let target = target.as_str()
+                .ok_or_else(|| native_bundle_error("invalid import target"))?;
+            if specifier.contains('\0') || target.contains('\0') {
+                return Err(native_bundle_error("NUL in import"));
+            }
+            if edges.insert(specifier.clone(), target.to_owned()).is_some() {
+                return Err(native_bundle_error("duplicate import"));
+            }
+        }
+        if records.insert(key.to_owned(), (source.to_owned(), edges)).is_some() {
+            return Err(native_bundle_error("duplicate module key"));
+        }
+    }
+    if !records.contains_key(main) || records.values().any(|(_, edges)|
+        edges.values().any(|target| !records.contains_key(target))) {
+        return Err(native_bundle_error("missing entry or import target"));
+    }
+    let owner = ctx.userdata::<NativeBundleOwner<'js>>()
+        .ok_or_else(|| native_bundle_error("missing native bundle owner"))?;
+    let sequence = owner.next_sequence.get().checked_add(1)
+        .ok_or_else(|| native_bundle_error("bundle sequence overflow"))?;
+    let prefix = format!("thaw-bundle:{sequence}:");
+    let token = format!("{prefix}{main}");
+    // Reserve the name before constructing a QuickJS Function, and release
+    // the userdata guard before that engine call.
+    owner.next_sequence.set(sequence);
+    drop(owner);
+    // Return the bound evaluator itself, not a guessable entry-name string.
+    let bound_token = token.clone();
+    let evaluate = Function::new(ctx.clone(), move |ctx: Ctx<'js>| {
+        eval_native_entry(ctx, bound_token.clone())
+    })?;
+    let owner = ctx.userdata::<NativeBundleOwner<'js>>()
+        .ok_or_else(|| native_bundle_error("missing native bundle owner"))?;
+    {
+        let mut sources = owner.sources.borrow_mut();
+        for (key, (source, imports)) in records {
+            sources.insert(format!("{prefix}{key}"), NativeBundleSource {
+                source, imports, sequence,
+            });
+        }
+    }
+    Ok(evaluate)
+}
+
+fn reject_native_entry_error<'js>(
+    ctx: &Ctx<'js>, reject: &Function<'js>, error: rquickjs::Error,
+) -> rquickjs::Result<()> {
+    if matches!(error, rquickjs::Error::Exception) {
+        reject.call::<_, ()>((ctx.catch(),))
+    } else {
+        reject.call::<_, ()>((error.to_string(),))
+    }
+}
+
+fn eval_native_entry<'js>(ctx: Ctx<'js>, token: String) -> rquickjs::Result<rquickjs::Promise<'js>> {
+    let (source, intrinsic_then) = {
+        let owner = ctx.userdata::<NativeBundleOwner<'js>>()
+            .ok_or_else(|| native_bundle_error("missing native bundle owner"))?;
+        if let Some(ready) = owner.entries.borrow().get(&token) {
+            return Ok(ready.clone());
+        }
+        let source = {
+            let sources = owner.sources.borrow();
+            sources.get(&token).map(|record| record.source.clone())
+                .ok_or_else(|| native_bundle_error("missing native entry source"))?
+        };
+        (source, owner.then.clone())
+    };
+    let (ready, resolve, reject) = rquickjs::Promise::new(&ctx)?;
+    {
+        let owner = ctx.userdata::<NativeBundleOwner<'js>>()
+            .ok_or_else(|| native_bundle_error("missing native bundle owner"))?;
+        owner.entries.borrow_mut().insert(token.clone(), ready.clone());
+    }
+    // The ready promise is visible to reentrant entry calls before module
+    // evaluation can run user code. Never hold userdata guards across JS calls.
+    let setup = (|| -> rquickjs::Result<()> {
+        let declared = rquickjs::Module::declare(ctx.clone(), token, source)?;
+        let (evaluated, evaluation) = declared.eval()?;
+        // Namespace creation does not read its bindings. Its object can be
+        // retained in a callback without storing a typed Module in userdata.
+        let namespace = evaluated.namespace()?;
+        let fulfillment_reject = reject.clone();
+        let fulfillment_ctx = ctx.clone();
+        let on_fulfilled = Function::new(ctx.clone(), move || -> rquickjs::Result<()> {
+            if let Err(error) = resolve.call::<_, ()>((namespace.clone(),)) {
+                reject_native_entry_error(&fulfillment_ctx, &fulfillment_reject, error)?;
+            }
+            Ok(())
+        })?;
+        let callback_reject = reject.clone();
+        let on_rejected = Function::new(ctx.clone(), move |reason: Value<'js>| -> rquickjs::Result<()> {
+            callback_reject.call((reason,))
+        })?;
+        intrinsic_then.call::<_, Value>((rquickjs::function::This(evaluation.clone()), on_fulfilled, on_rejected))?;
+        Ok(())
+    })();
+    if let Err(error) = setup {
+        // Keep the original JavaScript exception value when one exists.
+        reject_native_entry_error(&ctx, &reject, error)?;
+    }
+    Ok(ready)
+}
+
 struct BundleModuleResolver;
 
 impl rquickjs::loader::Resolver for BundleModuleResolver {
     fn resolve<'js>(
-        &mut self,
-        ctx: &Ctx<'js>,
-        base: &str,
-        name: &str,
+        &mut self, ctx: &Ctx<'js>, base: &str, name: &str,
         _attributes: Option<rquickjs::loader::ImportAttributes<'js>>,
     ) -> rquickjs::Result<String> {
-        let registry: Object = ctx.globals().get("__thaw_native_esm_sources")
-            .map_err(|_| rquickjs::Error::new_resolving(base, name))?;
-        if let Some(sequence) = base.strip_prefix("thaw-bundle:")
-            .and_then(|remainder| remainder.split_once(':'))
-            .map(|(sequence, _)| sequence) {
-            // A bundled module can import only its own collected edges. In
-            // particular, an absolute name from an earlier bundle is not an
-            // authority to bypass this bundle's import map.
-            let parent: Object = registry.get(base)
-                .map_err(|_| rquickjs::Error::new_resolving(base, name))?;
-            let imports: Object = parent.get("imports")?;
-            let target: String = imports.get(name)
-                .map_err(|_| rquickjs::Error::new_resolving(base, name))?;
-            let resolved = format!("thaw-bundle:{sequence}:{target}");
-            if !registry.contains_key(resolved.as_str())? {
-                return Err(rquickjs::Error::new_resolving(base, name));
-            }
-            return Ok(resolved);
+        let owner = ctx.userdata::<NativeBundleOwner<'js>>()
+            .ok_or_else(|| rquickjs::Error::new_resolving(base, name))?;
+        let sources = owner.sources.borrow();
+        let parent = sources.get(base)
+            .ok_or_else(|| rquickjs::Error::new_resolving(base, name))?;
+        let target = parent.imports.get(name)
+            .ok_or_else(|| rquickjs::Error::new_resolving(base, name))?;
+        let resolved = format!("thaw-bundle:{}:{target}", parent.sequence);
+        if !sources.contains_key(&resolved) {
+            return Err(rquickjs::Error::new_resolving(base, name));
         }
-        // The entry import originates in the surrounding eval script, not
-        // in a bundled module. It names the already registered entry once.
-        if name.starts_with("thaw-bundle:") && registry.contains_key(name)? {
-            return Ok(name.to_owned());
-        }
-        Err(rquickjs::Error::new_resolving(base, name))
+        Ok(resolved)
     }
 }
 
@@ -228,16 +355,16 @@ struct BundleModuleLoader;
 
 impl rquickjs::loader::Loader for BundleModuleLoader {
     fn load<'js>(
-        &mut self,
-        ctx: &Ctx<'js>,
-        name: &str,
+        &mut self, ctx: &Ctx<'js>, name: &str,
         _attributes: Option<rquickjs::loader::ImportAttributes<'js>>,
     ) -> rquickjs::Result<rquickjs::Module<'js, rquickjs::module::Declared>> {
-        let registry: Object = ctx.globals().get("__thaw_native_esm_sources")
-            .map_err(|_| rquickjs::Error::new_loading(name))?;
-        let entry: Object = registry.get(name)
-            .map_err(|_| rquickjs::Error::new_loading(name))?;
-        let source: String = entry.get("source")?;
+        let source = {
+            let owner = ctx.userdata::<NativeBundleOwner<'js>>()
+                .ok_or_else(|| rquickjs::Error::new_loading(name))?;
+            let sources = owner.sources.borrow();
+            sources.get(name).map(|record| record.source.clone())
+                .ok_or_else(|| rquickjs::Error::new_loading(name))?
+        };
         rquickjs::Module::declare(ctx.clone(), name, source)
     }
 }
@@ -296,18 +423,18 @@ fn ensure_context() {
             let context = Context::full(&runtime).expect("failed to create a QuickJS context");
             context.with(|ctx| {
                 install_shared_array_buffer_functions(&ctx);
-                // QuickJS caches modules by name for the lifetime of this
-                // realm. Keep each bundle prefix monotonic outside writable
-                // JavaScript globals, even when the same package is reloaded.
-                let next_sequence = std::cell::Cell::new(0u64);
-                let mint_sequence = Function::new(ctx.clone(), move || -> rquickjs::Result<String> {
-                    let next = next_sequence.get().checked_add(1).ok_or_else(||
-                        rquickjs::Error::new_from_js_message("native ESM sequence", "string", "bundle sequence overflow"))?;
-                    next_sequence.set(next);
-                    Ok(next.to_string())
-                }).expect("failed to create native ESM sequence source");
-                ctx.globals().prop("__thaw_native_esm_next_sequence", mint_sequence)
-                    .expect("failed to install native ESM sequence source");
+                let intrinsic_then: Function = ctx.eval("Promise.prototype.then")
+                    .expect("failed to capture intrinsic Promise.then");
+                ctx.store_userdata(NativeBundleOwner {
+                    next_sequence: Cell::new(0),
+                    sources: RefCell::new(HashMap::new()),
+                    entries: RefCell::new(HashMap::new()),
+                    then: intrinsic_then,
+                }).expect("native bundle owner userdata is already borrowed");
+                ctx.globals().prop("__thaw_register_native_bundle",
+                    Function::new(ctx.clone(), register_native_bundle)
+                        .expect("failed to create native bundle registrar"))
+                    .expect("failed to install native bundle registrar");
                 ctx.globals()
                     .set(
                         "__thaw_os_thread_token",
