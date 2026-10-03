@@ -2298,3 +2298,130 @@ fn function_typed_values_keep_runtime_undefined_checks() {
         assert!(lowered.contains("OptionalNone"), "{name}: {lowered}");
     }
 }
+
+
+#[test]
+fn tagged_function_absence_is_observed_before_equality_fallbacks() {
+    let program = lower(r#"
+        type Callback = (value: number) => number;
+        function strictOther(callback: Callback | undefined, number: number | undefined): boolean {
+            return callback === number;
+        }
+        function strictReverse(number: number | undefined, callback: Callback | undefined): boolean {
+            return number === callback;
+        }
+        function strictNull(callback: Callback | null, number: number | null): boolean {
+            return callback === number;
+        }
+        function looseNull(callback: Callback | undefined, other: null): boolean {
+            return callback == other;
+        }
+        function typeofNested(callback: (Callback | undefined) | null): string {
+            return typeof callback;
+        }
+        function sparse(callbacks: Callback[], index: number): boolean {
+            return callbacks[index] === undefined;
+        }
+        function replaceSparse(callbacks: Callback[], index: number, replacement: Callback): undefined {
+            callbacks[index] = replacement;
+            return undefined;
+        }
+        function sparseMutatingRhs(callbacks: Callback[], index: number, replacement: Callback): boolean {
+            return callbacks[index] === replaceSparse(callbacks, index, replacement);
+        }
+        function reverseSparseMutation(callbacks: Callback[], index: number, replacement: Callback): boolean {
+            return replaceSparse(callbacks, index, replacement) === callbacks[index];
+        }
+        function main(): void {}
+    "#);
+    for name in ["strictOther", "strictReverse", "strictNull", "looseNull", "typeofNested", "sparse", "sparseMutatingRhs", "reverseSparseMutation"] {
+        let function = program.functions.iter().find(|function| function.name == name).unwrap();
+        let body = format!("{:?}", function.body);
+        assert!(body.contains("Conditional"), "{name}: {body}");
+        if name != "strictNull" {
+            assert!(body.contains("OptionalNone"), "{name}: {body}");
+        } else {
+            assert!(body.contains("NullableIsNone"), "{name}: {body}");
+        }
+        if name == "strictOther" || name == "strictReverse" {
+            assert!(body.contains("OptionalIsNone"), "{name}: {body}");
+            assert!(body.contains("__thaw_strict_left_status_"), "{name}: {body}");
+            assert!(body.contains("__thaw_strict_right_status_"), "{name}: {body}");
+        }
+        if name == "sparse" || name == "sparseMutatingRhs" {
+            assert!(body.contains("__thaw_array_index_state"), "{name}: {body}");
+            assert!(body.contains("__thaw_index_missing_"), "{name}: {body}");
+        }
+        if name == "sparseMutatingRhs" {
+            // The missing/present snapshot is bound by an outer lambda,
+            // before the RHS call that can fill the formerly sparse slot.
+            assert!(body.contains("replaceSparse"), "{name}: {body}");
+            assert!(body.contains("__thaw_index_undefined_"), "{name}: {body}");
+        }
+        if name == "reverseSparseMutation" {
+            assert!(body.contains("replaceSparse"), "{name}: {body}");
+        }
+    }
+}
+
+#[test]
+fn tagged_function_present_leaves_keep_native_identity_and_ordered_dynamic_comparison() {
+    let program = lower(r#"
+        type Callback = (value: number) => number;
+        function looseMixed(callback: Callback | undefined, number: number | undefined): boolean {
+            return callback == number;
+        }
+        function looseReverse(number: number | undefined, callback: Callback | undefined): boolean {
+            return number == callback;
+        }
+        function unionMixed(value: Callback | number | undefined, number: number | undefined): boolean {
+            return value == number;
+        }
+        function strictLive(callback: Callback, value: any): boolean {
+            return callback === value;
+        }
+        function symbolMixed(callback: Callback | undefined, value: symbol | undefined): boolean {
+            return callback == value;
+        }
+        function bigintMixed(callback: Callback | undefined, value: bigint | undefined): boolean {
+            return callback == value;
+        }
+        function dictionaryStrict(callback: Callback, value: Record<string, any>): boolean {
+            return callback === value;
+        }
+        function dictionaryLoose(callback: Callback | undefined, value: Record<string, any>): boolean {
+            return callback == value;
+        }
+        type RestCallback = (head: number, ...rest: number[]) => number;
+        function callableMixed(callback: RestCallback | undefined, value: number | undefined): boolean {
+            return callback == value;
+        }
+        function main(): void {}
+    "#);
+    for name in ["looseMixed", "looseReverse", "unionMixed", "symbolMixed", "bigintMixed", "callableMixed"] {
+        let function = program.functions.iter().find(|function| function.name == name).unwrap();
+        let body = format!("{:?}", function.body);
+        assert!(body.contains("__thaw_native_loose_equal"), "{name}: {body}");
+        assert!(body.contains("__thaw_loose_left_status_"), "{name}: {body}");
+        assert!(body.contains("__thaw_loose_right_status_"), "{name}: {body}");
+    }
+    let strict = program.functions.iter().find(|function| function.name == "strictLive").unwrap();
+    let body = format!("{:?}", strict.body);
+    assert!(body.contains("__thaw_strict_equal_dynamic"), "{body}");
+    assert!(body.contains("callDynamicValueMixed"), "{body}");
+    assert!(body.contains("registerNativeCallback"), "{body}");
+    assert!(body.contains("JsValueAsJson"), "{body}");
+    assert!(body.contains("F64(3.0)"), "native Function side must retain the trusted identity flag: {body}");
+    for (name, comparison) in [("dictionaryStrict", "__thaw_strict_equal_dynamic"),
+        ("dictionaryLoose", "__thaw_native_loose_equal")] {
+        let function = program.functions.iter().find(|function| function.name == name).unwrap();
+        let body = format!("{:?}", function.body);
+        assert!(body.contains("__thaw_json_is_undefined"), "{name}: {body}");
+        assert!(body.contains(comparison), "{name}: {body}");
+        assert!(body.contains("TypedClosure(Json"), "{name}: {body}");
+    }
+    let callable = program.functions.iter().find(|function| function.name == "callableMixed").unwrap();
+    let body = format!("{:?}", callable.body);
+    assert!(body.contains("registerNativeCallback"), "{body}");
+    assert!(body.contains("JsValueAsJson"), "{body}");
+}
