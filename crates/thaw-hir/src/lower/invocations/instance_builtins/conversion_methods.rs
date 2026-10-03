@@ -716,9 +716,9 @@ impl<'a> FnLowerer<'a> {
                 "`hasOwn` currently requires a fixed object or dictionary, got {receiver_type:?}"
             ));
         };
-        let field_names = fields
-            .iter()
-            .map(|(name, _)| name.clone())
+        let field_names = ecmascript_field_order(fields)
+            .into_iter()
+            .map(|index| fields[index].0.clone())
             .collect::<Vec<_>>();
         let object_name = format!("__thaw_has_own_object_{}", self.next_binding);
         self.next_binding += 1;
