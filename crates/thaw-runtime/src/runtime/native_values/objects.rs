@@ -8,7 +8,13 @@ thread_local! {
     // the compiled object stores only that field's Boolean value. Keep the
     // marker beside the allocation so an extracted method can validate the
     // actual receiver after function values flow through aliases/containers.
-    static OBJECT_CLASS_IDENTITIES: RefCell<HashMap<usize, String>> = RefCell::new(HashMap::new());
+    static OBJECT_CLASS_IDENTITIES: RefCell<HashMap<usize, ObjectClassMetadata>> = RefCell::new(HashMap::new());
+}
+
+#[derive(Default)]
+struct ObjectClassMetadata {
+    ancestry: Option<String>,
+    hidden_markers: std::collections::HashSet<String>,
 }
 
 const NON_EXTENSIBLE: u8 = 1;
@@ -41,7 +47,10 @@ pub unsafe extern "C" fn thaw_object_set_class_identity(
         return false;
     };
     OBJECT_CLASS_IDENTITIES.with(|stored| {
-        stored.borrow_mut().insert(object as usize, identities.to_owned());
+        let mut stored = stored.borrow_mut();
+        let metadata = stored.entry(object as usize).or_default();
+        metadata.ancestry = Some(identities.to_owned());
+        metadata.hidden_markers.insert(marker.to_owned());
     });
     true
 }
@@ -64,7 +73,60 @@ pub unsafe extern "C" fn thaw_object_has_class_identity(
         stored
             .borrow()
             .get(&(object as usize))
+            .and_then(|metadata| metadata.ancestry.as_deref())
             .is_some_and(|identities| identities.split('\u{1f}').any(|name| name == expected))
+    })
+}
+
+/// Marks a compiler-created physical marker as hidden without granting nominal
+/// class identity to an ordinary object allocation.
+#[no_mangle]
+/// # Safety
+/// `marker` must be a valid NUL-terminated compiler marker name. `object`
+/// is an opaque arena allocation identity and is never dereferenced.
+pub unsafe extern "C" fn thaw_object_hide_marker(
+    object: *const u8,
+    marker: *const c_char,
+) -> bool {
+    if object.is_null() || marker.is_null() {
+        return false;
+    }
+    let Ok(marker) = CStr::from_ptr(marker).to_str() else {
+        return false;
+    };
+    if !marker.starts_with("__thaw_class_identity_\u{1e}") {
+        return false;
+    }
+    OBJECT_CLASS_IDENTITIES.with(|stored| {
+        stored
+            .borrow_mut()
+            .entry(object as usize)
+            .or_default()
+            .hidden_markers
+            .insert(marker.to_owned());
+    });
+    true
+}
+
+#[no_mangle]
+/// # Safety
+/// `marker` must be a valid NUL-terminated field name. `object` is used
+/// only as an opaque identity; a user-written same-name field is not hidden.
+pub unsafe extern "C" fn thaw_object_marker_hidden(
+    object: *const u8,
+    marker: *const c_char,
+) -> bool {
+    if object.is_null() || marker.is_null() {
+        return false;
+    }
+    let Ok(marker) = CStr::from_ptr(marker).to_str() else {
+        return false;
+    };
+    OBJECT_CLASS_IDENTITIES.with(|stored| {
+        stored
+            .borrow()
+            .get(&(object as usize))
+            .is_some_and(|metadata| metadata.hidden_markers.contains(marker))
     })
 }
 
@@ -214,12 +276,64 @@ mod object_state_tests {
         let false_base = std::ffi::CString::new("Base").unwrap();
         let other = std::ffi::CString::new("Other").unwrap();
         assert!(unsafe { thaw_object_set_class_identity(identity, marker.as_ptr()) });
+        assert!(unsafe { thaw_object_marker_hidden(identity, marker.as_ptr()) });
         assert!(unsafe { thaw_object_has_class_identity(identity, leaf.as_ptr()) });
         assert!(unsafe { thaw_object_has_class_identity(identity, base.as_ptr()) });
         assert!(!unsafe { thaw_object_has_class_identity(identity, false_base.as_ptr()) });
         assert!(!unsafe { thaw_object_has_class_identity(identity, other.as_ptr()) });
         clear_object_states();
         assert!(!unsafe { thaw_object_has_class_identity(identity, leaf.as_ptr()) });
+    }
+
+    #[test]
+    fn hidden_marker_is_provenance_not_a_reserved_field_name() {
+        clear_object_states();
+        let ordinary = 0_u8;
+        let builtin = 0_u8;
+        let ordinary = &ordinary as *const u8;
+        let builtin = &builtin as *const u8;
+        let marker = std::ffi::CString::new("__thaw_class_identity_\u{1e}AggregateError\u{1f}Error").unwrap();
+        let aggregate = std::ffi::CString::new("AggregateError").unwrap();
+        let invalid = std::ffi::CString::new("ordinary").unwrap();
+        assert!(!unsafe { thaw_object_marker_hidden(std::ptr::null(), marker.as_ptr()) });
+        assert!(!unsafe { thaw_object_marker_hidden(ordinary, std::ptr::null()) });
+        assert!(!unsafe { thaw_object_hide_marker(ordinary, invalid.as_ptr()) });
+        assert!(!unsafe { thaw_object_marker_hidden(ordinary, marker.as_ptr()) });
+        assert!(unsafe { thaw_object_hide_marker(builtin, marker.as_ptr()) });
+        assert!(unsafe { thaw_object_marker_hidden(builtin, marker.as_ptr()) });
+        assert!(!unsafe { thaw_object_has_class_identity(builtin, aggregate.as_ptr()) });
+        assert!(!unsafe { thaw_object_marker_hidden(ordinary, marker.as_ptr()) });
+        clear_object_states();
+        assert!(!unsafe { thaw_object_marker_hidden(builtin, marker.as_ptr()) });
+    }
+
+    #[test]
+    fn hidden_markers_follow_retained_and_reclaimed_arena_identities() {
+        std::thread::spawn(|| {
+            clear_object_states();
+            thaw_arena::thaw_arena_enable_tracing();
+            let retained = thaw_arena::thaw_arena_alloc(8, 8);
+            let reclaimed = thaw_arena::thaw_arena_alloc(8, 8);
+            assert!(!retained.is_null() && !reclaimed.is_null());
+            let marker = std::ffi::CString::new("__thaw_class_identity_\u{1e}Leaf").unwrap();
+            let leaf = std::ffi::CString::new("Leaf").unwrap();
+            assert!(unsafe { thaw_object_set_class_identity(retained, marker.as_ptr()) });
+            assert!(unsafe { thaw_object_set_class_identity(reclaimed, marker.as_ptr()) });
+            let root = thaw_arena::ArenaRoot::new(retained as usize);
+            thaw_arena::thaw_arena_reset();
+            prune_object_states();
+            assert!(unsafe { thaw_object_marker_hidden(retained, marker.as_ptr()) });
+            assert!(unsafe { thaw_object_has_class_identity(retained, leaf.as_ptr()) });
+            assert!(!unsafe { thaw_object_marker_hidden(reclaimed, marker.as_ptr()) });
+            assert!(!unsafe { thaw_object_has_class_identity(reclaimed, leaf.as_ptr()) });
+            let reused = thaw_arena::thaw_arena_alloc(8, 8);
+            assert!(!reused.is_null());
+            assert!(!unsafe { thaw_object_marker_hidden(reused, marker.as_ptr()) });
+            drop(root);
+            thaw_arena::thaw_arena_reset();
+            prune_object_states();
+            assert!(!unsafe { thaw_object_marker_hidden(retained, marker.as_ptr()) });
+        }).join().unwrap();
     }
 
     #[test]
