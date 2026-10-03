@@ -451,7 +451,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 let width = self
                     .context
                     .i64_type()
-                    .const_int(array_element_storage_bytes(&element), false);
+                    .const_int(array_element_storage_bytes(&element)?, false);
                 // Mutates the buffer's elements in place and returns the
                 // same pointer -- the expression's own value is still the
                 // original handle (no reallocation, so no new one).
@@ -490,7 +490,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     buffer.into(),
                     self.context
                         .i64_type()
-                        .const_int(array_element_storage_bytes(&element), false)
+                        .const_int(array_element_storage_bytes(&element)?, false)
                         .into(),
                     target.into(),
                     start.into(),
@@ -610,7 +610,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     value_bytes.into(),
                     self.context
                         .i64_type()
-                        .const_int(array_element_storage_bytes(&element), false)
+                        .const_int(array_element_storage_bytes(&element)?, false)
                         .into(),
                     start.into(),
                     end.into(),
@@ -662,7 +662,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     buffer.into(),
                     self.context
                         .i64_type()
-                        .const_int(array_element_storage_bytes(&element), false)
+                        .const_int(array_element_storage_bytes(&element)?, false)
                         .into(),
                     start.into(),
                     end.into(),
@@ -715,7 +715,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 let width = self
                     .context
                     .i64_type()
-                    .const_int(array_element_storage_bytes(&element), false);
+                    .const_int(array_element_storage_bytes(&element)?, false);
                 let result = self
                     .builder
                     .build_call(
@@ -776,7 +776,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     return Err("array push/unshift requires a homogeneous array".to_string());
                 };
                 let i64_type = self.context.i64_type();
-                let width = array_element_storage_bytes(&element);
+                let width = array_element_storage_bytes(&element)?;
                 let handle = self.compile_expr(receiver)?.into_pointer_value();
                 let buffer = self.compile_array_data(handle)?;
                 let old_length = self
@@ -860,7 +860,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     return Err("array pop/shift requires a homogeneous array".to_string());
                 };
                 let i64_type = self.context.i64_type();
-                let width = array_element_storage_bytes(&element);
+                let width = array_element_storage_bytes(&element)?;
                 let handle = self.compile_expr(receiver)?.into_pointer_value();
                 let buffer = self.compile_array_data(handle)?;
                 let old_length = self
@@ -1051,7 +1051,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     return Err("array splice requires a homogeneous array".to_string());
                 };
                 let i64_type = self.context.i64_type();
-                let width = array_element_storage_bytes(&element);
+                let width = array_element_storage_bytes(&element)?;
                 let handle = self.compile_expr(&args[0])?.into_pointer_value();
                 let buffer = self.compile_array_data(handle)?;
                 let old_len = self

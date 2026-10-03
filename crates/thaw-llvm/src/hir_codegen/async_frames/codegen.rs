@@ -50,7 +50,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 &[
                     self.context
                         .i64_type()
-                        .const_int(self.async_frame_size(plan), false)
+                        .const_int(self.async_frame_size(plan)?, false)
                         .into(),
                     self.context.i64_type().const_int(8, false).into(),
                 ],
@@ -86,7 +86,7 @@ impl<'ctx> HirCompiler<'ctx> {
             if name.starts_with("@@thaw_for_iteration_") {
                 let slot = self.async_frame_field(
                     frame,
-                    self.async_locals_offset(plan) + ASYNC_SLOT_BYTES * index as u64,
+                    self.async_local_offset(plan, index)?,
                     &format!("frame_{name}"),
                 )?;
                 self.builder.build_store(slot, ptr_ty.const_null())
@@ -108,7 +108,7 @@ impl<'ctx> HirCompiler<'ctx> {
             if index < plan.captures.len() {
                 let capture_slot = self.async_frame_field(
                     frame,
-                    self.async_captures_offset(plan) + ASYNC_SLOT_BYTES * index as u64,
+                    self.async_capture_offset(plan, index)?,
                     &format!("capture_{}", param.name),
                 )?;
                 self.builder
@@ -237,7 +237,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     .ok_or_else(|| format!("missing async rejection guard `{name}`"))?;
                 let slot = self.async_frame_field(
                     resume_frame,
-                    self.async_locals_offset(plan) + ASYNC_SLOT_BYTES * index as u64,
+                    self.async_local_offset(plan, index)?,
                     &format!("frame_{name}"),
                 )?;
                 let enabled = name == handler.catch_guard;
@@ -256,7 +256,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     .ok_or_else(|| format!("missing async disabled guard `{name}`"))?;
                 let slot = self.async_frame_field(
                     resume_frame,
-                    self.async_locals_offset(plan) + ASYNC_SLOT_BYTES * index as u64,
+                    self.async_local_offset(plan, index)?,
                     &format!("frame_{name}"),
                 )?;
                 self.builder
@@ -308,7 +308,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     .ok_or_else(|| format!("missing async catch metadata `{name}`"))?;
                 let slot = self.async_frame_field(
                     resume_frame,
-                    self.async_locals_offset(plan) + ASYNC_SLOT_BYTES * index as u64,
+                    self.async_local_offset(plan, index)?,
                     &format!("frame_{name}"),
                 )?;
                 let value = self
@@ -708,7 +708,7 @@ impl<'ctx> HirCompiler<'ctx> {
         for (index, (name, ty)) in plan.locals.iter().enumerate() {
             let slot = self.async_frame_field(
                 frame,
-                self.async_locals_offset(plan) + ASYNC_SLOT_BYTES * index as u64,
+                self.async_local_offset(plan, index)?,
                 &format!("frame_{name}"),
             )?;
             self.async_frame_cells.insert(slot);
@@ -788,7 +788,7 @@ impl<'ctx> HirCompiler<'ctx> {
         for (index, (name, ty)) in plan.captures.iter().enumerate() {
             let slot = self.async_frame_field(
                 frame,
-                self.async_captures_offset(plan) + ASYNC_SLOT_BYTES * index as u64,
+                self.async_capture_offset(plan, index)?,
                 &format!("capture_{name}"),
             )?;
             let cell = self
@@ -979,8 +979,7 @@ impl<'ctx> HirCompiler<'ctx> {
                                 .ok_or_else(|| format!("missing async guard `{guard_name}`"))?;
                             let guard_slot = self.async_frame_field(
                                 frame,
-                                self.async_locals_offset(plan)
-                                    + ASYNC_SLOT_BYTES * guard_index as u64,
+                                self.async_local_offset(plan, guard_index)?,
                                 "outer_catch_guard",
                             )?;
                             self.builder
@@ -1061,7 +1060,7 @@ impl<'ctx> HirCompiler<'ctx> {
                         .ok_or_else(|| format!("missing async frame slot for `{name}`"))?;
                     let slot = self.async_frame_field(
                         frame,
-                        self.async_locals_offset(plan) + ASYNC_SLOT_BYTES * index as u64,
+                        self.async_local_offset(plan, index)?,
                         &format!("frame_{name}"),
                     )?;
                     self.async_frame_cells.insert(slot);
@@ -1117,7 +1116,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 .ok_or_else(|| format!("missing async catch metadata `{name}`"))?;
             let slot = self.async_frame_field(
                 frame,
-                self.async_locals_offset(plan) + ASYNC_SLOT_BYTES * index as u64,
+                self.async_local_offset(plan, index)?,
                 "caught_sync_metadata",
             )?;
             let global = self.module.get_global(symbol)
@@ -1161,7 +1160,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 .ok_or_else(|| format!("missing async guard `{name}`"))?;
             let slot = self.async_frame_field(
                 frame,
-                self.async_locals_offset(plan) + ASYNC_SLOT_BYTES * index as u64,
+                self.async_local_offset(plan, index)?,
                 "caught_sync_guard",
             )?;
             self.builder.build_store(slot, self.context.bool_type().const_int(enabled as u64, false))
@@ -1182,21 +1181,30 @@ impl<'ctx> HirCompiler<'ctx> {
         Ok(())
     }
 
-    fn async_locals_offset(&self, plan: &FrameAsyncPlan) -> u64 {
-        self.async_captures_offset(plan) + ASYNC_SLOT_BYTES * plan.captures.len() as u64
+    fn async_return_width(&self, plan: &FrameAsyncPlan) -> Result<u64, String> {
+        if plan.ret == HirType::Void { Ok(0) }
+        else { Ok(ASYNC_SLOT_BYTES.max(arena_storage_bytes(&plan.ret)?)) }
     }
 
-    fn async_captures_offset(&self, plan: &FrameAsyncPlan) -> u64 {
-        ASYNC_FRAME_BYTES
-            + if plan.ret == HirType::Void {
-                0
-            } else {
-                ASYNC_SLOT_BYTES
-            }
+    fn async_capture_offset(&self, plan: &FrameAsyncPlan, index: usize) -> Result<u64, String> {
+        checked_storage_add(
+            checked_storage_add(ASYNC_FRAME_BYTES, self.async_return_width(plan)?)?,
+            checked_storage_mul(ASYNC_SLOT_BYTES, index as u64)?,
+        )
     }
 
-    fn async_frame_size(&self, plan: &FrameAsyncPlan) -> u64 {
-        self.async_locals_offset(plan) + ASYNC_SLOT_BYTES * plan.locals.len() as u64
+    fn async_locals_offset(&self, plan: &FrameAsyncPlan) -> Result<u64, String> {
+        self.async_capture_offset(plan, plan.captures.len())
+    }
+
+    fn async_local_offset(&self, plan: &FrameAsyncPlan, index: usize) -> Result<u64, String> {
+        plan.locals[..index].iter().try_fold(self.async_locals_offset(plan)?,
+            |offset, (_, ty)| checked_storage_add(
+                offset, ASYNC_SLOT_BYTES.max(arena_storage_bytes(ty)?)))
+    }
+
+    fn async_frame_size(&self, plan: &FrameAsyncPlan) -> Result<u64, String> {
+        self.async_local_offset(plan, plan.locals.len())
     }
 
     fn async_completion_result(
