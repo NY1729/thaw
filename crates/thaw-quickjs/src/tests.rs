@@ -639,6 +639,66 @@ fn message_port_transfer_detaches_the_source_port() {
 }
 
 #[test]
+fn message_port_retains_messages_until_started() {
+    assert_eq!(
+        load(r#"async function portStartQueue() {
+            const channel = new MessageChannel(), seen = [];
+            channel.port1.postMessage('first'); channel.port1.postMessage('second');
+            await Promise.resolve();
+            channel.port2.addEventListener('message', event => seen.push(event.data));
+            await Promise.resolve();
+            const beforeStart = seen.slice();
+            channel.port2.start(); channel.port2.start();
+            await Promise.resolve();
+            const afterStart = seen.slice();
+
+            const assigned = new MessageChannel(), assignedSeen = [];
+            assigned.port1.postMessage('assigned');
+            await Promise.resolve();
+            assigned.port2.onmessage = event => assignedSeen.push(event.data);
+            await Promise.resolve();
+
+            const node = new MessageChannel(), nodeSeen = [];
+            node.port1.postMessage('node');
+            await Promise.resolve();
+            node.port2.on('message', value => nodeSeen.push(value));
+            await Promise.resolve();
+
+            const source = new MessageChannel(), movedSeen = [];
+            source.port2.start();
+            source.port1.postMessage('moved');
+            const moved = structuredClone(source.port2, { transfer: [source.port2] });
+            await Promise.resolve();
+            const transferPending = [moved.__thawStarted, moved.__thawQueue.length];
+            moved.onmessage = event => movedSeen.push(event.data);
+            await Promise.resolve();
+
+            const closed = new MessageChannel(), closedSeen = [];
+            closed.port1.postMessage('discarded');
+            closed.port2.close();
+            closed.port2.onmessage = event => closedSeen.push(event.data);
+            await Promise.resolve();
+            const discarded = [closedSeen.length, closed.port2.__thawQueue.length];
+
+            const pulled = new MessageChannel();
+            pulled.port1.postMessage('pull');
+            await Promise.resolve();
+            const queuedForPull = pulled.port2.__thawQueue.length;
+            channel.port1.close(); channel.port2.close();
+            assigned.port1.close(); assigned.port2.close();
+            node.port1.close(); node.port2.close();
+            source.port1.close(); moved.close();
+            closed.port1.close(); pulled.port1.close(); pulled.port2.close();
+            return [beforeStart, afterStart, assignedSeen, nodeSeen,
+                    transferPending, movedSeen, discarded, queuedForPull];
+        }"#),
+        1
+    );
+    assert_eq!(call("portStartQueue", "[]"),
+        r#"[[],["first","second"],["assigned"],["node"],[false,1],["moved"],[0,0],1]"#);
+}
+
+#[test]
 fn url_search_params_skips_empty_fields_but_keeps_empty_names() {
     assert_eq!(load(r#"function emptyQueryFields() {
         const check = (value, expected) => { if (value !== expected) throw new Error('query field assertion'); };

@@ -5,6 +5,7 @@
         this.__thawPeer = null;
         this.__thawQueue = [];
         this.__thawScheduled = false;
+        this.__thawStarted = false;
         this.__thawClosed = false;
         this.__thawRefed = true;
         this.__thawNodeListeners = new Map();
@@ -40,7 +41,7 @@
         return transferred;
       }
       __thawSchedule() {
-        if (this.__thawScheduled || this.__thawClosed) return;
+        if (!this.__thawStarted || this.__thawScheduled || this.__thawClosed) return;
         this.__thawScheduled = true;
         queueMicrotask(() => {
           this.__thawScheduled = false;
@@ -59,7 +60,7 @@
         if (typeof this.__thawOnMessageError === 'function') this.__thawOnMessageError.call(this, event);
         for (const listener of (this.__thawNodeListeners.get('messageerror') || []).slice()) listener.call(this, error);
       }
-      start() { this.__thawSchedule(); }
+      start() { this.__thawStarted = true; this.__thawSchedule(); }
       close() {
         if (this.__thawClosed) return;
         this.__thawClosed = true;
