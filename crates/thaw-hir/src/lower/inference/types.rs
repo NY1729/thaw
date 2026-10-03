@@ -530,6 +530,38 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&HirType::Str, marker, "object marker name")?;
                         return Ok(object_type);
                     }
+                    "__thaw_object_order_begin" => {
+                        let [object] = args.as_slice() else {
+                            return Err("object order initialization expects one object".into());
+                        };
+                        let object_type = self.infer_expr_type(object)?;
+                        if !matches!(object_type, HirType::Object(_)) {
+                            return Err("object order initialization requires a fixed object".into());
+                        }
+                        return Ok(object_type);
+                    }
+                    "__thaw_object_order_seed" => {
+                        let [object, key] = args.as_slice() else {
+                            return Err("object order insertion expects an object and key".into());
+                        };
+                        let object_type = self.infer_expr_type(object)?;
+                        if !matches!(object_type, HirType::Object(_)) {
+                            return Err("object order insertion requires a fixed object".into());
+                        }
+                        self.expect_type(&HirType::Str, key, "object order key")?;
+                        return Ok(object_type);
+                    }
+                    "__thaw_object_order_rank" => {
+                        let [object, key, rank] = args.as_slice() else {
+                            return Err("object order rank expects an object, key, and fallback".into());
+                        };
+                        if !matches!(self.infer_expr_type(object)?, HirType::Object(_)) {
+                            return Err("object order rank requires a fixed object".into());
+                        }
+                        self.expect_type(&HirType::Str, key, "object order key")?;
+                        self.expect_type(&HirType::I64, rank, "object order fallback")?;
+                        return Ok(HirType::I64);
+                    }
                     "__thaw_object_has_accessor" => {
                         let [_, property, setter] = args.as_slice() else {
                             return Err(

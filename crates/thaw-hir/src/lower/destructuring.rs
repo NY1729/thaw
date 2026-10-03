@@ -262,38 +262,14 @@ impl<'a> FnLowerer<'a> {
                             )?;
                         }
                         ObjectPatProp::Rest(rest) => {
-                            let remaining = ecmascript_field_order(fields)
-                                .into_iter()
-                                .filter_map(|index| {
-                                    let (name, _) = &fields[index];
-                                    (!used.contains(name)).then(|| {
-                                        Ok((
-                                            name.clone(),
-                                            Self::fixed_object_property_read_type(fields, name)?,
-                                        ))
-                                    })
-                                })
-                                .collect::<Result<Vec<_>, String>>()?;
-                            let rest_value = HirExpr::ObjectLit(
-                                remaining
-                                    .iter()
-                                    .map(|(name, _)| {
-                                        (
-                                            name.clone(),
-                                            self.lower_fixed_object_property_read(
-                                                value.clone(),
-                                                fields,
-                                                name,
-                                            )
-                                            .expect("rest field was taken from its source type"),
-                                        )
-                                    })
-                                    .collect(),
-                            );
+                            let omitted = used.iter().cloned().collect::<Vec<_>>();
+                            let (rest_value, rest_type) = self.lower_fixed_object_rest_copy(
+                                value.clone(), fields, &omitted,
+                            )?;
                             self.lower_binding_pattern(
                                 &rest.arg,
                                 rest_value,
-                                &HirType::Object(remaining),
+                                &rest_type,
                                 statements,
                             )?;
                         }
@@ -1422,6 +1398,7 @@ impl<'a> FnLowerer<'a> {
         };
         let parameter = "__thaw_union_rest_value".to_string();
         let mut body = Vec::new();
+        let omitted = used.iter().cloned().collect::<Vec<_>>();
         for (index, element) in elements.iter().enumerate() {
             let HirType::Object(fields) = element else {
                 unreachable!()
@@ -1431,24 +1408,7 @@ impl<'a> FnLowerer<'a> {
                 index,
                 elements.to_vec(),
             );
-            let rest = HirExpr::ObjectLit(
-                ecmascript_field_order(fields)
-                    .into_iter()
-                    .filter(|index| !used.contains(&fields[*index].0))
-                    .map(|index| {
-                        let (name, _) = &fields[index];
-                        (
-                            name.clone(),
-                            self.lower_fixed_object_property_read(
-                                member.clone(),
-                                fields,
-                                name,
-                            )
-                            .expect("rest field was taken from its source type"),
-                        )
-                    })
-                    .collect(),
-            );
+            let (rest, _) = self.lower_fixed_object_rest_copy(member, fields, &omitted)?;
             let rest = self.coerce_to_declared(&result_type, rest)?;
             if index + 1 == elements.len() {
                 body.push(HirStmt::Return(Some(rest)));

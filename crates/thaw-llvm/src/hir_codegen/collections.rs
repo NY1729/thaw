@@ -791,12 +791,41 @@ impl<'ctx> HirCompiler<'ctx> {
         Ok((element, handle, idx_int))
     }
 
+    /// Preserve the existing static order for marker-capable allocations.
+    /// A fixed copy explicitly resets this list before creating its keys.
+    fn compile_initial_object_order(
+        &mut self,
+        object: PointerValue<'ctx>,
+        names: &[String],
+    ) -> Result<(), String> {
+        if !names.iter().any(|name| name.starts_with("__thaw_class_identity_\u{1e}")) {
+            return Ok(());
+        }
+        self.builder.build_call(
+            self.module.get_function("thaw_object_order_begin").unwrap(),
+            &[object.into()],
+            "object_order_begin",
+        ).map_err(|error| error.to_string())?;
+        let mut indices = names.iter().enumerate()
+            .filter_map(|(index, name)| (!is_hidden_accessor_field(name))
+                .then_some((index, object_array_index_key(name))))
+            .collect::<Vec<_>>();
+        indices.sort_by_key(|(index, numeric)| (numeric.is_none(), numeric.unwrap_or(*index as u32)));
+        for (index, _) in indices {
+            let key = self.compile_expr(&HirExpr::Lit(HirLit::Str(names[index].clone())))?
+                .into_pointer_value();
+            self.builder.build_call(
+                self.module.get_function("thaw_object_order_seed").unwrap(),
+                &[object.into(), key.into()],
+                "object_order_seed",
+            ).map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    }
+
     /// Allocates native fields from the arena in the order `fields` lists
-    /// them (thaw-hir's lowering already reordered
-    /// the literal to match its declared type, so this order is always the
-    /// declared one, not whatever order the user happened to write). No
-    /// length header: field count/order is static, part of the type, so
-    /// unlike arrays there's nothing to record at runtime.
+    /// them (thaw-hir's lowering already reordered the literal to match its
+    /// declared type). Marker-capable values also seed their visible key order.
     fn compile_object_lit(
         &mut self,
         fields: &[(String, HirExpr)],
@@ -879,6 +908,10 @@ impl<'ctx> HirCompiler<'ctx> {
             byte_offset = checked_storage_add(byte_offset, field_sizes[i])?;
         }
 
+        self.compile_initial_object_order(
+            base_ptr,
+            &fields.iter().map(|(name, _)| name.clone()).collect::<Vec<_>>(),
+        )?;
         Ok(base_ptr.into())
     }
 
@@ -947,6 +980,10 @@ impl<'ctx> HirCompiler<'ctx> {
                     .map_err(|error| error.to_string())?;
             }
         }
+        self.compile_initial_object_order(
+            allocation,
+            &fields.iter().map(|(name, _)| name.clone()).collect::<Vec<_>>(),
+        )?;
         Ok(allocation.into())
     }
 

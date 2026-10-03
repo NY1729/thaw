@@ -171,6 +171,71 @@ impl<'ctx> HirCompiler<'ctx> {
         self.compile_native_object_to_json_with_undefined(object, ty, false)
     }
 
+    /// Emit one statically typed field after the caller selected it from the
+    /// initial own-key snapshot. A live visibility check precedes every read.
+    fn compile_native_object_json_field(
+        &mut self,
+        object: PointerValue<'ctx>,
+        ty: &HirType,
+        fields: &[(String, HirType)],
+        index: usize,
+        json: BasicValueEnum<'ctx>,
+        preserve_undefined: bool,
+    ) -> Result<(), String> {
+        let visibility_name = &fields[index].0;
+        let hidden = if visibility_name.as_bytes().contains(&0) {
+            self.context.bool_type().const_zero()
+        } else {
+            let marker_name = self.builder.build_global_string_ptr(
+                visibility_name, "native_field_visibility_name",
+            ).map_err(|error| error.to_string())?;
+            self.builder.build_call(
+                self.module.get_function("thaw_object_marker_hidden").unwrap(),
+                &[object.into(), marker_name.as_pointer_value().into()],
+                "native_field_hidden",
+            ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                .ok_or("native field visibility query returned no value")?.into_int_value()
+        };
+        let function = self.current_function();
+        let visibility_write = self.context.append_basic_block(function, "write_visible_native_field");
+        let visibility_done = self.context.append_basic_block(function, "native_field_done");
+        self.builder.build_conditional_branch(hidden, visibility_done, visibility_write)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(visibility_write);
+        let (name, field_ty) = &fields[index];
+        let getter = format!("__thaw_getter_{name}");
+        let setter = format!("__thaw_setter_{name}");
+        let getter = fields.iter().position(|(field, _)| field == &getter);
+        if getter.is_none() && fields.iter().any(|(field, _)| field == &setter) {
+            if preserve_undefined {
+                let key = self.builder.build_global_string_ptr(name, "dynamic_setter_only_key")
+                    .map_err(|error| error.to_string())?;
+                let undefined = self.compile_napi_undefined_json()?;
+                self.compile_json_object_set_native_with_undefined(
+                    json, key.as_pointer_value(), undefined, &HirType::Json, true, true,
+                )?;
+            }
+        } else {
+            let (value, value_type) = if let Some(getter) = getter {
+                self.compile_native_object_getter(object, fields, getter)?
+            } else {
+                (
+                    self.compile_accessor_aware_field_read(object, ty, fields, index)?,
+                    field_ty.clone(),
+                )
+            };
+            let key = self.builder.build_global_string_ptr(name, "dynamic_object_key")
+                .map_err(|error| error.to_string())?;
+            self.compile_json_object_set_native_with_undefined(
+                json, key.as_pointer_value(), value, &value_type, preserve_undefined, false,
+            )?;
+        }
+        self.builder.build_unconditional_branch(visibility_done)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(visibility_done);
+        Ok(())
+    }
+
     fn compile_native_object_to_json_with_undefined(
         &mut self,
         object: PointerValue<'ctx>,
@@ -191,71 +256,100 @@ impl<'ctx> HirCompiler<'ctx> {
             .try_as_basic_value()
             .basic()
             .unwrap();
-        for index in ecmascript_object_field_order(fields) {
-            let visibility_name = &fields[index].0;
-            let hidden = if visibility_name.as_bytes().contains(&0) {
-                // Compiler markers never contain NUL; a C string would lose
-                // the suffix of an ordinary user field's name.
+        // Snapshot all present own keys before a getter can mutate a later
+        // marker. The physical field layout is static; the creation order is
+        // per allocation and can differ after a fixed spread or rest copy.
+        if !fields.iter().any(|(name, _)| name.starts_with("__thaw_class_identity_\u{1e}")) {
+            // Only marker visibility/reveal can alter relative physical order.
+            // A copied layout with no marker retains its static key order.
+            for index in ecmascript_object_field_order(fields) {
+                self.compile_native_object_json_field(
+                    object, ty, fields, index, json, preserve_undefined,
+                )?;
+            }
+        } else {
+        let i64_type = self.context.i64_type();
+        let mut ranks = Vec::new();
+        for (static_rank, index) in ecmascript_object_field_order(fields).into_iter().enumerate() {
+            let name = &fields[index].0;
+            let key = self.compile_expr(&HirExpr::Lit(HirLit::Str(name.clone())))?
+                .into_pointer_value();
+            let rank = self.builder.build_call(
+                self.module.get_function("thaw_object_order_rank").unwrap(),
+                &[object.into(), key.into(),
+                    i64_type.const_int(static_rank as u64, false).into()],
+                "native_field_initial_rank",
+            ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                .ok_or("native field rank returned no value")?.into_int_value();
+            let hidden = if name.as_bytes().contains(&0) {
                 self.context.bool_type().const_zero()
             } else {
-                let marker_name = self.builder.build_global_string_ptr(visibility_name, "native_field_visibility_name")
+                let marker = self.builder.build_global_string_ptr(name, "native_field_initial_visibility")
                     .map_err(|error| error.to_string())?;
                 self.builder.build_call(
                     self.module.get_function("thaw_object_marker_hidden").unwrap(),
-                    &[object.into(), marker_name.as_pointer_value().into()],
-                    "native_field_hidden",
+                    &[object.into(), marker.as_pointer_value().into()],
+                    "native_field_initially_hidden",
                 ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
-                    .ok_or("native field visibility query returned no value")?.into_int_value()
+                    .ok_or("native field visibility returned no value")?.into_int_value()
             };
-            let function = self.current_function();
-            let visibility_write = self.context.append_basic_block(function, "write_visible_native_field");
-            let visibility_done = self.context.append_basic_block(function, "native_field_done");
-            self.builder.build_conditional_branch(hidden, visibility_done, visibility_write)
+            let initial = self.builder.build_select(
+                hidden, i64_type.const_int(i64::MAX as u64, false), rank,
+                "native_field_snapshot_rank",
+            ).map_err(|error| error.to_string())?.into_int_value();
+            let slot = self.builder.build_alloca(i64_type, "native_field_rank_slot")
                 .map_err(|error| error.to_string())?;
-            self.builder.position_at_end(visibility_write);
-            let (name, field_ty) = &fields[index];
-            let getter = format!("__thaw_getter_{name}");
-            let setter = format!("__thaw_setter_{name}");
-            let getter = fields.iter().position(|(field, _)| field == &getter);
-            if getter.is_none() && fields.iter().any(|(field, _)| field == &setter) {
-                // A setter-only own field reads as undefined. Keep its key
-                // when this conversion preserves JavaScript property values,
-                // without reading the field's unreachable backing slot.
-                if preserve_undefined {
-                    let key = self.builder
-                        .build_global_string_ptr(name, "dynamic_setter_only_key")
-                        .map_err(|error| error.to_string())?;
-                    let undefined = self.compile_napi_undefined_json()?;
-                    self.compile_json_object_set_native_with_undefined(
-                        json, key.as_pointer_value(), undefined, &HirType::Json, true, true,
-                    )?;
-                }
-                self.builder.build_unconditional_branch(visibility_done).map_err(|error| error.to_string())?;
-                self.builder.position_at_end(visibility_done);
-                continue;
+            self.builder.build_store(slot, initial).map_err(|error| error.to_string())?;
+            ranks.push((index, slot));
+        }
+        for _ in 0..ranks.len() {
+            let mut minimum = i64_type.const_int(i64::MAX as u64, false);
+            for (_, slot) in &ranks {
+                let rank = self.builder.build_load(i64_type, *slot, "native_field_rank")
+                    .map_err(|error| error.to_string())?.into_int_value();
+                let smaller = self.builder.build_int_compare(
+                    IntPredicate::SLT, rank, minimum, "native_field_earlier",
+                ).map_err(|error| error.to_string())?;
+                minimum = self.builder.build_select(
+                    smaller, rank, minimum, "native_field_minimum",
+                ).map_err(|error| error.to_string())?.into_int_value();
             }
-            let (value, value_type) = if let Some(getter) = getter {
-                self.compile_native_object_getter(object, fields, getter)?
-            } else {
-                (
-                    self.compile_accessor_aware_field_read(object, ty, fields, index)?,
-                    field_ty.clone(),
-                )
-            };
-            let key = self
-                .builder
-                .build_global_string_ptr(name, "dynamic_object_key")
+            let function = self.current_function();
+            let done = self.context.append_basic_block(function, "native_order_step_done");
+            let check = self.context.append_basic_block(function, "native_order_check");
+            let absent = self.builder.build_int_compare(
+                IntPredicate::EQ, minimum, i64_type.const_int(i64::MAX as u64, false),
+                "native_order_no_more_keys",
+            ).map_err(|error| error.to_string())?;
+            self.builder.build_conditional_branch(absent, done, check)
                 .map_err(|error| error.to_string())?;
-            self.compile_json_object_set_native_with_undefined(
-                json,
-                key.as_pointer_value(),
-                value,
-                &value_type,
-                preserve_undefined,
-                false,
-            )?;
-            self.builder.build_unconditional_branch(visibility_done).map_err(|error| error.to_string())?;
-            self.builder.position_at_end(visibility_done);
+            self.builder.position_at_end(check);
+            for (index, slot) in &ranks {
+                let index = *index;
+                let rank = self.builder.build_load(i64_type, *slot, "native_order_candidate")
+                    .map_err(|error| error.to_string())?.into_int_value();
+                let chosen = self.builder.build_int_compare(
+                    IntPredicate::EQ, rank, minimum, "native_order_selected",
+                ).map_err(|error| error.to_string())?;
+                let write = self.context.append_basic_block(function, "native_order_write");
+                let next = self.context.append_basic_block(function, "native_order_next");
+                self.builder.build_conditional_branch(chosen, write, next)
+                    .map_err(|error| error.to_string())?;
+                self.builder.position_at_end(write);
+                self.compile_native_object_json_field(
+                    object, ty, fields, index, json, preserve_undefined,
+                )?;
+                self.builder.build_store(
+                    *slot, i64_type.const_int(i64::MAX as u64, false),
+                ).map_err(|error| error.to_string())?;
+                self.builder.build_unconditional_branch(done)
+                    .map_err(|error| error.to_string())?;
+                self.builder.position_at_end(next);
+            }
+            self.builder.build_unconditional_branch(done)
+                .map_err(|error| error.to_string())?;
+            self.builder.position_at_end(done);
+        }
         }
         // Carries `object`'s own frozen/sealed/non-extensible state (if
         // any -- a no-op otherwise) across onto the freshly built `json`

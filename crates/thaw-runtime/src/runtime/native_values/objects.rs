@@ -15,6 +15,9 @@ thread_local! {
 struct ObjectClassMetadata {
     ancestry: Option<String>,
     hidden_markers: std::collections::HashSet<String>,
+    // None keeps the static field-order fallback for ordinary fixed objects.
+    // A copied object's physical slots can precede their actual creation.
+    own_key_order: Option<Vec<String>>,
 }
 
 const NON_EXTENSIBLE: u8 = 1;
@@ -51,6 +54,9 @@ pub unsafe extern "C" fn thaw_object_set_class_identity(
         let metadata = stored.entry(object as usize).or_default();
         metadata.ancestry = Some(identities.to_owned());
         metadata.hidden_markers.insert(marker.to_owned());
+        if let Some(order) = metadata.own_key_order.as_mut() {
+            order.retain(|name| name != marker);
+        }
     });
     true
 }
@@ -98,12 +104,12 @@ pub unsafe extern "C" fn thaw_object_hide_marker(
         return false;
     }
     OBJECT_CLASS_IDENTITIES.with(|stored| {
-        stored
-            .borrow_mut()
-            .entry(object as usize)
-            .or_default()
-            .hidden_markers
-            .insert(marker.to_owned());
+        let mut stored = stored.borrow_mut();
+        let metadata = stored.entry(object as usize).or_default();
+        metadata.hidden_markers.insert(marker.to_owned());
+        if let Some(order) = metadata.own_key_order.as_mut() {
+            order.retain(|name| name != marker);
+        }
     });
     true
 }
@@ -125,8 +131,96 @@ pub unsafe extern "C" fn thaw_object_reveal_marker(
     };
     OBJECT_CLASS_IDENTITIES.with(|stored| {
         stored.borrow_mut().get_mut(&(object as usize))
-            .is_some_and(|metadata| metadata.hidden_markers.remove(marker))
+            .is_some_and(|metadata| {
+                if !metadata.hidden_markers.remove(marker) {
+                    return false;
+                }
+                if let Some(order) = metadata.own_key_order.as_mut() {
+                    if !order.iter().any(|name| name == marker) {
+                        order.push(marker.to_owned());
+                    }
+                }
+                true
+            })
     })
+}
+
+/// Starts explicit own-key ordering without changing nominal ancestry or the
+/// set of hidden compiler markers. Call before copying into a zeroed superset.
+#[no_mangle]
+pub extern "C" fn thaw_object_order_begin(object: *const u8) -> bool {
+    if object.is_null() {
+        return false;
+    }
+    OBJECT_CLASS_IDENTITIES.with(|stored| {
+        stored.borrow_mut().entry(object as usize).or_default().own_key_order = Some(Vec::new());
+    });
+    true
+}
+
+/// Records a successfully created visible field in an active order list.
+/// Ordinary objects without an order list keep their static-layout fallback.
+#[no_mangle]
+/// # Safety
+/// `key` must point to a live native string; `object` is only an identity.
+pub unsafe extern "C" fn thaw_object_order_seed(object: *const u8, key: *const c_char) -> bool {
+    if object.is_null() || key.is_null() {
+        return false;
+    }
+    let Ok(key) = thaw_arena::NativeStr::from_ptr(key).to_str() else {
+        return false;
+    };
+    OBJECT_CLASS_IDENTITIES.with(|stored| {
+        let mut stored = stored.borrow_mut();
+        let Some(metadata) = stored.get_mut(&(object as usize)) else {
+            return true;
+        };
+        if metadata.hidden_markers.contains(key) {
+            return true;
+        }
+        if let Some(order) = metadata.own_key_order.as_mut() {
+            if !order.iter().any(|name| name == key) {
+                order.push(key.to_owned());
+            }
+        }
+        true
+    })
+}
+
+/// Returns a sortable own-key rank. Canonical array indices precede string
+/// keys, while an active list distinguishes an uncreated physical slot from
+/// an ordinary object using static order. `i64::MAX` means absent/invalid.
+#[no_mangle]
+/// # Safety
+/// `key` must point to a live native string; `object` is only an identity.
+pub unsafe extern "C" fn thaw_object_order_rank(
+    object: *const u8,
+    key: *const c_char,
+    static_rank: i64,
+) -> i64 {
+    if object.is_null() || key.is_null() {
+        return i64::MAX;
+    }
+    let Ok(key) = thaw_arena::NativeStr::from_ptr(key).to_str() else {
+        return i64::MAX;
+    };
+    let index = key.parse::<u32>().ok()
+        .filter(|&index| index != u32::MAX && index.to_string() == key);
+    let string_rank = OBJECT_CLASS_IDENTITIES.with(|stored| {
+        stored.borrow().get(&(object as usize))
+            .and_then(|metadata| metadata.own_key_order.as_ref())
+            .map_or(static_rank, |order| {
+                order.iter().position(|name| name == key)
+                    .map_or(i64::MAX, |index| i64::try_from(index).unwrap_or(i64::MAX))
+            })
+    });
+    if string_rank == i64::MAX {
+        return i64::MAX;
+    }
+    if let Some(index) = index {
+        return i64::from(index);
+    }
+    (1_i64 << 32).checked_add(string_rank).unwrap_or(i64::MAX)
 }
 
 #[no_mangle]
@@ -285,6 +379,44 @@ fn prune_object_states() {
 #[cfg(test)]
 mod object_state_tests {
     use super::*;
+
+    #[test]
+    fn own_key_order_tracks_creation_hide_reveal_and_full_native_names() {
+        clear_object_states();
+        let object = 0_u8;
+        let object = &object as *const u8;
+        let marker = std::ffi::CString::new("__thaw_class_identity_\u{1e}A").unwrap();
+        let x = unsafe { thaw_arena::thaw_string_register_literal(b"x".as_ptr().cast(), 1) };
+        let marker_name = marker.as_bytes();
+        let marker_key = unsafe { thaw_arena::thaw_string_register_literal(
+            marker_name.as_ptr().cast(), marker_name.len(),
+        ) };
+        let nul_name = b"x\0second";
+        let nul_key = unsafe { thaw_arena::thaw_string_register_literal(
+            nul_name.as_ptr().cast(), nul_name.len(),
+        ) };
+        let numeric = unsafe { thaw_arena::thaw_string_register_literal(b"2".as_ptr().cast(), 1) };
+
+        assert_eq!(unsafe { thaw_object_order_rank(object, x, 7) }, (1_i64 << 32) + 7);
+        assert!(unsafe { thaw_object_set_class_identity(object, marker.as_ptr()) });
+        assert!(thaw_object_order_begin(object));
+        assert!(unsafe { thaw_object_order_seed(object, marker_key) });
+        assert_eq!(unsafe { thaw_object_order_rank(object, marker_key, 0) }, i64::MAX);
+        assert!(unsafe { thaw_object_order_seed(object, x) });
+        assert!(unsafe { thaw_object_order_seed(object, nul_key) });
+        assert!(unsafe { thaw_object_order_seed(object, numeric) });
+        assert_eq!(unsafe { thaw_object_order_rank(object, numeric, 99) }, 2);
+        assert_eq!(unsafe { thaw_object_order_rank(object, x, 9) }, 1_i64 << 32);
+        assert_eq!(unsafe { thaw_object_order_rank(object, nul_key, 9) }, (1_i64 << 32) + 1);
+        assert!(unsafe { thaw_object_reveal_marker(object, marker_key) });
+        assert_eq!(unsafe { thaw_object_order_rank(object, marker_key, 9) }, (1_i64 << 32) + 3);
+        assert!(unsafe { thaw_object_hide_marker(object, marker_key) });
+        assert_eq!(unsafe { thaw_object_order_rank(object, marker_key, 9) }, i64::MAX);
+        assert!(unsafe { thaw_object_reveal_marker(object, marker_key) });
+        assert_eq!(unsafe { thaw_object_order_rank(object, marker_key, 9) }, (1_i64 << 32) + 3);
+        clear_object_states();
+        assert_eq!(unsafe { thaw_object_order_rank(object, x, 7) }, (1_i64 << 32) + 7);
+    }
 
     #[test]
     fn class_identity_tracks_actual_allocation_and_inherited_names() {
