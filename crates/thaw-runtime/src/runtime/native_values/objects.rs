@@ -38,6 +38,17 @@ const PROPERTY_ENUMERABLE: u8 = 2;
 const PROPERTY_CONFIGURABLE: u8 = 4;
 const PROPERTY_DEFAULT: u8 = PROPERTY_WRITABLE | PROPERTY_ENUMERABLE | PROPERTY_CONFIGURABLE;
 
+fn object_can_set_property_flags(object: *const u8, property: &str, requested: u8) -> bool {
+    if object.is_null() || requested & !PROPERTY_DEFAULT != 0 {
+        return false;
+    }
+    let current = object_property_flags(object, property);
+    let configurable = current & PROPERTY_CONFIGURABLE != 0;
+    configurable || !(requested & PROPERTY_CONFIGURABLE != 0
+        || (requested ^ current) & PROPERTY_ENUMERABLE != 0
+        || (current & PROPERTY_WRITABLE == 0 && requested & PROPERTY_WRITABLE != 0))
+}
+
 /// Effective descriptor flags for one physically present native data field.
 /// A zero result is a valid fully restricted property; callers establish
 /// existence from the allocation's trusted field layout before querying.
@@ -71,22 +82,28 @@ pub unsafe extern "C" fn thaw_object_property_flags(object: *const u8, property:
 pub unsafe extern "C" fn thaw_object_set_property_flags(
     object: *const u8, property: *const c_char, requested: u8,
 ) -> bool {
-    if object.is_null() || property.is_null() || requested & !PROPERTY_DEFAULT != 0 {
-        return false;
-    }
+    if property.is_null() { return false; }
     let Ok(property) = thaw_arena::NativeStr::from_ptr(property).to_str() else { return false; };
-    let current = object_property_flags(object, property);
-    let configurable = current & PROPERTY_CONFIGURABLE != 0;
-    if !configurable && (requested & PROPERTY_CONFIGURABLE != 0
-        || (requested ^ current) & PROPERTY_ENUMERABLE != 0
-        || (current & PROPERTY_WRITABLE == 0 && requested & PROPERTY_WRITABLE != 0)) {
-        return false;
-    }
+    if !object_can_set_property_flags(object, property, requested) { return false; }
     OBJECT_PROPERTY_FLAGS.with(|stored| {
         stored.borrow_mut().entry(object as usize).or_default()
             .insert(property.to_owned(), requested);
     });
     true
+}
+
+#[no_mangle]
+/// Checks a descriptor transition before its value is written. The matching
+/// setter rechecks the same owner state when the write has completed.
+///
+/// # Safety
+/// `property` points to a live native string; `object` is an opaque identity.
+pub unsafe extern "C" fn thaw_object_can_set_property_flags(
+    object: *const u8, property: *const c_char, requested: u8,
+) -> bool {
+    if property.is_null() { return false; }
+    let Ok(property) = thaw_arena::NativeStr::from_ptr(property).to_str() else { return false; };
+    object_can_set_property_flags(object, property, requested)
 }
 
 /// A dynamic JSON object's last shared handle has been dropped.

@@ -10661,6 +10661,101 @@ fn projected_native_data_descriptors_share_owner_attributes() {
 }
 
 #[test]
+fn projected_native_data_descriptor_combines_value_and_attributes() {
+    let source = r#"
+        function main(): void {
+            const owner = { value: 1 };
+            const view: any = owner;
+            Object.defineProperty(view, 'value', {
+                value: 4, writable: false, enumerable: false, configurable: false,
+            });
+            const descriptor = Object.getOwnPropertyDescriptor(view, 'value');
+            console.log(owner.value, view.value, descriptor.value,
+                descriptor.writable, descriptor.enumerable, descriptor.configurable);
+            console.log(Object.keys(view).length);
+            console.log(Reflect.defineProperty(view, 'value', { value: 8 }), owner.value);
+            try { Object.defineProperty(view, 'value', { writable: true }); }
+            catch (error) { console.log(error.name); }
+
+            const second = { value: 5 };
+            const secondView: any = second;
+            Object.defineProperty(secondView, 'value', { writable: false });
+            console.log(Object.getOwnPropertyDescriptor(secondView, 'value').value,
+                Object.getOwnPropertyDescriptor(second, 'value').writable);
+            console.log(Reflect.defineProperty(secondView, 'value', { value: 6 }),
+                second.value, secondView.value);
+
+            const frozen = { value: NaN };
+            const frozenView: any = frozen;
+            Object.freeze(frozenView);
+            console.log(Reflect.defineProperty(frozenView, 'value', { value: NaN }),
+                Reflect.defineProperty(frozenView, 'value', { value: 1 }));
+            const signed = { value: -0 };
+            const signedView: any = signed;
+            Object.freeze(signedView);
+            console.log(Reflect.defineProperty(signedView, 'value', { value: -0 }),
+                Reflect.defineProperty(signedView, 'value', { value: 0 }));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "projected_native_combined_data_descriptor"),
+        "4 4 4 false false false\n0\nfalse 4\nTypeError\n5 false\ntrue 6 6\ntrue false\ntrue false\n"
+    );
+}
+
+#[test]
+fn projected_native_define_rechecks_flags_after_rhs_coercion() {
+    let source = r#"
+        function main(): void {
+            const owner = { value: 1 };
+            const view: any = owner;
+            let coercions = 0;
+            const incoming: any = {
+                valueOf(): number {
+                    coercions++;
+                    Object.freeze(owner);
+                    return 2;
+                },
+            };
+            console.log(Reflect.defineProperty(view, 'value', {
+                value: incoming, writable: false,
+            }));
+            console.log(coercions, owner.value, view.value,
+                Object.isFrozen(owner), Object.getOwnPropertyDescriptor(owner, 'value').writable);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "projected_native_define_reentrant_freeze"),
+        "false\n1 1 1 true false\n",
+    );
+}
+
+#[test]
+fn projected_native_define_rechecks_flags_after_nested_host_getter() {
+    let source = r#"
+        function main(): void {
+            const owner: { value: { n: number } } = { value: { n: 1 } };
+            const view: any = owner;
+            let reads = 0;
+            const replacement: any = {
+                get n(): number {
+                    reads++;
+                    Object.freeze(view);
+                    return 2;
+                },
+            };
+            console.log(Reflect.defineProperty(view, 'value', { value: replacement }));
+            console.log(reads, owner.value.n, view.value.n,
+                Object.isFrozen(owner), Object.isFrozen(view));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "projected_native_define_reentrant_host_getter"),
+        "false\n1 1 1 true true\n",
+    );
+}
+
+#[test]
 fn native_integrity_state_reaches_existing_projection_and_back() {
     let source = r#"
         function main(): void {
