@@ -1253,7 +1253,11 @@ impl<'a> FnLowerer<'a> {
                         let [description] = args.as_slice() else {
                             return Err("Symbol expects one description operand".into());
                         };
-                        self.expect_type(&HirType::Str, description, "Symbol description")?;
+                        let ty = self.infer_expr_type(description)?;
+                        if !matches!(ty, HirType::Str | HirType::StrLiteral(_))
+                            && ty != HirType::Optional(Box::new(HirType::Str)) {
+                            return Err("Symbol description must be string or optional string".into());
+                        }
                         return Ok(HirType::Symbol);
                     }
                     "__thaw_symbol_to_string" => {
