@@ -16,6 +16,7 @@ use std::collections::{BTreeMap, HashSet};
 use bumpalo::Bump;
 mod strings;
 pub use strings::*;
+pub mod error_wire;
 
 thread_local! {
     static ARENA: RefCell<Bump> = RefCell::new(Bump::new());

@@ -2110,7 +2110,10 @@ unsafe fn describe_env_exception(env: NapiEnv, exception: NapiValue) -> Result<S
     // walk above does not invoke accessors; this also clears any nested failure.
     if let Ok(env_ref) = env_mut(env) { env_ref.exception.take(); }
     Ok(match name {
-        Some(name) => format!("\u{1}{name}\u{1}{message}"),
+        Some(name) => String::from_utf8(
+            thaw_arena::error_wire::encode_tagged(name.as_bytes(), message.as_bytes(), None)
+                .ok_or("invalid native error text")?,
+        ).map_err(|_| "invalid native error text")?,
         None => message,
     })
 }
@@ -2435,10 +2438,16 @@ unsafe extern "C" fn thaw_compiled_callback(_env: NapiEnv, info: NapiCallbackInf
             let error = if _is_quickjs {
                 let message = serde_json::from_str::<String>(message)
                     .unwrap_or_else(|_| "invalid QuickJS callback error response".into());
-                let (name, body) = message.strip_prefix('\u{1}')
+                let framed = thaw_arena::error_wire::parse_tagged(message.as_bytes())
+                    .and_then(|frame| {
+                        let name = std::str::from_utf8(frame.chain).ok()?;
+                        let body = std::str::from_utf8(frame.original.unwrap_or(frame.display)).ok()?;
+                        Some((name, body))
+                    });
+                let (name, body) = framed.unwrap_or_else(|| message.strip_prefix('\u{1}')
                     .and_then(|tagged| tagged.split_once('\u{1}'))
                     .filter(|(name, _)| !name.is_empty())
-                    .unwrap_or(("Error", message.as_str()));
+                    .unwrap_or(("Error", message.as_str())));
                 alloc_error(env, name, body.into(), None)
             } else {
                 env.alloc(Value::Error(message.into()))

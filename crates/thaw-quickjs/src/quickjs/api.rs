@@ -299,7 +299,19 @@ pub extern "C" fn thaw_js_emit_rejection_handled() {
     let _ = legacy_process_emit(thaw_js_emit_rejection_handled_result());
 }
 
+fn framed_error(name: &str, display: &str, original: Option<&str>) -> String {
+    let bytes = thaw_arena::error_wire::encode_tagged(
+        name.as_bytes(), display.as_bytes(), original.map(str::as_bytes),
+    ).expect("Rust strings are valid UTF-8 error text");
+    String::from_utf8(bytes).expect("framed Rust error text is UTF-8")
+}
+
 fn tagged_error_parts(raw: &str) -> (&str, &str) {
+    if let Some(frame) = thaw_arena::error_wire::parse_tagged(raw.as_bytes()) {
+        if let (Ok(name), Ok(display)) = (
+            std::str::from_utf8(frame.chain), std::str::from_utf8(frame.display),
+        ) { return (name, display); }
+    }
     raw.strip_prefix('\u{1}')
         .and_then(|tagged| tagged.split_once('\u{1}'))
         .unwrap_or(("Error", raw))
@@ -2309,8 +2321,8 @@ fn describe_tagged_exception(ctx: &Ctx<'_>) -> String {
     let mut body = if let Some(obj) = exc.as_object() {
         if let Ok(message) = obj.get::<_, String>("message") {
             match obj.get::<_, String>("name") {
-                Ok(name) if name != "Error" => format!("\u{1}{name}\u{1}{message}"),
-                _ => message,
+                Ok(name) => framed_error(&name, &message, None),
+                _ => framed_error("Error", &message, None),
             }
         } else if let Some(value) = exc.as_string() {
             value.to_string().unwrap_or_default()
@@ -2358,15 +2370,18 @@ fn describe_host_exception(ctx: &Ctx<'_>, label: &str) -> String {
     let properties = error_property_json(ctx, &exc);
     let mut body = if let Some(obj) = exc.as_object() {
         if let Ok(message) = obj.get::<_, String>("message") {
-            let mut body = format!("`{label}` threw: {message}");
-            if let Ok(code) = obj.get::<_, String>("code") {
+            let display = format!("`{label}` threw: {message}");
+            // Preserve the established message → code → name getter order.
+            let code = obj.get::<_, String>("code").ok();
+            let mut body = match obj.get::<_, String>("name") {
+                Ok(name) => framed_error(&name, &display, None),
+                _ => framed_error("Error", &display, None),
+            };
+            if let Some(code) = code {
                 body.push('\u{3}');
                 body.push_str(&code);
             }
-            match obj.get::<_, String>("name") {
-                Ok(name) if name != "Error" => format!("\u{1}{name}\u{1}{body}"),
-                _ => body,
-            }
+            body
         } else if let Some(value) = exc.as_string() {
             format!("`{label}` threw: {}", value.to_string().unwrap_or_default())
         } else {
@@ -2391,28 +2406,12 @@ fn describe_promise_exception<'js>(ctx: &Ctx<'js>, label: &str, preserve_error: 
         if let Ok(message) = obj.get::<_, String>("message") {
             let name = obj.get::<_, String>("name").ok();
             if preserve_error {
-                match name {
-                    Some(name) => format!("\u{1}{name}\u{1}{message}"),
-                    None => message,
-                }
-            } else if let Some(name) = name.filter(|name| name != "Error") {
-                format!("\u{1}{name}\u{1}`{label}`'s promise rejected: {message}")
+                framed_error(name.as_deref().unwrap_or("Error"), &message, None)
             } else {
-                // A plain `Error` rejection: keep the exact user-visible
-                // labeled text unchanged, but append the original
-                // `\u{1}Error\u{1}message` segment so the full tagged form
-                // survives the native boundary (a later property
-                // reconstruction reads it; `thaw_error_message` strips it
-                // back off for display). Only when properties actually
-                // survive too -- otherwise the trailing segment would be
-                // pure noise for a plain `Error`, whose message is the
-                // only thing a caller could ever read.
-                if properties.is_some() {
-                    format!(
-                        "`{label}`'s promise rejected: {message}\u{1}Error\u{1}{message}"
-                    )
-                } else {
-                    format!("`{label}`'s promise rejected: {message}")
+                let display = format!("`{label}`'s promise rejected: {message}");
+                match name.as_deref() {
+                    Some(name) if name != "Error" => framed_error(name, &display, None),
+                    _ => framed_error("Error", &display, Some(&message)),
                 }
             }
         } else if let Some(value) = exc.as_string() {

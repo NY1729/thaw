@@ -3796,10 +3796,9 @@ impl<'a> FnLowerer<'a> {
                             }
                             None => HirExpr::Lit(HirLit::Str(String::new())),
                         };
-                        let tag = HirExpr::Lit(HirLit::Str(format!("\u{1}{}\u{1}", class.sym)));
                         let tagged = HirExpr::Call(
-                            Box::new(HirExpr::Var("__thaw_string_concat".to_string())),
-                            vec![tag, message],
+                            Box::new(HirExpr::Var("__thaw_error_frame".to_string())),
+                            vec![HirExpr::Lit(HirLit::Str(class.sym.to_string())), message],
                         );
                         let Some(options) = args.get(1) else {
                             return Ok(tagged);

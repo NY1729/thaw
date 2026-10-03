@@ -1330,6 +1330,18 @@ impl<'ctx> HirCompiler<'ctx> {
                     .basic()
                     .ok_or("error property access returned no value".into());
             }
+            "__thaw_error_frame" => {
+                let [name, message] = args else {
+                    return Err("error frame expects a name and message".into());
+                };
+                let name = self.compile_expr(name)?;
+                let message = self.compile_expr(message)?;
+                return self.builder.build_call(
+                    self.module.get_function("thaw_error_frame").unwrap(),
+                    &[name.into(), message.into()], "error_frame",
+                ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                    .ok_or("error frame returned no value".into());
+            }
             "__thaw_error_suppress" => {
                 let [error, suppressed, message] = args else {
                     return Err(format!("{name} expects three operands"));
