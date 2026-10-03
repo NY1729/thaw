@@ -1951,6 +1951,18 @@ fn register_native_callback(
             graph_mode,
             method_mode,
         );
+        // A typed closure decoded from a JS Function carries an original
+        // handle. Return that value itself, preserving strict identity and
+        // receiver semantics across native static slots and saved aliases.
+        unsafe extern "C" {
+            fn thaw_json_callback_origin_handle(closure: *const u8) -> u64;
+        }
+        let origin = unsafe { thaw_json_callback_origin_handle(closure as *const u8) };
+        if origin != 0 {
+            if let Ok(original) = value_for_handle(&ctx, origin) {
+                return retain_value(&ctx, original);
+            }
+        }
         // The generated adapter fixes the full native parameter/return and
         // receiver-layout ABI. Arity and JsValue mask alone cannot
         // distinguish two typed views of one closure pointer.
@@ -2414,6 +2426,12 @@ pub extern "C" fn thaw_js_get_property_json_key_result(
 pub extern "C" fn thaw_js_host_query_result(handle: u64, operation: u8) -> ThawResult {
     let result: Result<String, String> = with_active_or_context(|ctx| {
         let value = value_for_handle(&ctx, handle)?;
+        // Callback-origin validation must not consult the user-replaceable
+        // global Host query function. JS_IsFunction also accepts callable
+        // Proxy values and does not invoke their user properties.
+        if operation == 14 {
+            return Ok(if value.is_function() { "1" } else { "0" }.to_string());
+        }
         let query: Function = ctx.globals().get("__thaw_json_host_query")
             .map_err(|error| error.to_string())?;
         query.call((value, operation)).map_err(|error| match error {

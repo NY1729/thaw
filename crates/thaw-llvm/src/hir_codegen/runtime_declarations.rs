@@ -269,6 +269,16 @@ impl<'ctx> HirCompiler<'ctx> {
             Some(Linkage::External),
         );
         self.module.add_function(
+            "thaw_json_callback_origin_acquire",
+            i64_type.fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_register_callback_origin",
+            i8_type.fn_type(&[i8_ptr.into(), i64_type.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
             "thaw_json_borrowed_handle_id",
             i64_type.fn_type(&[i8_ptr.into()], false),
             Some(Linkage::External),
