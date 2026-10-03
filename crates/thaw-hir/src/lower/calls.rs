@@ -185,6 +185,10 @@ impl<'a> FnLowerer<'a> {
         )
     }
 
+    fn class_receiver_has_own_field(ty: &HirType, property: &str) -> bool {
+        matches!(ty, HirType::Object(fields) if fields.iter().any(|(name, _)| name == property))
+    }
+
     fn native_class_expression_type(&self, expression: &Expr) -> Option<HirType> {
         match expression {
             Expr::Ident(identifier) => self
@@ -539,6 +543,9 @@ impl<'a> FnLowerer<'a> {
         let Some(class_name) = class_name_from_type(&receiver_type) else {
             return Ok(None);
         };
+        if Self::class_receiver_has_own_field(&receiver_type, method_name) {
+            return Ok(None);
+        }
         let symbol = class_method_symbol(class_name, method_name);
         let Some(signature) = self.signatures.get(&symbol).cloned() else {
             return Ok(None);
@@ -624,6 +631,9 @@ impl<'a> FnLowerer<'a> {
         }
         let receiver = self.native_class_expression_type(&member.obj)?;
         let class = class_name_from_type(&receiver)?;
+        if Self::class_receiver_has_own_field(&receiver, &method) {
+            return None;
+        }
         let symbol = class_method_symbol(class, &method);
         self.signatures
             .get(&symbol)
