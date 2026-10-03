@@ -2275,3 +2275,26 @@ fn generator_resume_assignment_invalidates_completed_nullish_narrowing() {
         }
     "#);
 }
+
+#[test]
+fn function_typed_values_keep_runtime_undefined_checks() {
+    // A later class-method read can carry undefined in the existing raw
+    // Function pointer ABI. These source functions are already lowerable;
+    // the test checks their HIR retains runtime checks before that producer
+    // is enabled.
+    let program = lower(r#"
+        type Callback = (value: number) => number;
+        function kind(callback: Callback): string { return typeof callback; }
+        function maybeKind(callback: Callback | undefined): string { return typeof callback; }
+        function branch(callback: Callback): number { if (callback) return 1; return 0; }
+        function strict(callback: Callback): boolean { return callback === undefined; }
+        function reverse(callback: Callback): boolean { return undefined === callback; }
+        function loose(callback: Callback): boolean { return callback == null; }
+        function main(): void {}
+    "#);
+    for name in ["kind", "maybeKind", "branch", "strict", "reverse", "loose"] {
+        let function = program.functions.iter().find(|function| function.name == name).unwrap();
+        let lowered = format!("{:?}", function.body);
+        assert!(lowered.contains("OptionalNone"), "{name}: {lowered}");
+    }
+}

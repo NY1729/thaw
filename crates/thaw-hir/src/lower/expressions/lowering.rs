@@ -2574,14 +2574,27 @@ impl<'a> FnLowerer<'a> {
                             } else {
                                 HirExpr::OptionalIsNone(Box::new(bound), payload.clone())
                             };
+                            let present_typeof = if matches!(payload, HirType::Function(_, _) | HirType::CallableFunction(..)) {
+                                let present = if nullable {
+                                    HirExpr::NullableValue(Box::new(HirExpr::Var(parameter.clone())), payload.clone())
+                                } else {
+                                    HirExpr::OptionalValue(Box::new(HirExpr::Var(parameter.clone())), payload.clone())
+                                };
+                                HirExpr::Conditional(
+                                    Box::new(Self::function_pointer_is_undefined(present, payload)),
+                                    Box::new(HirExpr::Lit(HirLit::Str("undefined".into()))),
+                                    Box::new(HirExpr::Lit(HirLit::Str("function".into()))),
+                                    HirType::Str,
+                                )
+                            } else {
+                                HirExpr::Lit(HirLit::Str(type_name.into()))
+                            };
                             let result = HirExpr::Block(vec![HirStmt::If(
                                 is_none,
                                 vec![HirStmt::Return(Some(HirExpr::Lit(HirLit::Str(
                                     absent.into(),
                                 ))))],
-                                vec![HirStmt::Return(Some(HirExpr::Lit(HirLit::Str(
-                                    type_name.into(),
-                                ))))],
+                                vec![HirStmt::Return(Some(present_typeof))],
                             )]);
                             self.wrap_call_argument_bindings(
                                 result,
@@ -2593,10 +2606,13 @@ impl<'a> FnLowerer<'a> {
                                 "`typeof` requires one statically known runtime category, got {operand_type:?}"
                             ));
                         };
-                        if matches!(&value, HirExpr::Var(_) | HirExpr::FunctionRef(..))
-                            && matches!(operand_type, HirType::Function(_, _))
-                        {
-                            HirExpr::Lit(HirLit::Str(type_name.into()))
+                        if matches!(&operand_type, HirType::Function(_, _) | HirType::CallableFunction(..)) {
+                            HirExpr::Conditional(
+                                Box::new(Self::function_pointer_is_undefined(value, &operand_type)),
+                                Box::new(HirExpr::Lit(HirLit::Str("undefined".into()))),
+                                Box::new(HirExpr::Lit(HirLit::Str("function".into()))),
+                                HirType::Str,
+                            )
                         } else {
                         let parameter = format!("__thaw_typeof_{}", self.next_binding);
                         self.next_binding += 1;
