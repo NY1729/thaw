@@ -10928,3 +10928,24 @@ fn symbol_absent_description_is_distinct_from_empty_and_evaluates_once() {
     assert_eq!(compile_and_run(source, "symbol_absent_description"),
         "true true true\ntrue 1\ntrue 2\nSymbol() null\n9 true\n");
 }
+
+#[test]
+fn native_accessor_presence_hides_backing_closures_without_invoking_getter() {
+    let source = r#"
+        function main(): void {
+            let reads = 0;
+            const owner = {
+                get value(): number { reads++; return 1; },
+                set value(next: number) {},
+            };
+            console.log(Object.hasOwn(owner, 'value'), owner.hasOwnProperty('value'),
+                Reflect.has(owner, 'value'));
+            console.log(Object.hasOwn(owner, '__thaw_getter_value'),
+                owner.hasOwnProperty('__thaw_setter_value'),
+                Reflect.has(owner, '__thaw_getter_value'));
+            console.log(reads);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "native_accessor_presence"),
+        "true true true\nfalse false false\n0\n");
+}
