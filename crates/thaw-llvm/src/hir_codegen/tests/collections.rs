@@ -1,4 +1,60 @@
 #[test]
+fn join_uses_default_comma_for_explicit_undefined_separator() {
+    let source = r#"
+        let order = "";
+        function receiver(): number[] { order += "R"; return [1, 2]; }
+        function separator(): undefined { order += "S"; return undefined; }
+        function spread(): [undefined] { order += "T"; return [undefined]; }
+        function optional(flag: boolean): string | undefined {
+            return flag ? "|" : undefined;
+        }
+        function nullish(kind: number): string | null | undefined {
+            if (kind === 0) return undefined;
+            if (kind === 1) return null;
+            return "";
+        }
+        function union(kind: number): number | string | undefined {
+            if (kind === 0) return undefined;
+            if (kind === 1) return 0;
+            return "-";
+        }
+        function choose(flag: boolean): number[] | string[] {
+            return flag ? [1, 2] : ["a", "b"];
+        }
+        function main(): void {
+            const numbers: number[] = [1, 2];
+            const words: string[] = ["a", "b"];
+            const flags: boolean[] = [true, false];
+            const objects: { x: number }[] = [{ x: 1 }, { x: 2 }];
+            const tagged: (number | undefined)[] = [1, undefined, 2];
+            const tuple: [number, string] = [1, "x"];
+            const jsonElements: any[] = [1, 2];
+            const dynamic: any = JSON.parse("[1,2]");
+            console.log(numbers.join(undefined), numbers.join(), numbers.join(null), numbers.join(""));
+            console.log(words.join(undefined), flags.join(undefined), objects.join(undefined));
+            console.log(tagged.join(undefined), tuple.join(undefined), jsonElements.join(undefined));
+            console.log(dynamic.join(undefined), choose(true).join(undefined), choose(false).join(undefined));
+            console.log(numbers.join(optional(false)), numbers.join(optional(true)));
+            console.log(numbers.join(nullish(0)), numbers.join(nullish(1)), numbers.join(nullish(2)));
+            console.log(numbers.join(union(0)), numbers.join(union(1)), numbers.join(union(2)));
+            const jsonMissing: any = undefined;
+            const jsonNull: any = JSON.parse("null");
+            console.log(numbers.join(jsonMissing), numbers.join(jsonNull));
+            loadScript("globalThis.joinMissing = undefined; globalThis.joinNull = null;");
+            const liveMissing: JsValue = getDynamicValue("joinMissing");
+            const liveNull: JsValue = getDynamicValue("joinNull");
+            console.log(numbers.join(liveMissing), numbers.join(liveNull));
+            console.log(receiver().join(separator()), order);
+            console.log(numbers.join(...spread()), order);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "join_explicit_undefined_separator"),
+        "1,2 1,2 1null2 12\na,b true,false [object Object],[object Object]\n1,,2 1,x 1,2\n1,2 1,2 a,b\n1,2 1|2\n1,2 1null2 12\n1,2 102 1-2\n1,2 1null2\n1,2 1null2\n1,2 RS\n1,2 RST\n"
+    );
+}
+
+#[test]
 fn compiles_native_array_join() {
     let source = r#"
         function separator(): string {
