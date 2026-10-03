@@ -487,6 +487,52 @@ fn performance_timeline_marks_measures_and_observes_entries() {
 }
 
 #[test]
+fn performance_measure_end_duration_and_option_dictionary_order() {
+    assert_eq!(load(r#"
+      function measureEndDuration() {
+        performance.clearMarks(); performance.clearMeasures();
+        performance.mark('from', { startTime: 10 });
+        performance.mark('until', { startTime: 100 });
+        const numeric = performance.measure('numeric', { end: 100, duration: 20 });
+        const named = performance.measure('named', { end: 'until', duration: 20 });
+        const fromDuration = performance.measure('fromDuration', { start: 5, duration: 20 });
+        const fromEnd = performance.measure('fromEnd', { start: 5, end: 100 });
+        const legacy = performance.measure('legacy', 'from', 'until');
+        const empty = performance.measure('empty', {});
+        const emptyThird = performance.measure('emptyThird', {}, 'until');
+        let missingThird;
+        try { performance.measure('missingThird', {}, 'unknown'); missingThird = false; }
+        catch (error) { missingThird = error instanceof SyntaxError; }
+        const events = [];
+        const dictionary = {
+          get detail() { events.push('detail'); return 'd'; },
+          get duration() { events.push('duration'); return { valueOf() { events.push('coerce'); return 20; } }; },
+          get end() { events.push('end'); return 100; },
+          get start() { events.push('start'); return undefined; }
+        };
+        const accessed = performance.measure('accessed', dictionary);
+        const errors = [];
+        for (const options of [{ duration: 20 }, { detail: 'x' },
+                               { start: 5, end: 100, duration: 20 }]) {
+          try { performance.measure('bad', options); errors.push(false); }
+          catch (error) { errors.push(error instanceof TypeError); }
+        }
+        try { performance.measure('badThird', { end: 100, duration: 20 }, 'until'); errors.push(false); }
+        catch (error) { errors.push(error instanceof TypeError); }
+        try { performance.measure('allThree', { start: 5, end: 'missing', duration: 20 }); errors.push(false); }
+        catch (error) { errors.push(error instanceof TypeError); }
+        return [[numeric.startTime, numeric.duration], [named.startTime, named.duration],
+                [fromDuration.startTime, fromDuration.duration], [fromEnd.startTime, fromEnd.duration],
+                [legacy.startTime, legacy.duration], empty.startTime === 0 && empty.duration >= 0,
+                [emptyThird.startTime, emptyThird.duration], missingThird,
+                [accessed.startTime, accessed.duration, accessed.detail], events, errors];
+      }
+    "#), 1);
+    assert_eq!(call("measureEndDuration", "[]"),
+        r#"[[80,20],[80,20],[5,20],[5,95],[10,90],true,[0,100],true,[80,20,"d"],["detail","duration","coerce","end","start"],[true,true,true,true,true]]"#);
+}
+
+#[test]
 fn structured_clone_copies_cycles_and_builtins() {
     assert_eq!(
             load(
