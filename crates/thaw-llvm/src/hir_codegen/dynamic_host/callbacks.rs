@@ -595,7 +595,7 @@ impl<'ctx> HirCompiler<'ctx> {
         rest_start: Option<usize>,
     ) -> Result<(PointerValue<'ctx>, PointerValue<'ctx>), String> {
         let (adapter, closure, _) =
-            self.compile_value_callback_from_closure(closure, params, ret, false, rest_start, false, true)?;
+            self.compile_value_callback_from_closure(closure, params, ret, false, rest_start, false, true, false)?;
         Ok((adapter, closure))
     }
 
@@ -703,6 +703,7 @@ impl<'ctx> HirCompiler<'ctx> {
         rest_start: Option<usize>,
         graph_mode: bool,
         graph_wire: bool,
+        method_mode: bool,
     ) -> Result<
         (
             PointerValue<'ctx>,
@@ -797,7 +798,7 @@ impl<'ctx> HirCompiler<'ctx> {
         // Graph callbacks carry the JavaScript caller's holder at index zero.
         // Keeping it in the same graph as the arguments preserves aliases
         // between a JSON.stringify replacer's `this` and the current value.
-        let holder_json = if graph_mode {
+        let holder_json = if graph_mode && !method_mode {
             Some(self.builder.build_call(
                 self.module.get_function("thaw_json_index").unwrap(),
                 &[args_json.into(), self.context.f64_type().const_zero().into(), null_key.into()],
@@ -813,8 +814,18 @@ impl<'ctx> HirCompiler<'ctx> {
         // for later arguments do not dominate an earlier failure edge.
         let failed_block = self.context.append_basic_block(adapter, "callback_failed");
         let conversion_failed = self.context.append_basic_block(adapter, "callback_conversion_failed");
-        let mut argument_slots = Vec::with_capacity(params.len() + usize::from(graph_mode));
-        for _ in 0..params.len() + usize::from(graph_mode) {
+        let result_marshalling_failed = self.context.append_basic_block(adapter, "callback_result_marshalling_failed");
+        let result_array_slot = self.builder.build_alloca(ptr_type, "callback_result_array_slot")
+            .map_err(|error| error.to_string())?;
+        self.builder.build_store(result_array_slot, ptr_type.const_null())
+            .map_err(|error| error.to_string())?;
+        let projected_method_slot = self.builder.build_alloca(self.context.i64_type(), "callback_projected_method_slot")
+            .map_err(|error| error.to_string())?;
+        self.builder.build_store(projected_method_slot, self.context.i64_type().const_zero())
+            .map_err(|error| error.to_string())?;
+        let holder_offset = usize::from(graph_mode && !method_mode);
+        let mut argument_slots = Vec::with_capacity(params.len() + holder_offset);
+        for _ in 0..params.len() + holder_offset {
             let slot = self.builder.build_alloca(ptr_type, "callback_argument_json_slot")
                 .map_err(|error| error.to_string())?;
             self.builder.build_store(slot, ptr_type.const_null())
@@ -833,7 +844,7 @@ impl<'ctx> HirCompiler<'ctx> {
             handle_slots.push(slot);
         }
         let mut callback_args = vec![context.into()];
-        let mut argument_json = Vec::with_capacity(params.len() + usize::from(graph_mode));
+        let mut argument_json = Vec::with_capacity(params.len() + holder_offset);
         if let Some(holder) = holder_json {
             argument_json.push(holder);
             self.builder.build_store(argument_slots[0], holder)
@@ -844,7 +855,7 @@ impl<'ctx> HirCompiler<'ctx> {
             &[], "begin_callback_conversion_scope",
         ).map_err(|error| error.to_string())?;
         for (index, param) in params.iter().enumerate() {
-            let graph_index = index + usize::from(graph_mode);
+            let graph_index = index + holder_offset;
             let argument = if rest_start == Some(index) {
                 self.builder.build_call(
                     self.module.get_function("thaw_json_array_slice").unwrap(),
@@ -873,7 +884,25 @@ impl<'ctx> HirCompiler<'ctx> {
             self.builder.build_store(argument_slots[graph_index], argument)
                 .map_err(|error| error.to_string())?;
             self.catch_stack.push(conversion_failed);
-            let converted = self.compile_json_value_to_native(argument, param);
+            let converted = if method_mode && index == 0 {
+                let HirType::Object(fields) = param else {
+                    return Err("native method receiver requires an object type".into());
+                };
+                let (pointer, valid) = self.query_native_object_receiver(
+                    argument.into_pointer_value(), fields,
+                )?;
+                let accepted = self.context.append_basic_block(adapter, "native_method_receiver_valid");
+                let rejected = self.context.append_basic_block(adapter, "native_method_receiver_invalid");
+                self.builder.build_conditional_branch(valid, accepted, rejected)
+                    .map_err(|error| error.to_string())?;
+                self.builder.position_at_end(rejected);
+                self.compile_throw_type_error("Incompatible function receiver")?;
+                self.builder.position_at_end(accepted);
+                Ok(self.builder.build_int_to_ptr(pointer, ptr_type, "native_method_original_receiver")
+                    .map_err(|error| error.to_string())?.into())
+            } else {
+                self.compile_json_value_to_native(argument, param)
+            };
             self.catch_stack.pop();
             let converted = converted?;
             if let Some(slot) = handle_slots[index] {
@@ -886,7 +915,7 @@ impl<'ctx> HirCompiler<'ctx> {
             self.module.get_function("thaw_json_typed_decode_scope_end").unwrap(),
             &[self.context.i8_type().const_zero().into()], "finish_callback_conversion_scope",
         ).map_err(|error| error.to_string())?;
-        let code_slot = if graph_mode { unsafe {
+        let code_slot = if graph_mode && !method_mode { unsafe {
             self.builder.build_in_bounds_gep(
                 self.context.i8_type(), context,
                 &[self.context.i64_type().const_int(CLOSURE_THIS_ENTRY_OFFSET, false)],
@@ -898,7 +927,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .build_load(ptr_type, code_slot, "napi_value_callback_code")
             .map_err(|error| error.to_string())?
             .into_pointer_value();
-        let closure_type = if graph_mode {
+        let closure_type = if graph_mode && !method_mode {
             let holder = holder_json.expect("graph callback has a holder");
             let word = self.builder.build_ptr_to_int(holder, self.context.i64_type(), "callback_holder_word")
                 .map_err(|error| error.to_string())?;
@@ -936,7 +965,7 @@ impl<'ctx> HirCompiler<'ctx> {
         self.compile_discard_typed_decode_scope()?;
         // The scope released all acquired children and independent handles.
         // The common failure block still owns the holder and root graph.
-        for slot in argument_slots.iter().skip(usize::from(graph_mode)) {
+        for slot in argument_slots.iter().skip(holder_offset) {
             self.builder.build_store(*slot, ptr_type.const_null())
                 .map_err(|error| error.to_string())?;
         }
@@ -1007,7 +1036,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 if *param == HirType::JsValue {
                     self.builder.build_call(
                         self.module.get_function("thaw_js_release_handle").unwrap(),
-                        &[callback_args[index + 1 + usize::from(graph_mode)]],
+                        &[callback_args[index + 1 + holder_offset]],
                         "release_deferred_callback_argument",
                     ).map_err(|error| error.to_string())?;
                 }
@@ -1045,6 +1074,12 @@ impl<'ctx> HirCompiler<'ctx> {
         // `undefined` is a real callback result; only `void` means there is
         // no value for the JavaScript wrapper to reconstruct.
         let mut result_array = None;
+        let mut projected_method_handle = None;
+        // Result conversion can throw after the argument graph, the result
+        // array, or a projected callback registration has been acquired.
+        // Its own target releases those additions before the common argument
+        // failure cleanup; the outer callback's catch stack is not used.
+        self.catch_stack.push(result_marshalling_failed);
         let result_json = if matches!(ret, HirType::Undefined) {
             self.compile_napi_undefined_json()?
         } else if matches!(ret, HirType::Void) {
@@ -1091,6 +1126,8 @@ impl<'ctx> HirCompiler<'ctx> {
                     .basic()
                     .unwrap();
                 result_array = Some(result_json);
+                self.builder.build_store(result_array_slot, result_json)
+                    .map_err(|error| error.to_string())?;
                 // `preserve_undefined: true` -- this is a standalone
                 // return value being wrapped, not an object field that
                 // can legitimately omit itself (see `wrap_native_value_
@@ -1106,15 +1143,37 @@ impl<'ctx> HirCompiler<'ctx> {
                 // indistinguishable from an explicit `null` return.
                 if *ret == HirType::JsValue {
                     let result = self.compile_dynamic_value_placeholder_unchecked(result)?;
-                    self.builder
-                        .build_call(
-                            self.module
-                                .get_function("thaw_json_array_push_json")
-                                .unwrap(),
-                            &[result_json.into(), result.into()],
-                            "native_callback_dynamic_result",
-                        )
+                    self.compile_json_array_push_owned(result_json, result)?;
+                } else if graph_wire && matches!(ret,
+                    HirType::Function(params, _) | HirType::CallableFunction(params, _, _, _)
+                        if matches!(params.first(), Some(HirType::Object(fields))
+                            if fields.last().is_some_and(|(name, ty)|
+                                name == "__thaw_object_method_receiver" && *ty == HirType::Bool))) {
+                    // A function returned by a projected native field is a
+                    // method. Preserve its actual call-time `this` through
+                    // the graph callback ABI; ordinary snapshot encoders
+                    // continue to use their original callback convention.
+                    let (params, resolved, has_rest) = match ret {
+                        HirType::Function(params, resolved) =>
+                            (params.clone(), resolved.as_ref(), false),
+                        HirType::CallableFunction(params, _, rest, resolved) => {
+                            let mut visible = params.clone();
+                            if let Some(rest) = rest {
+                                visible.push(HirType::Array(rest.clone()));
+                            }
+                            (visible, resolved.as_ref(), rest.is_some())
+                        }
+                        _ => unreachable!(),
+                    };
+                    let method = self.compile_register_native_callback_from_closure_with_mode(
+                        result.into_pointer_value(), &params, resolved, has_rest, true, true,
+                    )?;
+                    let method_handle = method.into_int_value();
+                    projected_method_handle = Some(method_handle);
+                    self.builder.build_store(projected_method_slot, method_handle)
                         .map_err(|error| error.to_string())?;
+                    let method = self.compile_dynamic_value_placeholder_unchecked(method_handle.into())?;
+                    self.compile_json_array_push_owned(result_json, method)?;
                 } else {
                     self.compile_json_array_push_native_with_undefined(
                         result_json,
@@ -1139,6 +1198,22 @@ impl<'ctx> HirCompiler<'ctx> {
                     .unwrap()
             }
         };
+        self.catch_stack.pop();
+        let marshalled = self.builder.get_insert_block().unwrap();
+        self.builder.position_at_end(result_marshalling_failed);
+        let projected = self.builder.build_load(self.context.i64_type(), projected_method_slot,
+            "failed_projected_method_handle").map_err(|error| error.to_string())?;
+        self.builder.build_call(self.module.get_function("thaw_js_release_handle").unwrap(),
+            &[projected.into()], "release_failed_projected_method")
+            .map_err(|error| error.to_string())?;
+        let array = self.builder.build_load(ptr_type, result_array_slot,
+            "failed_callback_result_array").map_err(|error| error.to_string())?;
+        self.builder.build_call(self.module.get_function("thaw_json_destroy").unwrap(),
+            &[array.into()], "destroy_failed_callback_result_array")
+            .map_err(|error| error.to_string())?;
+        self.builder.build_unconditional_branch(failed_block)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(marshalled);
         // Cleans up every decoded argument (the `Json` values from
         // `thaw_json_index`/`thaw_json_array_slice`, and any retained
         // `JsValue` parameter handle) only *after* `result_json` has
@@ -1164,7 +1239,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     self.builder
                         .build_call(
                             self.module.get_function("thaw_js_release_handle").unwrap(),
-                            &[callback_args[index + 1 + usize::from(graph_mode)]],
+                            &[callback_args[index + 1 + holder_offset]],
                             "release_native_callback_argument",
                         )
                         .map_err(|error| error.to_string())?;
@@ -1191,6 +1266,14 @@ impl<'ctx> HirCompiler<'ctx> {
             .try_as_basic_value()
             .basic()
             .unwrap();
+        if let Some(method) = projected_method_handle {
+            // The graph encoder retained its own output lease before this
+            // registration reference is dropped. The JS method wrapper
+            // remains alive through the decoded object's property value.
+            self.builder.build_call(self.module.get_function("thaw_js_release_handle").unwrap(),
+                &[method.into()], "release_projected_method_registration")
+                .map_err(|error| error.to_string())?;
+        }
         self.builder
             .build_call(
                 self.module.get_function("thaw_json_destroy").unwrap(),
@@ -1484,6 +1567,26 @@ impl<'ctx> HirCompiler<'ctx> {
     /// JS call into exactly the JSON-string-in/JSON-string-out shape the
     /// adapter expects, then retains and returns it the same way any
     /// other live value gets a permanent handle.
+    fn compile_register_native_method_callback_graph(
+        &mut self,
+        args: &[HirExpr],
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let [closure_expr] = args else {
+            return Err("native object method callback expects one closure".into());
+        };
+        let (params, ret) = match self.expr_hir_type(closure_expr) {
+            Some(HirType::Function(params, ret)) => (params, *ret),
+            _ => return Err("native object method callback requires a function".into()),
+        };
+        if !matches!(params.first(), Some(HirType::Object(_))) {
+            return Err("native object method callback requires an object receiver".into());
+        }
+        let closure = self.compile_expr(closure_expr)?.into_pointer_value();
+        self.compile_register_native_callback_from_closure_with_mode(
+            closure, &params, &ret, false, true, true,
+        )
+    }
+
     fn compile_register_native_callback(
         &mut self,
         args: &[HirExpr],
@@ -1669,6 +1772,20 @@ impl<'ctx> HirCompiler<'ctx> {
         has_rest: bool,
         graph_mode: bool,
     ) -> Result<BasicValueEnum<'ctx>, String> {
+        self.compile_register_native_callback_from_closure_with_mode(
+            closure, params, ret, has_rest, graph_mode, false,
+        )
+    }
+
+    fn compile_register_native_callback_from_closure_with_mode(
+        &mut self,
+        closure: PointerValue<'ctx>,
+        params: &[HirType],
+        ret: &HirType,
+        has_rest: bool,
+        graph_mode: bool,
+        method_mode: bool,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
         self.uses_quickjs = true;
         self.uses_quickjs_handles = true;
         let absent = self.builder.build_is_null(closure, "native_callback_is_undefined")
@@ -1692,7 +1809,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .map(|(index, _)| 1u64 << index)
             .sum();
         let (adapter, closure, finish) =
-            self.compile_value_callback_from_closure(closure, params, ret, true, None, graph_mode, graph_mode)?;
+            self.compile_value_callback_from_closure(closure, params, ret, true, None, graph_mode, graph_mode, method_mode)?;
         let jsvalue_param_mask = self
             .context
             .i64_type()
@@ -1730,7 +1847,9 @@ impl<'ctx> HirCompiler<'ctx> {
             .builder
             .build_call(
                 self.module
-                    .get_function(if graph_mode { "thaw_js_register_native_callback_graph" } else { "thaw_js_register_native_callback" })
+                    .get_function(if method_mode { "thaw_js_register_native_method_callback_graph" }
+                        else if graph_mode { "thaw_js_register_native_callback_graph" }
+                        else { "thaw_js_register_native_callback" })
                     .unwrap(),
                 &[
                     adapter.into(),

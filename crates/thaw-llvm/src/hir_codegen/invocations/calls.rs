@@ -244,6 +244,37 @@ impl<'ctx> HirCompiler<'ctx> {
                 }
                 return result;
             }
+            "__thaw_object_property_flags" => {
+                let [object, key] = args else {
+                    return Err("native descriptor query expects object and key".into());
+                };
+                let object = self.compile_expr(object)?.into_pointer_value();
+                let key = self.compile_expr(key)?.into_pointer_value();
+                let flags = self.builder.build_call(
+                    self.module.get_function("thaw_object_property_flags").unwrap(),
+                    &[object.into(), key.into()], "native_property_flags",
+                ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                    .ok_or("native descriptor query returned no value")?.into_int_value();
+                return self.builder.build_unsigned_int_to_float(
+                    flags, self.context.f64_type(), "native_property_flags_number",
+                ).map(Into::into).map_err(|error| error.to_string());
+            }
+            "__thaw_object_set_property_flags" => {
+                let [object, key, flags] = args else {
+                    return Err("native descriptor update expects object, key, flags".into());
+                };
+                let object = self.compile_expr(object)?.into_pointer_value();
+                let key = self.compile_expr(key)?.into_pointer_value();
+                let flags = self.compile_expr(flags)?.into_float_value();
+                let flags = self.builder.build_float_to_unsigned_int(
+                    flags, self.context.i8_type(), "native_property_flags_byte",
+                ).map_err(|error| error.to_string())?;
+                return self.builder.build_call(
+                    self.module.get_function("thaw_object_set_property_flags").unwrap(),
+                    &[object.into(), key.into(), flags.into()], "set_native_property_flags",
+                ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                    .ok_or("native descriptor update returned no value".into());
+            }
             "__thaw_array_delete_strict" | "__thaw_array_delete_reflect" => {
                 let [array, key] = args else {
                     return Err("array delete expects a receiver and key".into());

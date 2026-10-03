@@ -489,6 +489,14 @@ impl<'a> FnLowerer<'a> {
                         }
                         return Ok(HirType::Bool);
                     }
+                    "__thaw_object_property_flags" => {
+                        if args.len() != 2 { return Err("native descriptor query expects object and key".into()); }
+                        return Ok(HirType::F64);
+                    }
+                    "__thaw_object_set_property_flags" => {
+                        if args.len() != 3 { return Err("native descriptor update expects object, key, flags".into()); }
+                        return Ok(HirType::Bool);
+                    }
                     "__thaw_date_assert_native_identity" => {
                         let [value] = args.as_slice() else { return Err("Date identity assertion expects one operand".into()); };
                         self.expect_type(&date_object_type(), value, "Date identity operand")?;
@@ -2334,7 +2342,16 @@ impl<'a> FnLowerer<'a> {
                     "retainDynamicJson" => return Ok(HirType::JsValue),
                     "callDynamicValueMixed" => return Ok(HirType::Json),
                     "callDynamicValueMixedNativeJson" => return Ok(HirType::Json),
-                    "callDynamicValueMixedHandle" => return Ok(HirType::JsValue),
+                    "__thaw_lookup_native_object" =>
+                        return Ok(HirType::Optional(Box::new(HirType::JsValue))),
+                    "__thaw_lookup_native_projector" =>
+                        return Ok(HirType::Optional(Box::new(HirType::Function(
+                            Vec::new(), Box::new(HirType::JsValue))))),
+                    "__thaw_register_native_object_projector" => return Ok(HirType::Bool),
+                    "__thaw_release_native_projection_callbacks" => return Ok(HirType::Void),
+                    "__thaw_require_native_owner" => return Ok(HirType::Void),
+                    "callDynamicValueMixedHandle" | "__thaw_build_native_object_wrapper"
+                    | "__thaw_intern_native_object" => return Ok(HirType::JsValue),
                     "constructDynamicValue" => return Ok(HirType::JsValue),
                     "loadNativeAddon" => return Ok(HirType::Bool),
                     "loadNativeAddonEmbedded" => return Ok(HirType::Bool),
@@ -2350,7 +2367,8 @@ impl<'a> FnLowerer<'a> {
                     // `coerce_to_declared`'s own doc comment for why this
                     // is built here instead of a bare pass-through the
                     // way `JsValue`/`Undefined` are.
-                    "registerNativeCallback" | "registerNativeCallbackGraph" => return Ok(HirType::JsValue),
+                    "registerNativeCallback" | "registerNativeCallbackGraph"
+                    | "__thaw_register_native_method_callback_graph" => return Ok(HirType::JsValue),
                     _ => {}
                 }
                 if let Some(HirType::Function(params, ret)) = self.scope.get(name) {

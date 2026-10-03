@@ -825,6 +825,19 @@ impl<'ctx> HirCompiler<'ctx> {
         cleanup: &[BasicValueEnum<'ctx>],
         graph_strings: &[BasicValueEnum<'ctx>],
     ) -> Result<BasicValueEnum<'ctx>, String> {
+        self.compile_check_json_stringify_error_with_inputs_and_handles(
+            result, cleanup, graph_strings, &[], &[],
+        )
+    }
+
+    fn compile_check_json_stringify_error_with_inputs_and_handles(
+        &mut self,
+        result: BasicValueEnum<'ctx>,
+        cleanup: &[BasicValueEnum<'ctx>],
+        graph_strings: &[BasicValueEnum<'ctx>],
+        handles: &[PointerValue<'ctx>],
+        direct_handles: &[IntValue<'ctx>],
+    ) -> Result<BasicValueEnum<'ctx>, String> {
         let error = self.builder.build_call(
             self.module.get_function("thaw_json_take_stringify_error").unwrap(),
             &[], "json_stringify_error",
@@ -859,6 +872,16 @@ impl<'ctx> HirCompiler<'ctx> {
                 &[(*string).into()], "destroy_cyclic_json_input_string",
             ).map_err(|error| error.to_string())?;
         }
+        for handle_array in handles {
+            self.builder.build_call(self.module.get_function("thaw_js_release_native_handle_array").unwrap(),
+                &[(*handle_array).into()], "release_failed_projection_callbacks")
+                .map_err(|error| error.to_string())?;
+        }
+        for handle in direct_handles {
+            self.builder.build_call(self.module.get_function("thaw_js_release_handle").unwrap(),
+                &[(*handle).into()], "release_failed_projection_builder")
+                .map_err(|error| error.to_string())?;
+        }
         self.compile_throw_builtin_error("TypeError", "Converting circular structure to JSON")?;
         self.builder.position_at_end(valid);
         let host_error = self.builder.build_call(
@@ -887,6 +910,16 @@ impl<'ctx> HirCompiler<'ctx> {
                 .map_err(|error| error.to_string())?;
             self.builder.build_call(self.module.get_function("thaw_cstring_destroy").unwrap(),
                 &[(*string).into()], "destroy_failed_host_stringify_string")
+                .map_err(|error| error.to_string())?;
+        }
+        for handle_array in handles {
+            self.builder.build_call(self.module.get_function("thaw_js_release_native_handle_array").unwrap(),
+                &[(*handle_array).into()], "release_failed_projection_callbacks")
+                .map_err(|error| error.to_string())?;
+        }
+        for handle in direct_handles {
+            self.builder.build_call(self.module.get_function("thaw_js_release_handle").unwrap(),
+                &[(*handle).into()], "release_failed_projection_builder")
                 .map_err(|error| error.to_string())?;
         }
         self.builder.build_store(self.pending_exception().as_pointer_value(), host_error)

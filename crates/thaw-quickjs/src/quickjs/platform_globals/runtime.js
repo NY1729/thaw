@@ -102,6 +102,15 @@
   const thawGraphObjectValues = Object.values;
   const thawGraphObjectCreate = Object.create;
   const thawGraphDefineProperty = Object.defineProperty;
+  const thawGraphProxy = Proxy;
+  const thawGraphReflectGet = Reflect.get;
+  const thawGraphReflectSet = Reflect.set;
+  const thawGraphReflectDefineProperty = Reflect.defineProperty;
+  const thawGraphReflectDeleteProperty = Reflect.deleteProperty;
+  const thawGraphReflectPreventExtensions = Reflect.preventExtensions;
+  const thawGraphReflectGetOwnPropertyDescriptor = Reflect.getOwnPropertyDescriptor;
+  const thawGraphObjectIsSealed = Object.isSealed;
+  const thawGraphObjectIsFrozen = Object.isFrozen;
   const thawGraphOwnProperty = Object.prototype.hasOwnProperty;
   const thawGraphArrayIsArray = Array.isArray;
   const thawGraphArrayFrom = Array.from;
@@ -109,6 +118,7 @@
   const thawGraphArrayForEach = Array.prototype.forEach;
   const thawGraphArrayEvery = Array.prototype.every;
   const thawGraphArrayPush = Array.prototype.push;
+  const thawGraphArraySlice = Array.prototype.slice;
   const thawGraphMapSet = Map.prototype.set;
   const thawGraphMapGet = Map.prototype.get;
   const thawGraphSetAdd = Set.prototype.add;
@@ -702,17 +712,148 @@
   thawGraphDefineProperty(globalThis, '__thaw_json_graph_decode_owned', {
     value: thawGraphDecodeOwned, writable: false, configurable: false,
   });
-  globalThis.__thaw_object_with_native_getters = (keys, readable, ...getters) => {
-    const object = {};
-    for (let i = 0; i < keys.length; i++) {
-      Object.defineProperty(object, keys[i], {
-        get: readable[i] ? getters[i] : undefined,
-        enumerable: true,
-        configurable: true,
+  thawGraphDefineProperty(globalThis, '__thaw_object_with_native_getters', {
+    value: (keys, readable, writable, accessors, ...callbacks) => {
+      const target = {};
+      const positions = new thawGraphMapConstructor();
+      for (let i = 0; i < keys.length; i++) {
+        thawGraphApply(thawGraphMapSet, positions, [keys[i], i]);
+        if (accessors[i]) {
+          thawGraphDefineProperty(target, keys[i], {
+            get: readable[i] ? callbacks[i * 2] : undefined,
+            set: writable[i] ? callbacks[i * 2 + 1] : undefined,
+            enumerable: true, configurable: true,
+          });
+        } else {
+          thawGraphDefineProperty(target, keys[i], {
+            value: undefined, writable: true, enumerable: true, configurable: true,
+          });
+        }
+      }
+      const state = thawGraphApply(thawGraphArraySlice, callbacks, [keys.length * 2]);
+      const [extensible, sealed, frozen, setState, propertyFlags, setFlags] = state;
+      const stateReceiver = thawGraphObjectCreate(null);
+      let wrapper;
+      const read = index => thawGraphApply(callbacks[index * 2], wrapper, []);
+      const write = (index, value) => thawGraphApply(callbacks[index * 2 + 1], wrapper, [value]);
+      // State callbacks capture the native pointer and have no receiver.
+      // Supplying this wrapper as their JS `this` would make the graph
+      // callback encode the whole Proxy holder and recursively enter sync().
+      // The generated callback is non-strict: `null` would become globalThis,
+      // so use a private empty holder instead.
+      const flags = key => thawGraphNumber(thawGraphApply(propertyFlags, stateReceiver, [key]));
+      let syncing = false;
+      const sync = () => {
+        if (syncing) return;
+        syncing = true;
+        try {
+        // A direct native Object.freeze/seal/preventExtensions can run after
+        // this wrapper was created. Bring the Proxy target into the same
+        // state before reporting descriptors or extensibility; Proxy
+        // invariants require the target to carry non-configurable flags.
+        const nativeFrozen = thawGraphApply(frozen, stateReceiver, []);
+        const nativeSealed = nativeFrozen || thawGraphApply(sealed, stateReceiver, []);
+        for (let i = 0; i < keys.length; i++) {
+          const key = keys[i];
+          const current = thawGraphReflectGetOwnPropertyDescriptor(target, key);
+          const bits = flags(key);
+          const configurable = !!(bits & 4) && !nativeSealed;
+          const enumerable = !!(bits & 2);
+          if (accessors[i]) {
+            if (current.configurable && (!configurable || current.enumerable !== enumerable)) {
+              thawGraphReflectDefineProperty(target, key, { configurable, enumerable });
+            }
+          } else if (current.configurable || current.writable) {
+            const writableNow = !!(bits & 1) && !nativeFrozen;
+            const update = { configurable, enumerable, writable: writableNow };
+            if (!writableNow || !configurable) update.value = read(i);
+            thawGraphReflectDefineProperty(target, key, update);
+          }
+        }
+        if (!thawGraphApply(extensible, stateReceiver, [])) {
+          thawGraphReflectPreventExtensions(target);
+        }
+        } finally { syncing = false; }
+      };
+      wrapper = new thawGraphProxy(target, {
+        get(_target, key, receiver) {
+          sync();
+          const index = thawGraphApply(thawGraphMapGet, positions, [key]);
+          if (index === undefined) return thawGraphReflectGet(target, key, receiver);
+          if (accessors[index]) return thawGraphReflectGet(target, key, receiver);
+          const descriptor = thawGraphReflectGetOwnPropertyDescriptor(target, key);
+          return descriptor.configurable || descriptor.writable ? read(index) : descriptor.value;
+        },
+        set(_target, key, value, receiver) {
+          sync();
+          const index = thawGraphApply(thawGraphMapGet, positions, [key]);
+          if (index === undefined) return false;
+          if (accessors[index]) return thawGraphReflectSet(target, key, value, receiver);
+          if (!(flags(key) & 1)) return false;
+          write(index, value);
+          return true;
+        },
+        deleteProperty(_target, key) {
+          sync();
+          // Native fixed-layout fields cannot be removed from the owner.
+          // Leaving the Proxy default would delete only its shadow slot.
+          if (thawGraphApply(thawGraphMapGet, positions, [key]) !== undefined) return false;
+          return thawGraphReflectDeleteProperty(target, key);
+        },
+        ownKeys() { sync(); return thawGraphReflectOwnKeys(target); },
+        getOwnPropertyDescriptor(_target, key) {
+          sync();
+          const descriptor = thawGraphReflectGetOwnPropertyDescriptor(target, key);
+          const index = thawGraphApply(thawGraphMapGet, positions, [key]);
+          if (index === undefined || accessors[index] || !descriptor) return descriptor;
+          return { value: descriptor.configurable || descriptor.writable ? read(index) : descriptor.value,
+            writable: descriptor.writable, enumerable: descriptor.enumerable,
+            configurable: descriptor.configurable };
+        },
+        isExtensible() { sync(); return thawGraphApply(extensible, stateReceiver, []); },
+        preventExtensions() {
+          sync();
+          if (!thawGraphApply(setState, stateReceiver, [keys.length ? 1 : 3])) return false;
+          return thawGraphReflectPreventExtensions(target);
+        },
+        defineProperty(_target, key, descriptor) {
+          sync();
+          const index = thawGraphApply(thawGraphMapGet, positions, [key]);
+          if (index === undefined) return false;
+          const before = thawGraphReflectGetOwnPropertyDescriptor(target, key);
+          const updated = { ...descriptor };
+          if (!accessors[index]) {
+            if ('get' in descriptor || 'set' in descriptor) return false;
+            if ('value' in descriptor) {
+              if (!(flags(key) & 1)) return false;
+              // A value write can invoke an accessor installed on the native
+              // owner. Keep it separate from attribute transitions so a
+              // throwing user setter cannot partially change native flags.
+              if ('writable' in descriptor || 'enumerable' in descriptor
+                  || 'configurable' in descriptor) return false;
+              write(index, descriptor.value);
+              return true;
+            }
+          } else if ('get' in descriptor || 'set' in descriptor || 'value' in descriptor
+              || 'writable' in descriptor) {
+            // Replacing the native accessor itself needs a distinct owner
+            // metadata mutation, not merely a change to this JS target.
+            return false;
+          }
+          const requested = ((updated.writable ?? before.writable) ? 1 : 0)
+            | ((updated.enumerable ?? before.enumerable) ? 2 : 0)
+            | ((updated.configurable ?? before.configurable) ? 4 : 0);
+          if (!thawGraphApply(setFlags, stateReceiver, [key, requested])) return false;
+          if (!thawGraphReflectDefineProperty(target, key, updated)) return false;
+          if (thawGraphObjectIsFrozen(target)) thawGraphApply(setState, stateReceiver, [3]);
+          else if (thawGraphObjectIsSealed(target)) thawGraphApply(setState, stateReceiver, [2]);
+          return true;
+        },
       });
-    }
-    return object;
-  };
+      return wrapper;
+    },
+    writable: false, configurable: false,
+  });
   globalThis.__thaw_object_from_operations = (kinds, keys, values, ...callbacks) => {
     const object = {};
     let callback = 0;
@@ -755,17 +896,17 @@
     }
     return object;
   };
-  globalThis.__thaw_accessor_descriptor = (readable, writable, getter, setter) => ({
+  globalThis.__thaw_accessor_descriptor = (readable, writable, getter, setter, flags = 7) => ({
     get: readable ? getter : undefined,
     set: writable ? setter : undefined,
-    enumerable: true,
-    configurable: true,
+    enumerable: !!(flags & 2),
+    configurable: !!(flags & 4),
   });
-  globalThis.__thaw_data_descriptor = value => ({
+  globalThis.__thaw_data_descriptor = (value, flags = 7) => ({
     value,
-    writable: true,
-    enumerable: true,
-    configurable: true,
+    writable: !!(flags & 1),
+    enumerable: !!(flags & 2),
+    configurable: !!(flags & 4),
   });
   globalThis.__thaw_json_stringify_native_accessors = (replacer, space, value) =>
     JSON.stringify(value, replacer, space);

@@ -1181,6 +1181,21 @@ impl<'ctx> HirCompiler<'ctx> {
         &mut self,
         args: &[HirExpr],
     ) -> Result<BasicValueEnum<'ctx>, String> {
+        self.compile_call_dynamic_value_mixed_handle_impl(args, false)
+    }
+
+    fn compile_build_native_object_wrapper(
+        &mut self,
+        args: &[HirExpr],
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        self.compile_call_dynamic_value_mixed_handle_impl(args, true)
+    }
+
+    fn compile_call_dynamic_value_mixed_handle_impl(
+        &mut self,
+        args: &[HirExpr],
+        consume_handles: bool,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
         self.uses_quickjs = true;
         self.uses_quickjs_handles = true;
         let [callable, json_args, handles] = args else {
@@ -1189,7 +1204,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     .into(),
             );
         };
-        let callable = self.compile_expr(callable)?;
+        let callable = self.compile_expr(callable)?.into_int_value();
         let json_args = self.compile_expr(json_args)?;
         let handles = self.compile_expr(handles)?.into_pointer_value();
         let handles = self.compile_array_data(handles)?;
@@ -1204,12 +1219,20 @@ impl<'ctx> HirCompiler<'ctx> {
             .try_as_basic_value()
             .basic()
             .unwrap();
-        let text = self.compile_check_json_stringify_error_with_cleanup(text, &[json_args])?;
+        let text = if consume_handles {
+            self.compile_check_json_stringify_error_with_inputs_and_handles(
+                text, &[json_args], &[], &[handles], &[callable],
+            )?
+        } else {
+            self.compile_check_json_stringify_error_with_cleanup(text, &[json_args])?
+        };
         let result = self
             .builder
             .build_call(
                 self.module
-                    .get_function("thaw_js_call_handle_mixed_handle_graph_args_result")
+                    .get_function(if consume_handles {
+                        "thaw_js_call_handle_mixed_handle_graph_args_consuming_result"
+                    } else { "thaw_js_call_handle_mixed_handle_graph_args_result" })
                     .unwrap(),
                 &[callable.into(), text.into(), handles.into()],
                 "mixed_handle_result",

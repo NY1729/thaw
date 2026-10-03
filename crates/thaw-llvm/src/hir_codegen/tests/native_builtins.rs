@@ -10488,3 +10488,257 @@ fn console_native_object_getter_failure_keeps_exception_and_next_log() {
     "#;
     assert_eq!(compile_and_run(source, "console_native_getter_ownership"), "true 1\n{\"value\":4}\n");
 }
+
+#[test]
+fn projected_native_object_preserves_storage_and_method_identity() {
+    let source = r#"
+        function main(): void {
+            const object = {
+                value: 1,
+                increment(): number { this.value++; return this.value; },
+                later: 9,
+            };
+            const first: any = object;
+            const second: any = object;
+            console.log(first === second, first.increment === first.increment);
+            console.log(first.increment(), object.value);
+            const detached = first.increment;
+            console.log(detached.call(second), object.value);
+
+            const other = {
+                value: 10,
+                increment(): number { this.value++; return this.value; },
+                later: 8,
+            };
+            const otherView: any = other;
+            console.log(detached.call(otherView), other.value, object.value);
+
+            const inner = {
+                value: 3,
+                increment(): number { this.value++; return this.value; },
+            };
+            const outer = { inner };
+            const outerView: any = outer;
+            console.log(outerView.inner.increment(), inner.value);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "projected_native_object_live_method"),
+        "true true\n2 2\n3 3\n11 11 3\n4 4\n"
+    );
+}
+
+#[test]
+fn native_object_narrow_view_reuses_full_layout_and_later_wide_view() {
+    let source = r#"
+        function main(): void {
+            const owner = {
+                value: 1,
+                increment(): number { this.value++; return this.value; },
+                later: 9,
+            };
+            const narrow: { value: number } = owner;
+            const first: any = narrow;
+            const second: any = owner;
+            console.log(first === second, second.later);
+            console.log(second.increment(), owner.value, first.value);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "native_object_wide_layout_after_narrow_view"),
+        "true 9\n2 2 2\n"
+    );
+}
+
+#[test]
+fn projected_native_accessors_write_original_storage() {
+    let source = r#"
+        function main(): void {
+            let backing = 1;
+            const object = {
+                get value(): number { return backing; },
+                set value(next: number) { backing = next; },
+            };
+            const view: any = object;
+            console.log(view.value, backing);
+            view.value = 7;
+            console.log(view.value, backing);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "projected_native_accessor_live_storage"),
+        "1 1\n7 7\n"
+    );
+}
+
+#[test]
+fn projected_native_data_descriptors_share_owner_attributes() {
+    let source = r#"
+        function main(): void {
+            const owner = { value: 1 };
+            const view: any = owner;
+            const initial = Object.getOwnPropertyDescriptor(view, 'value');
+            console.log('value' in initial, 'get' in initial, initial.writable);
+            Object.defineProperty(view, 'value', { writable: false });
+            console.log(Object.getOwnPropertyDescriptor(owner, 'value').writable,
+                Object.getOwnPropertyDescriptor(view, 'value').writable);
+            try { owner.value = 2; console.log('write allowed'); }
+            catch (error) { console.log(error.name); }
+            console.log(owner.value, view.value);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "projected_native_data_descriptor_authority"),
+        "true false true\nfalse false\nTypeError\n1 1\n");
+}
+
+#[test]
+fn native_integrity_state_reaches_existing_projection_and_back() {
+    let source = r#"
+        function main(): void {
+            const first = { value: 1 };
+            const view: any = first;
+            Object.freeze(first);
+            console.log(Object.isFrozen(view), Object.isExtensible(view),
+                Object.getOwnPropertyDescriptor(view, 'value').configurable);
+            const second = { value: 2 };
+            const secondView: any = second;
+            Object.freeze(secondView);
+            console.log(Object.isFrozen(second), Object.isFrozen(secondView));
+            try { second.value = 3; console.log('write allowed'); }
+            catch (error) { console.log(error.name); }
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "projected_native_integrity_owner"),
+        "true false false\ntrue true\nTypeError\n");
+}
+
+#[test]
+fn native_object_declared_reorder_keeps_source_field_effect_order() {
+    let source = r#"
+        interface Owner { first: number; second: number; }
+        function main(): void {
+            let order = "";
+            function first(): number { order += "A"; return 1; }
+            function second(): number { order += "B"; return 2; }
+            const owner: Owner = { second: second(), first: first() };
+            console.log(order, owner.first, owner.second);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "native_object_source_field_order"),
+        "BA 1 2\n"
+    );
+}
+
+#[test]
+fn projected_native_delete_cannot_remove_only_shadow_field() {
+    let source = r#"
+        function main(): void {
+            const owner = { value: 7 };
+            const view: any = owner;
+            console.log(Reflect.deleteProperty(view, 'value'));
+            console.log(view.value, owner.value, Object.keys(view).includes('value'));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "native_projection_delete_shadow"),
+        "false\n7 7 true\n"
+    );
+}
+
+#[test]
+fn projected_global_native_owner_is_tracked_before_module_initialization() {
+    let source = r#"
+        const owner = { value: 1 };
+        function main(): void {
+            const view: any = owner;
+            console.log(view.value, owner.value);
+            view.value = 4;
+            console.log(view.value, owner.value);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "native_projection_global_owner_tracing"),
+        "1 1\n4 4\n"
+    );
+}
+
+#[test]
+fn native_projection_method_registration_retains_physical_receiver_hir_type() {
+    let module = thaw_parser::parse_typescript(r#"
+        function main(): void {
+            const owner = { value: 1 };
+            const view: any = owner;
+            console.log(view.value);
+        }
+    "#).unwrap();
+    let program = thaw_hir::lower_module(&module).unwrap();
+    fn visit_expr(expr: &thaw_hir::HirExpr, count: &mut usize) {
+        use thaw_hir::HirExpr;
+        match expr {
+            HirExpr::Call(callee, args) => {
+                if matches!(callee.as_ref(), HirExpr::Var(name)
+                    if name == "__thaw_register_native_method_callback_graph") {
+                    let [HirExpr::Lambda(_, params, _, _)] = args.as_slice() else {
+                        panic!("method registration must receive a physical Lambda");
+                    };
+                    assert!(matches!(params.first(), Some(param)
+                        if param.name == "__thaw_this"
+                            && matches!(&param.ty, thaw_hir::HirType::Object(_))));
+                    *count += 1;
+                }
+                visit_expr(callee, count);
+                for arg in args { visit_expr(arg, count); }
+            }
+            HirExpr::Block(body) => visit_stmts(body, count),
+            HirExpr::Lambda(_, _, _, body) | HirExpr::NonArrowFunction(body)
+            | HirExpr::TypedClosure(_, body) | HirExpr::OptionalSome(body, _)
+            | HirExpr::OptionalValue(body, _) | HirExpr::JsValueAsJson(body) =>
+                visit_expr(body, count),
+            HirExpr::EvalThen(first, second) => {
+                visit_expr(first, count);
+                visit_expr(second, count);
+            }
+            HirExpr::Conditional(test, yes, no, _) => {
+                visit_expr(test, count);
+                visit_expr(yes, count);
+                visit_expr(no, count);
+            }
+            HirExpr::ObjectLit(fields) | HirExpr::JsonObjectLit(fields, _) => {
+                for (_, value) in fields { visit_expr(value, count); }
+            }
+            HirExpr::ArrayLit(items) => {
+                for item in items { visit_expr(item, count); }
+            }
+            _ => {}
+        }
+    }
+    fn visit_stmts(stmts: &[thaw_hir::HirStmt], count: &mut usize) {
+        use thaw_hir::HirStmt;
+        for stmt in stmts {
+            match stmt {
+                HirStmt::Expr(expr) | HirStmt::Let(_, _, expr) | HirStmt::Throw(expr)
+                | HirStmt::Return(Some(expr)) => visit_expr(expr, count),
+                HirStmt::If(test, yes, no) => {
+                    visit_expr(test, count);
+                    visit_stmts(yes, count);
+                    visit_stmts(no, count);
+                }
+                HirStmt::While(test, body) => {
+                    visit_expr(test, count);
+                    visit_stmts(body, count);
+                }
+                HirStmt::Try(body, _, catch, _) => {
+                    visit_stmts(body, count);
+                    visit_stmts(catch, count);
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut registrations = 0;
+    for function in &program.functions {
+        visit_stmts(&function.body, &mut registrations);
+    }
+    assert_eq!(registrations, 2, "one getter and one setter");
+}
