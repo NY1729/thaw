@@ -236,7 +236,8 @@ fn render_head(
     head
 }
 
-fn render_response(response_spec: ResponseSpec, keep_alive: bool) -> Vec<u8> {
+fn render_response(mut response_spec: ResponseSpec, keep_alive: bool) -> Vec<u8> {
+    response_spec.headers.retain(|(name, _)| !name.eq_ignore_ascii_case("Content-Length"));
     let framing = format!("Content-Length: {}\r\n", response_spec.body.len());
     let mut response = render_head(
         response_spec.status,
@@ -2571,6 +2572,27 @@ pub extern "C" fn createServer(callback: *const c_void) -> *const c_void {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn buffered_response_uses_one_computed_content_length() {
+        let response = render_response(ResponseSpec {
+            status: 200,
+            headers: vec![
+                ("Content-Length".into(), "99".into()),
+                ("X-Trace".into(), "kept".into()),
+                ("cOnTeNt-LeNgTh".into(), "123".into()),
+            ],
+            body: "é".as_bytes().to_vec(),
+        }, true);
+        assert_eq!(response, "HTTP/1.1 200 OK\r\nX-Trace: kept\r\nContent-Length: 2\r\nConnection: keep-alive\r\n\r\né".as_bytes());
+
+        let response = render_response(ResponseSpec {
+            status: 200,
+            headers: vec![("X-Trace".into(), "kept".into())],
+            body: b"ok".to_vec(),
+        }, false);
+        assert_eq!(response, b"HTTP/1.1 200 OK\r\nX-Trace: kept\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok");
+    }
 
     #[test]
     fn unhandled_server_error_sets_process_failure_once() {
