@@ -5031,6 +5031,58 @@ fn intl_large_exact_digits_share_format_parts_range_and_styles() {
     assert_eq!(call("intlLargeExact", "[]"), "[true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true]");
 }
 
+/// Combined flexible day-period requests use the locale skeleton without
+/// introducing a synthetic hour in the visible parts.
+#[cfg(all(feature = "intl", not(feature = "icu4c")))]
+#[test]
+fn intl_flexible_day_period_combined_without_hour() {
+    assert_eq!(
+        load(r#"function intlFlexibleCombined() {
+          const date = new Date('2024-07-04T15:05:09Z');
+          const base = { dayPeriod: 'long', timeZone: 'UTC' };
+          function parts(locale, extra) {
+            const formatter = new Intl.DateTimeFormat(locale, { ...base, ...extra });
+            const value = formatter.formatToParts(date);
+            return { value, text: formatter.format(date) };
+          }
+          function fields(result, expected) {
+            const actual = result.value.filter(part => part.type !== 'literal').map(part => part.type);
+            return actual.length === expected.length && expected.every(type => actual.includes(type)) &&
+              result.text === result.value.map(part => part.value).join('');
+          }
+          const only = parts('en-US', {});
+          const minute = parts('en-US', { minute: '2-digit' });
+          const second = parts('en-US', { second: '2-digit' });
+          const both = parts('en-US', { minute: '2-digit', second: '2-digit' });
+          const dated = parts('en-US', { year: 'numeric', month: 'numeric', day: 'numeric', minute: '2-digit' });
+          const chinese = parts('zh-Hans', { minute: '2-digit' });
+          const finnish = parts('fi', { minute: '2-digit', second: '2-digit' });
+          const cycle = parts('en-US', { minute: '2-digit', hourCycle: 'h23' });
+          const withHour = parts('en-US', { hour: 'numeric', dayPeriod: 'long' });
+          const period = only.value.find(part => part.type === 'dayPeriod').value;
+          const samePeriod = result => result.value.find(part => part.type === 'dayPeriod').value === period;
+          return [
+            fields(only, ['dayPeriod']),
+            fields(minute, ['minute', 'dayPeriod']) && samePeriod(minute),
+            fields(second, ['second', 'dayPeriod']) && samePeriod(second),
+            fields(both, ['minute', 'second', 'dayPeriod']) && samePeriod(both),
+            fields(dated, ['year', 'month', 'day', 'minute', 'dayPeriod']) && samePeriod(dated),
+            fields(chinese, ['dayPeriod', 'minute']) &&
+              chinese.value.findIndex(part => part.type === 'dayPeriod') < chinese.value.findIndex(part => part.type === 'minute'),
+            fields(finnish, ['minute', 'second', 'dayPeriod']) &&
+              finnish.value.some(part => part.type === 'literal' && part.value.includes('.')),
+            fields(cycle, ['minute', 'dayPeriod']) && samePeriod(cycle),
+            fields(withHour, ['hour', 'dayPeriod']),
+          ];
+        }"#),
+        1
+    );
+    assert_eq!(
+        call("intlFlexibleCombined", "[]"),
+        "[true,true,true,true,true,true,true,true,true]"
+    );
+}
+
 #[cfg(all(feature = "intl", not(feature = "icu4c")))]
 #[test]
 fn intl_followup_flexible_day_period_without_icu4c() {
