@@ -83,12 +83,17 @@
       if (!timers.has(id)) continue;
       if (timer.repeat) timer.due = Date.now() + timer.milliseconds;
       else timers.delete(id);
+      const previousAsyncContext = thawAsyncContext.swap(timer.asyncContext);
       try {
-        timer.callback(...timer.args);
-      } catch (error) {
-        if (typeof process === 'undefined' || !process.emit) throw error;
-        process.emit('uncaughtExceptionMonitor', error, 'uncaughtException');
-        if (!process.emit('uncaughtException', error, 'uncaughtException')) throw error;
+        try {
+          timer.callback(...timer.args);
+        } catch (error) {
+          if (typeof process === 'undefined' || !process.emit) throw error;
+          process.emit('uncaughtExceptionMonitor', error, 'uncaughtException');
+          if (!process.emit('uncaughtException', error, 'uncaughtException')) throw error;
+        }
+      } finally {
+        thawAsyncContext.swap(previousAsyncContext);
       }
     }
     return due.length;

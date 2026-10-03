@@ -100,6 +100,8 @@ fn async_hooks_disable_releases_registration_and_run_reactivates_it() {
               var released = !registered.has(storage);
               storage.disable();
               var repeated = !registered.has(storage);
+              // The snapshot holds the disabled-time frame. Reusing this
+              // storage later cannot borrow the invoking run's store.
               var withoutDisabled = hooks.AsyncLocalStorage.snapshot();
               var duringRun = storage.run('run', function () {
                 return [registered.has(storage), storage.getStore(),
@@ -114,8 +116,42 @@ fn async_hooks_disable_releases_registration_and_run_reactivates_it() {
               var capturedEnabled = withEnabled(function () { return storage.getStore(); });
               var restored = storage.getStore();
               storage.disable();
+              var oldSnapshot;
+              var disabledInside = storage.run('old-root', function () {
+                oldSnapshot = hooks.AsyncLocalStorage.snapshot();
+                storage.disable();
+                return storage.getStore() === undefined;
+              });
+              var restoredDisabled = storage.getStore() === undefined;
+              var afterReactivation = storage.run('fresh', function () {
+                return [storage.getStore(), oldSnapshot(function () { return storage.getStore(); })];
+              });
+              storage.disable();
+              var oldWeakMap = globalThis.WeakMap, oldSet = globalThis.Set;
+              var oldHas = oldSet.prototype.has, oldAdd = oldSet.prototype.add;
+              var oldDelete = oldSet.prototype.delete;
+              var intrinsicControl;
+              try {
+                globalThis.WeakMap = function () { throw new Error('changed WeakMap'); };
+                globalThis.Set = function () { throw new Error('changed Set'); };
+                oldSet.prototype.has = oldSet.prototype.add = oldSet.prototype.delete =
+                  function () { throw new Error('changed Set method'); };
+                var resilient = new hooks.AsyncLocalStorage({ defaultValue: 'default' });
+                resilient.enterWith('one');
+                var beforeReplacement = hooks.AsyncLocalStorage.snapshot();
+                resilient.enterWith('two');
+                intrinsicControl = [resilient.getStore(),
+                  beforeReplacement(function () { return resilient.getStore(); })];
+                resilient.disable();
+                intrinsicControl.push(beforeReplacement(function () { return resilient.getStore(); }));
+              } finally {
+                globalThis.WeakMap = oldWeakMap; globalThis.Set = oldSet;
+                oldSet.prototype.has = oldHas; oldSet.prototype.add = oldAdd;
+                oldSet.prototype.delete = oldDelete;
+              }
               return [initial, released, repeated, duringRun, reusedByRun,
-                      reusedByEnter, capturedEnabled, restored, !registered.has(storage)];
+                      reusedByEnter, capturedEnabled, restored, !registered.has(storage),
+                      disabledInside, restoredDisabled, afterReactivation, intrinsicControl];
             };"#,
     ).unwrap();
     let empty_node_modules = temp_registry("builtin_async_hooks_disable_node_modules");
@@ -132,7 +168,77 @@ fn async_hooks_disable_releases_registration_and_run_reactivates_it() {
     assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
     let result = thaw_quickjs::thaw_js_call(c"exerciseAsyncHooksDisable".as_ptr(), c"[]".as_ptr());
     assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(),
-        r#"[true,true,true,[true,"run","run"],true,true,"enter","changed",true]"#);
+        r#"[true,true,true,[true,"run","default"],true,true,"enter","changed",true,true,true,["fresh","default"],["two","one",null]]"#);
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+}
+
+#[test]
+fn async_hooks_capture_reactions_and_host_callbacks_without_shared_store_state() {
+    // Source-only regression: registration context, not settlement context,
+    // owns pending reactions and internal await continuations.
+    use std::ffi::{CStr, CString};
+    let dir = temp_registry("builtin_async_hooks_continuations");
+    fs::write(dir.join("index.js"), r#"
+        var hooks = require('node:async_hooks');
+        module.exports = async function () {
+          var storage = new hooks.AsyncLocalStorage({ defaultValue: 'default' });
+          var resolveA, resolveB;
+          var a = storage.run('A', async function () {
+            await new Promise(function (resolve) { resolveA = resolve; });
+            return storage.getStore();
+          });
+          var b = storage.run('B', async function () {
+            await new Promise(function (resolve) { resolveB = resolve; });
+            return storage.getStore();
+          });
+          var outside = storage.getStore();
+          storage.enterWith('outside');
+          resolveB(); resolveA();
+          var overlap = await Promise.all([a, b]);
+          var captured = storage.run('captured', function () {
+            return [hooks.AsyncLocalStorage.bind(function () { return storage.getStore(); }),
+                    hooks.AsyncLocalStorage.snapshot(),
+                    new hooks.AsyncResource('captured')];
+          });
+          var saved = [captured[0](), captured[1](function () { return storage.getStore(); }),
+                       captured[2].runInAsyncScope(function () { return storage.getStore(); })];
+          var replaced = storage.run('seed', function () {
+            storage.enterWith('first');
+            var prior = hooks.AsyncLocalStorage.snapshot();
+            for (var index = 0; index < 1000; index++) storage.enterWith('replacement-' + index);
+            return [prior(function () { return storage.getStore(); }), storage.getStore()];
+          });
+          var exited = storage.run('present', function () {
+            return storage.exit(function () { return storage.getStore(); });
+          });
+          var timer = new Promise(function (resolve) {
+            storage.run('timer', function () { setTimeout(function () { resolve(storage.getStore()); }, 0); });
+          });
+          var tick = new Promise(function (resolve) {
+            storage.run('tick', function () { process.nextTick(function () { resolve(storage.getStore()); }); });
+          });
+          var host = await Promise.all([timer, tick]);
+          var resolveOld;
+          var old = storage.run('old', async function () {
+            await new Promise(function (resolve) { resolveOld = resolve; });
+            return storage.getStore();
+          });
+          storage.disable();
+          storage.enterWith('new');
+          resolveOld();
+          var invalidated = await old;
+          return [outside, overlap, saved, replaced, exited === undefined, host, invalidated,
+                  storage.getStore()];
+        };
+    "#).unwrap();
+    let empty_node_modules = temp_registry("builtin_async_hooks_continuations_modules");
+    let (bundle, _, _, _) = bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseAsyncHooksContinuations = module.exports;");
+    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
+    let result = thaw_quickjs::thaw_js_call(c"exerciseAsyncHooksContinuations".as_ptr(), c"[]".as_ptr());
+    assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(),
+        r#"["default",["A","B"],["captured","captured","captured"],["first","replacement-999"],true,["timer","tick"],"default","new"]"#);
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
 }

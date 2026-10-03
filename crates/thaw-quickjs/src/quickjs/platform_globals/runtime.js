@@ -1,3 +1,4 @@
+  const thawAsyncContext = globalThis.__thaw_async_context_bootstrap;
   globalThis.global = globalThis;
   const thawDateConstructor = Date;
   const thawDateGetTime = Date.prototype.getTime;
@@ -318,6 +319,7 @@
     const id = nextTimerId++;
     const milliseconds = normalizeDelay(delay);
     timers.set(id, { callback, args, repeat, milliseconds, refed,
+                     asyncContext: thawAsyncContext.get(),
                      due: Date.now() + milliseconds });
     return timerHandle(id);
   };
@@ -450,7 +452,7 @@
     if (typeof callback !== 'function') {
       throw new TypeError('process.nextTick callback must be a function');
     }
-    nextTickQueue.push({ callback, args });
+    nextTickQueue.push({ callback, args, asyncContext: thawAsyncContext.get() });
   };
   globalThis.__thaw_next_tick_queue_pending = () => nextTickQueue.length > 0;
   // Returns whether it actually ran anything -- callers that poll "is
@@ -468,14 +470,19 @@
       let index = 0;
       try {
         for (; index < batch.length; index++) {
-          const { callback, args } = batch[index];
+          const { callback, args, asyncContext } = batch[index];
+          const previousAsyncContext = thawAsyncContext.swap(asyncContext);
           try {
-            callback(...args);
-          } catch (error) {
-            // Matches `__thaw_run_due_timers`'s uncaught handling.
-            if (typeof process === 'undefined' || !process.emit) throw error;
-            process.emit('uncaughtExceptionMonitor', error, 'uncaughtException');
-            if (!process.emit('uncaughtException', error, 'uncaughtException')) throw error;
+            try {
+              callback(...args);
+            } catch (error) {
+              // Matches `__thaw_run_due_timers`'s uncaught handling.
+              if (typeof process === 'undefined' || !process.emit) throw error;
+              process.emit('uncaughtExceptionMonitor', error, 'uncaughtException');
+              if (!process.emit('uncaughtException', error, 'uncaughtException')) throw error;
+            }
+          } finally {
+            thawAsyncContext.swap(previousAsyncContext);
           }
         }
       } catch (error) {
