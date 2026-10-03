@@ -337,6 +337,15 @@ fn erase_expr(expr: &mut HirExpr) {
             erase_ty(a);
             erase_ty(b);
         }
+        HirExpr::PromiseThenBoth(source, fulfilled, rejected, input, output, _, _) => {
+            erase_expr(source);
+            if let Some(fulfilled) = fulfilled {
+                erase_expr(fulfilled);
+            }
+            erase_expr(rejected);
+            erase_ty(input);
+            erase_ty(output);
+        }
         HirExpr::PromiseFinally(source, callback, a, b) => {
             erase_expr(source);
             erase_expr(callback);

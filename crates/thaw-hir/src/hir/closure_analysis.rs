@@ -110,6 +110,13 @@ fn collect_closure_captures_expr(expr: &HirExpr, names: &mut BTreeSet<Symbol>) {
             collect_closure_captures_expr(source, names);
             collect_closure_captures_expr(callback, names);
         }
+        HirExpr::PromiseThenBoth(source, fulfilled, rejected, _, _, _, _) => {
+            collect_closure_captures_expr(source, names);
+            if let Some(fulfilled) = fulfilled {
+                collect_closure_captures_expr(fulfilled, names);
+            }
+            collect_closure_captures_expr(rejected, names);
+        }
         HirExpr::PromiseFinally(source, callback, _, _) => {
             collect_closure_captures_expr(source, names);
             collect_closure_captures_expr(callback, names);

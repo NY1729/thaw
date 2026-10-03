@@ -212,7 +212,7 @@ impl<'a> FnLowerer<'a> {
                     HirExpr::FunctionRef(name, signature.params.clone(), ret)
                 }
             }
-            _ => return Err("Promise callback must be an arrow or function value".into()),
+            _ => self.lower_expr(expr)?,
         };
         let callback = if parameter_types
             .iter()
@@ -238,7 +238,7 @@ impl<'a> FnLowerer<'a> {
             callback
         };
         self.validate_promise_callback_value(&callback, parameter_types, expected_return)?;
-        Ok(callback)
+        self.normalize_promise_callback(callback, parameter_types)
     }
 
     fn validate_promise_callback_value(
@@ -247,24 +247,35 @@ impl<'a> FnLowerer<'a> {
         parameter_types: &[HirType],
         expected_return: Option<&HirType>,
     ) -> Result<(), String> {
-        let (params, ret) = match self.infer_expr_type(callback)? {
-            HirType::Function(params, ret) => (params, ret),
-            HirType::CallableFunction(mut params, _, rest, ret) => {
-                if let Some(rest) = rest {
-                    params.push(HirType::Array(rest));
-                }
-                (params, ret)
-            }
+        let (params, rest, ret) = match self.infer_expr_type(callback)? {
+            HirType::Function(mut params, ret) => {
+                let rest = if let HirExpr::FunctionRef(symbol, _, _) = callback {
+                    self.signatures.get(symbol).and_then(|signature| signature.native_rest.clone())
+                } else { None };
+                if rest.is_some() { params.pop(); }
+                (params, rest.map(Box::new), ret)
+            },
+            HirType::CallableFunction(params, _, rest, ret) => (params, rest, ret),
             _ => return Err("Promise callback is not a function value".into()),
         };
         if params.len() > parameter_types.len()
-            || !params
-                .iter()
-                .zip(parameter_types)
-                .all(|(actual, expected)| callback_param_compatible(expected, actual))
+            || !params.iter().zip(parameter_types).all(|(actual, supplied)| {
+                callback_param_compatible(supplied, actual)
+                    || match actual {
+                        HirType::Optional(payload)
+                        | HirType::Nullable(payload)
+                        | HirType::Nullish(payload) => callback_param_compatible(supplied, payload),
+                        _ => false,
+                    }
+            })
+            || rest.as_ref().is_some_and(|element| {
+                parameter_types[params.len()..].iter().any(|supplied| {
+                    !callback_param_compatible(supplied, element)
+                })
+            })
         {
             return Err(format!(
-                "Promise callback has parameters {params:?}, expected a prefix of {parameter_types:?}"
+                "Promise callback has parameters {params:?} and rest {rest:?}, expected a prefix of {parameter_types:?}"
             ));
         }
         if let Some(expected) = expected_return {
@@ -276,6 +287,81 @@ impl<'a> FnLowerer<'a> {
             }
         }
         Ok(())
+    }
+
+    /// Bind a callback expression once and expose the exact fixed Promise
+    /// callback ABI. Callable optional/rest slots and zero-argument functions
+    /// are invoked through their own original signature inside the wrapper.
+    fn normalize_promise_callback(
+        &mut self,
+        callback: HirExpr,
+        supplied: &[HirType],
+    ) -> Result<HirExpr, String> {
+        let original = self.infer_expr_type(&callback)?;
+        let (fixed, rest, ret) = match &original {
+            HirType::Function(fixed, ret) => {
+                let rest = if let HirExpr::FunctionRef(symbol, _, _) = &callback {
+                    self.signatures.get(symbol).and_then(|signature| signature.native_rest.clone())
+                } else { None };
+                let mut fixed = fixed.clone();
+                if rest.is_some() { fixed.pop(); }
+                (fixed, rest, ret.as_ref().clone())
+            },
+            HirType::CallableFunction(fixed, _, rest, ret) => {
+                (fixed.clone(), rest.as_deref().cloned(), ret.as_ref().clone())
+            }
+            _ => return Err("Promise callback is not a function value".into()),
+        };
+        if matches!(&original, HirType::Function(..)) && rest.is_none() && fixed == supplied {
+            return Ok(callback);
+        }
+        let callback_name = format!("__thaw_promise_callback_{}", self.next_binding);
+        self.next_binding += 1;
+        let input_names = (0..supplied.len())
+            .map(|index| format!("__thaw_promise_argument_{index}_{}", self.next_binding))
+            .collect::<Vec<_>>();
+        let inputs = input_names.iter().zip(supplied).map(|(name, ty)| HirParam {
+            name: name.clone(), ty: ty.clone(),
+        }).collect::<Vec<_>>();
+        for (name, ty) in input_names.iter().zip(supplied) {
+            self.scope.insert(name.clone(), ty.clone());
+        }
+        let arguments = (|| -> Result<Vec<HirExpr>, String> {
+            let mut arguments = Vec::new();
+            for (index, expected) in fixed.iter().enumerate() {
+                let input = HirExpr::Var(input_names[index].clone());
+                arguments.push(self.coerce_to_declared(expected, input)?);
+            }
+            if let Some(element) = rest {
+                let remaining = input_names.iter().skip(fixed.len())
+                    .map(|name| self.coerce_to_declared(&element, HirExpr::Var(name.clone())))
+                    .collect::<Result<Vec<_>, _>>()?;
+                arguments.push(HirExpr::ArrayLit(remaining));
+            }
+            Ok(arguments)
+        })();
+        for name in &input_names { self.scope.remove(name); }
+        let arguments = arguments?;
+        let call = HirExpr::Call(Box::new(HirExpr::Var(callback_name.clone())), arguments);
+        let body = if ret == HirType::Void {
+            HirExpr::Block(vec![HirStmt::Expr(call), HirStmt::Return(None)])
+        } else {
+            HirExpr::Block(vec![HirStmt::Return(Some(call))])
+        };
+        let normalized = HirExpr::Lambda(
+            vec![HirParam { name: callback_name.clone(), ty: original.clone() }],
+            inputs,
+            ret.clone(),
+            Box::new(body),
+        );
+        let result_type = HirType::Function(supplied.to_vec(), Box::new(ret));
+        let binder = HirExpr::Lambda(
+            Vec::new(),
+            vec![HirParam { name: callback_name, ty: original }],
+            result_type,
+            Box::new(HirExpr::Block(vec![HirStmt::Return(Some(normalized))])),
+        );
+        Ok(HirExpr::Call(Box::new(binder), vec![callback]))
     }
 
     fn callback_parameter_count(&self, expr: &Expr, label: &str) -> Result<usize, String> {
@@ -519,7 +605,7 @@ impl<'a> FnLowerer<'a> {
                 &available[..arity],
                 Some(&HirType::Void),
             )?;
-            executor
+            self.normalize_promise_callback(executor, &available[..arity])?
         } else {
             self.lower_promise_callback(
                 &executor.expr,

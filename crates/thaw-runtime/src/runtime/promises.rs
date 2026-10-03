@@ -456,18 +456,21 @@ unsafe fn detach_promise(
 struct PromiseChainState {
     output: *mut ThawPromise,
     input: *mut ThawPromise,
-    callback: PromiseTransformFn,
-    context: *mut u8,
-    on_rejected: bool,
+    fulfilled: Option<(PromiseTransformFn, *mut u8)>,
+    rejected: Option<(PromiseTransformFn, *mut u8)>,
 }
 
 extern "C" fn resume_promise_chain(frame: *mut u8, result: *const u8) {
     let state = unsafe { Box::from_raw(frame.cast::<PromiseChainState>()) };
     let rejected = unsafe { thaw_promise_state(state.input) } == 2;
-    if rejected == state.on_rejected {
-        (state.callback)(state.context, state.output, state.input, result);
-    } else if rejected {
-        forward_promise_rejection(state.output, state.input, result);
+    if rejected {
+        if let Some((callback, context)) = state.rejected {
+            callback(context, state.output, state.input, result);
+        } else {
+            forward_promise_rejection(state.output, state.input, result);
+        }
+    } else if let Some((callback, context)) = state.fulfilled {
+        callback(context, state.output, state.input, result);
     } else {
         forward_promise_fulfillment(state.output, state.input, result);
     }
@@ -489,6 +492,42 @@ pub unsafe extern "C" fn thaw_promise_chain(
     context: *mut u8,
     on_rejected: u8,
 ) -> *mut ThawPromise {
+    let selected = Some((callback, context));
+    let (fulfilled, rejected) = if on_rejected != 0 {
+        (None, selected)
+    } else {
+        (selected, None)
+    };
+    unsafe { promise_chain_with_handlers(input, fulfilled, rejected) }
+}
+
+/// Registers both handlers against one original input and returns one output.
+/// The optional fulfillment callback forwards unchanged fulfillment when
+/// absent. A failure of the selected callback only settles the output; it
+/// cannot invoke the other callback.
+///
+/// # Safety
+/// `input` is consumed once. Both contexts remain valid through settlement.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_promise_chain_both(
+    input: *mut ThawPromise,
+    on_fulfilled: Option<PromiseTransformFn>,
+    fulfilled_context: *mut u8,
+    on_rejected: PromiseTransformFn,
+    rejected_context: *mut u8,
+) -> *mut ThawPromise {
+    unsafe { promise_chain_with_handlers(
+        input,
+        on_fulfilled.map(|callback| (callback, fulfilled_context)),
+        Some((on_rejected, rejected_context)),
+    ) }
+}
+
+unsafe fn promise_chain_with_handlers(
+    input: *mut ThawPromise,
+    fulfilled: Option<(PromiseTransformFn, *mut u8)>,
+    rejected: Option<(PromiseTransformFn, *mut u8)>,
+) -> *mut ThawPromise {
     let output = thaw_promise_new();
     if input.is_null() {
         reject_native_text(output, PROMISE_ALL_INVALID_ERROR.as_ptr());
@@ -497,9 +536,8 @@ pub unsafe extern "C" fn thaw_promise_chain(
     let state = Box::into_raw(Box::new(PromiseChainState {
         output,
         input,
-        callback,
-        context,
-        on_rejected: on_rejected != 0,
+        fulfilled,
+        rejected,
     }));
     thaw_promise_subscribe(input, resume_promise_chain, state.cast());
     output
