@@ -1484,6 +1484,14 @@ fn ensure_context() {
                 )
                 .expect("failed to create JavaScript Intl percent formatter");
                 #[cfg(feature = "intl")]
+                let intl_percent_format_large_function = Function::new(
+                    ctx.clone(),
+                    |locale: String, representative: String, core: String, grouping: bool| {
+                        intl_percent_format_large(&locale, &representative, &core, grouping).unwrap_or_default()
+                    },
+                )
+                .expect("failed to create JavaScript Intl large percent formatter");
+                #[cfg(feature = "intl")]
                 let intl_currency_format_function = Function::new(
                     ctx.clone(),
                     |locale: String, digits: String, currency: String, display: String, grouping: bool| {
@@ -1493,6 +1501,15 @@ fn ensure_context() {
                 )
                 .expect("failed to create JavaScript Intl currency formatter");
                 #[cfg(feature = "intl")]
+                let intl_currency_format_large_function = Function::new(
+                    ctx.clone(),
+                    |locale: String, representative: String, core: String, currency: String, display: String, grouping: bool| {
+                        intl_currency_format_large(&locale, &representative, &core, &currency, &display, grouping)
+                            .unwrap_or_default()
+                    },
+                )
+                .expect("failed to create JavaScript Intl large currency formatter");
+                #[cfg(feature = "intl")]
                 let intl_unit_format_function = Function::new(
                     ctx.clone(),
                     |locale: String, digits: String, unit: String, width: String, grouping: bool| {
@@ -1500,6 +1517,15 @@ fn ensure_context() {
                     },
                 )
                 .expect("failed to create JavaScript Intl unit formatter");
+                #[cfg(feature = "intl")]
+                let intl_unit_format_large_function = Function::new(
+                    ctx.clone(),
+                    |locale: String, representative: String, core: String, unit: String, width: String, grouping: bool| {
+                        intl_unit_format_large(&locale, &representative, &core, &unit, &width, grouping)
+                            .unwrap_or_default()
+                    },
+                )
+                .expect("failed to create JavaScript Intl large unit formatter");
                 #[cfg(feature = "intl")]
                 let intl_time_zone_name_function = Function::new(
                     ctx.clone(),
@@ -1811,12 +1837,24 @@ fn ensure_context() {
                     .expect("failed to install JavaScript Intl percent formatter");
                 #[cfg(feature = "intl")]
                 ctx.globals()
+                    .set("__thaw_intl_percent_format_large", intl_percent_format_large_function)
+                    .expect("failed to install JavaScript Intl large percent formatter");
+                #[cfg(feature = "intl")]
+                ctx.globals()
                     .set("__thaw_intl_currency_format", intl_currency_format_function)
                     .expect("failed to install JavaScript Intl currency formatter");
                 #[cfg(feature = "intl")]
                 ctx.globals()
+                    .set("__thaw_intl_currency_format_large", intl_currency_format_large_function)
+                    .expect("failed to install JavaScript Intl large currency formatter");
+                #[cfg(feature = "intl")]
+                ctx.globals()
                     .set("__thaw_intl_unit_format", intl_unit_format_function)
                     .expect("failed to install JavaScript Intl unit formatter");
+                #[cfg(feature = "intl")]
+                ctx.globals()
+                    .set("__thaw_intl_unit_format_large", intl_unit_format_large_function)
+                    .expect("failed to install JavaScript Intl large unit formatter");
                 #[cfg(feature = "intl")]
                 ctx.globals()
                     .set("__thaw_intl_time_zone_name", intl_time_zone_name_function)

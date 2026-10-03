@@ -20,6 +20,7 @@ wasm = ["dep:wasmi", "dep:wasmi_wasi"]
 # references `Intl`.
 intl = [
     "dep:thaw-icu-data",
+    "dep:fixed_decimal",
     "dep:icu_calendar",
     "dep:icu_collator",
     "dep:icu_datetime",
@@ -60,6 +61,7 @@ icu_calendar = { version = "=2.3.0", default-features = false, optional = true }
 icu_collator = { version = "=2.3.1", default-features = false, optional = true }
 icu_datetime = { version = "=2.3.0", default-features = false, optional = true }
 icu_decimal = { version = "=2.3.0", default-features = false, features = ["unstable"], optional = true }
+fixed_decimal = { version = "=0.7.2", default-features = false, optional = true }
 icu_experimental = { version = "=0.6.0", default-features = false, optional = true }
 icu_list = { version = "=2.3.0", default-features = false, optional = true }
 icu_locale = { version = "=2.3.1", default-features = false, optional = true }
