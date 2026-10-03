@@ -1611,6 +1611,7 @@ impl<'ctx> HirCompiler<'ctx> {
             "thaw_object_set_class_identity",
             "thaw_object_has_class_identity",
             "thaw_object_hide_marker",
+            "thaw_object_reveal_marker",
             "thaw_object_marker_hidden",
         ] {
             self.module.add_function(

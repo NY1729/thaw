@@ -959,6 +959,55 @@ impl<'a> FnLowerer<'a> {
                             descriptor,
                             &label,
                         )?;
+                        if object.sym == *"Reflect" {
+                            if let [HirExpr::PropAssign(_, _, field, value)] = assignments.as_slice() {
+                                if field == &key && matches!(&target_type, HirType::Object(_)) {
+                                    // Bind target before descriptor value, including on failure.
+                                    let target_name = format!("__thaw_reflect_define_target_{}", self.next_binding);
+                                    self.next_binding += 1;
+                                    let value_name = format!("__thaw_reflect_define_value_{}", self.next_binding);
+                                    self.next_binding += 1;
+                                    let value_type = self.infer_expr_type(value)?;
+                                    self.scope.insert(target_name.clone(), target_type.clone());
+                                    self.scope.insert(value_name.clone(), value_type.clone());
+                                    let bound_target = HirExpr::Var(target_name.clone());
+                                    let mut body = Vec::new();
+                                    if key.starts_with("__thaw_class_identity_\u{1e}") {
+                                        let hidden = HirExpr::Call(
+                                            Box::new(HirExpr::Var("__thaw_object_marker_hidden".into())),
+                                            vec![bound_target.clone(), HirExpr::Lit(HirLit::Str(key.clone()))],
+                                        );
+                                        let extensible = HirExpr::Call(
+                                            Box::new(HirExpr::Var("__thaw_object_state".into())),
+                                            vec![bound_target.clone(), HirExpr::Lit(HirLit::F64(0.0))],
+                                        );
+                                        body.push(HirStmt::If(hidden, vec![HirStmt::If(
+                                            extensible, Vec::new(),
+                                            vec![HirStmt::Return(Some(HirExpr::Lit(HirLit::Bool(false))))],
+                                        )], Vec::new()));
+                                    }
+                                    let frozen = HirExpr::Call(
+                                        Box::new(HirExpr::Var("__thaw_object_state".into())),
+                                        vec![bound_target.clone(), HirExpr::Lit(HirLit::F64(2.0))],
+                                    );
+                                    body.push(HirStmt::If(frozen,
+                                        vec![HirStmt::Return(Some(HirExpr::Lit(HirLit::Bool(false))))],
+                                        Vec::new()));
+                                    body.push(HirStmt::Expr(HirExpr::PropAssign(
+                                        Box::new(bound_target), target_type.clone(), key.clone(),
+                                        Box::new(HirExpr::Var(value_name.clone())),
+                                    )));
+                                    body.push(HirStmt::Return(Some(HirExpr::Lit(HirLit::Bool(true)))));
+                                    return self.wrap_call_argument_bindings(
+                                        HirExpr::Block(body),
+                                        &[
+                                            (target_name, target_type, target_value),
+                                            (value_name, value_type, value.as_ref().clone()),
+                                        ],
+                                    );
+                                }
+                            }
+                        }
                         // `Object.defineProperty` returns the object;
                         // `Reflect.defineProperty` returns a boolean. Run
                         // the assignment for its side effect and hand back
@@ -1388,12 +1437,18 @@ impl<'a> FnLowerer<'a> {
                         let [target, key, value] = arguments.as_slice() else {
                             return Err("`Reflect.set` expects exactly three arguments".into());
                         };
-                        let HirExpr::Lit(HirLit::Str(key)) = key else {
-                            return Err(
-                                "`Reflect.set` currently requires a string-literal key".into()
-                            );
+                        let key = if let HirExpr::Lit(HirLit::Str(key)) = key {
+                            key.clone()
+                        } else if call.args.len() == 3 && call.args[1].spread.is_none() {
+                            // The argument binder turns source literals into Vars.
+                            // Retain that binding for left-to-right evaluation.
+                            let Expr::Lit(Lit::Str(key)) = call.args[1].expr.as_ref() else {
+                                return Err("`Reflect.set` currently requires a string-literal key".into());
+                            };
+                            key.value.to_string_lossy().into_owned()
+                        } else {
+                            return Err("`Reflect.set` currently requires a string-literal key".into());
                         };
-                        let key = key.clone();
                         let target_type = self.infer_expr_type(target)?;
                         let value_type = self.infer_expr_type(value)?;
                         let assign = match &target_type {
@@ -1406,13 +1461,13 @@ impl<'a> FnLowerer<'a> {
                                 HirExpr::PropAssign(
                                     Box::new(target.clone()),
                                     target_type.clone(),
-                                    key,
+                                    key.clone(),
                                     Box::new(value.clone()),
                                 )
                             }
                             HirType::Json => HirExpr::JsonSet(
                                 Box::new(target.clone()),
-                                Box::new(HirExpr::Lit(HirLit::Str(key))),
+                                Box::new(HirExpr::Lit(HirLit::Str(key.clone()))),
                                 Box::new(value.clone()),
                                 value_type,
                                 true,
@@ -1431,14 +1486,32 @@ impl<'a> FnLowerer<'a> {
                             Box::new(HirExpr::Var("__thaw_object_state".to_string())),
                             vec![target.clone(), HirExpr::Lit(HirLit::F64(2.0))],
                         );
-                        let body = HirExpr::Block(vec![HirStmt::If(
+                        let mut body = Vec::new();
+                        if matches!(&target_type, HirType::Object(_))
+                            && key.starts_with("__thaw_class_identity_\u{1e}")
+                        {
+                            let hidden = HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_object_marker_hidden".into())),
+                                vec![target.clone(), HirExpr::Lit(HirLit::Str(key.clone()))],
+                            );
+                            let extensible = HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_object_state".into())),
+                                vec![target.clone(), HirExpr::Lit(HirLit::F64(0.0))],
+                            );
+                            body.push(HirStmt::If(hidden, vec![HirStmt::If(
+                                extensible, Vec::new(),
+                                vec![HirStmt::Return(Some(HirExpr::Lit(HirLit::Bool(false))))],
+                            )], Vec::new()));
+                        }
+                        body.push(HirStmt::If(
                             frozen,
                             vec![HirStmt::Return(Some(HirExpr::Lit(HirLit::Bool(false))))],
                             vec![
                                 HirStmt::Expr(assign),
                                 HirStmt::Return(Some(HirExpr::Lit(HirLit::Bool(true)))),
                             ],
-                        )]);
+                        ));
+                        let body = HirExpr::Block(body);
                         let mut referenced = BTreeSet::new();
                         collect_referenced_bindings(&body, &mut referenced);
                         let captures = referenced

@@ -3311,3 +3311,73 @@ fn descriptor_maps_skip_hidden_class_markers_but_keep_same_named_user_fields() {
     assert_eq!(compile_and_run(source, "class_marker_descriptor_map_visibility"),
         "value value\n1 1 1\nfalse true\n3 false false\n2 2 2 2\ntrue true\ntrue function 0\n5 1\n");
 }
+
+#[test]
+fn hidden_class_marker_reveals_only_after_successful_public_data_write() {
+    let source = r#"
+        class Leaf { value: number; constructor() { this.value = 3; } }
+        class WithSetter {
+            stored: number;
+            constructor() { this.stored = 1; }
+            set value(next: number) { this.stored = next; }
+        }
+        function main(): void {
+            const key = "__thaw_class_identity_\u001eLeaf";
+            const direct = new Leaf();
+            console.log(Object.hasOwn(direct, key), direct instanceof Leaf);
+            direct["__thaw_class_identity_\u001eLeaf"] = true;
+            console.log(Object.hasOwn(direct, key), Object.values(direct).length, direct instanceof Leaf);
+            const reflected = new Leaf();
+            console.log(Reflect.set(reflected, "__thaw_class_identity_\u001eLeaf", true), Object.hasOwn(reflected, key));
+            const defined = new Leaf();
+            Object.defineProperty(defined, "__thaw_class_identity_\u001eLeaf", { value: true });
+            console.log(Object.hasOwn(defined, key));
+            const many = new Leaf();
+            Object.defineProperties(many, { "__thaw_class_identity_\u001eLeaf": { value: true } });
+            console.log(Object.hasOwn(many, key));
+            const prevented = new Leaf();
+            Object.preventExtensions(prevented);
+            let rhs = 0;
+            try { prevented["__thaw_class_identity_\u001eLeaf"] = (rhs++, true); }
+            catch (error) { console.log("blocked", rhs); }
+            console.log(Object.hasOwn(prevented, key), Object.keys(prevented).length);
+            const sealed = new Leaf();
+            Object.seal(sealed);
+            try { Object.defineProperty(sealed, "__thaw_class_identity_\u001eLeaf", { value: true }); }
+            catch (error) { console.log("sealed"); }
+            console.log(Object.hasOwn(sealed, key));
+            const blockedReflect = new Leaf();
+            Object.preventExtensions(blockedReflect);
+            let reflectTargets = 0;
+            let reflectValues = 0;
+            console.log(Reflect.set((reflectTargets++, blockedReflect), "__thaw_class_identity_\u001eLeaf", (reflectValues++, true)), reflectTargets, reflectValues, Object.hasOwn(blockedReflect, key));
+            const blockedDefine = new Leaf();
+            Object.preventExtensions(blockedDefine);
+            let defineTargets = 0;
+            let defineValues = 0;
+            console.log(Reflect.defineProperty((defineTargets++, blockedDefine), "__thaw_class_identity_\u001eLeaf", { value: (defineValues++, true) }), defineTargets, defineValues, Object.hasOwn(blockedDefine, key));
+            const frozenDefine = new Leaf();
+            Object.freeze(frozenDefine);
+            console.log(Reflect.defineProperty(frozenDefine, "__thaw_class_identity_\u001eLeaf", { value: true }), Object.hasOwn(frozenDefine, key));
+            Object.preventExtensions(direct);
+            direct["__thaw_class_identity_\u001eLeaf"] = false;
+            console.log(Object.hasOwn(direct, key), direct["__thaw_class_identity_\u001eLeaf"] === false);
+            console.log(Reflect.set(direct, "__thaw_class_identity_\u001eLeaf", true), Reflect.defineProperty(direct, "__thaw_class_identity_\u001eLeaf", { value: false }), Object.hasOwn(direct, key));
+            const ordinary = { ["__thaw_class_identity_\u001eLeaf"]: true, value: 1 };
+            Object.preventExtensions(ordinary);
+            ordinary["__thaw_class_identity_\u001eLeaf"] = false;
+            console.log(Object.hasOwn(ordinary, key), ordinary["__thaw_class_identity_\u001eLeaf"] === false);
+            const frozen = new Leaf();
+            Object.freeze(frozen);
+            try { frozen["__thaw_class_identity_\u001eLeaf"] = true; }
+            catch (error) { console.log("frozen"); }
+            console.log(Object.hasOwn(frozen, key));
+            console.log(Reflect.set(frozen, "__thaw_class_identity_\u001eLeaf", true), Object.hasOwn(frozen, key));
+            const setter = new WithSetter();
+            setter.value = 7;
+            console.log(setter.stored, Object.keys(setter).length);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "class_marker_public_write_reveal"),
+        "false true\ntrue 2 true\ntrue true\ntrue\ntrue\nblocked 1\nfalse 1\nsealed\nfalse\nfalse 1 1 false\nfalse 1 1 false\nfalse false\ntrue true\ntrue true true\ntrue true\nfrozen\nfalse\nfalse false\n7 1\n");
+}
