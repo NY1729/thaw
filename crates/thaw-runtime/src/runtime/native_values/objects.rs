@@ -291,23 +291,7 @@ pub unsafe extern "C" fn thaw_object_order_rank(
     let Ok(key) = thaw_arena::NativeStr::from_ptr(key).to_str() else {
         return i64::MAX;
     };
-    let index = key.parse::<u32>().ok()
-        .filter(|&index| index != u32::MAX && index.to_string() == key);
-    let string_rank = OBJECT_CLASS_IDENTITIES.with(|stored| {
-        stored.borrow().get(&(object as usize))
-            .and_then(|metadata| metadata.own_key_order.as_ref())
-            .map_or(static_rank, |order| {
-                order.iter().position(|name| name == key)
-                    .map_or(i64::MAX, |index| i64::try_from(index).unwrap_or(i64::MAX))
-            })
-    });
-    if string_rank == i64::MAX {
-        return i64::MAX;
-    }
-    if let Some(index) = index {
-        return i64::from(index);
-    }
-    (1_i64 << 32).checked_add(string_rank).unwrap_or(i64::MAX)
+    thaw_object_order_rank_for_key(object, key, static_rank)
 }
 
 #[no_mangle]
@@ -464,6 +448,90 @@ fn parse_object_offset_layout(layout: &str) -> Option<HashMap<String, u64>> {
         if fields.insert(hex_name.to_owned(), offset).is_some() { return None; }
     }
     Some(fields)
+}
+
+/// The first registered descriptor, rather than the current structural
+/// view, is the authority for native own-property names.
+fn full_object_field_names(owner: *const u8) -> Option<Vec<String>> {
+    let descriptor = OBJECT_FIELD_OFFSETS.with(|all| {
+        all.borrow().get(&(owner as usize)).map(|(layout, _)| layout.clone())
+    })?;
+    object_layout_segments(&descriptor)?.into_iter().map(|segment| {
+        let colon = segment.find(':')?;
+        let length = segment[..colon].parse::<usize>().ok()?;
+        let end = colon.checked_add(1)?.checked_add(length.checked_mul(2)?)?;
+        let hex = segment.get(colon + 1..end)?;
+        let bytes = hex.as_bytes().chunks_exact(2).map(|pair| {
+            u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok()
+        }).collect::<Option<Vec<_>>>()?;
+        String::from_utf8(bytes).ok()
+    }).collect()
+}
+
+fn object_internal_accessor_slot(key: &str) -> bool {
+    key.starts_with("__thaw_getter_") || key.starts_with("__thaw_setter_")
+}
+
+#[no_mangle]
+pub extern "C" fn thaw_object_has_full_layout(owner: *const u8) -> bool {
+    OBJECT_FIELD_OFFSETS.with(|all| all.borrow().contains_key(&(owner as usize)))
+}
+
+#[no_mangle]
+/// # Safety
+/// `key` points to a live native string.
+pub unsafe extern "C" fn thaw_object_full_has_own(owner: *const u8, key: *const c_char) -> bool {
+    if owner.is_null() || key.is_null() { return false; }
+    let Ok(key) = thaw_arena::NativeStr::from_ptr(key).to_str() else { return false; };
+    full_object_field_names(owner).is_some_and(|fields| {
+        fields.iter().any(|field| field == key) && !object_internal_accessor_slot(key)
+            && !OBJECT_CLASS_IDENTITIES.with(|states| states.borrow().get(&(owner as usize))
+                .is_some_and(|state| state.hidden_markers.contains(key)))
+            && thaw_object_order_rank_for_key(owner, key, 0) != i64::MAX
+    })
+}
+
+/// Uses the same numeric-first and insertion-order rule as
+/// `thaw_object_order_rank`, without allocating temporary native strings.
+fn thaw_object_order_rank_for_key(owner: *const u8, key: &str, static_rank: i64) -> i64 {
+    let index = key.parse::<u32>().ok()
+        .filter(|&index| index != u32::MAX && index.to_string() == key);
+    let string_rank = OBJECT_CLASS_IDENTITIES.with(|stored| {
+        stored.borrow().get(&(owner as usize))
+            .and_then(|metadata| metadata.own_key_order.as_ref())
+            .map_or(static_rank, |order| order.iter().position(|name| name == key)
+                .map_or(i64::MAX, |index| i64::try_from(index).unwrap_or(i64::MAX)))
+    });
+    if string_rank == i64::MAX { return i64::MAX; }
+    index.map_or_else(|| (1_i64 << 32).checked_add(string_rank).unwrap_or(i64::MAX), i64::from)
+}
+
+#[no_mangle]
+/// Returns the original owner's visible own string keys. `include_non_enumerable`
+/// selects the `getOwnPropertyNames`/`Reflect.ownKeys` string-key behavior.
+pub extern "C" fn thaw_object_full_own_keys(
+    owner: *const u8, include_non_enumerable: bool,
+) -> *mut u8 {
+    let Some(fields) = full_object_field_names(owner) else { return std::ptr::null_mut(); };
+    let hidden = OBJECT_CLASS_IDENTITIES.with(|states| states.borrow()
+        .get(&(owner as usize)).map(|state| state.hidden_markers.clone()).unwrap_or_default());
+    let mut keys = fields.into_iter().enumerate().filter_map(|(index, key)| {
+        if hidden.contains(&key) || object_internal_accessor_slot(&key)
+            || (!include_non_enumerable && object_property_flags(owner, &key) & PROPERTY_ENUMERABLE == 0) {
+            return None;
+        }
+        let rank = thaw_object_order_rank_for_key(owner, &key, index as i64);
+        (rank != i64::MAX).then_some((rank, key))
+    }).collect::<Vec<_>>();
+    keys.sort_by_key(|(rank, _)| *rank);
+    let output = thaw_arena::thaw_arena_alloc((keys.len() + 1) * 8, 8);
+    if output.is_null() { return output; }
+    unsafe { output.cast::<i64>().write(keys.len() as i64); }
+    for (index, (_, key)) in keys.iter().enumerate() {
+        let Some(key) = arena_wtf8(key.as_bytes()) else { return std::ptr::null_mut(); };
+        unsafe { output.add(8 + index * 8).cast::<*const u8>().write_unaligned(key); }
+    }
+    output
 }
 
 #[no_mangle]
@@ -797,5 +865,37 @@ mod marker_reveal_tests {
         assert!(!unsafe { thaw_object_marker_hidden(object, full) });
         clear_object_states();
         assert!(!unsafe { thaw_object_has_class_identity(object, leaf.as_ptr()) });
+    }
+}
+
+#[cfg(test)]
+mod full_native_own_key_tests {
+    use super::*;
+
+    #[test]
+    fn rooted_key_array_keeps_its_arena_string_after_reset() {
+        std::thread::spawn(|| {
+            clear_object_states();
+            thaw_arena::thaw_arena_enable_tracing();
+            let owner = thaw_arena::thaw_arena_alloc(8, 8);
+            assert!(!owner.is_null());
+            let offsets = std::ffi::CString::new("0:61;").unwrap();
+            let descriptor = std::ffi::CString::new("1:611:78").unwrap();
+            assert!(unsafe { thaw_object_register_field_offsets(
+                owner, offsets.as_ptr(), descriptor.as_ptr(),
+            ) });
+            let keys = thaw_object_full_own_keys(owner, false);
+            assert!(!keys.is_null());
+            assert_eq!(unsafe { keys.cast::<i64>().read() }, 1);
+            let key = unsafe { keys.add(8).cast::<*const c_char>().read_unaligned() };
+            assert_eq!(unsafe { thaw_arena::NativeStr::from_ptr(key) }.to_bytes(), b"a");
+            let root = thaw_arena::ArenaRoot::new(keys as usize);
+            thaw_arena::thaw_arena_reset();
+            assert!(!thaw_arena::was_reclaimed(key as usize));
+            assert_eq!(unsafe { thaw_arena::NativeStr::from_ptr(key) }.to_bytes(), b"a");
+            drop(root);
+            thaw_arena::thaw_arena_reset();
+            assert!(thaw_arena::was_reclaimed(key as usize));
+        }).join().unwrap();
     }
 }

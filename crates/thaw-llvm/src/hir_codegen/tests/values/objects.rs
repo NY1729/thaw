@@ -86,6 +86,30 @@ fn compiles_object_has_own_for_fixed_objects() {
 }
 
 #[test]
+fn structurally_narrowed_native_object_uses_its_original_own_keys() {
+    let source = r#"
+        interface Prefix { a: number; b: number; }
+        interface Reverse { b: number; a: number; }
+        interface Leaf { a: number; }
+        function main(): void {
+            const owner = { a: 1, b: 2, c: 3 };
+            const prefix: Prefix = owner;
+            const reverse: Reverse = prefix;
+            const leaf: Leaf = reverse;
+            console.log(Object.keys(leaf).join(','));
+            console.log(Object.getOwnPropertyNames(reverse).join('|'));
+            console.log(Reflect.ownKeys(prefix).join('+'));
+            console.log(Object.hasOwn(leaf, 'c'), leaf.hasOwnProperty('b'));
+            console.log(Object.hasOwn(owner, 'missing'));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "structurally_narrowed_native_own_keys"),
+        "a,b,c\na|b|c\na+b+c\ntrue true\nfalse\n"
+    );
+}
+
+#[test]
 fn compiles_object_values_for_fixed_objects() {
     let source = r#"
         interface Config { first: number; second: string; enabled: boolean; }
