@@ -3282,3 +3282,32 @@ fn prefix_property_updates_bind_receiver_and_key_once() {
         "5 1 5 40\n8 1 1 RK 8 70\n4 1 1 1 BGS 40\n4 4\n4 5\ntrue 9\n"
     );
 }
+
+#[test]
+fn descriptor_maps_skip_hidden_class_markers_but_keep_same_named_user_fields() {
+    let source = r#"
+        class Leaf { value: number; constructor() { this.value = 3; } }
+        let reads = 0;
+        function main(): void {
+            const marker = "__thaw_class_identity_\u001eLeaf";
+            const instance = new Leaf();
+            const alias = instance;
+            const hidden = Object.getOwnPropertyDescriptors(alias);
+            console.log(Object.keys(hidden).join(","), Object.getOwnPropertyNames(hidden).join(","));
+            console.log(Reflect.ownKeys(hidden).length, Object.values(hidden).length, Object.entries(hidden).length);
+            console.log(Object.hasOwn(hidden, marker), Object.getOwnPropertyDescriptor(hidden, "__thaw_class_identity_\u001eLeaf") === undefined);
+            console.log(hidden.value.value, JSON.stringify(hidden).includes("__thaw_class_identity_\\u001eLeaf"), hidden instanceof Leaf);
+            const ordinary = {
+                ["__thaw_class_identity_\u001eLeaf"]: true,
+                get value(): number { reads++; return 5; },
+            };
+            const visible = Object.getOwnPropertyDescriptors(ordinary);
+            console.log(Object.keys(visible).length, Reflect.ownKeys(visible).length, Object.values(visible).length, Object.entries(visible).length);
+            console.log(Object.hasOwn(visible, marker), Object.getOwnPropertyDescriptor(visible, "__thaw_class_identity_\u001eLeaf") !== undefined);
+            console.log(JSON.stringify(visible).includes("__thaw_class_identity_\\u001eLeaf"), typeof visible.value.get, reads);
+            console.log(visible.value.get.call(ordinary), reads);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "class_marker_descriptor_map_visibility"),
+        "value value\n1 1 1\nfalse true\n3 false false\n2 2 2 2\ntrue true\ntrue function 0\n5 1\n");
+}
