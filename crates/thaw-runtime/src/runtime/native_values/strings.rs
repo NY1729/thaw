@@ -1170,15 +1170,14 @@ static NEXT_SYMBOL_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU
 
 #[no_mangle]
 /// # Safety
-/// `description` must point to a valid NUL-terminated UTF-8 string.
+/// `description` is null for absent, otherwise a live native WTF-8 string.
 pub unsafe extern "C" fn thaw_symbol_new(description: *const c_char) -> *const c_char {
-    if description.is_null() {
-        return std::ptr::null();
-    }
-    let description = unsafe { wtf8_bytes(description) };
     let id = NEXT_SYMBOL_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let mut symbol = format!("\u{3}{id}:").into_bytes();
-    symbol.extend_from_slice(description);
+    let mut symbol = format!("\u{3}{id}").into_bytes();
+    if !description.is_null() {
+        symbol.push(b':');
+        symbol.extend_from_slice(unsafe { wtf8_bytes(description) });
+    }
     arena_wtf8(&symbol).map_or(std::ptr::null(), |value| value.cast())
 }
 
@@ -1261,13 +1260,15 @@ pub unsafe extern "C" fn thaw_symbol_key_for(symbol: *const c_char) -> *const c_
 /// `thaw_symbol_for`.
 ///
 /// The description part of any symbol (`Symbol("x").description`), or the
-/// empty string for a symbol with no description.
+/// null pointer for a symbol with no description.
 pub unsafe extern "C" fn thaw_symbol_description(symbol: *const c_char) -> *const c_char {
     if symbol.is_null() {
         return std::ptr::null();
     }
     let symbol = unsafe { wtf8_bytes(symbol) };
-    let description = symbol.splitn(2, |&byte| byte == b':').nth(1).unwrap_or_default();
+    let Some(description) = symbol.splitn(2, |&byte| byte == b':').nth(1) else {
+        return std::ptr::null();
+    };
     arena_wtf8(description).map_or(std::ptr::null(), |value| value.cast())
 }
 

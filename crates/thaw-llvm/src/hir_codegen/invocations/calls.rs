@@ -1626,8 +1626,24 @@ impl<'ctx> HirCompiler<'ctx> {
                     .basic()
                     .ok_or("bigint radix conversion returned no value".into());
             }
-            "__thaw_symbol_new"
-            | "__thaw_symbol_to_string"
+            "__thaw_symbol_new" => {
+                let [description] = args else { return Err("Symbol expects one description".into()); };
+                let value = self.compile_expr(description)?;
+                let pointer = if value.is_struct_value() {
+                    let optional = value.into_struct_value();
+                    let present = self.builder.build_extract_value(optional, 0, "symbol_description_present")
+                        .map_err(|error| error.to_string())?.into_int_value();
+                    let text = self.builder.build_extract_value(optional, 1, "symbol_description_text")
+                        .map_err(|error| error.to_string())?.into_pointer_value();
+                    self.builder.build_select(present, text, text.get_type().const_null(), "symbol_description_pointer")
+                        .map_err(|error| error.to_string())?.into_pointer_value()
+                } else { value.into_pointer_value() };
+                return self.builder.build_call(self.module.get_function("thaw_symbol_new").unwrap(),
+                    &[pointer.into()], "symbol_new")
+                    .map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                    .ok_or("symbol creation returned no value".into());
+            }
+            "__thaw_symbol_to_string"
             | "__thaw_symbol_key"
             | "__thaw_symbol_for"
             | "__thaw_symbol_key_for"
