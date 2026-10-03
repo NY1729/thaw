@@ -1037,23 +1037,64 @@ impl<'a> FnLowerer<'a> {
                                  object, got {target_type:?}"
                             ));
                         };
-                        let descriptors = ecmascript_field_order(fields)
-                            .into_iter()
-                            .map(|index| -> Result<_, String> {
-                                let name = &fields[index].0;
-                                Ok((
-                                    name.clone(),
-                                    self.fixed_object_property_descriptor(
-                                        target.clone(),
-                                        &target_type,
-                                        fields,
-                                        name,
-                                    )?,
-                                ))
-                            })
-                            .collect::<Result<Vec<_>, _>>()?;
-                        return self
-                            .wrap_call_argument_bindings(HirExpr::ObjectLit(descriptors), &bindings);
+                        let source_name = format!("__thaw_descriptor_map_source_{}", self.next_binding);
+                        self.next_binding += 1;
+                        self.scope.insert(source_name.clone(), target_type.clone());
+                        let source = HirExpr::Var(source_name.clone());
+                        let mut descriptors = Vec::new();
+                        let mut map_fields = Vec::new();
+                        for index in ecmascript_field_order(fields) {
+                            let name = fields[index].0.clone();
+                            let descriptor = self.fixed_object_property_descriptor(
+                                source.clone(), &target_type, fields, &name,
+                            )?;
+                            let descriptor_type = self.infer_expr_type(&descriptor)?;
+                            let marker = name.starts_with("__thaw_class_identity_\u{1e}");
+                            let field_type = if marker {
+                                HirType::Optional(Box::new(descriptor_type.clone()))
+                            } else {
+                                descriptor_type.clone()
+                            };
+                            map_fields.push((name.clone(), field_type));
+                            descriptors.push((name, descriptor, descriptor_type, marker));
+                        }
+                        let map_type = HirType::Object(map_fields);
+                        let map_name = format!("__thaw_descriptor_map_{}", self.next_binding);
+                        self.next_binding += 1;
+                        self.scope.insert(map_name.clone(), map_type.clone());
+                        let map = HirExpr::Var(map_name.clone());
+                        let mut statements = vec![HirStmt::Let(
+                            map_name, map_type.clone(), HirExpr::ObjectAlloc(map_type.clone()),
+                        )];
+                        for (name, descriptor, descriptor_type, marker) in descriptors {
+                            let value = if marker {
+                                HirExpr::OptionalSome(Box::new(descriptor), descriptor_type)
+                            } else {
+                                descriptor
+                            };
+                            let write = HirStmt::Expr(HirExpr::PropAssign(
+                                Box::new(map.clone()), map_type.clone(), name.clone(), Box::new(value),
+                            ));
+                            if marker {
+                                let key = HirExpr::Lit(HirLit::Str(name));
+                                let hidden = HirExpr::Call(
+                                    Box::new(HirExpr::Var("__thaw_object_marker_hidden".into())),
+                                    vec![source.clone(), key.clone()],
+                                );
+                                let hide = HirStmt::Expr(HirExpr::Call(
+                                    Box::new(HirExpr::Var("__thaw_object_hide_marker".into())),
+                                    vec![map.clone(), key],
+                                ));
+                                statements.push(HirStmt::If(hidden, vec![hide], vec![write]));
+                            } else {
+                                statements.push(write);
+                            }
+                        }
+                        statements.push(HirStmt::Return(Some(map)));
+                        let result = self.wrap_call_argument_bindings(
+                            HirExpr::Block(statements), &[(source_name, target_type, target.clone())],
+                        )?;
+                        return self.wrap_call_argument_bindings(result, &bindings);
                     }
                     if object.sym == *"Object" && property.sym == *"defineProperties" {
                         // Desugars to descriptor assignments over literal
