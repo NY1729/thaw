@@ -1317,8 +1317,8 @@ fn retain_value<'js>(ctx: &Ctx<'js>, value: Value<'js>) -> Result<u64, String> {
     let live: Array = globals
         .get("__thaw_value_handle_live")
         .map_err(|_| "JavaScript value handle liveness registry is empty".to_string())?;
-    let object: Object = globals.get("Object").map_err(|error| error.to_string())?;
-    let identical: Function = object.get("is").map_err(|error| error.to_string())?;
+    let identical = ctx.userdata::<NativeBundleOwner<'_>>()
+        .ok_or("intrinsic Object.is is unavailable")?.object_is.clone();
     let refs: Array = globals
         .get("__thaw_value_handle_refs")
         .map_err(|_| "JavaScript value handle reference registry is empty".to_string())?;
@@ -1893,6 +1893,42 @@ fn install_graph_handle_functions(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
             Function::new(ctx.clone(), pin_native_graph_symbol)?)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+#[test]
+fn handle_registry_identity_ignores_later_object_is_override() {
+    let handles = with_context(|ctx| {
+        let values: Array = ctx.eval(
+            "[{}, {}, Symbol('same'), Symbol('same'), Promise.resolve(1), Promise.resolve(1)]",
+        ).expect("distinct live values");
+        let object: Object = ctx.globals().get("Object").expect("Object intrinsic");
+        let original: Function = object.get("is").expect("Object.is intrinsic");
+        let spoof: Function = ctx.eval("() => true").expect("spoof comparator");
+        object.set("is", spoof).expect("override Object.is");
+        let retained = (|| -> Result<Vec<u64>, String> {
+            let mut handles = Vec::new();
+            for index in 0..values.len() {
+                handles.push(retain_value(&ctx, values.get(index)
+                    .map_err(|error| error.to_string())?)?);
+            }
+            handles.push(retain_value(&ctx, values.get(0)
+                .map_err(|error| error.to_string())?)?);
+            Ok(handles)
+        })();
+        object.set("is", original).expect("restore Object.is");
+        retained.expect("retain values with captured identity")
+    });
+    assert_eq!(handles.len(), 7);
+    for left in 0..6 {
+        for right in left + 1..6 {
+            assert_ne!(handles[left], handles[right], "distinct values share a handle");
+        }
+    }
+    assert_eq!(handles[0], handles[6], "same object should reuse its handle");
+    for handle in handles {
+        assert_eq!(thaw_js_release_handle(handle), 1);
+    }
 }
 
 #[cfg(test)]

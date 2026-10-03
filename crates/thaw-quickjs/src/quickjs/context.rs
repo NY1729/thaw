@@ -217,6 +217,7 @@ struct NativeBundleOwner<'js> {
     opaque_edges: RefCell<HashMap<String, NativeBundleOpaqueEdge>>,
     origin_modules: RefCell<HashMap<String, NativeBundleOriginModule>>,
     then: Function<'js>,
+    object_is: Function<'js>,
 }
 
 unsafe impl<'js> rquickjs::JsLifetime<'js> for NativeBundleOwner<'js> {
@@ -1035,6 +1036,8 @@ fn ensure_context() {
                 install_shared_array_buffer_functions(&ctx);
                 let intrinsic_then: Function = ctx.eval("Promise.prototype.then")
                     .expect("failed to capture intrinsic Promise.then");
+                let intrinsic_object_is: Function = ctx.eval("Object.is")
+                    .expect("failed to capture intrinsic Object.is");
                 ctx.store_userdata(NativeBundleOwner {
                     next_sequence: Cell::new(0),
                     sources: RefCell::new(HashMap::new()),
@@ -1044,6 +1047,7 @@ fn ensure_context() {
                     opaque_edges: RefCell::new(HashMap::new()),
                     origin_modules: RefCell::new(HashMap::new()),
                     then: intrinsic_then,
+                    object_is: intrinsic_object_is,
                 }).expect("native bundle owner userdata is already borrowed");
                 ctx.globals().prop("__thaw_register_native_bundle",
                     Function::new(ctx.clone(), register_native_bundle)
