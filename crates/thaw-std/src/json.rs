@@ -148,6 +148,7 @@ thread_local! {
 struct TypedDecodeScope {
     children: Vec<usize>,
     handles: Vec<u64>,
+    origins: Vec<(usize, u64, u64)>,
 }
 
 fn track_typed_decode_child(value: *mut Value) -> *mut Value {
@@ -212,6 +213,7 @@ pub extern "C" fn thaw_json_typed_decode_scope_end(mode: u8) {
             if let Some(parent) = scopes.borrow_mut().last_mut().and_then(Option::as_mut) {
                 parent.children.extend(scope.children);
                 parent.handles.extend(scope.handles);
+                parent.origins.extend(scope.origins);
             }
         });
         return;
@@ -220,6 +222,22 @@ pub extern "C" fn thaw_json_typed_decode_scope_end(mode: u8) {
     // Cleanup callbacks may report their own Host error. Keep the conversion's
     // original state and do not let a cleanup-only error poison the next call.
     let original_host_error = HOST_ERROR.with(|slot| slot.borrow_mut().take());
+    // Remove sidecar entries before any release callback can re-enter and
+    // observe or reuse the arena closure address. A successful conversion
+    // disarms this list; a later sibling failure rolls it back.
+    for (closure, handle, serial) in scope.origins.into_iter().rev() {
+        let removed = CALLBACK_ORIGINS.with(|origins| {
+            let mut origins = origins.borrow_mut();
+            if origins.get(&closure) == Some(&(handle, serial)) {
+                origins.remove(&closure)
+            } else { None }
+        });
+        if removed.is_some() {
+            if let Some(ops) = HOST_OPERATIONS.with(|slot| slot.get()) {
+                without_typed_decode_scope(|| (ops.release)(handle));
+            }
+        }
+    }
     // Remove the scope before dropping any child or handle: release callbacks
     // can re-enter a separate typed decoder on this thread.
     for child in scope.children.into_iter().rev() {
@@ -231,6 +249,106 @@ pub extern "C" fn thaw_json_typed_decode_scope_end(mode: u8) {
         }
     }
     HOST_ERROR.with(|slot| *slot.borrow_mut() = original_host_error);
+}
+
+// A decoded JS Function closure owns exactly one independently retained
+// original handle. Its arena reachability controls that handle's lifetime.
+thread_local! {
+    static CALLBACK_ORIGINS: RefCell<HashMap<usize, (u64, u64)>> = RefCell::new(HashMap::new());
+    static NEXT_CALLBACK_ORIGIN: Cell<u64> = const { Cell::new(0) };
+}
+
+fn reset_callback_origins(tracing: bool) {
+    let dead = CALLBACK_ORIGINS.with(|origins| origins.borrow().iter()
+        .filter_map(|(&closure, &(handle, serial))|
+            (!tracing || thaw_arena::was_reclaimed(closure))
+                .then_some((closure, handle, serial)))
+        .collect::<Vec<_>>());
+    for (closure, handle, serial) in dead {
+        let removed = CALLBACK_ORIGINS.with(|origins| {
+            let mut origins = origins.borrow_mut();
+            if origins.get(&closure) == Some(&(handle, serial)) {
+                origins.remove(&closure)
+            } else { None }
+        });
+        if removed.is_some() {
+            // Release callbacks may report a cleanup-only Host error; keep
+            // the error that preceded arena reset authoritative.
+            let prior = HOST_ERROR.with(|slot| slot.borrow_mut().take());
+            if let Some(ops) = HOST_OPERATIONS.with(|slot| slot.get()) {
+                without_typed_decode_scope(|| (ops.release)(handle));
+            }
+            HOST_ERROR.with(|slot| *slot.borrow_mut() = prior);
+        }
+    }
+}
+
+/// Acquires one callback-origin reference for either a live Host value or a
+/// branded handle placeholder. The active typed scope keeps failure ownership
+/// through registration and transfers lifetime to the sidecar only on success.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_json_callback_origin_acquire(value: *const Value) -> u64 {
+    let Some(value) = (unsafe { value.as_ref() }) else { return 0; };
+    let handle = unsafe { thaw_json_borrowed_handle_id(value as *const Value) };
+    if handle == 0 { return 0; }
+    // A branded marker is only a handle carrier. The typed Function lane
+    // must verify the live value, including for an already-decoded Host.
+    if host_query_handle(handle, 14).as_deref() != Some("1") {
+        set_host_error("Callback origin is not a function".into());
+        return 0;
+    }
+    let retained = HOST_OPERATIONS.with(|slot| slot.get())
+        .is_some_and(|ops| without_typed_decode_scope(|| (ops.retain)(handle)) != 0);
+    if !retained { return 0; }
+    TYPED_DECODE_SCOPES.with(|scopes| {
+        if let Some(scope) = scopes.borrow_mut().last_mut().and_then(Option::as_mut) {
+            scope.handles.push(handle);
+        }
+    });
+    handle
+}
+
+/// Associates the acquired reference with its initialized arena closure.
+/// The active conversion scope still owns rollback until all sibling fields
+/// complete; on success the sidecar owns the reference until arena reset.
+#[no_mangle]
+pub extern "C" fn thaw_json_register_callback_origin(closure: *const u8, handle: u64) -> u8 {
+    if closure.is_null() || handle == 0 {
+        set_host_error("Invalid callback origin".into());
+        return 0;
+    }
+    let Some(serial) = NEXT_CALLBACK_ORIGIN.with(|next| next.get().checked_add(1)
+        .inspect(|serial| next.set(*serial))) else {
+        set_host_error("Callback origin serial exhausted".into());
+        return 0;
+    };
+    let inserted = CALLBACK_ORIGINS.with(|origins| {
+        let mut origins = origins.borrow_mut();
+        if origins.contains_key(&(closure as usize)) { false }
+        else { origins.insert(closure as usize, (handle, serial)); true }
+    });
+    if !inserted {
+        set_host_error("Callback origin already registered".into());
+        return 0;
+    }
+    thaw_arena::register_reset_hook(reset_callback_origins);
+    TYPED_DECODE_SCOPES.with(|scopes| {
+        // A reentrant callback may sit behind a None boundary; never steal
+        // an identically numbered retain from its suspended parent scope.
+        if let Some(scope) = scopes.borrow_mut().last_mut().and_then(Option::as_mut) {
+            if let Some(index) = scope.handles.iter().rposition(|id| *id == handle) {
+                scope.handles.swap_remove(index);
+                scope.origins.push((closure as usize, handle, serial));
+            }
+        }
+    });
+    1
+}
+
+#[no_mangle]
+pub extern "C" fn thaw_json_callback_origin_handle(closure: *const u8) -> u64 {
+    CALLBACK_ORIGINS.with(|origins| origins.borrow()
+        .get(&(closure as usize)).map_or(0, |(handle, _)| *handle))
 }
 
 fn set_host_error(message: String) {
@@ -494,11 +612,15 @@ fn host_enumerable_entries(lease: &HostLease) -> Vec<(Vec<u8>, Value)> {
 }
 
 fn host_query(lease: &HostLease, operation: u8) -> Option<String> {
+    host_query_handle(lease.handle, operation)
+}
+
+fn host_query_handle(handle: u64, operation: u8) -> Option<String> {
     let Some(ops) = HOST_OPERATIONS.with(|slot| slot.get()) else {
         set_host_error("Host operations unavailable".into());
         return None;
     };
-    let result = without_typed_decode_scope(|| (ops.query)(lease.handle, operation));
+    let result = without_typed_decode_scope(|| (ops.query)(handle, operation));
     if !result.error.is_null() {
         let error = to_str(result.error);
         unsafe { thaw_arena::destroy_string(result.error.cast_mut()) };
@@ -5657,6 +5779,12 @@ mod tests {
         HostTextResult { value: std::ptr::null(), error: std::ptr::null() }
     }
 
+    extern "C" fn callback_origin_test_query(handle: u64, operation: u8) -> HostTextResult {
+        assert_eq!(operation, 14);
+        let kind = if handle == 42 { b"1".as_slice() } else { b"0".as_slice() };
+        HostTextResult { value: thaw_arena::owned_string(kind), error: std::ptr::null() }
+    }
+
     extern "C" fn cleanup_test_host_query(_: u64, _: u8) -> HostTextResult {
         HostTextResult { value: thaw_arena::owned_string(b"object"), error: std::ptr::null() }
     }
@@ -6862,6 +6990,103 @@ mod tests {
         }).join().unwrap();
     }
 
+
+    #[test]
+    fn callback_origin_transfer_owns_one_handle_until_closure_reclaim() {
+        std::thread::spawn(|| {
+            HOST_RELEASES.with(|count| count.set(0));
+            TYPED_SCOPE_RETAINS.with(|count| count.set(0));
+            HOST_OPERATIONS.with(|slot| slot.set(Some(HostOperations {
+                retain: retain_typed_scope_host,
+                release: count_host_release,
+                get: reentrant_typed_scope_get,
+                query: callback_origin_test_query,
+                date_set: unused_typed_scope_date,
+                set: unused_typed_scope_set,
+                predicate: unused_typed_scope_predicate,
+                enumerate: unused_typed_scope_text,
+            })));
+            thaw_arena::thaw_arena_enable_tracing();
+            let host = leak(Value::Host(Rc::new(HostLease {
+                handle: 42, release: count_host_release,
+            })));
+            thaw_json_typed_decode_scope_begin();
+            assert_eq!(unsafe { thaw_json_callback_origin_acquire(host) }, 42);
+            let closure = thaw_arena::thaw_arena_alloc(24, 8);
+            assert!(!closure.is_null());
+            assert_eq!(thaw_json_register_callback_origin(closure, 42), 1);
+            assert_eq!(thaw_json_callback_origin_handle(closure), 42);
+            thaw_json_typed_decode_scope_end(0);
+            HOST_RELEASES.with(|count| assert_eq!(count.get(), 0));
+            let root = thaw_arena::ArenaRoot::new(closure as usize);
+            thaw_arena::thaw_arena_reset();
+            HOST_RELEASES.with(|count| assert_eq!(count.get(), 0));
+            drop(root);
+            thaw_arena::thaw_arena_reset();
+            HOST_RELEASES.with(|count| assert_eq!(count.get(), 1));
+            assert_eq!(thaw_json_callback_origin_handle(closure), 0);
+            thaw_json_typed_decode_scope_begin();
+            assert_eq!(unsafe { thaw_json_callback_origin_acquire(host) }, 42);
+            thaw_json_typed_decode_scope_end(1);
+            HOST_RELEASES.with(|count| assert_eq!(count.get(), 2));
+            let forged = parse(r#"{"__thaw_js_handle_id__":42}"#);
+            assert_eq!(unsafe { thaw_json_callback_origin_acquire(forged) }, 0);
+            let branded = thaw_json_brand_wrapper(parse(r#"{"__thaw_js_handle_id__":42}"#));
+            thaw_json_typed_decode_scope_begin();
+            assert_eq!(unsafe { thaw_json_callback_origin_acquire(branded) }, 42);
+            thaw_json_typed_decode_scope_end(1);
+            TYPED_SCOPE_RETAINS.with(|count| assert_eq!(count.get(), 3));
+            HOST_RELEASES.with(|count| assert_eq!(count.get(), 3));
+            unsafe { thaw_json_destroy(forged); thaw_json_destroy(branded); thaw_json_destroy(host) };
+            HOST_RELEASES.with(|count| assert_eq!(count.get(), 4));
+        }).join().unwrap();
+    }
+
+    #[test]
+    fn callback_origin_nested_failure_rolls_back_and_rejects_non_functions() {
+        std::thread::spawn(|| {
+            HOST_RELEASES.with(|count| count.set(0));
+            TYPED_SCOPE_RETAINS.with(|count| count.set(0));
+            HOST_OPERATIONS.with(|slot| slot.set(Some(HostOperations {
+                retain: retain_typed_scope_host,
+                release: count_host_release,
+                get: reentrant_typed_scope_get,
+                query: callback_origin_test_query,
+                date_set: unused_typed_scope_date,
+                set: unused_typed_scope_set,
+                predicate: unused_typed_scope_predicate,
+                enumerate: unused_typed_scope_text,
+            })));
+            thaw_arena::thaw_arena_enable_tracing();
+            let invalid = leak(Value::Host(Rc::new(HostLease {
+                handle: 43, release: count_host_release,
+            })));
+            thaw_json_typed_decode_scope_begin();
+            assert_eq!(unsafe { thaw_json_callback_origin_acquire(invalid) }, 0);
+            TYPED_SCOPE_RETAINS.with(|count| assert_eq!(count.get(), 0));
+            let error = thaw_json_take_host_error();
+            assert_eq!(to_str(error), "Callback origin is not a function");
+            unsafe { thaw_arena::destroy_string(error.cast_mut()) };
+            thaw_json_typed_decode_scope_end(1);
+            let valid = leak(Value::Host(Rc::new(HostLease {
+                handle: 42, release: count_host_release,
+            })));
+            thaw_json_typed_decode_scope_begin();
+            thaw_json_typed_decode_scope_begin();
+            assert_eq!(unsafe { thaw_json_callback_origin_acquire(valid) }, 42);
+            let closure = thaw_arena::thaw_arena_alloc(24, 8);
+            assert_eq!(thaw_json_register_callback_origin(closure, 42), 1);
+            thaw_json_typed_decode_scope_end(2);
+            assert_eq!(thaw_json_callback_origin_handle(closure), 42);
+            thaw_json_typed_decode_scope_end(1);
+            assert_eq!(thaw_json_callback_origin_handle(closure), 0);
+            TYPED_SCOPE_RETAINS.with(|count| assert_eq!(count.get(), 1));
+            HOST_RELEASES.with(|count| assert_eq!(count.get(), 1));
+            thaw_arena::thaw_arena_reset();
+            HOST_RELEASES.with(|count| assert_eq!(count.get(), 1));
+            unsafe { thaw_json_destroy(valid); thaw_json_destroy(invalid); }
+        }).join().unwrap();
+    }
 
     #[test]
     fn arena_owned_host_receiver_survives_root_then_releases() {

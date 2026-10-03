@@ -3707,6 +3707,33 @@ fn non_arrow_json_receiver_enables_arena_tracing_before_module_init() {
 }
 
 #[test]
+fn typed_js_function_origin_enables_tracing_before_module_init() {
+    let source = r#"
+        declare function __thaw_typed_js_72657475726e43616c6c6261636b(): {
+            callback: () => number;
+            later: number;
+        };
+        function __thaw_module_init(): void {}
+        function main(): void {
+            const result = __thaw_typed_js_72657475726e43616c6c6261636b();
+            console.log(result.later);
+        }
+    "#;
+    let module = thaw_parser::parse_typescript(source).unwrap();
+    let program = thaw_hir::lower_module(&module).unwrap();
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "typed_function_origin_tracing");
+    compiler.compile_program(&program).unwrap();
+    let ir = compiler.print_to_string();
+    assert!(ir.contains("call i64 @thaw_json_callback_origin_acquire("), "{ir}");
+    let main = ir.find("define i32 @main(").expect(&ir);
+    let body = &ir[main..main + ir[main..].find("\n}").unwrap()];
+    let enable = body.find("call void @thaw_arena_enable_tracing(").expect(body);
+    let init = body.find("call void @__thaw_module_init(").expect(body);
+    assert!(enable < init, "{body}");
+}
+
+#[test]
 fn optional_void_callable_adapter_preserves_calls_and_void_returns() {
     let source = r#"
         function emit(value: number = 7): void { console.log(value); }
