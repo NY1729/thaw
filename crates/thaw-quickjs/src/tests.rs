@@ -7097,3 +7097,30 @@ fn result_error_abi_keeps_embedded_nul_in_throw_rejection_and_getter() {
     unsafe { thaw_arena::destroy_string(getter.error.cast_mut()) };
     assert_eq!(thaw_js_release_handle(handle), 1);
 }
+
+#[cfg(feature = "intl")]
+#[test]
+fn intl_datetime_resolved_hour_cycle_matches_locale_and_midnight() {
+    assert_eq!(load(r#"
+        function cycles() {
+            return ['en-US', 'de', 'en-US-u-hc-h23', 'de-u-hc-h12', 'en-US-u-hc-h24']
+                .map(locale => {
+                    const d = new Intl.DateTimeFormat(locale, {hour: 'numeric', timeZone: 'UTC'});
+                    const r = d.resolvedOptions();
+                    return [r.hourCycle, r.hour12,
+                        d.formatToParts(new Date(Date.UTC(2024, 0, 1, 0)))
+                            .find(p => p.type === 'hour').value];
+                });
+        }
+        function localizedMidnight() {
+            const d = new Intl.DateTimeFormat('ar-u-hc-h24', {hour: 'numeric', timeZone: 'UTC'});
+            return [d.resolvedOptions().hourCycle,
+                d.formatToParts(new Date(Date.UTC(2024, 0, 1, 0))).find(p => p.type === 'hour').value];
+        }
+    "#), 1);
+    assert_eq!(call("cycles", "[]"), serde_json::json!([
+        ["h12", true, "12"], ["h23", false, "00"], ["h23", false, "00"],
+        ["h12", true, "12"], ["h24", false, "24"]
+    ]).to_string());
+    assert_eq!(call("localizedMidnight", "[]"), serde_json::json!(["h24", "٢٤"]).to_string());
+}
