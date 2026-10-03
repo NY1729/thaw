@@ -1,3 +1,144 @@
+
+#[test]
+fn mixed_json_add_respects_literal_optional_string_and_operand_order() {
+    let source = r#"
+        class Hook {
+            [Symbol.toPrimitive](hint: string): any {
+                order += "P";
+                return "H";
+            }
+        }
+        let order: string = "";
+        function rhs(): number { order += "R"; return 1; }
+        function optional(present: boolean): string | undefined {
+            if (present) return "S";
+            return undefined;
+        }
+        function nullable(present: boolean): string | null {
+            if (present) return "N";
+            return null;
+        }
+        function choose(present: boolean): string | number {
+            if (present) return "Q";
+            return 2;
+        }
+        function chooseSymbol(present: boolean): symbol | number {
+            if (present) return Symbol("tag");
+            return 2;
+        }
+        function chooseBigString(text: boolean): bigint | string {
+            if (text) return "B";
+            return 2n;
+        }
+        function main(): void {
+            const literal: "L" = "L";
+            const value: any = 4;
+            console.log(literal + value, value + literal, literal + 1n);
+            try { console.log(literal + Symbol("x")); }
+            catch (error) { console.log(error instanceof TypeError); }
+            console.log(value + optional(true), optional(true) + value,
+                value + optional(false), optional(false) + value);
+            console.log(value + nullable(true), nullable(true) + value,
+                value + nullable(false), nullable(false) + value);
+            console.log(value + choose(true), value + choose(false),
+                choose(true) + value, choose(false) + value);
+            console.log(optional(true) + 1n, 1n + optional(true));
+            try { console.log(optional(false) + 1n); }
+            catch (error) { console.log(error instanceof TypeError); }
+            try { console.log(1n + optional(false)); }
+            catch (error) { console.log(error instanceof TypeError); }
+            try { console.log(value + Symbol("right")); }
+            catch (error) { console.log(error instanceof TypeError); }
+            try { console.log(Symbol("left") + value); }
+            catch (error) { console.log(error instanceof TypeError); }
+            try { console.log(value + chooseSymbol(true)); }
+            catch (error) { console.log(error instanceof TypeError); }
+            console.log(value + chooseSymbol(false));
+            console.log(chooseBigString(false) + chooseBigString(false) === 4n);
+            console.log(chooseBigString(true) + chooseBigString(false));
+            try { console.log(chooseBigString(false) + 4); }
+            catch (error) { console.log(error instanceof TypeError); }
+            console.log(new Hook() + rhs(), order);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "mixed_json_add_literal_optional_order"),
+        "L4 4L L1\ntrue\n4S S4 NaN NaN\n4N N4 4 4\n4Q 6 Q4 6\nS1 1S\ntrue\ntrue\ntrue\ntrue\ntrue\n6\ntrue\nB2\ntrue\nH1 RP\n");
+}
+
+#[test]
+fn normalized_constructor_static_writes_keep_time_and_optional_storage() {
+    let source = r#"
+        let order: string = "";
+        let phase: number = 0;
+        function Box() { this.value = 0; }
+        let before: boolean = Box.count === undefined;
+        let beforeLabel: boolean = Box.label === undefined;
+        function rhs(): number { order += "R"; return phase; }
+        order += "A";
+        phase = 4;
+        Box.effect = rhs();
+        order += "B";
+        Box.count = phase + 0;
+        Box.count = phase + 1;
+        let old: number = Box.count++;
+        Box.count += 1;
+        let updated: number = ++Box.count;
+        Box.label = "x";
+        Box.label += 1;
+        function main(): void {
+            console.log(before, beforeLabel, order, old, updated, Box.count, Box.label);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "normalized_constructor_static_order"),
+        "true true ARB 5 8 8 x1\n");
+}
+
+#[test]
+fn normalized_constructor_mixed_json_static_add_uses_runtime_primitive() {
+    let source = r#"
+        function Box() { this.value = 0; }
+        let order: string = "";
+        function rhs(): number { order += "R"; return 2; }
+        Box.mixed = "a";
+        let joined: any = Box.mixed += rhs();
+        Box.mixed = 1;
+        let added: any = Box.mixed += rhs();
+        function suffix(): string { order += "S"; return "x"; }
+        let stringJoined: any = Box.mixed += suffix();
+        const left: any = "z";
+        const right: any = 4;
+        const staticLeft: string = "L";
+        function main(): void {
+            console.log(joined, added, stringJoined, Box.mixed,
+                left + 2, right + 2, right + "x", "x" + right,
+                staticLeft + right, order);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "normalized_mixed_json_static_add"),
+        "a2 3 3x 3x z2 6 4x x4 L4 RRS\n");
+}
+#[test]
+fn normalized_json_static_add_preserves_live_js_operand_order() {
+    let source = r#"
+        function Box() { this.value = 0; }
+        Box.mixed = "a";
+        Box.mixed = 1;
+        function main(): void {
+            const loaded: boolean = loadScript("globalThis.liveAddText = 'x'; globalThis.liveAddNumber = 2;");
+            const text: JsValue = getDynamicValue("liveAddText");
+            const number: JsValue = getDynamicValue("liveAddNumber");
+            const native: any = 1;
+            console.log(loaded, native + text, text + native);
+            const withText: any = Box.mixed += text;
+            Box.mixed = 2;
+            const withNumber: any = Box.mixed += number;
+            console.log(withText, withNumber, Box.mixed);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "normalized_json_live_add"),
+        "true 1x x1\n1x 4 4\n");
+}
+
 #[test]
 fn native_instance_accessor_update_orders_receiver_getter_setter_and_result() {
     let source = r#"
