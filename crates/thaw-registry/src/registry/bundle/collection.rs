@@ -216,11 +216,13 @@ fn prepare_mixed_native_render(main_key: &str, modules: &[BundledModule]) -> Opt
         && !module.commonjs_context && !module.uses_legacy_bundle_globals
         && !module.has_nonliteral_module_load && !module.uses_import_meta)
         .map(|module| module.key.clone()).collect::<BTreeSet<_>>();
-    if !native.contains(main_key) || native.len() == modules.len() { return None; }
-    // CJS-first require of ESM, Worker entry rewriting and nonliteral loads
-    // are separate gates. A mixed candidate cannot silently use those paths.
-    if modules.iter().any(|module| module.requires.iter().any(|(_, target)| native.contains(target))
-        || module.has_nonliteral_module_load || module.uses_legacy_bundle_globals && native.contains(&module.key)) {
+    if native.is_empty() || native.len() == modules.len() { return None; }
+    // Nonliteral loads, serialized Worker URLs, and legacy globals still use
+    // the established factory renderer. Literal CommonJS require edges can use the private native
+    // evaluator after the shared synchronous/async guard in the renderer.
+    if modules.iter().any(|module| module.has_nonliteral_module_load
+        || module.source.contains("data:text/javascript;thaw-bundle,")
+        || module.uses_legacy_bundle_globals && native.contains(&module.key)) {
         return None;
     }
     let module_keys = modules.iter().map(|module| module.key.as_str()).collect::<BTreeSet<_>>();
@@ -318,12 +320,15 @@ fn prepare_mixed_native_render(main_key: &str, modules: &[BundledModule]) -> Opt
             .filter(move |(source, _, _)| source == owner).cloned()).collect::<Vec<_>>();
         static_link_checks.insert(entry.key.clone(), checks);
     }
+    let registration = serde_json::json!({ "main": if native.contains(main_key) { main_key } else {
+        native.iter().next().map(String::as_str)?
+    }, "modules": records,
+        "opaqueKeys": opaque, "opaqueEdges": opaque_edges, "origins": origins });
     Some(MixedBundleRender {
         native_keys: native,
         mixed_keys: mixed,
         static_link_checks,
-        registration: serde_json::json!({ "main": main_key, "modules": records,
-            "opaqueKeys": opaque, "opaqueEdges": opaque_edges, "origins": origins }),
+        registration,
     })
 }
 

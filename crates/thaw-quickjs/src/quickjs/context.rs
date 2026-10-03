@@ -187,6 +187,7 @@ fn install_shared_array_buffer_functions(ctx: &Ctx<'_>) {
 // QuickJS itself owns declared/evaluated modules in its per-runtime cache.
 struct NativeBundleSource<'js> {
     source: String,
+    unmarked_source: String,
     imports: std::collections::HashMap<String, String>,
     sequence: u64,
     linked: bool,
@@ -386,6 +387,114 @@ fn native_bundle_error(message: &str) -> rquickjs::Error {
     rquickjs::Error::new_from_js_message("native bundle", "valid bundle", message)
 }
 
+// A computed query/fragment has the same source as its registered base, but
+// it is a distinct ESM instance. Keep its marker, origin and opaque imports
+// distinct while ordinary static dependencies retain their registered keys.
+fn native_bundle_instance_token<'js>(
+    ctx: &Ctx<'js>, sequence: u64, key: &str, factory: &str,
+) -> rquickjs::Result<String> {
+    if key.contains('\0') || factory.contains('\0') {
+        return Err(native_bundle_error("NUL in native module key"));
+    }
+    if key != factory && !key.strip_prefix(factory)
+        .is_some_and(|suffix| suffix.starts_with('?') || suffix.starts_with('#')) {
+        return Err(native_bundle_error("invalid native instance suffix"));
+    }
+    let prefix = format!("thaw-bundle:{sequence}:");
+    let token = format!("{prefix}{key}");
+    let owner = ctx.userdata::<NativeBundleOwner<'js>>()
+        .ok_or_else(|| native_bundle_error("missing native bundle owner"))?;
+    if let Some(existing) = owner.sources.borrow().get(&token) {
+        return if existing.sequence == sequence { Ok(token) }
+            else { Err(native_bundle_error("foreign native bundle target")) };
+    }
+    if owner.opaque_edges.borrow().contains_key(&token)
+        || owner.origin_modules.borrow().contains_key(&token) {
+        return Err(native_bundle_error("native instance key collision"));
+    }
+    let suffix = key.strip_prefix(factory)
+        .filter(|suffix| suffix.starts_with('?') || suffix.starts_with('#'))
+        .ok_or_else(|| native_bundle_error("uncollected native module instance"))?;
+    if suffix.is_empty() || factory.is_empty() {
+        return Err(native_bundle_error("uncollected native module instance"));
+    }
+    let base = format!("{prefix}{factory}");
+    let (unmarked_source, mut imports) = {
+        let sources = owner.sources.borrow();
+        let source = sources.get(&base)
+            .filter(|source| source.sequence == sequence)
+            .ok_or_else(|| native_bundle_error("foreign native bundle factory"))?;
+        (source.unmarked_source.clone(), source.imports.clone())
+    };
+    let marker = native_bundle_marker(&token);
+    if imports.contains_key(&marker) || owner.markers.borrow().contains_key(&marker) {
+        return Err(native_bundle_error("reserved native instance marker"));
+    }
+    let mut rewrites = HashMap::<String, String>::new();
+    let mut opaque = Vec::<(String, NativeBundleOpaqueEdge)>::new();
+    let mut origins = Vec::<(String, NativeBundleOriginModule)>::new();
+    for (index, target) in imports.values_mut().enumerate() {
+        if let Some(rewritten) = rewrites.get(target) {
+            *target = rewritten.clone();
+            continue;
+        }
+        let original = target.clone();
+        let original_token = format!("{prefix}{original}");
+        let alias = if let Some(edge) = owner.opaque_edges.borrow().get(&original_token) {
+            if edge.sequence != sequence || edge.importer != factory {
+                return Err(native_bundle_error("foreign opaque instance edge"));
+            }
+            let alias = format!("{key}\u{1f}opaque:{index}");
+            opaque.push((format!("{prefix}{alias}"), NativeBundleOpaqueEdge {
+                sequence, importer: key.to_owned(), specifier: edge.specifier.clone(),
+                target: edge.target.clone(), factory: edge.factory.clone(),
+                asynchronous: edge.asynchronous,
+            }));
+            Some(alias)
+        } else if let Some(origin) = owner.origin_modules.borrow().get(&original_token) {
+            if origin.sequence != sequence || origin.owner != factory {
+                return Err(native_bundle_error("foreign native origin capability"));
+            }
+            let alias = format!("{key}\u{1f}origin:{index}");
+            origins.push((format!("{prefix}{alias}"), NativeBundleOriginModule {
+                sequence, owner: key.to_owned(),
+            }));
+            Some(alias)
+        } else {
+            None
+        };
+        if let Some(alias) = alias {
+            rewrites.insert(original, alias.clone());
+            *target = alias;
+        }
+    }
+    let mut planned = std::collections::HashSet::new();
+    for (target, _) in &opaque {
+        if !planned.insert(target.clone()) || !planned.insert(format!("{target}/load")) {
+            return Err(native_bundle_error("native instance edge collision"));
+        }
+    }
+    for (target, _) in &origins {
+        if !planned.insert(target.clone()) {
+            return Err(native_bundle_error("native instance origin collision"));
+        }
+    }
+    if planned.iter().any(|target|
+        owner.sources.borrow().contains_key(target)
+            || owner.opaque_edges.borrow().contains_key(target)
+            || owner.origin_modules.borrow().contains_key(target)) {
+        return Err(native_bundle_error("native instance target collision"));
+    }
+    owner.sources.borrow_mut().insert(token.clone(), NativeBundleSource {
+        source: native_bundle_marked_source(&unmarked_source, &marker),
+        unmarked_source, imports, sequence, linked: false, module: None,
+    });
+    owner.opaque_edges.borrow_mut().extend(opaque);
+    owner.origin_modules.borrow_mut().extend(origins);
+    owner.markers.borrow_mut().insert(marker, token.clone());
+    Ok(token)
+}
+
 fn register_native_bundle<'js>(
     ctx: Ctx<'js>, payload: String,
     opaque_load: rquickjs::function::Opt<Function<'js>>,
@@ -509,20 +618,41 @@ fn register_native_bundle<'js>(
     })?;
     evaluate.prop("readNative", reader)?;
     let native_sequence = sequence;
-    let native_ready = Function::new(ctx.clone(), move |ctx: Ctx<'js>, key: String| {
-        let token = {
-            let owner = ctx.userdata::<NativeBundleOwner<'js>>()
-                .ok_or_else(|| native_bundle_error("missing native bundle owner"))?;
-            let token = format!("thaw-bundle:{native_sequence}:{key}");
-            let sources = owner.sources.borrow();
-            if !sources.get(&token).is_some_and(|source| source.sequence == native_sequence) {
-                return Err(native_bundle_error("foreign native bundle target"));
-            }
-            token
-        };
+    let native_ready = Function::new(ctx.clone(), move |ctx: Ctx<'js>, key: String, factory: rquickjs::function::Opt<String>| {
+        let factory = factory.0.unwrap_or_else(|| key.clone());
+        let token = native_bundle_instance_token(&ctx, native_sequence, &key, &factory)?;
         eval_native_entry(ctx, token)
     })?;
     evaluate.prop("evalNative", native_ready)?;
+    let sync_sequence = sequence;
+    let native_sync = Function::new(ctx.clone(), move |ctx: Ctx<'js>, key: String, factory: rquickjs::function::Opt<String>| -> rquickjs::Result<Value<'js>> {
+        let factory = factory.0.unwrap_or_else(|| key.clone());
+        let token = native_bundle_instance_token(&ctx, sync_sequence, &key, &factory)?;
+        let ready = eval_native_entry(ctx.clone(), token.clone())?;
+        if ready.state() == rquickjs::promise::PromiseState::Rejected {
+            return ready.result::<Value<'js>>().expect("rejected promise has a result");
+        }
+        let declared = {
+            let owner = ctx.userdata::<NativeBundleOwner<'js>>()
+                .ok_or_else(|| native_bundle_error("missing native bundle owner"))?;
+            let sources = owner.sources.borrow();
+            sources.get(&token).and_then(|source| source.module.clone())
+                .ok_or_else(|| native_bundle_error("native module was not declared"))?
+        };
+        // QuickJS returns the cached evaluation promise for a module already
+        // evaluating or evaluated; this does not run the module body twice.
+        let (_, evaluation) = declared.eval()?;
+        match evaluation.state() {
+            rquickjs::promise::PromiseState::Resolved =>
+                read_native_bundle_export(ctx, format!("thaw-bundle:{sync_sequence}:{}", key), key,
+                    rquickjs::function::Opt(None)),
+            rquickjs::promise::PromiseState::Rejected =>
+                evaluation.result::<Value<'js>>().expect("rejected promise has a result"),
+            rquickjs::promise::PromiseState::Pending =>
+                Err(rquickjs::Exception::throw_type(&ctx, "Cannot synchronously require an async module")),
+        }
+    })?;
+    evaluate.prop("evalNativeSync", native_sync)?;
     let owner = ctx.userdata::<NativeBundleOwner<'js>>()
         .ok_or_else(|| native_bundle_error("missing native bundle owner"))?;
     {
@@ -531,6 +661,7 @@ fn register_native_bundle<'js>(
             let token = format!("{prefix}{key}");
             sources.insert(token.clone(), NativeBundleSource {
                 source: native_bundle_marked_source(&source, &native_bundle_marker(&token)),
+                unmarked_source: source,
                 imports, sequence, linked: false, module: None,
             });
         }
