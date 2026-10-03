@@ -1,4 +1,29 @@
 #[test]
+fn native_instanceof_checks_allocated_identity_not_marker_layout() {
+    let source = r#"
+        class Base {}
+        class Derived extends Base {}
+        const ordinary = { ["__thaw_class_identity_\u001eBase"]: true };
+        function choose(flag: boolean): void {
+            const selected = flag ? ordinary : "text";
+            console.log(selected instanceof Base);
+            if (!(selected instanceof Base)) console.log("not-base");
+        }
+        function main(): void {
+            console.log(new Base() instanceof Base);
+            console.log(new Derived() instanceof Base);
+            console.log(ordinary instanceof Base);
+            choose(true);
+            choose(false);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "nominal_instanceof_not_layout"),
+        "true\ntrue\nfalse\nfalse\nnot-base\nfalse\nnot-base\n"
+    );
+}
+
+#[test]
 fn fixed_object_values_entries_skip_only_runtime_hidden_markers() {
     let source = r#"
         class Leaf { value: number; label: string; constructor() { this.value = 3; this.label = "s"; } }

@@ -1520,6 +1520,22 @@ impl<'a> FnLowerer<'a> {
                                     )),
                                     Box::new(HirExpr::Lit(HirLit::F64(index as f64))),
                                 );
+                                // A marker-shaped union member may also be an ordinary
+                                // object with the same physical fields. Test its actual
+                                // ancestry only after the tag matches.
+                                let check = if class.sym == *"Array" {
+                                    check
+                                } else {
+                                    let projected = HirExpr::UnionValue(
+                                        Box::new(HirExpr::Var(name.clone())), index,
+                                        elements.clone(),
+                                    );
+                                    let identity = HirExpr::Call(
+                                        Box::new(HirExpr::Var("__thaw_object_has_class_identity".into())),
+                                        vec![projected, HirExpr::Lit(HirLit::Str(class.sym.to_string()))],
+                                    );
+                                    self.lower_logical_expr(check, identity, true)?
+                                };
                                 result = self.lower_logical_expr(result, check, false)?;
                             }
                         }
@@ -1599,6 +1615,19 @@ impl<'a> FnLowerer<'a> {
                     }
                     let result = native_builtin_match
                         .unwrap_or_else(|| class_type_has_identity(&value_type, class.sym.as_ref()));
+                    if native_builtin_match.is_none() && result {
+                        // A physical marker slot is not proof of nominal class
+                        // ancestry. The native table is keyed by this object's
+                        // allocation identity and includes inherited classes.
+                        let name = format!("__thaw_instanceof_value_{}", self.next_binding);
+                        self.next_binding += 1;
+                        self.scope.insert(name.clone(), value_type.clone());
+                        let query = HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_object_has_class_identity".into())),
+                            vec![HirExpr::Var(name.clone()), HirExpr::Lit(HirLit::Str(class.sym.to_string()))],
+                        );
+                        return self.wrap_call_argument_bindings(query, &[(name, value_type, value)]);
+                    }
                     let name = format!("__thaw_instanceof_value_{}", self.next_binding);
                     self.next_binding += 1;
                     self.scope.insert(name.clone(), value_type.clone());
