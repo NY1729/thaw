@@ -185,21 +185,87 @@ fn install_shared_array_buffer_functions(ctx: &Ctx<'_>) {
 
 // Source graphs and completion promises are owned by the QuickJS context.
 // QuickJS itself owns declared/evaluated modules in its per-runtime cache.
-struct NativeBundleSource {
+struct NativeBundleSource<'js> {
     source: String,
     imports: std::collections::HashMap<String, String>,
     sequence: u64,
+    linked: bool,
+    module: Option<rquickjs::Module<'js, rquickjs::module::Declared>>,
 }
 
 struct NativeBundleOwner<'js> {
     next_sequence: Cell<u64>,
-    sources: RefCell<HashMap<String, NativeBundleSource>>,
+    sources: RefCell<HashMap<String, NativeBundleSource<'js>>>,
+    markers: RefCell<HashMap<String, String>>,
     entries: RefCell<HashMap<String, rquickjs::Promise<'js>>>,
     then: Function<'js>,
 }
 
 unsafe impl<'js> rquickjs::JsLifetime<'js> for NativeBundleOwner<'js> {
+    // These module handles belong to this runtime/context. During runtime
+    // teardown rquickjs clears userdata and its opaque JS values before
+    // JS_FreeRuntime; no handle escapes to another runtime.
     type Changed<'to> = NativeBundleOwner<'to>;
+}
+
+#[cfg(test)]
+#[test]
+fn native_bundle_marker_preserves_source_prefix_and_line_position() {
+    let marker = "thaw-linked:1:first";
+    assert_eq!(native_bundle_marked_source("export const value = 1;", marker),
+        "import \"thaw-linked:1:first\";export const value = 1;");
+    assert_eq!(native_bundle_marked_source("\u{feff}#! /usr/bin/env thaw\nexport const value = 1;", marker),
+        "\u{feff}#! /usr/bin/env thaw\nimport \"thaw-linked:1:first\";export const value = 1;");
+    assert_eq!(native_bundle_marked_source("#! /usr/bin/env thaw", marker),
+        "#! /usr/bin/env thaw\nimport \"thaw-linked:1:first\";");
+}
+
+fn native_bundle_marker(token: &str) -> String {
+    format!("thaw-linked:{token}")
+}
+
+fn native_bundle_marked_source(source: &str, marker: &str) -> String {
+    let import = format!("import {};", serde_json::to_string(marker).expect("marker is serializable"));
+    let bom = if source.starts_with('\u{feff}') { '\u{feff}'.len_utf8() } else { 0 };
+    let after_hashbang = if source[bom..].starts_with("#!") {
+        let Some(at) = source[bom..].find('\n') else { return format!("{source}\n{import}"); };
+        bom + at + 1
+    } else { bom };
+    format!("{}{}{}", &source[..after_hashbang], import, &source[after_hashbang..])
+}
+
+struct NativeBundleLinkedMarker;
+
+impl rquickjs::module::ModuleDef for NativeBundleLinkedMarker {
+    fn evaluate<'js>(ctx: &Ctx<'js>, exports: &rquickjs::module::Exports<'js>) -> rquickjs::Result<()> {
+        let marker: String = exports.module().name()?;
+        let owner = ctx.userdata::<NativeBundleOwner<'js>>()
+            .ok_or_else(|| native_bundle_error("missing native bundle owner"))?;
+        let token = owner.markers.borrow().get(&marker).cloned()
+            .ok_or_else(|| native_bundle_error("unknown linked marker"))?;
+        let mut sources = owner.sources.borrow_mut();
+        let source = sources.get_mut(&token)
+            .ok_or_else(|| native_bundle_error("missing marked source"))?;
+        source.linked = true;
+        Ok(())
+    }
+}
+
+fn read_native_bundle_export<'js>(ctx: Ctx<'js>, entry: String, key: String, name: String) -> rquickjs::Result<Value<'js>> {
+    let module = {
+        let owner = ctx.userdata::<NativeBundleOwner<'js>>()
+            .ok_or_else(|| native_bundle_error("missing native bundle owner"))?;
+        let entry_source = owner.sources.borrow().get(&entry).map(|source| source.sequence)
+            .ok_or_else(|| native_bundle_error("missing native entry"))?;
+        let sources = owner.sources.borrow();
+        let source = sources.get(&key)
+            .filter(|source| source.sequence == entry_source && source.linked)
+            .ok_or_else(|| native_bundle_error("unlinked or foreign native source"))?;
+        source.module.clone().ok_or_else(|| native_bundle_error("missing native module"))?
+    };
+    // The marker runs after QuickJS has linked the complete graph. A namespace
+    // getter still enforces lexical TDZ for an initialized-later export.
+    module.namespace()?.get(name)
 }
 
 fn native_bundle_error(message: &str) -> rquickjs::Error {
@@ -247,6 +313,14 @@ fn register_native_bundle<'js>(ctx: Ctx<'js>, payload: String) -> rquickjs::Resu
         .ok_or_else(|| native_bundle_error("bundle sequence overflow"))?;
     let prefix = format!("thaw-bundle:{sequence}:");
     let token = format!("{prefix}{main}");
+    let marked = records.keys().map(|key| {
+        let token = format!("{prefix}{key}");
+        (native_bundle_marker(&token), token)
+    }).collect::<HashMap<_, _>>();
+    if records.values().any(|(_, edges)| edges.keys().any(|name|
+        marked.contains_key(name))) {
+        return Err(native_bundle_error("reserved marker import"));
+    }
     // Reserve the name before constructing a QuickJS Function, and release
     // the userdata guard before that engine call.
     owner.next_sequence.set(sequence);
@@ -256,16 +330,24 @@ fn register_native_bundle<'js>(ctx: Ctx<'js>, payload: String) -> rquickjs::Resu
     let evaluate = Function::new(ctx.clone(), move |ctx: Ctx<'js>| {
         eval_native_entry(ctx, bound_token.clone())
     })?;
+    let reader_entry = token.clone();
+    let reader = Function::new(ctx.clone(), move |ctx: Ctx<'js>, key: String, name: String| {
+        read_native_bundle_export(ctx, reader_entry.clone(), key, name)
+    })?;
+    evaluate.prop("readNative", reader)?;
     let owner = ctx.userdata::<NativeBundleOwner<'js>>()
         .ok_or_else(|| native_bundle_error("missing native bundle owner"))?;
     {
         let mut sources = owner.sources.borrow_mut();
         for (key, (source, imports)) in records {
-            sources.insert(format!("{prefix}{key}"), NativeBundleSource {
-                source, imports, sequence,
+            let token = format!("{prefix}{key}");
+            sources.insert(token.clone(), NativeBundleSource {
+                source: native_bundle_marked_source(&source, &native_bundle_marker(&token)),
+                imports, sequence, linked: false, module: None,
             });
         }
     }
+    owner.markers.borrow_mut().extend(marked);
     Ok(evaluate)
 }
 
@@ -302,7 +384,15 @@ fn eval_native_entry<'js>(ctx: Ctx<'js>, token: String) -> rquickjs::Result<rqui
     // The ready promise is visible to reentrant entry calls before module
     // evaluation can run user code. Never hold userdata guards across JS calls.
     let setup = (|| -> rquickjs::Result<()> {
-        let declared = rquickjs::Module::declare(ctx.clone(), token, source)?;
+        let declared = rquickjs::Module::declare(ctx.clone(), token.clone(), source)?;
+        {
+            let owner = ctx.userdata::<NativeBundleOwner<'js>>()
+                .ok_or_else(|| native_bundle_error("missing native bundle owner"))?;
+            let mut sources = owner.sources.borrow_mut();
+            sources.get_mut(&token)
+                .ok_or_else(|| native_bundle_error("missing native entry source"))?
+                .module = Some(declared.clone());
+        }
         let (evaluated, evaluation) = declared.eval()?;
         // Namespace creation does not read its bindings. Its object can be
         // retained in a callback without storing a typed Module in userdata.
@@ -339,6 +429,13 @@ impl rquickjs::loader::Resolver for BundleModuleResolver {
         let owner = ctx.userdata::<NativeBundleOwner<'js>>()
             .ok_or_else(|| rquickjs::Error::new_resolving(base, name))?;
         let sources = owner.sources.borrow();
+        if let Some(token) = owner.markers.borrow().get(name) {
+            if token == base && sources.contains_key(base) { return Ok(name.to_owned()); }
+            return Err(rquickjs::Error::new_resolving(base, name));
+        }
+        if name.starts_with("thaw-linked:") {
+            return Err(rquickjs::Error::new_resolving(base, name));
+        }
         let parent = sources.get(base)
             .ok_or_else(|| rquickjs::Error::new_resolving(base, name))?;
         let target = parent.imports.get(name)
@@ -361,11 +458,25 @@ impl rquickjs::loader::Loader for BundleModuleLoader {
         let source = {
             let owner = ctx.userdata::<NativeBundleOwner<'js>>()
                 .ok_or_else(|| rquickjs::Error::new_loading(name))?;
+            let marker = owner.markers.borrow().contains_key(name);
+            if marker {
+                drop(owner);
+                return rquickjs::Module::declare_def::<NativeBundleLinkedMarker, _>(ctx.clone(), name);
+            }
             let sources = owner.sources.borrow();
             sources.get(name).map(|record| record.source.clone())
                 .ok_or_else(|| rquickjs::Error::new_loading(name))?
         };
-        rquickjs::Module::declare(ctx.clone(), name, source)
+        let module = rquickjs::Module::declare(ctx.clone(), name, source)?;
+        {
+            let owner = ctx.userdata::<NativeBundleOwner<'js>>()
+                .ok_or_else(|| rquickjs::Error::new_loading(name))?;
+            let mut sources = owner.sources.borrow_mut();
+            sources.get_mut(name)
+                .ok_or_else(|| rquickjs::Error::new_loading(name))?
+                .module = Some(module.clone());
+        }
+        Ok(module)
     }
 }
 
@@ -428,6 +539,7 @@ fn ensure_context() {
                 ctx.store_userdata(NativeBundleOwner {
                     next_sequence: Cell::new(0),
                     sources: RefCell::new(HashMap::new()),
+                    markers: RefCell::new(HashMap::new()),
                     entries: RefCell::new(HashMap::new()),
                     then: intrinsic_then,
                 }).expect("native bundle owner userdata is already borrowed");
