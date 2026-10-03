@@ -7774,6 +7774,42 @@ fn compiles_object_create_prototype_and_property_is_enumerable() {
     );
 }
 
+#[test]
+fn property_is_enumerable_uses_own_descriptor_without_reading_value() {
+    let source = r#"
+        let receiverCalls = 0;
+        let keyCalls = 0;
+        function receiver(): { visible: number, hidden: number } {
+            receiverCalls++;
+            return object;
+        }
+        function key(): string { keyCalls++; return "hidden"; }
+        const object = { visible: 1, hidden: 2 };
+        function main(): void {
+            Object.defineProperty(object, "hidden", { enumerable: false });
+            console.log(receiver().propertyIsEnumerable(key()), receiverCalls, keyCalls);
+            console.log(object.propertyIsEnumerable("visible"), object.propertyIsEnumerable("missing"));
+            const dictionary: Record<string, number> = { own: 1 };
+            console.log(dictionary.propertyIsEnumerable("own"), dictionary.propertyIsEnumerable("toString"));
+            const ordinary = JSON.parse("{\"own\":1}");
+            console.log(ordinary.propertyIsEnumerable("own"), ordinary.propertyIsEnumerable("missing"));
+            const array = [1, 2];
+            delete array[0];
+            console.log(array.propertyIsEnumerable(0), array.propertyIsEnumerable(1), array.propertyIsEnumerable("length"));
+            loadScript("globalThis.hostReads = 0; globalThis.host = {}; Object.defineProperty(host, 'hidden', { enumerable: false, configurable: true, get() { hostReads++; return 1; } }); Object.defineProperty(host, 'visible', { enumerable: true, configurable: true, get() { hostReads++; return 2; } }); Object.setPrototypeOf(host, { inherited: 3 });");
+            const host: Json = getDynamicValue("host");
+            console.log(host.propertyIsEnumerable("hidden"), host.propertyIsEnumerable("visible"), host.propertyIsEnumerable("missing"), host.propertyIsEnumerable("inherited"));
+            console.log(Number(getDynamicValue("hostReads")));
+            loadScript("Reflect.getOwnPropertyDescriptor = () => { throw new Error('modified Reflect'); }; JSON.parse = () => { throw new Error('modified JSON'); };");
+            console.log(host.propertyIsEnumerable("visible"));
+            const string: Json = "😀x";
+            console.log(string.propertyIsEnumerable("0"), string.propertyIsEnumerable("1"), string.propertyIsEnumerable("2"), string.propertyIsEnumerable("length"));
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "property_is_enumerable_descriptors"),
+        "false 1 1\ntrue false\ntrue false\ntrue false\nfalse true false\nfalse true false false\n0\ntrue\ntrue true true false\n");
+}
+
 /// `Array.fromAsync` over an array-like input with an optional sync or
 /// async mapper, delegated to the JS realm (`Array.fromAsync`) so an async
 /// mapper's per-element `await` is honored. An async iterable or an array of

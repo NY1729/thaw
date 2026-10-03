@@ -687,7 +687,12 @@ impl<'ctx> HirCompiler<'ctx> {
                     .basic()
                     .ok_or("thaw_json_array_slice returned no value".into());
             }
-            "__thaw_json_has_own" => {
+            "__thaw_json_has_own" | "__thaw_json_property_is_enumerable" => {
+                let predicate = if name == "__thaw_json_property_is_enumerable" {
+                    "thaw_json_property_is_enumerable"
+                } else {
+                    "thaw_json_has_own"
+                };
                 let [value, key] = args else {
                     return Err("Object.hasOwn expects two operands".to_string());
                 };
@@ -697,7 +702,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 let result = self
                     .builder
                     .build_call(
-                        self.module.get_function("thaw_json_has_own").unwrap(),
+                        self.module.get_function(predicate).unwrap(),
                         &[value.into(), key.into()],
                         "json_has_own",
                     )

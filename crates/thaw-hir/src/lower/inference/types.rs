@@ -2088,7 +2088,7 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&HirType::F64, start, "dynamic array rest start")?;
                         return Ok(HirType::Json);
                     }
-                    "__thaw_json_has_own" | "__thaw_json_has"
+                    "__thaw_json_has_own" | "__thaw_json_property_is_enumerable" | "__thaw_json_has"
                     | "__thaw_json_object_delete_reflect" => {
                         let [value, key] = args.as_slice() else {
                             return Err("Object.hasOwn expects two operands".into());
