@@ -5065,6 +5065,54 @@ fn intl_large_exact_digits_share_format_parts_range_and_styles() {
     assert_eq!(call("intlLargeExact", "[]"), "[true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true]");
 }
 
+/// The native Bh pattern supplies flexible-period names and ordering when
+/// fractional seconds are the only requested numeric field. The synthetic
+/// hour and its unit suffix must not leak into visible parts.
+#[cfg(all(feature = "intl", not(feature = "icu4c")))]
+#[test]
+fn intl_flexible_day_period_with_fractional_seconds_only() {
+    assert_eq!(
+        load(r#"function intlFlexibleFractionOnly() {
+          const date = new Date('2024-07-04T15:05:09.123Z');
+          const shapes = [
+            ['en-US', true, ' '], ['de', true, ' '], ['vi', true, ' '],
+            ['bg', true, ' '], ['zh-Hant', false, ''], ['tr', false, ' '],
+            ['ko', false, ' '], ['ja', false, ''], ['zh-Hans', false, ''],
+          ];
+          const all = shapes.map(([locale, fractionFirst, separator]) => {
+            const base = { dayPeriod: 'long', timeZone: 'UTC' };
+            const formatter = new Intl.DateTimeFormat(locale, { ...base, fractionalSecondDigits: 3 });
+            const parts = formatter.formatToParts(date);
+            const fields = parts.filter(part => part.type !== 'literal');
+            const expected = fractionFirst
+              ? ['fractionalSecond', 'dayPeriod'] : ['dayPeriod', 'fractionalSecond'];
+            const bare = new Intl.DateTimeFormat(locale, base).formatToParts(date)
+              .find(part => part.type === 'dayPeriod');
+            const middle = parts.filter(part => part.type === 'literal').map(part => part.value).join('');
+            return fields.length === 2 && fields.every((part, index) => part.type === expected[index]) &&
+              fields.find(part => part.type === 'dayPeriod').value === bare.value &&
+              fields.find(part => part.type === 'fractionalSecond').value.length > 0 &&
+              middle === separator && formatter.format(date) === parts.map(part => part.value).join('');
+          });
+          const one = new Intl.DateTimeFormat('en-US', {
+            dayPeriod: 'short', fractionalSecondDigits: 1, timeZone: 'UTC'
+          }).formatToParts(date);
+          const standalone = new Intl.DateTimeFormat('en-US', {
+            fractionalSecondDigits: 3, timeZone: 'UTC'
+          }).formatToParts(date);
+          const leadingZero = new Intl.DateTimeFormat('en-US', {
+            dayPeriod: 'long', fractionalSecondDigits: 3, timeZone: 'UTC'
+          }).formatToParts(new Date('2024-07-04T15:05:09.005Z'));
+          return [...all,
+            one.filter(part => part.type !== 'literal').map(part => part.type).join(',') === 'fractionalSecond,dayPeriod',
+            standalone.filter(part => part.type !== 'literal').map(part => part.type).join(',') === 'fractionalSecond',
+            leadingZero.find(part => part.type === 'fractionalSecond').value === '005'];
+        }"#),
+        1
+    );
+    assert_eq!(call("intlFlexibleFractionOnly", "[]"), "[true,true,true,true,true,true,true,true,true,true,true,true]");
+}
+
 /// Combined flexible day-period requests use the locale skeleton without
 /// introducing a synthetic hour in the visible parts.
 #[cfg(all(feature = "intl", not(feature = "icu4c")))]
