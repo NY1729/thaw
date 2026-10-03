@@ -59,6 +59,12 @@
       return globalThis.__thaw_property_key(value);
     }
     if (typeof value === 'string' && value.charCodeAt(0) === 1) {
+      const frame = globalThis.__thaw_error_frame_parts(value);
+      if (frame) {
+        const error = new Error(frame.original === null ? frame.display : frame.original);
+        error.name = frame.name;
+        return error;
+      }
       const separator = value.indexOf('\u0001', 1);
       if (separator > 1) {
         const error = new Error(value.slice(separator + 1));

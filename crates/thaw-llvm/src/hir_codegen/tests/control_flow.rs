@@ -1314,3 +1314,32 @@ fn guarded_async_direct_throws_keep_string_and_typed_rejection_metadata() {
         "string true\ntrue direct typed\n"
     );
 }
+
+
+#[test]
+fn error_constructor_messages_with_control_markers_are_bound_once() {
+    let source = r#"
+        class MarkerError extends Error {
+            constructor(message: string) { super(message); }
+        }
+        let calls = 0;
+        function message(): string {
+            calls++;
+            return "a\u0001b\u0002c\u0003d\u0004e\u0005f\u0006g";
+        }
+        function main(): void {
+            const expected = "a\u0001b\u0002c\u0003d\u0004e\u0005f\u0006g";
+            try { throw new Error(message()); }
+            catch (e) { console.log(e.message === expected); }
+            try { throw Error(message()); }
+            catch (e) { console.log(e.message === expected); }
+            try { throw new MarkerError(message()); }
+            catch (e) { console.log(e.message === expected, e instanceof MarkerError); }
+            console.log(calls);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "error_constructor_control_messages"),
+        "true\ntrue\ntrue true\n3\n"
+    );
+}

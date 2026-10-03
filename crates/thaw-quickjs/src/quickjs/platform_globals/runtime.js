@@ -216,7 +216,60 @@
   // (`\u0004`/`\u0002`/`\u0003`) stripped from the message. Shared by both
   // the synchronous callback-error and rejected-native-Promise paths of
   // the native-callback wrapper.
+  // Native frames count UTF-16 units, exactly the units String.slice uses.
+  globalThis.__thaw_error_frame_parts = function (raw) {
+    if (raw.charCodeAt(0) !== 1) return null;
+    const separator = raw.indexOf('\u0001', 1);
+    if (separator < 1) return null;
+    const body = raw.slice(separator + 1);
+    if (!body.startsWith('\u001eE1:')) return null;
+    let cursor = 4;
+    const length = () => {
+      const end = body.indexOf(':', cursor);
+      if (end <= cursor) return null;
+      const digits = body.slice(cursor, end);
+      if (!/^[0-9]+$/.test(digits)) return null;
+      const value = Number(digits);
+      if (!Number.isSafeInteger(value)) return null;
+      cursor = end + 1;
+      return value;
+    };
+    const displayLength = length();
+    if (displayLength === null) return null;
+    let originalLength = null;
+    if (body.slice(cursor, cursor + 2) === '-:') cursor += 2;
+    else {
+      originalLength = length();
+      if (originalLength === null) return null;
+    }
+    if (cursor + displayLength > body.length) return null;
+    const display = body.slice(cursor, cursor + displayLength);
+    cursor += displayLength;
+    let original = null;
+    if (originalLength !== null) {
+      if (cursor + originalLength > body.length) return null;
+      original = body.slice(cursor, cursor + originalLength);
+      cursor += originalLength;
+    }
+    const chain = raw.slice(1, separator);
+    const name = chain.charCodeAt(0) === 30
+      ? chain.slice(1).split('\u001f')[0] : chain.split('$')[0];
+    return { name, display, original, suffix: body.slice(cursor) };
+  };
   globalThis.__thaw_error_from_tagged = function (raw) {
+    const frame = globalThis.__thaw_error_frame_parts(raw);
+    if (frame) {
+      const error = new Error(frame.original === null ? frame.display : frame.original);
+      error.name = frame.name;
+      const propertiesIndex = frame.suffix.indexOf('\u0005');
+      if (propertiesIndex >= 0) {
+        try {
+          const properties = JSON.parse(frame.suffix.slice(propertiesIndex + 1));
+          for (const key in properties) error[key] = properties[key];
+        } catch (ignored) {}
+      }
+      return error;
+    }
     let propertiesJson = null;
     const propertiesIndex = raw.indexOf('\u0005');
     if (propertiesIndex >= 0) {

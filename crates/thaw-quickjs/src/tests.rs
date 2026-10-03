@@ -479,6 +479,70 @@ fn error_properties_round_trip_through_the_tagged_exception_format() {
 }
 
 #[test]
+fn framed_error_rebuilds_original_message_and_keeps_display_separate() {
+    assert_eq!(load(r#"
+      function framedErrorRoundTrip() {
+        const raw = '\u0001Error\u0001\u001eE1:7:5:show\u0002meraw\u0003x\u0005{"status":418}';
+        const emptyName = '\u0001\u0001\u001eE1:3:-:a\u0002b';
+        const frame = __thaw_error_frame_parts(raw);
+        const restored = __thaw_error_from_tagged(raw);
+        const emptyRestored = __thaw_error_from_tagged(emptyName);
+        const revived = JSON.parse(JSON.stringify(raw), __thaw_json_date_reviver);
+        return [frame.display, frame.original, restored.name, restored.message,
+                restored.status, revived.message, emptyRestored.name, emptyRestored.message];
+      }
+    "#), 1);
+    assert_eq!(call("framedErrorRoundTrip", "[]"),
+        "[\"show\\u0002me\",\"raw\\u0003x\",\"Error\",\"raw\\u0003x\",418,\"raw\\u0003x\",\"\",\"a\\u0002b\"]");
+}
+
+
+#[test]
+fn framed_error_actual_throw_and_rejection_keep_empty_name_getter_order_and_original() {
+    assert_eq!(load(r#"
+      function throwEmptyName() { const error = new Error('a\u0002b'); error.name = ''; throw error; }
+      function rejectFramedError() { return Promise.reject(Object.assign(new Error('raw\u0003x'), { status: 418 })); }
+      globalThis.errorGetterOrder = '';
+      function throwGetterOrder() {
+        throw Object.defineProperties({}, {
+          message: { get() { errorGetterOrder += 'M'; return 'body\u0004x'; } },
+          code: { get() { errorGetterOrder += 'C'; return 'CODE'; } },
+          name: { get() { errorGetterOrder += 'N'; return 'TypeError'; } }
+        });
+      }
+      function readErrorGetterOrder() { return errorGetterOrder; }
+    "#), 1);
+    let empty = thaw_js_call_result(c"throwEmptyName".as_ptr(), c"[]".as_ptr());
+    assert!(empty.value.is_null());
+    let empty_error = unsafe { CString::from_raw(empty.error.cast_mut()) };
+    let wire = empty_error.as_bytes();
+    let frame = thaw_arena::error_wire::parse_tagged(wire).unwrap();
+    assert_eq!(frame.chain, b"");
+    assert_eq!(frame.display, b"`throwEmptyName` threw: a\x02b");
+    assert_eq!(frame.suffix, b"");
+
+    let rejected = thaw_js_call_result(c"rejectFramedError".as_ptr(), c"[]".as_ptr());
+    assert!(rejected.value.is_null());
+    let rejected_error = unsafe { CString::from_raw(rejected.error.cast_mut()) };
+    let wire = rejected_error.as_bytes();
+    let frame = thaw_arena::error_wire::parse_tagged(wire).unwrap();
+    assert_eq!(frame.chain, b"Error");
+    assert_eq!(frame.display, b"`rejectFramedError`'s promise rejected: raw\x03x");
+    assert_eq!(frame.original, Some(&b"raw\x03x"[..]));
+    assert_eq!(frame.suffix, b"\x05{\"status\":418}");
+
+    let ordered = thaw_js_call_result(c"throwGetterOrder".as_ptr(), c"[]".as_ptr());
+    assert!(ordered.value.is_null());
+    let ordered_error = unsafe { CString::from_raw(ordered.error.cast_mut()) };
+    let wire = ordered_error.as_bytes();
+    let frame = thaw_arena::error_wire::parse_tagged(wire).unwrap();
+    assert_eq!(frame.chain, b"TypeError");
+    assert_eq!(frame.display, b"`throwGetterOrder` threw: body\x04x");
+    assert_eq!(frame.suffix, b"\x03CODE");
+    assert_eq!(call("readErrorGetterOrder", "[]"), "\"MCN\"");
+}
+
+#[test]
 fn base64_globals_round_trip_latin1_and_validate_input() {
     assert_eq!(
             load(
@@ -6257,12 +6321,12 @@ fn dynamic_reflect_predicates_preserve_thrown_error_class() {
     assert_eq!(has.value, 0);
     assert!(!has.error.is_null());
     let has_error = unsafe { CStr::from_ptr(has.error) }.to_string_lossy();
-    assert!(has_error.starts_with("\u{1}TypeError\u{1}has marker"));
+    assert!(has_error.starts_with("\u{1}TypeError\u{1}\u{1e}E1:"));
     assert!(has_error.contains("\u{5}{\"code\":\"HAS_TRAP\"}"));
     let delete = thaw_js_delete_property_result(handle, key.as_ptr());
     assert_eq!(delete.value, 0);
     assert!(!delete.error.is_null());
-    assert!(unsafe { CStr::from_ptr(delete.error) }.to_string_lossy().starts_with("\u{1}RangeError\u{1}delete marker"));
+    assert!(unsafe { CStr::from_ptr(delete.error) }.to_string_lossy().starts_with("\u{1}RangeError\u{1}\u{1e}E1:"));
     unsafe {
         thaw_arena::destroy_string(has.error.cast_mut());
         thaw_arena::destroy_string(delete.error.cast_mut());
@@ -6277,7 +6341,7 @@ fn process_report_result_preserves_listener_error_and_ordered_event_identity() {
     assert_eq!(uncaught.value, 0);
     assert!(!uncaught.error.is_null());
     let error = unsafe { CStr::from_ptr(uncaught.error) }.to_string_lossy();
-    assert!(error.starts_with("\u{1}TypeError\u{1}listener"), "{error}");
+    assert!(error.starts_with("\u{1}TypeError\u{1}\u{1e}E1:"), "{error}");
     assert!(error.contains("E_LISTENER"), "{error}");
     unsafe { thaw_arena::destroy_string(uncaught.error.cast_mut()) };
 
@@ -6285,7 +6349,7 @@ fn process_report_result_preserves_listener_error_and_ordered_event_identity() {
     assert_eq!(rejection.value, 0);
     assert!(!rejection.error.is_null());
     let error = unsafe { CStr::from_ptr(rejection.error) }.to_string_lossy();
-    assert!(error.starts_with("\u{1}RangeError\u{1}rejection listener"), "{error}");
+    assert!(error.starts_with("\u{1}RangeError\u{1}\u{1e}E1:"), "{error}");
     unsafe { thaw_arena::destroy_string(rejection.error.cast_mut()) };
 
     let handled = thaw_js_emit_rejection_handled_result();

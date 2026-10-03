@@ -1282,6 +1282,14 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&HirType::Str, argument, "error property receiver")?;
                         return Ok(HirType::Str);
                     }
+                    "__thaw_error_frame" => {
+                        let [name, message] = args.as_slice() else {
+                            return Err("error frame expects a name and message".into());
+                        };
+                        self.expect_type(&HirType::Str, name, "error name")?;
+                        self.expect_type(&HirType::Str, message, "error message")?;
+                        return Ok(HirType::Str);
+                    }
                     "__thaw_error_suppress" => {
                         let [error, suppressed, message] = args.as_slice() else {
                             return Err(format!("{name} expects three operands"));
