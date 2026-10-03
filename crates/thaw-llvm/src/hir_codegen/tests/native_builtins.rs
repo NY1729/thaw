@@ -645,6 +645,7 @@ fn compiles_tagged_template_evaluation_order_and_async() {
 fn compiles_tagged_template_raw_strings() {
     let source = r#"
         function tag(strings: TemplateStringsArray, ...values: any[]): string {
+            console.log(strings.raw === strings.raw);
             return strings.raw.join("|") + "::" + strings.join(",") + "::" + values.join(",");
         }
         function noSub(strings: TemplateStringsArray): string {
@@ -659,7 +660,7 @@ fn compiles_tagged_template_raw_strings() {
     "#;
     assert_eq!(
         compile_and_run(source, "tagged_template_raw_strings"),
-        "hello\\n| number\\t|::hello\n, number\t,::world,42\na\\nb\n[\"plain\\\\ttext\"]\n"
+        "true\nhello\\n| number\\t|::hello\n, number\t,::world,42\na\\nb\n[\"plain\\\\ttext\"]\n"
     );
 }
 
