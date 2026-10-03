@@ -2255,7 +2255,10 @@
   class RelativeTimeFormat {
     constructor(locale, options) {
       const opts = options || {};
-      this.locale = intlRequestedLocale(locale);
+      const localeTag = intlRequestedLocale(locale);
+      const numberingSystem = opts.numberingSystem;
+      this.locale = numberingSystem === undefined
+        ? localeTag : new Locale(localeTag, { numberingSystem }).toString();
       this._style = opts.style === undefined ? 'long' : String(opts.style);
       this._numeric = opts.numeric === undefined ? 'always' : String(opts.numeric);
       if (!['long', 'short', 'narrow'].includes(this._style)) throw new RangeError(`Invalid style: ${this._style}`);
@@ -2273,7 +2276,10 @@
     }
 
     resolvedOptions() {
-      return { locale: this.locale, style: this._style, numeric: this._numeric, numberingSystem: 'latn' };
+      const resolved = typeof __thaw_intl_datetime_resolved_options === 'function'
+        ? JSON.parse(__thaw_intl_datetime_resolved_options(this.locale)) : null;
+      return { locale: this.locale, style: this._style, numeric: this._numeric,
+        numberingSystem: resolved && resolved.numberingSystem ? resolved.numberingSystem : 'latn' };
     }
   }
 

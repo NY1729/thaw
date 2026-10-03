@@ -3774,6 +3774,40 @@ fn intl_segmenter_matches_real_node() {
     assert_eq!(call("containing", "[-1]"), "null");
 }
 
+/// RelativeTimeFormat shares the requested locale's digit preference with
+/// its DecimalFormatter and reports the actually supported system.
+#[cfg(feature = "intl")]
+#[test]
+fn intl_relative_time_numbering_system_extension_and_option() {
+    assert_eq!(
+        load(r#"function intlRelativeNumbering() {
+          const arab = new Intl.RelativeTimeFormat('en-u-nu-arab', { numeric: 'always' });
+          const override = new Intl.RelativeTimeFormat('en-u-nu-latn', { numberingSystem: 'arab' });
+          const fallback = new Intl.RelativeTimeFormat('en-u-nu-zzzz');
+          let reads = 0;
+          const once = new Intl.RelativeTimeFormat('en', {
+            get numberingSystem() { reads++; return 'arab'; }
+          });
+          let invalid = false;
+          try { new Intl.RelativeTimeFormat('en', { numberingSystem: 'bad!' }); }
+          catch (error) { invalid = error instanceof RangeError; }
+          return [
+            arab.resolvedOptions().numberingSystem === 'arab' && arab.format(12, 'day').includes('١٢'),
+            override.resolvedOptions().numberingSystem === 'arab' && override.format(-12, 'day').includes('١٢'),
+            fallback.resolvedOptions().numberingSystem === 'latn' && fallback.format(12, 'day').includes('12'),
+            new Intl.RelativeTimeFormat('en').resolvedOptions().numberingSystem === 'latn',
+            reads === 1 && once.resolvedOptions().numberingSystem === 'arab',
+            invalid,
+          ];
+        }"#),
+        1
+    );
+    assert_eq!(
+        call("intlRelativeNumbering", "[]"),
+        "[true,true,true,true,true,true]"
+    );
+}
+
 #[cfg(feature = "intl")]
 #[test]
 fn intl_relative_time_rejects_inherited_unit_names() {
