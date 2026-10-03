@@ -1283,3 +1283,43 @@ fn absent_promise_executor_checks_before_allocation() {
     let allocate = main.find("@thaw_promise_new(").expect(&ir);
     assert!(evaluate < check && check < allocate, "{ir}");
 }
+
+#[test]
+fn promise_input_allocation_failure_reaches_catch_and_empty_input_skips_allocator() {
+    static CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    extern "C" fn fail_allocation(_bytes: u64, _alignment: u64) -> *mut u8 {
+        CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        std::ptr::null_mut()
+    }
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "promise_input_allocation_failure");
+    compiler.declare_exception_state();
+    let pointer = context.ptr_type(AddressSpace::default());
+    let word = context.i64_type();
+    let allocator = compiler.module.add_function("thaw_arena_alloc",
+        pointer.fn_type(&[word.into(), word.into()], false), None);
+    for (name, words) in [("nonempty", 1), ("empty", 0)] {
+        let probe = compiler.module.add_function(name, context.i8_type().fn_type(&[], false), None);
+        let entry = context.append_basic_block(probe, "entry");
+        let caught = context.append_basic_block(probe, "caught");
+        compiler.builder.position_at_end(entry);
+        compiler.catch_stack.push(caught);
+        compiler.compile_promise_input_words(words, "input").unwrap();
+        compiler.catch_stack.pop();
+        compiler.builder.build_return(Some(&context.i8_type().const_int(1, false))).unwrap();
+        compiler.builder.position_at_end(caught);
+        compiler.builder.build_return(Some(&context.i8_type().const_zero())).unwrap();
+    }
+    compiler.module.verify().unwrap();
+    let engine = compiler.module.create_jit_execution_engine(inkwell::OptimizationLevel::None).unwrap();
+    engine.add_global_mapping(&allocator, fail_allocation as usize);
+    CALLS.store(0, std::sync::atomic::Ordering::SeqCst);
+    type Probe = unsafe extern "C" fn() -> u8;
+    unsafe {
+        let nonempty = engine.get_function::<Probe>("nonempty").unwrap();
+        let empty = engine.get_function::<Probe>("empty").unwrap();
+        assert_eq!(nonempty.call(), 0);
+        assert_eq!(empty.call(), 1);
+    }
+    assert_eq!(CALLS.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
