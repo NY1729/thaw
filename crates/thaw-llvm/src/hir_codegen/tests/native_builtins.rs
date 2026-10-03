@@ -10135,3 +10135,39 @@ fn date_constructor_uses_live_value_without_snapshot_or_user_date_globals() {
     assert_eq!(compile_and_run(source, "date_live_value_constructor"),
         "1704067200500 1704067200500\n1704067200500\n1704067200000 1704067200000 1 2\nhook threw\ntrue\nbigint threw\nsymbol threw\ntrue\n1704067200000 1 0\n");
 }
+
+#[test]
+fn date_constructor_dispatches_static_string_and_absence_wrappers_once() {
+    let source = r#"
+        let calls = 0;
+        function tagged(flag: boolean): string | number {
+            calls++; return flag ? "2024-01-01T00:00:00.000Z" : 1704067200500;
+        }
+        function maybe(flag: boolean): string | undefined {
+            calls++; return flag ? "2024-01-01T00:00:00.000Z" : undefined;
+        }
+        function nullable(flag: boolean): string | null {
+            calls++; return flag ? "2024-01-01T00:00:00.000Z" : null;
+        }
+        function nullish(which: number): string | null | undefined {
+            calls++; return which === 0 ? "2024-01-01T00:00:00.000Z" : which === 1 ? null : undefined;
+        }
+        function liveOrString(flag: boolean): JsValue | string {
+            calls++; return flag ? getDynamicValue("liveIso") : "2024-01-01T00:00:00.000Z";
+        }
+        function main(): void {
+            loadScript("globalThis.liveIso = { [Symbol.toPrimitive](hint) { if (hint !== 'default') throw new Error('hint'); return '2024-01-01T00:00:00.000Z'; } }");
+            const literal: "2024-01-01T00:00:00.000Z" = "2024-01-01T00:00:00.000Z";
+            console.log(new Date(literal).getTime());
+            console.log(new Date(tagged(true)).getTime(), new Date(tagged(false)).getTime(), calls);
+            console.log(new Date(maybe(true)).getTime(), Number.isNaN(new Date(maybe(false)).getTime()), calls);
+            console.log(new Date(nullable(true)).getTime(), new Date(nullable(false)).getTime(), calls);
+            console.log(new Date(nullish(0)).getTime(), new Date(nullish(1)).getTime(), Number.isNaN(new Date(nullish(2)).getTime()), calls);
+            const mixed: string | number | null | undefined = "2024-01-01T00:00:00.000Z";
+            console.log(new Date(mixed).getTime());
+            console.log(new Date(liveOrString(true)).getTime(), new Date(liveOrString(false)).getTime(), calls);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "date_static_wrapper_dispatch"),
+        "1704067200000\n1704067200000 1704067200500 2\n1704067200000 true 4\n1704067200000 0 6\n1704067200000 0 true 9\n1704067200000\n1704067200000 1704067200000 11\n");
+}
