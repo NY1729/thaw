@@ -279,6 +279,11 @@ impl<'ctx> HirCompiler<'ctx> {
             Some(Linkage::External),
         );
         self.module.add_function(
+            "thaw_json_track_arena_owned_root",
+            i8_ptr.fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
             "thaw_cstring_destroy",
             self.context.void_type().fn_type(&[i8_ptr.into()], false),
             Some(Linkage::External),

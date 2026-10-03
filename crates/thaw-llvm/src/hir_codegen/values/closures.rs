@@ -386,6 +386,8 @@ impl<'ctx> HirCompiler<'ctx> {
         name: &str,
     ) -> Result<FunctionValue<'ctx>, String> {
         let parent = self.builder.get_insert_block().ok_or("this entry needs a parent block")?;
+        let outer_catch_stack = std::mem::take(&mut self.catch_stack);
+        let outer_async_completion = self.active_async_completion.take();
         let entry_fn = self.module.add_function(&format!("{name}__thaw_this_adapter"),
             self.this_entry_function_type(visible, ret)?, Some(Linkage::Internal));
         let entry = self.context.append_basic_block(entry_fn, "entry");
@@ -403,6 +405,8 @@ impl<'ctx> HirCompiler<'ctx> {
         if *ret == HirType::Void { self.builder.build_return(None).map_err(|error| error.to_string())?; }
         else { self.builder.build_return(Some(&call.try_as_basic_value().basic()
             .ok_or("non-arrow this entry returned no value")?)).map_err(|error| error.to_string())?; }
+        self.catch_stack = outer_catch_stack;
+        self.active_async_completion = outer_async_completion;
         self.builder.position_at_end(parent);
         Ok(entry_fn)
     }
@@ -454,7 +458,7 @@ impl<'ctx> HirCompiler<'ctx> {
             HirType::I64 => vec![4],
             HirType::Str | HirType::StrLiteral(_) => vec![5],
             HirType::Symbol => vec![6],
-            HirType::Json => vec![0, 1, 2, 3, 5, 7],
+            HirType::Json => vec![0, 1, 2, 3, 5, 7, 8],
             HirType::Dictionary(_) => vec![7],
             HirType::JsValue => vec![8],
             HirType::Object(fields) if fields.first().is_some_and(|(name, _)|
@@ -649,7 +653,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     if claimed.contains(&7) {
                         return Err("Json and dictionary receiver union members share the same source tag".into());
                     }
-                    for tag in [0_u64, 1, 2, 3, 4, 5, 7] {
+                    for tag in [0_u64, 1, 2, 3, 4, 5, 7, 8] {
                         if tag == 5 && (!string_literals.is_empty() || string_catchall.is_some()) {
                             continue;
                         }
@@ -841,9 +845,10 @@ impl<'ctx> HirCompiler<'ctx> {
         kind: IntValue<'ctx>,
         word: IntValue<'ctx>,
     ) -> Result<PointerValue<'ctx>, String> {
+        self.tracks_owned_json_roots = true;
         let join = self.context.append_basic_block(entry_fn, "receiver_json_ready");
         let rejected = self.context.append_basic_block(entry_fn, "receiver_json_rejected");
-        let cases = [0_u64, 1, 2, 3, 4, 5, 7]
+        let cases = [0_u64, 1, 2, 3, 4, 5, 7, 8]
             .map(|tag| (tag, self.context.append_basic_block(entry_fn, &format!("receiver_json_{tag}"))));
         let branches = cases.iter().map(|(tag, block)|
             (self.context.i8_type().const_int(*tag, false), *block)).collect::<Vec<_>>();
@@ -889,10 +894,34 @@ impl<'ctx> HirCompiler<'ctx> {
                 }
                 7 => self.builder.build_int_to_ptr(word, pointer, "receiver_json_existing")
                     .map_err(|error| error.to_string())?,
+                8 => {
+                    self.uses_quickjs = true;
+                    self.uses_quickjs_handles = true;
+                    self.compile_register_js_callback_host_operations()?;
+                    let value = self.builder.build_call(
+                        self.module.get_function("thaw_json_host_from_borrowed_handle").unwrap(),
+                        &[word.into()], "receiver_json_live_host")
+                        .map_err(|error| error.to_string())?
+                        .try_as_basic_value().basic()
+                        .ok_or("live receiver conversion returned no value")?;
+                    self.compile_check_json_host_error(value, Some("thaw_json_destroy"))?
+                        .into_pointer_value()
+                }
                 _ => unreachable!(),
             };
+            let value = if tag == 7 || tag == 8 { value } else {
+                let tracked = self.builder.build_call(
+                    self.module.get_function("thaw_json_track_arena_owned_root").unwrap(),
+                    &[value.into()], "track_receiver_json_root")
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value().basic()
+                    .ok_or("tracked receiver returned no value")?;
+                self.compile_check_json_host_error(tracked, Some("thaw_json_destroy"))?
+                    .into_pointer_value()
+            };
+            let exit = self.builder.get_insert_block().ok_or("receiver conversion has no exit")?;
             self.builder.build_unconditional_branch(join).map_err(|error| error.to_string())?;
-            incoming.push((value, block));
+            incoming.push((value, exit));
         }
         self.builder.position_at_end(rejected);
         let saved_catch_stack = std::mem::take(&mut self.catch_stack);

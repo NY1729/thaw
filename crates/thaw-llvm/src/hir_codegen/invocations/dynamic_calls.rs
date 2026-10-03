@@ -120,6 +120,7 @@ impl<'ctx> HirCompiler<'ctx> {
         };
         self.uses_quickjs = true;
         self.uses_quickjs_handles = true;
+        self.tracks_owned_json_roots = true;
         let handle = self.compile_expr(source)?.into_int_value();
         let json = self.builder.build_call(
             self.module.get_function("thaw_json_host_from_borrowed_handle").unwrap(),
