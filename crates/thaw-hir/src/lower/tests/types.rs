@@ -2447,3 +2447,11 @@ fn function_dynamic_conversion_keeps_raw_undefined_before_registration() {
     let handle = program.functions.iter().find(|function| function.name == "asHandle").unwrap();
     assert!(format!("{:?}", handle.body).contains("registerNativeCallback"));
 }
+
+#[test]
+fn dynamic_symbol_rejects_nonascii_hex_without_slicing_codepoints() {
+    assert!(dynamic_symbol("__thaw_typed_js_aéa").is_none());
+    assert!(dynamic_symbol("__thaw_typed_napi_zz").is_none());
+    assert_eq!(dynamic_symbol("__thaw_typed_js_666f6f__arity_1"),
+        Some((DynamicBackend::QuickJs, "foo".into())));
+}

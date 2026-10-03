@@ -3705,3 +3705,16 @@ fn non_arrow_json_receiver_enables_arena_tracing_before_module_init() {
     let init = body.find("call void @__thaw_module_init(").expect(body);
     assert!(enable < init, "{body}");
 }
+
+#[test]
+fn optional_void_callable_adapter_preserves_calls_and_void_returns() {
+    let source = r#"
+        function emit(value: number = 7): void { console.log(value); }
+        function main(): void {
+            const callback: (value?: number) => void = emit;
+            callback();
+            callback(3);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "optional_void_callable_adapter"), "7\n3\n");
+}
