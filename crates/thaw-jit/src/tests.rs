@@ -50,6 +50,21 @@ mod tests {
         }
     }
 
+    #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+    #[test]
+    fn nullish_tuple_reads_preserve_null_and_undefined() {
+        for kind in ["n", "b", "s"] {
+            let symbol = CString::new(format!("expr:a0,tupnull{kind}0:tuple-absence")).unwrap();
+            for (tag, expected) in [(1_u64, NULL_STATUS), (2_u64, ABSENT_STATUS)] {
+                let data = [1_u64, tag, 0];
+                let handle = data.as_ptr().cast::<u8>();
+                let argument = f64::from_bits((&handle as *const *const u8) as usize as u64);
+                let result = call(&symbol, &[argument]);
+                assert_eq!(result.error, expected);
+            }
+        }
+    }
+
     fn call(symbol: &CString, args: &[f64]) -> ThawJitResult {
         unsafe extern "C" fn allocate(size: usize, _: usize) -> *mut u8 {
             unsafe { libc::malloc(size).cast() }
