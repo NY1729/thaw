@@ -285,7 +285,7 @@
       let rawResult;
       try { rawResult = JSON.parse(__thaw_wasm_instantiate(module.__thawHandle, JSON.stringify(linkage))); }
       catch (error) { __thaw_wasm_release_pending(JSON.stringify(linkage.functions.map(value => value.handle))); throw error; }
-      if (!rawResult.ok) { __thaw_wasm_release_pending(JSON.stringify(linkage.functions.map(value => value.handle))); wasmResult(JSON.stringify(rawResult), WebAssembly.LinkError); }
+      if (!rawResult.ok) { __thaw_wasm_release_pending(JSON.stringify(linkage.functions.map(value => value.handle))); wasmResult(JSON.stringify(rawResult), rawResult.runtime ? WebAssembly.RuntimeError : WebAssembly.LinkError); }
       const result = rawResult;
       Object.defineProperty(this, '__thawHandle', { value: result.handle });
       const exports = Object.create(null), resources = pendingResources.map(resource => ({ value: resource.value, binding: resource.value.__thawBind(this.__thawHandle, resource.item.module, resource.item.name) }));
