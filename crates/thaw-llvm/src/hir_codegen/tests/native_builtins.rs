@@ -11315,3 +11315,21 @@ fn iterator_yield_delegate_preserves_done_value() {
         "2\n7\ntrue\n0\n"
     );
 }
+#[test]
+fn array_from_length_mapper_receives_explicit_this_arg() {
+    let source = r#"
+        function main(): void {
+            const source = { length: 1 };
+            function third(): number { source.length = 2; return 10; }
+            const values = Array.from(source,
+                function(this: number, _value: undefined, index: number): number {
+                    return this + index;
+                }, third());
+            console.log(values.join(","));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "array_from_length_this_arg"),
+        "10,11\n"
+    );
+}

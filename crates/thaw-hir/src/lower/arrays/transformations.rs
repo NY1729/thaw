@@ -213,11 +213,21 @@ impl<'a> FnLowerer<'a> {
         callback: Option<HirExpr>,
         this_arg: Option<HirExpr>,
     ) -> Result<HirExpr, String> {
+        // Array.from evaluates the source before mapfn/thisArg, but reads
+        // its length only after those arguments have been evaluated.
+        let (source_binding, length) = if let HirExpr::PropAccess(source, ty, key) = length {
+            let name = format!("__thaw_array_from_source_{}", self.next_binding);
+            self.next_binding += 1;
+            self.scope.insert(name.clone(), ty.clone());
+            (Some((name.clone(), ty.clone(), *source)),
+                HirExpr::PropAccess(Box::new(HirExpr::Var(name)), ty, key))
+        } else { (None, length) };
         let length_name = format!("__thaw_array_from_length_{}", self.next_binding);
         self.next_binding += 1;
         self.scope.insert(length_name.clone(), HirType::F64);
-        let mut bindings = vec![(length_name.clone(), HirType::F64, length)];
+        let mut bindings = source_binding.into_iter().collect::<Vec<_>>();
         let Some(callback) = callback else {
+            bindings.push((length_name.clone(), HirType::F64, length));
             let result = HirExpr::ArrayAlloc(
                 Box::new(HirExpr::Var(length_name)),
                 HirType::Undefined,
@@ -227,11 +237,11 @@ impl<'a> FnLowerer<'a> {
         let callback_name = format!("__thaw_array_from_callback_{}", self.next_binding);
         self.next_binding += 1;
         let callback_type = self.infer_expr_type(&callback)?;
-        let HirType::Function(params, output_type) = &callback_type else {
+        let HirType::Function(params, callback_return_type) = &callback_type else {
             unreachable!("Array.from mapper was validated as a function")
         };
-        let returns_void = **output_type == HirType::Void;
-        let output_type = if returns_void { HirType::Undefined } else { output_type.as_ref().clone() };
+        let returns_void = **callback_return_type == HirType::Void;
+        let output_type = if returns_void { HirType::Undefined } else { callback_return_type.as_ref().clone() };
         self.scope
             .insert(callback_name.clone(), callback_type.clone());
         let result_name = format!("__thaw_array_from_result_{}", self.next_binding);
@@ -241,12 +251,21 @@ impl<'a> FnLowerer<'a> {
         let result_type = HirType::Array(Box::new(output_type.clone()));
         self.scope.insert(result_name.clone(), result_type.clone());
         self.scope.insert(index_name.clone(), HirType::F64);
+        let this_binding = if let Some(this_arg) = this_arg {
+            let ty = self.infer_expr_type(&this_arg)?;
+            let name = format!("__thaw_array_from_this_{}", self.next_binding);
+            self.next_binding += 1;
+            self.scope.insert(name.clone(), ty.clone());
+            Some((name, ty, this_arg))
+        } else { None };
         let available = [
             HirExpr::Lit(HirLit::Undefined),
             HirExpr::Var(index_name.clone()),
         ];
-        let callback_call =
-            self.lower_array_callback_call(&callback_name, params, &available)?;
+        let callback_call = self.lower_array_from_mapper_call(
+            &callback_name, params, callback_return_type.as_ref(), &available,
+            this_binding.as_ref().map(|(name, _, _)| name.as_str()),
+        )?;
         let callback_call = if returns_void {
             self.array_void_to_undefined(callback_call)?
         } else {
@@ -288,13 +307,8 @@ impl<'a> FnLowerer<'a> {
             HirStmt::Return(Some(HirExpr::Var(result_name))),
         ]);
         bindings.push((callback_name, callback_type, callback));
-        if let Some(this_arg) = this_arg {
-            let ty = self.infer_expr_type(&this_arg)?;
-            let name = format!("__thaw_array_from_this_{}", self.next_binding);
-            self.next_binding += 1;
-            self.scope.insert(name.clone(), ty.clone());
-            bindings.push((name, ty, this_arg));
-        }
+        bindings.extend(this_binding);
+        bindings.push((length_name, HirType::F64, length));
         self.wrap_call_argument_bindings(body, &bindings)
     }
 
