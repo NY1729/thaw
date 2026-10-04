@@ -1945,6 +1945,25 @@ fn graph_codec_roundtrip_preserves_negative_zero() {
 
 #[cfg(test)]
 #[test]
+fn property_key_decoder_stays_original_after_replacement_attempt() {
+    let valid: bool = with_context(|ctx| ctx.eval(r#"(() => {
+      const encoded = '\u0003R19:shared-key';
+      const original = globalThis.__thaw_property_key;
+      const before = original(encoded);
+      const changed = Reflect.set(globalThis, '__thaw_property_key', () => 'wrong');
+      const descriptor = Object.getOwnPropertyDescriptor(globalThis, '__thaw_property_key');
+      return before === Symbol.for('shared-key') && changed === false
+        && globalThis.__thaw_property_key === original
+        && globalThis.__thaw_property_key(encoded) === before
+        && globalThis.__thaw_json_date_reviver('', encoded) === before
+        && descriptor.writable === false && descriptor.configurable === false
+        && descriptor.enumerable === true;
+    })()"#).expect("property key bootstrap source check"));
+    assert!(valid);
+}
+
+#[cfg(test)]
+#[test]
 fn graph_codec_roundtrip_retains_identity_and_releases_live_lease() {
     let valid: bool = with_context(|ctx| ctx.eval(r#"(() => {
       const source = { own: { __thaw_js_handle_id__: 19 }, big: 123n };
