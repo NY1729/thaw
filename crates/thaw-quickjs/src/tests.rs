@@ -7420,3 +7420,53 @@ fn webassembly_global_preserves_numeric_type_boundaries() {
     "#), 1);
     assert_eq!(call("wasmGlobalConversion", "[]"), "[[true,true,true,true],[true,true,true,true],[true,true,true,true],true,0,\"1\",\"7\",9,true,true]");
 }
+
+// Unrun regression: Wasm parameter types govern scalar conversion and externref retention.
+#[test]
+fn webassembly_arguments_use_declared_parameter_types() {
+    assert_eq!(load(r#"
+        function wasmArgumentTypes() {
+            const bytes = new TextEncoder().encode(`(module
+                (func (export "ref") (param externref) (result externref) local.get 0)
+                (func (export "int") (param i32) (result i32) local.get 0)
+                (func (export "wide") (param i64) (result i64) local.get 0)
+                (func (export "float") (param f64) (result f64) local.get 0))`);
+            const exports = new WebAssembly.Instance(new WebAssembly.Module(bytes)).exports;
+            const rejects = action => { try { action(); return false; } catch (e) { return e instanceof TypeError; } };
+            let coercions = 0;
+            const object = { valueOf() { coercions++; return 7; } };
+            const refs = [0, 1, 7n, undefined, null, object].map(value => exports.ref(value) === value);
+            const values = [exports.int('7'), exports.float(object), exports.int(4294967297), exports.int(), exports.int(9, Symbol('ignored')), exports.wide('18446744073709551617').toString()];
+            return [refs, values, coercions, rejects(() => exports.int(1n)), rejects(() => exports.wide(1)), rejects(() => exports.float({ valueOf() { return 1n; } }))];
+        }
+    "#), 1);
+    assert_eq!(call("wasmArgumentTypes", "[]"), "[[true,true,true,true,true,true],[7,7,1,0,9,\"1\"],1,true,true,true]");
+}
+
+// Unrun regression: special floats and primitive externrefs cross Global/Table boundaries.
+#[test]
+fn webassembly_codec_preserves_special_numbers_and_reference_values() {
+    assert_eq!(load(r#"
+        function wasmCodecBoundaries() {
+            const bytes = new TextEncoder().encode(`(module
+                (import "host" "global" (global $g (mut externref)))
+                (import "host" "table" (table $t 2 externref))
+                (export "global" (global $g)) (export "table" (table $t))
+                (global (export "floatGlobal") (mut f64) (f64.const 0))
+                (func (export "float") (param f64) (result f64) local.get 0)
+                (func (export "readGlobal") (result externref) global.get $g))`);
+            const global = new WebAssembly.Global({ value: 'externref', mutable: true }, 7n);
+            const table = new WebAssembly.Table({ element: 'externref', initial: 2, maximum: 3 }, 1);
+            const exports = new WebAssembly.Instance(new WebAssembly.Module(bytes), { host: { global, table } }).exports;
+            const initial = [exports.readGlobal() === 7n, exports.table.get(0) === 1];
+            exports.global.value = 0; exports.table.set(0, 9n); exports.table.grow(1, 17);
+            const refs = [exports.global.value === 0, exports.table.get(0) === 9n, exports.table.get(2) === 17];
+            const floats = [NaN, Infinity, -Infinity, -0].map(value => {
+                exports.floatGlobal.value = value;
+                return Object.is(exports.float(value), value) && Object.is(exports.floatGlobal.value, value);
+            });
+            return [initial, refs, floats];
+        }
+    "#), 1);
+    assert_eq!(call("wasmCodecBoundaries", "[]"), "[[true,true],[true,true,true],[true,true,true,true]]");
+}
