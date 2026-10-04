@@ -76,7 +76,9 @@ fn wasm_error_result(error: &wasmi::Error) -> String {
     if let Some(exit) = error.i32_exit_status() {
         return serde_json::json!({ "ok": false, "exit": exit }).to_string();
     }
-    serde_json::json!({ "ok": false, "error": error.to_string() }).to_string()
+    let runtime = error.as_trap_code().is_some()
+        || matches!(error.kind(), wasmi::errors::ErrorKind::Host(_) | wasmi::errors::ErrorKind::Message(_));
+    serde_json::json!({ "ok": false, "error": error.to_string(), "runtime": runtime }).to_string()
 }
 
 #[derive(Clone)]
