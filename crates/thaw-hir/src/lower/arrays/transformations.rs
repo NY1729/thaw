@@ -415,7 +415,10 @@ impl<'a> FnLowerer<'a> {
                                 Box::new(callback_call),
                             )),
                         ],
-                        Vec::new(),
+                        vec![HirStmt::Expr(HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_array_set_hole".into())),
+                            vec![HirExpr::Var(result_name.clone()), HirExpr::Var(index_name.clone())],
+                        ))],
                     ),
                     HirStmt::Expr(HirExpr::Assign(
                         index_name.clone(),
@@ -427,13 +430,7 @@ impl<'a> FnLowerer<'a> {
                     )),
                 ],
             ),
-            HirStmt::Return(Some(HirExpr::Call(
-                Box::new(HirExpr::Var("__thaw_array_map_presence".into())),
-                vec![
-                    HirExpr::Var(result_name),
-                    HirExpr::Var(receiver_name.clone()),
-                ],
-            ))),
+            HirStmt::Return(Some(HirExpr::Var(result_name))),
         ]);
         let mut bindings = vec![
             (receiver_name, array_type, receiver),

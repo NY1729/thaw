@@ -709,3 +709,25 @@ fn nested_destructuring_preserves_array_and_function_union_metadata() {
         "42\nreturned!\n"
     );
 }
+
+#[test]
+fn array_map_keeps_presence_at_each_visit() {
+    let source = r#"
+        function main(): void {
+            const source = [1, 2, 3];
+            const mapped = source.map((value: number, index: number) => {
+                if (index === 1) { delete source[0]; }
+                return value * 10;
+            });
+            console.log(0 in mapped, mapped[0]);
+            const sparse = [1, 2, 3];
+            delete sparse[1];
+            const result = sparse.map((value: number, index: number) => {
+                if (index === 2) { sparse[1] = 99; }
+                return value * 10;
+            });
+            console.log(1 in result, 2 in result, result[2]);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "array_map_visit_presence"), "true 10\nfalse true 30\n");
+}
