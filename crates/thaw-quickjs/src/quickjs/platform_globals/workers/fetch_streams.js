@@ -848,6 +848,10 @@
       value: request => consumeRequestBody(request, requestData.get(request).signal),
       configurable: false, writable: false,
     });
+    Object.defineProperty(globalThis, '__thaw_request_body_replayable', {
+      value: request => { const record = requestData.get(request); if (!record) throw new TypeError('invalid Request receiver'); return !record.body || record.bodyHasSource; },
+      configurable: false, writable: false,
+    });
     class Request {
       constructor(input, init = {}) {
         const inherited = requestData.get(input), url = new URL(inherited ? inherited.url : String(input));
@@ -858,6 +862,7 @@
         if (upperMethod === 'CONNECT' || upperMethod === 'TRACE' || upperMethod === 'TRACK') throw new TypeError(`unsupported HTTP method ${upperMethod}`);
         const headers = new Headers(init.headers === undefined ? inherited ? inherited.headers : undefined : init.headers), hasBody = Object.prototype.hasOwnProperty.call(init, 'body');
         let normalized = { stream: null, type: null };
+        const bodyHasSource = hasBody ? !(init.body instanceof ReadableStream) : inherited ? inherited.bodyHasSource : true;
         if (hasBody) normalized = responseBody(init.body);
         else if (inherited && inherited.body) {
           if (inherited.body._disturbed || inherited.body.locked) throw new TypeError('Body is unusable');
@@ -879,7 +884,7 @@
         let referrer = init.referrer === undefined ? inherited ? inherited.referrer : 'about:client' : String(init.referrer);
         if (referrer && referrer !== 'about:client') referrer = new URL(referrer).href;
         requestData.set(this, {
-          body: normalized.stream, headers, method, url: url.href, signal: signalController.signal,
+          body: normalized.stream, bodyHasSource, headers, method, url: url.href, signal: signalController.signal,
           cache, credentials,
           destination: inherited ? inherited.destination : '',
           integrity: init.integrity === undefined ? inherited ? inherited.integrity : '' : String(init.integrity),
@@ -910,7 +915,7 @@
       async json() { return JSON.parse(await this.text()); }
       async text() { return new TextDecoder().decode(await consumeRequestBody(this)); }
       async formData() { const type = this.headers.get('content-type') || ''; return parseFormDataBody(type, await consumeRequestBody(this)); }
-      clone() { const record = requestData.get(this); if (record.body && (record.body._disturbed || record.body.locked)) throw new TypeError('Body has already been consumed'); let body = null; if (record.body) { const branches = record.body.tee(); record.body = branches[0]; body = branches[1]; } return new Request(record.url, { method: record.method, headers: record.headers, body, signal: record.signal, cache: record.cache, credentials: record.credentials, integrity: record.integrity, keepalive: record.keepalive, mode: record.mode, redirect: record.redirect, referrer: record.referrer, referrerPolicy: record.referrerPolicy, duplex: 'half' }); }
+      clone() { const record = requestData.get(this); if (record.body && (record.body._disturbed || record.body.locked)) throw new TypeError('Body has already been consumed'); let body = null; if (record.body) { const branches = record.body.tee(); record.body = branches[0]; body = branches[1]; } const clone = new Request(record.url, { method: record.method, headers: record.headers, body, signal: record.signal, cache: record.cache, credentials: record.credentials, integrity: record.integrity, keepalive: record.keepalive, mode: record.mode, redirect: record.redirect, referrer: record.referrer, referrerPolicy: record.referrerPolicy, duplex: 'half' }); requestData.get(clone).bodyHasSource = record.bodyHasSource; return clone; }
       get [Symbol.toStringTag]() { return 'Request'; }
     }
     globalThis.Response = Response;
