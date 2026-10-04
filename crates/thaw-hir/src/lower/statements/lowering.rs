@@ -849,11 +849,24 @@ impl<'a> FnLowerer<'a> {
         ))
     }
 
+    fn bind_generator_assignment_reference(
+        &mut self,
+        statements: &mut Vec<HirStmt>,
+        value: HirExpr,
+    ) -> Result<HirExpr, String> {
+        let ty = self.infer_expr_type(&value)?;
+        let name = format!("__thaw_generator_reference_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(name.clone(), ty.clone());
+        statements.push(HirStmt::Let(name.clone(), ty, value));
+        Ok(HirExpr::Var(name))
+    }
+
     fn lower_generator_resume_assignment(
         &mut self,
         target: &AssignTarget,
         value: HirExpr,
-    ) -> Result<Vec<HirStmt>, String> {
+    ) -> Result<(Vec<HirStmt>, Vec<HirStmt>), String> {
         if let AssignTarget::Pat(pattern) = target {
             let pattern = match pattern {
                 swc_ecma_ast::AssignTargetPat::Array(pattern) => Pat::Array(pattern.clone()),
@@ -877,13 +890,50 @@ impl<'a> FnLowerer<'a> {
                 &ty,
                 &mut statements,
             )?;
-            return Ok(statements);
+            return Ok((Vec::new(), statements));
         }
 
         let target = self.lower_assign_target(target)?;
+        // A property assignment resolves its receiver and computed key before
+        // evaluating the RHS. The suspended `yield` is the RHS here, so keep
+        // that reference across the suspension instead of reevaluating it on
+        // resume. A variable target has no reference expression to capture.
+        let mut before_yield = Vec::new();
+        let target = match target {
+            Target::Var(name) => Target::Var(name),
+            Target::Prop(object, ty, field) => Target::Prop(
+                self.bind_generator_assignment_reference(&mut before_yield, object)?,
+                ty,
+                field,
+            ),
+            Target::Index(object, key) => Target::Index(
+                self.bind_generator_assignment_reference(&mut before_yield, object)?,
+                Box::new(self.bind_generator_assignment_reference(&mut before_yield, *key)?),
+            ),
+            Target::Dictionary(object, key, element) => Target::Dictionary(
+                self.bind_generator_assignment_reference(&mut before_yield, object)?,
+                Box::new(self.bind_generator_assignment_reference(&mut before_yield, *key)?),
+                element,
+            ),
+            Target::JsonIndex(object, key) => Target::JsonIndex(
+                self.bind_generator_assignment_reference(&mut before_yield, object)?,
+                Box::new(self.bind_generator_assignment_reference(&mut before_yield, *key)?),
+            ),
+            Target::DynamicProperty(object, key) => Target::DynamicProperty(
+                self.bind_generator_assignment_reference(&mut before_yield, object)?,
+                Box::new(self.bind_generator_assignment_reference(&mut before_yield, *key)?),
+            ),
+        };
         if let Target::Var(name) = &target {
             if self.immutable_bindings.contains(name) {
                 return Err(format!("cannot assign to constant `{name}`"));
+            }
+        }
+        if let Target::Prop(_, HirType::Object(fields), field) = &target {
+            if fields.iter().any(|(name, _)| name == &format!("__thaw_setter_{field}")) {
+                return Ok((before_yield, vec![HirStmt::Expr(
+                    self.lower_assignment_target_write(target, value)?,
+                )]));
             }
         }
         let value = match &target {
@@ -913,10 +963,10 @@ impl<'a> FnLowerer<'a> {
             }
             Target::DynamicProperty(object, key) => {
                 let value = self.coerce_to_declared(&HirType::Json, value)?;
-                return Ok(vec![HirStmt::Expr(HirExpr::Call(
+                return Ok((before_yield, vec![HirStmt::Expr(HirExpr::Call(
                     Box::new(HirExpr::Var("setDynamicPropertyJson".into())),
                     vec![object.clone(), key.as_ref().clone(), value],
-                ))]);
+                ))]));
             }
             Target::Prop(_, other, field) => {
                 return Err(format!(
@@ -927,7 +977,9 @@ impl<'a> FnLowerer<'a> {
         if let Target::Var(name) = &target {
             self.record_binding_write(name);
         }
-        Ok(vec![HirStmt::Expr(build_assign(target, value))])
+        Ok((before_yield, vec![HirStmt::Expr(
+            self.lower_assignment_target_write(target, value)?,
+        )]))
     }
 
     fn lower_stmt_seq(&mut self, stmt: &Stmt) -> Result<Vec<HirStmt>, String> {
@@ -1027,10 +1079,10 @@ impl<'a> FnLowerer<'a> {
                             let resumed = delegated
                                 .map(|(value, _)| value)
                                 .unwrap_or_else(|| HirExpr::Var(input));
-                            let mut statements = emission;
-                            statements.extend(
-                                self.lower_generator_resume_assignment(&assign.left, resumed)?,
-                            );
+                            let (mut statements, resumed_assignment) =
+                                self.lower_generator_resume_assignment(&assign.left, resumed)?;
+                            statements.extend(emission);
+                            statements.extend(resumed_assignment);
                             return Ok(statements);
                     }
                     }

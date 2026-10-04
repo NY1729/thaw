@@ -2721,6 +2721,44 @@ fn generator_next_assigns_to_members_indexes_and_patterns() {
 }
 
 #[test]
+fn generator_assignment_captures_reference_before_yield_and_calls_object_setter() {
+    let source = r#"
+        let order = "";
+        let firstStored = 0;
+        let secondStored = 0;
+        const first = { set value(next: number) { order += "S"; firstStored = next * 10; } };
+        const second = { set value(next: number) { order += "T"; secondStored = next * 100; } };
+        let selected = first;
+        function pick() { order += "R"; return selected; }
+        function yielded(): number { order += "Y"; return 1; }
+        function* setterTarget(): Generator<number, void, number> {
+            pick().value = yield yielded();
+        }
+        const target: any = { left: 0, right: 0 };
+        let key = "left";
+        function pickKey(): string { order += "K"; return key; }
+        function* computedTarget(): Generator<number, void, number> {
+            target[pickKey()] = yield yielded();
+        }
+        function main(): void {
+            const setter = setterTarget();
+            console.log(setter.next().value, order);
+            selected = second;
+            console.log(setter.next(7).done, firstStored, secondStored, order);
+            order = "";
+            const computed = computedTarget();
+            console.log(computed.next().value, order);
+            key = "right";
+            console.log(computed.next(9).done, target.left, target.right, order);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "generator_resume_setter_reference"),
+        "1 RY\ntrue 70 0 RYS\n1 KY\ntrue 9 0 KY\n"
+    );
+}
+
+#[test]
 fn async_generator_next_returns_promised_iterator_results() {
     let source = r#"
         async function* values(): AsyncGenerator<number, string> {
