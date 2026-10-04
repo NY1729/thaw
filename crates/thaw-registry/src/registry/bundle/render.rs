@@ -44,6 +44,38 @@ function __thaw_bundle_validate_static(key, visited) {
   for (var j = 0; j < requests.length; j++)
     origin.validateKnownStatic(requests[j][0], requests[j][1]);
 }
+var __thaw_namespace_create = Object.create, __thaw_namespace_define = Object.defineProperty;
+var __thaw_namespace_prevent = Object.preventExtensions, __thaw_namespace_own = Object.prototype.hasOwnProperty;
+var __thaw_namespace_keys = Object.keys, __thaw_namespace_apply = Reflect.apply;
+var __thaw_namespace_get = WeakMap.prototype.get, __thaw_namespace_set = WeakMap.prototype.set;
+var __thaw_namespace_has = WeakMap.prototype.has, __thaw_namespace_tag = Symbol.toStringTag;
+var __thaw_namespace_promise = Promise, __thaw_namespace_resolve = Promise.resolve;
+var __thaw_namespace_reject = Promise.reject, __thaw_namespace_then = Promise.prototype.then;
+var __thaw_bundle_cjs_namespaces = Object.create(null);
+var __thaw_bundle_cjs_namespace_values = new WeakMap();
+function __thaw_bundle_cjs_namespace(key, value, names) {
+  if (__thaw_namespace_apply(__thaw_namespace_own, __thaw_bundle_cjs_namespaces, [key]))
+    return __thaw_bundle_cjs_namespaces[key];
+  var namespace = __thaw_namespace_create(null);
+  __thaw_namespace_define(namespace, 'default', {value:value, enumerable:true});
+  __thaw_namespace_define(namespace, 'module.exports', {value:value, enumerable:true});
+  for (var index = 0; index < names.length; index++) {
+    var name = names[index];
+    if (!__thaw_namespace_apply(__thaw_namespace_own, namespace, [name]))
+      __thaw_namespace_define(namespace, name, {value:value == null ? undefined : value[name], enumerable:true});
+  }
+  __thaw_namespace_define(namespace, __thaw_namespace_tag, {value:'Module'});
+  __thaw_namespace_prevent(namespace);
+  __thaw_namespace_apply(__thaw_namespace_set, __thaw_bundle_cjs_namespace_values, [namespace, value]);
+  __thaw_bundle_cjs_namespaces[key] = namespace;
+  return namespace;
+}
+function __thaw_bundle_cjs_fallback_namespace(spec, value) {
+  var builtin = spec.slice(0, 5) === 'node:' ? spec.slice(5) : spec;
+  var known = __thaw_bundle_builtin_names.indexOf(builtin) >= 0;
+  return __thaw_bundle_cjs_namespace('external:' + (known ? 'node:' + builtin : spec),
+    value, known && value != null ? __thaw_namespace_keys(value) : []);
+}
 function __thaw_bundle_origin_for(ownerKey) {
   var own = Object.prototype.hasOwnProperty;
   var ambiguous = {};
@@ -239,6 +271,11 @@ function __thaw_bundle_origin_for(ownerKey) {
       return __thaw_native_apply(__thaw_native_reject, __thaw_native_promise, [error]);
     },
     edge: function(spec, value) {
+      // Async static imports share the loader with dynamic import. Only our
+      // own namespace wrappers unwrap here; user exports keep their identity.
+      if (value != null && (typeof value === 'object' || typeof value === 'function')
+          && __thaw_namespace_apply(__thaw_namespace_has, __thaw_bundle_cjs_namespace_values, [value]))
+        value = __thaw_namespace_apply(__thaw_namespace_get, __thaw_bundle_cjs_namespace_values, [value]);
       var edges = __thaw_bundle_edges[ownerKey];
       if (!edges) edges = __thaw_bundle_edges[ownerKey] = Object.create(null);
       if (own.call(edges, spec) && edges[spec] === value) return;
@@ -336,7 +373,7 @@ function __thaw_bundle_origin_for(ownerKey) {
       if (!target) return namespace;
       // The private shell's namespace contains no CJS exports. The existing
       // bundle contract returns that target's cached CommonJS value instead.
-      if (!graphOf(target.key)) return this.namespaceImport(spec);
+      if (!graphOf(target.key)) return __thaw_bundle_cjs_namespace(target.key, this.namespaceImport(spec), __thaw_bundle_cjs_export_names[target.factory] || []);
       return __thaw_bundle_mixed_keys[__thaw_bundle_factory_of(target.key)]
         ? __thaw_bundle_facade_for(target.key) : namespace;
     },
@@ -500,6 +537,12 @@ fn render_bundle_mode(main_key: &str, modules: &[BundledModule], mixed: Option<&
         .collect::<serde_json::Map<String, serde_json::Value>>();
     out.push_str(&format!("var __thaw_bundle_commonjs_contexts = JSON.parse({});\n",
         js_string_literal(&serde_json::Value::Object(commonjs_contexts).to_string())));
+    let cjs_names = modules.iter().filter(|module| module.export_graph.is_none())
+        .map(|module| (module.key.clone(), serde_json::json!(
+            analyze_module_named(&module.source, &module.source_name)._commonjs_exports)))
+        .collect::<serde_json::Map<String, serde_json::Value>>();
+    out.push_str(&format!("var __thaw_bundle_cjs_export_names = JSON.parse({});\n",
+        js_string_literal(&serde_json::Value::Object(cjs_names).to_string())));
     out.push_str(STAR_ORIGIN_RUNTIME);
     if let Some(route) = mixed {
         out.push_str(MIXED_FACADE_RUNTIME);
@@ -523,7 +566,7 @@ fn render_bundle_mode(main_key: &str, modules: &[BundledModule], mixed: Option<&
             "var __thaw_native_registered = globalThis.__thaw_register_native_bundle({}, \
              function(importer, spec, target, factory, asynchronous) {{ \
                var value = __thaw_bundle_require(target, factory, asynchronous); \
-               if (asynchronous) return __thaw_native_apply(__thaw_native_then, __thaw_bundle_cache[target].ready, [function(finalValue) {{ __thaw_bundle_origin_for(importer).edge(spec, finalValue); return finalValue; }}]); \
+               if (asynchronous) return __thaw_native_apply(__thaw_native_then, __thaw_bundle_cache[target].ready, [function() {{ var finalValue = __thaw_bundle_cache[target].exports; __thaw_bundle_origin_for(importer).edge(spec, finalValue); }}]); \
                __thaw_bundle_origin_for(importer).edge(spec, value); return value; \
              }}, \
              function(key) {{ return __thaw_bundle_origin_for(key); }});\n",
@@ -605,7 +648,7 @@ fn render_bundle_mode(main_key: &str, modules: &[BundledModule], mixed: Option<&
          \x20\x20\x20\x20var filename = '/thaw_modules/' + factoryKey, slash = filename.lastIndexOf('/'), dirname = slash < 0 ? '.' : filename.slice(0, slash);\n\
          \x20\x20\x20\x20var initialized;\n\
          \x20\x20\x20\x20try { var factory = __thaw_bundle_factories[factoryKey]; if (Object.prototype.hasOwnProperty.call(__thaw_bundle_export_graphs, factoryKey)) factory = factory(__thaw_bundle_origin_for(key)); initialized = Object.prototype.hasOwnProperty.call(__thaw_bundle_commonjs_contexts, factoryKey) ? factory.call(mod.exports, mod, mod.exports, localRequire, localRequireAsync, filename, dirname, localImport) : factory(mod, mod.exports, localRequire, localRequireAsync, filename, dirname, localImport); } catch (error) { delete __thaw_bundle_cache[key]; delete __thaw_bundle_edges[key]; delete __thaw_bundle_star_linkers[key]; throw error; }\n\
-         \x20\x20\x20\x20mod.ready = Promise.resolve(initialized).then(function() { return mod.exports; }, function(error) { delete __thaw_bundle_cache[key]; delete __thaw_bundle_edges[key]; delete __thaw_bundle_star_linkers[key]; throw error; });\n\
+         \x20\x20\x20\x20mod.ready = __thaw_namespace_apply(__thaw_namespace_then, __thaw_namespace_apply(__thaw_namespace_resolve, __thaw_namespace_promise, [Object.prototype.hasOwnProperty.call(__thaw_bundle_async_keys, factoryKey) ? initialized : undefined]), [function() {}, function(error) { delete __thaw_bundle_cache[key]; delete __thaw_bundle_edges[key]; delete __thaw_bundle_star_linkers[key]; throw error; }]);\n\
          \x20\x20}\n\
          \x20\x20return __thaw_bundle_cache[key].exports;\n\
          }\n\
@@ -628,17 +671,26 @@ fn render_bundle_mode(main_key: &str, modules: &[BundledModule], mixed: Option<&
          \x20\x20var map = __thaw_bundle_import_maps[String(base)] || {};\n\
          \x20\x20var known = __thaw_bundle_known_package_maps[String(base)] || [];\n\
          \x20\x20return function(spec) {\n\
-         \x20\x20\x20\x20try { spec = `${spec}`; } catch (error) { return Promise.reject(error); }\n\
-         \x20\x20\x20\x20if (workerModule !== undefined && (spec === 'worker_threads' || spec === 'node:worker_threads')) return Promise.resolve(workerModule);\n\
-         \x20\x20\x20\x20return Promise.resolve().then(function() {\n\
-         \x20\x20\x20\x20\x20\x20var target = __thaw_bundle_target(map, spec);\n\
-         \x20\x20\x20\x20\x20\x20if (target) {\n\
-         \x20\x20\x20\x20\x20\x20\x20\x20if (typeof __thaw_bundle_native_keys !== 'undefined' && Object.prototype.hasOwnProperty.call(__thaw_bundle_native_keys, target.factory)) return __thaw_native_apply(__thaw_native_then, __thaw_native_entry.evalNative(target.key, target.factory), [function(namespace) { return __thaw_bundle_mixed_keys[target.factory] ? __thaw_bundle_facade_for(target.key) : namespace; }]);\n\
-         \x20\x20\x20\x20\x20\x20\x20__thaw_bundle_require(target.key, target.factory, true); return __thaw_bundle_cache[target.key].ready;\n\
+         \x20\x20\x20\x20try { spec = `${spec}`; } catch (error) { return __thaw_namespace_apply(__thaw_namespace_reject, __thaw_namespace_promise, [error]); }\n\
+         \x20\x20\x20\x20if (workerModule !== undefined && (spec === 'worker_threads' || spec === 'node:worker_threads')) { try { return __thaw_namespace_apply(__thaw_namespace_resolve, __thaw_namespace_promise, [__thaw_bundle_cjs_fallback_namespace(spec, workerModule)]); } catch (error) { return __thaw_namespace_apply(__thaw_namespace_reject, __thaw_namespace_promise, [error]); } }\n\
+         \x20\x20return new __thaw_namespace_promise(function(resolve, reject) {\n\
+         \x20\x20\x20__thaw_namespace_apply(__thaw_namespace_then, __thaw_namespace_apply(__thaw_namespace_resolve, __thaw_namespace_promise, []), [function() {\n\
+         \x20\x20\x20\x20try {\n\
+         \x20\x20\x20\x20\x20var target = __thaw_bundle_target(map, spec);\n\
+         \x20\x20\x20\x20\x20if (target) {\n\
+         \x20\x20\x20\x20\x20\x20if (typeof __thaw_bundle_native_keys !== 'undefined' && Object.prototype.hasOwnProperty.call(__thaw_bundle_native_keys, target.factory)) {\n\
+         \x20\x20\x20\x20\x20\x20\x20__thaw_native_apply(__thaw_native_then, __thaw_native_entry.evalNative(target.key, target.factory), [function(namespace) { try { resolve(__thaw_bundle_mixed_keys[target.factory] ? __thaw_bundle_facade_for(target.key) : namespace); } catch (error) { reject(error); } }, reject]);\n\
+         \x20\x20\x20\x20\x20\x20\x20return;\n\
          \x20\x20\x20\x20\x20\x20}\n\
-         \x20\x20\x20\x20\x20\x20if (__thaw_bundle_import_missing(known, spec)) throw new Error('Cannot resolve import ' + spec);\n\
-         \x20\x20\x20\x20\x20\x20return require(spec);\n\
-         \x20\x20\x20\x20});\n\
+         \x20\x20\x20\x20\x20\x20__thaw_bundle_require(target.key, target.factory, true);\n\
+         \x20\x20\x20\x20\x20\x20__thaw_namespace_apply(__thaw_namespace_then, __thaw_bundle_cache[target.key].ready, [function() { try { var value = __thaw_bundle_cache[target.key].exports; resolve(Object.prototype.hasOwnProperty.call(__thaw_bundle_export_graphs, target.factory) ? value : __thaw_bundle_cjs_namespace(target.key, value, __thaw_bundle_cjs_export_names[target.factory] || [])); } catch (error) { reject(error); } }, reject]);\n\
+         \x20\x20\x20\x20\x20\x20return;\n\
+         \x20\x20\x20\x20\x20}\n\
+         \x20\x20\x20\x20\x20if (__thaw_bundle_import_missing(known, spec)) throw new Error('Cannot resolve import ' + spec);\n\
+         \x20\x20\x20\x20\x20resolve(__thaw_bundle_cjs_fallback_namespace(spec, require(spec)));\n\
+         \x20\x20\x20\x20} catch (error) { reject(error); }\n\
+         \x20\x20\x20}, reject]);\n\
+         \x20\x20});\n\
          \x20\x20};\n\
          }\n\
          function __thaw_bundle_register_worker_main(key, mod) {\n\
@@ -646,9 +698,9 @@ fn render_bundle_mode(main_key: &str, modules: &[BundledModule], mixed: Option<&
          \x20\x20if (Object.prototype.hasOwnProperty.call(__thaw_bundle_cache, key)) throw new Error('Worker entry already initialized');\n\
          \x20\x20mod.filename = '/thaw_modules/' + key;\n\
          \x20\x20var resolveReady, rejectReady;\n\
-         \x20\x20mod.ready = new Promise(function(resolve, reject) { resolveReady = resolve; rejectReady = reject; });\n\
+         \x20\x20mod.ready = new __thaw_namespace_promise(function(resolve, reject) { resolveReady = resolve; rejectReady = reject; });\n\
          \x20\x20__thaw_bundle_cache[key] = mod;\n\
-         \x20\x20return function(succeeded, error) { if (succeeded) resolveReady(mod.exports); else rejectReady(error); };\n\
+         \x20\x20return function(succeeded, error) { if (succeeded) resolveReady(); else rejectReady(error); };\n\
          }\n\
          globalThis.__thaw_bundle_create_require = __thaw_bundle_create_require;\n\
          globalThis.__thaw_bundle_create_import = __thaw_bundle_create_import;\n\
@@ -661,7 +713,8 @@ fn render_bundle_mode(main_key: &str, modules: &[BundledModule], mixed: Option<&
          \x20\x20'var __thaw_bundle_known_package_maps = ' + JSON.stringify(__thaw_bundle_known_package_maps) + ';\\n' +\n\
          \x20\x20'var __thaw_bundle_export_graphs = JSON.parse(' + JSON.stringify(JSON.stringify(__thaw_bundle_export_graphs)) + ');\\n' +\n\
          \x20\x20'var __thaw_bundle_commonjs_contexts = JSON.parse(' + JSON.stringify(JSON.stringify(__thaw_bundle_commonjs_contexts)) + ');\\n' +\n\
-         \x20\x20__thaw_bundle_factory_of.toString() + '\\n' + __thaw_bundle_validate_static.toString() + '\\n' + __thaw_bundle_origin_for.toString() + '\\n' + __thaw_bundle_target.toString() + '\\n' + __thaw_bundle_import_missing.toString() + '\\n' + __thaw_bundle_resolve.toString() + '\\n' + __thaw_bundle_async_error.toString() + '\\n' + __thaw_bundle_require.toString() + '\\n' + __thaw_bundle_create_require.toString() + '\\n' + __thaw_bundle_create_import.toString() + '\\n' + __thaw_bundle_create_import_async.toString() + '\\n' + __thaw_bundle_register_worker_main.toString() + '\\n' +\n\
+         \x20\x20'var __thaw_namespace_create = Object.create, __thaw_namespace_define = Object.defineProperty;\\nvar __thaw_namespace_prevent = Object.preventExtensions, __thaw_namespace_own = Object.prototype.hasOwnProperty;\\nvar __thaw_namespace_keys = Object.keys, __thaw_namespace_apply = Reflect.apply;\\nvar __thaw_namespace_get = WeakMap.prototype.get, __thaw_namespace_set = WeakMap.prototype.set;\\nvar __thaw_namespace_has = WeakMap.prototype.has, __thaw_namespace_tag = Symbol.toStringTag;\\nvar __thaw_namespace_promise = Promise, __thaw_namespace_resolve = Promise.resolve;\\nvar __thaw_namespace_reject = Promise.reject, __thaw_namespace_then = Promise.prototype.then;\\nvar __thaw_bundle_cjs_namespaces = Object.create(null);\\nvar __thaw_bundle_cjs_namespace_values = new WeakMap();\\nvar __thaw_bundle_cjs_export_names = ' + JSON.stringify(__thaw_bundle_cjs_export_names) + ';\\n' +\n\
+         \x20\x20__thaw_bundle_cjs_namespace.toString() + '\\n' + __thaw_bundle_cjs_fallback_namespace.toString() + '\\n' + __thaw_bundle_factory_of.toString() + '\\n' + __thaw_bundle_validate_static.toString() + '\\n' + __thaw_bundle_origin_for.toString() + '\\n' + __thaw_bundle_target.toString() + '\\n' + __thaw_bundle_import_missing.toString() + '\\n' + __thaw_bundle_resolve.toString() + '\\n' + __thaw_bundle_async_error.toString() + '\\n' + __thaw_bundle_require.toString() + '\\n' + __thaw_bundle_create_require.toString() + '\\n' + __thaw_bundle_create_import.toString() + '\\n' + __thaw_bundle_create_import_async.toString() + '\\n' + __thaw_bundle_register_worker_main.toString() + '\\n' +\n\
          \x20\x20'globalThis.__thaw_bundle_create_require = __thaw_bundle_create_require;\\nglobalThis.__thaw_bundle_create_import = __thaw_bundle_create_import;\\nglobalThis.__thaw_bundle_create_import_async = __thaw_bundle_create_import_async;\\nglobalThis.__thaw_bundle_worker_origin = __thaw_bundle_origin_for;\\nglobalThis.__thaw_bundle_register_worker_main = __thaw_bundle_register_worker_main;\\n})();\\n';\n\
          globalThis.__thaw_worker_bundle_source = __thaw_worker_bundle_source;\n",
     );
@@ -829,6 +882,101 @@ fn js_string_literal(s: &str) -> String {
 
 #[cfg(test)]
 mod static_link_runtime_regressions {
+    #[test]
+    fn dynamic_import_wraps_commonjs_and_worker_fallbacks() {
+        let module = |key: &str, source: &str, imports: Vec<(String,String)>| super::BundledModule {
+            key:key.into(), source:source.into(), source_name:thaw_parser::common::FileName::Custom(key.into()),
+            export_graph:None, origin_parameter:None, requires:imports.clone(), imports,
+            known_packages:vec![], static_esm_specs:vec![], has_esm:false, has_top_level_await:false,
+            commonjs_context:true, native_esm_context:false, uses_legacy_bundle_globals:true,
+            has_nonliteral_module_load:false, uses_import_meta:false, async_module:false, source_path:None,
+        };
+        let modules = vec![
+            module("main", r#"module.exports = async function() {
+                const raw = require('fn'), first = await requireAsync('fn'), again = await requireAsync('fn');
+                const scalar = await requireAsync('scalar');
+                const bare = await requireAsync('fs'), prefixed = await requireAsync('node:fs');
+                const saved = [Object.create, Object.defineProperty, Object.preventExtensions,
+                    WeakMap.prototype.set, Promise.prototype.then];
+                let intrinsicSafe = false;
+                try {
+                    Promise.resolve().then(function() {
+                        Promise.prototype.then = function() { throw new Error('late Promise.then'); };
+                    });
+                    const poisoned = await requireAsync('poison');
+                    intrinsicSafe = poisoned.default === 23 && poisoned['module.exports'] === 23;
+                } finally {
+                    [Object.create, Object.defineProperty, Object.preventExtensions,
+                        WeakMap.prototype.set, Promise.prototype.then] = saved;
+                }
+                new Function(globalThis.__thaw_worker_bundle_source)();
+                const workerImport = globalThis.__thaw_bundle_create_import_async('main', {worker:true});
+                const worker = await workerImport('worker_threads'), workerAgain = await workerImport('node:worker_threads');
+                const workerFn = await workerImport('fn');
+                const badWorkerImport = globalThis.__thaw_bundle_create_import_async('main',
+                    new Proxy({}, { ownKeys: function() { throw new Error('worker names'); } }));
+                let badWorkerPromise, badWorkerRejected = false;
+                try { badWorkerPromise = badWorkerImport('worker_threads'); } catch (_) {}
+                if (badWorkerPromise) {
+                    try { await badWorkerPromise; } catch (error) {
+                        badWorkerRejected = error.message === 'worker names';
+                    }
+                }
+                return [first.default === raw, first.default() === 17, first === again,
+                    first.named === 3, scalar.default === 7, bare === prefixed,
+                    bare.default === globalThis.__thaw_dynamic_builtin,
+                    worker === workerAgain, worker.default.worker === true,
+                    workerFn.default() === 17, globalThis.__thaw_dynamic_then_calls === 0,
+                    intrinsicSafe, badWorkerRejected];
+            };"#, vec![("fn".into(),"fn".into()),("scalar".into(),"scalar".into()),("poison".into(),"poison".into())]),
+            module("fn", "module.exports = function(){return 17;}; module.exports.named = 3; Object.defineProperty(module.exports, 'then', {value:function(){globalThis.__thaw_dynamic_then_calls++; throw new Error('exports assimilated');}});", vec![]),
+            module("scalar", "module.exports = 7;", vec![]),
+            module("poison", "module.exports = 23; const fail = function(){throw new Error('late namespace intrinsic');}; Object.create = fail; Object.defineProperty = fail; Object.preventExtensions = fail; WeakMap.prototype.set = fail;", vec![]),
+        ];
+        let bundle = super::render_bundle("main", &modules);
+        let script = format!("globalThis.module = {{exports:{{}}}}; globalThis.__thaw_dynamic_then_calls = 0; globalThis.__thaw_dynamic_builtin = {{readFile:function(){{}}}}; globalThis.require = function(spec){{if(spec === 'fs' || spec === 'node:fs') return globalThis.__thaw_dynamic_builtin; throw new Error(spec);}}; {bundle} globalThis.__thaw_dynamic_namespace_check = module.exports;");
+        let script = std::ffi::CString::new(script).unwrap();
+        assert_eq!(thaw_quickjs::thaw_js_load(script.as_ptr()), 1);
+        let result = thaw_quickjs::thaw_js_call(c"__thaw_dynamic_namespace_check".as_ptr(), c"[]".as_ptr());
+        let text = unsafe { std::ffi::CStr::from_ptr(result) }.to_string_lossy().into_owned();
+        unsafe { drop(std::ffi::CString::from_raw(result.cast_mut())); }
+        assert_eq!(text, "[true,true,true,true,true,true,true,true,true,true,true,true,true]");
+    }
+
+    #[test]
+    fn commonjs_namespace_keeps_default_identity_and_builtin_aliases() {
+        let script = format!(r#"(() => {{
+            var __thaw_bundle_builtin_names = ['fs'];
+            var __thaw_bundle_import_maps = {{owner:{{fn:'function'}}}}, __thaw_bundle_export_graphs = {{}};
+            var __thaw_bundle_edges = {{}}, __thaw_bundle_cache = {{}}, __thaw_bundle_star_linkers = {{}}, __thaw_bundle_edge_version = 0;
+            function __thaw_bundle_target(map, spec) {{return map[spec] ? {{key:map[spec],factory:map[spec]}} : null;}}
+            {runtime}
+            const fn = function() {{ return 17; }};
+            fn.named = 3;
+            const first = __thaw_bundle_cjs_namespace('function', fn, ['named','named','default']);
+            if (first.default !== fn || first['module.exports'] !== fn || first.named !== 3 || first.default() !== 17)
+                throw new Error('function exports namespace changed');
+            const origin = __thaw_bundle_origin_for('owner');
+            origin.edge('fn', first);
+            if (origin.readDefault('fn') !== fn || origin.namespaceImport('fn') !== fn)
+                throw new Error('async static import confused namespace and exports');
+            if (__thaw_bundle_cjs_namespace('function', fn, ['named']) !== first)
+                throw new Error('namespace identity changed');
+            fn.named = 9;
+            if (first.named !== 3 || Object.getPrototypeOf(first) !== null || Object.isExtensible(first) || first[Symbol.toStringTag] !== 'Module')
+                throw new Error('namespace snapshot or shape changed');
+            const scalar = __thaw_bundle_cjs_namespace('scalar', 7, []);
+            if (scalar.default !== 7 || scalar['module.exports'] !== 7)
+                throw new Error('primitive exports missing default');
+            const builtin = {{readFile:fn}};
+            const bare = __thaw_bundle_cjs_fallback_namespace('fs', builtin);
+            if (bare !== __thaw_bundle_cjs_fallback_namespace('node:fs', builtin) || bare.default !== builtin || bare.readFile !== fn)
+                throw new Error('builtin alias namespace changed');
+        }})();"#, runtime = super::STAR_ORIGIN_RUNTIME);
+        let script = std::ffi::CString::new(script).unwrap();
+        assert_eq!(thaw_quickjs::thaw_js_load(script.as_ptr()), 1);
+    }
+
     #[test]
     fn missing_static_dependency_rejects_before_any_factory_side_effect() {
         let module = |key: &str, source: &str, imports: Vec<(String, String)>, dependencies: Vec<&str>| super::BundledModule {
