@@ -7542,3 +7542,107 @@ fn webassembly_duplicate_memory_imports_share_one_resource() {
     "#), 1);
     assert_eq!(call("wasmMemoryImportAliases", "[]"), "[true,true,0,131072,42,73]");
 }
+
+// Unrun regression target: an imported JS callback reenters its active instance.
+#[test]
+fn webassembly_import_callback_reenters_same_instance() {
+    assert_eq!(load(r#"
+        function wasmReentry() {
+            const bytes = new TextEncoder().encode(`(module
+                (import "host" "callback" (func $callback (result i32)))
+                (memory (export "memory") 1)
+                (func (export "inner") (result i32) i32.const 0 i32.load8_u)
+                (func (export "outer") (result i32) call $callback i32.const 1 i32.add))`);
+            let instance;
+            instance = new WebAssembly.Instance(new WebAssembly.Module(bytes), { host: { callback() {
+                new Uint8Array(instance.exports.memory.buffer)[0] = 41;
+                return instance.exports.inner();
+            } } });
+            return [instance.exports.outer(), instance.exports.inner()];
+        }
+    "#), 1);
+    assert_eq!(call("wasmReentry", "[]"), "[42,41]");
+}
+
+// Unrun regression target: result coercion reenters the active Caller.
+#[test]
+fn webassembly_import_result_coercion_reenters_same_instance() {
+    assert_eq!(load(r#"
+        function wasmResultReentry() {
+            const bytes = new TextEncoder().encode(`(module
+                (import "host" "callback" (func $callback (result i32)))
+                (func (export "inner") (result i32) i32.const 41)
+                (func (export "outer") (result i32) call $callback i32.const 1 i32.add))`);
+            let instance, conversions = 0;
+            instance = new WebAssembly.Instance(new WebAssembly.Module(bytes), { host: { callback() {
+                return { valueOf() { conversions++; return instance.exports.inner(); } };
+            } } });
+            return [instance.exports.outer(), conversions];
+        }
+    "#), 1);
+    assert_eq!(call("wasmResultReentry", "[]"), "[42,1]");
+}
+
+// Unrun regression target: a start import can call another published instance.
+#[test]
+fn webassembly_start_import_calls_existing_instance() {
+    assert_eq!(load(r#"
+        function wasmStartReentry() {
+            const firstBytes = new TextEncoder().encode(`(module
+                (func (export "read") (result i32) i32.const 41))`);
+            const first = new WebAssembly.Instance(new WebAssembly.Module(firstBytes));
+            const nextBytes = new TextEncoder().encode(`(module
+                (import "host" "callback" (func $callback (result i32)))
+                (global $value (mut i32) (i32.const 0))
+                (func $start call $callback global.set $value)
+                (start $start)
+                (func (export "read") (result i32) global.get $value))`);
+            const next = new WebAssembly.Instance(new WebAssembly.Module(nextBytes), {
+                host: { callback() { return first.exports.read(); } }
+            });
+            return [next.exports.read(), first.exports.read()];
+        }
+    "#), 1);
+    assert_eq!(call("wasmStartReentry", "[]"), "[41,41]");
+}
+
+// Unrun regression target: releasing another instance preserves running externrefs.
+#[test]
+fn webassembly_reentrant_dispose_preserves_externrefs() {
+    assert_eq!(load(r#"
+        function wasmDisposeDuringCall() {
+            const empty = new TextEncoder().encode('(module)');
+            const other = new WebAssembly.Instance(new WebAssembly.Module(empty));
+            const value = { answer: 42 };
+            const global = new WebAssembly.Global({ value: 'externref', mutable: false }, value);
+            const bytes = new TextEncoder().encode(`(module
+                (import "host" "value" (global $value externref))
+                (import "host" "callback" (func $callback))
+                (func (export "read") (result externref) call $callback global.get $value))`);
+            const instance = new WebAssembly.Instance(new WebAssembly.Module(bytes), {
+                host: { value: global, callback() { other.dispose(); } }
+            });
+            return instance.exports.read() === value;
+        }
+    "#), 1);
+    assert_eq!(call("wasmDisposeDuringCall", "[]"), "true");
+}
+
+// Unrun regression target: nested imports use the newest Caller for their Store.
+#[test]
+fn webassembly_nested_import_reentry() {
+    assert_eq!(load(r#"
+        function wasmNestedReentry() {
+            const bytes = new TextEncoder().encode(`(module
+                (import "host" "callback" (func $callback (param i32) (result i32)))
+                (func (export "recurse") (param i32) (result i32)
+                    local.get 0 call $callback i32.const 1 i32.add))`);
+            let instance;
+            instance = new WebAssembly.Instance(new WebAssembly.Module(bytes), { host: {
+                callback(depth) { return depth === 0 ? 40 : instance.exports.recurse(depth - 1); }
+            } });
+            return instance.exports.recurse(2);
+        }
+    "#), 1);
+    assert_eq!(call("wasmNestedReentry", "[]"), "43");
+}
