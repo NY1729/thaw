@@ -752,3 +752,34 @@ fn array_filter_keeps_the_pre_predicate_value_and_presence() {
     "#;
     assert_eq!(compile_and_run(source, "array_filter_snapshot"), "1 1\n2 true 3 true 4\n");
 }
+
+#[test]
+fn comparator_sort_uses_snapshot_and_writes_back_only_on_success() {
+    let source = r#"
+        function main(): void {
+            const values = [2, 1];
+            const result = values.sort((left: number, right: number): number => {
+                values[0] = 99;
+                return 0;
+            });
+            console.log(result === values, values.join(","));
+            const failed = [2, 1];
+            try {
+                failed.sort((left: number, right: number): number => {
+                    failed[0] = 99;
+                    throw "stop";
+                });
+            } catch (error) {
+                console.log(failed.join(","));
+            }
+            const extended = [2, 1];
+            extended.sort((left: number, right: number): number => {
+                extended.push(3);
+                return 0;
+            });
+            console.log(extended.join(","));
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "sort_snapshot_mutation"),
+        "true 2,1\n99,1\n2,1,3\n");
+}

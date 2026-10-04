@@ -391,14 +391,10 @@ impl<'a> FnLowerer<'a> {
         let variable = |name: &str| HirExpr::Var(name.to_string());
         let add_one =
             |value: HirExpr| HirExpr::BinOp(BinOp::Add, Box::new(value), Box::new(number(1.0)));
-        let working_source = if copy {
-            HirExpr::Call(
-                Box::new(HirExpr::Var("__thaw_array_slice".into())),
-                vec![variable(&receiver_name), number(0.0), number(f64::INFINITY)],
-            )
-        } else {
-            variable(&receiver_name)
-        };
+        let working_source = HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_array_slice".into())),
+            vec![variable(&receiver_name), number(0.0), number(f64::INFINITY)],
+        );
         let inner_index = variable(&inner_name);
         let next_index = add_one(inner_index.clone());
         let left_value = HirExpr::TypedIndex(
@@ -440,9 +436,9 @@ impl<'a> FnLowerer<'a> {
                 vec![variable(&array_name)],
             )
         } else {
-            variable(&array_name)
+            variable(&receiver_name)
         };
-        let body = HirExpr::Block(vec![
+        let mut statements = vec![
             HirStmt::Let(array_name.clone(), array_type.clone(), working_source),
             HirStmt::Let(
                 length_name.clone(),
@@ -490,8 +486,58 @@ impl<'a> FnLowerer<'a> {
                     )),
                 ],
             ),
-            HirStmt::Return(Some(result)),
-        ]);
+        ];
+        if !copy {
+            let write_index = format!("__thaw_sort_write_{}", self.next_binding);
+            self.next_binding += 1;
+            let write_state = format!("__thaw_sort_state_{}", self.next_binding);
+            self.next_binding += 1;
+            self.scope.insert(write_index.clone(), HirType::F64);
+            self.scope.insert(write_state.clone(), HirType::F64);
+            let delete_key = self.coerce_primitive_to_string(variable(&write_index))?;
+            statements.push(HirStmt::Let(write_index.clone(), HirType::F64, number(0.0)));
+            statements.push(HirStmt::While(
+                HirExpr::BinOp(
+                    BinOp::Lt,
+                    Box::new(variable(&write_index)),
+                    Box::new(HirExpr::ArrayLen(Box::new(variable(&array_name)))),
+                ),
+                vec![
+                    HirStmt::Let(write_state.clone(), HirType::F64, HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_array_index_state".into())),
+                        vec![variable(&array_name), variable(&write_index)],
+                    )),
+                    HirStmt::If(
+                        HirExpr::BinOp(BinOp::EqEqEq,
+                            Box::new(variable(&write_state)), Box::new(number(0.0))),
+                        vec![HirStmt::Expr(HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_array_delete_strict".into())),
+                            vec![variable(&receiver_name), delete_key],
+                        ))],
+                        vec![HirStmt::If(
+                            HirExpr::BinOp(BinOp::EqEqEq,
+                                Box::new(variable(&write_state)), Box::new(number(2.0))),
+                            vec![HirStmt::Expr(HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_array_set_undefined".into())),
+                                vec![variable(&receiver_name), variable(&write_index)],
+                            ))],
+                            vec![HirStmt::Expr(HirExpr::IndexAssign(
+                                Box::new(variable(&receiver_name)),
+                                Box::new(variable(&write_index)),
+                                Box::new(HirExpr::TypedIndex(
+                                    Box::new(variable(&array_name)),
+                                    Box::new(variable(&write_index)), element_type.clone(),
+                                )),
+                            ))],
+                        )],
+                    ),
+                    HirStmt::Expr(HirExpr::Assign(write_index.clone(),
+                        Box::new(add_one(variable(&write_index))))),
+                ],
+            ));
+        }
+        statements.push(HirStmt::Return(Some(result)));
+        let body = HirExpr::Block(statements);
         self.wrap_call_argument_bindings(
             body,
             &[
