@@ -2284,3 +2284,51 @@ module.exports = async function () {
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
 }
+
+#[test]
+fn test_plan_counts_context_assertions_and_child_tests() {
+    use std::ffi::{CStr, CString};
+
+    let dir = temp_registry("builtin_test_plan");
+    fs::write(
+            dir.join("index.js"),
+            r#"var test = require('node:test'), assertion = require('node:assert');
+module.exports = async function () {
+  var passed = await test('counts', async function(t) {
+    t.plan(4); t.assert(true); t.assert.strict.ok(true); t.assert.strictEqual.call(null, 1, 1);
+    await t.test('child', function(child) { child.plan(1); child.assert.ok(true); });
+  });
+  var missing = await test('missing', function(t) { t.plan(1); });
+  var excess = await test('excess', function(t) { t.plan(1); t.assert.ok(true); t.assert.ok(true); });
+  var isolated = await test('isolated', function(t) { t.plan(0); assertion.ok(true); });
+  var caught = await test('caught', function(t) { t.plan(1); try { t.assert.fail('expected'); } catch (error) {} });
+  Object.freeze(assertion);
+  var frozen = await test('frozen', function(t) { t.plan(1); t.assert.strictEqual(1, 1); });
+  return [passed.status, missing.status, excess.status, isolated.status, caught.status, frozen.status];
+};"#,
+        )
+        .unwrap();
+    let empty_node_modules = temp_registry("builtin_test_plan_node_modules");
+    let (bundle, _, file_count, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    assert!(file_count >= 3);
+    let script = format!(
+            "globalThis.module = {{ exports: {{}} }};\n\
+             globalThis.exports = globalThis.module.exports;\n\
+             globalThis.require = function(name) {{ throw new Error(\"require('\" + name + \"') is not supported\"); }};\n\
+             {bundle}\n\
+             globalThis.exerciseTestPlan = module.exports;\n"
+        );
+    let source = CString::new(script).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let func = CString::new("exerciseTestPlan").unwrap();
+    let args = CString::new("[]").unwrap();
+    let result_ptr = thaw_quickjs::thaw_js_call(func.as_ptr(), args.as_ptr());
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(
+        result,
+        r#"["passed","failed","failed","passed","passed","passed"]"#
+    );
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+}
