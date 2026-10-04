@@ -932,6 +932,13 @@ fn global_fetch_sends_requests_follows_redirects_and_returns_responses() {
     let mut brotli = brotli::CompressorWriter::new(Vec::new(), 4096, 5, 22);
     brotli.write_all(b"compressed").unwrap();
     let brotli = brotli.into_inner();
+    let mut stacked = brotli::CompressorWriter::new(Vec::new(), 4096, 5, 22);
+    stacked.write_all(&[
+                            0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x4b, 0xce,
+                            0xcf, 0x2d, 0x28, 0x4a, 0x2d, 0x2e, 0x4e, 0x4d, 0x01, 0x00, 0x1e, 0x4b,
+                            0x56, 0x97, 0x0a, 0x00, 0x00, 0x00,
+                        ]).unwrap();
+    let stacked = stacked.into_inner();
     let server = std::thread::spawn(move || {
         fn read_request(stream: &mut std::net::TcpStream) -> Vec<u8> {
             let mut request = Vec::new();
@@ -962,6 +969,7 @@ fn global_fetch_sends_requests_follows_redirects_and_returns_responses() {
             "GET /gzip ",
             "GET /deflate ",
             "GET /br ",
+            "GET /stacked ",
         ] {
             let (mut stream, _) = listener.accept().unwrap();
             let request = read_request(&mut stream);
@@ -1000,6 +1008,7 @@ fn global_fetch_sends_requests_follows_redirects_and_returns_responses() {
             } else if expected.contains("gzip")
                 || expected.contains("deflate")
                 || expected.contains("/br")
+                || expected.contains("/stacked")
             {
                 assert!(request
                     .to_ascii_lowercase()
@@ -1021,6 +1030,8 @@ fn global_fetch_sends_requests_follows_redirects_and_returns_responses() {
                             0x01, 0x00, 0x17, 0x3f, 0x04, 0x36,
                         ],
                     )
+                } else if expected.contains("/stacked") {
+                    ("GZip, BR", &stacked)
                 } else {
                     ("br", &brotli)
                 };
@@ -1044,7 +1055,7 @@ fn global_fetch_sends_requests_follows_redirects_and_returns_responses() {
     let dir = temp_registry("global_fetch");
     fs::write(
             dir.join("index.js"),
-            "module.exports = async function (port) { var base = 'http://127.0.0.1:' + port; var redirected = await fetch(base + '/redirect', { headers: { 'Content-Type': 'text/plain' } }), cookies = redirected.headers.getSetCookie(), json = await redirected.json(); var posted = await fetch(new Request(base + '/echo', { method: 'POST', headers: { 'X-Thaw': 'enabled' }, body: 'payload' })), before = posted.bodyUsed, text = await posted.text(); var data = new FormData(); data.append('title', 'thaw'); data.append('asset', new Blob(['file-body'], { type: 'text/plain' }), 'note.txt'); var multipartRequest = new Request(base + '/multipart', { method: 'POST', body: data }), parsedRequest = await multipartRequest.clone().formData(), multipart = await fetch(multipartRequest), parsed = await multipart.formData(), upload = parsed.get('upload'); var rewritten = await fetch(base + '/post-redirect#source', { method: 'POST', body: 'again' }), rewrittenText = await rewritten.text(), gzip = await fetch(base + '/gzip'), gzipText = await gzip.text(), deflate = await fetch(base + '/deflate'), deflateText = await deflate.text(), br = await fetch(base + '/br'), brText = await br.text(); var controller = new AbortController(), abortReason; controller.abort('stop'); try { await fetch(base + '/unused', { signal: controller.signal }); } catch (error) { abortReason = error; } var schemeError; try { await fetch('file:///tmp/value'); } catch (error) { schemeError = error instanceof TypeError; } return [redirected.status, redirected.ok, redirected.redirected, redirected.url, cookies, json.ok, posted.status, posted.statusText, posted.headers.get('content-type'), before, posted.bodyUsed, text, typeof fetch, abortReason, schemeError, parsedRequest.get('title'), await parsedRequest.get('asset').text(), parsed.get('answer'), upload instanceof File, upload.name, upload.type, await upload.text(), rewritten.redirected, rewritten.url, rewrittenText, gzipText, gzip.headers.get('content-encoding'), deflateText, deflate.headers.get('content-encoding'), brText, br.headers.get('content-encoding')]; };",
+            "module.exports = async function (port) { var base = 'http://127.0.0.1:' + port; var redirected = await fetch(base + '/redirect', { headers: { 'Content-Type': 'text/plain' } }), cookies = redirected.headers.getSetCookie(), json = await redirected.json(); var posted = await fetch(new Request(base + '/echo', { method: 'POST', headers: { 'X-Thaw': 'enabled' }, body: 'payload' })), before = posted.bodyUsed, text = await posted.text(); var data = new FormData(); data.append('title', 'thaw'); data.append('asset', new Blob(['file-body'], { type: 'text/plain' }), 'note.txt'); var multipartRequest = new Request(base + '/multipart', { method: 'POST', body: data }), parsedRequest = await multipartRequest.clone().formData(), multipart = await fetch(multipartRequest), parsed = await multipart.formData(), upload = parsed.get('upload'); var rewritten = await fetch(base + '/post-redirect#source', { method: 'POST', body: 'again' }), rewrittenText = await rewritten.text(), gzip = await fetch(base + '/gzip'), gzipText = await gzip.text(), deflate = await fetch(base + '/deflate'), deflateText = await deflate.text(), br = await fetch(base + '/br'), brText = await br.text(), stacked = await fetch(base + '/stacked'), stackedText = await stacked.text(); var controller = new AbortController(), abortReason; controller.abort('stop'); try { await fetch(base + '/unused', { signal: controller.signal }); } catch (error) { abortReason = error; } var schemeError; try { await fetch('file:///tmp/value'); } catch (error) { schemeError = error instanceof TypeError; } return [redirected.status, redirected.ok, redirected.redirected, redirected.url, cookies, json.ok, posted.status, posted.statusText, posted.headers.get('content-type'), before, posted.bodyUsed, text, typeof fetch, abortReason, schemeError, parsedRequest.get('title'), await parsedRequest.get('asset').text(), parsed.get('answer'), upload instanceof File, upload.name, upload.type, await upload.text(), rewritten.redirected, rewritten.url, rewrittenText, gzipText, gzip.headers.get('content-encoding'), deflateText, deflate.headers.get('content-encoding'), brText, br.headers.get('content-encoding'), stackedText, stacked.headers.get('content-encoding')]; };",
         )
         .unwrap();
     let empty_node_modules = temp_registry("global_fetch_node_modules");
@@ -1061,7 +1072,7 @@ fn global_fetch_sends_requests_follows_redirects_and_returns_responses() {
     assert_eq!(
         result,
         format!(
-            r#"[200,true,true,"http://127.0.0.1:{port}/final",["a=1","b=2"],true,201,"Created","text/plain",false,true,"payload","function","stop",true,"thaw","file-body","42",true,"reply.txt","text/plain","reply-body",true,"http://127.0.0.1:{port}/post-final","rewritten","compressed","gzip","compressed","deflate","compressed","br"]"#
+            r#"[200,true,true,"http://127.0.0.1:{port}/final",["a=1","b=2"],true,201,"Created","text/plain",false,true,"payload","function","stop",true,"thaw","file-body","42",true,"reply.txt","text/plain","reply-body",true,"http://127.0.0.1:{port}/post-final","rewritten","compressed","gzip","compressed","deflate","compressed","br","compressed","GZip, BR"]"#
         )
     );
     server.join().unwrap();
