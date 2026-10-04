@@ -685,7 +685,7 @@ impl<'a> FnLowerer<'a> {
                                 for (member_index, member) in members.iter().enumerate() {
                                     let HirType::Array(element) = member else { unreachable!() };
                                     let coerced = arguments.iter().cloned().enumerate().map(|(index, value)| {
-                                        if index < 2 { self.coerce_primitive_to_number(value) }
+                                        if index < 2 { Ok(value) }
                                         else { self.coerce_array_insert_value(value, element) }
                                     }).collect::<Result<Vec<_>, _>>().map_err(|error| format!(
                                         "`.toSpliced()` value cannot be represented by union member {member:?}: {error}"
@@ -717,7 +717,7 @@ impl<'a> FnLowerer<'a> {
                         .enumerate()
                         .map(|(index, value)| {
                             if index < 2 {
-                                self.coerce_primitive_to_number(value)
+                                Ok(value)
                             } else {
                                 self.coerce_array_insert_value(value, &element_type)
                             }

@@ -59,7 +59,8 @@ impl<'a> FnLowerer<'a> {
         };
         let initial_start = argument_names
             .first()
-            .map(|name| var(name))
+            .map(|name| self.coerce_primitive_to_number(var(name)))
+            .transpose()?
             .unwrap_or_else(|| number(0.0));
         let mut statements = vec![
             HirStmt::Let(
@@ -106,7 +107,7 @@ impl<'a> FnLowerer<'a> {
         let initial_delete = match argument_names.len() {
             0 => number(0.0),
             1 => sub(var(&length_name), var(&start_name)),
-            _ => var(&argument_names[1]),
+            _ => self.coerce_primitive_to_number(var(&argument_names[1]))?,
         };
         statements.extend([
             HirStmt::Let(delete_name.clone(), HirType::F64, initial_delete),
