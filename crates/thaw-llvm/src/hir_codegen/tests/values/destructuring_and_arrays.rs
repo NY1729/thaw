@@ -834,3 +834,26 @@ fn dynamic_destructuring_defaults_check_read_value_and_preserve_null() {
     assert_eq!(compile_and_run(source, "dynamic_destructuring_value_defaults"),
         "42 42 null 7 2\n42 3\n42 1 4\n42 null 7 5\n42 1 6\n");
 }
+
+#[test]
+fn missing_fixed_object_assignment_properties_use_defaults() {
+    let source = r#"
+        let defaults = 0;
+        function fallback(): number { defaults++; return 99; }
+        function main(): void {
+            let assigned = 0;
+            ({ assigned = fallback() } = {});
+            console.log(assigned, defaults);
+            const source = { present: 7 };
+            const returned = ({ missing: assigned = fallback() } = source);
+            console.log(assigned, defaults, returned.present);
+            ({ present: assigned = fallback() } = source);
+            console.log(assigned, defaults);
+            let rest = { present: 0 };
+            ({ missing: assigned = fallback(), ...rest } = source);
+            console.log(assigned, defaults, rest.present);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "missing_fixed_assignment_defaults"),
+        "99 1\n99 2 7\n7 2\n99 3 7\n");
+}
