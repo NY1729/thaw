@@ -332,6 +332,7 @@ fn emit_compare(code: &mut Vec<u8>, left: u8, right: u8, operation: CompareOp) {
 
 struct Code {
     memory: *mut libc::c_void,
+    mapped_size: usize,
     globals: *const JitGlobals,
 }
 
@@ -340,7 +341,7 @@ unsafe impl Sync for Code {}
 
 impl Drop for Code {
     fn drop(&mut self) {
-        unsafe { libc::munmap(self.memory, page_size()) };
+        unsafe { libc::munmap(self.memory, self.mapped_size) };
     }
 }
 
@@ -350,6 +351,64 @@ fn page_size() -> usize {
         size as usize
     } else {
         4096
+    }
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+fn mapped_code_size(bytes_len: usize) -> Option<usize> {
+    let page = page_size();
+    bytes_len.max(1).checked_add(page - 1)?.checked_div(page)?.checked_mul(page)
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+fn map_executable_code(bytes: &[u8]) -> Result<(*mut libc::c_void, usize), *const c_char> {
+    let size = mapped_code_size(bytes.len()).ok_or_else(|| ALLOCATION_FAILED.as_ptr().cast())?;
+    let memory = unsafe {
+        libc::mmap(
+            ptr::null_mut(),
+            size,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+            -1,
+            0,
+        )
+    };
+    if memory == libc::MAP_FAILED {
+        return Err(ALLOCATION_FAILED.as_ptr().cast());
+    }
+    unsafe {
+        ptr::copy_nonoverlapping(bytes.as_ptr(), memory.cast(), bytes.len());
+        if libc::mprotect(memory, size, libc::PROT_READ | libc::PROT_EXEC) != 0 {
+            libc::munmap(memory, size);
+            return Err(ALLOCATION_FAILED.as_ptr().cast());
+        }
+    }
+    Ok((memory, size))
+}
+
+#[cfg(all(test, target_arch = "x86_64", target_family = "unix"))]
+mod executable_mapping_tests {
+    use super::*;
+
+    // Unrun regression: the byte just past one page must be inside the
+    // mapped, executable span, and Code's destructor receives that span.
+    #[test]
+    fn generated_code_can_cross_a_page_boundary() {
+        let page = page_size();
+        let bytes = vec![0xc3; page + 1];
+        let (memory, mapped_size) = map_executable_code(&bytes).unwrap();
+        assert_eq!(mapped_size, page * 2);
+        assert_eq!(unsafe { *memory.cast::<u8>().add(page) }, 0xc3);
+        drop(Code {
+            memory,
+            mapped_size,
+            globals: ptr::null(),
+        });
+    }
+
+    #[test]
+    fn mapping_size_overflow_fails_before_allocation() {
+        assert!(mapped_code_size(usize::MAX).is_none());
     }
 }
 
@@ -387,27 +446,7 @@ fn compile(
     let bytes = program
         .machine_code()
         .ok_or_else(|| INVALID_SYMBOL.as_ptr().cast())?;
-    let size = page_size();
-    let memory = unsafe {
-        libc::mmap(
-            ptr::null_mut(),
-            size,
-            libc::PROT_READ | libc::PROT_WRITE,
-            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
-            -1,
-            0,
-        )
-    };
-    if memory == libc::MAP_FAILED {
-        return Err(ALLOCATION_FAILED.as_ptr().cast());
-    }
-    unsafe {
-        ptr::copy_nonoverlapping(bytes.as_ptr(), memory.cast(), bytes.len());
-        if libc::mprotect(memory, size, libc::PROT_READ | libc::PROT_EXEC) != 0 {
-            libc::munmap(memory, size);
-            return Err(ALLOCATION_FAILED.as_ptr().cast());
-        }
-    }
+    let (memory, mapped_size) = map_executable_code(&bytes)?;
     let globals_ptr = {
         let mut globals = globals_cache()
             .lock()
@@ -426,6 +465,7 @@ fn compile(
         symbol.to_owned(),
         Code {
             memory,
+            mapped_size,
             globals: globals_ptr,
         },
     );
