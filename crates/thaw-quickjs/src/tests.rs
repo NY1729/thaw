@@ -8052,3 +8052,22 @@ fn webassembly_import_resource_type_mismatches() {
     "#), 1);
     assert_eq!(call("wasmResourceTypes", "[]"), "[true,true,true,true]");
 }
+
+// Unrun regression target: omitted externref Global initial value is undefined.
+#[test]
+fn webassembly_externref_global_default() {
+    assert_eq!(load(r#"
+        function wasmGlobalDefault() {
+            const omitted = new WebAssembly.Global({ value: "externref" });
+            const explicitNull = new WebAssembly.Global({ value: "externref" }, null);
+            const explicitUndefined = new WebAssembly.Global({ value: "externref" }, undefined);
+            const bytes = new TextEncoder().encode(`(module
+                (import "host" "value" (global $value externref))
+                (func (export "read") (result externref) global.get $value))`);
+            const instance = new WebAssembly.Instance(new WebAssembly.Module(bytes), { host: { value: omitted } });
+            return [omitted.value === undefined, explicitNull.value === null,
+                explicitUndefined.value === undefined, instance.exports.read() === undefined];
+        }
+    "#), 1);
+    assert_eq!(call("wasmGlobalDefault", "[]"), "[true,true,true,true]");
+}
