@@ -18,6 +18,10 @@ pub unsafe extern "C" fn napi_define_properties(
     if count == 0 {
         return NAPI_OK;
     }
+    let _dispatch = ForeignCallbackGuard::new();
+    // A later descriptor can fail after an earlier member changed an edge.
+    // Sweep once after the entire (possibly partial) definition transaction.
+    let mut scope_sweep = ScopeMutationSweep::new(env);
     for descriptor in std::slice::from_raw_parts(descriptors, count) {
         let key = if !descriptor.utf8name.is_null() {
             env_mut(env).map(|env| {
@@ -86,6 +90,9 @@ pub unsafe extern "C" fn napi_define_properties(
                     _ => NAPI_GENERIC_FAILURE,
                 }
             } else {
+                // The native array may already have lost higher indices if
+                // a lower readonly index makes ArraySetLength fail.
+                scope_sweep.changed();
                 set_array_length(env, object, descriptor.value,
                     attributes & NAPI_WRITABLE == 0)
             };
@@ -175,6 +182,7 @@ pub unsafe extern "C" fn napi_define_properties(
             // A replaced JS accessor may release its last QuickJS handle and
             // run a finalizer. Do so after the Env mutation borrow ends.
             drop(replaced);
+            scope_sweep.changed();
             continue;
         }
         let value = if let Some(method) = descriptor.method {
@@ -197,12 +205,14 @@ pub unsafe extern "C" fn napi_define_properties(
         // Definition writes an own descriptor directly. A property setter
         // must not run, and a nonconfigurable predecessor must pass the same
         // compatibility checks as the trusted graph descriptor route.
+        if is_array_length_property(object, &key_name) { scope_sweep.changed(); }
         let status = qjs_install_native_data_property(env, object, key_name,
             value, descriptor.method.is_some() || !descriptor.value.is_null(),
             attributes);
         if status != NAPI_OK {
             return record_status(env, status);
         }
+        scope_sweep.changed();
     }
     NAPI_OK
 }
@@ -856,7 +866,7 @@ pub unsafe extern "C" fn napi_get_prototype(
     let prototype =
         prototype_for_owner(env_ptr, object as usize).map(|prototype| prototype as NapiValue);
     match prototype {
-        Some(prototype) => write_value(result, prototype),
+        Some(prototype) => write_scoped_value(env_ptr, result, prototype),
         None => {
             let undefined = env.alloc(Value::Undefined);
             write_value(result, undefined)
@@ -883,6 +893,8 @@ pub unsafe extern "C" fn node_api_set_prototype(
         }
         return qjs_set_prototype(env, handle, prototype);
     }
+    let _dispatch = ForeignCallbackGuard::new();
+    let mut scope_sweep = ScopeMutationSweep::new(env);
     if !matches!(value_ref(object), Ok(value) if is_object_value(value)) {
         return record_status(env, NAPI_OBJECT_EXPECTED);
     }
@@ -918,6 +930,7 @@ pub unsafe extern "C" fn node_api_set_prototype(
         }
     }
     env.prototypes.insert(object_id, prototype_id);
+    scope_sweep.changed();
     NAPI_OK
 }
 

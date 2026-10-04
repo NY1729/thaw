@@ -876,6 +876,116 @@ unsafe fn write_value(out: *mut NapiValue, value: NapiValue) -> NapiStatus {
     NAPI_OK
 }
 
+#[derive(Clone, Copy)]
+enum ScopedValueRoot {
+    None,
+    Scope { scope: usize, value: usize, generation: u64 },
+    Unscoped { value: usize, generation: u64 },
+}
+
+// A native handle returned from an existing property/cache/reference is a
+// new handle in the recipient's scope, even when its Value allocation came
+// from a scope that has already closed. This is the same ownership record
+// Env::alloc gives freshly allocated values.
+unsafe fn root_existing_value(env: NapiEnv, value: NapiValue) -> Result<ScopedValueRoot, NapiStatus> {
+    if value.is_null() { return Ok(ScopedValueRoot::None); }
+    let owner = env_mut(env).map_err(|_| NAPI_INVALID_ARG)?;
+    if !owner.values.contains(&value) || owner.finalized_handles.contains(&(value as usize)) {
+        return Err(NAPI_INVALID_ARG);
+    }
+    let generation = *owner.value_generations.get(&(value as usize))
+        .ok_or(NAPI_INVALID_ARG)?;
+    if let Some(scope) = owner.active_handle_scopes.last().copied() {
+        if (*scope).values.contains(&(value, generation)) { return Ok(ScopedValueRoot::None); }
+        (*scope).values.push((value, generation));
+        Ok(ScopedValueRoot::Scope { scope: scope as usize, value: value as usize, generation })
+    } else if owner.rooted_scope_escapes.insert(value as usize) {
+        Ok(ScopedValueRoot::Unscoped { value: value as usize, generation })
+    } else {
+        Ok(ScopedValueRoot::None)
+    }
+}
+
+unsafe fn rollback_existing_value_root(env: NapiEnv, acquisition: ScopedValueRoot) {
+    let Ok(owner) = env_mut(env) else { return; };
+    match acquisition {
+        ScopedValueRoot::None => {},
+        ScopedValueRoot::Scope { scope, value, generation } => {
+            if owner.active_handle_scopes.iter().any(|candidate| *candidate as usize == scope) {
+                let entries = &mut (*(scope as *mut HandleScope)).values;
+                if let Some(index) = entries.iter().rposition(|entry|
+                    *entry == (value as NapiValue, generation)) {
+                    entries.remove(index);
+                }
+            }
+        }
+        ScopedValueRoot::Unscoped { value, generation } => {
+            if owner.value_generations.get(&value) == Some(&generation) {
+                owner.rooted_scope_escapes.remove(&value);
+            }
+        }
+    }
+}
+
+unsafe fn prepare_scoped_value(
+    env: NapiEnv, value: NapiValue,
+) -> Result<ScopedValueRoot, NapiStatus> {
+    let recipient_scope = env_mut(env).map_err(|_| NAPI_INVALID_ARG)?
+        .active_handle_scopes.last().copied();
+    let root = root_existing_value(env, value)?;
+    #[cfg(feature = "quickjs")]
+    if !value.is_null() {
+        let local_symbol = env.as_ref().and_then(|owner| {
+            let Value::Symbol { id, .. } = value_ref(value).ok()? else { return None; };
+            owner.js_origin_symbol_ids.contains(id).then_some((*id,
+                owner.value_generations.get(&(value as usize)).copied()?))
+        });
+        if let Some((id, generation)) = local_symbol {
+            let _dispatch = ForeignCallbackGuard::new();
+            sync_js_origin_symbol_pins(env);
+            let pinned = env.as_ref().is_some_and(|owner|
+                owner.js_pinned_symbol_ids.contains(&id)
+                    && owner.symbols.get(&id) == Some(&value)
+                    && owner.value_generations.get(&(value as usize)) == Some(&generation)
+                    && owner.active_handle_scopes.last().copied() == recipient_scope
+                    && match recipient_scope {
+                        Some(scope) => (*scope).values.contains(&(value, generation)),
+                        None => owner.rooted_scope_escapes.contains(&(value as usize)),
+                    });
+            if !pinned {
+                rollback_existing_value_root(env, root);
+                return Err(NAPI_GENERIC_FAILURE);
+            }
+        }
+    }
+    Ok(root)
+}
+
+unsafe fn write_scoped_value(env: NapiEnv, out: *mut NapiValue, value: NapiValue) -> NapiStatus {
+    if out.is_null() { return NAPI_INVALID_ARG; }
+    if let Err(status) = prepare_scoped_value(env, value) { return status; }
+    *out = value;
+    NAPI_OK
+}
+
+// Multiple callback-info outputs are published together. A later local
+// Symbol pin may reenter native code after an earlier output was prepared.
+unsafe fn prepared_scoped_values_still_rooted(
+    env: NapiEnv, recipient_scope: Option<*mut HandleScope>,
+    values: &[(NapiValue, u64)],
+) -> bool {
+    env.as_ref().is_some_and(|owner|
+        owner.active_handle_scopes.last().copied() == recipient_scope
+            && values.iter().all(|(value, generation)|
+                owner.values.contains(value)
+                    && !owner.finalized_handles.contains(&(*value as usize))
+                    && owner.value_generations.get(&(*value as usize)) == Some(generation)
+                    && match recipient_scope {
+                        Some(scope) => (*scope).values.contains(&(*value, *generation)),
+                        None => owner.rooted_scope_escapes.contains(&(*value as usize)),
+                    }))
+}
+
 unsafe fn write_callback_value(env: NapiEnv, out: *mut NapiValue, value: NapiValue) -> NapiStatus {
     if out.is_null() {
         return NAPI_INVALID_ARG;
@@ -886,5 +996,5 @@ unsafe fn write_callback_value(env: NapiEnv, out: *mut NapiValue, value: NapiVal
     if !value_belongs_to_environment(env, value) {
         return NAPI_INVALID_ARG;
     }
-    write_value(out, value)
+    write_scoped_value(env, out, value)
 }

@@ -577,6 +577,8 @@ pub unsafe extern "C" fn napi_delete_element(
     index: u32,
     result: *mut bool,
 ) -> NapiStatus {
+    let _dispatch = ForeignCallbackGuard::new();
+    let mut scope_sweep = ScopeMutationSweep::new(env);
     if !value_belongs_to_environment(env, object) {
         return NAPI_INVALID_ARG;
     }
@@ -619,6 +621,7 @@ pub unsafe extern "C" fn napi_delete_element(
         removed
     } else { None };
     drop(removed_accessor);
+    if own { scope_sweep.changed(); }
     if let Some(result) = result.as_mut() {
         *result = true;
     }
@@ -662,7 +665,7 @@ pub unsafe extern "C" fn napi_get_element(
         }
     }
     let status = match value {
-        Some(value) => write_value(out, value),
+        Some(value) => write_scoped_value(env, out, value),
         None => napi_get_undefined(env, out),
     };
     record_status(env, status)

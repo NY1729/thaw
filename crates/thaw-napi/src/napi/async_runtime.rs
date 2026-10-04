@@ -69,6 +69,7 @@ pub unsafe extern "C" fn napi_async_destroy(env: NapiEnv, context: *mut c_void) 
     };
     let _ = (context.resource, &context.resource_name);
     context.destroyed = true;
+    sweep_pending_scope_values(env);
     NAPI_OK
 }
 
@@ -361,6 +362,8 @@ pub unsafe extern "C" fn napi_escape_handle(
         return record_status(env, NAPI_ESCAPE_CALLED_TWICE);
     }
     scope_ref.escaped = true;
+    scope_ref.escaped_value = env_ref.value_generations
+        .get(&(value as usize)).copied().map(|generation| (value, generation));
     *out = value;
     NAPI_OK
 }

@@ -16,6 +16,8 @@ pub unsafe extern "C" fn napi_set_named_property(
     if let Some(handle) = qjs_handle(object) {
         return qjs_set_property(env, handle, &name, value, false);
     }
+    let _dispatch = ForeignCallbackGuard::new();
+    let mut scope_sweep = ScopeMutationSweep::new(env);
     if let Some(accessor) = find_accessor(env, object, &name) {
         let Some(setter) = accessor.setter else {
             return record_status(env, NAPI_GENERIC_FAILURE);
@@ -58,6 +60,9 @@ pub unsafe extern "C" fn napi_set_named_property(
         return record_status(env, NAPI_GENERIC_FAILURE);
     }
     let status = if is_array_length_property(object, &name) {
+        // ArraySetLength can delete high indices before a lower readonly
+        // index stops the operation with a failure status.
+        scope_sweep.changed();
         set_array_length(env, object, value, false)
     } else {
         match env_mut(env) {
@@ -72,6 +77,7 @@ pub unsafe extern "C" fn napi_set_named_property(
                 .insert((object as usize, name), NAPI_DEFAULT_PROPERTY_ATTRIBUTES);
         }
     }
+    if status == NAPI_OK { scope_sweep.changed(); }
     record_status(env, status)
 }
 
@@ -115,7 +121,7 @@ pub unsafe extern "C" fn napi_get_named_property(
         }
     }
     let status = match value {
-        Some(value) => write_value(out, value),
+        Some(value) => write_scoped_value(env, out, value),
         None => napi_get_undefined(env, out),
     };
     record_status(env, status)
@@ -135,7 +141,12 @@ unsafe fn property_key(env: NapiEnv, handle: NapiValue) -> Result<PropertyKey, N
             // and without an Env borrow across the engine call.
             let source = *source;
             let _dispatch = ForeignCallbackGuard::new();
-            match qjs_query(source, 0) {
+            let symbol = match qjs_is_symbol(source) {
+                Ok(symbol) => symbol,
+                Err(error) => return Err(qjs_error_status(env, error)),
+            };
+            if !symbol {
+                match qjs_query(source, 0) {
                 Ok(kind) if kind == "string" => {
                     let units = qjs_actual_string_units(env, source)?;
                     return Ok(match String::from_utf16(&units) {
@@ -143,37 +154,49 @@ unsafe fn property_key(env: NapiEnv, handle: NapiValue) -> Result<PropertyKey, N
                         Err(_) => PropertyKey::Utf16(units),
                     });
                 }
-                Ok(kind) if kind == "symbol" => {}
                 Ok(_) => return Err(record_status(env, NAPI_STRING_EXPECTED)),
                 Err(error) => return Err(qjs_error_status(env, error)),
+                }
             }
-            let needs_retain = env.as_ref().is_some_and(|owner|
-                !owner.quickjs_live_values.contains_key(&source));
-            // A key may arrive from another live addon Env. Own a separate
-            // QuickJS registry retain before storing it in this Env's map.
-            if needs_retain && thaw_quickjs::thaw_js_retain_handle(source) == 0 {
-                return Err(record_status(env, NAPI_INVALID_ARG));
-            }
-            let (id, duplicate_retain) = {
-                let Ok(owner) = env_mut(env) else {
-                    if needs_retain { thaw_quickjs::thaw_js_release_handle(source); }
+            // A property key owns the Symbol through the native object graph.
+            // Register its exact JS identity in the per-owner weak cache; do
+            // not add an independent strong QuickJS registry retain merely
+            // because the key was materialized through a live carrier.
+            let owner_id = env.as_ref().map(|owner| owner.graph_owner_id)
+                .ok_or(NAPI_INVALID_ARG)?;
+            if owner_id == 0 {
+                // A non-bridge test Env has no owner-specific JS weak cache.
+                let needs_retain = env.as_ref().is_some_and(|owner|
+                    !owner.quickjs_live_values.contains_key(&source));
+                // A key may arrive from another live addon Env. Own a separate
+                // QuickJS registry retain before storing it in this Env's map.
+                if needs_retain && thaw_quickjs::thaw_js_retain_handle(source) == 0 {
                     return Err(record_status(env, NAPI_INVALID_ARG));
+                }
+                let (id, duplicate_retain) = {
+                    let Ok(owner) = env_mut(env) else {
+                        if needs_retain { thaw_quickjs::thaw_js_release_handle(source); }
+                        return Err(record_status(env, NAPI_INVALID_ARG));
+                    };
+                    let duplicate_retain = owner.quickjs_live_values.contains_key(&source) && needs_retain;
+                    let owned = if let Some(owned) = owner.quickjs_live_values.get(&source).copied() {
+                        owned
+                    } else {
+                        let owned = owner.alloc(Value::QuickJsHandle { handle: source, object_like: false });
+                        owner.quickjs_live_values.insert(source, owned);
+                        owned
+                    };
+                    let id = *owner.quickjs_symbol_ids.entry(source).or_insert_with(|| {
+                        NEXT_SYMBOL_ID.fetch_add(1, Ordering::Relaxed)
+                    });
+                    owner.symbols.insert(id, owned);
+                    (id, duplicate_retain)
                 };
-                let duplicate_retain = owner.quickjs_live_values.contains_key(&source) && needs_retain;
-                let owned = if let Some(owned) = owner.quickjs_live_values.get(&source).copied() {
-                    owned
-                } else {
-                    let owned = owner.alloc(Value::QuickJsHandle { handle: source, object_like: false });
-                    owner.quickjs_live_values.insert(source, owned);
-                    owned
-                };
-                let id = *owner.quickjs_symbol_ids.entry(source).or_insert_with(|| {
-                    NEXT_SYMBOL_ID.fetch_add(1, Ordering::Relaxed)
-                });
-                owner.symbols.insert(id, owned);
-                (id, duplicate_retain)
-            };
-            if duplicate_retain { thaw_quickjs::thaw_js_release_handle(source); }
+                if duplicate_retain { thaw_quickjs::thaw_js_release_handle(source); }
+                return Ok(PropertyKey::Symbol(id));
+            }
+            let id = thaw_quickjs::thaw_js_napi_graph_symbol_register(owner_id, source);
+            if id == 0 { return Err(record_status(env, NAPI_GENERIC_FAILURE)); }
             Ok(PropertyKey::Symbol(id))
         }
         Ok(Value::Number(value)) => Ok(PropertyKey::String(if *value == 0.0 {
@@ -207,6 +230,8 @@ unsafe fn set_property_key(
             // C API cannot express it. Use the generic key path then.
         }
     }
+    let _dispatch = ForeignCallbackGuard::new();
+    let mut scope_sweep = ScopeMutationSweep::new(env);
     if let Some(accessor) = find_accessor(env, object, &key) {
         let Some(setter) = accessor.setter else {
             return record_status(env, NAPI_GENERIC_FAILURE);
@@ -265,6 +290,7 @@ unsafe fn set_property_key(
             return record_status(env, NAPI_GENERIC_FAILURE);
         }
         let status = if is_array_length_property(receiver, &key) {
+            scope_sweep.changed();
             set_array_length(env, receiver, value, false)
         } else {
             let Ok(receiver_env) = env_mut(env) else {
@@ -280,6 +306,7 @@ unsafe fn set_property_key(
                     (receiver as usize, key), NAPI_DEFAULT_PROPERTY_ATTRIBUTES);
             }
         }
+        scope_sweep.changed();
         return NAPI_OK;
     }
     let Some(env_ref) = env.as_ref() else {
@@ -292,6 +319,7 @@ unsafe fn set_property_key(
         return record_status(env, NAPI_GENERIC_FAILURE);
     }
     let status = if is_array_length_property(object, &key) {
+        scope_sweep.changed();
         set_array_length(env, object, value, false)
     } else {
         let Ok(env_ref) = env_mut(env) else {
@@ -309,6 +337,7 @@ unsafe fn set_property_key(
                 .insert((object as usize, key), NAPI_DEFAULT_PROPERTY_ATTRIBUTES);
         }
     }
+    scope_sweep.changed();
     NAPI_OK
 }
 
@@ -352,7 +381,7 @@ unsafe fn get_property_key(
         }
     }
     let status = match value {
-        Some(value) => write_value(out, value),
+        Some(value) => write_scoped_value(env, out, value),
         None => napi_get_undefined(env, out),
     };
     record_status(env, status)
@@ -482,6 +511,8 @@ pub unsafe extern "C" fn napi_delete_property(
     key: NapiValue,
     out: *mut bool,
 ) -> NapiStatus {
+    let _dispatch = ForeignCallbackGuard::new();
+    let mut scope_sweep = ScopeMutationSweep::new(env);
     if !value_belongs_to_environment(env, object) || !value_belongs_to_environment(env, key) {
         return NAPI_INVALID_ARG;
     }
@@ -532,6 +563,7 @@ pub unsafe extern "C" fn napi_delete_property(
     } else { None };
     // Releasing a JS accessor can run a finalizer and reenter N-API.
     drop(removed_accessor);
+    if own { scope_sweep.changed(); }
     if let Some(out) = out.as_mut() {
         *out = true;
     }
