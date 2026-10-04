@@ -3185,3 +3185,34 @@ fn all_settled_consumes_distinct_inputs_on_early_failure() {
         unsafe { thaw_promise_destroy(output) };
     }
 }
+
+#[test]
+fn fd_poll_rounds_only_fractional_milliseconds_and_skips_removed_watchers() {
+    assert_eq!(fd_poll_timeout_ms(Some(Duration::ZERO)), 0);
+    assert_eq!(fd_poll_timeout_ms(Some(Duration::from_millis(1))), 1);
+    assert_eq!(fd_poll_timeout_ms(Some(Duration::from_nanos(1))), 1);
+    assert_eq!(fd_poll_timeout_ms(Some(Duration::from_micros(1001))), 2);
+    assert_eq!(fd_poll_timeout_ms(Some(Duration::MAX)), i32::MAX);
+    assert_eq!(fd_poll_timeout_ms(None), -1);
+    extern "C" fn remove_other(context: *mut u8, _events: i16) {
+        let id = unsafe { *(context as *const u64) };
+        assert!(thaw_runtime_unwatch_fd(id));
+    }
+    extern "C" fn count_call(context: *mut u8, _events: i16) {
+        unsafe { *(context as *mut usize) += 1; }
+    }
+    let mut fds = [0; 2];
+    assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+    let mut other_id = 0u64;
+    let mut calls = 0usize;
+    let first = thaw_runtime_watch_fd(fds[0], THAW_FD_READABLE, remove_other, (&mut other_id as *mut u64).cast());
+    other_id = thaw_runtime_watch_fd(fds[0], THAW_FD_READABLE, count_call, (&mut calls as *mut usize).cast());
+    assert_ne!(first, 0);
+    assert_ne!(other_id, 0);
+    assert_eq!(unsafe { libc::write(fds[1], b"x".as_ptr().cast(), 1) }, 1);
+    assert_eq!(poll_fd_waits(Some(Duration::ZERO)), 1);
+    assert_eq!(calls, 0);
+    assert!(thaw_runtime_unwatch_fd(first));
+    assert!(!thaw_runtime_unwatch_fd(other_id));
+    unsafe { libc::close(fds[0]); libc::close(fds[1]); }
+}
