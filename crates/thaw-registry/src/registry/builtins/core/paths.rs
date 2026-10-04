@@ -22,7 +22,7 @@ pub(super) fn source(name: &str) -> Option<&'static str> {
              \x20\x20return n.charAt(0) === '/' ? n : '/' + n;\n\
              }\n\
              function join() {\n\
-             \x20\x20return __thaw_path_normalize(Array.prototype.join.call(arguments, '/'));\n\
+             \x20\x20var parts = []; for (var i = 0; i < arguments.length; i++) { if (arguments[i] !== '') parts.push(arguments[i]); } return __thaw_path_normalize(Array.prototype.join.call(parts, '/'));\n\
              }\n\
              function dirname(p) {\n\
              \x20\x20var n = __thaw_path_normalize(p);\n\
