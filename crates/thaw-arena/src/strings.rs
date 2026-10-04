@@ -163,6 +163,13 @@ mod tests {
     }
 
     #[test]
+    fn case_segments_keep_context_and_lone_surrogates() {
+        let units = [0xd800, 0x039f, 0x03a3, 0xdc00, 0x00df];
+        assert_eq!(utf16_map_segments(&units, |text, output| output.extend(text.to_lowercase().encode_utf16())), [0xd800, 0x03bf, 0x03c2, 0xdc00, 0x00df]);
+        assert_eq!(utf16_map_segments(&units, |text, output| output.extend(text.to_uppercase().encode_utf16())), [0xd800, 0x039f, 0x03a3, 0xdc00, 0x0053, 0x0053]);
+    }
+
+    #[test]
     fn native_and_c_strings_keep_distinct_lengths() {
         let pointer = owned_string(b"a\0b");
         assert_eq!(unsafe { NativeStr::from_ptr(pointer) }.to_bytes(), b"a\0b");
@@ -350,5 +357,26 @@ pub fn utf16_replace(value: &[u16], search: &[u16], replacement: &[u16], all: bo
         }
     }
     output.extend_from_slice(&value[cursor..]);
+    output
+}
+
+/// Maps contiguous valid UTF-16 text while preserving lone surrogates unchanged.
+pub fn utf16_map_segments(
+    units: &[u16],
+    mut map: impl FnMut(&str, &mut Vec<u16>),
+) -> Vec<u16> {
+    let mut output = Vec::with_capacity(units.len());
+    let mut segment = String::new();
+    for character in char::decode_utf16(units.iter().copied()) {
+        match character {
+            Ok(character) => segment.push(character),
+            Err(error) => {
+                map(&segment, &mut output);
+                segment.clear();
+                output.push(error.unpaired_surrogate());
+            }
+        }
+    }
+    map(&segment, &mut output);
     output
 }
