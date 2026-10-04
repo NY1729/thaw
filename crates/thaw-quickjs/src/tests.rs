@@ -7345,3 +7345,17 @@ fn response_headers_preserve_immutable_guard_on_clone() {
     assert_eq!(call("responseHeadersGuard", "[]"),
         r#"[[true,true,true,true],"original","copy","ordinary"]"#);
 }
+
+#[test]
+fn request_body_source_survives_copy_and_clone() {
+    assert_eq!(load(r#"
+      function requestBodySource() {
+        const regular = new Request('https://example.test/', {method: 'POST', body: 'payload'});
+        const clone = regular.clone(), copied = new Request(regular);
+        const streamed = new Request('https://example.test/', {method: 'POST', body: new ReadableStream(), duplex: 'half'});
+        const streamClone = streamed.clone(), streamCopy = new Request(streamed);
+        return [clone, copied, streamClone, streamCopy, new Request('https://example.test/')].map(__thaw_request_body_replayable);
+      }
+    "#), 1);
+    assert_eq!(call("requestBodySource", "[]"), "[true,true,false,false,true]");
+}
