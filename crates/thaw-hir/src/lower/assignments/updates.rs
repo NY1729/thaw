@@ -490,7 +490,14 @@ impl<'a> FnLowerer<'a> {
                 ],
             );
         }
-        let current = target_to_read_expr(&target)?;
+        let current = self.lower_assignment_target_read(&target)?;
+        let current = if matches!(&target, Target::Prop(_, HirType::Object(fields), field)
+            if fields.iter().any(|(name, _)| name == &format!("__thaw_setter_{field}")))
+        {
+            self.coerce_primitive_to_number(current)?
+        } else {
+            current
+        };
         self.expect_type(&HirType::F64, &current, "update operand")?;
         if let Target::Var(name) = &target {
             self.record_binding_write(name);
@@ -593,7 +600,7 @@ impl<'a> FnLowerer<'a> {
                 index.as_ref().clone(),
             )?
         } else {
-            target_to_read_expr(&target)?
+            self.lower_assignment_target_read(&target)?
         };
         bindings.push((old_name.clone(), HirType::F64, self.coerce_primitive_to_number(current)?));
         let old = HirExpr::Var(old_name);
@@ -604,12 +611,12 @@ impl<'a> FnLowerer<'a> {
             self.scope.insert(updated_name.clone(), HirType::F64);
             bindings.push((updated_name.clone(), HirType::F64, updated));
             HirExpr::Block(vec![
-                HirStmt::Expr(build_assign(target, HirExpr::Var(updated_name.clone()))),
+                HirStmt::Expr(self.lower_assignment_target_write(target, HirExpr::Var(updated_name.clone()))?),
                 HirStmt::Return(Some(HirExpr::Var(updated_name))),
             ])
         } else {
             HirExpr::Block(vec![
-                HirStmt::Expr(build_assign(target, updated)),
+                HirStmt::Expr(self.lower_assignment_target_write(target, updated)?),
                 HirStmt::Return(Some(old)),
             ])
         };

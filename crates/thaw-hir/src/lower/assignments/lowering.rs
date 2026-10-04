@@ -1,4 +1,50 @@
 impl<'a> FnLowerer<'a> {
+    fn lower_assignment_target_write(
+        &mut self,
+        target: Target,
+        value: HirExpr,
+    ) -> Result<HirExpr, String> {
+        let mut bindings = Vec::new();
+        // An object-literal setter stores a hidden `__thaw_setter_<field>`
+        // closure; a write dispatches to it (receiver + value) instead of
+        // storing the field.
+        if let Target::Prop(object, HirType::Object(fields), field) = &target {
+            let setter = format!("__thaw_setter_{field}");
+            if let Some((_, setter_type)) = fields.iter().find(|(name, _)| name == &setter) {
+                let parameter_type = match setter_type {
+                    HirType::Function(params, _) => params.last().cloned(),
+                    HirType::CallableFunction(params, _, _, _) => params.last().cloned(),
+                    _ => None,
+                }
+                .ok_or_else(|| format!("object setter `{field}` has no value parameter"))?;
+                let value_type = self.infer_expr_type(&value)?;
+                let object_type = HirType::Object(fields.clone());
+                let receiver_name = format!("__thaw_setter_receiver_{}", self.next_binding);
+                self.next_binding += 1;
+                let value_name = format!("__thaw_setter_value_{}", self.next_binding);
+                self.next_binding += 1;
+                self.scope.insert(receiver_name.clone(), object_type.clone());
+                self.scope.insert(value_name.clone(), value_type.clone());
+                bindings.push((receiver_name.clone(), object_type.clone(), object.clone()));
+                bindings.push((value_name.clone(), value_type, value));
+                let receiver = HirExpr::Var(receiver_name);
+                let value = HirExpr::Var(value_name);
+                let argument = self.coerce_to_declared(&parameter_type, value.clone())?;
+                let setter_value = HirExpr::PropAccess(
+                    Box::new(receiver.clone()), object_type, setter,
+                );
+                let result = HirExpr::Block(vec![
+                    HirStmt::Expr(HirExpr::Call(
+                        Box::new(setter_value), vec![receiver, argument],
+                    )),
+                    HirStmt::Return(Some(value)),
+                ]);
+                return self.wrap_call_argument_bindings(result, &bindings);
+            }
+        }
+        Ok(build_assign(target, value))
+    }
+
     fn lower_array_index_operand(&mut self, value: HirExpr) -> Result<HirExpr, String> {
         let HirExpr::TypedIndex(source, offset, element) = value else {
             return Ok(value);
@@ -15,6 +61,9 @@ impl<'a> FnLowerer<'a> {
     }
 
     fn lower_assignment_target_read(&mut self, target: &Target) -> Result<HirExpr, String> {
+        if let Target::Prop(object, HirType::Object(fields), property) = target {
+            return self.lower_fixed_object_property_read(object.clone(), fields, property);
+        }
         let Target::Index(array, index) = target else {
             return target_to_read_expr(target);
         };
@@ -932,6 +981,26 @@ impl<'a> FnLowerer<'a> {
             };
         }
 
+        if matches!(assign.op, AssignOp::NullishAssign | AssignOp::AndAssign | AssignOp::OrAssign)
+            && matches!(&target, Target::Prop(_, HirType::Object(fields), field)
+                if fields.iter().any(|(name, _)| name == &format!("__thaw_setter_{field}")))
+        {
+            let current = self.lower_assignment_target_read(&target)?;
+            let current_type = self.infer_expr_type(&current)?;
+            if matches!(current_type, HirType::Undefined | HirType::Null) {
+                let current_name = format!("__thaw_setter_absent_{}", self.next_binding);
+                self.next_binding += 1;
+                self.scope.insert(current_name.clone(), current_type.clone());
+                bindings.push((current_name.clone(), current_type, current));
+                let result = if assign.op == AssignOp::AndAssign {
+                    HirExpr::Var(current_name)
+                } else {
+                    self.lower_assignment_target_write(target, rhs)?
+                };
+                return self.wrap_call_argument_bindings(result, &bindings);
+            }
+        }
+
         if assign.op == AssignOp::NullishAssign {
             let current = self.lower_assignment_target_read(&target)?;
             let current_type = self.infer_expr_type(&current)?;
@@ -960,7 +1029,7 @@ impl<'a> FnLowerer<'a> {
                 self.next_binding += 1;
                 self.scope.insert(rhs_name.clone(), HirType::Json);
                 let assigned = HirExpr::Block(vec![
-                    HirStmt::Expr(build_assign(target, HirExpr::Var(rhs_name.clone()))),
+                    HirStmt::Expr(self.lower_assignment_target_write(target, HirExpr::Var(rhs_name.clone()))?),
                     HirStmt::Return(Some(HirExpr::Var(rhs_name.clone()))),
                 ]);
                 let assigned = self
@@ -1062,7 +1131,7 @@ impl<'a> FnLowerer<'a> {
                 _ => unreachable!(),
             }};
             let assigned = HirExpr::Block(vec![
-                HirStmt::Expr(build_assign(target, stored)),
+                HirStmt::Expr(self.lower_assignment_target_write(target, stored)?),
                 HirStmt::Return(Some(HirExpr::Var(rhs_name.clone()))),
             ]);
             let assigned = self.wrap_call_argument_bindings(
@@ -1156,7 +1225,7 @@ impl<'a> FnLowerer<'a> {
                         )?
                     } else {
                         HirExpr::Block(vec![
-                            HirStmt::Expr(build_assign(target, HirExpr::Var(rhs_name.clone()))),
+                            HirStmt::Expr(self.lower_assignment_target_write(target, HirExpr::Var(rhs_name.clone()))?),
                             HirStmt::Return(Some(HirExpr::Var(rhs_name.clone()))),
                         ])
                     }
@@ -1165,7 +1234,7 @@ impl<'a> FnLowerer<'a> {
                 }
             } else {
                 HirExpr::Block(vec![
-                    HirStmt::Expr(build_assign(target, HirExpr::Var(rhs_name.clone()))),
+                    HirStmt::Expr(self.lower_assignment_target_write(target, HirExpr::Var(rhs_name.clone()))?),
                     HirStmt::Return(Some(HirExpr::Var(rhs_name.clone()))),
                 ])
             };
@@ -1263,6 +1332,13 @@ impl<'a> FnLowerer<'a> {
             }
         }
 
+        if let Target::Prop(_, HirType::Object(fields), field) = &target {
+            if fields.iter().any(|(name, _)| name == &format!("__thaw_setter_{field}")) {
+                let result = self.lower_assignment_target_write(target, value)?;
+                return self.wrap_call_argument_bindings(result, &bindings);
+            }
+        }
+
         // Reorder/typecheck an object literal against the target's
         // declared shape, same as a `let`/call-argument assignment --
         // needed now that a field can itself be an object (`p.corner =
@@ -1306,32 +1382,7 @@ impl<'a> FnLowerer<'a> {
             }
         };
 
-        // An object-literal setter stores a hidden `__thaw_setter_<field>`
-        // closure; a write dispatches to it (receiver + value) instead of
-        // storing the field.
-        if let Target::Prop(object, HirType::Object(fields), field) = &target {
-            let setter = format!("__thaw_setter_{field}");
-            if let Some((_, setter_type)) = fields.iter().find(|(name, _)| name == &setter) {
-                let parameter_type = match setter_type {
-                    HirType::Function(params, _) => params.last().cloned(),
-                    HirType::CallableFunction(params, _, _, _) => params.last().cloned(),
-                    _ => None,
-                }
-                .ok_or_else(|| format!("object setter `{field}` has no value parameter"))?;
-                let value = self.coerce_to_declared(&parameter_type, value)?;
-                let setter_value = HirExpr::PropAccess(
-                    Box::new(object.clone()),
-                    HirType::Object(fields.clone()),
-                    setter,
-                );
-                return Ok(HirExpr::Call(
-                    Box::new(setter_value),
-                    vec![object.clone(), value],
-                ));
-            }
-        }
-
-        let result = build_assign(target, value);
+        let result = self.lower_assignment_target_write(target, value)?;
         if let Some((object, path, value, nested)) = assigned_function_property {
             let metadata = self
                 .object_function_property_discriminants
