@@ -1632,7 +1632,10 @@ fn rewrite_esm_to_commonjs_mode_named(source: &str, await_imports: bool, source_
     } else {
         String::new()
     };
-    let generated = format!("module.exports.__esModule = true;\n{local_export_prologue}{star_setup}{prologue}{rest}");
+    // Opaque star names become available only after the import prologue.
+    // Recheck deferred requests before any statement in the module body.
+    let link_check = format!("if (typeof {origin_name} !== 'undefined') {origin_name}.validateRequests();\n");
+    let generated = format!("module.exports.__esModule = true;\n{local_export_prologue}{star_setup}{prologue}{link_check}{rest}");
     let generated_name = rewritten_js_source_name(source_name, "CommonJS generation");
     let meta_rewritten = rewrite_import_meta_urls_named(&generated, &generated_name);
     let meta_name = if meta_rewritten != generated {
@@ -1660,23 +1663,31 @@ fn esm_export_graph_named(source: &str, source_name: &thaw_parser::common::FileN
         ModuleExportName::Ident(id) => id.sym.to_string(),
         ModuleExportName::Str(text) => text.value.to_string_lossy().into_owned(),
     };
+    let mut requests = Vec::<(String, String)>::new();
+    let mut dependencies = Vec::<String>::new();
     let mut imported = BTreeMap::<String, (String, Option<String>, bool)>::new();
     for item in &module.body {
         let ModuleItem::ModuleDecl(ModuleDecl::Import(decl)) = item else { continue };
+        if decl.type_only || (!decl.specifiers.is_empty() && decl.specifiers.iter().all(|specifier|
+            matches!(specifier, ImportSpecifier::Named(named) if named.is_type_only))) { continue; }
         let source = decl.src.value.to_string_lossy().into_owned();
+        dependencies.push(source.clone());
         for specifier in &decl.specifiers {
             match specifier {
-                ImportSpecifier::Named(named) => {
+                ImportSpecifier::Named(named) if !named.is_type_only => {
                     let local = named.local.sym.to_string();
                     let remote = named.imported.as_ref().map(&name).unwrap_or_else(|| local.clone());
+                    requests.push((source.clone(), remote.clone()));
                     imported.insert(local, (source.clone(), Some(remote), false));
                 }
                 ImportSpecifier::Default(default) => {
+                    requests.push((source.clone(), "default".to_owned()));
                     imported.insert(default.local.sym.to_string(), (source.clone(), Some("default".to_string()), true));
                 }
                 ImportSpecifier::Namespace(namespace) => {
                     imported.insert(namespace.local.sym.to_string(), (source.clone(), None, false));
                 }
+                _ => {}
             }
         }
     }
@@ -1710,10 +1721,14 @@ fn esm_export_graph_named(source: &str, source_name: &thaw_parser::common::FileN
                 local.insert("default".to_string(), "*default*".into());
             }
             ModuleDecl::ExportNamed(export) if !export.type_only => {
+                if !export.specifiers.is_empty() && export.specifiers.iter().all(|specifier|
+                    matches!(specifier, ExportSpecifier::Named(named) if named.is_type_only)) { continue; }
+                if let Some(source) = &export.src { dependencies.push(source.value.to_string_lossy().into_owned()); }
                 for specifier in &export.specifiers {
                     match specifier {
                         ExportSpecifier::Named(named) if !named.is_type_only => {
                             let original = name(&named.orig);
+                            if let Some(source) = &export.src { requests.push((source.value.to_string_lossy().into_owned(), original.clone())); }
                             let exported = named.exported.as_ref().map(&name).unwrap_or_else(|| original.clone());
                             let target = export.src.as_ref().map(|source| (source.value.to_string_lossy().into_owned(), Some(original.clone()), original == "default"))
                                 .or_else(|| imported.get(&original).cloned());
@@ -1733,12 +1748,13 @@ fn esm_export_graph_named(source: &str, source_name: &thaw_parser::common::FileN
                 }
             }
             ModuleDecl::ExportAll(export) if !export.type_only => {
+                dependencies.push(export.src.value.to_string_lossy().into_owned());
                 stars.push(serde_json::Value::String(export.src.value.to_string_lossy().into_owned()));
             }
             _ => {}
         }
     }
-    has_esm.then(|| serde_json::json!({ "local": local, "indirect": indirect, "stars": stars }))
+    has_esm.then(|| serde_json::json!({ "local": local, "indirect": indirect, "stars": stars, "requests": requests, "dependencies": dependencies }))
 }
 
 fn esm_origin_parameter_named(source: &str, source_name: &thaw_parser::common::FileName) -> Option<String> {
@@ -1791,5 +1807,48 @@ mod wrapper_binding_regression {
         }})();"#);
         let script = std::ffi::CString::new(script).unwrap();
         assert_eq!(thaw_quickjs::thaw_js_load(script.as_ptr()), 1);
+    }
+}
+
+#[cfg(test)]
+mod static_link_metadata_regressions {
+    #[test]
+    fn deferred_link_failure_prevents_module_body() {
+        let source = "import { missing } from './dep.js'; globalThis.__thaw_link_body_ran = true;";
+        let rewritten = super::rewrite_esm_to_commonjs_mode_named(
+            source, false, &thaw_parser::common::FileName::Custom("link-order.js".into())
+        ).expect("rewritten ESM");
+        let origin = super::esm_origin_parameter_named(
+            source, &thaw_parser::common::FileName::Custom("link-order.js".into())
+        ).expect("origin parameter");
+        let script = format!(r#"(() => {{
+            const events = [], target = {{ exports: {{}} }};
+            const origin = {{ edge() {{ events.push('edge'); }}, validateRequests() {{
+                events.push('validate'); throw new SyntaxError('Missing export');
+            }} }};
+            delete globalThis.__thaw_link_body_ran;
+            let rejected = false;
+            try {{ (function(module, exports, __thaw_require, {origin}) {{
+                {rewritten}
+            }})(target, target.exports, () => (events.push('load'), {{}}), origin); }}
+            catch (error) {{ rejected = error instanceof SyntaxError; }}
+            if (!rejected || globalThis.__thaw_link_body_ran || events.join(',') !== 'load,edge,validate')
+                throw new Error('link failure ran module body or changed import order');
+        }})();"#);
+        let script = std::ffi::CString::new(script).unwrap();
+        assert_eq!(thaw_quickjs::thaw_js_load(script.as_ptr()), 1);
+    }
+
+    #[test]
+    fn retains_unused_imports_and_static_dependencies() {
+        let graph = super::esm_export_graph(
+            "import unused, { missing as ignored } from './dep.js'; import './side.js'; export { other as renamed } from './more.js'; export * from './star.js';"
+        ).expect("ESM graph");
+        assert_eq!(graph["requests"], serde_json::json!([
+            ["./dep.js", "default"], ["./dep.js", "missing"], ["./more.js", "other"]
+        ]));
+        assert_eq!(graph["dependencies"], serde_json::json!([
+            "./dep.js", "./side.js", "./more.js", "./star.js"
+        ]));
     }
 }

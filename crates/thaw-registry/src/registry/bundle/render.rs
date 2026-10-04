@@ -25,6 +25,25 @@ const STAR_ORIGIN_RUNTIME: &str = r#"function __thaw_bundle_factory_of(key) {
   var at = query < 0 ? fragment : (fragment < 0 ? query : Math.min(query, fragment));
   return at < 0 ? key : key.slice(0, at);
 }
+function __thaw_bundle_validate_static(key, visited) {
+  visited = visited || [];
+  if (visited.indexOf(key) >= 0) return;
+  var graph = __thaw_bundle_export_graphs[__thaw_bundle_factory_of(key)];
+  if (!graph) return;
+  var next = visited.concat(key), dependencies = graph.dependencies || [];
+  var map = __thaw_bundle_import_maps[__thaw_bundle_factory_of(key)] || {};
+  for (var i = 0; i < dependencies.length; i++) {
+    var target = __thaw_bundle_target(map, dependencies[i]);
+    if (!target) {
+      var spec = dependencies[i], builtin = spec.slice(0, 5) === 'node:' ? spec.slice(5) : spec;
+      if (__thaw_bundle_builtin_names.indexOf(builtin) < 0 && !(String(spec).endsWith('.node') && typeof require.addon === 'function'))
+        throw new SyntaxError('Cannot resolve import ' + spec);
+    } else __thaw_bundle_validate_static(target.key, next);
+  }
+  var origin = __thaw_bundle_origin_for(key), requests = graph.requests || [];
+  for (var j = 0; j < requests.length; j++)
+    origin.validateKnownStatic(requests[j][0], requests[j][1]);
+}
 function __thaw_bundle_origin_for(ownerKey) {
   var own = Object.prototype.hasOwnProperty;
   var ambiguous = {};
@@ -188,6 +207,24 @@ function __thaw_bundle_origin_for(ownerKey) {
       var resolution = resolve(target.key, name, [], false, ownerKey, spec);
       if (!resolution || resolution === ambiguous)
         throw new SyntaxError('Missing or ambiguous export ' + name);
+    },
+    validateKnownStatic: function(spec, name) {
+      var target = targetOf(ownerKey, spec);
+      // Opaque CommonJS stars are discovered only after their owner's load.
+      // Do not execute that owner during source-graph validation.
+      if (!target) {
+        var builtin = spec.slice(0, 5) === 'node:' ? spec.slice(5) : spec;
+        if (__thaw_bundle_builtin_names.indexOf(builtin) < 0 && !(String(spec).endsWith('.node') && typeof require.addon === 'function'))
+          throw new SyntaxError('Cannot resolve import ' + spec);
+        return;
+      }
+      if (graphOf(target.key) && linksReady(target.key, []))
+        this.validateStatic(spec, name);
+    },
+    validateRequests: function() {
+      var graph = graphOf(ownerKey), requests = graph && graph.requests || [];
+      for (var index = 0; index < requests.length; index++)
+        this.validateKnownStatic(requests[index][0], requests[index][1]);
     },
     validateDynamic: function(spec) {
       var target = targetOf(ownerKey, spec);
@@ -476,7 +513,7 @@ fn render_bundle_mode(main_key: &str, modules: &[BundledModule], mixed: Option<&
             .expect("static native link checks are serializable");
         out.push_str(&format!("var __thaw_native_link_checks = JSON.parse({});\n",
             js_string_literal(&checks)));
-        out.push_str("function __thaw_validate_native_link(key) { var checks = __thaw_native_link_checks[key] || []; for (var i = 0; i < checks.length; i++) { var check = checks[i]; __thaw_bundle_origin_for(check[0]).validateStatic(check[1], check[2]); } }\n");
+        out.push_str("function __thaw_validate_native_link(key) { __thaw_bundle_validate_static(key); var checks = __thaw_native_link_checks[key] || []; for (var i = 0; i < checks.length; i++) { var check = checks[i]; __thaw_bundle_origin_for(check[0]).validateStatic(check[1], check[2]); } }\n");
         let mixed_keys = route.mixed_keys.iter().map(|key| (key.clone(), serde_json::Value::Bool(true)))
             .collect::<serde_json::Map<String, serde_json::Value>>();
         out.push_str(&format!("var __thaw_bundle_mixed_keys = JSON.parse({});\n",
@@ -547,6 +584,7 @@ fn render_bundle_mode(main_key: &str, modules: &[BundledModule], mixed: Option<&
          \x20\x20\x20\x20var namespace = __thaw_native_entry.evalNativeSync(key, factoryKey);\n\
          \x20\x20\x20\x20return Object.prototype.hasOwnProperty.call(__thaw_bundle_mixed_keys, factoryKey) ? __thaw_bundle_facade_for(key) : namespace;\n\
          \x20\x20}\n\
+         \x20\x20__thaw_bundle_validate_static(key);\n\
          \x20\x20if (!(key in __thaw_bundle_cache)) {\n\
          \x20\x20\x20\x20var mod = { exports: {}, filename: '/thaw_modules/' + (factoryKey || key) };\n\
          \x20\x20\x20\x20__thaw_bundle_cache[key] = mod;\n\
@@ -604,6 +642,7 @@ fn render_bundle_mode(main_key: &str, modules: &[BundledModule], mixed: Option<&
          \x20\x20};\n\
          }\n\
          function __thaw_bundle_register_worker_main(key, mod) {\n\
+         \x20\x20__thaw_bundle_validate_static(key);\n\
          \x20\x20if (Object.prototype.hasOwnProperty.call(__thaw_bundle_cache, key)) throw new Error('Worker entry already initialized');\n\
          \x20\x20mod.filename = '/thaw_modules/' + key;\n\
          \x20\x20var resolveReady, rejectReady;\n\
@@ -622,7 +661,7 @@ fn render_bundle_mode(main_key: &str, modules: &[BundledModule], mixed: Option<&
          \x20\x20'var __thaw_bundle_known_package_maps = ' + JSON.stringify(__thaw_bundle_known_package_maps) + ';\\n' +\n\
          \x20\x20'var __thaw_bundle_export_graphs = JSON.parse(' + JSON.stringify(JSON.stringify(__thaw_bundle_export_graphs)) + ');\\n' +\n\
          \x20\x20'var __thaw_bundle_commonjs_contexts = JSON.parse(' + JSON.stringify(JSON.stringify(__thaw_bundle_commonjs_contexts)) + ');\\n' +\n\
-         \x20\x20__thaw_bundle_factory_of.toString() + '\\n' + __thaw_bundle_origin_for.toString() + '\\n' + __thaw_bundle_target.toString() + '\\n' + __thaw_bundle_import_missing.toString() + '\\n' + __thaw_bundle_resolve.toString() + '\\n' + __thaw_bundle_async_error.toString() + '\\n' + __thaw_bundle_require.toString() + '\\n' + __thaw_bundle_create_require.toString() + '\\n' + __thaw_bundle_create_import.toString() + '\\n' + __thaw_bundle_create_import_async.toString() + '\\n' + __thaw_bundle_register_worker_main.toString() + '\\n' +\n\
+         \x20\x20__thaw_bundle_factory_of.toString() + '\\n' + __thaw_bundle_validate_static.toString() + '\\n' + __thaw_bundle_origin_for.toString() + '\\n' + __thaw_bundle_target.toString() + '\\n' + __thaw_bundle_import_missing.toString() + '\\n' + __thaw_bundle_resolve.toString() + '\\n' + __thaw_bundle_async_error.toString() + '\\n' + __thaw_bundle_require.toString() + '\\n' + __thaw_bundle_create_require.toString() + '\\n' + __thaw_bundle_create_import.toString() + '\\n' + __thaw_bundle_create_import_async.toString() + '\\n' + __thaw_bundle_register_worker_main.toString() + '\\n' +\n\
          \x20\x20'globalThis.__thaw_bundle_create_require = __thaw_bundle_create_require;\\nglobalThis.__thaw_bundle_create_import = __thaw_bundle_create_import;\\nglobalThis.__thaw_bundle_create_import_async = __thaw_bundle_create_import_async;\\nglobalThis.__thaw_bundle_worker_origin = __thaw_bundle_origin_for;\\nglobalThis.__thaw_bundle_register_worker_main = __thaw_bundle_register_worker_main;\\n})();\\n';\n\
          globalThis.__thaw_worker_bundle_source = __thaw_worker_bundle_source;\n",
     );
@@ -786,4 +825,86 @@ fn js_string_literal(s: &str) -> String {
     }
     out.push('"');
     out
+}
+
+#[cfg(test)]
+mod static_link_runtime_regressions {
+    #[test]
+    fn missing_static_dependency_rejects_before_any_factory_side_effect() {
+        let module = |key: &str, source: &str, imports: Vec<(String, String)>, dependencies: Vec<&str>| super::BundledModule {
+            key: key.into(), source: source.into(),
+            source_name: thaw_parser::common::FileName::Custom(key.into()),
+            export_graph: Some(serde_json::json!({"local":{},"indirect":{},"stars":[],"requests":[],"dependencies":dependencies})),
+            origin_parameter: Some("origin".into()), requires: vec![], imports,
+            known_packages: vec![], static_esm_specs: vec![], has_esm: true,
+            has_top_level_await: false, commonjs_context: false, native_esm_context: false,
+            uses_legacy_bundle_globals: false, has_nonliteral_module_load: false,
+            uses_import_meta: false, async_module: false, source_path: None,
+        };
+        let modules = vec![
+            module("main", "__thaw_require('side'); __thaw_require('missing');", vec![("side".into(), "side".into())], vec!["side", "missing"]),
+            module("side", "globalThis.__thaw_static_link_side_effect++;", vec![], vec![]),
+        ];
+        let bundle = super::render_bundle("main", &modules);
+        let script = format!(r#"(() => {{
+            const module = {{exports:{{}}}};
+            globalThis.__thaw_static_link_side_effect = 0;
+            let rejected = false;
+            try {{ {bundle} }} catch(error) {{ rejected = error instanceof SyntaxError; }}
+            if (!rejected || globalThis.__thaw_static_link_side_effect !== 0)
+                throw new Error('static dependency failure ran a factory');
+            delete globalThis.__thaw_static_link_side_effect;
+        }})();"#);
+        let script = std::ffi::CString::new(script).unwrap();
+        assert_eq!(thaw_quickjs::thaw_js_load(script.as_ptr()), 1);
+    }
+
+    #[test]
+    fn validates_transitive_requests_cycles_and_deferred_stars() {
+        let script = format!(r#"(() => {{
+            var __thaw_bundle_cache = Object.create(null), __thaw_bundle_edges = Object.create(null);
+            var __thaw_bundle_star_linkers = Object.create(null), __thaw_bundle_edge_version = 0;
+            var __thaw_bundle_builtin_names = ['fs'];
+            var __thaw_bundle_import_maps = {{
+                main: {{dep:'dep'}}, dep: {{leaf:'leaf'}}, missingEntry: {{side:'leaf'}},
+                cycleA: {{b:'cycleB'}}, cycleB: {{a:'cycleA'}},
+                ambiguous: {{left:'left', right:'right'}},
+                mixed: {{opaque:'opaque'}}, consumer: {{mixed:'mixed'}}, ambiguityConsumer: {{source:'ambiguous'}}
+            }};
+            function __thaw_bundle_target(map, spec) {{
+                return map[spec] ? {{key:map[spec], factory:map[spec]}} : null;
+            }}
+            function graph(local, indirect, stars, requests, dependencies) {{
+                return {{local, indirect, stars, requests, dependencies}};
+            }}
+            var __thaw_bundle_export_graphs = {{
+                main:graph({{}},{{}},[],[],['dep']), missingEntry:graph({{}},{{}},[],[],['side','missing']),
+                dep:graph({{}},{{}},[],[['leaf','missing']],['leaf']),
+                leaf:graph({{present:'present'}},{{}},[],[],[]),
+                cycleA:graph({{a:'a'}},{{}},[],[['b','b']],['b']),
+                cycleB:graph({{b:'b'}},{{}},[],[['a','a']],['a']),
+                ambiguous:graph({{}},{{}},['left','right'],[],['left','right']),
+                left:graph({{same:'one'}},{{}},[],[],[]),
+                right:graph({{same:'two'}},{{}},[],[],[]),
+                mixed:graph({{}},{{}},['opaque'],[],['opaque']),
+                consumer:graph({{}},{{}},[],[['mixed','missing']],['mixed']),
+                ambiguityConsumer:graph({{}},{{}},[],[['source','same']],['source'])
+            }};
+            {runtime}
+            function rejects(call) {{
+                try {{ call(); }} catch (error) {{ if (error instanceof SyntaxError) return; throw error; }}
+                throw new Error('missing link rejection');
+            }}
+            rejects(() => __thaw_bundle_validate_static('main'));
+            rejects(() => __thaw_bundle_validate_static('missingEntry'));
+            rejects(() => __thaw_bundle_origin_for('missingEntry').validateKnownStatic('missing','unused'));
+            __thaw_bundle_validate_static('cycleA');
+            rejects(() => __thaw_bundle_validate_static('ambiguityConsumer'));
+            __thaw_bundle_validate_static('consumer');
+            __thaw_bundle_edges.mixed = {{opaque:{{present:1}}}};
+            rejects(() => __thaw_bundle_origin_for('consumer').validateRequests());
+        }})();"#, runtime = super::STAR_ORIGIN_RUNTIME);
+        let script = std::ffi::CString::new(script).unwrap();
+        assert_eq!(thaw_quickjs::thaw_js_load(script.as_ptr()), 1);
+    }
 }
