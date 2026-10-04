@@ -731,3 +731,24 @@ fn array_map_keeps_presence_at_each_visit() {
     "#;
     assert_eq!(compile_and_run(source, "array_map_visit_presence"), "true 10\nfalse true 30\n");
 }
+
+#[test]
+fn array_filter_keeps_the_pre_predicate_value_and_presence() {
+    let source = r#"
+        function main(): void {
+            const source = [1, 2];
+            const filtered = source.filter((value: number, index: number) => {
+                source[index] = 99;
+                return value === 1;
+            });
+            console.log(filtered.length, filtered[0]);
+            const values = [3, 4];
+            const result = values.filter((value: number, index: number) => {
+                delete values[index];
+                return true;
+            });
+            console.log(result.length, 0 in result, result[0], 1 in result, result[1]);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "array_filter_snapshot"), "1 1\n2 true 3 true 4\n");
+}

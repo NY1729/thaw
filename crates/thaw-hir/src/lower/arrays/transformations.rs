@@ -473,17 +473,19 @@ impl<'a> FnLowerer<'a> {
         self.next_binding += 1;
         let element_name = format!("__thaw_filter_element_{}", self.next_binding);
         self.next_binding += 1;
+        let raw_name = format!("__thaw_filter_raw_{}", self.next_binding);
+        self.next_binding += 1;
+        let state_name = format!("__thaw_filter_state_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(raw_name.clone(), element_type.clone());
+        self.scope.insert(state_name.clone(), HirType::F64);
         self.scope.insert(length_name.clone(), HirType::F64);
         self.scope.insert(result_name.clone(), array_type.clone());
         self.scope.insert(index_name.clone(), HirType::F64);
         self.scope.insert(output_index_name.clone(), HirType::F64);
         self.scope
             .insert(element_name.clone(), callback_element_type.clone());
-        let raw_element = HirExpr::TypedIndex(
-            Box::new(HirExpr::Var(receiver_name.clone())),
-            Box::new(HirExpr::Var(index_name.clone())),
-            element_type.clone(),
-        );
+        let raw_element = HirExpr::Var(raw_name.clone());
         let element = if callback_element_type == element_type
             && !matches!(element_type, HirType::Optional(_) | HirType::Nullish(_))
             && !matches!(&element_type, HirType::Union(members) if members.contains(&HirType::Undefined))
@@ -494,10 +496,7 @@ impl<'a> FnLowerer<'a> {
             HirExpr::Conditional(
                 Box::new(HirExpr::BinOp(
                     BinOp::EqEqEq,
-                    Box::new(HirExpr::Call(
-                        Box::new(HirExpr::Var("__thaw_array_index_state".into())),
-                        vec![HirExpr::Var(receiver_name.clone()), HirExpr::Var(index_name.clone())],
-                    )),
+                    Box::new(HirExpr::Var(state_name.clone())),
                     Box::new(HirExpr::Lit(HirLit::F64(1.0))),
                 )),
                 Box::new(present),
@@ -567,6 +566,20 @@ impl<'a> FnLowerer<'a> {
                         ),
                         vec![
                             HirStmt::Let(
+                                state_name.clone(), HirType::F64,
+                                HirExpr::Call(
+                                    Box::new(HirExpr::Var("__thaw_array_index_state".into())),
+                                    vec![HirExpr::Var(receiver_name.clone()), HirExpr::Var(index_name.clone())],
+                                ),
+                            ),
+                            HirStmt::Let(
+                                raw_name.clone(), element_type.clone(),
+                                HirExpr::TypedIndex(
+                                    Box::new(HirExpr::Var(receiver_name.clone())),
+                                    Box::new(HirExpr::Var(index_name.clone())), element_type.clone(),
+                                ),
+                            ),
+                            HirStmt::Let(
                                 element_name.clone(),
                                 callback_element_type,
                                 element,
@@ -574,24 +587,21 @@ impl<'a> FnLowerer<'a> {
                             HirStmt::If(
                                 callback_truthy,
                                 vec![
-                                    HirStmt::Expr(HirExpr::IndexAssign(
-                                        Box::new(HirExpr::Var(result_name.clone())),
-                                        Box::new(HirExpr::Var(output_index_name.clone())),
-                                        Box::new(HirExpr::TypedIndex(
-                                            Box::new(HirExpr::Var(receiver_name.clone())),
-                                            Box::new(HirExpr::Var(index_name.clone())),
-                                            element_type.clone(),
-                                        )),
-                                    )),
-                                    HirStmt::Expr(HirExpr::Call(
-                                        Box::new(HirExpr::Var("__thaw_array_copy_index_state".into())),
-                                        vec![
-                                            HirExpr::Var(result_name.clone()),
-                                            HirExpr::Var(output_index_name.clone()),
-                                            HirExpr::Var(receiver_name.clone()),
-                                            HirExpr::Var(index_name.clone()),
-                                        ],
-                                    )),
+                                    HirStmt::If(
+                                        HirExpr::BinOp(
+                                            BinOp::EqEqEq, Box::new(HirExpr::Var(state_name)),
+                                            Box::new(HirExpr::Lit(HirLit::F64(2.0))),
+                                        ),
+                                        vec![HirStmt::Expr(HirExpr::Call(
+                                            Box::new(HirExpr::Var("__thaw_array_set_undefined".into())),
+                                            vec![HirExpr::Var(result_name.clone()), HirExpr::Var(output_index_name.clone())],
+                                        ))],
+                                        vec![HirStmt::Expr(HirExpr::IndexAssign(
+                                            Box::new(HirExpr::Var(result_name.clone())),
+                                            Box::new(HirExpr::Var(output_index_name.clone())),
+                                            Box::new(HirExpr::Var(raw_name)),
+                                        ))],
+                                    ),
                                     increment(&output_index_name),
                                 ],
                                 Vec::new(),
