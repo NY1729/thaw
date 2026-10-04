@@ -700,8 +700,9 @@ fn render_bundle_mode(main_key: &str, modules: &[BundledModule], mixed: Option<&
                 incoming.on('aborted', function() { cleanupBody(); if (controller) controller.error(new TypeError('terminated')); });
                 bodyAbort = function() { cleanupBody(); if (controller) controller.error(aborted()); if (incoming.destroy) incoming.destroy(); };
                 if (request.signal) request.signal.addEventListener('abort', bodyAbort, { once: true });
-                var contentEncoding = String(responseHeaders.get('content-encoding') || '').trim().toLowerCase();
-                if (contentEncoding === 'gzip' || contentEncoding === 'deflate' || contentEncoding === 'br') stream = stream.pipeThrough(new DecompressionStream(contentEncoding));
+                var contentEncodings = String(responseHeaders.get('content-encoding') || '').toLowerCase().split(',').map(function(value) { return value.trim(); });
+                if (contentEncodings.every(function(value) { return value === 'gzip' || value === 'deflate' || value === 'br'; }))
+                  for (var coding = contentEncodings.length - 1; coding >= 0; coding--) stream = stream.pipeThrough(new DecompressionStream(contentEncodings[coding]));
               }
               var response;
               try { response = new Response(stream, { status: status, statusText: incoming.statusMessage || '', headers: responseHeaders }); }
