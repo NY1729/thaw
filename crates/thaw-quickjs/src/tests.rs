@@ -8029,3 +8029,26 @@ fn webassembly_immutable_global_import_sync() {
     "#), 1);
     assert_eq!(call("wasmImmutableGlobals", "[]"), "[42,42,42]");
 }
+
+// Unrun regression target: import resources retain declared type and mutability.
+#[test]
+fn webassembly_import_resource_type_mismatches() {
+    assert_eq!(load(r#"
+        function wasmResourceTypes() {
+            const module = text => new WebAssembly.Module(new TextEncoder().encode(text));
+            const globalModule = module('(module (import "host" "value" (global (mut i32))))');
+            const tableModule = module('(module (import "host" "value" (table 1 funcref)))');
+            const rejects = (source, value) => {
+                try { new WebAssembly.Instance(source, { host: { value } }); return false; }
+                catch (error) { return error instanceof WebAssembly.LinkError; }
+            };
+            return [
+                rejects(globalModule, new WebAssembly.Global({ value: "f64", mutable: true }, 1)),
+                rejects(globalModule, new WebAssembly.Global({ value: "i32", mutable: false }, 1)),
+                rejects(tableModule, new WebAssembly.Table({ element: "externref", initial: 1 })),
+                new WebAssembly.Instance(globalModule, { host: { value: new WebAssembly.Global({ value: "i32", mutable: true }, 1) } }) instanceof WebAssembly.Instance
+            ];
+        }
+    "#), 1);
+    assert_eq!(call("wasmResourceTypes", "[]"), "[true,true,true,true]");
+}
