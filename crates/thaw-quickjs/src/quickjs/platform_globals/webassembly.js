@@ -371,6 +371,13 @@
     }
     dispose() { if (this.__thawDisposed) return; if (!__thaw_wasm_release('instance', this.__thawHandle)) return; this.__thawDisposed = true; wasmInstances.delete(this.__thawHandle); for (const resource of this.__thawResources) if (resource.binding) resource.value.__thawUnbind(resource.binding); }
   }
+  function compileStreaming(source) { return Promise.resolve(source).then(response => {
+      if (!response || typeof response.arrayBuffer !== 'function') throw new TypeError('WebAssembly streaming source must be a Response');
+      if (response.ok === false) throw new TypeError('WebAssembly streaming response was not successful');
+      const contentType = response.headers && typeof response.headers.get === 'function' ? response.headers.get('content-type') : null;
+      if (!contentType || String(contentType).split(';', 1)[0].trim().toLowerCase() !== 'application/wasm') throw new TypeError('WebAssembly streaming response has an unsupported MIME type');
+      return response.arrayBuffer();
+    }).then(bytes => new WasmModule(bytes)); }
   globalThis.WebAssembly = {
     CompileError: class CompileError extends Error { constructor(message) { super(message); this.name = 'CompileError'; } },
     LinkError: class LinkError extends Error { constructor(message) { super(message); this.name = 'LinkError'; } },
@@ -387,13 +394,7 @@
         ? new WasmInstance(source, imports)
         : (() => { const module = new WasmModule(source); return { module, instance: new WasmInstance(module, imports) }; })());
     },
-    compileStreaming(source) { return Promise.resolve(source).then(response => {
-      if (!response || typeof response.arrayBuffer !== 'function') throw new TypeError('WebAssembly streaming source must be a Response');
-      if (response.ok === false) throw new TypeError('WebAssembly streaming response was not successful');
-      const contentType = response.headers && typeof response.headers.get === 'function' ? response.headers.get('content-type') : null;
-      if (!contentType || String(contentType).split(';', 1)[0].trim().toLowerCase() !== 'application/wasm') throw new TypeError('WebAssembly streaming response has an unsupported MIME type');
-      return response.arrayBuffer();
-    }).then(bytes => new WasmModule(bytes)); },
-    instantiateStreaming(source, imports) { return this.compileStreaming(source).then(module => ({ module, instance: new WasmInstance(module, imports) })); }
+    compileStreaming,
+    instantiateStreaming(source, imports) { return compileStreaming(source).then(module => ({ module, instance: new WasmInstance(module, imports) })); }
   };
   let nextTimerId = 1;
