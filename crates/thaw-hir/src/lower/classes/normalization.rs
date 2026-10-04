@@ -392,16 +392,35 @@ fn normalize_static_computed_class_members(module: &Module) -> Module {
 }
 
 fn private_member_name(owner: &str, name: &str) -> Symbol {
-    format!("__thaw_private_{owner}_{name}")
+    PRIVATE_CLASS_SLOTS.with(|slots| slots.borrow().get(owner)
+        .and_then(|fields| fields.get(name)).cloned())
+        .unwrap_or_else(|| format!("__thaw_private_{owner}_{name}"))
 }
 
 struct PrivateMemberNormalizer<'a> {
     owner: &'a str,
+    shadowed: Vec<HashSet<Symbol>>,
 }
 
 impl VisitMut for PrivateMemberNormalizer<'_> {
+    fn visit_mut_class(&mut self, class: &mut swc_ecma_ast::Class) {
+        // Heritage is evaluated in the enclosing private environment.
+        let mut heritage = class.super_class.take();
+        if let Some(expression) = &mut heritage { expression.visit_mut_with(self); }
+        let names = class.body.iter().filter_map(|member| match member {
+            ClassMember::PrivateProp(property) => Some(property.key.name.to_string()),
+            ClassMember::PrivateMethod(method) => Some(method.key.name.to_string()),
+            _ => None,
+        }).collect();
+        self.shadowed.push(names);
+        class.visit_mut_children_with(self);
+        self.shadowed.pop();
+        class.super_class = heritage;
+    }
+
     fn visit_mut_expr(&mut self, expression: &mut Expr) {
         if let Expr::PrivateName(name) = expression {
+            if self.shadowed.iter().any(|scope| scope.contains(name.name.as_ref())) { return; }
             *expression = Expr::Lit(Lit::Str(swc_ecma_ast::Str {
                 span: name.span,
                 value: private_member_name(self.owner, name.name.as_ref()).into(),
@@ -414,6 +433,7 @@ impl VisitMut for PrivateMemberNormalizer<'_> {
 
     fn visit_mut_member_prop(&mut self, property: &mut MemberProp) {
         if let MemberProp::PrivateName(name) = property {
+            if self.shadowed.iter().any(|scope| scope.contains(name.name.as_ref())) { return; }
             *property = MemberProp::Ident(IdentName::new(
                 private_member_name(self.owner, name.name.as_ref()).into(),
                 name.span,
@@ -426,11 +446,47 @@ impl VisitMut for PrivateMemberNormalizer<'_> {
 
 fn normalize_private_class_members(module: &Module) -> Module {
     let mut module = module.clone();
+    // Reserve public names across the module before choosing internal slots:
+    // an inherited public field can also collide with a derived private slot.
+    let mut occupied = module.body.iter().filter_map(|item| match item {
+        ModuleItem::Stmt(Stmt::Decl(Decl::Class(declaration))) => Some(declaration),
+        ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export)) => match &export.decl {
+            Decl::Class(declaration) => Some(declaration),
+            _ => None,
+        },
+        _ => None,
+    }).flat_map(|declaration| declaration.class.body.iter().filter_map(|member| {
+        let key = match member {
+            ClassMember::ClassProp(property) => &property.key,
+            ClassMember::Method(method) => &method.key,
+            _ => return None,
+        };
+        class_property_name(key).ok()
+    })).collect::<HashSet<_>>();
     for item in &mut module.body {
-        let ModuleItem::Stmt(Stmt::Decl(Decl::Class(declaration))) = item else {
-            continue;
+        let declaration = match item {
+            ModuleItem::Stmt(Stmt::Decl(Decl::Class(declaration))) => declaration,
+            ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export)) => match &mut export.decl {
+                Decl::Class(declaration) => declaration,
+                _ => continue,
+            },
+            _ => continue,
         };
         let owner = declaration.ident.sym.to_string();
+        let mut slots = HashMap::new();
+        for member in &declaration.class.body {
+            let name = match member {
+                ClassMember::PrivateProp(property) => property.key.name.as_ref(),
+                ClassMember::PrivateMethod(method) => method.key.name.as_ref(),
+                _ => continue,
+            };
+            if slots.contains_key(name) { continue; }
+            let mut slot = format!("__thaw_private_{owner}_{name}");
+            while occupied.contains(&slot) { slot.push('_'); }
+            occupied.insert(slot.clone());
+            slots.insert(name.to_string(), slot);
+        }
+        PRIVATE_CLASS_SLOTS.with(|registry| { registry.borrow_mut().insert(owner.clone(), slots); });
         declaration.class.body = std::mem::take(&mut declaration.class.body)
             .into_iter()
             .map(|member| match member {
@@ -471,7 +527,7 @@ fn normalize_private_class_members(module: &Module) -> Module {
             .collect();
         declaration
             .class
-            .visit_mut_with(&mut PrivateMemberNormalizer { owner: &owner });
+            .visit_mut_children_with(&mut PrivateMemberNormalizer { owner: &owner, shadowed: Vec::new() });
     }
     module
 }
