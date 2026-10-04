@@ -118,11 +118,22 @@ pub unsafe extern "C" fn thaw_promise_subscribe(
     };
     unsafe { thaw_promise_mark_handled(promise) };
     if let Some(result) = promise.result {
-        enqueue_continuation(PromiseSubscription { resume, frame }, result);
+        enqueue_continuation(
+            PromiseSubscription {
+                resume,
+                frame,
+                _frame_root: thaw_arena::ArenaRoot::new(frame as usize),
+            },
+            result,
+        );
     } else {
         promise
             .subscribers
-            .push(PromiseSubscription { resume, frame });
+            .push(PromiseSubscription {
+                resume,
+                frame,
+                _frame_root: thaw_arena::ArenaRoot::new(frame as usize),
+            });
     }
     1
 }
