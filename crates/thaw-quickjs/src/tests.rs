@@ -7980,3 +7980,18 @@ fn webassembly_table_index_conversion() {
     "#), 1);
     assert_eq!(call("wasmTableIndices", "[]"), "[\"value\",\"value\",true,true,true]");
 }
+
+// Unrun regression target: streaming instantiate has no receiver dependency.
+#[test]
+fn webassembly_detached_instantiate_streaming() {
+    assert_eq!(load(r#"
+        async function wasmDetachedStreaming() {
+            const { instantiateStreaming } = WebAssembly;
+            const result = await instantiateStreaming(new Response(
+                new Uint8Array([0,97,115,109,1,0,0,0]),
+                { headers: { "Content-Type": "application/wasm" } }));
+            return result.module instanceof WebAssembly.Module && result.instance instanceof WebAssembly.Instance;
+        }
+    "#), 1);
+    assert_eq!(call("wasmDetachedStreaming", "[]"), "true");
+}
