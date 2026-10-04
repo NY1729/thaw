@@ -2058,3 +2058,35 @@ fn console_log_renders_a_map_or_set_crossing_an_any_boundary_in_node_inspect_sty
          [ 1, { a: 1 }, 'text' ]\n"
     );
 }
+
+#[test]
+fn to_spliced_saves_length_after_arguments_before_numeric_conversion() {
+    let source = r#"
+        function main(): void {
+            const values = [1, 2];
+            const start = {
+                [Symbol.toPrimitive](hint: string): number {
+                    values.push(3);
+                    return 1;
+                },
+            };
+            console.log(values.toSpliced(start, 0).join(","), values.join(","));
+            const spreadValues = [1, 2];
+            const spreadStart = {
+                [Symbol.toPrimitive](hint: string): number {
+                    spreadValues.push(3);
+                    return 1;
+                },
+            };
+            console.log(spreadValues.toSpliced(...[spreadStart, 0]).join(","));
+            const argumentsFirst = [1, 2];
+            function argument(): number {
+                argumentsFirst.push(3);
+                return 0;
+            }
+            console.log(argumentsFirst.toSpliced(argument(), 0).join(","));
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "to_spliced_length_order"),
+        "1,2 1,2,3\n1,2\n1,2,3\n");
+}
