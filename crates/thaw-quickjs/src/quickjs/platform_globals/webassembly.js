@@ -288,7 +288,7 @@
         if (item.kind === 'function' && typeof value !== 'function') throw new WebAssembly.LinkError(`WebAssembly import '${item.module}.${item.name}' must be a function`);
         if (item.kind === 'memory' && !(value instanceof WasmMemory)) throw new WebAssembly.LinkError(`WebAssembly import '${item.module}.${item.name}' must be a Memory`);
         if (item.kind === 'global' && !(value instanceof WasmGlobal)) throw new WebAssembly.LinkError(`WebAssembly import '${item.module}.${item.name}' must be a Global`);
-        if (item.kind === 'table' && (!(value instanceof WasmTable) || value.__thawInstance !== undefined)) throw new WebAssembly.LinkError(`WebAssembly import '${item.module}.${item.name}' must be a standalone Table`);
+        if (item.kind === 'table' && !(value instanceof WasmTable)) throw new WebAssembly.LinkError(`WebAssembly import '${item.module}.${item.name}' must be a Table`);
         importValues.push({ item, value });
       }
       try {
