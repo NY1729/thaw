@@ -250,6 +250,13 @@ static PROMISE_SETTLED_FULFILLED: &[u8] = b"fulfilled\0";
 static PROMISE_SETTLED_REJECTED: &[u8] = b"rejected\0";
 static PROMISE_SETTLED_EMPTY_REASON: &[u8] = b"\0";
 
+fn fd_poll_timeout_ms(timeout: Option<Duration>) -> i32 {
+    match timeout {
+        Some(duration) => duration.as_nanos().div_ceil(1_000_000).min(i32::MAX as u128) as i32,
+        None => -1,
+    }
+}
+
 fn poll_fd_waits(timeout: Option<Duration>) -> usize {
     let wait_count = FD_WAITS.with(|waits| waits.borrow().len());
     let mut pollfds = FD_WAITS.with(|waits| {
@@ -295,10 +302,7 @@ fn poll_fd_waits(timeout: Option<Duration>) -> usize {
         (Some(delay), None) | (None, Some(delay)) => Some(delay),
         (None, None) => None,
     };
-    let timeout_ms = match timeout {
-        Some(duration) => duration.as_millis().saturating_add(1).min(i32::MAX as u128) as i32,
-        None => -1,
-    };
+    let timeout_ms = fd_poll_timeout_ms(timeout);
     let ready = unsafe {
         libc::poll(
             pollfds.as_mut_ptr(),
@@ -347,9 +351,15 @@ fn poll_fd_waits(timeout: Option<Duration>) -> usize {
             .map(|(watcher, pollfd)| (watcher.clone(), pollfd.revents))
             .collect::<Vec<_>>()
     });
-    let watcher_count = ready_watchers.len();
+    let mut watcher_count = 0;
     for (watcher, events) in ready_watchers {
-        (watcher.callback)(watcher.context, events);
+        let registered = FD_WATCHERS.with(|watchers| {
+            watchers.borrow().iter().any(|current| current.id == watcher.id)
+        });
+        if registered {
+            (watcher.callback)(watcher.context, events);
+            watcher_count += 1;
+        }
     }
     count + watcher_count
 }
