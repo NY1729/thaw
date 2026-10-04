@@ -8,9 +8,10 @@ impl<'a> FnLowerer<'a> {
         ty: &HirType,
         statements: &mut Vec<HirStmt>,
     ) -> HirExpr {
-        if matches!(value, HirExpr::Var(_)) {
-            return value;
-        }
+        let union = match &value {
+            HirExpr::Var(name) => self.union_discriminants.get(name).cloned(),
+            _ => None,
+        };
         // Preserve the same nested array/function metadata a named binding
         // carries. The recursive pattern reads child properties from this
         // Var, so metadata tied to the original PropAccess must follow it.
@@ -21,6 +22,9 @@ impl<'a> FnLowerer<'a> {
         let name = format!("__thaw_destructure_value_{}", self.next_binding);
         self.next_binding += 1;
         self.scope.insert(name.clone(), ty.clone());
+        if let Some(metadata) = union {
+            self.union_discriminants.insert(name.clone(), metadata);
+        }
         if let Some(metadata) = array {
             self.array_element_discriminants.insert(name.clone(), metadata);
         }
@@ -51,7 +55,25 @@ impl<'a> FnLowerer<'a> {
             self.object_function_property_discriminants.insert(name.clone(), metadata);
         }
         statements.push(HirStmt::Let(name.clone(), ty.clone(), value));
-        HirExpr::Var(name)
+        let source = HirExpr::Var(name);
+        let nullish = match ty {
+            HirType::Json | HirType::Dictionary(_) => Some(HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_json_is_nullish".into())),
+                vec![source.clone()],
+            )),
+            HirType::JsValue => Some(self.dynamic_value_is_nullish(source.clone())),
+            _ => None,
+        };
+        if let Some(nullish) = nullish {
+            statements.push(HirStmt::If(
+                nullish,
+                vec![HirStmt::Throw(HirExpr::Lit(HirLit::Str(
+                    "\u{1}TypeError\u{1}Cannot destructure null or undefined".into(),
+                )))],
+                Vec::new(),
+            ));
+        }
+        source
     }
 
     fn lower_binding_pattern(
