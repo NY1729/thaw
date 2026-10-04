@@ -2382,3 +2382,64 @@ module.exports = async function () {
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
 }
+
+#[test]
+fn test_child_failure_propagates_to_parent_and_suite() {
+    use std::ffi::{CStr, CString};
+
+    let dir = temp_registry("builtin_test_child_failure");
+    fs::write(
+            dir.join("index.js"),
+            r#"var test = require('node:test');
+module.exports = async function () {
+  var parent = await test('parent', async function(t) {
+    await t.test('bad', function() { throw new Error('child failure'); });
+  });
+  var nested = await test('nested', async function(t) {
+    await t.test('middle', async function(child) {
+      await child.test('bad grandchild', function() { throw new Error('grandchild'); });
+    });
+  });
+  var suite = await test.describe('suite', function() {
+    test('suite parent', async function(t) {
+      await t.test('suite child', function() { throw new Error('failure'); });
+    });
+  });
+  var passing = await test('passing', async function(t) {
+    t.plan(2);
+    await t.test('good', function() {});
+    await t.test('skip', {skip:true}, function() { throw new Error('not run'); });
+  });
+  var unawaited = await test('registered', function(t) {
+    t.test('registered child', async function() {
+      await Promise.resolve(); throw new Error('late child');
+    });
+  });
+  return [parent.status,nested.status,suite.status,passing.status,unawaited.status];
+};"#,
+        )
+        .unwrap();
+    let empty_node_modules = temp_registry("builtin_test_child_failure_node_modules");
+    let (bundle, _, file_count, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    assert!(file_count >= 3);
+    let script = format!(
+            "globalThis.module = {{ exports: {{}} }};\n\
+             globalThis.exports = globalThis.module.exports;\n\
+             globalThis.require = function(name) {{ throw new Error(\"require('\" + name + \"') is not supported\"); }};\n\
+             {bundle}\n\
+             globalThis.exerciseTestChildFailure = module.exports;\n"
+        );
+    let source = CString::new(script).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let func = CString::new("exerciseTestChildFailure").unwrap();
+    let args = CString::new("[]").unwrap();
+    let result_ptr = thaw_quickjs::thaw_js_call(func.as_ptr(), args.as_ptr());
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(
+        result,
+        r#"["failed","failed","failed","passed","failed"]"#
+    );
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+}
