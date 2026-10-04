@@ -7832,3 +7832,26 @@ fn webassembly_start_trap_error_kind() {
     "#), 1);
     assert_eq!(call("wasmStartErrorKind", "[]"), "[true,true]");
 }
+
+// Unrun regression target: registration uses each import value already validated.
+#[test]
+fn webassembly_import_getters_evaluated_once() {
+    assert_eq!(load(r#"
+        function wasmImportGetters() {
+            const bytes = new TextEncoder().encode(`(module
+                (import "host" "value" (func $value (result i32)))
+                (import "host" "memory" (memory 1))
+                (func (export "read") (result i32) call $value))`);
+            let namespaces = 0, functions = 0, memories = 0;
+            const memory = new WebAssembly.Memory({ initial: 1 });
+            const namespace = {
+                get value() { functions++; return functions === 1 ? () => 42 : () => 91; },
+                get memory() { memories++; return memories === 1 ? memory : null; }
+            };
+            const imports = { get host() { namespaces++; return namespace; } };
+            const instance = new WebAssembly.Instance(new WebAssembly.Module(bytes), imports);
+            return [instance.exports.read(), functions, memories, namespaces];
+        }
+    "#), 1);
+    assert_eq!(call("wasmImportGetters", "[]"), "[42,1,1,2]");
+}
