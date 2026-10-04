@@ -1377,6 +1377,20 @@ extern "C" fn resume_promise_all_settled_child(frame: *mut u8, value: *const u8)
     }
 }
 
+// Snapshot before destruction: retiring an input may reenter and reclaim
+// the arena array containing these handles.
+unsafe fn consume_distinct_promise_inputs(promises: *const *mut ThawPromise, len: usize) {
+    if promises.is_null() { return; }
+    let mut distinct = Vec::new();
+    for index in 0..len {
+        let promise = unsafe { *promises.add(index) };
+        // ponytail: preserve first-input retirement order with quadratic
+        // deduplication; use an auxiliary HashSet if large joins need it.
+        if !promise.is_null() && !distinct.contains(&promise) { distinct.push(promise); }
+    }
+    for promise in distinct { unsafe { thaw_promise_destroy(promise) }; }
+}
+
 /// Waits for every distinct input and resolves with an input-ordered array of
 /// `{ status, value, reason }` object pointers. Rejections become result
 /// entries and never reject the output Promise.
@@ -1394,24 +1408,39 @@ pub unsafe extern "C" fn thaw_promise_all_settled(
     let output = thaw_promise_new();
     if element_size == 0 || (len != 0 && promises.is_null()) {
         reject_native_text(output, PROMISE_ALL_INVALID_ERROR.as_ptr());
+        unsafe { consume_distinct_promise_inputs(promises, len) };
         return output;
     }
-    let allocation =
-        thaw_arena::thaw_arena_alloc((len + 2) * size_of::<u64>(), align_of::<u64>()).cast::<u64>();
+    let Some(allocation_size) = len.checked_add(2)
+        .and_then(|words| words.checked_mul(size_of::<u64>())) else {
+        reject_native_text(output, PROMISE_ALL_INVALID_ERROR.as_ptr());
+        unsafe { consume_distinct_promise_inputs(promises, len) };
+        return output;
+    };
+    let allocation = thaw_arena::thaw_arena_alloc(allocation_size, align_of::<u64>()).cast::<u64>();
     let Some(object_stride) = size_of::<u64>()
         .checked_add(element_size.max(size_of::<u64>()))
         .and_then(|size| size.checked_add(size_of::<u64>()))
     else {
         reject_native_text(output, PROMISE_ALL_INVALID_ERROR.as_ptr());
+        unsafe { consume_distinct_promise_inputs(promises, len) };
         return output;
     };
     let Some(objects_size) = len.checked_mul(object_stride) else {
         reject_native_text(output, PROMISE_ALL_INVALID_ERROR.as_ptr());
+        unsafe { consume_distinct_promise_inputs(promises, len) };
         return output;
     };
     let objects = thaw_arena::thaw_arena_alloc(objects_size, align_of::<u64>());
     if allocation.is_null() || (len != 0 && objects.is_null()) {
         reject_native_text(output, PROMISE_ALL_INVALID_ERROR.as_ptr());
+        unsafe { consume_distinct_promise_inputs(promises, len) };
+        return output;
+    }
+    let result_handle = wrap_array_handle(unsafe { allocation.add(1) }.cast());
+    if result_handle.is_null() {
+        reject_native_text(output, PROMISE_ALL_INVALID_ERROR.as_ptr());
+        unsafe { consume_distinct_promise_inputs(promises, len) };
         return output;
     }
     let result_slot = allocation.cast::<*const u8>();
@@ -1422,7 +1451,7 @@ pub unsafe extern "C" fn thaw_promise_all_settled(
         // extraction loads it back out of `result_slot`. See
         // `wrap_array_handle` (defined alongside `thaw_regex_match_all`,
         // which needs the identical wrap for its own nested arrays).
-        result_slot.write(wrap_array_handle(result.cast()).cast());
+        result_slot.write(result_handle.cast());
         result.write(len as u64);
     }
     if len == 0 {
@@ -1434,6 +1463,7 @@ pub unsafe extern "C" fn thaw_promise_all_settled(
         let promise = unsafe { *promises.add(index) };
         if promise.is_null() {
             reject_native_text(output, PROMISE_ALL_INVALID_ERROR.as_ptr());
+            unsafe { consume_distinct_promise_inputs(promises, len) };
             return output;
         }
         if let Some((_, indices)) = grouped
