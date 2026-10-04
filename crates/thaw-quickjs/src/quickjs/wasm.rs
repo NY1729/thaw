@@ -1419,6 +1419,9 @@ fn wasm_global(instance_handle: u32, name: String, value: Option<String>) -> Str
 }
 
 fn wasm_memory_create(initial: u32, maximum: i64) -> String {
+    if maximum < -1 || maximum > 65_536 {
+        return serde_json::json!({ "ok": false, "error": "WebAssembly.Memory page limits are invalid" }).to_string();
+    }
     let maximum = u32::try_from(maximum).ok();
     if initial > 65_536 || maximum.is_some_and(|maximum| maximum < initial || maximum > 65_536) {
         return serde_json::json!({ "ok": false, "error": "WebAssembly.Memory page limits are invalid" }).to_string();

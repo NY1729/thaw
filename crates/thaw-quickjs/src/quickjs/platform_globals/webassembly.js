@@ -1,5 +1,13 @@
 (() => {
-  const wasmApply = Reflect.apply;
+  const wasmApply = Reflect.apply, wasmArrayPush = Array.prototype.push;
+  const wasmTrunc = Math.trunc, wasmIsFinite = Number.isFinite;
+  const wasmUnsigned32 = value => {
+    const number = +value;
+    if (!wasmIsFinite(number)) throw new TypeError('WebAssembly length must be finite');
+    const integer = wasmTrunc(number);
+    if (integer < 0 || integer > 0xffffffff) throw new TypeError('WebAssembly length is outside the unsigned 32-bit range');
+    return integer === 0 ? 0 : integer;
+  };
   const wasmBytes = value => {
     if (value instanceof ArrayBuffer) return new Uint8Array(value);
     if (ArrayBuffer.isView(value)) return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
@@ -143,12 +151,16 @@
         this.__thawInstance = 0;
         this.__thawName = String(retained.handle);
       } else {
-        if (!descriptor || descriptor.initial === undefined) throw new TypeError('WebAssembly.Memory(): Property initial is required');
-        const initial = Number(descriptor.initial), maximum = descriptor.maximum === undefined ? -1 : Number(descriptor.maximum);
+        if (!descriptor) throw new TypeError('WebAssembly.Memory(): Property initial is required');
+        const initialValue = descriptor.initial;
+        if (initialValue === undefined) throw new TypeError('WebAssembly.Memory(): Property initial is required');
+        const initial = wasmUnsigned32(initialValue);
+        const maximumValue = descriptor.maximum;
+        const maximum = maximumValue === undefined ? -1 : wasmUnsigned32(maximumValue);
         const result = wasmResult(__thaw_wasm_memory_create(initial, maximum), RangeError);
         this.__thawInstance = 0;
         this.__thawName = String(result.handle);
-        this.__thawMaximum = descriptor.maximum === undefined ? null : Number(descriptor.maximum);
+        this.__thawMaximum = maximum === -1 ? null : maximum;
       }
       this.__thawBindings = [];
       this.__thawRefresh();
@@ -172,8 +184,9 @@
     __thawUnbind(binding) { this.__thawBindings = this.__thawBindings.filter(value => value !== binding); }
     get buffer() { return this.__thawBuffer; }
     grow(delta) {
+      delta = wasmUnsigned32(delta);
       this.__thawSync();
-      const result = wasmResult(__thaw_wasm_memory(this.__thawInstance, this.__thawName, 'grow', String(Number(delta))), RangeError);
+      const result = wasmResult(__thaw_wasm_memory(this.__thawInstance, this.__thawName, 'grow', String(delta)), RangeError);
       __thaw_detach_array_buffer(this.__thawBuffer);
       this.__thawBuffer = undefined;
       this.__thawRefresh();
@@ -223,8 +236,10 @@
         return;
       }
       if (!descriptor || !['anyfunc','funcref','externref'].includes(String(descriptor.element))) throw new TypeError('WebAssembly.Table(): invalid element type');
-      const initial = Number(descriptor.initial), maximum = descriptor.maximum === undefined ? Infinity : Number(descriptor.maximum);
-      if (!Number.isInteger(initial) || initial < 0 || initial > maximum) throw new RangeError('WebAssembly.Table(): invalid table limits');
+      const initial = wasmUnsigned32(descriptor.initial);
+      const maximumValue = descriptor.maximum;
+      const maximum = maximumValue === undefined ? Infinity : wasmUnsigned32(maximumValue);
+      if (initial > maximum) throw new RangeError('WebAssembly.Table(): invalid table limits');
       this.__thawElement = descriptor.element === 'externref' ? 'externref' : 'funcref'; this.__thawMaximum = maximum;
       this.__thawValidate(value); this.__thawValues = Array(initial).fill(value); this.__thawBindings = [];
     }
@@ -232,7 +247,7 @@
     get length() { return this.__thawInstance === undefined ? this.__thawValues.length : wasmResult(__thaw_wasm_table(this.__thawInstance, this.__thawName, 'size', 0, undefined)).value; }
     get(index) { index = Number(index); if (!Number.isInteger(index) || index < 0 || index >= this.length) throw new RangeError('WebAssembly.Table.get(): invalid index'); return this.__thawInstance === undefined ? this.__thawValues[index] : wasmDecodeValue(wasmResult(__thaw_wasm_table(this.__thawInstance, this.__thawName, 'get', index, undefined)).value, this.__thawInstance); }
     set(index, value = null) { index = Number(index); if (!Number.isInteger(index) || index < 0 || index >= this.length) throw new RangeError('WebAssembly.Table.set(): invalid index'); this.__thawValidate(value); if (this.__thawInstance === undefined) { this.__thawValues[index] = value; this.__thawSync(); } else wasmResult(__thaw_wasm_table(this.__thawInstance, this.__thawName, 'set', index, JSON.stringify(wasmEncodeArgument(value, this.__thawElement)))); }
-    grow(delta, value = null) { delta = Number(delta); const previous = this.length; this.__thawValidate(value); if (!Number.isInteger(delta) || delta < 0 || (this.__thawMaximum !== undefined && previous + delta > this.__thawMaximum)) throw new RangeError('WebAssembly.Table.grow(): failed to grow table'); if (this.__thawInstance !== undefined) return wasmResult(__thaw_wasm_table(this.__thawInstance, this.__thawName, 'grow', delta, JSON.stringify(wasmEncodeArgument(value, this.__thawElement))), RangeError).value; this.__thawValues.push(...Array(delta).fill(value)); for (const binding of this.__thawBindings) wasmResult(__thaw_wasm_table(binding.instance, binding.name, 'grow', delta, JSON.stringify(wasmEncodeArgument(value, this.__thawElement))), RangeError); return previous; }
+    grow(delta, value = null) { delta = wasmUnsigned32(delta); const previous = this.length; this.__thawValidate(value); if (!Number.isInteger(delta) || delta < 0 || (this.__thawMaximum !== undefined && previous + delta > this.__thawMaximum)) throw new RangeError('WebAssembly.Table.grow(): failed to grow table'); if (this.__thawInstance !== undefined) return wasmResult(__thaw_wasm_table(this.__thawInstance, this.__thawName, 'grow', delta, JSON.stringify(wasmEncodeArgument(value, this.__thawElement))), RangeError).value; for (let index = 0; index < delta; index++) wasmApply(wasmArrayPush, this.__thawValues, [value]); for (const binding of this.__thawBindings) wasmResult(__thaw_wasm_table(binding.instance, binding.name, 'grow', delta, JSON.stringify(wasmEncodeArgument(value, this.__thawElement))), RangeError); return previous; }
     __thawBind(instance, module, name) { const binding = { instance, name: 'import:' + module + '\x1f' + name }; this.__thawBindings.push(binding); return binding; }
     __thawUnbind(binding) { this.__thawBindings = this.__thawBindings.filter(value => value !== binding); }
     __thawSync() { if (this.__thawInstance !== undefined) return; for (const binding of this.__thawBindings) { let size = wasmResult(__thaw_wasm_table(binding.instance, binding.name, 'size', 0, undefined)).value; if (size < this.__thawValues.length) wasmResult(__thaw_wasm_table(binding.instance, binding.name, 'grow', this.__thawValues.length - size, JSON.stringify(wasmEncodeArgument(null, this.__thawElement))), RangeError); for (let index = 0; index < this.__thawValues.length; index++) wasmResult(__thaw_wasm_table(binding.instance, binding.name, 'set', index, JSON.stringify(wasmEncodeArgument(this.__thawValues[index], this.__thawElement)))); } }
