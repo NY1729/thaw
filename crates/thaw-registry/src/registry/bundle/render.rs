@@ -651,7 +651,7 @@ fn render_bundle_mode(main_key: &str, modules: &[BundledModule], mixed: Option<&
     var request;
     try { request = new Request(input, init); } catch (error) { return Promise.reject(error); }
     return Promise.resolve().then(async function() {
-      var redirects = 0;
+      var redirects = 0, bodyReplayable = !globalThis.__thaw_request_body_replayable || globalThis.__thaw_request_body_replayable(request);
       function aborted() {
         var reason = request.signal && request.signal.reason;
         if (reason !== undefined) return reason;
@@ -683,7 +683,8 @@ fn render_bundle_mode(main_key: &str, modules: &[BundledModule], mixed: Option<&
                 if (request.redirect === 'follow') {
                   if (++redirects > 20) { finishReject(new TypeError('fetch redirect count exceeded')); return; }
                   var nextUrl = new URL(String(location), parsed), nextMethod = method, nextBody = bytes, nextHeaders = Object.assign({}, headers);
-                  if (status === 303 && method !== 'GET' && method !== 'HEAD' || (status === 301 || status === 302) && method === 'POST') { nextMethod = 'GET'; nextBody = new Uint8Array(); Object.keys(nextHeaders).forEach(function(name) { if (name.indexOf('content-') === 0) delete nextHeaders[name]; }); }
+                  if (status !== 303 && !bodyReplayable) { finishReject(new TypeError('Cannot replay a streaming request body')); return; }
+                  if (status === 303 && method !== 'GET' && method !== 'HEAD' || (status === 301 || status === 302) && method === 'POST') { nextMethod = 'GET'; nextBody = new Uint8Array(); bodyReplayable = true; Object.keys(nextHeaders).forEach(function(name) { if (name.indexOf('content-') === 0) delete nextHeaders[name]; }); }
                   if (nextUrl.origin !== parsed.origin) ['authorization', 'proxy-authorization', 'cookie', 'cookie2'].forEach(function(name) { delete nextHeaders[name]; });
                   dispatch(nextUrl.href, nextMethod, nextBody, true, nextHeaders); return;
                 }
