@@ -246,6 +246,9 @@
       const result = rawResult;
       Object.defineProperty(this, '__thawHandle', { value: result.handle });
       const exports = {}, resources = pendingResources.map(resource => ({ value: resource.value, binding: resource.value.__thawBind(this.__thawHandle, resource.item.module, resource.item.name) }));
+      // Instantiation runs data segments and the start function before returning.
+      // Adopt their imported-memory writes before any later call can sync an old buffer.
+      for (const resource of resources) if (resource.value instanceof WasmMemory) resource.value.__thawRefresh(resource.binding);
       for (const item of result.exports) {
         if (item.kind === 'function') {
           const reference = wasmResult(__thaw_wasm_export_funcref(this.__thawHandle, item.name)).value;

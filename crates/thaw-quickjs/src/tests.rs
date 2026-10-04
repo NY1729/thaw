@@ -7470,3 +7470,29 @@ fn webassembly_codec_preserves_special_numbers_and_reference_values() {
     "#), 1);
     assert_eq!(call("wasmCodecBoundaries", "[]"), "[[true,true],[true,true,true],[true,true,true,true]]");
 }
+
+// Unrun regression: start writes and growth are visible before the first exported call.
+#[test]
+fn webassembly_start_refreshes_imported_memory() {
+    assert_eq!(load(r#"
+        function wasmStartMemory() {
+            const memory = new WebAssembly.Memory({ initial: 1, maximum: 2 });
+            const oldBuffer = memory.buffer;
+            const bytes = new TextEncoder().encode(`(module
+                (import "host" "memory" (memory 1 2))
+                (data (i32.const 1) "A")
+                (func $start
+                    i32.const 0 i32.const 42 i32.store8
+                    i32.const 1 memory.grow drop
+                    i32.const 65536 i32.const 8 i32.store8)
+                (start $start)
+                (func (export "read") (result i32)
+                    i32.const 0 i32.load8_u i32.const 65536 i32.load8_u i32.add))`);
+            const instance = new WebAssembly.Instance(new WebAssembly.Module(bytes), { host: { memory } });
+            const view = new Uint8Array(memory.buffer);
+            const before = [view[0], view[1], view[65536], oldBuffer.byteLength, memory.buffer.byteLength];
+            return [before, instance.exports.read(), new Uint8Array(memory.buffer)[0]];
+        }
+    "#), 1);
+    assert_eq!(call("wasmStartMemory", "[]"), "[[42,65,8,0,131072],50,42]");
+}
