@@ -238,6 +238,7 @@
       if (imports === null || (typeof imports !== 'object' && typeof imports !== 'function')) throw new TypeError('WebAssembly.Instance(): imports must be an object');
       const wasi = imports && imports.wasi_snapshot_preview1 && imports.wasi_snapshot_preview1.__thawWasiOptions;
       const linkage = { wasi: wasi, functions: [], memories: [], globals: [], tables: [] }, pendingResources = [], linkedMemories = new Map();
+      const importValues = [];
       for (const item of module.__thawImports) {
         if (item.module === 'wasi_snapshot_preview1' && wasi) continue;
         const namespace = imports[item.module];
@@ -247,11 +248,10 @@
         if (item.kind === 'memory' && !(value instanceof WasmMemory)) throw new WebAssembly.LinkError(`WebAssembly import '${item.module}.${item.name}' must be a Memory`);
         if (item.kind === 'global' && !(value instanceof WasmGlobal)) throw new WebAssembly.LinkError(`WebAssembly import '${item.module}.${item.name}' must be a Global`);
         if (item.kind === 'table' && (!(value instanceof WasmTable) || value.__thawInstance !== undefined)) throw new WebAssembly.LinkError(`WebAssembly import '${item.module}.${item.name}' must be a standalone Table`);
+        importValues.push({ item, value });
       }
       try {
-        for (const item of module.__thawImports) {
-          if (item.module === 'wasi_snapshot_preview1' && wasi) continue;
-          const value = imports[item.module][item.name];
+        for (const { item, value } of importValues) {
           if (item.kind === 'function') {
             const bridge = (...args) => {
               for (const memory of linkedMemories.keys()) memory.__thawRefresh();
