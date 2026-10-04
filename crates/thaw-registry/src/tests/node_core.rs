@@ -2155,3 +2155,41 @@ module.exports = function() {
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
 }
+
+#[test]
+fn path_join_skips_empty_segments_before_normalizing() {
+    use std::ffi::{CStr, CString};
+
+    let dir = temp_registry("builtin_path_empty_join");
+    fs::write(
+            dir.join("index.js"),
+            "var path = require('node:path');\n\
+             module.exports = function () {\n\
+             \x20 return [path.join('', 'file'), path.join('dir', ''), path.join('dir/', ''), path.join('', ''), path.join(), path.join('', '/root', '', 'file'), path.join(null), path.join(undefined, 'file'), path.win32.join('', 'file') ];\n\
+             };",
+        )
+        .unwrap();
+    let empty_node_modules = temp_registry("builtin_path_empty_join_node_modules");
+    let (bundle, _, file_count, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(file_count, 2);
+    let script = format!(
+            "globalThis.module = {{ exports: {{}} }};\n\
+             globalThis.exports = globalThis.module.exports;\n\
+             globalThis.require = function(name) {{ throw new Error(\"require('\" + name + \"') is not supported\"); }};\n\
+             {bundle}\n\
+             globalThis.exercisePath = module.exports;\n"
+        );
+    let source = CString::new(script).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let func = CString::new("exercisePath").unwrap();
+    let args = CString::new("[]").unwrap();
+    let result_ptr = thaw_quickjs::thaw_js_call(func.as_ptr(), args.as_ptr());
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(
+        result,
+        r#"["file","dir","dir/",".",".","/root/file",".","/file","file"]"#
+    );
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+}
