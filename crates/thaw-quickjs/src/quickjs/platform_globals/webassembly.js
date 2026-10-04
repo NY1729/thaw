@@ -412,8 +412,14 @@
     Global: WasmGlobal,
     Table: WasmTable,
     validate(bytes) { const result = JSON.parse(__thaw_wasm_compile(wasmHex(bytes))); if (result.ok) __thaw_wasm_release('module', result.handle); return result.ok; },
-    compile(bytes) { return Promise.resolve().then(() => new WasmModule(bytes)); },
+    compile(bytes) {
+      try { bytes = new Uint8Array(wasmBytes(bytes)); }
+      catch (error) { return Promise.reject(error); }
+      return Promise.resolve().then(() => new WasmModule(bytes));
+    },
     instantiate(source, imports) {
+      try { if (!(source instanceof WasmModule)) source = new Uint8Array(wasmBytes(source)); }
+      catch (error) { return Promise.reject(error); }
       return Promise.resolve().then(() => source instanceof WasmModule
         ? new WasmInstance(source, imports)
         : (() => { const module = new WasmModule(source); return { module, instance: new WasmInstance(module, imports) }; })());
