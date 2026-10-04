@@ -2332,3 +2332,49 @@ module.exports = async function () {
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
 }
+
+#[test]
+fn test_mock_restore_failure_is_published_and_remaining_mocks_restore() {
+    use std::ffi::{CStr, CString};
+
+    let dir = temp_registry("builtin_test_restore");
+    fs::write(
+            dir.join("index.js"),
+            r#"var test = require('node:test');
+module.exports = async function () {
+  var object = { good: function() { return 1; }, locked: function() { return 2; } };
+  var failed = await test('restore failure', function(t) {
+    t.mock.method(object, 'good', function() { return 3; });
+    t.mock.method(object, 'locked', function() { return 4; });
+    Object.defineProperty(object, 'locked', { value: object.locked, writable: false, configurable: false });
+  });
+  var next = await test('next', function() {}), seen = [];
+  for await (var event of test.run()) seen.push([event.name, event.status, typeof event.duration_ms === 'number']);
+  return [failed.status, object.good(), next.status, seen];
+};"#,
+        )
+        .unwrap();
+    let empty_node_modules = temp_registry("builtin_test_restore_node_modules");
+    let (bundle, _, file_count, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    assert!(file_count >= 3);
+    let script = format!(
+            "globalThis.module = {{ exports: {{}} }};\n\
+             globalThis.exports = globalThis.module.exports;\n\
+             globalThis.require = function(name) {{ throw new Error(\"require('\" + name + \"') is not supported\"); }};\n\
+             {bundle}\n\
+             globalThis.exerciseTestRestore = module.exports;\n"
+        );
+    let source = CString::new(script).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let func = CString::new("exerciseTestRestore").unwrap();
+    let args = CString::new("[]").unwrap();
+    let result_ptr = thaw_quickjs::thaw_js_call(func.as_ptr(), args.as_ptr());
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(
+        result,
+        r#"["failed",1,"passed",[["restore failure","failed",true],["next","passed",true]]]"#
+    );
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+}
