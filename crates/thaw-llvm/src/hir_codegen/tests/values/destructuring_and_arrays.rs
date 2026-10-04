@@ -857,3 +857,35 @@ fn missing_fixed_object_assignment_properties_use_defaults() {
     assert_eq!(compile_and_run(source, "missing_fixed_assignment_defaults"),
         "99 1\n99 2 7\n7 2\n99 3 7\n");
 }
+
+#[test]
+fn dynamic_destructuring_validates_empty_patterns_and_snapshots_named_sources() {
+    let source = r#"
+        let reads = 0;
+        let defaults = 0;
+        function absent(): any { reads++; return null; }
+        function fallback(): number { defaults++; return 42; }
+        function main(): void {
+            try { const {} = absent(); }
+            catch (error) { console.log(error instanceof TypeError, reads, defaults); }
+            try { const [] = absent(); }
+            catch (error) { console.log(error instanceof TypeError, reads, defaults); }
+            try { const { value = fallback() } = absent(); }
+            catch (error) { console.log(error instanceof TypeError, reads, defaults); }
+            try { ({} = absent()); }
+            catch (error) { console.log(error instanceof TypeError, reads, defaults); }
+            let original: any = { first: undefined, later: 7 };
+            function replace(): number { original = { later: 99 }; return 42; }
+            const { first = replace(), later } = original;
+            console.log(first, later, original.later);
+            let assigned: any = { first: undefined, later: 8 };
+            let a = 0;
+            let b = 0;
+            function replaceAssigned(): number { assigned = { later: 100 }; return 43; }
+            ({ first: a = replaceAssigned(), later: b } = assigned);
+            console.log(a, b, assigned.later);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "destructure_dynamic_source"),
+        "true 1 0\ntrue 2 0\ntrue 3 0\ntrue 4 0\n42 7 99\n43 8 100\n");
+}
