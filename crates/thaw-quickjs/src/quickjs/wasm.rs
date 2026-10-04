@@ -366,7 +366,11 @@ fn wasm_compile(value: String) -> String {
                     wasmi::ExternType::Func(function) => Some(function.results().iter().copied().map(wasm_type_name).collect::<Vec<_>>()),
                     _ => None,
                 };
-                serde_json::json!({ "module": import.module(), "name": import.name(), "kind": wasm_kind(import.ty()), "resultTypes": result_types })
+                let (value_type, mutable) = match import.ty() {
+                    wasmi::ExternType::Global(global) => (Some(wasm_type_name(global.content())), Some(global.mutability().is_mut())),
+                    _ => (None, None),
+                };
+                serde_json::json!({ "module": import.module(), "name": import.name(), "kind": wasm_kind(import.ty()), "resultTypes": result_types, "valueType": value_type, "mutable": mutable })
             })
             .collect::<Vec<_>>();
         let handle = table.next_module;
@@ -1154,9 +1158,23 @@ fn wasm_instantiate_inner(module_handle: u32, linkage: Option<String>) -> String
                     let Some(descriptor) = global_imports.get(&key) else {
                         return serde_json::json!({ "ok": false, "error": format!("WebAssembly global import {}.{} is not provided", import.module(), import.name()) }).to_string();
                     };
-                    let global = match wasm_import_global(descriptor, &store) {
-                        Ok(global) => global,
-                        Err(error) => return serde_json::json!({ "ok": false, "error": error }).to_string(),
+                    let global = if let Some(encoded) = descriptor.get("primitive") {
+                        if !matches!(global_type.content(), WasmValType::I32 | WasmValType::I64 | WasmValType::F32 | WasmValType::F64) {
+                            return serde_json::json!({ "ok": false, "error": "primitive WebAssembly global import requires a numeric type" }).to_string();
+                        }
+                        if global_type.mutability().is_mut() {
+                            return serde_json::json!({ "ok": false, "error": "mutable WebAssembly global import requires a Global" }).to_string();
+                        }
+                        let value = match wasm_runtime_value(encoded, global_type.content(), &mut store) {
+                            Ok(value) => value,
+                            Err(error) => return serde_json::json!({ "ok": false, "error": error }).to_string(),
+                        };
+                        wasmi::Global::new(&mut store, value, wasmi::Mutability::Const)
+                    } else {
+                        match wasm_import_global(descriptor, &store) {
+                            Ok(global) => global,
+                            Err(error) => return serde_json::json!({ "ok": false, "error": error }).to_string(),
+                        }
                     };
                     let actual = global.ty(&store);
                     if actual.content() != global_type.content() || actual.mutability() != global_type.mutability() {
