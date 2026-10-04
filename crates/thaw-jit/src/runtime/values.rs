@@ -518,7 +518,11 @@ fn tagged_tuple_field(tuple: f64, index: f64, kind: u8, present_tag: u8) -> f64 
         return 0.0;
     }
     let field = unsafe { data.add(8 + index as usize * 16) };
-    if unsafe { field.read() } != present_tag {
+    let tag = unsafe { field.read() };
+    if tag != present_tag {
+        if present_tag == 0 {
+            CALL_ABSENCE.with(|absence| absence.set(if tag == 1 { 2 } else { 1 }));
+        }
         CALL_PRESENT.with(|present| present.set(false));
         return 0.0;
     }
