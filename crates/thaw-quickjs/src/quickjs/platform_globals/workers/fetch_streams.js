@@ -1,3 +1,4 @@
+  const thawImmutableResponseHeaders = new WeakSet();
   if (typeof globalThis.Headers !== 'function') {
     const headerLists = new WeakMap();
     const headerIteratorStates = new WeakMap();
@@ -13,6 +14,7 @@
       return text.replace(/^[\t ]+|[\t ]+$/g, '');
     };
     const headersList = value => { const list = headerLists.get(value); if (!list) throw new TypeError('invalid Headers receiver'); return list; };
+    const writableHeaders = value => { if (thawImmutableResponseHeaders.has(value)) throw new TypeError('Headers are immutable'); };
     const normalizedHeaderEntries = value => {
       const grouped = new Map();
       for (const [name, item] of headersList(value)) { const values = grouped.get(name) || []; values.push(item); grouped.set(name, values); }
@@ -54,11 +56,11 @@
         if (init === null || (typeof init !== 'object' && typeof init !== 'function')) throw new TypeError('Headers init must be an object');
         for (const name of Object.keys(init)) this.append(name, init[name]);
       }
-      append(name, value) { headersList(this).push([headerName(name), headerValue(value)]); }
-      delete(name) { const normalized = headerName(name), list = headersList(this); headerLists.set(this, list.filter(entry => entry[0] !== normalized)); }
+      append(name, value) { const list = headersList(this), normalized = headerName(name), text = headerValue(value); writableHeaders(this); list.push([normalized, text]); }
+      delete(name) { const normalized = headerName(name), list = headersList(this); writableHeaders(this); headerLists.set(this, list.filter(entry => entry[0] !== normalized)); }
       get(name) { const normalized = headerName(name), values = headersList(this).filter(entry => entry[0] === normalized).map(entry => entry[1]); return values.length ? values.join(', ') : null; }
       has(name) { const normalized = headerName(name); return headersList(this).some(entry => entry[0] === normalized); }
-      set(name, value) { const normalized = headerName(name), text = headerValue(value), list = headersList(this).filter(entry => entry[0] !== normalized); list.push([normalized, text]); headerLists.set(this, list); }
+      set(name, value) { const normalized = headerName(name), text = headerValue(value), list = headersList(this).filter(entry => entry[0] !== normalized); writableHeaders(this); list.push([normalized, text]); headerLists.set(this, list); }
       getSetCookie() { return headersList(this).filter(entry => entry[0] === 'set-cookie').map(entry => entry[1]); }
       keys() { return headerIterator(this, 'key'); }
       values() { return headerIterator(this, 'value'); }
@@ -804,17 +806,17 @@
       async json() { return JSON.parse(await this.text()); }
       async text() { return new TextDecoder().decode(await consumeResponseBody(this)); }
       async formData() { const type = this.headers.get('content-type') || ''; return parseFormDataBody(type, await consumeResponseBody(this)); }
-      clone() { const record = responseData.get(this); if (record.body && (record.body._disturbed || record.body.locked)) throw new TypeError('Body has already been consumed'); let body = null; if (record.body) { const branches = record.body.tee(); record.body = branches[0]; body = branches[1]; } const clone = new Response(body, { status: record.status, statusText: record.statusText, headers: record.headers }); const cloneRecord = responseData.get(clone); cloneRecord.type = record.type; cloneRecord.url = record.url; cloneRecord.redirected = record.redirected; return clone; }
-      static error() { const response = new Response(); const record = responseData.get(response); record.status = 0; record.type = 'error'; return response; }
+      clone() { const record = responseData.get(this); if (record.body && (record.body._disturbed || record.body.locked)) throw new TypeError('Body has already been consumed'); let body = null; if (record.body) { const branches = record.body.tee(); record.body = branches[0]; body = branches[1]; } const clone = new Response(body, { status: record.status, statusText: record.statusText, headers: record.headers }); const cloneRecord = responseData.get(clone); cloneRecord.type = record.type; cloneRecord.url = record.url; cloneRecord.redirected = record.redirected; if (thawImmutableResponseHeaders.has(record.headers)) thawImmutableResponseHeaders.add(cloneRecord.headers); return clone; }
+      static error() { const response = new Response(); const record = responseData.get(response); record.status = 0; record.type = 'error'; thawImmutableResponseHeaders.add(record.headers); return response; }
       static json(value, init = {}) { const body = JSON.stringify(value); if (body === undefined) throw new TypeError('value is not JSON serializable'); const headers = new Headers(init.headers); if (!headers.has('content-type')) headers.set('content-type', 'application/json'); return new Response(body, { ...init, headers }); }
-      static redirect(url, status = 302) { const code = Number(status); if (![301, 302, 303, 307, 308].includes(code)) throw new RangeError('invalid redirect status'); return new Response(null, { status: code, headers: { location: new URL(String(url)).href } }); }
+      static redirect(url, status = 302) { const code = Number(status); if (![301, 302, 303, 307, 308].includes(code)) throw new RangeError('invalid redirect status'); const response = new Response(null, { status: code, headers: { location: new URL(String(url)).href } }); thawImmutableResponseHeaders.add(responseData.get(response).headers); return response; }
       get [Symbol.toStringTag]() { return 'Response'; }
     }
     Object.defineProperty(globalThis, '__thaw_set_response_metadata', {
       configurable: true,
       value(response, url, redirected) {
         const record = responseData.get(response); if (!record) throw new TypeError('invalid Response receiver');
-        record.url = String(url); record.redirected = Boolean(redirected); return response;
+        record.url = String(url); record.redirected = Boolean(redirected); thawImmutableResponseHeaders.add(record.headers); return response;
       }
     });
     const requestData = new WeakMap();
