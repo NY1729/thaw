@@ -2348,9 +2348,13 @@ module.exports = async function () {
     t.mock.method(object, 'locked', function() { return 4; });
     Object.defineProperty(object, 'locked', { value: object.locked, writable: false, configurable: false });
   });
+  var nullish = await test('nullish after', function(t) {
+    t.mock.method(object, 'good', function() { return 5; });
+    t.after(function() { throw null; });
+  });
   var next = await test('next', function() {}), seen = [];
   for await (var event of test.run()) seen.push([event.name, event.status, typeof event.duration_ms === 'number']);
-  return [failed.status, object.good(), next.status, seen];
+  return [failed.status, nullish.status, object.good(), next.status, seen];
 };"#,
         )
         .unwrap();
@@ -2373,7 +2377,7 @@ module.exports = async function () {
     let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
     assert_eq!(
         result,
-        r#"["failed",1,"passed",[["restore failure","failed",true],["next","passed",true]]]"#
+        r#"["failed","failed",1,"passed",[["restore failure","failed",true],["nullish after","failed",true],["next","passed",true]]]"#
     );
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
