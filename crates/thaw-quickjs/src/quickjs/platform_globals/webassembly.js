@@ -203,7 +203,7 @@
       }
       if (!descriptor || !['i32','i64','f32','f64','externref'].includes(String(descriptor.value))) throw new TypeError('WebAssembly.Global(): invalid value type');
       this.__thawType = String(descriptor.value); this.__thawMutable = Boolean(descriptor.mutable);
-      this.__thawLocalValue = this.__thawConvert(arguments.length < 2 ? (this.__thawType === 'i64' ? 0n : this.__thawType === 'externref' ? null : 0) : value);
+      this.__thawLocalValue = this.__thawConvert(arguments.length < 2 ? (this.__thawType === 'i64' ? 0n : this.__thawType === 'externref' ? undefined : 0) : value);
       this.__thawBindings = [];
     }
     __thawConvert(value) {
