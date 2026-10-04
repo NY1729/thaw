@@ -2732,6 +2732,9 @@ impl<'a> FnLowerer<'a> {
                                         None
                                     } else if has_spread {
                                         let callback = spread_arguments[1].clone();
+                                        if self.infer_expr_type(&callback)? == HirType::Undefined {
+                                            Some(callback)
+                                        } else {
                                         let params = match self.infer_expr_type(&callback)? {
                                             HirType::Function(params, _)
                                             | HirType::CallableFunction(params, _, _, _) => params,
@@ -2755,11 +2758,41 @@ impl<'a> FnLowerer<'a> {
                                             None,
                                         )?;
                                         Some(callback)
+                                        }
                                     } else {
-                                        Some(self.lower_array_from_callback(
-                                            &call.args[1].expr,
-                                            &HirType::Undefined,
-                                        )?)
+                                        let callback = match &call.args[1].expr {
+                                            Expr::Arrow(_) | Expr::Fn(_) => self.lower_array_from_callback(
+                                                &call.args[1].expr, &HirType::Undefined,
+                                            )?,
+                                            Expr::Ident(ident) if ident.sym == *"undefined"
+                                                && !self.scope.contains_key(
+                                                    &self.resolve_binding(ident.sym.as_ref()),
+                                                ) => self.lower_expr(&call.args[1].expr)?,
+                                            Expr::Ident(ident) if self.scope.get(
+                                                &self.resolve_binding(ident.sym.as_ref()),
+                                            ) != Some(&HirType::Undefined) => self.lower_array_from_callback(
+                                                &call.args[1].expr, &HirType::Undefined,
+                                            )?,
+                                            _ => self.lower_expr(&call.args[1].expr)?,
+                                        };
+                                        if self.infer_expr_type(&callback)? != HirType::Undefined {
+                                            let params = match self.infer_expr_type(&callback)? {
+                                                HirType::Function(params, _)
+                                                | HirType::CallableFunction(params, _, _, _) => params,
+                                                _ => return Err("Array.from mapper is not a function value".into()),
+                                            };
+                                            if params.len() > 2 {
+                                                return Err(format!(
+                                                    "Array.from mapper accepts at most two parameters, got {}",
+                                                    params.len(),
+                                                ));
+                                            }
+                                            let available = [HirType::Undefined, HirType::F64];
+                                            self.validate_promise_callback_value(
+                                                &callback, &available[..params.len()], None,
+                                            )?;
+                                        }
+                                        Some(callback)
                                     };
                                     let this_arg = if has_spread {
                                         spread_arguments.get(2).cloned()

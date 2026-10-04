@@ -226,19 +226,35 @@ impl<'a> FnLowerer<'a> {
         self.next_binding += 1;
         self.scope.insert(length_name.clone(), HirType::F64);
         let mut bindings = source_binding.into_iter().collect::<Vec<_>>();
-        let Some(callback) = callback else {
+        let callback_type = callback.as_ref()
+            .map(|value| self.infer_expr_type(value)).transpose()?;
+        if callback_type.as_ref().is_none_or(|ty| ty == &HirType::Undefined) {
+            if let Some(callback) = callback {
+                let name = format!("__thaw_array_from_ignored_mapper_{}", self.next_binding);
+                self.next_binding += 1;
+                self.scope.insert(name.clone(), HirType::Undefined);
+                bindings.push((name, HirType::Undefined, callback));
+            }
+            if let Some(this_arg) = this_arg {
+                let ty = self.infer_expr_type(&this_arg)?;
+                let name = format!("__thaw_array_from_ignored_this_{}", self.next_binding);
+                self.next_binding += 1;
+                self.scope.insert(name.clone(), ty.clone());
+                bindings.push((name, ty, this_arg));
+            }
             bindings.push((length_name.clone(), HirType::F64, length));
             let result = HirExpr::ArrayAlloc(
                 Box::new(HirExpr::Var(length_name)),
                 HirType::Undefined,
             );
             return self.wrap_call_argument_bindings(result, &bindings);
-        };
+        }
+        let callback = callback.expect("a non-undefined mapper is present");
         let callback_name = format!("__thaw_array_from_callback_{}", self.next_binding);
         self.next_binding += 1;
-        let callback_type = self.infer_expr_type(&callback)?;
+        let callback_type = callback_type.expect("a non-undefined mapper type is present");
         let HirType::Function(params, callback_return_type) = &callback_type else {
-            unreachable!("Array.from mapper was validated as a function")
+            return Err("Array.from mapper needs a fixed function signature".into());
         };
         let returns_void = **callback_return_type == HirType::Void;
         let output_type = if returns_void { HirType::Undefined } else { callback_return_type.as_ref().clone() };

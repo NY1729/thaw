@@ -11333,3 +11333,20 @@ fn array_from_length_mapper_receives_explicit_this_arg() {
         "10,11\n"
     );
 }
+
+#[test]
+fn array_from_length_undefined_mapper_still_evaluates_this_arg() {
+    let source = r#"
+        function main(): void {
+            const source = { length: 1 };
+            let calls = 0;
+            function third(): number { calls++; source.length = 2; return 10; }
+            const values = Array.from(source, undefined, third());
+            console.log(calls, values.length, values[0] === undefined);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "array_from_length_undefined_mapper"),
+        "1 2 true\n"
+    );
+}
