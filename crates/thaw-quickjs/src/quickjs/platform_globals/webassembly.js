@@ -224,8 +224,8 @@
     }
     __thawBind(instance, module, name) { const binding = { instance, name: 'import:' + module + '\x1f' + name }; this.__thawBindings.push(binding); return binding; }
     __thawUnbind(binding) { this.__thawBindings = this.__thawBindings.filter(value => value !== binding); }
-    __thawSync() { if (this.__thawInstance !== undefined) return; const encoded = JSON.stringify(wasmEncodeArgument(this.__thawLocalValue, this.__thawType)); for (const binding of this.__thawBindings) wasmResult(__thaw_wasm_global(binding.instance, binding.name, encoded)); }
-    __thawRefresh(binding) { if (!binding) return; this.__thawLocalValue = wasmDecodeValue(wasmResult(__thaw_wasm_global(binding.instance, binding.name, undefined)).value); const encoded = JSON.stringify(wasmEncodeArgument(this.__thawLocalValue, this.__thawType)); for (const other of this.__thawBindings) if (other !== binding) wasmResult(__thaw_wasm_global(other.instance, other.name, encoded)); }
+    __thawSync() { if (this.__thawInstance !== undefined || !this.__thawMutable) return; const encoded = JSON.stringify(wasmEncodeArgument(this.__thawLocalValue, this.__thawType)); for (const binding of this.__thawBindings) wasmResult(__thaw_wasm_global(binding.instance, binding.name, encoded)); }
+    __thawRefresh(binding) { if (!binding || !this.__thawMutable) return; this.__thawLocalValue = wasmDecodeValue(wasmResult(__thaw_wasm_global(binding.instance, binding.name, undefined)).value); const encoded = JSON.stringify(wasmEncodeArgument(this.__thawLocalValue, this.__thawType)); for (const other of this.__thawBindings) if (other !== binding) wasmResult(__thaw_wasm_global(other.instance, other.name, encoded)); }
     valueOf() { return this.value; }
   }
   class WasmTable {
