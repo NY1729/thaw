@@ -894,11 +894,6 @@ fn lower_class_methods(
         } else {
             signature.ret.clone()
         };
-        if method.kind == MethodKind::Setter {
-            lowered_body.push(HirStmt::Return(Some(HirExpr::Var(
-                params.last().expect("setter value parameter").name.clone(),
-            ))));
-        }
         functions.push(HirFunction {
             name: symbol.clone(),
             params: params.clone(),

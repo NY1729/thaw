@@ -3798,3 +3798,33 @@ fn object_setter_assignment_evaluates_receiver_once_and_returns_assigned_value()
     assert_eq!(compile_and_run(source, "object_setter_assignment_result"),
         "7 1 RVS 70\n77 1 RGVS 770\n7 1 RGVS 70\n70 1 RGS 710\n711 1 RGS 7110\nstring 70\ntrue true 2 true\n3 4 undefined 4\n");
 }
+
+#[test]
+fn class_setter_assignment_result_survives_parameter_mutation_and_early_return() {
+    let source = r#"
+        let stored = 0;
+        class Base {
+            set value(next: number) { if (next < 0) return; next += 1; stored = next; }
+            static set current(next: number) { if (next < 0) return; next += 2; stored = next; }
+        }
+        class Derived extends Base {
+            write(next: number): number { return super.value = next; }
+            static write(next: number): number { return super.current = next; }
+        }
+        function main(): void {
+            const box = new Derived();
+            console.log(box.value = 7, stored);
+            console.log(box.value = -1, stored);
+            console.log(Base.current = 7, stored);
+            console.log(Base.current = -1, stored);
+            console.log(box.write(7), stored);
+            console.log(Derived.write(7), stored);
+            function raw(): any { return "7"; }
+            const instanceRaw = (box.value = raw());
+            const staticRaw = (Base.current = raw());
+            console.log(typeof instanceRaw, typeof staticRaw, stored);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "class_setter_original_rhs"),
+        "7 8\n-1 8\n7 9\n-1 9\n7 8\n7 9\nstring string 9\n");
+}

@@ -927,11 +927,10 @@ fn lowers_native_class_setters_and_preserves_assignment_values() {
         .iter()
         .find(|function| function.name == "__thaw_class_Box_instance_setter_value")
         .unwrap();
-    assert_eq!(setter.ret, HirType::F64);
-    assert!(matches!(
-        setter.body.last(),
-        Some(HirStmt::Return(Some(HirExpr::Var(name)))) if name == "next"
-    ));
+    assert_eq!(setter.ret, HirType::Void);
+    assert!(!setter.body.iter().any(|statement| matches!(statement,
+        HirStmt::Return(Some(_))
+    )));
 }
 
 #[test]
