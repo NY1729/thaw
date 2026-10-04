@@ -143,6 +143,9 @@ impl<'ctx> HirCompiler<'ctx> {
         let key = self.compile_expr(key)?;
         let result = self.compile_expr(value)?;
         if !owned {
+            // PutValue happens after RHS evaluation. A nullish reference
+            // fails here, before frozen/sealed state or the native write.
+            self.compile_guard_json_non_nullish(object, "Cannot set properties of null or undefined")?;
             // `owned` means this write is populating a brand-new object
             // literal still under construction (never observable/frozen
             // yet) -- only a write through an existing binding needs the
@@ -397,6 +400,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .basic()
             .ok_or("thaw_number_to_string returned no value")?;
         let value = self.compile_expr(value)?;
+        self.compile_guard_json_non_nullish(object, "Cannot set properties of null or undefined")?;
         self.compile_guard_json_write(object, key.into_pointer_value())?;
         let result = self.builder
             .build_call(
