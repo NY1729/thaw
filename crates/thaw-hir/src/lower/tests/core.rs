@@ -919,3 +919,28 @@ fn generic_key_literal_strict_equality_lowers_as_string_content_comparison() {
         _ => false,
     }), "literal-typed equality must lower both operands as string content");
 }
+
+#[test]
+fn explicit_this_default_wrappers_keep_receiver_and_default_binding() {
+    let program = lower(
+        r#"
+        function withReceiver(this: number, value: number = this): number {
+            return this + value;
+        }
+        "#,
+    );
+    for name in [
+        "withReceiver__thawdefault_arity_1",
+        "withReceiver__thawomitted_mask_2",
+    ] {
+        let wrapper = program.functions.iter().find(|function| function.name == name)
+            .expect("receiver-preserving default wrapper");
+        assert_eq!(wrapper.params.len(), 1);
+        assert_eq!(wrapper.params[0].name, "__thaw_this");
+        assert_eq!(wrapper.params[0].ty, HirType::F64);
+        assert!(wrapper.body.iter().any(|statement| matches!(
+            statement,
+            HirStmt::Let(_, HirType::F64, HirExpr::Var(source)) if source == "__thaw_this"
+        )));
+    }
+}
