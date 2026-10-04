@@ -351,6 +351,27 @@ fn analyze_module_named(source: &str, source_name: &thaw_parser::common::FileNam
                 if let Some(name) = commonjs_export_name(member) {
                     self.commonjs_exports.push(name);
                 }
+                if is_module_exports(member) && assignment.op == thaw_parser::ast::AssignOp::Assign {
+                    if let Expr::Object(object) = assignment.right.as_ref() {
+                        for property in &object.props {
+                            let PropOrSpread::Prop(property) = property else { continue; };
+                            let key = match property.as_ref() {
+                                Prop::Shorthand(identifier) => { self.commonjs_exports.push(identifier.sym.to_string()); continue; }
+                                Prop::KeyValue(property) => &property.key,
+                                Prop::Method(property) => &property.key,
+                                Prop::Getter(property) => &property.key,
+                                Prop::Setter(property) => &property.key,
+                                _ => continue,
+                            };
+                            let name = match key {
+                                PropName::Ident(identifier) => Some(identifier.sym.to_string()),
+                                PropName::Str(text) => Some(text.value.to_string_lossy().into_owned()),
+                                _ => None,
+                            };
+                            if let Some(name) = name { self.commonjs_exports.push(name); }
+                        }
+                    }
+                }
             }
             if assignment.op == thaw_parser::ast::AssignOp::Assign {
                 if let (AssignTarget::Simple(SimpleAssignTarget::Ident(binding)), Expr::Call(call)) =
@@ -1851,4 +1872,11 @@ mod static_link_metadata_regressions {
             "./dep.js", "./side.js", "./more.js", "./star.js"
         ]));
     }
+}
+
+#[cfg(test)]
+#[test]
+fn commonjs_export_names_include_static_object_literal_members() {
+    let graph = analyze_module("const short = 1; module.exports = {short, named:2, 'hyphen-name':3, method() {}}; exports.extra = 4;");
+    assert_eq!(graph._commonjs_exports, vec!["default", "extra", "hyphen-name", "method", "named", "short"]);
 }
