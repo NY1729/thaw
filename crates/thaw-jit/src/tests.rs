@@ -898,6 +898,12 @@ mod tests {
             ("includes2", "😀", 1.0, 1.0),
             ("indexof2", "😀", 1.0, 5.0),
             ("lastindexof2", "😀", 4.0, 0.0),
+            ("lastindexof2", "😀", f64::NAN, 5.0),
+            ("lastindexof2", "", f64::NAN, 7.0),
+            ("lastindexof2", "😀", f64::NEG_INFINITY, 0.0),
+            ("indexof2", "😀", f64::NAN, 0.0),
+            ("startswith2", "😀", f64::NAN, 1.0),
+            ("endswith2", "😀", f64::NAN, 0.0),
             ("indexof2", "", f64::INFINITY, 7.0),
         ] {
             let search = CString::new(search).unwrap();
