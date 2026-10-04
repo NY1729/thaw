@@ -7289,3 +7289,39 @@ fn live_host_key_predicate_uses_captured_intrinsics() {
     assert_eq!(thaw_js_release_handle(symbol), 1);
     assert_eq!(thaw_js_release_handle(object), 1);
 }
+
+#[test]
+fn private_iterator_helper_keeps_receiver_and_reads_getters_once() {
+    assert_eq!(load(r#"
+      globalThis.iteratorIntrinsicObserved = [];
+      const source = {
+        get [Symbol.iterator]() {
+          iteratorIntrinsicObserved.push('iterator');
+          return function () {
+            iteratorIntrinsicObserved.push(this === source ? 'receiver' : 'wrong');
+            return {
+              get next() {
+                iteratorIntrinsicObserved.push('next');
+                return () => ({ value: 7, done: false });
+              },
+              get return() {
+                iteratorIntrinsicObserved.push('return');
+                return () => ({ done: true });
+              },
+            };
+          };
+        },
+      };
+      const descriptor = Object.getOwnPropertyDescriptor(globalThis, '__thaw_to_iterator');
+      const replaced = Reflect.set(globalThis, '__thaw_to_iterator', () => 0);
+      const iterator = descriptor.value(source);
+      iterator.next();
+      iterator.return();
+      globalThis.iteratorIntrinsicControl = descriptor.enumerable
+        && !descriptor.writable && !descriptor.configurable && !replaced
+        && globalThis.__thaw_to_iterator === descriptor.value
+        && iteratorIntrinsicObserved.join(',') === 'iterator,receiver,next,return';
+    "#), 1);
+    assert_eq!(eval_json("iteratorIntrinsicControl"), Ok(Some("true".into())));
+    assert_eq!(load("delete globalThis.iteratorIntrinsicObserved; delete globalThis.iteratorIntrinsicControl;"), 1);
+}
