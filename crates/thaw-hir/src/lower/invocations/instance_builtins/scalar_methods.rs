@@ -517,6 +517,17 @@ impl<'a> FnLowerer<'a> {
                             vec![var(&normalized_name)],
                         )),
                         HirStmt::If(
+                            HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_number_is_finite".into())),
+                                vec![var(&receiver_name)],
+                            ),
+                            Vec::new(),
+                            vec![HirStmt::Return(Some(HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_number_to_string".into())),
+                                vec![var(&receiver_name)],
+                            )))],
+                        ),
+                        HirStmt::If(
                             HirExpr::BinOp(
                                 BinOp::Lt,
                                 Box::new(var(&normalized_name)),
@@ -612,6 +623,17 @@ impl<'a> FnLowerer<'a> {
                             Box::new(HirExpr::Var("__thaw_math_trunc".into())),
                             vec![var(&normalized_name)],
                         )),
+                        HirStmt::If(
+                            HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_number_is_finite".into())),
+                                vec![var(&receiver_name)],
+                            ),
+                            Vec::new(),
+                            vec![HirStmt::Return(Some(HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_number_to_string".into())),
+                                vec![var(&receiver_name)],
+                            )))],
+                        ),
                         HirStmt::If(
                             HirExpr::BinOp(
                                 BinOp::Lt,
