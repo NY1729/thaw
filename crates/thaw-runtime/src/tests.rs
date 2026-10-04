@@ -317,6 +317,31 @@ extern "C" fn record_resume(frame: *mut u8, result: *const u8) {
     record.result = result;
 }
 
+#[test]
+fn pending_promise_subscription_keeps_arena_frame_until_resume() {
+    thaw_arena::thaw_arena_enable_tracing();
+    let frame = thaw_arena::thaw_arena_alloc(
+        std::mem::size_of::<ResumeRecord>(),
+        std::mem::align_of::<ResumeRecord>(),
+    ).cast::<ResumeRecord>();
+    assert!(!frame.is_null());
+    unsafe { frame.write(ResumeRecord { calls: 0, result: std::ptr::null() }) };
+    let promise = thaw_promise_new();
+    assert_eq!(unsafe { thaw_promise_subscribe(promise, record_resume, frame.cast()) }, 1);
+    thaw_arena::thaw_arena_reset();
+    assert!(!thaw_arena::was_reclaimed(frame as usize));
+    let result = std::ptr::dangling::<u8>();
+    assert_eq!(thaw_promise_resolve(promise, result), 1);
+    thaw_arena::thaw_arena_reset();
+    assert!(!thaw_arena::was_reclaimed(frame as usize));
+    assert_eq!(thaw_runtime_poll_one(), 1);
+    assert_eq!(unsafe { (*frame).calls }, 1);
+    assert_eq!(unsafe { (*frame).result }, result);
+    unsafe { thaw_promise_destroy(promise) };
+    thaw_arena::thaw_arena_reset();
+    assert!(thaw_arena::was_reclaimed(frame as usize));
+}
+
 struct ChainNumberContext {
     calls: usize,
     add: f64,

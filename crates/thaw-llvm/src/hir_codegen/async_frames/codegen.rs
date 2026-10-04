@@ -18,6 +18,9 @@ impl<'ctx> HirCompiler<'ctx> {
         func: &HirFunction,
         plan: &FrameAsyncPlan,
     ) -> Result<(), String> {
+        // A Promise subscription owns an ArenaRoot for its suspended frame.
+        // Start tracing before the entrypoint can allocate that frame.
+        self.tracks_owned_json_roots = true;
         let segments = &plan.segments;
         let symbol = Self::llvm_symbol_for(&func.name);
         let ramp = self.module.get_function(&symbol).unwrap();
