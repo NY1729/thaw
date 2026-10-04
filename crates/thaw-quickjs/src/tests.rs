@@ -7517,3 +7517,28 @@ fn webassembly_memory_export_aliases_reuse_original_buffer() {
     "#), 1);
     assert_eq!(call("wasmMemoryIdentity", "[]"), "[true,true,true,73,73,true,true]");
 }
+
+// Unrun regression: duplicate imports share native memory and refresh growth once.
+#[test]
+fn webassembly_duplicate_memory_imports_share_one_resource() {
+    assert_eq!(load(r#"
+        function wasmMemoryImportAliases() {
+            const memory = new WebAssembly.Memory({ initial: 1, maximum: 2 });
+            const oldBuffer = memory.buffer;
+            const bytes = new TextEncoder().encode(`(module
+                (import "host" "first" (memory $first 1 2))
+                (import "host" "second" (memory $second 1 2))
+                (export "a" (memory $first)) (export "b" (memory $second))
+                (func $start
+                    i32.const 0 i32.const 42 i32.store8 $first
+                    i32.const 1 memory.grow $first drop)
+                (start $start)
+                (func (export "read") (result i32) i32.const 0 i32.load8_u $second))`);
+            const exports = new WebAssembly.Instance(new WebAssembly.Module(bytes), { host: { first: memory, second: memory } }).exports;
+            const before = exports.read();
+            new Uint8Array(memory.buffer)[0] = 73;
+            return [exports.a === memory, exports.b === memory, oldBuffer.byteLength, memory.buffer.byteLength, before, exports.read()];
+        }
+    "#), 1);
+    assert_eq!(call("wasmMemoryImportAliases", "[]"), "[true,true,0,131072,42,73]");
+}
