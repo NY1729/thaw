@@ -20,7 +20,7 @@ impl NumericProgram {
                     depth += 1;
                 }
                 NumericValue::DynamicArgument(index) => {
-                    if depth == 8 {
+                    if depth >= 7 {
                         return None;
                     }
                     code.extend_from_slice(&[0xf2, 0x0f, 0x10, 0x47 | (depth << 3), index * 8]);
