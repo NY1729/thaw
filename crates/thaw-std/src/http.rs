@@ -1224,12 +1224,18 @@ fn normalize_status(status_code: f64) -> u16 {
     }
 }
 
-/// Non-blocking check for the client having closed the read side. `peek`
-/// doesn't consume, so it can't lose bytes a client did send.
-fn client_hung_up(connection: &ConnectionState) -> bool {
+/// EOF closes only the peer's sending half; response writes remain valid.
+fn client_hung_up(connection: &mut ConnectionState) -> bool {
+    if connection.peer_read_closed { return false; }
     let mut probe = [0_u8; 1];
     match &connection.stream {
-        Some(stream) => matches!(stream.peek(&mut probe), Ok(0)),
+        Some(stream) => match stream.peek(&mut probe) {
+            Ok(0) => { connection.peer_read_closed = true; false }
+            Ok(_) => false,
+            Err(error) if matches!(error.kind(), std::io::ErrorKind::WouldBlock
+                | std::io::ErrorKind::Interrupted) => false,
+            Err(_) => true,
+        },
         None => true,
     }
 }
@@ -1465,6 +1471,7 @@ struct ConnectionState {
     /// descriptor early. Every request/response-path use is past a
     /// `client_gone` check by then, so `socket()` is `Some` for them.
     stream: Option<TcpStream>,
+    peer_read_closed: bool,
     server: *const ServerState,
     request: Vec<u8>,
     response: Vec<u8>,
@@ -1769,6 +1776,7 @@ fn register_connection(stream: TcpStream, server: &ServerState) {
     }
     let connection = Box::into_raw(Box::new(ConnectionState {
         stream: Some(stream),
+        peer_read_closed: false,
         server,
         request: Vec::new(),
         response: Vec::new(),
@@ -1848,8 +1856,8 @@ fn feed_parked_request_body(connection: &mut ConnectionState) -> ParkedBodyFeed 
         };
         match socket.read(&mut chunk) {
             Ok(0) => {
-                finish_connection(connection);
-                return ParkedBodyFeed::ConnectionClosed;
+                connection.peer_read_closed = true;
+                break;
             }
             Ok(length) => {
                 connection.request.extend_from_slice(&chunk[..length]);
@@ -1867,7 +1875,7 @@ fn feed_parked_request_body(connection: &mut ConnectionState) -> ParkedBodyFeed 
     // loops on `Fed` expecting real progress each time, and a nonblocking
     // socket with no new data never blocks on its own, so returning `Fed`
     // here would spin forever with no actual I/O to wait on.
-    if !read_any {
+    if !read_any && !connection.peer_read_closed {
         return ParkedBodyFeed::Nothing;
     }
     // Nothing between here and the entry check above can have nulled
@@ -1875,6 +1883,10 @@ fn feed_parked_request_body(connection: &mut ConnectionState) -> ParkedBodyFeed 
     // returned early above).
     let context = unsafe { &mut *connection.response_ctx };
     sync_request_body_buffer(connection, context);
+    if connection.peer_read_closed && !connection.body_complete {
+        finish_connection(connection);
+        return ParkedBodyFeed::ConnectionClosed;
+    }
     refresh_body_deadline(connection);
     deliver_request_body_listeners(connection, context);
     ParkedBodyFeed::Fed
@@ -1891,11 +1903,9 @@ extern "C" fn connection_ready(context: *mut u8, _events: i16) {
             }
             // An `async` handler / streaming response is still in flight.
             // Its `response.write`/`end` drives things from here -- but a
-            // readable event now may be the client hanging up. If so,
-            // shut the socket and stop watching immediately (freeing the
-            // descriptor); the handler's next `res.*` call then tears the
-            // rest down via `bail_if_client_gone` rather than rendering /
-            // streaming into a dead socket.
+            // A fatal read error abandons the connection. Peer send EOF
+            // only stops read watching; queued or later response writes
+            // remain valid and detect their own send failures.
             if !connection.client_gone && client_hung_up(connection) {
                 mark_client_gone(connection);
             } else if connection.streaming
@@ -1903,6 +1913,8 @@ extern "C" fn connection_ready(context: *mut u8, _events: i16) {
                 && !connection.response.is_empty()
             {
                 write_response(connection);
+            } else if connection.peer_read_closed {
+                rewatch_connection(connection, 0);
             }
             return;
         }
@@ -2248,6 +2260,11 @@ fn write_response(connection: &mut ConnectionState) -> FlushResult {
         connection.body_scan_offset = 0;
         connection.body_complete = false;
         connection.dispatched = false;
+        if connection.peer_read_closed
+            && !connection.request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+            finish_connection(connection);
+            return FlushResult::Closed;
+        }
         // Waiting for the next request now: the read-side timeout applies
         // again (doubling as a keep-alive idle timeout).
         connection.head_deadline = Some(Instant::now() + header_timeout());
@@ -2292,6 +2309,8 @@ fn drain_pending_context_frees() {
 fn rewatch_connection(connection: &mut ConnectionState, interests: u8) -> bool {
     unsafe { thaw_runtime_unwatch_fd(connection.watcher) };
     connection.watcher = 0;
+    let interests = if connection.peer_read_closed { interests & !THAW_FD_READABLE } else { interests };
+    if interests == 0 { return true; }
     let Some(fd) = connection.stream.as_ref().map(TcpStream::as_raw_fd) else {
         finish_connection(connection);
         return false;
@@ -2568,6 +2587,58 @@ pub extern "C" fn createServer(callback: *const c_void) -> *const c_void {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Unrun regression: a peer can finish sending and still receive delayed chunks.
+    #[test]
+    fn peer_send_eof_preserves_pending_streamed_response() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (stream, _) = listener.accept().unwrap();
+        stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        client.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        client.shutdown(Shutdown::Write).unwrap();
+        let mut connection = ConnectionState {
+            stream: Some(stream), peer_read_closed: false,
+            server: std::ptr::null(), request: Vec::new(), response: Vec::new(),
+            written: 0, watcher: 0, keep_alive: false, awaiting_handler: true,
+            response_ctx: std::ptr::null_mut(), streaming: true, response_ended: false,
+            head_deadline: None, head_end: 0, body_plan: BodyPlan::None,
+            consumed: 0, body_scan_offset: 0, body_complete: true,
+            dispatched: true, client_gone: false,
+        };
+        assert!(!client_hung_up(&mut connection));
+        assert!(connection.peer_read_closed);
+        assert!(!connection.client_gone);
+        // EOF can follow the last body bytes already buffered by a prior read.
+        let mut context = RequestContext::new("POST", "/", &[], &[], std::ptr::null_mut());
+        connection.response_ctx = &mut context;
+        connection.request.extend_from_slice(b"abc");
+        connection.body_plan = BodyPlan::Fixed(3);
+        connection.body_complete = false;
+        assert!(matches!(feed_parked_request_body(&mut connection), ParkedBodyFeed::Fed));
+        assert!(connection.body_complete);
+        assert_eq!(context._raw_body, b"abc");
+        connection.response_ctx = std::ptr::null_mut();
+        connection.request.clear();
+        // The parked async handler may resume and produce multiple chunks.
+        for chunk in [b"first".as_slice(), b"second".as_slice()] {
+            connection.response.extend_from_slice(chunk);
+            assert!(matches!(write_response(&mut connection), FlushResult::Pending));
+            assert!(connection.stream.is_some());
+            assert_eq!(connection.watcher, 0);
+            let mut received = vec![0; chunk.len()];
+            client.read_exact(&mut received).unwrap();
+            assert_eq!(received, chunk);
+        }
+        // Already buffered pipeline requests survive peer send EOF too.
+        connection.streaming = false;
+        connection.keep_alive = true;
+        connection.request.extend_from_slice(b"GET /next HTTP/1.1\r\nHost: local\r\n\r\n");
+        connection.consumed = 0;
+        assert!(matches!(write_response(&mut connection), FlushResult::KeptAlive));
+        assert!(connection.request.starts_with(b"GET /next"));
+        assert_eq!(connection.watcher, 0);
+    }
 
     #[test]
     fn buffered_response_uses_one_computed_content_length() {
