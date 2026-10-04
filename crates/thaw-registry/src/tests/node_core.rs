@@ -2243,3 +2243,44 @@ module.exports = function () {
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
 }
+
+#[test]
+fn junit_reporter_escapes_names_and_failure_text() {
+    use std::ffi::{CStr, CString};
+
+    let dir = temp_registry("builtin_junit_xml");
+    fs::write(
+            dir.join("index.js"),
+            r#"var reporters = require('node:test/reporters');
+module.exports = async function () {
+  var output = '';
+  var events = [{ type: 'test', status: 'failed', fullName: '<&>"', message: '<failure>&lt;"</failure>' }, { type: 'test', status: 'passed', fullName: 'normal', message: 'ignored' }];
+  for await (var part of reporters.junit(events)) output += part;
+  return output === '<testsuite><testcase name="&lt;&amp;&gt;&quot;"><failure>&lt;failure&gt;&amp;lt;&quot;&lt;/failure&gt;</failure></testcase><testcase name="normal"></testcase></testsuite>';
+};"#,
+        )
+        .unwrap();
+    let empty_node_modules = temp_registry("builtin_junit_xml_node_modules");
+    let (bundle, _, file_count, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(file_count, 2);
+    let script = format!(
+            "globalThis.module = {{ exports: {{}} }};\n\
+             globalThis.exports = globalThis.module.exports;\n\
+             globalThis.require = function(name) {{ throw new Error(\"require('\" + name + \"') is not supported\"); }};\n\
+             {bundle}\n\
+             globalThis.exerciseJunitXml = module.exports;\n"
+        );
+    let source = CString::new(script).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let func = CString::new("exerciseJunitXml").unwrap();
+    let args = CString::new("[]").unwrap();
+    let result_ptr = thaw_quickjs::thaw_js_call(func.as_ptr(), args.as_ptr());
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(
+        result,
+        "true"
+    );
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+}
