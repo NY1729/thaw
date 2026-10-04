@@ -583,7 +583,7 @@ fn datetime_skeleton(options: &serde_json::Value) -> String {
             (_, "h12") => 'h',
             (_, "h23") => 'H',
             (_, "h24") => 'k',
-            _ => 'h',
+            _ => 'j',
         };
         skeleton.push(letter);
         if hour == "2-digit" {
@@ -643,10 +643,34 @@ fn skeleton_field_type(letter: u16) -> Option<&'static str> {
         'M' | 'L' => Some("month"),
         'd' => Some("day"),
         'E' | 'c' => Some("weekday"),
-        'h' | 'H' | 'K' | 'k' => Some("hour"),
+        'h' | 'H' | 'K' | 'k' | 'j' => Some("hour"),
         'm' => Some("minute"),
         's' => Some("second"),
         _ => None,
+    }
+}
+
+fn finish_datetime_parts(
+    parts: &mut Vec<serde_json::Value>, cursor: usize, text: &[u16], skeleton: &[u16],
+) {
+    // Classify a fieldless single-field pattern before the literal tail
+    // consumes it. A multi-field pattern must remain literal without spans.
+    if parts.is_empty() && cursor == 0 && !text.is_empty() {
+        if let Some(kind) = skeleton.first().and_then(|letter| skeleton_field_type(*letter)) {
+            if skeleton.iter().all(|letter| skeleton_field_type(*letter) == Some(kind)) {
+                parts.push(serde_json::json!({
+                    "type": kind,
+                    "value": String::from_utf16_lossy(text),
+                }));
+                return;
+            }
+        }
+    }
+    if cursor < text.len() {
+        parts.push(serde_json::json!({
+            "type": "literal",
+            "value": String::from_utf16_lossy(&text[cursor..]),
+        }));
     }
 }
 
@@ -801,23 +825,7 @@ fn intl_datetime_narrow_icu4c_inner(
         }
         cursor = cursor.max(end);
     }
-    if cursor < text.len() {
-        parts.push(serde_json::json!({
-            "type": "literal",
-            "value": String::from_utf16_lossy(&text[cursor..]),
-        }));
-    }
-    // ICU's field-position iterator reports nothing for a pattern that is
-    // a single bare field (`{month:'narrow'}` -> `"LLLLL"`), so those
-    // would otherwise end up empty; the whole text is that one field.
-    if parts.is_empty() && !text.is_empty() {
-        if let Some(kind) = skeleton.first().and_then(|letter| skeleton_field_type(*letter)) {
-            parts.push(serde_json::json!({
-                "type": kind,
-                "value": String::from_utf16_lossy(text),
-            }));
-        }
-    }
+    finish_datetime_parts(&mut parts, cursor, text, &skeleton);
     unsafe {
         fpi_close(iterator);
         date_close(formatter);
@@ -1347,4 +1355,26 @@ fn intl_number_range_parts_icu4c_inner(
         unsafe { close(formatter) };
     }
     output
+}
+
+#[cfg(test)]
+mod parts_regression_tests {
+    use super::*;
+
+    #[test]
+    fn unspecified_hour_cycle_uses_locale_skeleton() {
+        assert_eq!(datetime_skeleton(&serde_json::json!({"hour":"numeric"})), "j");
+        assert_eq!(datetime_skeleton(&serde_json::json!({"hour":"numeric","hour12":true})), "h");
+        assert_eq!(datetime_skeleton(&serde_json::json!({"hour":"numeric","hourCycle":"h23"})), "H");
+    }
+
+    #[test]
+    fn fieldless_single_month_is_classified_before_literal_tail() {
+        let mut parts = Vec::new();
+        finish_datetime_parts(&mut parts, 0, &utf16("M"), &utf16("LLLLL"));
+        assert_eq!(parts, vec![serde_json::json!({"type":"month","value":"M"})]);
+        let mut parts = Vec::new();
+        finish_datetime_parts(&mut parts, 0, &utf16("M 1"), &utf16("Md"));
+        assert_eq!(parts, vec![serde_json::json!({"type":"literal","value":"M 1"})]);
+    }
 }
