@@ -3,6 +3,17 @@ mod tests {
     use super::*;
     use std::ffi::CString;
 
+    #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+    #[test]
+    fn dynamic_argument_requires_two_available_registers() {
+        for (depth, accepted) in [(6, true), (7, false)] {
+            let mut values = vec![NumericValue::Constant(1.0); depth];
+            values.push(NumericValue::DynamicArgument(0));
+            values.extend(std::iter::repeat(NumericValue::Operation(NumericOp::Add)).take(depth));
+            assert_eq!(NumericProgram(values).machine_code().is_some(), accepted);
+        }
+    }
+
     fn call(symbol: &CString, args: &[f64]) -> ThawJitResult {
         unsafe extern "C" fn allocate(size: usize, _: usize) -> *mut u8 {
             unsafe { libc::malloc(size).cast() }
