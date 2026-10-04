@@ -889,3 +889,63 @@ fn dynamic_destructuring_validates_empty_patterns_and_snapshots_named_sources() 
     assert_eq!(compile_and_run(source, "destructure_dynamic_source"),
         "true 1 0\ntrue 2 0\ntrue 3 0\ntrue 4 0\n42 7 99\n43 8 100\n");
 }
+
+#[test]
+fn any_array_search_distinguishes_holes_and_explicit_undefined() {
+    let source = r#"
+        async function main(): Promise<void> {
+            const holes: any[] = [,];
+            console.log(holes.includes(undefined));
+            console.log(holes.includes(undefined, 1));
+            console.log(holes.indexOf(undefined));
+            console.log(holes.lastIndexOf(undefined));
+            console.log(holes.includes(null));
+            const mixed: any[] = [, undefined];
+            console.log(mixed.indexOf(undefined));
+            console.log(mixed.lastIndexOf(undefined));
+            console.log(mixed.includes(undefined));
+            console.log(mixed.includes(null));
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "any_array_search_absence"),
+        "true\nfalse\n-1\n-1\nfalse\n1\n1\ntrue\nfalse\n");
+}
+
+#[test]
+fn any_array_search_checks_host_query_failure_before_returning() {
+    // A Host-backed needle can make thaw_json_is_undefined set HOST_ERROR
+    // while the runtime search returns its ordinary not-found value. Every
+    // search variant must branch on that error before exposing the result.
+    let source = r#"
+        function main(): void {
+            const values: any[] = [, undefined];
+            console.log(values.includes(undefined));
+            console.log(values.indexOf(undefined));
+            console.log(values.lastIndexOf(undefined));
+        }
+    "#;
+    let module = thaw_parser::parse_typescript(source).unwrap();
+    let program = thaw_hir::lower_module(&module).unwrap();
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "any_array_search_host_error");
+    compiler.compile_program(&program).unwrap();
+    let ir = compiler.print_to_string();
+    let lines: Vec<_> = ir.lines().collect();
+    for variant in ["includes", "index_of", "last_index_of"] {
+        let call = format!("@thaw_any_array_{variant}(");
+        let index = lines.iter().position(|line| line.contains(" = call ") && line.contains(&call))
+            .unwrap_or_else(|| panic!("missing {call} in generated IR"));
+        let continuation = &lines[index + 1..];
+        let query = continuation.iter().position(|line| line.contains("@thaw_json_take_host_error("))
+            .unwrap_or_else(|| panic!("{call} did not check HostError"));
+        assert!(query < 4, "{call} must check HostError immediately after the search");
+        let failure_branch = continuation.iter().skip(query).take(8)
+            .any(|line| line.contains("br i1") && line.contains("json_host_failed"));
+        assert!(failure_branch, "{call} must route HostError to the exception branch");
+        if variant == "includes" {
+            let converted = continuation.iter().position(|line| line.contains("array_includes_bool"))
+                .expect("includes result was not converted to bool");
+            assert!(converted > query, "includes converted its normal result before HostError");
+        }
+    }
+}
