@@ -7814,3 +7814,21 @@ fn webassembly_table_funcref_memory_coherence() {
     "#), 1);
     assert_eq!(call("wasmTableMemory", "[]"), "[73,91]");
 }
+
+// Unrun regression target: start traps are runtime errors; incompatible imports are link errors.
+#[test]
+fn webassembly_start_trap_error_kind() {
+    assert_eq!(load(r#"
+        function wasmStartErrorKind() {
+            const trap = new TextEncoder().encode(`(module (func $start unreachable) (start $start))`);
+            const wrongImport = new TextEncoder().encode(`(module (import "host" "memory" (memory 2)))`);
+            let runtime = false, link = false;
+            try { new WebAssembly.Instance(new WebAssembly.Module(trap)); }
+            catch (error) { runtime = error instanceof WebAssembly.RuntimeError && !(error instanceof WebAssembly.LinkError); }
+            try { new WebAssembly.Instance(new WebAssembly.Module(wrongImport), { host: { memory: new WebAssembly.Memory({ initial: 1, maximum: 1 }) } }); }
+            catch (error) { link = error instanceof WebAssembly.LinkError && !(error instanceof WebAssembly.RuntimeError); }
+            return [runtime, link];
+        }
+    "#), 1);
+    assert_eq!(call("wasmStartErrorKind", "[]"), "[true,true]");
+}
