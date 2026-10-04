@@ -627,6 +627,20 @@ mod tests {
             assert_eq!(result.value, expected);
         }
 
+        for (name, clauses, cases) in [
+            ("default-first", format!("default,ln0,{ten},+,setl0,case,dup,{one},==,casebody,ln0,{twenty},+,setl0,switchbreak"), vec![(1.0, 20.0), (2.0, 30.0)]),
+            ("default-first-break", format!("default,ln0,{ten},+,setl0,switchbreak,case,dup,{one},==,casebody,ln0,{twenty},+,setl0,switchbreak"), vec![(1.0, 20.0), (2.0, 10.0)]),
+            ("default-middle", format!("case,dup,{one},==,casebody,ln0,{ten},+,setl0,default,ln0,{twenty},+,setl0,case,dup,{two},==,casebody,ln0,{forty},+,setl0,switchbreak"), vec![(1.0, 70.0), (2.0, 40.0), (3.0, 60.0)]),
+            ("default-last", format!("case,dup,{one},==,casebody,ln0,{ten},+,setl0,default,ln0,{twenty},+,setl0"), vec![(1.0, 30.0), (2.0, 20.0)]),
+        ] {
+            let symbol = CString::new(format!("expr:{zero},a0,switch,{clauses},switchend,ln0,nip:{name}")).unwrap();
+            for (value, expected) in cases {
+                let result = call(&symbol, &[value]);
+                assert!(result.error.is_null());
+                assert_eq!(result.value, expected, "{name}: {value}");
+            }
+        }
+
         let optional_present = CString::new(format!(
             "expr:{one},if,{one},else,absentn,end:optional-present"
         ))
