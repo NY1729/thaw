@@ -1258,6 +1258,10 @@ fn ensure_context() {
                     .expect("failed to create WebAssembly memory allocator");
                 let wasm_memory_function = Function::new(ctx.clone(), wasm_memory)
                     .expect("failed to create WebAssembly memory accessor");
+                let wasm_table_create_function = Function::new(ctx.clone(), wasm_table_create)
+                    .expect("failed to create WebAssembly table allocator");
+                let wasm_table_retain_function = Function::new(ctx.clone(), wasm_table_retain)
+                    .expect("failed to create WebAssembly table retainer");
                 let wasm_table_function = Function::new(ctx.clone(), wasm_table)
                     .expect("failed to create WebAssembly table accessor");
                 ctx.globals()
@@ -1320,6 +1324,12 @@ fn ensure_context() {
                 ctx.globals()
                     .set("__thaw_wasm_memory", wasm_memory_function)
                     .expect("failed to install WebAssembly memory accessor");
+                ctx.globals()
+                    .set("__thaw_wasm_table_create", wasm_table_create_function)
+                    .expect("failed to install WebAssembly table allocator");
+                ctx.globals()
+                    .set("__thaw_wasm_table_retain", wasm_table_retain_function)
+                    .expect("failed to install WebAssembly table retainer");
                 ctx.globals()
                     .set("__thaw_wasm_table", wasm_table_function)
                     .expect("failed to install WebAssembly table accessor");

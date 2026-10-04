@@ -112,12 +112,18 @@ struct WasmInstanceState {
     funcrefs: HashMap<u32, wasmi::Func>,
     funcref_ids: HashMap<String, u32>,
     foreign_funcrefs: HashMap<String, (u32, u32)>,
+    table_provenance: Vec<(
+        std::rc::Rc<std::cell::RefCell<std::collections::HashSet<u32>>>,
+        std::rc::Rc<std::cell::RefCell<HashMap<String, (u32, u32)>>>,
+    )>,
+    prepublished_table_functions: HashMap<String, u32>,
 }
 
 // These stacks exist only during synchronous native execution / JS imports.
 // RAII removes entries before their stack-owned state or Caller can disappear.
 std::thread_local! {
     static WASM_VALUE_SWEEP_PENDING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static WASM_VALUE_SWEEP_ACTIVE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static WASM_RUNNING_STATES: std::cell::RefCell<Vec<Option<*const std::cell::RefCell<WasmInstanceState>>>> = const { std::cell::RefCell::new(Vec::new()) };
     static WASM_ACTIVE_CALLERS: std::cell::RefCell<Vec<WasmActiveCallerEntry>> = const { std::cell::RefCell::new(Vec::new()) };
 }
@@ -239,6 +245,24 @@ struct RetainedWasmGlobal {
     global: wasmi::Global,
 }
 
+struct RetainedWasmTable {
+    store: SharedWasmStore,
+    table: wasmi::Table,
+    foreign_funcrefs: std::rc::Rc<std::cell::RefCell<HashMap<String, (u32, u32)>>>,
+    owners: std::rc::Rc<std::cell::RefCell<std::collections::HashSet<u32>>>,
+}
+
+struct RetainedWasmTableFunction {
+    store: SharedWasmStore,
+    function: wasmi::Func,
+    foreign_funcrefs: std::rc::Rc<std::cell::RefCell<HashMap<String, (u32, u32)>>>,
+    owners: std::rc::Rc<std::cell::RefCell<std::collections::HashSet<u32>>>,
+}
+
+type WasmTableOwners = std::rc::Rc<std::cell::RefCell<std::collections::HashSet<u32>>>;
+type WasmTableReferences = std::rc::Rc<std::cell::RefCell<HashMap<String, (u32, u32)>>>;
+type WasmTableGroup = (WasmTableOwners, WasmTableReferences);
+
 struct WasmTable {
     engine: WasmEngine,
     shared_store: SharedWasmStore,
@@ -246,10 +270,20 @@ struct WasmTable {
     next_instance: u32,
     next_memory: u32,
     next_global: u32,
+    next_table: u32,
+    next_table_function: u32,
     modules: HashMap<u32, WasmModule>,
     instances: HashMap<u32, WasmInstance>,
+    retained_instances: HashMap<u32, WasmInstance>,
+    failed_table_owners: std::collections::HashSet<u32>,
     memories: HashMap<u32, StandaloneWasmMemory>,
     globals: HashMap<u32, RetainedWasmGlobal>,
+    tables: HashMap<u32, RetainedWasmTable>,
+    table_functions: HashMap<u32, RetainedWasmTableFunction>,
+    table_function_ids: HashMap<String, u32>,
+    // Instance metadata may hold an older group while a nested callback joins
+    // its Tables. Redirect those holders to the current pair at every read.
+    group_redirects: Vec<(WasmTableOwners, WasmTableGroup)>,
 }
 
 impl Default for WasmTable {
@@ -263,10 +297,18 @@ impl Default for WasmTable {
             next_instance: 1,
             next_memory: 1,
             next_global: 1,
+            next_table: 1,
+            next_table_function: 1,
             modules: HashMap::new(),
             instances: HashMap::new(),
+            retained_instances: HashMap::new(),
+            failed_table_owners: std::collections::HashSet::new(),
             memories: HashMap::new(),
             globals: HashMap::new(),
+            tables: HashMap::new(),
+            table_functions: HashMap::new(),
+            table_function_ids: HashMap::new(),
+            group_redirects: Vec::new(),
         }
     }
 }
@@ -471,6 +513,31 @@ fn wasm_reference_stats() -> String {
 }
 
 fn wasm_sweep_inactive_values() {
+    // Dropping a retained import can run its JS finalizer, which may release
+    // another WebAssembly resource. Queue that release for this outer sweep;
+    // never recurse through the same registry/Store retirement stack.
+    if WASM_VALUE_SWEEP_ACTIVE.with(|active| active.replace(true)) {
+        WASM_VALUE_SWEEP_PENDING.with(|pending| pending.set(true));
+        return;
+    }
+    struct SweepGuard;
+    impl Drop for SweepGuard {
+        fn drop(&mut self) {
+            WASM_VALUE_SWEEP_ACTIVE.with(|active| active.set(false));
+        }
+    }
+    let _guard = SweepGuard;
+    loop {
+        wasm_sweep_inactive_values_once();
+        if !WASM_VALUE_SWEEP_PENDING.with(|pending| pending.get())
+            || WASM_RUNNING_STATES.with(|stack| !stack.borrow().is_empty())
+            || WASM_ACTIVE_CALLERS.with(|stack| !stack.borrow().is_empty()) {
+            break;
+        }
+    }
+}
+
+fn wasm_sweep_inactive_values_once() {
     // Executing instances are temporarily outside the registry. Their Store
     // remains live, so sweeping the registry alone would drop live JS values.
     if WASM_RUNNING_STATES.with(|stack| !stack.borrow().is_empty())
@@ -479,9 +546,36 @@ fn wasm_sweep_inactive_values() {
         return;
     }
     WASM_VALUE_SWEEP_PENDING.with(|pending| pending.set(false));
+    WASM.with(|registry| {
+        registry.borrow_mut().group_redirects.retain(|(old, _)| std::rc::Rc::strong_count(old) > 1);
+    });
+    let owners = wasm_table_function_owners();
+    let abandoned_imports = WASM.with(|registry| {
+        let mut registry = registry.borrow_mut();
+        let abandoned = registry.failed_table_owners.iter().copied()
+            .filter(|handle| !owners.contains(handle)).collect::<Vec<_>>();
+        for handle in &abandoned { registry.failed_table_owners.remove(handle); }
+        abandoned
+    });
+    for handle in abandoned_imports {
+        let store = WASM.with(|registry| registry.borrow().shared_store.clone());
+        store.run(|mut context| { context.data_mut().wasi.remove(&handle); });
+        wasm_drop_callback_imports(handle);
+    }
+    let released = WASM.with(|registry| {
+        let mut registry = registry.borrow_mut();
+        let handles = registry.retained_instances.keys().copied()
+            .filter(|handle| !owners.contains(handle)).collect::<Vec<_>>();
+        handles.into_iter().filter_map(|handle| {
+            registry.retained_instances.remove(&handle).map(|record| (handle, record))
+        }).collect::<Vec<_>>()
+    });
+    for (handle, record) in released {
+        wasm_drop_instance(handle, record);
+    }
     let retired = WASM.with(|table| {
         let mut table = table.borrow_mut();
-        if table.instances.is_empty() && table.memories.is_empty() && table.globals.is_empty()
+        if table.instances.is_empty() && table.retained_instances.is_empty() && table.memories.is_empty() && table.globals.is_empty() && table.tables.is_empty() && table.table_functions.is_empty()
             && std::rc::Rc::strong_count(&table.shared_store.inner) == 1 {
             let replacement = SharedWasmStore::new(&table.engine);
             Some(std::mem::replace(&mut table.shared_store, replacement))
@@ -503,16 +597,12 @@ fn wasm_sweep_inactive_values() {
     });
 }
 
-fn wasm_flush_deferred_value_sweep() {
-    if WASM_VALUE_SWEEP_PENDING.with(|pending| pending.get()) {
-        wasm_sweep_inactive_values();
-    }
-}
-
 struct WasmSweepOnExit;
 impl Drop for WasmSweepOnExit {
     fn drop(&mut self) {
-        wasm_flush_deferred_value_sweep();
+        // Guest table.set/copy can remove the last FuncRef without passing
+        // through a JS setter. Scan after the Store/Caller locals retire.
+        wasm_sweep_inactive_values();
     }
 }
 
@@ -533,6 +623,242 @@ fn wasm_release_pending(import_handles: String) {
     wasm_sweep_inactive_values();
 }
 
+fn wasm_table_function_owners() -> std::collections::HashSet<u32> {
+    type Group = (
+        std::rc::Rc<std::cell::RefCell<std::collections::HashSet<u32>>>,
+        std::rc::Rc<std::cell::RefCell<HashMap<String, (u32, u32)>>>,
+    );
+    let scan_slots = WASM_RUNNING_STATES.with(|stack| stack.borrow().is_empty())
+        && WASM_ACTIVE_CALLERS.with(|stack| stack.borrow().is_empty());
+    let (mut owners, mut handles, retained_groups) = WASM.with(|registry| {
+        let registry = registry.borrow();
+        let mut owners = std::collections::HashSet::new();
+        let mut handles = std::collections::HashSet::new();
+        for record in registry.tables.values() {
+            let keys = if scan_slots && std::rc::Rc::ptr_eq(&record.store.identity, &registry.shared_store.identity) {
+                Some(record.store.run(|context| {
+                    let mut keys = std::collections::HashSet::new();
+                    if record.table.ty(&context).element() == WasmValType::FuncRef {
+                        for index in 0..record.table.size(&context) {
+                            if let Some(WasmVal::FuncRef(reference)) = record.table.get(&context, index) {
+                                if let Some(function) = reference.val() { keys.insert(format!("{function:?}")); }
+                            }
+                        }
+                    }
+                    keys
+                }))
+            } else { None };
+            let references = record.foreign_funcrefs.borrow();
+            if keys.as_ref().is_none_or(|keys| keys.iter().any(|key| !references.contains_key(key))) {
+                owners.extend(record.owners.borrow().iter().copied());
+            }
+            handles.extend(references.iter()
+                .filter(|(key, _)| keys.as_ref().is_none_or(|keys| keys.contains(*key)))
+                .flat_map(|(_, (bridge, restore))| [*bridge, *restore]));
+        }
+        owners.extend(registry.table_functions.values().flat_map(|record| record.owners.borrow().iter().copied().collect::<Vec<_>>()));
+        handles.extend(registry.table_functions.values().flat_map(|record| {
+            record.foreign_funcrefs.borrow().values().flat_map(|(bridge, restore)| [*bridge, *restore]).collect::<Vec<_>>()
+        }));
+        // A retained instance is not its own root. Its imported Table
+        // provenance becomes live only if another Table/function reaches it.
+        for record in registry.instances.values() {
+            let state = record.state.borrow();
+            handles.extend(state.foreign_funcrefs.values().flat_map(|(bridge, restore)| [*bridge, *restore]));
+            for (group_owners, group_references) in &state.table_provenance {
+                let (group_owners, group_references) = wasm_resolve_table_group(
+                    &registry, &(group_owners.clone(), group_references.clone()),
+                );
+                owners.extend(group_owners.borrow().iter().copied());
+                handles.extend(group_references.borrow().values().flat_map(|(bridge, restore)| [*bridge, *restore]));
+            }
+        }
+        let retained_groups = registry.retained_instances.iter().map(|(handle, record)| {
+            let state = record.state.borrow();
+            (*handle, state.table_provenance.iter()
+                .map(|group| wasm_resolve_table_group(&registry, group)).collect(),
+                state.foreign_funcrefs.clone())
+        }).collect::<Vec<(u32, Vec<Group>, HashMap<String, (u32, u32)>)>>();
+        (owners, handles, retained_groups)
+    });
+    loop {
+        let old_owners = owners.len();
+        let old_handles = handles.len();
+        for (handle, groups, state_references) in &retained_groups {
+            if !owners.contains(handle) { continue; }
+            handles.extend(state_references.values().flat_map(|(bridge, restore)| [*bridge, *restore]));
+            for (group_owners, group_references) in groups {
+                owners.extend(group_owners.borrow().iter().copied());
+                handles.extend(group_references.borrow().values().flat_map(|(bridge, restore)| [*bridge, *restore]));
+            }
+        }
+        WASM_JS_IMPORTS.with(|imports| {
+            let imports = imports.borrow();
+            owners.extend(handles.iter().filter_map(|handle| imports.1.get(handle).and_then(|import| import.owner)));
+        });
+        if owners.len() == old_owners && handles.len() == old_handles { break; }
+    }
+    owners
+}
+
+// A JS Table setter can change a Table while its importing instance remains
+// live, or while that instance is temporarily outside the registry executing
+// a guest call. Publish the exact JS-origin Func identity to those instances
+// before a later guest return decodes the same Wasmi Func.
+fn wasm_publish_table_reference(
+    owners: &std::rc::Rc<std::cell::RefCell<std::collections::HashSet<u32>>>,
+    key: &str,
+    handles: (u32, u32),
+) {
+    let recipients = owners.borrow().clone();
+    WASM.with(|registry| {
+        let registry = registry.borrow();
+        for owner in &recipients {
+            if let Some(record) = registry.instances.get(owner)
+                .or_else(|| registry.retained_instances.get(owner)) {
+                record.state.borrow_mut().foreign_funcrefs.insert(key.to_string(), handles);
+            }
+        }
+    });
+    WASM_ACTIVE_CALLERS.with(|stack| {
+        for entry in stack.borrow().iter() {
+            let Some(state) = entry.state else { continue; };
+            let state = unsafe { &*state };
+            let mut state = state.borrow_mut();
+            if recipients.contains(&state.handle) {
+                state.foreign_funcrefs.insert(key.to_string(), handles);
+            }
+        }
+    });
+}
+
+// Share provenance among Tables that an instance can move funcrefs between.
+// `table.copy` is performed inside wasmi, so no JS Table.set hook observes it.
+fn wasm_resolve_table_group(registry: &WasmTable, group: &WasmTableGroup) -> WasmTableGroup {
+    registry.group_redirects.iter().rev()
+        .find(|(old, _)| std::rc::Rc::ptr_eq(old, &group.0))
+        .map(|(_, current)| current.clone())
+        .unwrap_or_else(|| group.clone())
+}
+
+fn wasm_redirect_table_groups(registry: &mut WasmTable, old: &[WasmTableGroup], current: &WasmTableGroup) {
+    for (_, target) in &mut registry.group_redirects {
+        if old.iter().any(|group| std::rc::Rc::ptr_eq(&group.0, &target.0)) {
+            *target = current.clone();
+        }
+    }
+    for (owners, _) in old {
+        if !std::rc::Rc::ptr_eq(owners, &current.0) {
+            registry.group_redirects.push((owners.clone(), current.clone()));
+        }
+    }
+    // A source group no longer held by any instance/active caller needs no
+    // redirect. This also prevents merge-only history from retaining owners.
+    registry.group_redirects.retain(|(old, _)| std::rc::Rc::strong_count(old) > 1);
+}
+
+fn wasm_merge_table_groups(
+    registry: &mut WasmTable,
+    identities: &std::collections::HashSet<String>,
+    owner: Option<u32>,
+) -> Option<(
+    std::rc::Rc<std::cell::RefCell<std::collections::HashSet<u32>>>,
+    std::rc::Rc<std::cell::RefCell<HashMap<String, (u32, u32)>>>,
+)> {
+    let groups = registry.tables.values()
+        .filter(|record| identities.contains(&format!("{:?}", record.table))
+            || owner.is_some_and(|owner| record.owners.borrow().contains(&owner)))
+        .map(|record| (record.owners.clone(), record.foreign_funcrefs.clone()))
+        .collect::<Vec<_>>();
+    if groups.is_empty() { return None; }
+    let mut owners = std::collections::HashSet::new();
+    if let Some(owner) = owner { owners.insert(owner); }
+    let mut references = HashMap::new();
+    for (group_owners, group_references) in &groups {
+        owners.extend(group_owners.borrow().iter().copied());
+        references.extend(group_references.borrow().clone());
+    }
+    let owners = std::rc::Rc::new(std::cell::RefCell::new(owners));
+    let references = std::rc::Rc::new(std::cell::RefCell::new(references));
+    wasm_redirect_table_groups(registry, &groups, &(owners.clone(), references.clone()));
+    for record in registry.tables.values_mut() {
+        if groups.iter().any(|(group, _)| std::rc::Rc::ptr_eq(group, &record.owners)) {
+            record.owners = owners.clone();
+            record.foreign_funcrefs = references.clone();
+        }
+    }
+    for record in registry.table_functions.values_mut() {
+        if groups.iter().any(|(group, _)| std::rc::Rc::ptr_eq(group, &record.owners)) {
+            record.owners = owners.clone();
+            record.foreign_funcrefs = references.clone();
+        }
+    }
+    Some((owners, references))
+}
+
+fn wasm_join_function_groups(
+    registry: &mut WasmTable,
+    left_owners: &std::rc::Rc<std::cell::RefCell<std::collections::HashSet<u32>>>,
+    left_references: &std::rc::Rc<std::cell::RefCell<HashMap<String, (u32, u32)>>>,
+    right_owners: &std::rc::Rc<std::cell::RefCell<std::collections::HashSet<u32>>>,
+    right_references: &std::rc::Rc<std::cell::RefCell<HashMap<String, (u32, u32)>>>,
+) -> (
+    std::rc::Rc<std::cell::RefCell<std::collections::HashSet<u32>>>,
+    std::rc::Rc<std::cell::RefCell<HashMap<String, (u32, u32)>>>,
+) {
+    let (left_owners, left_references) = wasm_resolve_table_group(
+        registry, &(left_owners.clone(), left_references.clone()),
+    );
+    let (right_owners, right_references) = wasm_resolve_table_group(
+        registry, &(right_owners.clone(), right_references.clone()),
+    );
+    if std::rc::Rc::ptr_eq(&left_owners, &right_owners) {
+        return (left_owners.clone(), left_references.clone());
+    }
+    let mut merged_owners = left_owners.borrow().clone();
+    merged_owners.extend(right_owners.borrow().iter().copied());
+    let owners = std::rc::Rc::new(std::cell::RefCell::new(merged_owners));
+    let mut merged_references = left_references.borrow().clone();
+    merged_references.extend(right_references.borrow().clone());
+    let references = std::rc::Rc::new(std::cell::RefCell::new(merged_references));
+    wasm_redirect_table_groups(registry,
+        &[(left_owners.clone(), left_references.clone()), (right_owners.clone(), right_references.clone())],
+        &(owners.clone(), references.clone()));
+    for record in registry.tables.values_mut() {
+        if std::rc::Rc::ptr_eq(&record.owners, &left_owners)
+            || std::rc::Rc::ptr_eq(&record.owners, &right_owners) {
+            record.owners = owners.clone();
+            record.foreign_funcrefs = references.clone();
+        }
+    }
+    for record in registry.table_functions.values_mut() {
+        if std::rc::Rc::ptr_eq(&record.owners, &left_owners)
+            || std::rc::Rc::ptr_eq(&record.owners, &right_owners) {
+            record.owners = owners.clone();
+            record.foreign_funcrefs = references.clone();
+        }
+    }
+    (owners, references)
+}
+
+fn wasm_drop_instance(handle: u32, record: WasmInstance) {
+    record.store.run(|mut store| { store.data_mut().wasi.remove(&handle); });
+    drop(record);
+    wasm_drop_callback_imports(handle);
+}
+
+fn wasm_drop_callback_imports(handle: u32) {
+    let removed = WASM_JS_IMPORTS.with(|imports| {
+        let mut imports = imports.borrow_mut();
+        let handles = imports.1.iter().filter_map(|(id, import)| {
+            (import.owner == Some(handle)).then_some(*id)
+        }).collect::<Vec<_>>();
+        handles.into_iter().filter_map(|id| imports.1.remove(&id)).collect::<Vec<_>>()
+    });
+    // Persistent callbacks may release other resources when dropped.
+    drop(removed);
+}
+
 fn wasm_release(kind: String, handle: u32) -> bool {
     if kind == "module" {
         return WASM.with(|table| table.borrow_mut().modules.remove(&handle).is_some());
@@ -549,6 +875,30 @@ fn wasm_release(kind: String, handle: u32) -> bool {
         if existed { wasm_sweep_inactive_values(); }
         return existed;
     }
+    if kind == "table" {
+        let removed = WASM.with(|table| table.borrow_mut().tables.remove(&handle));
+        let existed = removed.is_some();
+        drop(removed);
+        if existed { wasm_sweep_inactive_values(); }
+        return existed;
+    }
+    if kind == "table-funcref" {
+        let removed = WASM.with(|table| {
+            let mut table = table.borrow_mut();
+            let removed = table.table_functions.remove(&handle);
+            if let Some(record) = &removed {
+                let key = format!("{:?}", record.function);
+                if table.table_function_ids.get(&key) == Some(&handle) {
+                    table.table_function_ids.remove(&key);
+                }
+            }
+            removed
+        });
+        let existed = removed.is_some();
+        drop(removed);
+        if existed { wasm_sweep_inactive_values(); }
+        return existed;
+    }
     if kind != "instance" {
         return false;
     }
@@ -556,14 +906,11 @@ fn wasm_release(kind: String, handle: u32) -> bool {
     let Some(record) = removed else {
         return false;
     };
-    record.store.run(|mut store| { store.data_mut().wasi.remove(&handle); });
-    drop(record);
-    WASM_JS_IMPORTS.with(|imports| {
-        imports
-            .borrow_mut()
-            .1
-            .retain(|_, import| import.owner != Some(handle));
-    });
+    if wasm_table_function_owners().contains(&handle) {
+        WASM.with(|registry| { registry.borrow_mut().retained_instances.insert(handle, record); });
+        return true;
+    }
+    wasm_drop_instance(handle, record);
     wasm_sweep_inactive_values();
     true
 }
@@ -778,17 +1125,14 @@ fn wasm_instantiate_inner(module_handle: u32, linkage: Option<String>) -> String
             let encoded_key = wasm_import_key(import.module(), import.name());
             match import.ty() {
                 wasmi::ExternType::Func(function_type) => {
-                    let Some(handle) = function_imports.get(&key).copied() else {
+                    let Some(import_handle) = function_imports.get(&key).copied() else {
                         return serde_json::json!({ "ok": false, "error": format!("WebAssembly import {}.{} is not provided", import.module(), import.name()) }).to_string();
                     };
-                    if let Err(error) = linker.func_new(
-                        import.module(),
-                        import.name(),
-                        function_type.clone(),
-                        move |caller, inputs, outputs| {
-                            wasm_call_js_import(handle, caller, inputs, outputs)
-                        },
-                    ) {
+                    let function = wasmi::Func::new(&mut store, function_type.clone(), move |caller, inputs, outputs| {
+                        wasm_call_js_import(import_handle, caller, inputs, outputs)
+                    });
+                    foreign_funcrefs.insert(format!("{function:?}"), (import_handle, import_handle));
+                    if let Err(error) = linker.define(import.module(), import.name(), function) {
                         return serde_json::json!({ "ok": false, "error": error.to_string() }).to_string();
                     }
                 }
@@ -827,38 +1171,19 @@ fn wasm_instantiate_inner(module_handle: u32, linkage: Option<String>) -> String
                     let Some(descriptor) = table_imports.get(&key) else {
                         return serde_json::json!({ "ok": false, "error": format!("WebAssembly table import {}.{} is not provided", import.module(), import.name()) }).to_string();
                     };
-                    if descriptor.get("element").and_then(serde_json::Value::as_str) != Some(wasm_type_name(expected.element())) {
+                    let imported = match wasm_import_table(descriptor, &store) {
+                        Ok(table) => table,
+                        Err(error) => return serde_json::json!({ "ok": false, "error": error }).to_string(),
+                    };
+                    if imported.ty(&store).element() != expected.element() {
                         return serde_json::json!({ "ok": false, "error": format!("WebAssembly table import {}.{} has incompatible element type", import.module(), import.name()) }).to_string();
                     }
-                    let values = descriptor.get("values").and_then(serde_json::Value::as_array).cloned().unwrap_or_default();
-                    let minimum = u32::try_from(values.len()).unwrap_or(u32::MAX);
-                    let maximum = descriptor.get("maximum").and_then(serde_json::Value::as_u64).and_then(|value| u32::try_from(value).ok());
-                    if u64::from(minimum) < expected.minimum() {
-                        return serde_json::json!({ "ok": false, "error": format!("WebAssembly table import {}.{} has incompatible limits", import.module(), import.name()) }).to_string();
-                    }
-                    let initial = WasmVal::default(expected.element());
-                    let imported = match wasmi::Table::new(&mut store, wasmi::TableType::new(expected.element(), minimum, maximum), initial) {
-                        Ok(table) => table,
-                        Err(error) => return serde_json::json!({ "ok": false, "error": error.to_string() }).to_string(),
-                    };
-                    for (index, value) in values.iter().enumerate() {
-                        let value = match if expected.element() == WasmValType::FuncRef
-                            && value.get("v").and_then(serde_json::Value::as_u64).unwrap_or(0) != 0
-                        {
-                            wasm_foreign_funcref(value, &mut store).map(|(value, key, handles)| {
-                                foreign_funcrefs.insert(key, handles);
-                                value
-                            })
-                        } else {
-                            wasm_runtime_value(value, expected.element(), &mut store)
-                        } {
-                            Ok(value) => value,
-                            Err(error) => return serde_json::json!({ "ok": false, "error": error }).to_string(),
-                        };
-                        if let Err(error) = imported.set(&mut store, index as u64, value) {
-                            return serde_json::json!({ "ok": false, "error": error.to_string() }).to_string();
-                        }
-                    }
+                    let key = format!("{imported:?}");
+                    let references = WASM.with(|registry| {
+                        registry.borrow().tables.values().find(|record| format!("{:?}", record.table) == key)
+                            .map(|record| record.foreign_funcrefs.borrow().clone()).unwrap_or_default()
+                    });
+                    foreign_funcrefs.extend(references);
                     if let Err(error) = linker.define(import.module(), import.name(), imported) {
                         return serde_json::json!({ "ok": false, "error": error.to_string() }).to_string();
                     }
@@ -866,12 +1191,39 @@ fn wasm_instantiate_inner(module_handle: u32, linkage: Option<String>) -> String
                 }
             }
         }
+        let imported_funcref_tables = imported_tables.values()
+            .filter(|table| table.ty(&store).element() == WasmValType::FuncRef)
+            .map(|table| format!("{table:?}"))
+            .collect::<std::collections::HashSet<_>>();
+        // A start callback may observe table.copy before instantiation returns.
+        // Keep the reserved owner while a failed start can leave new FuncRefs
+        // in these imported Tables.
+        WASM.with(|registry| {
+            if let Some((_, references)) = wasm_merge_table_groups(
+                &mut registry.borrow_mut(), &imported_funcref_tables, Some(handle),
+            ) {
+                references.borrow_mut().extend(foreign_funcrefs.clone());
+            }
+        });
+        if !imported_funcref_tables.is_empty() {
+            WASM_JS_IMPORTS.with(|imports| {
+                let mut imports = imports.borrow_mut();
+                for import_handle in function_imports.values() {
+                    if let Some(import) = imports.1.get_mut(import_handle) { import.owner = Some(handle); }
+                }
+            });
+        }
         // A start callback has no published instance state yet. Hide an outer
         // running state so this new Store cannot be paired with that state.
         let start_scope = WasmRunningState::during_start();
         let instance = match linker.instantiate_and_start(&mut store, &module) {
             Ok(instance) => instance,
-            Err(error) => return wasm_error_result(&error),
+            Err(error) => {
+                if !imported_funcref_tables.is_empty() {
+                    WASM.with(|registry| { registry.borrow_mut().failed_table_owners.insert(handle); });
+                }
+                return wasm_error_result(&error);
+            },
         };
         drop(start_scope);
         let exports = instance
@@ -921,6 +1273,16 @@ fn wasm_instantiate_inner(module_handle: u32, linkage: Option<String>) -> String
             })
             .collect::<Vec<_>>();
 
+        // ponytail: tables connected by an instance share conservative function
+        // ownership until their last alias is released; per-slot provenance can
+        // reduce retention when wasmi exposes reference tracing.
+        WASM.with(|registry| {
+            if let Some((_, references)) = wasm_merge_table_groups(
+                &mut registry.borrow_mut(), &imported_funcref_tables, Some(handle),
+            ) {
+                foreign_funcrefs.extend(references.borrow().clone());
+            }
+        });
         WASM_JS_IMPORTS.with(|imports| {
             let mut imports = imports.borrow_mut();
             for import_handle in function_imports.values() {
@@ -929,6 +1291,7 @@ fn wasm_instantiate_inner(module_handle: u32, linkage: Option<String>) -> String
                 }
             }
         });
+        let prepublished_table_functions = WASM.with(|registry| registry.borrow().table_function_ids.clone());
         WASM.with(|table| table.borrow_mut().instances.insert(handle, WasmInstance {
             store: retained_store,
             state: std::cell::RefCell::new(WasmInstanceState {
@@ -941,13 +1304,18 @@ fn wasm_instantiate_inner(module_handle: u32, linkage: Option<String>) -> String
                 funcrefs: HashMap::new(),
                 funcref_ids: HashMap::new(),
                 foreign_funcrefs,
+                table_provenance: Vec::new(),
+                prepublished_table_functions,
             }),
         }));
         published.set(true);
         serde_json::json!({ "ok": true, "handle": handle, "exports": exports }).to_string()
         });
         if !published.get() {
-            shared_store.run(|mut store| { store.data_mut().wasi.remove(&handle); });
+            let table_owned = WASM.with(|registry| registry.borrow().failed_table_owners.contains(&handle));
+            if !table_owned {
+                shared_store.run(|mut store| { store.data_mut().wasi.remove(&handle); });
+            }
             WASM_VALUE_SWEEP_PENDING.with(|pending| pending.set(true));
         }
         result
@@ -1037,6 +1405,48 @@ fn wasm_import_global(
         }
     });
     global.ok_or_else(|| "WebAssembly.Global belongs to a released or different Store".to_string())
+}
+
+
+fn wasm_import_table(
+    descriptor: &serde_json::Value,
+    context: &impl wasmi::AsContext<Data = WasmStoreData>,
+) -> Result<wasmi::Table, String> {
+    let owner = descriptor.get("instance").and_then(serde_json::Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok()).ok_or("invalid WebAssembly.Table owner")?;
+    let name = descriptor.get("name").and_then(serde_json::Value::as_str)
+        .ok_or("invalid WebAssembly.Table name")?;
+    let identity = context.as_context().data().identity.clone();
+    let resolve = |state: &WasmInstanceState| {
+        if let Some(key) = name.strip_prefix("import:") {
+            state.imported_tables.get(key).copied()
+        } else {
+            state.instance.get_table(context, name)
+        }
+    };
+    if owner != 0 {
+        let active = WASM_ACTIVE_CALLERS.with(|stack| {
+            stack.borrow().iter().rev().find_map(|entry| {
+                let state = entry.state?;
+                if !std::rc::Rc::ptr_eq(&entry.store_identity, &identity) { return None; }
+                let state = unsafe { (&*state).borrow() };
+                (state.handle == owner).then(|| resolve(&state)).flatten()
+            })
+        });
+        if let Some(resource) = active { return Ok(resource); }
+    }
+    let resource = WASM.with(|table| {
+        let table = table.borrow();
+        if owner == 0 {
+            let record = name.parse::<u32>().ok().and_then(|handle| table.tables.get(&handle))?;
+            std::rc::Rc::ptr_eq(&record.store.identity, &identity).then_some(record.table)
+        } else {
+            let record = table.instances.get(&owner)?;
+            if !std::rc::Rc::ptr_eq(&record.store.identity, &identity) { return None; }
+            resolve(&record.state.borrow())
+        }
+    });
+    resource.ok_or_else(|| "WebAssembly.Table belongs to a released or different Store".to_string())
 }
 
 
@@ -1157,6 +1567,8 @@ fn wasm_runtime_value(
             .unwrap_or(0);
         return if handle == 0 {
             Ok(WasmVal::FuncRef(wasmi::Ref::Null))
+        } else if let Some(retained) = wasm_retained_function_value(value, &store)? {
+            Ok(retained)
         } else {
             Err("WebAssembly funcref belongs to a different instance".to_string())
         };
@@ -1218,6 +1630,46 @@ fn wasm_foreign_funcref(
     Ok((WasmVal::from(function), key, (bridge, restore)))
 }
 
+fn wasm_retained_function_value(
+    value: &serde_json::Value,
+    context: &impl wasmi::AsContext<Data = WasmStoreData>,
+) -> Result<Option<WasmVal>, String> {
+    if value.get("instance").and_then(serde_json::Value::as_u64) != Some(0)
+        || value.get("v").and_then(serde_json::Value::as_u64).unwrap_or(0) == 0 {
+        return Ok(None);
+    }
+    let handle = value.get("v").and_then(serde_json::Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok())
+        .ok_or("invalid retained WebAssembly function handle")?;
+    let identity = context.as_context().data().identity.clone();
+    WASM.with(|registry| {
+        let registry = registry.borrow();
+        let record = registry.table_functions.get(&handle)
+            .ok_or("released WebAssembly function reference")?;
+        if !std::rc::Rc::ptr_eq(&record.store.identity, &identity) {
+            return Err("WebAssembly function belongs to a different Store".to_string());
+        }
+        Ok(Some(WasmVal::from(record.function)))
+    })
+}
+
+fn wasm_connect_retained_function_groups(
+    value: &serde_json::Value,
+    target_owners: &std::rc::Rc<std::cell::RefCell<std::collections::HashSet<u32>>>,
+    target_references: &std::rc::Rc<std::cell::RefCell<HashMap<String, (u32, u32)>>>,
+) {
+    if value.get("instance").and_then(serde_json::Value::as_u64) != Some(0) { return; }
+    let Some(handle) = value.get("v").and_then(serde_json::Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok()) else { return; };
+    WASM.with(|registry| {
+        let mut registry = registry.borrow_mut();
+        let Some(record) = registry.table_functions.get(&handle) else { return; };
+        let owners = record.owners.clone();
+        let references = record.foreign_funcrefs.clone();
+        wasm_join_function_groups(&mut registry, &owners, &references, target_owners, target_references);
+    });
+}
+
 fn wasm_instance_runtime_value(
     value: &serde_json::Value,
     ty: WasmValType,
@@ -1234,13 +1686,47 @@ fn wasm_instance_runtime_value(
     if handle == 0 {
         return Ok(WasmVal::FuncRef(wasmi::Ref::Null));
     }
+    if let Some(retained) = wasm_retained_function_value(value, context)? {
+        let retained_handle = u32::try_from(handle).map_err(|_| "invalid retained WebAssembly function handle")?;
+        let provenance = WASM.with(|registry| {
+            let mut registry = registry.borrow_mut();
+            let Some(source) = registry.table_functions.get(&retained_handle) else { return None; };
+            let source = (source.owners.clone(), source.foreign_funcrefs.clone());
+            let target = wasm_merge_table_groups(
+                &mut registry, &std::collections::HashSet::new(), Some(record.handle),
+            );
+            Some(match target {
+                Some((owners, references)) => wasm_join_function_groups(
+                    &mut registry, &source.0, &source.1, &owners, &references,
+                ),
+                None => source,
+            })
+        });
+        if let Some(provenance) = provenance {
+            if !record.table_provenance.iter().any(|(owners, _)| std::rc::Rc::ptr_eq(owners, &provenance.0)) {
+                record.table_provenance.push(provenance);
+            }
+        }
+        return Ok(retained);
+    }
     let owner = value
         .get("instance")
         .and_then(serde_json::Value::as_u64)
         .and_then(|value| u32::try_from(value).ok());
     if owner != Some(record.handle) {
         let (function, key, handles) = wasm_foreign_funcref(value, context)?;
-        record.foreign_funcrefs.insert(key, handles);
+        record.foreign_funcrefs.insert(key.clone(), handles);
+        // The guest can table.set this parameter without returning through a
+        // JS Table setter. Existing exported/imported Table wrappers must see
+        // its original JS function before the guest call begins.
+        WASM.with(|registry| {
+            let registry = registry.borrow();
+            for table in registry.tables.values() {
+                if table.owners.borrow().contains(&record.handle) {
+                    table.foreign_funcrefs.borrow_mut().insert(key.clone(), handles);
+                }
+            }
+        });
         return Ok(function);
     }
     let handle = u32::try_from(handle).map_err(|_| "invalid WebAssembly funcref handle")?;
@@ -1374,9 +1860,10 @@ fn wasm_call_inner(instance_handle: u32, name: String, arguments: String) -> Str
     }) { return result; }
     let record = WASM.with(|table| {
         let mut table = table.borrow_mut();
-        table.instances.remove(&instance_handle)
+        table.instances.remove(&instance_handle).map(|record| (record, false))
+            .or_else(|| table.retained_instances.remove(&instance_handle).map(|record| (record, true)))
     });
-    let Some(mut record) = record else {
+    let Some((mut record, retained)) = record else {
         return serde_json::json!({ "ok": false, "error": "invalid or recursively entered WebAssembly.Instance" }).to_string();
     };
     let store = record.store.clone();
@@ -1388,7 +1875,9 @@ fn wasm_call_inner(instance_handle: u32, name: String, arguments: String) -> Str
         }
     });
     WASM.with(|table| {
-        table.borrow_mut().instances.insert(instance_handle, record);
+        let mut table = table.borrow_mut();
+        if retained { table.retained_instances.insert(instance_handle, record); }
+        else { table.instances.insert(instance_handle, record); }
     });
     result
 }
@@ -1401,6 +1890,9 @@ fn wasm_call_funcref(ctx: Ctx<'_>, instance_handle: u32, handle: u32, arguments:
 fn wasm_call_funcref_inner(instance_handle: u32, handle: u32, arguments: String) -> String {
     // Declared before Store/state locals so they retire before deferred sweep.
     let _sweep_on_exit = WasmSweepOnExit;
+    if instance_handle == 0 {
+        return wasm_call_retained_table_function(handle, &arguments);
+    }
     if let Some(result) = with_active_wasm_instance(instance_handle, |state, caller| {
         let function = state.borrow().funcrefs.get(&handle).copied();
         match function {
@@ -1408,8 +1900,12 @@ fn wasm_call_funcref_inner(instance_handle: u32, handle: u32, arguments: String)
             None => serde_json::json!({ "ok": false, "error": "released WebAssembly function reference" }).to_string(),
         }
     }) { return result; }
-    let record = WASM.with(|table| table.borrow_mut().instances.remove(&instance_handle));
-    let Some(mut record) = record else {
+    let record = WASM.with(|table| {
+        let mut table = table.borrow_mut();
+        table.instances.remove(&instance_handle).map(|record| (record, false))
+            .or_else(|| table.retained_instances.remove(&instance_handle).map(|record| (record, true)))
+    });
+    let Some((mut record, retained)) = record else {
         return serde_json::json!({ "ok": false, "error": "invalid or recursively entered WebAssembly.Instance" }).to_string();
     };
     let function = record.state.borrow().funcrefs.get(&handle).copied();
@@ -1421,15 +1917,90 @@ fn wasm_call_funcref_inner(instance_handle: u32, handle: u32, arguments: String)
         }
     };
     WASM.with(|table| {
-        table.borrow_mut().instances.insert(instance_handle, record);
+        let mut table = table.borrow_mut();
+        if retained { table.retained_instances.insert(instance_handle, record); }
+        else { table.instances.insert(instance_handle, record); }
     });
     result
+}
+
+fn wasm_call_retained_table_function(handle: u32, arguments: &str) -> String {
+    let retained = WASM.with(|registry| registry.borrow().table_functions.get(&handle)
+        .map(|record| (record.store.clone(), record.function,
+            record.foreign_funcrefs.clone(), record.owners.clone())));
+    let Some((store, function, references, owners)) = retained else {
+        return serde_json::json!({ "ok": false, "error": "released WebAssembly function reference" }).to_string();
+    };
+    store.run(|mut context| {
+        let ty = function.ty(&context);
+        let raw: Vec<serde_json::Value> = match serde_json::from_str(arguments) {
+            Ok(raw) => raw,
+            Err(error) => return serde_json::json!({ "ok": false, "error": error.to_string() }).to_string(),
+        };
+        if raw.len() != ty.params().len() {
+            return serde_json::json!({ "ok": false, "error": format!("expected {} arguments, received {}", ty.params().len(), raw.len()) }).to_string();
+        }
+        let mut inputs = Vec::with_capacity(raw.len());
+        for (value, ty) in raw.iter().zip(ty.params()) {
+            let decoded = if *ty == WasmValType::FuncRef
+                && value.get("v").and_then(serde_json::Value::as_u64).unwrap_or(0) != 0
+                && value.get("instance").and_then(serde_json::Value::as_u64) != Some(0) {
+                wasm_foreign_funcref(value, &mut context).map(|(value, key, handles)| {
+                    references.borrow_mut().insert(key, handles);
+                    value
+                })
+            } else {
+                wasm_runtime_value(value, *ty, &mut context)
+            };
+            match decoded {
+                Ok(value) => inputs.push(value),
+                Err(error) => return serde_json::json!({ "ok": false, "error": error }).to_string(),
+            }
+        }
+        let mut outputs = ty.results().iter().copied().map(WasmVal::default).collect::<Vec<_>>();
+        let running = WasmRunningState::during_start();
+        let called = function.call(&mut context, &inputs, &mut outputs);
+        drop(running);
+        if let Err(error) = called { return wasm_error_result(&error); }
+        // A nested callback may have joined this Func's Table group while it
+        // ran. Decode results against the current identity/provenance map.
+        let (references, owners) = WASM.with(|registry| registry.borrow()
+            .table_functions.get(&handle)
+            .map(|record| (record.foreign_funcrefs.clone(), record.owners.clone())))
+            .unwrap_or((references, owners));
+        let mut values = Vec::with_capacity(outputs.len());
+        for value in outputs {
+            let decoded = if let WasmVal::FuncRef(reference) = &value {
+                if let Some(function) = reference.val() {
+                    if let Some((_, restore)) = references.borrow().get(&format!("{function:?}")).copied() {
+                        Ok(serde_json::json!({ "t": "jsfuncref", "v": restore }))
+                    } else {
+                        wasm_retain_table_function(*function, references.clone(), owners.clone(), &context)
+                    }
+                } else { Ok(serde_json::json!({ "t": "funcref", "v": 0 })) }
+            } else {
+                wasm_non_funcref_value(value, &context)
+            };
+            match decoded {
+                Ok(value) => values.push(value),
+                Err(error) => return serde_json::json!({ "ok": false, "error": error }).to_string(),
+            }
+        }
+        serde_json::json!({ "ok": true, "values": values }).to_string()
+    })
 }
 
 fn wasm_instance_export_funcref(state: &mut WasmInstanceState, context: &impl wasmi::AsContext<Data = WasmStoreData>, name: &str) -> String {
         let Some(function) = state.instance.get_func(&*context, &name) else {
             return serde_json::json!({ "ok": false, "error": format!("WebAssembly export `{name}` is not a function") }).to_string();
         };
+        if let Some(handle) = state.prepublished_table_functions.get(&format!("{function:?}")).copied() {
+            let ty = function.ty(context);
+            let value = serde_json::json!({ "t": "funcref", "instance": 0, "v": handle,
+                "parameters": ty.params().iter().copied().map(wasm_type_name).collect::<Vec<_>>(),
+                "results": ty.results().iter().copied().map(wasm_type_name).collect::<Vec<_>>() });
+            return serde_json::json!({ "ok": true, "value": value }).to_string();
+        }
         match wasm_value(WasmVal::from(function), state, &*context) {
             Ok(value) => serde_json::json!({ "ok": true, "value": value }).to_string(),
             Err(error) => serde_json::json!({ "ok": false, "error": error }).to_string(),
@@ -1712,6 +2283,306 @@ fn wasm_instance_table(state: &mut WasmInstanceState, context: &mut impl wasmi::
         }
 }
 
+fn wasm_retain_table(
+    resource: wasmi::Table,
+    foreign_funcrefs: std::rc::Rc<std::cell::RefCell<HashMap<String, (u32, u32)>>>,
+    owners: std::rc::Rc<std::cell::RefCell<std::collections::HashSet<u32>>>,
+    owner: Option<u32>,
+    context: &impl wasmi::AsContext<Data = WasmStoreData>,
+) -> Result<u32, String> {
+    let identity = context.as_context().data().identity.clone();
+    WASM.with(|registry| {
+        let mut registry = registry.borrow_mut();
+        if !std::rc::Rc::ptr_eq(&registry.shared_store.identity, &identity) {
+            return Err("WebAssembly.Table belongs to a different Store".to_string());
+        }
+        let handle = registry.next_table;
+        let next = handle.checked_add(1).ok_or("WebAssembly.Table handle limit reached")?;
+        registry.next_table = next;
+        let store = registry.shared_store.clone();
+        registry.tables.insert(handle, RetainedWasmTable { store, table: resource, foreign_funcrefs, owners });
+        if resource.ty(context).element() == WasmValType::FuncRef {
+            wasm_merge_table_groups(
+                &mut registry, &std::collections::HashSet::from([format!("{resource:?}")]), owner,
+            );
+        }
+        Ok(handle)
+    })
+}
+
+fn wasm_retain_table_function(
+    function: wasmi::Func,
+    references: std::rc::Rc<std::cell::RefCell<HashMap<String, (u32, u32)>>>,
+    owners: std::rc::Rc<std::cell::RefCell<std::collections::HashSet<u32>>>,
+    context: &impl wasmi::AsContext<Data = WasmStoreData>,
+) -> Result<serde_json::Value, String> {
+    let ty = function.ty(context);
+    let parameters = ty.params().iter().copied().map(wasm_type_name).collect::<Vec<_>>();
+    let results = ty.results().iter().copied().map(wasm_type_name).collect::<Vec<_>>();
+    let key = format!("{function:?}");
+    let identity = context.as_context().data().identity.clone();
+    WASM.with(|registry| {
+        let mut registry = registry.borrow_mut();
+        if !std::rc::Rc::ptr_eq(&registry.shared_store.identity, &identity) {
+            return Err("WebAssembly function belongs to a different Store".to_string());
+        }
+        let handle = if let Some(handle) = registry.table_function_ids.get(&key).copied() {
+            if let Some(existing) = registry.table_functions.get(&handle) {
+                let old_owners = existing.owners.clone();
+                let old_references = existing.foreign_funcrefs.clone();
+                wasm_join_function_groups(&mut registry,
+                    &old_owners, &old_references, &owners, &references);
+            }
+            handle
+        } else {
+            let handle = registry.next_table_function;
+            registry.next_table_function = handle.checked_add(1)
+                .ok_or("WebAssembly function reference handle limit reached")?;
+            let store = registry.shared_store.clone();
+            registry.table_functions.insert(handle, RetainedWasmTableFunction {
+                store, function, foreign_funcrefs: references, owners,
+            });
+            registry.table_function_ids.insert(key, handle);
+            handle
+        };
+        Ok(serde_json::json!({ "t": "funcref", "instance": 0, "v": handle,
+            "parameters": parameters, "results": results }))
+    })
+}
+
+fn wasm_table_create(element: String, initial: u32, maximum: i64, encoded: String) -> String {
+    let element = match wasm_type_from_name(&element) {
+        Ok(element @ (WasmValType::ExternRef | WasmValType::FuncRef)) => element,
+        _ => return serde_json::json!({ "ok": false, "error": "invalid WebAssembly.Table element" }).to_string(),
+    };
+    let maximum = match maximum {
+        -1 => None,
+        value => match u32::try_from(value) {
+            Ok(value) => Some(value),
+            Err(_) => return serde_json::json!({ "ok": false, "error": "invalid WebAssembly.Table maximum" }).to_string(),
+        },
+    };
+    if maximum.is_some_and(|maximum| initial > maximum) {
+        return serde_json::json!({ "ok": false, "error": "WebAssembly.Table initial exceeds maximum" }).to_string();
+    }
+    let encoded: serde_json::Value = match serde_json::from_str(&encoded) {
+        Ok(encoded) => encoded,
+        Err(error) => return serde_json::json!({ "ok": false, "error": error.to_string() }).to_string(),
+    };
+    let store = WASM.with(|registry| registry.borrow().shared_store.clone());
+    store.run(|mut context| {
+        let mut references = HashMap::new();
+        let value = if element == WasmValType::FuncRef
+            && encoded.get("v").and_then(serde_json::Value::as_u64).unwrap_or(0) != 0
+            && encoded.get("instance").and_then(serde_json::Value::as_u64) != Some(0) {
+            match wasm_foreign_funcref(&encoded, &mut context) {
+                Ok((value, key, handles)) => { references.insert(key, handles); value },
+                Err(error) => return serde_json::json!({ "ok": false, "error": error }).to_string(),
+            }
+        } else {
+            match wasm_runtime_value(&encoded, element, &mut context) {
+                Ok(value) => value,
+                Err(error) => return serde_json::json!({ "ok": false, "error": error }).to_string(),
+            }
+        };
+        let resource = match wasmi::Table::new(&mut context, wasmi::TableType::new(element, initial, maximum), value) {
+            Ok(resource) => resource,
+            Err(error) => return serde_json::json!({ "ok": false, "error": error.to_string() }).to_string(),
+        };
+        match wasm_retain_table(resource, std::rc::Rc::new(std::cell::RefCell::new(references)), std::rc::Rc::new(std::cell::RefCell::new(std::collections::HashSet::new())), None, &context) {
+            Ok(handle) => {
+                if let Some((target_references, target_owners)) = WASM.with(|registry| {
+                    registry.borrow().tables.get(&handle)
+                        .map(|record| (record.foreign_funcrefs.clone(), record.owners.clone()))
+                }) {
+                    wasm_connect_retained_function_groups(&encoded, &target_owners, &target_references);
+                }
+                serde_json::json!({ "ok": true, "handle": handle }).to_string()
+            },
+            Err(error) => serde_json::json!({ "ok": false, "error": error }).to_string(),
+        }
+    })
+}
+
+fn wasm_table_retain(instance_handle: u32, name: String) -> String {
+    let store = WASM.with(|registry| registry.borrow().shared_store.clone());
+    store.run(|context| {
+        let descriptor = serde_json::json!({ "instance": instance_handle, "name": name });
+        let resource = match wasm_import_table(&descriptor, &context) {
+            Ok(resource) => resource,
+            Err(error) => return serde_json::json!({ "ok": false, "error": error }).to_string(),
+        };
+        let key = format!("{resource:?}");
+        let existing = WASM.with(|registry| {
+            registry.borrow().tables.values().find(|record| format!("{:?}", record.table) == key)
+                .map(|record| (record.foreign_funcrefs.clone(), record.owners.clone()))
+        });
+        let (references, owners) = match existing {
+            Some(existing) => existing,
+            None => {
+                let references = WASM.with(|registry| {
+                    registry.borrow().instances.get(&instance_handle)
+                        .map(|record| record.state.borrow().foreign_funcrefs.clone()).unwrap_or_default()
+                });
+                (std::rc::Rc::new(std::cell::RefCell::new(references)), std::rc::Rc::new(std::cell::RefCell::new(std::collections::HashSet::new())))
+            }
+        };
+        let ty = resource.ty(&context);
+        if ty.element() == WasmValType::FuncRef { owners.borrow_mut().insert(instance_handle); }
+        match wasm_retain_table(resource, references, owners, Some(instance_handle), &context) {
+            Ok(handle) => {
+                if ty.element() == WasmValType::FuncRef {
+                    let dependencies = WASM.with(|registry| registry.borrow().instances.get(&instance_handle)
+                        .map(|record| record.state.borrow().table_provenance.clone()).unwrap_or_default());
+                    WASM.with(|registry| {
+                        let mut registry = registry.borrow_mut();
+                        for (source_owners, source_references) in dependencies {
+                            let Some(target) = registry.tables.get(&handle) else { break; };
+                            let target = (target.owners.clone(), target.foreign_funcrefs.clone());
+                            wasm_join_function_groups(&mut registry,
+                                &source_owners, &source_references, &target.0, &target.1);
+                        }
+                    });
+                }
+                serde_json::json!({ "ok": true, "handle": handle, "type": wasm_type_name(ty.element()), "maximum": ty.maximum() }).to_string()
+            },
+            Err(error) => serde_json::json!({ "ok": false, "error": error }).to_string(),
+        }
+    })
+}
+
+fn wasm_retained_table(name: &str, operation: &str, index: u64, encoded: Option<&str>) -> String {
+    let retained = WASM.with(|registry| {
+        let registry = registry.borrow();
+        let record = name.parse::<u32>().ok().and_then(|handle| registry.tables.get(&handle))?;
+        Some((record.store.clone(), record.table, record.foreign_funcrefs.clone(), record.owners.clone()))
+    });
+    let Some((store, resource, references, owners)) = retained else {
+        return serde_json::json!({ "ok": false, "error": "released WebAssembly.Table" }).to_string();
+    };
+    let result = store.run(|mut context| {
+        let ty = resource.ty(&context);
+        match operation {
+            "size" => serde_json::json!({ "ok": true, "value": resource.size(&context), "type": wasm_type_name(ty.element()), "maximum": ty.maximum() }).to_string(),
+            "get" => {
+                let Some(value) = resource.get(&context, index) else {
+                    return serde_json::json!({ "ok": false, "error": "WebAssembly.Table index is out of bounds" }).to_string();
+                };
+                let encoded = if let WasmVal::FuncRef(reference) = &value {
+                    if let Some(function) = reference.val() {
+                        let key = format!("{function:?}");
+                        let restored = references.borrow().get(&key).copied();
+                        let retained_function = WASM.with(|registry| registry.borrow().table_function_ids.contains_key(&key));
+                        let native_owner = owners.borrow().iter().copied().filter(|owner| {
+                            WASM.with(|registry| {
+                                let registry = registry.borrow();
+                                registry.instances.get(owner).or_else(|| registry.retained_instances.get(owner))
+                                    .is_some_and(|record| record.state.borrow().funcref_ids.contains_key(&key))
+                            }) || WASM_ACTIVE_CALLERS.with(|stack| stack.borrow().iter().any(|entry| {
+                                entry.state.is_some_and(|state| unsafe {
+                                    let state = (&*state).borrow();
+                                    state.handle == *owner && state.funcref_ids.contains_key(&key)
+                                })
+                            }))
+                        }).min();
+                        if let Some((_, restore)) = restored {
+                            Ok(serde_json::json!({ "t": "jsfuncref", "v": restore }))
+                        } else if retained_function {
+                            wasm_retain_table_function(*function, references.clone(), owners.clone(), &context)
+                        } else if let Some(owner) = native_owner {
+                            let identity = context.as_context().data().identity.clone();
+                            let active = WASM_ACTIVE_CALLERS.with(|stack| {
+                                stack.borrow().iter().rev().find_map(|entry| {
+                                    if !std::rc::Rc::ptr_eq(&entry.store_identity, &identity) { return None; }
+                                    let state = unsafe { &*entry.state? };
+                                    if state.borrow().handle != owner { return None; }
+                                    Some(wasm_value(value.clone(), &mut state.borrow_mut(), &context))
+                                })
+                            });
+                            if let Some(result) = active {
+                                result.map(|mut encoded| { encoded["instance"] = owner.into(); encoded })
+                            } else {
+                                WASM.with(|registry| {
+                                    let registry = registry.borrow();
+                                    let record = registry.instances.get(&owner).or_else(|| registry.retained_instances.get(&owner)).ok_or("released WebAssembly.Table function owner")?;
+                                    let encoded = wasm_value(value.clone(), &mut record.state.borrow_mut(), &context);
+                                    encoded.map(|mut encoded| { encoded["instance"] = owner.into(); encoded })
+                                })
+                            }
+                        } else {
+                            wasm_retain_table_function(*function, references.clone(), owners.clone(), &context)
+                        }
+                    } else {
+                        Ok(serde_json::json!({ "t": "funcref", "v": 0 }))
+                    }
+                } else {
+                    wasm_non_funcref_value(value, &context)
+                };
+                match encoded {
+                    Ok(value) => serde_json::json!({ "ok": true, "value": value }).to_string(),
+                    Err(error) => serde_json::json!({ "ok": false, "error": error }).to_string(),
+                }
+            }
+            "set" | "grow" => {
+                let encoded: serde_json::Value = match encoded.map(serde_json::from_str).transpose() {
+                    Ok(Some(value)) => value,
+                    Ok(None) => return serde_json::json!({ "ok": false, "error": "WebAssembly.Table value is missing" }).to_string(),
+                    Err(error) => return serde_json::json!({ "ok": false, "error": error.to_string() }).to_string(),
+                };
+                let size = resource.size(&context);
+                if operation == "set" && index >= size {
+                    return serde_json::json!({ "ok": false, "error": "WebAssembly.Table index is out of bounds" }).to_string();
+                }
+                if operation == "grow" && size.checked_add(index).is_none_or(|next| ty.maximum().is_some_and(|maximum| next > maximum)) {
+                    return serde_json::json!({ "ok": false, "error": "WebAssembly.Table grow exceeds maximum" }).to_string();
+                }
+                let mut pending_reference = None;
+                let value = if ty.element() == WasmValType::FuncRef
+                    && encoded.get("v").and_then(serde_json::Value::as_u64).unwrap_or(0) != 0
+                    && encoded.get("instance").and_then(serde_json::Value::as_u64) != Some(0) {
+                    match wasm_foreign_funcref(&encoded, &mut context) {
+                        Ok((value, key, handles)) => { pending_reference = Some((key, handles)); value },
+                        Err(error) => return serde_json::json!({ "ok": false, "error": error }).to_string(),
+                    }
+                } else {
+                    match wasm_runtime_value(&encoded, ty.element(), &mut context) {
+                        Ok(value) => value,
+                        Err(error) => return serde_json::json!({ "ok": false, "error": error }).to_string(),
+                    }
+                };
+                if operation == "set" {
+                    match resource.set(&mut context, index, value) {
+                        Ok(()) => {
+                            if let Some((key, handles)) = pending_reference {
+                                references.borrow_mut().insert(key.clone(), handles);
+                                wasm_publish_table_reference(&owners, &key, handles);
+                            }
+                            wasm_connect_retained_function_groups(&encoded, &owners, &references);
+                            serde_json::json!({ "ok": true }).to_string()
+                        },
+                        Err(error) => serde_json::json!({ "ok": false, "error": error.to_string() }).to_string(),
+                    }
+                } else {
+                    match resource.grow(&mut context, index, value) {
+                        Ok(previous) => {
+                            if let Some((key, handles)) = pending_reference {
+                                references.borrow_mut().insert(key.clone(), handles);
+                                wasm_publish_table_reference(&owners, &key, handles);
+                            }
+                            wasm_connect_retained_function_groups(&encoded, &owners, &references);
+                            serde_json::json!({ "ok": true, "value": previous }).to_string()
+                        },
+                        Err(error) => serde_json::json!({ "ok": false, "error": error.to_string() }).to_string(),
+                    }
+                }
+            }
+            _ => serde_json::json!({ "ok": false, "error": "invalid WebAssembly.Table operation" }).to_string(),
+        }
+    });
+    if operation == "set" || operation == "grow" { wasm_sweep_inactive_values(); }
+    result
+}
+
 fn wasm_table(
     instance_handle: u32,
     name: String,
@@ -1719,12 +2590,26 @@ fn wasm_table(
     index: u64,
     value: Option<String>,
 ) -> String {
+    if instance_handle == 0 { return wasm_retained_table(&name, &operation, index, value.as_deref()); }
     if let Some(result) = with_active_wasm_instance(instance_handle, |state, caller| wasm_instance_table(&mut state.borrow_mut(), caller, &name, &operation, index, value.as_deref())) { return result; }
+    let _sweep_on_exit = WasmSweepOnExit;
+    let record = WASM.with(|table| {
+        let mut table = table.borrow_mut();
+        table.instances.remove(&instance_handle).map(|record| (record, false))
+            .or_else(|| table.retained_instances.remove(&instance_handle).map(|record| (record, true)))
+    });
+    let Some((record, retained)) = record else {
+        return serde_json::json!({ "ok": false, "error": "invalid or recursively entered WebAssembly.Instance" }).to_string();
+    };
+    // The setter can connect funcref provenance to other registered Tables.
+    // Keep the registry borrow closed while it examines that shared metadata.
+    let result = record.store.run(|mut context| wasm_instance_table(
+        &mut record.state.borrow_mut(), &mut context, &name, &operation, index, value.as_deref(),
+    ));
     WASM.with(|table| {
         let mut table = table.borrow_mut();
-        let Some(record) = table.instances.get_mut(&instance_handle) else {
-            return serde_json::json!({ "ok": false, "error": "invalid WebAssembly.Instance" }).to_string();
-        };
-        record.store.run(|mut context| wasm_instance_table(&mut record.state.borrow_mut(), &mut context, &name, &operation, index, value.as_deref()))
-    })
+        if retained { table.retained_instances.insert(instance_handle, record); }
+        else { table.instances.insert(instance_handle, record); }
+    });
+    result
 }
