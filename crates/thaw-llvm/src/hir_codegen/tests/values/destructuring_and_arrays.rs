@@ -805,3 +805,32 @@ fn computed_dictionary_assignment_default_evaluates_key_once() {
     assert_eq!(compile_and_run(source, "computed_dictionary_assignment_key_once"),
         "7 1 0\n99 1 1\n");
 }
+
+#[test]
+fn dynamic_destructuring_defaults_check_read_value_and_preserve_null() {
+    let source = r#"
+        let defaults = 0;
+        function fallback(): number { defaults++; return 42; }
+        let keys = 0;
+        function key(): string { keys++; return "present"; }
+        function main(): void {
+            const source: any = { present: undefined, nil: null, value: 7 };
+            const { present = fallback(), missing = fallback(), nil = fallback(), value = fallback() } = source;
+            console.log(present, missing, nil, value, defaults);
+            let assigned: any = 0;
+            ({ present: assigned = fallback() } = source);
+            console.log(assigned, defaults);
+            const { [key()]: computed = fallback() } = source;
+            console.log(computed, keys, defaults);
+            const array: any = [undefined, null, 7];
+            const [first = fallback(), second = fallback(), third = fallback()] = array;
+            console.log(first, second, third, defaults);
+            let reads = 0;
+            const access: any = { get value(): any { reads++; return undefined; } };
+            const { value: accessed = fallback() } = access;
+            console.log(accessed, reads, defaults);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "dynamic_destructuring_value_defaults"),
+        "42 42 null 7 2\n42 3\n42 1 4\n42 null 7 5\n42 1 6\n");
+}
