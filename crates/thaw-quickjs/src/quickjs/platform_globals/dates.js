@@ -35,7 +35,7 @@
   // Native graph and static-property callers share this bootstrap decoder.
   // User code may run before either caller's first lookup, so publish the
   // original function as an immutable property while the realm is starting.
-  Object.defineProperty(globalThis, '__thaw_property_key', {
+  thawGraphDefineProperty(globalThis, '__thaw_property_key', {
     value: thawPropertyKey, writable: false, configurable: false, enumerable: true,
   });
   globalThis.__thaw_json_date_reviver = (key, value) => {
