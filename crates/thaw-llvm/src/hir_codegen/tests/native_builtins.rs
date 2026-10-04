@@ -11350,3 +11350,18 @@ fn array_from_length_undefined_mapper_still_evaluates_this_arg() {
         "1 2 true\n"
     );
 }
+
+// Unrun regression: explicit undefined padding keeps argument side effects.
+#[test]
+fn string_padding_undefined_uses_space_once() {
+    let source = r#"
+        function main(): void {
+            let calls = 0;
+            function filler(): undefined { calls++; return undefined; }
+            console.log(JSON.stringify("x".padStart(3, filler())));
+            console.log(JSON.stringify("x".padEnd(3, undefined)));
+            console.log(calls);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "string_pad_undefined"), "\"  x\"\n\"x  \"\n1\n");
+}
