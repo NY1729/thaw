@@ -1358,9 +1358,9 @@ impl<'a> FnLowerer<'a> {
 
             Stmt::DoWhile(do_while) => {
                 let cond = self.lower_condition_expr(&do_while.test)?;
-                let guard = HirStmt::If(cond, Vec::new(), vec![HirStmt::Break]);
+                let guard = HirStmt::If(cond.clone(), Vec::new(), vec![HirStmt::Break]);
                 let mut body = self.lower_loop_body(&do_while.body)?;
-                body = inject_do_while_guard_before_continue(body, &guard);
+                body = inject_do_while_guard_before_continue(body, &cond);
                 body.push(guard);
                 Ok(vec![HirStmt::While(
                     HirExpr::Lit(HirLit::Bool(true)),

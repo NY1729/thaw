@@ -684,33 +684,33 @@ fn capture_finally_throw(&mut self, value: HirExpr) -> Result<(Vec<HirStmt>, Hir
 /// belonging to this loop, but stop at nested loops whose `continue`s target
 /// the nested loop instead.
 fn inject_for_update_before_continue(stmts: Vec<HirStmt>, update: &HirExpr) -> Vec<HirStmt> {
-    inject_before_target_continue(stmts, 0, &[HirStmt::Expr(update.clone())])
+    inject_before_target_continue(stmts, 0, &|_| vec![HirStmt::Expr(update.clone())])
 }
 
 fn inject_for_advance_before_continue(
     stmts: Vec<HirStmt>,
     advance: &[HirStmt],
 ) -> Vec<HirStmt> {
-    inject_before_target_continue(stmts, 0, advance)
+    inject_before_target_continue(stmts, 0, &|_| advance.to_vec())
 }
 
 fn inject_before_target_continue(
     stmts: Vec<HirStmt>,
     nested_depth: usize,
-    injected: &[HirStmt],
+    injected: &impl Fn(usize) -> Vec<HirStmt>,
 ) -> Vec<HirStmt> {
     let mut out = Vec::new();
     for stmt in stmts {
         match stmt {
             HirStmt::Continue => {
                 if nested_depth == 0 {
-                    out.extend_from_slice(injected);
+                    out.extend(injected(nested_depth));
                 }
                 out.push(HirStmt::Continue);
             }
             HirStmt::ContinueDepth(depth) => {
                 if depth == nested_depth {
-                    out.extend_from_slice(injected);
+                    out.extend(injected(nested_depth));
                 }
                 out.push(HirStmt::ContinueDepth(depth));
             }
@@ -741,8 +741,12 @@ fn inject_before_target_continue(
 /// A `do { body } while (condition)` is represented as an unconditional HIR
 /// loop with a condition guard at the tail. Source-level `continue` also has
 /// to execute that guard before starting the next iteration.
-fn inject_do_while_guard_before_continue(stmts: Vec<HirStmt>, guard: &HirStmt) -> Vec<HirStmt> {
-    inject_before_target_continue(stmts, 0, std::slice::from_ref(guard))
+fn inject_do_while_guard_before_continue(stmts: Vec<HirStmt>, condition: &HirExpr) -> Vec<HirStmt> {
+    inject_before_target_continue(stmts, 0, &|depth| vec![HirStmt::If(
+        condition.clone(),
+        Vec::new(),
+        vec![HirStmt::BreakDepth(depth)],
+    )])
 }
 
 /// Rewrites breaks that target a source switch into an assignment selecting
