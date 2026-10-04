@@ -29,6 +29,7 @@ fn iterator_object_adapter(
     iterator: HirExpr,
     iterator_type: &HirType,
     iterator_name: Symbol,
+    capture_completion: bool,
 ) -> Option<(HirExpr, HirType)> {
     let HirType::Object(fields) = iterator_type else {
         return None;
@@ -121,7 +122,17 @@ fn iterator_object_adapter(
                 HirStmt::Let(name.clone(), result_type.as_ref().clone(), call),
                 HirStmt::If(
                     done,
-                    vec![HirStmt::Return(Some(HirExpr::ArrayLit(Vec::new())))],
+                    if capture_completion {
+                        vec![
+                            HirStmt::Expr(HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_array_push".into())),
+                                vec![HirExpr::Var(returns.clone()), value.clone()],
+                            )),
+                            HirStmt::Return(Some(HirExpr::ArrayLit(Vec::new()))),
+                        ]
+                    } else {
+                        vec![HirStmt::Return(Some(HirExpr::ArrayLit(Vec::new())))]
+                    },
                     Vec::new(),
                 ),
                 HirStmt::Return(Some(HirExpr::ArrayLit(vec![value]))),
@@ -601,7 +612,7 @@ impl<'a> FnLowerer<'a> {
                 let name = format!("__thaw_iterator_{}", self.next_binding);
                 self.next_binding += 1;
                 if let Some((producer, producer_type)) =
-                    iterator_object_adapter(self, value.clone(), &value_type, name)
+                    iterator_object_adapter(self, value.clone(), &value_type, name, true)
                 {
                     value = producer;
                     value_type = producer_type;
@@ -1430,7 +1441,7 @@ impl<'a> FnLowerer<'a> {
                         let name = format!("__thaw_iterator_{}", self.next_binding);
                         self.next_binding += 1;
                         if let Some((producer, producer_type)) =
-                            iterator_object_adapter(self, values.clone(), &values_type, name)
+                            iterator_object_adapter(self, values.clone(), &values_type, name, false)
                         {
                             values = producer;
                             values_type = producer_type;
