@@ -387,7 +387,7 @@
     Memory: WasmMemory,
     Global: WasmGlobal,
     Table: WasmTable,
-    validate(bytes) { try { new WasmModule(bytes); return true; } catch (_) { return false; } },
+    validate(bytes) { const result = JSON.parse(__thaw_wasm_compile(wasmHex(bytes))); if (result.ok) __thaw_wasm_release('module', result.handle); return result.ok; },
     compile(bytes) { return Promise.resolve().then(() => new WasmModule(bytes)); },
     instantiate(source, imports) {
       return Promise.resolve().then(() => source instanceof WasmModule

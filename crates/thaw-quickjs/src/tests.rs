@@ -7995,3 +7995,19 @@ fn webassembly_detached_instantiate_streaming() {
     "#), 1);
     assert_eq!(call("wasmDetachedStreaming", "[]"), "true");
 }
+
+// Unrun regression target: validate distinguishes binary failure from input errors.
+#[test]
+fn webassembly_validate_input_errors() {
+    assert_eq!(load(r#"
+        function wasmValidateInputs() {
+            const invalidInputs = [null, undefined, "text", {}, []].every(value => {
+                try { WebAssembly.validate(value); return false; }
+                catch (error) { return error instanceof TypeError; }
+            });
+            const header = new Uint8Array([0,97,115,109,1,0,0,0]);
+            return [invalidInputs, WebAssembly.validate(header), WebAssembly.validate(new Uint8Array([0]))];
+        }
+    "#), 1);
+    assert_eq!(call("wasmValidateInputs", "[]"), "[true,true,false]");
+}
