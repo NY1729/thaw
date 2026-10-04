@@ -479,6 +479,8 @@ fn wasm_instantiate(module_handle: u32, linkage: Option<String>) -> String {
             }
         }
         let mut imported_memories = HashMap::new();
+        let mut shared_memory_imports: HashMap<u64, WasmMemory> = HashMap::new();
+        let mut memory_origins: HashMap<String, String> = HashMap::new();
         let mut imported_globals = HashMap::new();
         let mut imported_tables = HashMap::new();
         let mut foreign_funcrefs = HashMap::new();
@@ -516,11 +518,23 @@ fn wasm_instantiate(module_handle: u32, linkage: Option<String>) -> String {
                     {
                         return serde_json::json!({ "ok": false, "error": format!("WebAssembly memory import {}.{} has incompatible limits", import.module(), import.name()) }).to_string();
                     }
-                    let memory = match WasmMemory::new(&mut store, WasmMemoryType::new(pages, maximum)) {
-                        Ok(memory) => memory,
-                        Err(error) => return serde_json::json!({ "ok": false, "error": error.to_string() }).to_string(),
+                    let identity = descriptor.get("identity").and_then(serde_json::Value::as_u64);
+                    let memory = if let Some(memory) = identity.and_then(|id| shared_memory_imports.get(&id).copied()) {
+                        if memory.data(&store) != bytes.as_slice()
+                            || memory.ty(&store).maximum() != maximum.map(u64::from) {
+                            return serde_json::json!({ "ok": false, "error": "WebAssembly memory aliases have inconsistent descriptors" }).to_string();
+                        }
+                        memory
+                    } else {
+                        let memory = match WasmMemory::new(&mut store, WasmMemoryType::new(pages, maximum)) {
+                            Ok(memory) => memory,
+                            Err(error) => return serde_json::json!({ "ok": false, "error": error.to_string() }).to_string(),
+                        };
+                        memory.data_mut(&mut store).copy_from_slice(&bytes);
+                        if let Some(identity) = identity { shared_memory_imports.insert(identity, memory); }
+                        memory
                     };
-                    memory.data_mut(&mut store).copy_from_slice(&bytes);
+                    memory_origins.entry(format!("{memory:?}")).or_insert_with(|| encoded_key.clone());
                     if let Err(error) = linker.define(import.module(), import.name(), memory) {
                         return serde_json::json!({ "ok": false, "error": error.to_string() }).to_string();
                     }
@@ -623,8 +637,7 @@ fn wasm_instantiate(module_handle: u32, linkage: Option<String>) -> String {
                     WasmExtern::Table(_) => ("table", None, None),
                     WasmExtern::Memory(memory) => {
                         let identity = format!("{memory:?}");
-                        let import = imported_memories.iter().find_map(|(key, value)|
-                            (format!("{value:?}") == identity).then(|| key.clone()));
+                        let import = memory_origins.get(&identity).cloned();
                         ("memory", Some(identity), import)
                     },
                 };

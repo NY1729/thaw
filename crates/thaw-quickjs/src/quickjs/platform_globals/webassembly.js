@@ -219,7 +219,7 @@
       if (!(module instanceof WasmModule)) throw new TypeError('WebAssembly.Instance(): argument 0 must be a WebAssembly.Module');
       if (imports === null || (typeof imports !== 'object' && typeof imports !== 'function')) throw new TypeError('WebAssembly.Instance(): imports must be an object');
       const wasi = imports && imports.wasi_snapshot_preview1 && imports.wasi_snapshot_preview1.__thawWasiOptions;
-      const linkage = { wasi: wasi, functions: [], memories: [], globals: [], tables: [] }, pendingResources = [];
+      const linkage = { wasi: wasi, functions: [], memories: [], globals: [], tables: [] }, pendingResources = [], linkedMemories = new Map();
       for (const item of module.__thawImports) {
         if (item.module === 'wasi_snapshot_preview1' && wasi) continue;
         const namespace = imports[item.module];
@@ -235,7 +235,16 @@
           if (item.module === 'wasi_snapshot_preview1' && wasi) continue;
           const value = imports[item.module][item.name];
           if (item.kind === 'function') linkage.functions.push({ module: item.module, name: item.name, handle: __thaw_wasm_retain_import(value) });
-          else if (item.kind === 'memory') { value.__thawSync(); linkage.memories.push({ module: item.module, name: item.name, value: { data: wasmHex(value.buffer), maximum: value.__thawMaximum } }); pendingResources.push({ value, item }); }
+          else if (item.kind === 'memory') {
+            let descriptor = linkedMemories.get(value);
+            if (!descriptor) {
+              value.__thawSync();
+              descriptor = { identity: linkedMemories.size, data: wasmHex(value.buffer), maximum: value.__thawMaximum };
+              linkedMemories.set(value, descriptor);
+              pendingResources.push({ value, item });
+            }
+            linkage.memories.push({ module: item.module, name: item.name, value: descriptor });
+          }
           else if (item.kind === 'global') { linkage.globals.push({ module: item.module, name: item.name, value: wasmEncodeArgument(value.value, value.__thawType) }); pendingResources.push({ value, item }); }
           else if (item.kind === 'table') { linkage.tables.push({ module: item.module, name: item.name, value: { values: value.__thawValues.map(entry => wasmEncodeArgument(entry, value.__thawElement)), maximum: Number.isFinite(value.__thawMaximum) ? value.__thawMaximum : null } }); pendingResources.push({ value, item }); }
           else throw new WebAssembly.LinkError(`WebAssembly import '${item.module}.${item.name}' has an unsupported kind`);
