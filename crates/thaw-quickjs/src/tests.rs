@@ -7962,3 +7962,21 @@ fn webassembly_table_growth_captures_push() {
     "#), 1);
     assert_eq!(call("wasmCapturedPush", "[]"), "[0,3,\"entry\"]");
 }
+
+#[test]
+fn webassembly_table_index_conversion() {
+    assert_eq!(load(r#"
+        function wasmTableIndices() {
+            const table = new WebAssembly.Table({ element: "externref", initial: 1 });
+            table.set(0.9, "value");
+            const rejects = action => { try { action(); return false; } catch (error) { return error instanceof TypeError; } };
+            const invalid = [-1, NaN, Infinity, 4294967296, 0n];
+            const gets = invalid.every(index => rejects(() => table.get(index)));
+            const sets = invalid.every(index => rejects(() => table.set(index, "other")));
+            let outside = false;
+            try { table.get(1); } catch (error) { outside = error instanceof RangeError; }
+            return [table.get(0.9), table.get(-0), gets, sets, outside];
+        }
+    "#), 1);
+    assert_eq!(call("wasmTableIndices", "[]"), "[\"value\",\"value\",true,true,true]");
+}
