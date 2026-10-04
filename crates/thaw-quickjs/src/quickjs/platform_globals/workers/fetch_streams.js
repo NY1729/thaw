@@ -820,14 +820,34 @@
       }
     });
     const requestData = new WeakMap();
-    const consumeRequestBody = async request => {
+    const consumeRequestBody = async (request, signal) => {
       const record = requestData.get(request); if (!record) throw new TypeError('invalid Request receiver');
+      if (signal && signal.aborted) throw signal.reason;
       if (!record.body) return new Uint8Array();
       if (record.body._disturbed || record.body.locked) throw new TypeError('Body is unusable');
-      const reader = record.body.getReader(), chunks = []; let length = 0;
+      const reader = record.body.getReader(), chunks = []; let length = 0, onAbort;
+      const interrupted = signal ? new Promise((resolve, reject) => {
+        onAbort = () => {
+          reject(signal.reason);
+          Promise.resolve(reader.cancel(signal.reason)).catch(() => {});
+        };
+        signal.addEventListener('abort', onAbort, { once: true });
+      }) : null;
+      const reading = (async () => {
       while (true) { const result = await reader.read(); if (result.done) break; const chunk = result.value instanceof ArrayBuffer ? new Uint8Array(result.value) : ArrayBuffer.isView(result.value) ? new Uint8Array(result.value.buffer, result.value.byteOffset, result.value.byteLength) : Uint8Array.from(encodeUtf8(String(result.value))); chunks.push(chunk); length += chunk.byteLength; }
       const output = new Uint8Array(length); let offset = 0; for (const chunk of chunks) { output.set(chunk, offset); offset += chunk.byteLength; } return output;
+      })();
+      try {
+        return await (interrupted ? Promise.race([reading, interrupted]) : reading);
+      } finally {
+        if (signal) signal.removeEventListener('abort', onAbort);
+        reader.releaseLock();
+      }
     };
+    Object.defineProperty(globalThis, '__thaw_request_bytes_for_fetch', {
+      value: request => consumeRequestBody(request, requestData.get(request).signal),
+      configurable: false, writable: false,
+    });
     class Request {
       constructor(input, init = {}) {
         const inherited = requestData.get(input), url = new URL(inherited ? inherited.url : String(input));
