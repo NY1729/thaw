@@ -699,14 +699,18 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                         .iter()
                         .map(|parameter| parameter.pat.clone())
                         .collect::<Vec<_>>();
+                    let receiver_count = usize::from(func.this_param.is_some());
                     if let Some(default_start) = trailing_omittable_start(&patterns) {
                         for arity in default_start..patterns.len() {
+                            let total_arity = receiver_count + arity;
                             let mut wrapper = signatures[&name].clone();
-                            wrapper.params.truncate(arity);
-                            signatures.insert(default_arity_symbol(&name, arity), wrapper);
+                            wrapper.params.truncate(total_arity);
+                            signatures.insert(default_arity_symbol(&name, total_arity), wrapper);
                         }
                     }
-                    insert_omitted_parameter_signatures(&mut signatures, &name, &patterns, 0)?;
+                    insert_omitted_parameter_signatures(
+                        &mut signatures, &name, &patterns, receiver_count,
+                    )?;
                 }
                 if !is_extern {
                     fn_decls.push(fn_decl);
@@ -2039,11 +2043,12 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
             .iter()
             .map(|parameter| parameter.pat.clone())
             .collect::<Vec<_>>();
+        let receiver_count = usize::from(fn_decl.function.this_param.is_some());
         specialized.extend(lower_callable_default_wrappers(
             &function.name,
             &function.params,
             &patterns,
-            0,
+            receiver_count,
             None,
             &function.ret,
             &signatures,
@@ -2058,7 +2063,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
             &function.name,
             &function.params,
             &patterns,
-            0,
+            receiver_count,
             None,
             &function.ret,
             &signatures,
