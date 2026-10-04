@@ -287,7 +287,11 @@
         const value = namespace[item.name];
         if (item.kind === 'function' && typeof value !== 'function') throw new WebAssembly.LinkError(`WebAssembly import '${item.module}.${item.name}' must be a function`);
         if (item.kind === 'memory' && !(value instanceof WasmMemory)) throw new WebAssembly.LinkError(`WebAssembly import '${item.module}.${item.name}' must be a Memory`);
-        if (item.kind === 'global' && !(value instanceof WasmGlobal)) throw new WebAssembly.LinkError(`WebAssembly import '${item.module}.${item.name}' must be a Global`);
+        if (item.kind === 'global' && !(value instanceof WasmGlobal)) {
+          const numeric = ['i32', 'f32', 'f64'].includes(item.valueType) && typeof value === 'number';
+          const wide = item.valueType === 'i64' && typeof value === 'bigint';
+          if (item.mutable || !(numeric || wide)) throw new WebAssembly.LinkError(`WebAssembly import '${item.module}.${item.name}' must be a compatible immutable value or Global`);
+        }
         if (item.kind === 'table' && !(value instanceof WasmTable)) throw new WebAssembly.LinkError(`WebAssembly import '${item.module}.${item.name}' must be a Table`);
         importValues.push({ item, value });
       }
@@ -328,7 +332,14 @@
             }
             linkage.memories.push({ module: item.module, name: item.name, value: descriptor });
           }
-          else if (item.kind === 'global') { linkage.globals.push({ module: item.module, name: item.name, value: { instance: value.__thawInstance, name: value.__thawName } }); pendingResources.push({ value, item }); }
+          else if (item.kind === 'global') {
+            if (value instanceof WasmGlobal) {
+              linkage.globals.push({ module: item.module, name: item.name, value: { instance: value.__thawInstance, name: value.__thawName } });
+              pendingResources.push({ value, item });
+            } else {
+              linkage.globals.push({ module: item.module, name: item.name, value: { primitive: wasmEncodeArgument(value, item.valueType) } });
+            }
+          }
           else if (item.kind === 'table') { linkage.tables.push({ module: item.module, name: item.name, value: { instance: value.__thawInstance, name: value.__thawName } }); pendingResources.push({ value, item }); }
           else throw new WebAssembly.LinkError(`WebAssembly import '${item.module}.${item.name}' has an unsupported kind`);
         }
