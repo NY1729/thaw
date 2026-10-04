@@ -29,7 +29,8 @@ pub(super) fn source(name: &str) -> Option<&'static str> {
              async function* dot(source) { for await (var event of records(source)) if (event.type === 'test') yield event.status === 'passed' ? '.' : event.status === 'failed' ? 'X' : '-'; yield '\n'; }
              async function* spec(source) { for await (var event of records(source)) yield (event.status === 'passed' ? '✔ ' : event.status === 'failed' ? '✖ ' : '- ') + event.fullName + '\n'; }
              async function* tap(source) { var index = 0; yield 'TAP version 13\n'; for await (var event of records(source)) if (event.type === 'test') yield (++index) + (event.status === 'passed' ? ' ok ' : ' not ok ') + '- ' + event.fullName + '\n'; yield '1..' + index + '\n'; }
-             async function* junit(source) { yield '<testsuite>'; for await (var event of records(source)) if (event.type === 'test') yield '<testcase name="' + String(event.fullName).replace(/&/g, '&amp;').replace(/"/g, '&quot;') + '">' + (event.status === 'failed' ? '<failure>' + String(event.message || '') + '</failure>' : '') + '</testcase>'; yield '</testsuite>'; }
+             function escapeXml(value) { return String(value).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
+             async function* junit(source) { yield '<testsuite>'; for await (var event of records(source)) if (event.type === 'test') yield '<testcase name="' + escapeXml(event.fullName) + '">' + (event.status === 'failed' ? '<failure>' + escapeXml(event.message || '') + '</failure>' : '') + '</testcase>'; yield '</testsuite>'; }
              async function* lcov(source) { for await (var event of records(source)) if (event.coverage) yield String(event.coverage); }
              module.exports = { dot: dot, spec: spec, tap: tap, junit: junit, lcov: lcov }; module.exports.default = module.exports; module.exports.__esModule = true;
 "#,
