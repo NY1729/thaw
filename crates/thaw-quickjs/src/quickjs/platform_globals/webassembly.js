@@ -1,4 +1,5 @@
 (() => {
+  const wasmApply = Reflect.apply;
   const wasmBytes = value => {
     if (value instanceof ArrayBuffer) return new Uint8Array(value);
     if (ArrayBuffer.isView(value)) return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
@@ -18,7 +19,25 @@
   const wasmFinalizer = typeof FinalizationRegistry === 'function' ? new FinalizationRegistry(resource => {
     if (resource.resources) for (const entry of resource.resources) if (entry.binding) entry.value.__thawUnbind(entry.binding);
     __thaw_wasm_release(resource.kind, resource.handle);
+    if (resource.kind === 'instance') wasmInstances.delete(resource.handle);
   }) : null;
+  const wasmInstances = new Map();
+  const wasmInstance = handle => {
+    const entry = wasmInstances.get(handle);
+    return entry && typeof entry.deref === 'function' ? entry.deref() : entry;
+  };
+  const wasmWithResources = (owner, invoke) => {
+    const resources = owner ? owner.__thawResources : [];
+    for (const resource of resources) resource.value.__thawSync();
+    let result, failed = false, primary;
+    try { result = invoke(); } catch (error) { failed = true; primary = error; }
+    for (const resource of resources) {
+      try { resource.value.__thawRefresh(resource.binding); }
+      catch (error) { if (!failed) { failed = true; primary = error; } }
+    }
+    if (failed) throw primary;
+    return result;
+  };
   const wasmFuncrefs = new Map();
   const wasmCachedFuncref = key => { const entry = wasmFuncrefs.get(key); return entry && typeof entry.deref === 'function' ? entry.deref() : entry; };
   const wasmCacheFuncref = (key, value) => wasmFuncrefs.set(key, typeof WeakRef === 'function' ? new WeakRef(value) : value);
@@ -33,7 +52,8 @@
   const wasmPrepareFuncref = value => {
     if (value.__thawWasmBridge === undefined) {
       const bridge = (...args) => {
-        const called = wasmResult(__thaw_wasm_call_funcref(value.__thawWasmInstance, value.__thawWasmFuncref, JSON.stringify(wasmEncodeArguments(args, value.__thawWasmParameters))), WebAssembly.RuntimeError);
+        const encoded = JSON.stringify(wasmEncodeArguments(args, value.__thawWasmParameters));
+        const called = wasmWithResources(wasmInstance(value.__thawWasmInstance), () => wasmResult(__thaw_wasm_call_funcref(value.__thawWasmInstance, value.__thawWasmFuncref, encoded), WebAssembly.RuntimeError));
         const values = called.values.map(item => wasmDecodeValue(item, value.__thawWasmInstance));
         return values.length === 0 ? undefined : (values.length === 1 ? values[0] : values);
       };
@@ -72,8 +92,10 @@
     const key = instance + ':' + value.v;
     let cached = wasmCachedFuncref(key);
     if (!cached) {
+      const owner = wasmInstance(instance);
       const callable = (...args) => {
-        const called = wasmResult(__thaw_wasm_call_funcref(instance, value.v, JSON.stringify(wasmEncodeArguments(args, value.parameters || []))), WebAssembly.RuntimeError);
+        const encoded = JSON.stringify(wasmEncodeArguments(args, value.parameters || []));
+        const called = wasmWithResources(owner, () => wasmResult(__thaw_wasm_call_funcref(instance, value.v, encoded), WebAssembly.RuntimeError));
         const values = called.values.map(item => wasmDecodeValue(item, instance));
         return values.length === 0 ? undefined : (values.length === 1 ? values[0] : values);
       };
@@ -111,8 +133,9 @@
   class WasmMemory {
     constructor(descriptor, internal) {
       if (internal) {
-        this.__thawInstance = descriptor.instance;
-        this.__thawName = descriptor.name;
+        const retained = wasmResult(__thaw_wasm_memory(descriptor.instance, descriptor.name, 'retain', ''));
+        this.__thawInstance = 0;
+        this.__thawName = String(retained.handle);
       } else {
         if (!descriptor || descriptor.initial === undefined) throw new TypeError('WebAssembly.Memory(): Property initial is required');
         const initial = Number(descriptor.initial), maximum = descriptor.maximum === undefined ? -1 : Number(descriptor.maximum);
@@ -123,27 +146,21 @@
       }
       this.__thawBindings = [];
       this.__thawRefresh();
+      if (wasmFinalizer) wasmFinalizer.register(this, { kind: 'memory', handle: Number(this.__thawName) });
     }
     __thawRefresh(binding) {
       const instance = binding ? binding.instance : this.__thawInstance, name = binding ? binding.name : this.__thawName;
       const result = wasmResult(__thaw_wasm_memory(instance, name, 'read', ''));
       const bytes = wasmUnhex(result.value);
-      if (this.__thawBuffer && bytes.byteLength > this.__thawBuffer.byteLength && binding) {
-        const delta = (bytes.byteLength - this.__thawBuffer.byteLength) / 65536;
-        wasmResult(__thaw_wasm_memory(this.__thawInstance, this.__thawName, 'grow', String(delta)), RangeError);
-        for (const other of this.__thawBindings) if (other !== binding) wasmResult(__thaw_wasm_memory(other.instance, other.name, 'grow', String(delta)), RangeError);
-      }
       if (this.__thawBuffer && this.__thawBuffer.byteLength === bytes.byteLength) new Uint8Array(this.__thawBuffer).set(bytes);
       else {
         if (this.__thawBuffer) __thaw_detach_array_buffer(this.__thawBuffer);
         this.__thawBuffer = bytes.buffer;
       }
-      if (binding) { const data = wasmHex(this.__thawBuffer); wasmResult(__thaw_wasm_memory(this.__thawInstance, this.__thawName, 'write', data)); for (const other of this.__thawBindings) if (other !== binding) wasmResult(__thaw_wasm_memory(other.instance, other.name, 'write', data)); }
     }
     __thawSync() {
       const data = wasmHex(this.__thawBuffer);
       wasmResult(__thaw_wasm_memory(this.__thawInstance, this.__thawName, 'write', data));
-      for (const binding of this.__thawBindings) wasmResult(__thaw_wasm_memory(binding.instance, binding.name, 'write', data));
     }
     __thawBind(instance, module, name) { const binding = { instance, name: 'import:' + module + '\x1f' + name }; this.__thawBindings.push(binding); return binding; }
     __thawUnbind(binding) { this.__thawBindings = this.__thawBindings.filter(value => value !== binding); }
@@ -151,7 +168,8 @@
     grow(delta) {
       this.__thawSync();
       const result = wasmResult(__thaw_wasm_memory(this.__thawInstance, this.__thawName, 'grow', String(Number(delta))), RangeError);
-      for (const binding of this.__thawBindings) wasmResult(__thaw_wasm_memory(binding.instance, binding.name, 'grow', String(Number(delta))), RangeError);
+      __thaw_detach_array_buffer(this.__thawBuffer);
+      this.__thawBuffer = undefined;
       this.__thawRefresh();
       return result.value;
     }
@@ -234,12 +252,26 @@
         for (const item of module.__thawImports) {
           if (item.module === 'wasi_snapshot_preview1' && wasi) continue;
           const value = imports[item.module][item.name];
-          if (item.kind === 'function') linkage.functions.push({ module: item.module, name: item.name, handle: __thaw_wasm_retain_import(value) });
+          if (item.kind === 'function') {
+            const bridge = (...args) => {
+              for (const memory of linkedMemories.keys()) memory.__thawRefresh();
+              let result, failed = false, primary;
+              try { result = wasmApply(value, undefined, args); }
+              catch (error) { failed = true; primary = error; }
+              for (const memory of linkedMemories.keys()) {
+                try { memory.__thawSync(); }
+                catch (error) { if (!failed) { failed = true; primary = error; } }
+              }
+              if (failed) throw primary;
+              return result;
+            };
+            linkage.functions.push({ module: item.module, name: item.name, handle: __thaw_wasm_retain_import(value, bridge) });
+          }
           else if (item.kind === 'memory') {
             let descriptor = linkedMemories.get(value);
             if (!descriptor) {
               value.__thawSync();
-              descriptor = { identity: linkedMemories.size, data: wasmHex(value.buffer), maximum: value.__thawMaximum };
+              descriptor = { instance: value.__thawInstance, name: value.__thawName };
               linkedMemories.set(value, descriptor);
               pendingResources.push({ value, item });
             }
@@ -250,8 +282,10 @@
           else throw new WebAssembly.LinkError(`WebAssembly import '${item.module}.${item.name}' has an unsupported kind`);
         }
       } catch (error) { __thaw_wasm_release_pending(JSON.stringify(linkage.functions.map(value => value.handle))); throw error; }
-      const rawResult = JSON.parse(__thaw_wasm_instantiate(module.__thawHandle, JSON.stringify(linkage)));
-      if (!rawResult.ok) { __thaw_wasm_release_pending(JSON.stringify(linkage.functions.map(value => value.handle))); throw new WebAssembly.LinkError(rawResult.error); }
+      let rawResult;
+      try { rawResult = JSON.parse(__thaw_wasm_instantiate(module.__thawHandle, JSON.stringify(linkage))); }
+      catch (error) { __thaw_wasm_release_pending(JSON.stringify(linkage.functions.map(value => value.handle))); throw error; }
+      if (!rawResult.ok) { __thaw_wasm_release_pending(JSON.stringify(linkage.functions.map(value => value.handle))); wasmResult(JSON.stringify(rawResult), WebAssembly.LinkError); }
       const result = rawResult;
       Object.defineProperty(this, '__thawHandle', { value: result.handle });
       const exports = Object.create(null), resources = pendingResources.map(resource => ({ value: resource.value, binding: resource.value.__thawBind(this.__thawHandle, resource.item.module, resource.item.name) }));
@@ -270,11 +304,12 @@
           const cached = wasmCachedFuncref(key);
           if (cached) { exports[item.name] = cached; continue; }
           const callable = (...args) => {
-            for (const resource of resources) resource.value.__thawSync();
-            const raw = JSON.parse(__thaw_wasm_call(this.__thawHandle, item.name, JSON.stringify(wasmEncodeArguments(args, item.parameterTypes || []))));
-            for (const resource of resources) resource.value.__thawRefresh(resource.binding);
-            if (raw.exit !== undefined) { const exit = new Error('WASI exited with code ' + raw.exit); exit.__thawWasiExit = raw.exit; throw exit; }
-            const called = raw.ok ? raw : (() => { throw new WebAssembly.RuntimeError(raw.error); })();
+            const encoded = JSON.stringify(wasmEncodeArguments(args, item.parameterTypes || []));
+            const called = wasmWithResources(this, () => {
+              const raw = JSON.parse(__thaw_wasm_call(this.__thawHandle, item.name, encoded));
+              if (raw.exit !== undefined) { const exit = new Error('WASI exited with code ' + raw.exit); exit.__thawWasiExit = raw.exit; throw exit; }
+              return wasmResult(JSON.stringify(raw), WebAssembly.RuntimeError);
+            });
             const values = called.values.map(value => wasmDecodeValue(value, this.__thawHandle));
             return values.length === 0 ? undefined : (values.length === 1 ? values[0] : values);
           };
@@ -291,6 +326,7 @@
             const imported = item.memoryImport === null ? undefined : resources.find(resource => resource.binding && resource.binding.name === 'import:' + item.memoryImport);
             memory = imported ? imported.value : new WasmMemory({ instance: this.__thawHandle, name: item.name }, true);
             memories.set(item.memoryKey, memory);
+            linkedMemories.set(memory, { instance: memory.__thawInstance, name: memory.__thawName });
             if (!imported) resources.push({ value: memory });
           }
           exports[item.name] = memory;
@@ -299,9 +335,10 @@
       }
       Object.defineProperty(this, 'exports', { value: Object.freeze(exports), enumerable: true });
       Object.defineProperty(this, '__thawResources', { value: resources });
+      wasmInstances.set(this.__thawHandle, typeof WeakRef === 'function' ? new WeakRef(this) : this);
       if (wasmFinalizer) wasmFinalizer.register(this, { kind: 'instance', handle: this.__thawHandle, resources });
     }
-    dispose() { if (this.__thawDisposed) return; if (!__thaw_wasm_release('instance', this.__thawHandle)) return; this.__thawDisposed = true; for (const resource of this.__thawResources) if (resource.binding) resource.value.__thawUnbind(resource.binding); }
+    dispose() { if (this.__thawDisposed) return; if (!__thaw_wasm_release('instance', this.__thawHandle)) return; this.__thawDisposed = true; wasmInstances.delete(this.__thawHandle); for (const resource of this.__thawResources) if (resource.binding) resource.value.__thawUnbind(resource.binding); }
   }
   globalThis.WebAssembly = {
     CompileError: class CompileError extends Error { constructor(message) { super(message); this.name = 'CompileError'; } },

@@ -7666,3 +7666,151 @@ fn webassembly_special_export_names() {
     "#), 1);
     assert_eq!(call("wasmSpecialExports", "[]"), "[true,true,42,42,true,true]");
 }
+
+// Unrun regression target: shared memory remains coherent across native callbacks.
+#[test]
+fn webassembly_shared_memory_cross_instance_callback() {
+    assert_eq!(load(r#"
+        function wasmSharedCallback() {
+            const memory = new WebAssembly.Memory({ initial: 1, maximum: 2 });
+            const readerBytes = new TextEncoder().encode(`(module
+                (import "host" "memory" (memory 1))
+                (func (export "read") (result i32) i32.const 0 i32.load8_u)
+                (func (export "size") (result i32) memory.size))`);
+            const reader = new WebAssembly.Instance(new WebAssembly.Module(readerBytes), { host: { memory } });
+            const writerBytes = new TextEncoder().encode(`(module
+                (import "host" "memory" (memory 1))
+                (import "host" "callback" (func $callback (result i32)))
+                (func (export "writeAndRead") (result i32)
+                    i32.const 0 i32.const 42 i32.store8 call $callback))`);
+            let observedBuffer;
+            const writer = new WebAssembly.Instance(new WebAssembly.Module(writerBytes), {
+                host: { memory, callback() { observedBuffer = new Uint8Array(memory.buffer)[0]; const value = reader.exports.read(); new Uint8Array(memory.buffer)[1] = 73; return value; } }
+            });
+            const fromCallback = writer.exports.writeAndRead();
+            const afterCallback = [fromCallback, reader.exports.read(), observedBuffer, new Uint8Array(memory.buffer)[0], new Uint8Array(memory.buffer)[1]];
+            const previousPages = memory.grow(1);
+            return afterCallback.concat([previousPages, memory.buffer.byteLength, reader.exports.size()]);
+        }
+    "#), 1);
+    assert_eq!(call("wasmSharedCallback", "[]"), "[42,42,42,42,73,1,131072,2]");
+}
+
+// Unrun regression target: an exported memory retains the physical memory after dispose.
+#[test]
+fn webassembly_exported_memory_survives_instance_dispose() {
+    assert_eq!(load(r#"
+        function wasmRetainedMemory() {
+            const bytes = new TextEncoder().encode(`(module
+                (memory (export "memory") 1 2)
+                (data (i32.const 0) "A"))`);
+            const module = new WebAssembly.Module(bytes);
+            const instance = new WebAssembly.Instance(module);
+            const memory = instance.exports.memory;
+            instance.dispose();
+            module.dispose();
+            const before = new Uint8Array(memory.buffer)[0];
+            const oldPages = memory.grow(1);
+            return [before, oldPages, memory.buffer.byteLength, new Uint8Array(memory.buffer)[0]];
+        }
+    "#), 1);
+    assert_eq!(call("wasmRetainedMemory", "[]"), "[65,1,131072,65]");
+}
+
+// Unrun regression target: successful grow(0) replaces and detaches the buffer.
+#[test]
+fn webassembly_memory_zero_growth_detaches_buffer() {
+    assert_eq!(load(r#"
+        function wasmZeroGrowth() {
+            const memory = new WebAssembly.Memory({ initial: 1, maximum: 1 });
+            const oldBuffer = memory.buffer;
+            new Uint8Array(oldBuffer)[0] = 91;
+            const previous = memory.grow(0);
+            const current = memory.buffer;
+            let failed = false;
+            try { memory.grow(1); } catch (error) { failed = error instanceof RangeError; }
+            return [previous, oldBuffer.byteLength, current !== oldBuffer,
+                current.byteLength, new Uint8Array(current)[0], failed, memory.buffer === current];
+        }
+    "#), 1);
+    assert_eq!(call("wasmZeroGrowth", "[]"), "[1,0,true,65536,91,true,true]");
+}
+
+// Unrun regression target: callbacks refresh memory defined by the calling module.
+#[test]
+fn webassembly_internal_memory_callback_coherence() {
+    assert_eq!(load(r#"
+        function wasmInternalCallback() {
+            const bytes = new TextEncoder().encode(`(module
+                (import "host" "callback" (func $callback))
+                (memory (export "memory") 1)
+                (func (export "writeAndCall") (result i32)
+                    i32.const 0 i32.const 42 i32.store8
+                    call $callback
+                    i32.const 1 i32.load8_u))`);
+            let memory, observed;
+            const instance = new WebAssembly.Instance(new WebAssembly.Module(bytes), {
+                host: { callback() { observed = new Uint8Array(memory.buffer)[0]; new Uint8Array(memory.buffer)[1] = 73; } }
+            });
+            memory = instance.exports.memory;
+            return [instance.exports.writeAndCall(), observed, new Uint8Array(memory.buffer)[1]];
+        }
+    "#), 1);
+    assert_eq!(call("wasmInternalCallback", "[]"), "[73,42,73]");
+}
+
+// Unrun regression target: import, coercion and start preserve the exact thrown value.
+#[test]
+fn webassembly_callback_exception_identity() {
+    assert_eq!(load(r#"
+        function wasmExceptionIdentity() {
+            const marker = { reason: "callback" }, coercion = { reason: "coercion" };
+            const bytes = new TextEncoder().encode(`(module
+                (import "host" "callback" (func $callback (result i32)))
+                (func (export "call") (result i32) call $callback))`);
+            const results = [];
+            for (const thrown of [marker, null, undefined, 17]) {
+                const instance = new WebAssembly.Instance(new WebAssembly.Module(bytes), {
+                    host: { callback() { throw thrown; } }
+                });
+                let caught = false;
+                try { instance.exports.call(); } catch (error) { caught = error === thrown; }
+                results.push(caught);
+                instance.dispose();
+            }
+            const converted = new WebAssembly.Instance(new WebAssembly.Module(bytes), {
+                host: { callback() { return { valueOf() { throw coercion; } }; } }
+            });
+            try { converted.exports.call(); results.push(false); } catch (error) { results.push(error === coercion); }
+            converted.dispose();
+            const start = new TextEncoder().encode(`(module
+                (import "host" "callback" (func $callback))
+                (func $start call $callback) (start $start))`);
+            try { new WebAssembly.Instance(new WebAssembly.Module(start), { host: { callback() { throw marker; } } }); results.push(false); }
+            catch (error) { results.push(error === marker); }
+            return results;
+        }
+    "#), 1);
+    assert_eq!(call("wasmExceptionIdentity", "[]"), "[true,true,true,true,true,true]");
+}
+
+// Unrun regression target: a table-derived function synchronizes exported memory.
+#[test]
+fn webassembly_table_funcref_memory_coherence() {
+    assert_eq!(load(r#"
+        function wasmTableMemory() {
+            const bytes = new TextEncoder().encode(`(module
+                (memory (export "memory") 1)
+                (table (export "table") 1 funcref)
+                (func $write (param i32) i32.const 0 local.get 0 i32.store8)
+                (elem (i32.const 0) $write))`);
+            const instance = new WebAssembly.Instance(new WebAssembly.Module(bytes));
+            const memory = instance.exports.memory;
+            new Uint8Array(memory.buffer)[1] = 91;
+            const write = instance.exports.table.get(0);
+            write(73);
+            return [new Uint8Array(memory.buffer)[0], new Uint8Array(memory.buffer)[1]];
+        }
+    "#), 1);
+    assert_eq!(call("wasmTableMemory", "[]"), "[73,91]");
+}
