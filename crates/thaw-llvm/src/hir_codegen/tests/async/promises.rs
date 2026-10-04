@@ -1357,3 +1357,22 @@ fn reject_resolvers_record_their_native_string_before_settlement() {
         assert!(marked < settled, "{ir}");
     }
 }
+
+#[test]
+fn async_arrow_try_returns_use_the_general_frame_path() {
+    let source = r#"
+        const choose = async (flag: number): Promise<number> => {
+            if (flag === 0) {
+                try { return 1; } catch (error) { return 3; }
+            }
+            if (flag === 1) {
+                try { throw new Error("caught"); } catch (error) { return 4; }
+            }
+            return await Promise.resolve(2);
+        };
+        async function main(): Promise<void> {
+            console.log(await choose(0), await choose(1), await choose(2));
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "async_arrow_try_tail_returns"), "1 4 2\n");
+}
