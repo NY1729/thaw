@@ -7923,7 +7923,7 @@ fn webassembly_unsigned_limits_and_table_growth() {
             const tablePrevious = table.grow(150000.9);
             return [memoryLimits, tableLimits, rejectedGrowth, keptBuffer,
                 initialReads, maximumReads, coercions, previous, before.byteLength,
-                memory.buffer !== before, tablePrevious, table.length, table.get(150000) === null];
+                memory.buffer !== before, tablePrevious, table.length, table.get(150000) === undefined];
         }
     "#), 1);
     assert_eq!(call("wasmUnsignedLimits", "[]"), "[true,true,true,true,1,1,1,0,0,true,1,150001,true]");
@@ -8070,4 +8070,27 @@ fn webassembly_externref_global_default() {
         }
     "#), 1);
     assert_eq!(call("wasmGlobalDefault", "[]"), "[true,true,true,true]");
+}
+
+// Unrun regression target: table missing values differ from explicit undefined.
+#[test]
+fn webassembly_table_reference_defaults() {
+    assert_eq!(load(r#"
+        function wasmTableDefaults() {
+            const table = new WebAssembly.Table({ element: "externref", initial: 1, maximum: 3 });
+            const initial = table.get(0) === undefined;
+            table.grow(1);
+            const grown = table.get(1) === undefined;
+            table.set(0, null);
+            const explicitNull = table.get(0) === null;
+            table.set(0);
+            const omittedSet = table.get(0) === undefined;
+            const funcs = new WebAssembly.Table({ element: "anyfunc", initial: 1 });
+            const rejects = action => { try { action(); return false; } catch (error) { return error instanceof TypeError; } };
+            return [initial, grown, explicitNull, omittedSet, funcs.get(0) === null,
+                rejects(() => funcs.set(0, undefined)), rejects(() => funcs.grow(1, undefined)),
+                rejects(() => new WebAssembly.Table({ element: "anyfunc", initial: 1 }, undefined))];
+        }
+    "#), 1);
+    assert_eq!(call("wasmTableDefaults", "[]"), "[true,true,true,true,true,true,true,true]");
 }
