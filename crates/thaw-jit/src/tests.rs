@@ -36,6 +36,20 @@ mod tests {
         }
     }
 
+    #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+    #[test]
+    fn reversed_helper_calls_preserve_outer_values() {
+        for (operation, args, expected) in [
+            ("rpow", [19.0, 3.0, 2.0], 27.0),
+            ("rrem", [19.0, 3.0, 10.0], 20.0),
+        ] {
+            let symbol = CString::new(format!("expr:a0,a1,a2,{operation},+:outer-{operation}")).unwrap();
+            let result = call(&symbol, &args);
+            assert!(result.error.is_null());
+            assert_eq!(result.value, expected);
+        }
+    }
+
     fn call(symbol: &CString, args: &[f64]) -> ThawJitResult {
         unsafe extern "C" fn allocate(size: usize, _: usize) -> *mut u8 {
             unsafe { libc::malloc(size).cast() }
