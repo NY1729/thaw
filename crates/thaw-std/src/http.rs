@@ -624,11 +624,11 @@ unsafe fn request_body_is_complete(context: &RequestContext) -> bool {
 /// switches the socket out of its usual nonblocking mode for the
 /// duration; restores it before returning in the success case (a torn-
 /// down connection has nothing left to restore). A read error, EOF, or
-/// timeout tears the connection down via `finish_connection` (matching
-/// every other socket failure in this module) and nulls `context.
-/// connection`/sets `abandoned` (the same "connection died mid-handler"
-/// signal `bail_if_client_gone` already uses elsewhere) -- the caller
-/// still gets back whatever partial body arrived before that happened.
+/// timeout closes the socket and marks the context abandoned. A synchronous
+/// handler still owns the connection allocation through `dispatch_request`;
+/// that caller retires it after `run_server_callback` returns. A parked async
+/// handler takes the existing `finish_connection` path immediately. The
+/// caller still gets back whatever partial body arrived before the failure.
 unsafe fn block_until_body_complete(context: &mut RequestContext) {
     if context.connection.is_null() {
         return;
@@ -641,7 +641,17 @@ unsafe fn block_until_body_complete(context: &mut RequestContext) {
         }
         let remaining = deadline.saturating_duration_since(Instant::now());
         let abandon = |connection: &mut ConnectionState, context: &mut RequestContext| {
-            finish_connection(connection);
+            if context.resumable {
+                // The parked context is already owned by the connection;
+                // finish_connection defers freeing it until its resumed
+                // handler has unwound.
+                finish_connection(connection);
+            } else {
+                // The synchronous callback and dispatch_request still hold
+                // this allocation. Close the socket now, retire the box
+                // after they return.
+                mark_client_gone(connection);
+            }
             context.connection = std::ptr::null_mut();
             context.abandoned = true;
         };
@@ -1370,10 +1380,12 @@ fn run_server_callback(
     // only be a *partial* delivery (more bytes can still arrive later,
     // fed by `connection_ready`); the one-shot helpers have no
     // connection and no body, so they just fire `end`.
-    if connection.is_null() {
-        deliver_request_body_events(&mut context);
-    } else {
-        deliver_request_body_listeners(unsafe { &*connection }, &mut context);
+    if !context.abandoned {
+        if connection.is_null() {
+            deliver_request_body_events(&mut context);
+        } else {
+            deliver_request_body_listeners(unsafe { &*connection }, &mut context);
+        }
     }
     if context.state.ended || connection.is_null() {
         CallbackOutcome::Ready(ResponseSpec {
@@ -2192,14 +2204,26 @@ fn dispatch_request(connection: &mut ConnectionState) -> bool {
     // won't return through here, and `finish_response` needs the
     // negotiated value when it renders the response later.
     connection.keep_alive = keep_alive;
-    match run_server_callback(
+    let outcome = run_server_callback(
         callback,
         &method,
         &target,
         &[],
         &headers,
         connection as *mut ConnectionState,
-    ) {
+    );
+    if connection.client_gone {
+        // `body()`/`bodyHex()`/`bodyBytes()` can detect EOF or timeout
+        // during a synchronous callback. Their close only shuts the socket;
+        // the callback still needs this allocation until it returns. If it
+        // suspended, hand its context to the ordinary deferred-free path.
+        if let CallbackOutcome::Pending(context) = outcome {
+            connection.response_ctx = context;
+        }
+        finish_connection(connection);
+        return false;
+    }
+    match outcome {
         CallbackOutcome::Ready(spec) => {
             connection.response = render_response(spec, keep_alive);
             true
@@ -2767,6 +2791,86 @@ mod tests {
         assert_eq!(probe.error_calls.get(), 1);
         first.closed.store(true, Ordering::Release);
         assert_eq!(dispatch_server_events(&servers), (true, false));
+    }
+
+    // Unrun regression: body() sees a truncated fixed body/peer EOF inside a
+    // synchronous handler. The handler and its caller must finish before the
+    // connection box is freed; res.end after the failure is a safe no-op.
+    #[test]
+    fn body_eof_defers_connection_free_until_synchronous_handler_returns() {
+        thread_local! {
+            static HANDLER_COMPLETED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+            static PARTIAL_BODY_SEEN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+        }
+        unsafe extern "C" fn callback(
+            _environment: *const c_void,
+            request: *const IncomingMessage,
+            response: *mut ServerResponse,
+        ) {
+            let body = (*request).body;
+            let read: unsafe extern "C" fn(*const c_void) -> *const c_char =
+                std::mem::transmute((*body).code);
+            let partial = read(body.cast());
+            PARTIAL_BODY_SEEN.with(|seen| seen.set(string_from_ptr(partial) == "a"));
+            response_end((*response).end.cast(), c"ignored".as_ptr());
+            HANDLER_COMPLETED.with(|completed| completed.set(true));
+        }
+
+        HANDLER_COMPLETED.with(|completed| completed.set(false));
+        PARTIAL_BODY_SEEN.with(|seen| seen.set(false));
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (stream, _) = listener.accept().unwrap();
+        client.shutdown(Shutdown::Write).unwrap();
+        let callback = Box::new(NativeClosure {
+            code: callback as *const c_void,
+            context: std::ptr::null_mut(),
+        });
+        let server = Box::new(ServerState {
+            callback: (&*callback as *const NativeClosure) as usize,
+            closed: AtomicBool::new(false),
+            listener: Mutex::new(None),
+            watcher: AtomicU64::new(0),
+            connections: AtomicUsize::new(1),
+            listening_listeners: Mutex::new(Vec::new()),
+            close_listeners: Mutex::new(Vec::new()),
+            error_listeners: Mutex::new(Vec::new()),
+            pending_listening: AtomicBool::new(false),
+            pending_errors: Mutex::new(Vec::new()),
+            close_requested: AtomicBool::new(false),
+        });
+        let head = b"POST /body HTTP/1.1\r\nContent-Length: 5\r\n\r\n";
+        let mut request = head.to_vec();
+        request.push(b'a');
+        let connection = Box::into_raw(Box::new(ConnectionState {
+            stream: Some(stream),
+            peer_read_closed: false,
+            server: &*server,
+            request,
+            response: Vec::new(),
+            written: 0,
+            watcher: 0,
+            keep_alive: false,
+            awaiting_handler: false,
+            response_ctx: std::ptr::null_mut(),
+            streaming: false,
+            response_ended: false,
+            head_deadline: None,
+            head_end: head.len(),
+            body_plan: BodyPlan::Fixed(5),
+            consumed: 0,
+            body_scan_offset: 0,
+            body_complete: false,
+            dispatched: true,
+            client_gone: false,
+        }));
+        track_connection(connection);
+        ACTIVE_CONNECTIONS.fetch_add(1, Ordering::AcqRel);
+        assert!(!dispatch_request(unsafe { &mut *connection }));
+        assert!(HANDLER_COMPLETED.with(|completed| completed.get()));
+        assert!(PARTIAL_BODY_SEEN.with(|seen| seen.get()));
+        assert_eq!(server.connections.load(Ordering::Acquire), 0);
+        drain_pending_context_frees();
     }
 
     // Unrun regression: a peer can finish sending and still receive delayed chunks.
