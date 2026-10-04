@@ -8196,3 +8196,366 @@ fn webassembly_shared_externref_global_authority() {
     "#), 1);
     assert_eq!(call("wasmSharedExternrefGlobal", "[]"), "[true,true,true,true]");
 }
+
+// Unrun regression target: Table imports share native values and growth immediately.
+#[test]
+fn webassembly_shared_externref_table_authority() {
+    assert_eq!(load(r#"
+        function wasmSharedTableAuthority() {
+            const bytes = new TextEncoder().encode(`(module
+                (import "host" "table" (table 1 3 externref))
+                (import "host" "observe" (func $observe))
+                (export "table" (table 0))
+                (func (export "read") (result externref) i32.const 0 table.get)
+                (func (export "write") (param externref)
+                    i32.const 0 local.get 0 table.set call $observe)
+                (func (export "grow") (param externref) (result i32)
+                    local.get 0 i32.const 1 table.grow))`);
+            const initial = {}, replacement = {};
+            const table = new WebAssembly.Table({ element: "externref", initial: 1, maximum: 3 }, initial);
+            const module = new WebAssembly.Module(bytes);
+            let sibling, observed = false;
+            const instance = new WebAssembly.Instance(module, { host: { table, observe() {
+                observed = table.get(0) === replacement && sibling.exports.read() === replacement;
+            } } });
+            sibling = new WebAssembly.Instance(module, { host: { table, observe() {} } });
+            const before = instance.exports.read() === initial;
+            instance.exports.write(replacement);
+            const previous = instance.exports.grow(replacement);
+            const exported = instance.exports.table;
+            instance.dispose(); sibling.dispose();
+            const retained = exported.get(0) === replacement;
+            exported.set(0, undefined);
+            return [before, observed, previous, table.length, retained, table.get(0) === undefined];
+        }
+    "#), 1);
+    assert_eq!(call("wasmSharedTableAuthority", "[]"), "[true,true,1,2,true,true]");
+}
+
+// Unrun regression target: failed Table growth preserves contents and identity.
+#[test]
+fn webassembly_native_table_failed_growth() {
+    assert_eq!(load(r#"
+        function wasmTableFailedGrowth() {
+            const bytes = new TextEncoder().encode('(module (func (export "value") (result i32) i32.const 42))');
+            const instance = new WebAssembly.Instance(new WebAssembly.Module(bytes));
+            const fn = instance.exports.value;
+            const table = new WebAssembly.Table({ element: "anyfunc", initial: 1, maximum: 1 }, fn);
+            let rejected = false;
+            try { table.grow(1, fn); } catch (error) { rejected = error instanceof RangeError; }
+            return [rejected, table.length, table.get(0) === fn, table.get(0)()];
+        }
+    "#), 1);
+    assert_eq!(call("wasmTableFailedGrowth", "[]"), "[true,1,true,42]");
+}
+
+// Unrun regression target: standalone and exported aliases retain function execution.
+#[test]
+fn webassembly_table_functions_survive_instance_disposal() {
+    assert_eq!(load(r#"
+        function wasmTableRetainedFunctions() {
+            const bytes = new TextEncoder().encode(`(module
+                (import "host" "table" (table 1 funcref))
+                (export "table" (table 0))
+                (func $value (result i32) i32.const 42)
+                (elem (i32.const 0) $value))`);
+            const table = new WebAssembly.Table({ element: "anyfunc", initial: 1 });
+            const instance = new WebAssembly.Instance(new WebAssembly.Module(bytes), { host: { table } });
+            const exported = instance.exports.table;
+            instance.dispose();
+            const first = table.get(0), second = exported.get(0);
+            const producer = new WebAssembly.Instance(new WebAssembly.Module(
+                new TextEncoder().encode('(module (func (export "value") (result i32) i32.const 7))')));
+            const original = producer.exports.value;
+            const foreign = new WebAssembly.Table({ element: "anyfunc", initial: 1 }, original);
+            producer.dispose();
+            return [first(), second(), first === second, foreign.get(0) === original, foreign.get(0)()];
+        }
+    "#), 1);
+    assert_eq!(call("wasmTableRetainedFunctions", "[]"), "[42,42,true,true,7]");
+}
+
+// Unrun regression target: native table.copy preserves foreign function identity.
+#[test]
+fn webassembly_table_copy_preserves_foreign_function_owner() {
+    assert_eq!(load(r#"
+        function wasmTableCopiedFunction() {
+            const producer = new WebAssembly.Instance(new WebAssembly.Module(
+                new TextEncoder().encode('(module (func (export "value") (result i32) i32.const 19))')));
+            const original = producer.exports.value;
+            const source = new WebAssembly.Table({ element: "anyfunc", initial: 1 }, original);
+            const target = new WebAssembly.Table({ element: "anyfunc", initial: 1 });
+            const bytes = new TextEncoder().encode(`(module
+                (import "host" "source" (table $source 1 funcref))
+                (import "host" "target" (table $target 1 funcref))
+                (func (export "copy")
+                    i32.const 0 i32.const 0 i32.const 1 table.copy $target $source))`);
+            const copier = new WebAssembly.Instance(new WebAssembly.Module(bytes), { host: { source, target } });
+            copier.exports.copy();
+            producer.dispose(); copier.dispose();
+            return [target.get(0) === original, target.get(0)()];
+        }
+    "#), 1);
+    assert_eq!(call("wasmTableCopiedFunction", "[]"), "[true,19]");
+}
+
+// Unrun: module-owned exported tables can exchange a JS-origin funcref.
+#[test]
+fn webassembly_exported_table_copy_preserves_foreign_identity() {
+    assert_eq!(load(r#"
+        function wasmExportedTableCopiedFunction() {
+            const producer = new WebAssembly.Instance(new WebAssembly.Module(
+                new TextEncoder().encode('(module (func (export "value") (result i32) i32.const 23))')));
+            const original = producer.exports.value;
+            const bytes = new TextEncoder().encode(`(module
+                (table $source (export "source") 1 funcref)
+                (table $target (export "target") 1 funcref)
+                (func (export "copy")
+                    i32.const 0 i32.const 0 i32.const 1 table.copy $target $source))`);
+            const copier = new WebAssembly.Instance(new WebAssembly.Module(bytes));
+            const source = copier.exports.source, target = copier.exports.target;
+            source.set(0, original); copier.exports.copy();
+            // Simulate the source wrapper's finalizer before reading its target.
+            __thaw_wasm_release('table', Number(source.__thawName));
+            producer.dispose(); copier.dispose();
+            return [target.get(0) === original, target.get(0)()];
+        }
+    "#), 1);
+    assert_eq!(call("wasmExportedTableCopiedFunction", "[]"), "[true,23]");
+}
+
+// Unrun: a start callback observes copied identity before instantiate returns.
+#[test]
+fn webassembly_start_callback_observes_copied_table_identity() {
+    assert_eq!(load(r#"
+        function wasmStartCopiedTableFunction() {
+            const producer = new WebAssembly.Instance(new WebAssembly.Module(
+                new TextEncoder().encode('(module (func (export "value") (result i32) i32.const 29))')));
+            const original = producer.exports.value;
+            const source = new WebAssembly.Table({ element: "anyfunc", initial: 1 }, original);
+            const target = new WebAssembly.Table({ element: "anyfunc", initial: 1 });
+            let observed = false;
+            const bytes = new TextEncoder().encode(`(module
+                (import "host" "source" (table $source 1 funcref))
+                (import "host" "target" (table $target 1 funcref))
+                (import "host" "observe" (func $observe))
+                (func $start
+                    i32.const 0 i32.const 0 i32.const 1 table.copy $target $source
+                    call $observe)
+                (start $start))`);
+            const copier = new WebAssembly.Instance(new WebAssembly.Module(bytes),
+                { host: { source, target, observe() { observed = target.get(0) === original; } } });
+            producer.dispose(); copier.dispose();
+            return [observed, target.get(0) === original, target.get(0)()];
+        }
+    "#), 1);
+    assert_eq!(call("wasmStartCopiedTableFunction", "[]"), "[true,true,29]");
+}
+
+// Unrun: element/start writes survive a trapping start, including callable code.
+#[test]
+fn webassembly_failed_start_preserves_imported_table_function() {
+    assert_eq!(load(r#"
+        function wasmFailedStartTableFunction() {
+            const table = new WebAssembly.Table({ element: "anyfunc", initial: 1 });
+            const bytes = new TextEncoder().encode(`(module
+                (import "host" "table" (table $table 1 funcref))
+                (func $value (result i32) i32.const 31)
+                (elem (i32.const 0) $value)
+                (func $start unreachable)
+                (start $start))`);
+            let trapped = false;
+            try { new WebAssembly.Instance(new WebAssembly.Module(bytes), { host: { table } }); }
+            catch (error) { trapped = error instanceof WebAssembly.RuntimeError; }
+            const value = table.get(0);
+            return [trapped, typeof value, value()];
+        }
+    "#), 1);
+    assert_eq!(call("wasmFailedStartTableFunction", "[]"), "[true,\"function\",31]");
+}
+
+// Unrun: a failed start must not discard a callback stored in an imported Table.
+#[test]
+fn webassembly_failed_start_keeps_imported_callback_identity() {
+    assert_eq!(load(r#"
+        function wasmFailedStartImportedCallback() {
+            const table = new WebAssembly.Table({ element: "anyfunc", initial: 1 });
+            const callback = () => 37;
+            const bytes = new TextEncoder().encode(`(module
+                (import "host" "table" (table $table 1 funcref))
+                (import "host" "callback" (func $callback (result i32)))
+                (elem (i32.const 0) $callback)
+                (func $start unreachable)
+                (start $start))`);
+            let trapped = false;
+            try { new WebAssembly.Instance(new WebAssembly.Module(bytes), { host: { table, callback } }); }
+            catch (error) { trapped = error instanceof WebAssembly.RuntimeError; }
+            return [trapped, table.get(0) === callback, table.get(0)()];
+        }
+    "#), 1);
+    assert_eq!(call("wasmFailedStartImportedCallback", "[]"), "[true,true,37]");
+}
+
+// Unrun: a function first read during start keeps that callable after publish.
+#[test]
+fn webassembly_start_native_table_function_keeps_identity() {
+    assert_eq!(load(r#"
+        function wasmStartNativeTableIdentity() {
+            const table = new WebAssembly.Table({ element: "anyfunc", initial: 1 });
+            let during;
+            const bytes = new TextEncoder().encode(`(module
+                (import "host" "table" (table $table 1 funcref))
+                (import "host" "observe" (func $observe))
+                (func $value (result i32) i32.const 41)
+                (export "value" (func $value))
+                (elem (i32.const 0) $value)
+                (func $start call $observe)
+                (start $start))`);
+            const instance = new WebAssembly.Instance(new WebAssembly.Module(bytes),
+                { host: { table, observe() { during = table.get(0); } } });
+            const after = table.get(0);
+            instance.dispose();
+            return [during === after, after === instance.exports.value, after()];
+        }
+    "#), 1);
+    assert_eq!(call("wasmStartNativeTableIdentity", "[]"), "[true,true,41]");
+}
+
+// Unrun: a funcref argument can be written by guest code into an already
+// exported Table; no JavaScript Table.set observes that write.
+#[test]
+fn webassembly_guest_table_write_preserves_foreign_argument_identity() {
+    assert_eq!(load(r#"
+        function wasmGuestTableWriteIdentity() {
+            const producer = new WebAssembly.Instance(new WebAssembly.Module(
+                new TextEncoder().encode('(module (func (export "value") (result i32) i32.const 43))')));
+            const original = producer.exports.value;
+            const bytes = new TextEncoder().encode(`(module
+                (table $table (export "table") 1 funcref)
+                (func (export "put") (param funcref)
+                    i32.const 0 local.get 0 table.set $table))`);
+            const consumer = new WebAssembly.Instance(new WebAssembly.Module(bytes));
+            const table = consumer.exports.table;
+            consumer.exports.put(original);
+            producer.dispose(); consumer.dispose();
+            return [table.get(0) === original, table.get(0)()];
+        }
+    "#), 1);
+    assert_eq!(call("wasmGuestTableWriteIdentity", "[]"), "[true,43]");
+}
+
+// Unrun: retained instances must not keep themselves alive through their own
+// Table provenance once the last externally owned Table has been released.
+#[test]
+fn webassembly_table_owner_claims_retire_after_last_table() {
+    assert_eq!(load(r#"
+        function wasmTableOwnerClaimsRetire() {
+            const before = JSON.parse(__thaw_wasm_reference_stats()).imports;
+            const producer = new WebAssembly.Instance(new WebAssembly.Module(
+                new TextEncoder().encode('(module (func (export "value") (result i32) i32.const 47))')));
+            const source = new WebAssembly.Table({ element: 'anyfunc', initial: 1 }, producer.exports.value);
+            const bytes = new TextEncoder().encode(`(module
+                (import "host" "source" (table 1 funcref)))`);
+            const consumer = new WebAssembly.Instance(new WebAssembly.Module(bytes), { host: { source } });
+            producer.dispose(); consumer.dispose();
+            const held = JSON.parse(__thaw_wasm_reference_stats()).imports > before;
+            __thaw_wasm_release('table', Number(source.__thawName));
+            return [held, JSON.parse(__thaw_wasm_reference_stats()).imports === before];
+        }
+    "#), 1);
+    assert_eq!(call("wasmTableOwnerClaimsRetire", "[]"), "[true,true]");
+}
+
+// Unrun: updating an imported Table after instantiation must also update the
+// guest's return decoder, which otherwise sees only its original snapshot.
+#[test]
+fn webassembly_imported_table_late_set_preserves_guest_return_identity() {
+    assert_eq!(load(r#"
+        function wasmImportedTableLateSetIdentity() {
+            const producer = new WebAssembly.Instance(new WebAssembly.Module(
+                new TextEncoder().encode('(module (func (export "value") (result i32) i32.const 53))')));
+            const original = producer.exports.value;
+            const table = new WebAssembly.Table({ element: 'anyfunc', initial: 1 });
+            const bytes = new TextEncoder().encode(`(module
+                (import "host" "table" (table $table 1 funcref))
+                (func (export "fetch") (result funcref)
+                    i32.const 0 table.get $table))`);
+            const consumer = new WebAssembly.Instance(new WebAssembly.Module(bytes), { host: { table } });
+            table.set(0, original);
+            const returned = consumer.exports.fetch();
+            producer.dispose(); consumer.dispose();
+            return [returned === original, table.get(0) === original, returned()];
+        }
+    "#), 1);
+    assert_eq!(call("wasmImportedTableLateSetIdentity", "[]"), "[true,true,53]");
+}
+
+// Unrun: a trapping start's callback claim retires when its final Table slot
+// is cleared, even though the Table wrapper itself remains live.
+#[test]
+fn webassembly_failed_start_last_slot_clear_retires_callback() {
+    assert_eq!(load(r#"
+        function wasmFailedStartLastSlotRetires() {
+            const before = JSON.parse(__thaw_wasm_reference_stats()).imports;
+            const table = new WebAssembly.Table({ element: 'anyfunc', initial: 1 });
+            const callback = () => 61;
+            const bytes = new TextEncoder().encode(`(module
+                (import "host" "table" (table $table 1 funcref))
+                (import "host" "callback" (func $callback (result i32)))
+                (elem (i32.const 0) $callback)
+                (func $start unreachable) (start $start))`);
+            try { new WebAssembly.Instance(new WebAssembly.Module(bytes), { host: { table, callback } }); }
+            catch (error) { if (!(error instanceof WebAssembly.RuntimeError)) throw error; }
+            const held = table.get(0) === callback && JSON.parse(__thaw_wasm_reference_stats()).imports > before;
+            table.set(0, null);
+            return [held, table.length, JSON.parse(__thaw_wasm_reference_stats()).imports === before];
+        }
+    "#), 1);
+    assert_eq!(call("wasmFailedStartLastSlotRetires", "[]"), "[true,1,true]");
+}
+
+// Unrun: guest table.set bypasses JS setters; the call-exit sweep sees its
+// final-slot removal before a disposed instance can retain stale imports.
+#[test]
+fn webassembly_guest_last_slot_clear_retires_callback() {
+    assert_eq!(load(r#"
+        function wasmGuestLastSlotRetires() {
+            const before = JSON.parse(__thaw_wasm_reference_stats()).imports;
+            const table = new WebAssembly.Table({ element: 'anyfunc', initial: 1 });
+            const callback = () => 67;
+            const bytes = new TextEncoder().encode(`(module
+                (import "host" "table" (table $table 1 funcref))
+                (import "host" "callback" (func $callback (result i32)))
+                (elem (i32.const 0) $callback)
+                (func (export "clear") i32.const 0 ref.null func table.set $table))`);
+            const instance = new WebAssembly.Instance(new WebAssembly.Module(bytes), { host: { table, callback } });
+            const held = table.get(0) === callback;
+            instance.exports.clear(); instance.dispose();
+            return [held, table.get(0) === null, JSON.parse(__thaw_wasm_reference_stats()).imports === before];
+        }
+    "#), 1);
+    assert_eq!(call("wasmGuestLastSlotRetires", "[]"), "[true,true,true]");
+}
+
+// Unrun metadata control: a state that still holds the first group must
+// resolve through two nested callback merges to the current owner/reference.
+#[test]
+fn webassembly_nested_table_group_redirects_old_state() {
+    let mut registry = WasmTable::default();
+    let group = |owner: u32| (
+        std::rc::Rc::new(std::cell::RefCell::new(std::collections::HashSet::from([owner]))),
+        std::rc::Rc::new(std::cell::RefCell::new(HashMap::<String, (u32, u32)>::new())),
+    );
+    let first = group(1);
+    let second = group(2);
+    let third = group(3);
+    let merged = wasm_join_function_groups(
+        &mut registry, &first.0, &first.1, &second.0, &second.1,
+    );
+    let latest = wasm_join_function_groups(
+        &mut registry, &merged.0, &merged.1, &third.0, &third.1,
+    );
+    let resolved = wasm_resolve_table_group(&registry, &first);
+    assert!(std::rc::Rc::ptr_eq(&resolved.0, &latest.0));
+    assert_eq!(*resolved.0.borrow(), std::collections::HashSet::from([1, 2, 3]));
+}
