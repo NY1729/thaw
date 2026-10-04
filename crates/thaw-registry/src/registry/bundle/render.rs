@@ -666,6 +666,25 @@ fn render_bundle_mode(main_key: &str, modules: &[BundledModule], mixed: Option<&
         function onAbort() { if (active && typeof active.destroy === 'function') active.destroy(); finishReject(aborted()); }
         if (request.signal) request.signal.addEventListener('abort', onAbort, { once: true });
         var initialHeaders = {}; request.headers.forEach(function(value, name) { initialHeaders[name] = value; }); if (initialHeaders['accept-encoding'] === undefined) initialHeaders['accept-encoding'] = 'gzip, deflate, br';
+        async function verifyIntegrity(response, url, redirected) {
+          var metadata = [], strongest = -1, algorithms = ['sha256', 'sha384', 'sha512'];
+          String(request.integrity).split(/[\t\n\f\r ]+/).forEach(function(item) {
+            var expression = item.split('?')[0], separator = expression.indexOf('-');
+            var algorithm = separator < 0 ? expression : expression.slice(0, separator), rank = algorithms.indexOf(algorithm);
+            if (rank < 0 || rank < strongest) return;
+            if (rank > strongest) { strongest = rank; metadata = []; }
+            metadata.push(separator < 0 ? '' : expression.slice(separator + 1).split('-')[0]);
+          });
+          var bytes = await response.bytes();
+          if (strongest >= 0) {
+            var digest = new Uint8Array(await crypto.subtle.digest(algorithms[strongest], bytes));
+            var actual = btoa(Array.from(digest, function(byte) { return String.fromCharCode(byte); }).join(''));
+            if (metadata.indexOf(actual) < 0) throw new TypeError('fetch integrity mismatch');
+          }
+          var verified = new Response(response.body === null ? null : bytes, { status: response.status, statusText: response.statusText, headers: response.headers });
+          if (globalThis.__thaw_set_response_metadata) globalThis.__thaw_set_response_metadata(verified, url, redirected);
+          return verified;
+        }
         function dispatch(url, method, bytes, redirected, headers) {
           var parsed;
           try { parsed = new URL(url); } catch (error) { finishReject(error); return; }
@@ -710,7 +729,11 @@ fn render_bundle_mode(main_key: &str, modules: &[BundledModule], mixed: Option<&
               try { response = new Response(stream, { status: status, statusText: incoming.statusMessage || '', headers: responseHeaders }); }
               catch (error) { finishReject(error); return; }
               if (globalThis.__thaw_set_response_metadata) globalThis.__thaw_set_response_metadata(response, parsed.href, redirected);
-              if (!settled) { settled = true; cleanup(); resolve(response); }
+              if (request.integrity) {
+                verifyIntegrity(response, parsed.href, redirected).then(function(verified) {
+                  if (!settled) { settled = true; cleanup(); resolve(verified); }
+                }, finishReject);
+              } else if (!settled) { settled = true; cleanup(); resolve(response); }
             });
             active.once('error', function(error) { var failure = new TypeError('fetch failed'); failure.cause = error; finishReject(failure); });
             if (bytes.length) active.write(bytes);
