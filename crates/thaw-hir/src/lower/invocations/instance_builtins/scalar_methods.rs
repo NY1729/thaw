@@ -334,7 +334,16 @@ impl<'a> FnLowerer<'a> {
                     }
                     let target_length = self.coerce_primitive_to_number(arguments[0].clone())?;
                     let pad = match arguments.get(1) {
-                        Some(pad) => self.coerce_primitive_to_string(pad.clone())?,
+                        Some(pad) => {
+                            let ty = self.infer_expr_type(pad)?;
+                            let missing = self.number_format_is_undefined(pad.clone(), &ty);
+                            HirExpr::Conditional(
+                                Box::new(missing),
+                                Box::new(HirExpr::Lit(HirLit::Str(" ".into()))),
+                                Box::new(self.coerce_primitive_to_string(pad.clone())?),
+                                HirType::Str,
+                            )
+                        },
                         None => HirExpr::Lit(HirLit::Str(" ".into())),
                     };
                     let suffix = if property.sym == *"padStart" {
