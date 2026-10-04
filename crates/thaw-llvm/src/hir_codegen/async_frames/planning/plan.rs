@@ -58,6 +58,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 Self::async_block_returns_on_all_paths(then_body)
                     && Self::async_block_returns_on_all_paths(else_body)
             }
+            HirStmt::Finally(body, _) => Self::async_block_returns_on_all_paths(body),
             HirStmt::Try(try_body, _, catch_body, _) => {
                 Self::async_block_returns_on_all_paths(try_body)
                     && Self::async_block_returns_on_all_paths(catch_body)
@@ -74,6 +75,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 .chain(else_body)
                 .any(Self::async_stmt_exits),
             HirStmt::While(_, body) => body.iter().any(Self::async_stmt_exits),
+            HirStmt::Finally(body, _) => body.iter().any(Self::async_stmt_exits),
             HirStmt::Try(try_body, _, catch_body, _) => try_body
                 .iter()
                 .chain(catch_body)
@@ -104,6 +106,7 @@ impl<'ctx> HirCompiler<'ctx> {
             await_next: None,
             resume_target: None,
             rejection_handler: None,
+            rejection_handler_authoritative: false,
         }];
         let mut found = false;
         let mut extra_locals = Vec::new();
@@ -144,6 +147,7 @@ impl<'ctx> HirCompiler<'ctx> {
                         catch_guard: catch_guard.clone(),
                         catch_binding: catch_name.clone(),
                         disable_guards: Vec::new(),
+                        parent: None,
                     };
                     for nested in try_body {
                         if let HirStmt::Try(inner_body, inner_catch_name, inner_catch_body, _) = nested
@@ -176,6 +180,7 @@ impl<'ctx> HirCompiler<'ctx> {
                                 catch_guard: inner_catch_guard.clone(),
                                 catch_binding: inner_catch_name.clone(),
                                 disable_guards: Vec::new(),
+                                parent: Some(Box::new(outer_handler.clone())),
                             };
                             for inner_stmt in inner_body {
                                 if let HirStmt::Try(
@@ -236,9 +241,11 @@ impl<'ctx> HirCompiler<'ctx> {
                                         &mut next_temporary,
                                         &mut next_guard,
                                     )?;
-                                    for segment in &mut segments[first_new..] {
-                                        if segment.rejection_handler.is_none() {
-                                            segment.rejection_handler = Some(inner_handler.clone());
+                                    if !matches!(inner_stmt, HirStmt::Finally(..)) {
+                                        for segment in &mut segments[first_new..] {
+                                            if !segment.rejection_handler_authoritative && segment.rejection_handler.is_none() {
+                                                segment.rejection_handler = Some(inner_handler.clone());
+                                            }
                                         }
                                     }
                                 }
@@ -299,11 +306,13 @@ impl<'ctx> HirCompiler<'ctx> {
                                         &mut next_guard,
                                     )?;
                                 }
-                                for segment in &mut segments[first_new..] {
-                                    let mut handler = outer_handler.clone();
-                                    handler.disable_guards.push(inner_catch_guard.clone());
-                                    if segment.rejection_handler.is_none() {
-                                        segment.rejection_handler = Some(handler);
+                                if !matches!(inner_stmt, HirStmt::Finally(..)) {
+                                    for segment in &mut segments[first_new..] {
+                                        let mut handler = outer_handler.clone();
+                                        handler.disable_guards.push(inner_catch_guard.clone());
+                                        if !segment.rejection_handler_authoritative && segment.rejection_handler.is_none() {
+                                            segment.rejection_handler = Some(handler);
+                                        }
                                     }
                                 }
                             }
@@ -342,9 +351,11 @@ impl<'ctx> HirCompiler<'ctx> {
                                 &mut next_temporary,
                                 &mut next_guard,
                             )?;
-                            for segment in &mut segments[first_new_segment..] {
-                                if segment.rejection_handler.is_none() {
-                                    segment.rejection_handler = Some(outer_handler.clone());
+                            if !matches!(nested, HirStmt::Finally(..)) {
+                                for segment in &mut segments[first_new_segment..] {
+                                    if !segment.rejection_handler_authoritative && segment.rejection_handler.is_none() {
+                                        segment.rejection_handler = Some(outer_handler.clone());
+                                    }
                                 }
                             }
                         }
@@ -406,6 +417,7 @@ impl<'ctx> HirCompiler<'ctx> {
                         await_next: None,
                         resume_target: None,
                         rejection_handler: None,
+                        rejection_handler_authoritative: false,
                     });
                     let mut rewritten_condition = cond.clone();
                     loop {
@@ -424,6 +436,7 @@ impl<'ctx> HirCompiler<'ctx> {
                             await_next: None,
                             resume_target: Some((temporary, ty)),
                             rejection_handler: None,
+                            rejection_handler_authoritative: false,
                         });
                     }
                     segments.last_mut().unwrap().stmts.push(HirStmt::Let(
@@ -521,6 +534,7 @@ impl<'ctx> HirCompiler<'ctx> {
                                     await_next: None,
                                     resume_target: None,
                                     rejection_handler: None,
+                                    rejection_handler_authoritative: false,
                                 });
                                 continue;
                             }
@@ -544,6 +558,7 @@ impl<'ctx> HirCompiler<'ctx> {
                                 await_next: None,
                                 resume_target: Some((temporary, ty)),
                                 rejection_handler: None,
+                                rejection_handler_authoritative: false,
                             });
                         }
                         segments.last_mut().unwrap().stmts.push(HirStmt::If(
@@ -563,6 +578,7 @@ impl<'ctx> HirCompiler<'ctx> {
                         await_next: None,
                         resume_target: None,
                         rejection_handler: None,
+                        rejection_handler_authoritative: false,
                     });
                     continue;
                 }
@@ -595,6 +611,7 @@ impl<'ctx> HirCompiler<'ctx> {
                             await_next: None,
                             resume_target: Some((temporary, ty)),
                             rejection_handler: None,
+                            rejection_handler_authoritative: false,
                         });
                     }
                     let guard = format!("__thaw_branch_{next_guard}");
@@ -656,6 +673,7 @@ impl<'ctx> HirCompiler<'ctx> {
                                         await_next: None,
                                         resume_target: None,
                                         rejection_handler: None,
+                                        rejection_handler_authoritative: false,
                                     });
                                     continue;
                                 }
@@ -683,6 +701,7 @@ impl<'ctx> HirCompiler<'ctx> {
                                     await_next: None,
                                     resume_target: Some((temporary, ty)),
                                     rejection_handler: None,
+                                    rejection_handler_authoritative: false,
                                 });
                             }
                             segments.last_mut().unwrap().stmts.push(HirStmt::If(
@@ -724,6 +743,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     await_next: None,
                     resume_target: target,
                     rejection_handler: None,
+                    rejection_handler_authoritative: false,
                 });
             } else {
                 let frame_names = self
@@ -751,6 +771,7 @@ impl<'ctx> HirCompiler<'ctx> {
                             await_next: None,
                             resume_target: Some((temporary, ty)),
                             rejection_handler: None,
+                            rejection_handler_authoritative: false,
                         });
                     }
                     segments.last_mut().unwrap().stmts.push(rewritten);

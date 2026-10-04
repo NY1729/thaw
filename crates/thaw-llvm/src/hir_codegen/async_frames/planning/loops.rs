@@ -105,6 +105,7 @@ impl<'ctx> HirCompiler<'ctx> {
             await_next: None,
             resume_target: None,
             rejection_handler: None,
+            rejection_handler_authoritative: false,
         });
 
         let mut rewritten_condition = cond.clone();
@@ -126,6 +127,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 await_next: None,
                 resume_target: Some((temporary, ty)),
                 rejection_handler: None,
+                rejection_handler_authoritative: false,
             });
         }
 
@@ -176,10 +178,11 @@ impl<'ctx> HirCompiler<'ctx> {
             await_next: None,
             resume_target: None,
             rejection_handler: None,
+            rejection_handler_authoritative: false,
         });
         if let Some(handler) = loop_rejection_handler {
             for segment in &mut segments[condition_state..] {
-                if segment.rejection_handler.is_none() {
+                if !segment.rejection_handler_authoritative && segment.rejection_handler.is_none() {
                     segment.rejection_handler = Some(handler.clone());
                 }
             }

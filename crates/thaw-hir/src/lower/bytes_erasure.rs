@@ -200,6 +200,7 @@ fn erase_stmt(stmt: &mut HirStmt) {
             erase_expr(cond);
             erase_stmts(body);
         }
+        HirStmt::Finally(body, _) => erase_stmts(body),
         HirStmt::Try(body, _, handler, _) => {
             erase_stmts(body);
             erase_stmts(handler);

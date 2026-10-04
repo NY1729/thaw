@@ -18,6 +18,7 @@ struct GeneratorBlock {
 struct GeneratorHandler {
     binding: String,
     entry: usize,
+    parent: Option<Box<GeneratorHandler>>,
 }
 
 struct GeneratorStateMachine<'a> {
@@ -179,6 +180,17 @@ impl<'a> GeneratorStateMachine<'a> {
                 handler,
                 cancel_target,
             )),
+            HirStmt::Finally(body, suspended) => {
+                let mut active = handler.clone();
+                for _ in 0..*suspended {
+                    active = active.and_then(|item| item.parent.map(|parent| *parent));
+                    // `active` is restored by the caller after this sequence.
+                }
+                self.sequence(
+                    body, continuation, break_target, continue_target,
+                    active, cancel_target,
+                )
+            }
             HirStmt::Try(try_body, catch_name, catch_body, _) => {
                 self.locals.push(HirStmt::Let(
                     catch_name.clone(),
@@ -212,6 +224,7 @@ impl<'a> GeneratorStateMachine<'a> {
                     Some(GeneratorHandler {
                         binding: catch_name.clone(),
                         entry: catch_entry,
+                        parent: handler.map(Box::new),
                     }),
                     nested_cancel,
                 )
@@ -288,6 +301,7 @@ fn generator_statements_emit_value(statements: &[HirStmt], values: &str) -> bool
                     generator_statements_emit_value(try_body, values)
                         || generator_statements_emit_value(catch_body, values)
                 }
+                HirStmt::Finally(body, _) => generator_statements_emit_value(body, values),
                 _ => false,
             }
     })

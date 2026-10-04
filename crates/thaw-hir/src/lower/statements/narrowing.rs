@@ -227,10 +227,6 @@ impl<'a> FnLowerer<'a> {
             return Ok(out);
         }
         using_disposals.reverse();
-        // A return expression is evaluated before the enclosing resources
-        // are disposed. Hoist it once so injecting the finalizer before the
-        // actual Return cannot observe mutations performed by a disposer.
-        let out = self.hoist_using_return_values(out)?;
         let mut name = "__thaw_using_finally".to_string();
         while self.scope.contains_key(&name) {
             name.push('_');
@@ -243,7 +239,7 @@ impl<'a> FnLowerer<'a> {
         );
         self.generator_finalizers
             .insert(catch_name.clone(), normal_disposal.clone());
-        let body = inject_finally_before_exits(out, &normal_disposal, false);
+        let body = self.inject_finally_before_exits(out, &normal_disposal, false, 1)?;
         // Every flag is initialized before any fallible acquisition in the Try.
         using_flags.push(HirStmt::Try(
             body,
@@ -263,40 +259,6 @@ impl<'a> FnLowerer<'a> {
                 Box::new(HirExpr::Lit(HirLit::Bool(false))))),
             disposal,
         ], Vec::new())
-    }
-
-    fn hoist_using_return_values(
-        &mut self,
-        statements: Vec<HirStmt>,
-    ) -> Result<Vec<HirStmt>, String> {
-        let mut lowered = Vec::new();
-        for statement in statements {
-            match statement {
-                HirStmt::Return(Some(value)) => {
-                    let ty = self.infer_expr_type(&value)?;
-                    let name = self.bind_local("__thaw_using_return", ty.clone());
-                    lowered.push(HirStmt::Let(name.clone(), ty, value));
-                    lowered.push(HirStmt::Return(Some(HirExpr::Var(name))));
-                }
-                HirStmt::If(condition, then_body, else_body) => lowered.push(HirStmt::If(
-                    condition,
-                    self.hoist_using_return_values(then_body)?,
-                    self.hoist_using_return_values(else_body)?,
-                )),
-                HirStmt::While(condition, body) => lowered.push(HirStmt::While(
-                    condition,
-                    self.hoist_using_return_values(body)?,
-                )),
-                HirStmt::Try(body, catch, catch_body, hidden) => lowered.push(HirStmt::Try(
-                    self.hoist_using_return_values(body)?,
-                    catch,
-                    self.hoist_using_return_values(catch_body)?,
-                    hidden,
-                )),
-                other => lowered.push(other),
-            }
-        }
-        Ok(lowered)
     }
 
     /// A nesting-safe `SuppressedError` combining a new `error` with the
@@ -415,6 +377,7 @@ impl<'a> FnLowerer<'a> {
                         collect(else_body, out, bare);
                     }
                     HirStmt::While(_, body) => collect(body, out, bare),
+                    HirStmt::Finally(body, _) => collect(body, out, bare),
                     HirStmt::Try(body, _, catch_body, _) => {
                         collect(body, out, bare);
                         collect(catch_body, out, bare);
@@ -486,6 +449,9 @@ impl<'a> FnLowerer<'a> {
                     }
                     HirStmt::While(_, loop_body) => {
                         collect(loop_body, yields, returns, yielded, returned)
+                    }
+                    HirStmt::Finally(body, _) => {
+                        collect(body, yields, returns, yielded, returned);
                     }
                     HirStmt::Try(try_body, _, catch_body, _) => {
                         collect(try_body, yields, returns, yielded, returned);

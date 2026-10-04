@@ -811,6 +811,62 @@ fn frame_split_runs_finally_before_catch_rethrow() {
 }
 
 #[test]
+fn rejected_await_in_finalizer_skips_its_remaining_statements() {
+    let source = r#"
+        async function main(): Promise<void> {
+            let cleanup = 0;
+            try {
+                try {
+                    return;
+                } finally {
+                    await Promise.reject("failed");
+                    cleanup++;
+                }
+            } catch (error) {
+                console.log(error, cleanup);
+            }
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "async_finalizer_rejection_guard"), "failed 0\n");
+}
+
+#[test]
+fn conditional_and_loop_exit_finalizers_bypass_source_catch_after_await() {
+    let source = r#"
+        let wrong = 0;
+        async function conditional(flag: boolean): Promise<number> {
+            try {
+                if (flag) return 1;
+                return 2;
+            } catch (error) {
+                wrong++;
+                return 3;
+            } finally {
+                await Promise.reject("override");
+            }
+        }
+        async function loop(flag: boolean): Promise<number> {
+            try {
+                while (flag) return 1;
+                return 2;
+            } catch (error) {
+                wrong++;
+                return 3;
+            } finally {
+                await Promise.reject("override");
+            }
+        }
+        async function main(): Promise<void> {
+            try { await conditional(true); } catch (error) { console.log(error, wrong); }
+            try { await conditional(false); } catch (error) { console.log(error, wrong); }
+            try { await loop(true); } catch (error) { console.log(error, wrong); }
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "nested_exit_finalizer_await_guard"),
+        "override 0\noverride 0\noverride 0\n");
+}
+
+#[test]
 fn frame_split_routes_inner_catch_rethrow_to_outer_catch() {
     let source = r#"
         async function main(): Promise<void> {
@@ -1394,4 +1450,121 @@ fn using_iteration_disposal_failure_does_not_repeat_after_continue() {
     "#;
     assert_eq!(compile_and_run(source, "using_iteration_once"),
         "body\ndispose first\ncaught first\n");
+}
+
+#[test]
+fn exit_finalizer_throw_bypasses_every_exited_catch() {
+    let source = r#"
+        function exit(): number {
+            try {
+                try { return 1; }
+                catch (inner) { console.log("wrong-inner"); return 2; }
+            } catch (outer) {
+                console.log("wrong-outer");
+                return 3;
+            } finally {
+                console.log("cleanup");
+                throw "override";
+            }
+        }
+        function main(): void {
+            try { console.log(exit()); }
+            catch (error) { console.log(error); }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "exit_finalizer_bypasses_all_catches"),
+        "cleanup\noverride\n",
+    );
+}
+
+#[test]
+fn finally_keeps_evaluated_return_and_break_order() {
+    let source = r#"
+        function value(): number {
+            let state: number = 1;
+            try { return state; }
+            finally { state = 2; }
+        }
+        function main(): void {
+            console.log(value());
+            let state: number = 0;
+            while (true) {
+                try { break; }
+                finally { state = 3; }
+            }
+            console.log(state);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "finally_exit_evaluation_order"), "1\n3\n");
+}
+
+#[test]
+fn frame_split_finalizer_rejection_bypasses_exited_catches() {
+    let source = r#"
+        async function value(): Promise<number> {
+            try {
+                try { await sleep(1); return 1; }
+                catch (inner) { console.log("wrong-inner"); return 2; }
+            } catch (outer) {
+                console.log("wrong-outer");
+                return 3;
+            } finally {
+                await sleep(1);
+                console.log("cleanup");
+                throw "override";
+            }
+        }
+        async function main(): Promise<void> {
+            try { await value(); }
+            catch (error) { console.log(error); }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "async_exit_finalizer_bypasses_all_catches"),
+        "cleanup\noverride\n",
+    );
+}
+
+#[test]
+fn throwing_source_catch_runs_finalizer_once_with_original_failure() {
+    let source = r#"
+        let cleanups: number = 0;
+        function fail(): number { throw "second"; }
+        function run(): number {
+            try { throw "first"; }
+            catch (first) { fail(); return 0; }
+            finally { cleanups += 1; }
+        }
+        function main(): void {
+            try { run(); }
+            catch (error) { console.log(error); }
+            console.log(cleanups);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "throwing_catch_finalizer_once"),
+        "second\n1\n",
+    );
+}
+
+#[test]
+fn source_catch_explicit_throw_does_not_rerun_finalizer_guard() {
+    let source = r#"
+        let cleanups: number = 0;
+        function run(): void {
+            try { throw "first"; }
+            catch (first) { throw "second"; }
+            finally { cleanups += 1; }
+        }
+        function main(): void {
+            try { run(); }
+            catch (error) { console.log(error); }
+            console.log(cleanups);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "catch_rethrow_finalizer_once"),
+        "second\n1\n",
+    );
 }

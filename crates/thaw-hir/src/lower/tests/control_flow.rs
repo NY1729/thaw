@@ -423,11 +423,127 @@ fn lowers_finally_onto_normal_return_and_rethrow_paths() {
     let HirStmt::Try(body, _, catch_body, _) = &program.functions[0].body[0] else {
         panic!("expected lowered try");
     };
-    assert!(matches!(body[0], HirStmt::Expr(_)));
-    assert!(matches!(body[1], HirStmt::Return(_)));
-    assert!(matches!(catch_body[0], HirStmt::Expr(_)));
-    assert!(matches!(catch_body.last(), Some(HirStmt::Throw(_))));
+    assert!(matches!(body.as_slice(), [HirStmt::Let(..), HirStmt::Finally(cleanup, 1), HirStmt::Return(Some(HirExpr::Var(_)))]
+        if matches!(cleanup.as_slice(), [HirStmt::Expr(_)])), "{body:?}");
+    let [HirStmt::Try(guarded, _, failure, _)] = catch_body.as_slice() else {
+        panic!("expected one synthetic source-catch guard: {catch_body:?}");
+    };
+    assert!(matches!(guarded.as_slice(),
+        [.., HirStmt::Try(captured, _, failed, _), HirStmt::Finally(_, 1), HirStmt::Finally(rethrow, 1)]
+            if matches!(captured.as_slice(), [HirStmt::Let(..)])
+                && matches!(failed.as_slice(), [HirStmt::Finally(_, 1), HirStmt::Finally(throw, 1)]
+                    if matches!(throw.as_slice(), [HirStmt::Throw(_)]))
+                && matches!(rethrow.as_slice(), [HirStmt::Throw(_)])), "{guarded:?}");
+    assert!(matches!(failure.as_slice(), [HirStmt::Let(..), HirStmt::Finally(_, 0), HirStmt::Throw(_)]), "{failure:?}");
     assert!(matches!(program.functions[0].body[1], HirStmt::Expr(_)));
+}
+
+#[test]
+fn finally_snapshots_return_and_throw_values_before_mutation() {
+    let program = lower(r#"
+        function returned(): number {
+            let value = 1;
+            try { return value; } finally { value = 2; }
+        }
+        function thrown(): void {
+            let value = "before";
+            try { throw "trigger"; }
+            catch (error) { throw value; }
+            finally { value = "after"; }
+        }
+    "#);
+    let returned = program.functions.iter().find(|function| function.name == "returned").unwrap();
+    let thrown = program.functions.iter().find(|function| function.name == "thrown").unwrap();
+    let HirStmt::Try(return_body, _, _, _) = &returned.body[1] else {
+        panic!("expected return try");
+    };
+    assert!(matches!(return_body.as_slice(),
+        [HirStmt::Let(_, _, HirExpr::Var(_)), HirStmt::Finally(_, 1), HirStmt::Return(Some(HirExpr::Var(_)))]),
+        "{return_body:?}");
+    let HirStmt::Try(_, _, throw_body, _) = &thrown.body[1] else {
+        panic!("expected throw try");
+    };
+    assert!(matches!(throw_body.as_slice(), [HirStmt::Try(guarded, _, failure, _)]
+        if matches!(guarded.as_slice(),
+            [.., HirStmt::Try(captured, _, failed, _), HirStmt::Finally(_, 1), HirStmt::Finally(rethrow, 1)]
+                if captured.len() == 7 && captured.iter().all(|stmt| matches!(stmt, HirStmt::Let(..)))
+                    && matches!(failed.as_slice(), [HirStmt::Finally(_, 1), HirStmt::Finally(throw, 1)]
+                        if matches!(throw.as_slice(), [HirStmt::Throw(_)]))
+                    && matches!(rethrow.as_slice(), [HirStmt::Throw(HirExpr::Call(callee, args))]
+                        if matches!(callee.as_ref(), HirExpr::Var(name)
+                            if name == "@@thaw_rethrow_pending_exception") && args.len() == 9))
+            && matches!(failure.as_slice(), [HirStmt::Let(..), HirStmt::Finally(_, 0), HirStmt::Throw(_)])),
+        "{throw_body:?}");
+}
+
+#[test]
+fn finally_runs_when_catch_exit_expression_itself_throws() {
+    let program = lower(r#"
+        function fail(): string { throw "expression failed"; }
+        function choose(): string {
+            try { throw "first"; }
+            catch (error) { return fail(); }
+            finally { console.log("cleanup"); }
+        }
+    "#);
+    let choose = program.functions.iter().find(|function| function.name == "choose").unwrap();
+    let HirStmt::Try(_, _, catch_body, _) = &choose.body[0] else {
+        panic!("expected try");
+    };
+    assert!(matches!(catch_body.as_slice(), [HirStmt::Try(guarded, _, failure, _)]
+        if matches!(guarded.as_slice(),
+            [.., HirStmt::Try(captured, _, failed, _), HirStmt::Finally(_, 1), HirStmt::Return(Some(HirExpr::Var(_)))]
+                if matches!(captured.as_slice(), [HirStmt::Let(_, _, HirExpr::Call(..))])
+                    && matches!(failed.as_slice(), [HirStmt::Finally(_, 1), HirStmt::Finally(throw, 1)]
+                        if matches!(throw.as_slice(), [HirStmt::Throw(_)])))
+            && matches!(failure.as_slice(), [HirStmt::Let(..), HirStmt::Finally(_, 0), HirStmt::Throw(_)])),
+        "{catch_body:?}");
+}
+
+#[test]
+fn finally_preserves_pending_throw_tuple_after_handled_inner_throw() {
+    let program = lower(r#"
+        function keep(): void {
+            try { throw "outer"; }
+            catch (error) { throw 17; }
+            finally { try { throw "inner"; } catch (ignored) {} }
+        }
+    "#);
+    let keep = program.functions.iter().find(|function| function.name == "keep").unwrap();
+    let HirStmt::Try(_, _, catch_body, _) = &keep.body[0] else {
+        panic!("expected try");
+    };
+    let [HirStmt::Try(guarded, _, _, _)] = catch_body.as_slice() else {
+        panic!("expected synthetic source-catch guard: {catch_body:?}");
+    };
+    let Some(HirStmt::Finally(rethrow, 1)) = guarded.last() else {
+        panic!("expected catch-exit rethrow after finalizer: {guarded:?}");
+    };
+    let [HirStmt::Throw(HirExpr::Call(callee, args))] = rethrow.as_slice() else {
+        panic!("expected pending-tuple rethrow: {rethrow:?}");
+    };
+    assert!(matches!(callee.as_ref(), HirExpr::Var(name)
+        if name == "@@thaw_rethrow_pending_exception"));
+    assert_eq!(args.len(), 9);
+}
+
+#[test]
+fn abrupt_finalizer_precedes_captured_return() {
+    let program = lower(r#"
+        function chosen(): number {
+            let value = 1;
+            try { return value; } finally { value = 2; return 3; }
+        }
+    "#);
+    let chosen = program.functions.iter().find(|function| function.name == "chosen").unwrap();
+    let HirStmt::Try(body, _, _, _) = &chosen.body[1] else {
+        panic!("expected try");
+    };
+    assert!(matches!(body.first(), Some(HirStmt::Let(_, _, HirExpr::Var(_)))), "{body:?}");
+    assert!(matches!(body.get(1), Some(HirStmt::Finally(finalizer, 1))
+        if matches!(finalizer.as_slice(), [HirStmt::Expr(_), HirStmt::Return(Some(HirExpr::Lit(HirLit::F64(_))))])),
+        "{body:?}");
+    assert!(matches!(body.last(), Some(HirStmt::Return(Some(HirExpr::Var(_))))), "{body:?}");
 }
 
 #[test]
@@ -534,4 +650,31 @@ fn inferred_block_arrow_includes_undefined_without_absorbing_nested_returns() {
         panic!("expected inferred block arrow");
     };
     assert_eq!(ret, &HirType::Union(vec![HirType::F64, HirType::Undefined]));
+}
+
+#[test]
+fn nested_exit_finalizer_suspends_both_exited_catches() {
+    fn contains_skip(stmts: &[HirStmt], expected: usize) -> bool {
+        stmts.iter().any(|stmt| match stmt {
+            HirStmt::Finally(_, count) if *count == expected => true,
+            HirStmt::Finally(body, _) | HirStmt::While(_, body) => {
+                contains_skip(body, expected)
+            }
+            HirStmt::If(_, yes, no) | HirStmt::Try(yes, _, no, _) => {
+                contains_skip(yes, expected) || contains_skip(no, expected)
+            }
+            _ => false,
+        })
+    }
+    let program = lower(r#"
+        function value(): number {
+            try {
+                try { return 1; }
+                catch (inner) { return 2; }
+            } catch (outer) { return 3; }
+            finally { throw "override"; }
+        }
+    "#);
+    let value = program.functions.iter().find(|function| function.name == "value").unwrap();
+    assert!(contains_skip(&value.body, 2), "{:#?}", value.body);
 }
