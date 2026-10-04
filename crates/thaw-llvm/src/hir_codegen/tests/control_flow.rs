@@ -1568,3 +1568,26 @@ fn source_catch_explicit_throw_does_not_rerun_finalizer_guard() {
         "second\n1\n",
     );
 }
+
+#[test]
+fn labeled_do_while_continue_checks_outer_condition_and_exits_outer_loop() {
+    let source = r#"
+        let checks = 0;
+        function condition(): boolean { checks++; return checks < 2; }
+        function main(): void {
+            let entries = 0;
+            outer: do {
+                entries++;
+                while (true) {
+                    while (true) { continue outer; }
+                }
+                console.log("unreachable");
+            } while (condition());
+            console.log(entries, checks);
+            let ordinary = 0;
+            do { ordinary++; continue; } while (ordinary < 2);
+            console.log(ordinary);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "do_while_continue_depth"), "2 2\n2\n");
+}
