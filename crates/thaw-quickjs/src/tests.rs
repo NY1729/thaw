@@ -8094,3 +8094,19 @@ fn webassembly_table_reference_defaults() {
     "#), 1);
     assert_eq!(call("wasmTableDefaults", "[]"), "[true,true,true,true,true,true,true,true]");
 }
+
+// Unrun regression target: Table.set converts reference value before bounds error.
+#[test]
+fn webassembly_table_set_reference_before_bounds() {
+    assert_eq!(load(r#"
+        function wasmTableSetOrder() {
+            const table = new WebAssembly.Table({ element: "anyfunc", initial: 0 });
+            let invalidValue = false, validValue = false, invalidIndex = false;
+            try { table.set(0, undefined); } catch (error) { invalidValue = error instanceof TypeError; }
+            try { table.set(0, null); } catch (error) { validValue = error instanceof RangeError; }
+            try { table.set(-1, undefined); } catch (error) { invalidIndex = error instanceof TypeError; }
+            return [invalidValue, validValue, invalidIndex];
+        }
+    "#), 1);
+    assert_eq!(call("wasmTableSetOrder", "[]"), "[true,true,true]");
+}
