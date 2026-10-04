@@ -1902,6 +1902,7 @@ impl NumericProgram {
                     if let Some(fallthrough) = fallthrough {
                         patch_near_jump(&mut code, fallthrough)?;
                     }
+                    switch.has_case = true;
                     switch.has_default = true;
                     switch.default_body = Some(body);
                 }
