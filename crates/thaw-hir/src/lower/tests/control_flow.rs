@@ -678,3 +678,17 @@ fn nested_exit_finalizer_suspends_both_exited_catches() {
     let value = program.functions.iter().find(|function| function.name == "value").unwrap();
     assert!(contains_skip(&value.body, 2), "{:#?}", value.body);
 }
+
+#[test]
+fn rethrow_tag_preserves_object_text_in_catch_binding() {
+    for source_name in ["error_object", "error_object_object"] {
+        let source = format!("function main(): void {{ try {{ throw 42; }} catch ({source_name}) {{ throw {source_name}; }} }}");
+        let program = lower(&source);
+        let HirStmt::Try(_, binding, catch_body, _) = &program.functions[0].body[0] else {
+            panic!("expected catch");
+        };
+        let body = format!("{catch_body:?}");
+        assert!(body.contains(&format!("Var(\"{binding}__thaw_exception_object\")")), "{body}");
+        assert!(body.contains(&format!("Var(\"{binding}__thaw_exception_tag\")")), "{body}");
+    }
+}

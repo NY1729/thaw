@@ -2497,7 +2497,7 @@ impl<'a> FnLowerer<'a> {
                     let name = self.resolve_binding(ident.sym.as_ref());
                     self.catch_bindings
                         .contains(&name)
-                        .then(|| format!("{name}__thaw_exception_object"))
+                        .then(|| (format!("{name}__thaw_exception_object"), format!("{name}__thaw_exception_tag")))
                 });
                 let value = self.lower_expr(&throw_stmt.arg)?;
                 let value_type = self.infer_expr_type(&value)?;
@@ -2518,8 +2518,7 @@ impl<'a> FnLowerer<'a> {
                         args,
                     ))]);
                 }
-                if let Some(object_name) = rethrow_object {
-                    let tag_name = object_name.replace("_object", "_tag");
+                if let Some((object_name, tag_name)) = rethrow_object {
                     self.scope
                         .insert(object_name.clone(), HirType::Object(Vec::new()));
                     self.scope.insert(tag_name.clone(), HirType::I64);
