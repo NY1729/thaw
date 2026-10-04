@@ -191,7 +191,16 @@ impl<'a> FnLowerer<'a> {
                                     branches.push(branch);
                                 }
                                 let result = self.merge_union_array_method_branches(&receiver_name, members, branches)?;
-                                return self.wrap_call_argument_bindings(result, &[(receiver_name, receiver_type, receiver)]);
+                                let mut bindings = vec![(receiver_name, receiver_type, receiver)];
+                                if let Some(value) = comparator {
+                                    if self.infer_expr_type(&value)? == HirType::Undefined {
+                                        let argument_name = format!("__thaw_sort_argument_{}", self.next_binding);
+                                        self.next_binding += 1;
+                                        self.scope.insert(argument_name.clone(), HirType::Undefined);
+                                        bindings.push((argument_name, HirType::Undefined, value));
+                                    }
+                                }
+                                return self.wrap_call_argument_bindings(result, &bindings);
                             }
                         }
                     }
