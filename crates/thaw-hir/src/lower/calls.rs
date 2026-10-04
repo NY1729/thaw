@@ -134,6 +134,53 @@ impl<'a> FnLowerer<'a> {
         value: HirExpr,
         ty: &HirType,
     ) -> Result<HirExpr, String> {
+        if matches!(ty, HirType::Optional(_) | HirType::Nullable(_)
+            | HirType::Nullish(_) | HirType::Union(_)) {
+            let name = format!("__thaw_object_tagged_to_string_{}", self.next_binding);
+            self.next_binding += 1;
+            self.scope.insert(name.clone(), ty.clone());
+            let bound = HirExpr::Var(name.clone());
+            let tag = |text: &str| HirExpr::Lit(HirLit::Str(format!("[object {text}]")));
+            let choose = |test, yes, no| HirExpr::Conditional(
+                Box::new(test), Box::new(yes), Box::new(no), HirType::Str,
+            );
+            let result = match ty {
+                HirType::Optional(payload) => choose(
+                    HirExpr::OptionalIsNone(Box::new(bound.clone()), payload.as_ref().clone()),
+                    tag("Undefined"), self.object_prototype_to_string_tag(
+                        HirExpr::OptionalValue(Box::new(bound), payload.as_ref().clone()), payload)?,
+                ),
+                HirType::Nullable(payload) => choose(
+                    HirExpr::NullableIsNone(Box::new(bound.clone()), payload.as_ref().clone()),
+                    tag("Null"), self.object_prototype_to_string_tag(
+                        HirExpr::NullableValue(Box::new(bound), payload.as_ref().clone()), payload)?,
+                ),
+                HirType::Nullish(payload) => choose(
+                    HirExpr::NullishIsUndefined(Box::new(bound.clone()), payload.as_ref().clone()),
+                    tag("Undefined"), choose(
+                        HirExpr::NullishIsNull(Box::new(bound.clone()), payload.as_ref().clone()),
+                        tag("Null"), self.object_prototype_to_string_tag(
+                            HirExpr::NullishValue(Box::new(bound), payload.as_ref().clone()), payload)?,
+                    ),
+                ),
+                HirType::Union(members) => {
+                    let mut result = tag("Object");
+                    for (index, member) in members.iter().enumerate().rev() {
+                        result = choose(
+                            HirExpr::BinOp(BinOp::EqEqEq,
+                                Box::new(HirExpr::UnionTag(Box::new(bound.clone()), members.clone())),
+                                Box::new(HirExpr::Lit(HirLit::F64(index as f64)))),
+                            self.object_prototype_to_string_tag(
+                                HirExpr::UnionValue(Box::new(bound.clone()), index, members.clone()), member)?,
+                            result,
+                        );
+                    }
+                    result
+                }
+                _ => unreachable!(),
+            };
+            return self.wrap_call_argument_bindings(result, &[(name, ty.clone(), value)]);
+        }
         if let HirType::Object(_) = ty {
             if ty != &date_object_type() && ty != &regex_object_type() {
                 let tag_property = well_known_symbol_key("toStringTag");
@@ -180,7 +227,7 @@ impl<'a> FnLowerer<'a> {
             _ if *ty == date_object_type() => "Date",
             _ if *ty == regex_object_type() => "RegExp",
             HirType::F64 => "Number",
-            HirType::Str => "String",
+            HirType::Str | HirType::StrLiteral(_) => "String",
             HirType::Bool => "Boolean",
             HirType::Map(_, _) => "Map",
             HirType::WeakMap(_, _) => "WeakMap",
