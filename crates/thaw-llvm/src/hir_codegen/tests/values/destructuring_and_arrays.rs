@@ -949,3 +949,29 @@ fn any_array_search_checks_host_query_failure_before_returning() {
         }
     }
 }
+
+#[test]
+fn union_array_sort_evaluates_undefined_comparator_after_receiver_once() {
+    let source = r#"
+        function values(text: boolean): number[] | string[] {
+            console.log("receiver");
+            if (text) return ["b", "a"];
+            return [2, 1];
+        }
+        function argument(fail: boolean): undefined {
+            console.log("argument");
+            if (fail) throw "argument failed";
+            return undefined;
+        }
+        function main(): void {
+            values(false).sort(argument(false));
+            values(true).toSorted(argument(false));
+            try { values(false).sort(argument(true)); }
+            catch (error) { console.log("caught"); }
+            try { values(true).toSorted(argument(true)); }
+            catch (error) { console.log("caught"); }
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "union_sort_undefined_argument"),
+        "receiver\nargument\nreceiver\nargument\nreceiver\nargument\ncaught\nreceiver\nargument\ncaught\n");
+}
