@@ -48,6 +48,85 @@ fn process_builtin_polyfill_actually_runs_through_quickjs() {
 }
 
 #[test]
+fn async_describe_keeps_declaration_scope_across_await() {
+    use std::ffi::{CStr, CString};
+
+    let dir = temp_registry("builtin_test_async_describe");
+    fs::write(
+        dir.join("index.js"),
+        r#"var test = require('node:test');
+module.exports = async function () {
+  var effects = [];
+  var first = test.describe('first', async function () {
+    await Promise.resolve();
+    test.before(function () { effects.push('first before'); });
+    test('late first', function () { effects.push('first case'); });
+    await test.describe('inner', async function () {
+      await Promise.resolve();
+      test('grandchild', function () { effects.push('grandchild'); });
+    });
+    test.describe('unawaited', async function () {
+      await Promise.resolve();
+      effects.push('unawaited declared');
+      test('late unawaited', function () { effects.push('late unawaited'); });
+    });
+  });
+  var second = test.describe('second', async function () {
+    await Promise.resolve();
+    test('late second', function () { effects.push('second case'); });
+  });
+  var outside = test('root case', function () { effects.push('root case'); });
+  var rejected = test.describe('rejected', async function () {
+    await Promise.resolve();
+    throw new Error('declaration failed');
+  });
+  var nestedRejected = test.describe('parent rejected', async function () {
+    test.before(function () { effects.push('failed parent hook ran'); });
+    await test.describe('child rejected', async function () {
+      test('invalid child body', function () { effects.push('invalid child body ran'); });
+      await Promise.resolve();
+      throw new Error('nested declaration failed');
+    });
+  });
+  var skipped = test.describe.skip('skipped', async function () {
+    await Promise.resolve();
+    test.before(function () { effects.push('skipped hook ran'); });
+    test('late skipped', function () { effects.push('skipped body ran'); });
+  });
+  var afterRejected = test('after rejection', function () { effects.push('after rejection'); });
+  var results = await Promise.all([first, second, outside, rejected, nestedRejected, skipped, afterRejected]);
+  var names = [], failedSuites = [], skippedSuites = [];
+  for await (var event of test.run()) {
+    if (event.type === 'test') names.push(event.fullName);
+    if (event.type === 'suite' && event.status === 'failed') failedSuites.push(event.name);
+    if (event.type === 'suite' && event.status === 'skipped') skippedSuites.push(event.name);
+  }
+  return [results.map(function (result) { return result.status; }), effects, names, failedSuites, skippedSuites];
+};"#,
+    ).unwrap();
+    let empty_node_modules = temp_registry("builtin_test_async_describe_modules");
+    let (bundle, _, file_count, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    assert!(file_count >= 4);
+    let script = format!(
+        "globalThis.module = {{ exports: {{}} }};\n\
+         globalThis.exports = globalThis.module.exports;\n\
+         globalThis.require = function(name) {{ throw new Error(\"require('\" + name + \"') is not supported\"); }};\n\
+         {bundle}\n\
+         globalThis.exerciseAsyncDescribe = module.exports;\n"
+    );
+    let source = CString::new(script).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let func = CString::new("exerciseAsyncDescribe").unwrap();
+    let args = CString::new("[]").unwrap();
+    let result_ptr = thaw_quickjs::thaw_js_call(func.as_ptr(), args.as_ptr());
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(result, r#"[["passed","passed","passed","failed","failed","skipped","passed"],["unawaited declared","first before","first case","grandchild","late unawaited","second case","root case","after rejection"],["first > late first","inner > grandchild","unawaited > late unawaited","second > late second","root case","after rejection"],["rejected","child rejected","parent rejected"],["skipped"]]"#);
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+}
+
+#[test]
 fn url_builtin_supports_legacy_parse_and_format() {
     use std::ffi::{CStr, CString};
 
@@ -1447,7 +1526,7 @@ fn node_test_runs_suites_hooks_mocks_and_reporters() {
     let empty_node_modules = temp_registry("builtin_node_test_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    assert_eq!(file_count, 5);
+    assert_eq!(file_count, 6);
     let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseNodeTest = module.exports;");
     let source = CString::new(script).unwrap();
     assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
