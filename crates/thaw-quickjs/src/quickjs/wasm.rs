@@ -1028,7 +1028,7 @@ fn wasm_global(instance_handle: u32, name: String, value: Option<String>) -> Str
         }
         let value = global.get(&record.store);
         match wasm_value(value, record) {
-            Ok(value) => serde_json::json!({ "ok": true, "value": value }).to_string(),
+            Ok(value) => serde_json::json!({ "ok": true, "value": value, "type": wasm_type_name(global.ty(&record.store).content()), "mutable": global.ty(&record.store).mutability().is_mut() }).to_string(),
             Err(error) => serde_json::json!({ "ok": false, "error": error }).to_string(),
         }
     })

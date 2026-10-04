@@ -7391,3 +7391,32 @@ fn webassembly_export_aliases_share_function_identity() {
     "#), 1);
     assert_eq!(call("wasmExportIdentity", "[]"), "[true,true,true,42,true,true,true,true,42,42]");
 }
+
+// Unrun regression: the same scalar conversion governs local and exported globals.
+#[test]
+fn webassembly_global_preserves_numeric_type_boundaries() {
+    assert_eq!(load(r#"
+        function wasmGlobalConversion() {
+            const rejects = action => { try { action(); return false; } catch (e) { return e instanceof TypeError; } };
+            const types = ['i32', 'i64', 'f32', 'f64'];
+            const constructorChecks = types.map(type => rejects(() => new WebAssembly.Global({ value: type }, type === 'i64' ? 1 : 1n)));
+            const globals = types.map(type => new WebAssembly.Global({ value: type, mutable: true }));
+            const localChecks = globals.map((global, i) => rejects(() => { global.value = types[i] === 'i64' ? { valueOf() { return 1; } } : { valueOf() { return 1n; } }; }));
+            const bytes = new TextEncoder().encode(`(module
+                (global (export "i32") (mut i32) (i32.const 0))
+                (global (export "i64") (mut i64) (i64.const 0))
+                (global (export "f32") (mut f32) (f32.const 0))
+                (global (export "f64") (mut f64) (f64.const 0))
+                (global (export "fixed") i32 (i32.const 0)))`);
+            const exported = new WebAssembly.Instance(new WebAssembly.Module(bytes)).exports;
+            const exportedChecks = types.map(type => rejects(() => { exported[type].value = type === 'i64' ? 1 : 1n; }));
+            let conversions = 0;
+            const immutable = rejects(() => { exported.fixed.value = { valueOf() { conversions++; return 1; } }; });
+            globals[1].value = { valueOf() { return 18446744073709551617n; } };
+            exported.i64.value = '7'; exported.i32.value = '9';
+            return [constructorChecks, localChecks, exportedChecks, immutable, conversions, globals[1].value.toString(), exported.i64.value.toString(), exported.i32.value,
+                rejects(() => new WebAssembly.Global({ value: 'i64' }, undefined)), new WebAssembly.Global({ value: 'externref' }).value === null];
+        }
+    "#), 1);
+    assert_eq!(call("wasmGlobalConversion", "[]"), "[[true,true,true,true],[true,true,true,true],[true,true,true,true],true,0,\"1\",\"7\",9,true,true]");
+}
