@@ -11365,3 +11365,22 @@ fn string_padding_undefined_uses_space_once() {
     "#;
     assert_eq!(compile_and_run(source, "string_pad_undefined"), "\"  x\"\n\"x  \"\n1\n");
 }
+
+#[test]
+fn number_nonfinite_formatting_preserves_digits_evaluation() {
+    let source = r#"
+        function digits(): number { console.log("digits"); return 101; }
+        function main(): void {
+            console.log((1 / 0).toPrecision(digits()));
+            console.log((-1 / 0).toExponential(digits()));
+            console.log((0 / 0).toPrecision(0));
+            console.log((0 / 0).toExponential(-1));
+            try { (1).toPrecision(101); } catch (error) { console.log("finite precision range"); }
+            try { (1).toExponential(-1); } catch (error) { console.log("finite exponential range"); }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "number_nonfinite_formatting"),
+        "digits\nInfinity\ndigits\n-Infinity\nNaN\nNaN\nfinite precision range\nfinite exponential range\n"
+    );
+}
