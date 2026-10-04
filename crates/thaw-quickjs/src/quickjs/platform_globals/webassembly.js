@@ -254,7 +254,7 @@
       if (!rawResult.ok) { __thaw_wasm_release_pending(JSON.stringify(linkage.functions.map(value => value.handle))); throw new WebAssembly.LinkError(rawResult.error); }
       const result = rawResult;
       Object.defineProperty(this, '__thawHandle', { value: result.handle });
-      const exports = {}, resources = pendingResources.map(resource => ({ value: resource.value, binding: resource.value.__thawBind(this.__thawHandle, resource.item.module, resource.item.name) }));
+      const exports = Object.create(null), resources = pendingResources.map(resource => ({ value: resource.value, binding: resource.value.__thawBind(this.__thawHandle, resource.item.module, resource.item.name) }));
       // Instantiation runs data segments and the start function before returning.
       // Adopt their imported-memory writes before any later call can sync an old buffer.
       for (const resource of resources) if (resource.value instanceof WasmMemory) resource.value.__thawRefresh(resource.binding);
