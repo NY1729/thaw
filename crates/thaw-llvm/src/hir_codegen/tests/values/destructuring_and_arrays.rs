@@ -783,3 +783,25 @@ fn comparator_sort_uses_snapshot_and_writes_back_only_on_success() {
     assert_eq!(compile_and_run(source, "sort_snapshot_mutation"),
         "true 2,1\n99,1\n2,1,3\n");
 }
+
+#[test]
+fn computed_dictionary_assignment_default_evaluates_key_once() {
+    let source = r#"
+        let calls = 0;
+        let defaults = 0;
+        function key(): string { calls++; return calls === 1 ? "a" : "b"; }
+        function fallback(): number { defaults++; return 99; }
+        function main(): void {
+            const present: Record<string, number> = { a: 7, b: 9 };
+            let result = 0;
+            ({ [key()]: result = fallback() } = present);
+            console.log(result, calls, defaults);
+            calls = 0;
+            const missing: Record<string, number> = { b: 9 };
+            ({ [key()]: result = fallback() } = missing);
+            console.log(result, calls, defaults);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "computed_dictionary_assignment_key_once"),
+        "7 1 0\n99 1 1\n");
+}
