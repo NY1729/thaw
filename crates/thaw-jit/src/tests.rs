@@ -979,6 +979,16 @@ mod tests {
         )
         .error
         .is_null());
+        for count in [-0.5, -0.0, 0.0, f64::NAN] {
+            let output = call(&repeat, &[f64::from_bits(repeated.as_ptr() as usize as u64), count]);
+            assert!(output.error.is_null());
+            let output = output.value.to_bits() as usize as *mut c_char;
+            assert_eq!(unsafe { CStr::from_ptr(output) }.to_bytes(), b"");
+            unsafe { libc::free(output.cast()) };
+        }
+        for count in [-1.5, f64::NEG_INFINITY, f64::INFINITY] {
+            assert!(!call(&repeat, &[f64::from_bits(repeated.as_ptr() as usize as u64), count]).error.is_null());
+        }
         let sliced = CString::new("😀abcd").unwrap();
         for (operation, start, expected) in [
             ("slice", -2.0, "cd"),
