@@ -35,6 +35,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 await_next: None,
                 resume_target: Some((temporary, ty)),
                 rejection_handler: None,
+                rejection_handler_authoritative: false,
             });
         }
         let then_guard = format!("__thaw_nested_then_{}", *next_guard);
@@ -124,6 +125,56 @@ impl<'ctx> HirCompiler<'ctx> {
         next_temporary: &mut usize,
         next_guard: &mut usize,
     ) -> Result<(), String> {
+        if let HirStmt::Finally(body, suspended) = stmt {
+            // Every statement of a resumed finalizer must bypass the catches
+            // whose try bodies are being exited. Give it a distinct guard so
+            // the original exit-expression guard retains its own handler.
+            let mut handler = rejection_handler;
+            let mut skipped_guards = Vec::new();
+            for _ in 0..*suspended {
+                handler = handler.and_then(|active| {
+                    skipped_guards.extend(active.disable_guards);
+                    skipped_guards.push(active.try_guard);
+                    skipped_guards.push(active.catch_guard);
+                    active.parent.map(|parent| *parent)
+                });
+            }
+            let active_guard = format!("__thaw_finally_active_{}", *next_guard);
+            *next_guard += 1;
+            if let Some(outer) = &mut handler {
+                outer.disable_guards.extend(skipped_guards);
+                // An escaping rejection or throw aborts the rest of this
+                // finalizer even when its suspended catches were skipped.
+                outer.disable_guards.push(active_guard.clone());
+            }
+            let current = segments.last_mut().unwrap();
+            current.stmts.push(HirStmt::Let(
+                active_guard.clone(), HirType::Bool, HirExpr::Lit(HirLit::Bool(false)),
+            ));
+            let activate = HirStmt::Expr(HirExpr::Assign(
+                active_guard.clone(), Box::new(HirExpr::Lit(HirLit::Bool(true))),
+            ));
+            current.stmts.push(HirStmt::If(
+                HirExpr::Var(guard.to_string()),
+                if expected { vec![activate.clone()] } else { Vec::new() },
+                if expected { Vec::new() } else { vec![activate] },
+            ));
+            let first_finalizer_segment = segments.len();
+            for nested in body {
+                self.append_guarded_async_stmt(
+                    segments, nested, &active_guard, true, loop_guards, frame_names,
+                    extra_locals, guarded_rethrow_handlers, handler.clone(),
+                    next_temporary, next_guard,
+                )?;
+            }
+            // An absent selected handler means the finalizer has exited all
+            // catches. Do not let a caller wrapping this Finally in If/While
+            // fill its resumed segments with the exited source handler.
+            for segment in &mut segments[first_finalizer_segment..] {
+                segment.rejection_handler_authoritative = true;
+            }
+            return Ok(());
+        }
         let first_new_segment = segments.len();
         if let Some(handler) = &rejection_handler {
             // The same guard also identifies synchronous exceptions raised while
@@ -229,10 +280,11 @@ impl<'ctx> HirCompiler<'ctx> {
                     await_next: None,
                     resume_target: None,
                     rejection_handler: None,
+                    rejection_handler_authoritative: false,
                 });
                 if let Some(handler) = rejection_handler {
                     for segment in &mut segments[first_new_segment..] {
-                        if segment.rejection_handler.is_none() {
+                        if !segment.rejection_handler_authoritative && segment.rejection_handler.is_none() {
                             segment.rejection_handler = Some(handler.clone());
                         }
                     }
@@ -259,6 +311,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 await_next: None,
                 resume_target: Some((temporary, ty)),
                 rejection_handler: None,
+                rejection_handler_authoritative: false,
             });
         }
         segments.last_mut().unwrap().stmts.push(HirStmt::If(
@@ -276,7 +329,7 @@ impl<'ctx> HirCompiler<'ctx> {
         ));
         if let Some(handler) = rejection_handler {
             for segment in &mut segments[first_new_segment..] {
-                if segment.rejection_handler.is_none() {
+                if !segment.rejection_handler_authoritative && segment.rejection_handler.is_none() {
                     segment.rejection_handler = Some(handler.clone());
                 }
             }

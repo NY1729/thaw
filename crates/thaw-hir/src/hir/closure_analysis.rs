@@ -193,6 +193,11 @@ fn collect_closure_captures_stmt(stmt: &HirStmt, names: &mut BTreeSet<Symbol>) {
                 collect_closure_captures_stmt(stmt, names);
             }
         }
+        HirStmt::Finally(body, _) => {
+            for stmt in body {
+                collect_closure_captures_stmt(stmt, names);
+            }
+        }
         HirStmt::Try(body, _, catch_body, _) => {
             for stmt in body {
                 collect_closure_captures_stmt(stmt, names);

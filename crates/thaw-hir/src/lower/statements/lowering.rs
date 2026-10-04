@@ -1903,7 +1903,7 @@ impl<'a> FnLowerer<'a> {
                             HirType::Str,
                         );
                         HirStmt::Try(
-                            inject_finally_before_exits(vec![loop_stmt], std::slice::from_ref(&close), false),
+                            self.inject_finally_before_exits(vec![loop_stmt], std::slice::from_ref(&close), false, 1)?,
                             exception.clone(),
                             vec![close.clone(), HirStmt::Throw(HirExpr::Var(exception.clone()))],
                             Some(exception.clone()),
@@ -2498,9 +2498,26 @@ impl<'a> FnLowerer<'a> {
                     let finalizer = self.lower_scoped_stmts(&finalizer.stmts)?;
                     self.generator_finalizers
                         .insert(catch_name.clone(), finalizer.clone());
-                    body = inject_finally_before_exits(body, &finalizer, false);
-                    catch_body =
-                        inject_finally_before_exits(catch_body, &finalizer, true);
+                    body = self.inject_finally_before_exits(body, &finalizer, false, 1)?;
+                    let source_catch = try_stmt.handler.is_some();
+                    catch_body = self.inject_finally_before_exits(
+                        catch_body, &finalizer, true, usize::from(source_catch),
+                    )?;
+                    if source_catch {
+                        // Calls, initializers, conditions, and awaits in a
+                        // source catch can fail without an explicit Throw.
+                        // Protect that entire body. Exit finalizers and their
+                        // terminal rethrows skip this guard after running once.
+                        let failure = self.bind_local("__thaw_finally_catch_failure", HirType::Str);
+                        let (captures, rethrow) =
+                            self.capture_finally_throw(HirExpr::Var(failure.clone()))?;
+                        let mut exceptional = captures;
+                        exceptional.push(HirStmt::Finally(finalizer.clone(), 0));
+                        exceptional.push(HirStmt::Throw(rethrow));
+                        catch_body = vec![HirStmt::Try(
+                            catch_body, failure.clone(), exceptional, Some(failure),
+                        )];
+                    }
                     after_try = finalizer;
                 }
                 let mut lowered = vec![HirStmt::Try(

@@ -74,6 +74,7 @@ impl<'a> FnLowerer<'a> {
                     self.lower_sparse_mapping_returns(else_branch)?;
                 }
                 HirStmt::While(_, body) => self.lower_sparse_mapping_returns(body)?,
+                HirStmt::Finally(body, _) => self.lower_sparse_mapping_returns(body)?,
                 HirStmt::Try(body, _, catch, _) => {
                     self.lower_sparse_mapping_returns(body)?;
                     self.lower_sparse_mapping_returns(catch)?;

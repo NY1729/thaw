@@ -90,7 +90,19 @@ impl<'ctx> HirCompiler<'ctx> {
             if matches!(callee.as_ref(), HirExpr::Var(name) if name == "@@thaw_rethrow_pending_exception")
                 && args.len() == 9 { Some(args.as_slice()) } else { None }
         } else { None };
-        let val = self.compile_expr(pending_rethrow.map(|args| &args[0]).or(trusted_text).unwrap_or(expr))?.into_pointer_value();
+        // The exit injector has already evaluated the visible catch binding.
+        // Keep its original binding only as provenance for the caught tuple;
+        // evaluating it again after `finally` would observe later mutation.
+        let snapshot_caught = if let HirExpr::Call(callee, args) = expr {
+            if matches!(callee.as_ref(), HirExpr::Var(name) if name == "@@thaw_snapshot_caught_exception")
+                && matches!(args.as_slice(), [_, HirExpr::Lit(HirLit::Str(_))]) {
+                Some(args.as_slice())
+            } else { None }
+        } else { None };
+        let val = self.compile_expr(pending_rethrow.map(|args| &args[0])
+            .or(trusted_text)
+            .or_else(|| snapshot_caught.map(|args| &args[0]))
+            .unwrap_or(expr))?.into_pointer_value();
         if let Some(args) = pending_rethrow {
             // Snapshot fields belong to this callback parameter, so a handled
             // inner exception cannot replace the original rejection metadata.
@@ -136,13 +148,19 @@ impl<'ctx> HirCompiler<'ctx> {
                 .map_err(|error| error.to_string())?;
             return Ok(val);
         }
-        if self.restore_caught_exception_tuple(val, expr)? {
+        let snapshot_origin = snapshot_caught.and_then(|args| {
+            if let HirExpr::Lit(HirLit::Str(name)) = &args[1] {
+                Some(HirExpr::Var(name.clone()))
+            } else { None }
+        });
+        let provenance_expr = snapshot_origin.as_ref().unwrap_or(expr);
+        if self.restore_caught_exception_tuple(val, provenance_expr)? {
             return Ok(val);
         }
         self.clear_pending_native_text()?;
         if trusted_text.is_some() || matches!(expr, HirExpr::Lit(HirLit::Str(_) | HirLit::Wtf8(_))) {
             self.mark_pending_native_text(val)?;
-        } else if let HirExpr::Var(name) = expr {
+        } else if let HirExpr::Var(name) = provenance_expr {
             if let Some((catch_slot, native_slot, _, _)) = self.catch_native_text.get(name) {
                 if self.variables.get(name).map(|(slot, _)| slot) == Some(catch_slot) {
                     let provenance = self.builder.build_load(
@@ -322,6 +340,19 @@ impl<'ctx> HirCompiler<'ctx> {
 
             HirStmt::Try(body, catch_name, catch_body, hidden_tag) => {
                 self.compile_try(body, catch_name, catch_body, hidden_tag.as_deref())
+            }
+            HirStmt::Finally(body, suspended) => {
+                if *suspended > self.catch_stack.len() {
+                    return Err("finally suspends more lexical catches than are active".into());
+                }
+                let at = self.catch_stack.len() - suspended;
+                let handlers = self.catch_stack.split_off(at);
+                let result = self.compile_block(body);
+                // Nested compilation may return an error before its own pop.
+                // Restore the lexical stack exactly on both paths.
+                self.catch_stack.truncate(at);
+                self.catch_stack.extend(handlers);
+                result
             }
         }
     }
