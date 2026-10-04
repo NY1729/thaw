@@ -3,6 +3,8 @@
   const thawDateConstructor = Date;
   const thawDateGetTime = Date.prototype.getTime;
   const thawDateApply = Reflect.apply;
+  const thawBootstrapDefineProperty = Object.defineProperty;
+  const thawBootstrapIteratorKey = Symbol.iterator;
   Object.defineProperty(globalThis, '__thaw_date_from_live_value', {
     value: value => thawDateApply(thawDateGetTime, new thawDateConstructor(value), []),
     configurable: false, writable: false,
@@ -59,22 +61,31 @@
   globalThis.__thaw_is_null_dynamic_value = value => value === null;
   globalThis.__thaw_is_nullish_dynamic_value = value => value == null;
   globalThis.__thaw_is_array_dynamic_value = value => Array.isArray(value);
-  globalThis.__thaw_to_iterator = value => {
-    const iterator =
-      value != null && typeof value[Symbol.iterator] === 'function'
-        ? value[Symbol.iterator]()
-        : value;
-    if (iterator == null || typeof iterator.next !== 'function') return iterator;
-    return {
-      next: () => iterator.next(),
-      return: typeof iterator.return === 'function'
-        ? () => iterator.return()
-        : () => ({ value: undefined, done: true }),
-      throw: typeof iterator.throw === 'function'
-        ? error => iterator.throw(error)
-        : () => ({ value: undefined, done: true }),
-    };
-  };
+  thawBootstrapDefineProperty(globalThis, '__thaw_to_iterator', {
+    value: value => {
+      if (value == null) return value;
+      const method = value[thawBootstrapIteratorKey];
+      const iterator = typeof method === 'function'
+        ? thawDateApply(method, value, []) : value;
+      if (iterator == null) return iterator;
+      const next = iterator.next;
+      if (typeof next !== 'function') return iterator;
+      return {
+        next: () => thawDateApply(next, iterator, []),
+        return: () => {
+          const close = iterator.return;
+          return typeof close === 'function'
+            ? thawDateApply(close, iterator, []) : { value: undefined, done: true };
+        },
+        throw: error => {
+          const resume = iterator.throw;
+          return typeof resume === 'function'
+            ? thawDateApply(resume, iterator, [error])
+            : { value: undefined, done: true };
+        },
+      };
+    }, enumerable: true, configurable: false, writable: false,
+  });
   globalThis.__thaw_json_stringify_replacer = (value, space, replacer) =>
     JSON.stringify(value, function (key, item) {
       return thawDateApply(replacer, this, [key, item]);
