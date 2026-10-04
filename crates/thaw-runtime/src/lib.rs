@@ -128,10 +128,12 @@ pub unsafe extern "C" fn thaw_runtime_exception_report_text(
     thaw_arena::owned_string(text)
 }
 
-#[derive(Clone, Copy)]
 struct PromiseSubscription {
     resume: PromiseResumeFn,
     frame: *mut u8,
+    // Rust subscriber and ready queues are invisible to the arena scanner.
+    // Pin a suspended arena frame until its resume callback returns.
+    _frame_root: thaw_arena::ArenaRoot,
 }
 
 thread_local! {
