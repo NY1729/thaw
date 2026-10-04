@@ -1714,19 +1714,19 @@ pub unsafe extern "C" fn thaw_number_array_join(
     if separator.is_null() {
         return std::ptr::null();
     }
-    let separator = unsafe { CStr::from_ptr(separator) }.to_string_lossy();
-    let mut result = String::new();
+    let separator = unsafe { wtf8_bytes(separator) };
+    let mut result = Vec::new();
     for index in 0..length {
         if index != 0 {
-            result.push_str(&separator);
+            result.extend_from_slice(separator);
         }
         if !unsafe { array_index_present(presence, index) } {
             continue;
         }
         let slot = unsafe { array.add(8 + index * 8).cast::<f64>().read_unaligned() };
-        result.push_str(&javascript_number_string(slot));
+        result.extend_from_slice(javascript_number_string(slot).as_bytes());
     }
-    arena_c_string(&result).map_or(std::ptr::null(), |value| value.cast())
+    arena_wtf8(&result).map_or(std::ptr::null(), |value| value.cast())
 }
 
 #[no_mangle]
@@ -1807,19 +1807,19 @@ pub unsafe extern "C" fn thaw_bool_array_join(
     if separator.is_null() {
         return std::ptr::null();
     }
-    let separator = unsafe { CStr::from_ptr(separator) }.to_string_lossy();
-    let mut result = String::new();
+    let separator = unsafe { wtf8_bytes(separator) };
+    let mut result = Vec::new();
     for index in 0..length {
         if index != 0 {
-            result.push_str(&separator);
+            result.extend_from_slice(separator);
         }
         if !unsafe { array_index_present(presence, index) } {
             continue;
         }
         let slot = unsafe { array.add(8 + index * 8).read() };
-        result.push_str(if slot == 0 { "false" } else { "true" });
+        result.extend_from_slice(if slot == 0 { &b"false"[..] } else { &b"true"[..] });
     }
-    arena_c_string(&result).map_or(std::ptr::null(), |value| value.cast())
+    arena_wtf8(&result).map_or(std::ptr::null(), |value| value.cast())
 }
 
 #[no_mangle]
@@ -1868,18 +1868,17 @@ pub unsafe extern "C" fn thaw_object_array_join(
     if separator.is_null() {
         return std::ptr::null();
     }
-    let separator = unsafe { CStr::from_ptr(separator) }.to_string_lossy();
-    let result = (0..length)
-        .map(|index| {
-            if unsafe { array_index_present(presence, index) } {
-                "[object Object]"
-            } else {
-                ""
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(&separator);
-    arena_c_string(&result).map_or(std::ptr::null(), |value| value.cast())
+    let separator = unsafe { wtf8_bytes(separator) };
+    let mut result = Vec::new();
+    for index in 0..length {
+        if index != 0 {
+            result.extend_from_slice(separator);
+        }
+        if unsafe { array_index_present(presence, index) } {
+            result.extend_from_slice(b"[object Object]");
+        }
+    }
+    arena_wtf8(&result).map_or(std::ptr::null(), |value| value.cast())
 }
 
 #[no_mangle]
@@ -2197,7 +2196,7 @@ pub unsafe extern "C" fn thaw_tagged_array_index_of(
                 let value = unsafe { payload.cast::<*const c_char>().read_unaligned() };
                 let expected = unsafe { needle.cast::<*const c_char>().read_unaligned() };
                 !value.is_null() && !expected.is_null()
-                    && unsafe { CStr::from_ptr(value).to_bytes() == CStr::from_ptr(expected).to_bytes() }
+                    && unsafe { wtf8_bytes(value) == wtf8_bytes(expected) }
             }
             2 => (unsafe { payload.read() } != 0) == (unsafe { needle.read() } != 0),
             3 => (unsafe { payload.cast::<*const u8>().read_unaligned() })
@@ -2301,7 +2300,7 @@ unsafe fn string_array_search(
     if needle.is_null() {
         return -1.0;
     }
-    let needle = unsafe { CStr::from_ptr(needle) }.to_bytes();
+    let needle = unsafe { wtf8_bytes(needle) };
     for index in array_search_start(length, from_index)..length {
         if !unsafe { array_index_present(presence, index) } {
             continue;
@@ -2312,7 +2311,7 @@ unsafe fn string_array_search(
                 .cast::<*const c_char>()
                 .read_unaligned()
         };
-        if !slot.is_null() && unsafe { CStr::from_ptr(slot) }.to_bytes() == needle {
+        if !slot.is_null() && unsafe { wtf8_bytes(slot) } == needle {
             return index as f64;
         }
     }
@@ -2366,7 +2365,7 @@ pub unsafe extern "C" fn thaw_string_array_last_index_of(
     let Some(start) = array_search_end(length, from_index) else {
         return -1.0;
     };
-    let needle = unsafe { CStr::from_ptr(needle) }.to_bytes();
+    let needle = unsafe { wtf8_bytes(needle) };
     for index in (0..=start).rev() {
         if !unsafe { array_index_present(presence, index) } {
             continue;
@@ -2377,7 +2376,7 @@ pub unsafe extern "C" fn thaw_string_array_last_index_of(
                 .cast::<*const c_char>()
                 .read_unaligned()
         };
-        if !slot.is_null() && unsafe { CStr::from_ptr(slot) }.to_bytes() == needle {
+        if !slot.is_null() && unsafe { wtf8_bytes(slot) } == needle {
             return index as f64;
         }
     }
@@ -2785,6 +2784,53 @@ mod array_read_ptr_tests {
             assert_eq!(array.cast::<u64>().read(), 4);
             assert_eq!(thaw_array_has_property(array, updated, c"3".as_ptr(), 1), 0);
             assert_eq!(thaw_array_has_property(array, updated, c"2".as_ptr(), 1), 1);
+        }
+    }
+
+    #[test]
+    fn array_search_and_join_keep_registered_nul_and_wtf8_bytes() {
+        let x = arena_wtf8(b"a\0x").unwrap().cast::<c_char>();
+        let y = arena_wtf8(b"a\0y").unwrap().cast::<c_char>();
+        let z = arena_wtf8(b"a\0z").unwrap().cast::<c_char>();
+        let array = thaw_arena::thaw_arena_alloc(24, 8);
+        let tagged = thaw_arena::thaw_arena_alloc(40, 8);
+        let numbers = thaw_arena::thaw_arena_alloc(24, 8);
+        let bools = thaw_arena::thaw_arena_alloc(24, 8);
+        assert!(!array.is_null() && !tagged.is_null() && !numbers.is_null() && !bools.is_null());
+        unsafe {
+            array.cast::<u64>().write(2);
+            array.add(8).cast::<*const c_char>().write(x);
+            array.add(16).cast::<*const c_char>().write(y);
+            assert_eq!(thaw_string_array_index_of(array, std::ptr::null(), y, 0.0), 1.0);
+            assert_eq!(thaw_string_array_includes(array, std::ptr::null(), z, 0.0), 0);
+            assert_eq!(thaw_string_array_last_index_of(array, std::ptr::null(), x, f64::INFINITY), 0.0);
+            tagged.cast::<u64>().write(2);
+            tagged.add(8).write(1);
+            tagged.add(16).cast::<*const c_char>().write(x);
+            tagged.add(24).write(1);
+            tagged.add(32).cast::<*const c_char>().write(y);
+            assert_eq!(thaw_tagged_array_index_of(tagged, std::ptr::null(), (&y as *const *const c_char).cast(), 0.0, 0, 0, 1, 1, 0), 1.0);
+            assert_eq!(thaw_tagged_array_index_of(tagged, std::ptr::null(), (&z as *const *const c_char).cast(), 0.0, 0, 1, 1, 1, 0), -1.0);
+            array.add(8).cast::<*const c_char>().write(y);
+            array.add(16).cast::<*const c_char>().write(x);
+            let sorted = thaw_string_array_to_sorted(array);
+            assert!(!sorted.is_null());
+            assert_eq!(sorted.add(8).cast::<*const c_char>().read(), x);
+            assert_eq!(array.add(8).cast::<*const c_char>().read(), y);
+            assert_eq!(thaw_string_array_sort(array), array);
+            assert_eq!(array.add(8).cast::<*const c_char>().read(), x);
+            assert_eq!(thaw_jit_array_sort(5, array), array);
+            assert_eq!(array.add(8).cast::<*const c_char>().read(), y);
+            numbers.cast::<u64>().write(2);
+            numbers.add(8).cast::<f64>().write(1.0);
+            numbers.add(16).cast::<f64>().write(2.0);
+            bools.cast::<u64>().write(2);
+            bools.add(8).write(0);
+            bools.add(16).write(1);
+            let separator = arena_wtf8(&[0, 0xed, 0xa0, 0x80]).unwrap().cast::<c_char>();
+            assert_eq!(wtf8_bytes(thaw_number_array_join(numbers, std::ptr::null(), separator)), &[b'1', 0, 0xed, 0xa0, 0x80, b'2']);
+            assert_eq!(wtf8_bytes(thaw_bool_array_join(bools, std::ptr::null(), separator)), b"false\0\xed\xa0\x80true");
+            assert_eq!(wtf8_bytes(thaw_object_array_join(array, std::ptr::null(), separator)), b"[object Object]\0\xed\xa0\x80[object Object]");
         }
     }
 
