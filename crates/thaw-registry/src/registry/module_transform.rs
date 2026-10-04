@@ -1266,8 +1266,8 @@ fn rewrite_import_meta_urls_named(source: &str, source_name: &thaw_parser::commo
 /// Rather than reason about whether the shim's own computation matches
 /// the wrapper's value, just drop the `const`/`let` keyword from a
 /// top-level (module-body-scope, not nested in any block or function)
-/// declaration whose sole binding is exactly one of these reserved
-/// names, turning it into a plain reassignment of the existing
+/// declaration with reserved identifier bindings. Split mixed declarations
+/// in source order, turning reserved bindings into reassignment of the existing
 /// parameter -- same runtime effect the shim always intended, no new
 /// lexical binding, no collision.
 fn strip_reserved_wrapper_redeclarations_named(source: &str, source_name: &thaw_parser::common::FileName) -> String {
@@ -1286,42 +1286,46 @@ fn strip_reserved_wrapper_redeclarations_named(source: &str, source_name: &thaw_
     let Ok((module, source_map)) = thaw_parser::parse_javascript_with_source_map_named(source, source_name.clone()) else {
         return source.to_string();
     };
-    let mut edits: Vec<(u32, u32)> = Vec::new();
+    let offset = |position| {
+        source_map.lookup_byte_offset(thaw_parser::common::BytePos(position)).pos.0 as usize
+    };
+    let mut edits = Vec::new();
     for item in &module.body {
         let ModuleItem::Stmt(Stmt::Decl(Decl::Var(var_decl))) = item else {
             continue;
         };
-        if !matches!(var_decl.kind, VarDeclKind::Const | VarDeclKind::Let) {
-            continue;
-        }
-        let [declarator] = var_decl.decls.as_slice() else {
-            continue;
+        let keyword = match var_decl.kind {
+            VarDeclKind::Const => "const",
+            VarDeclKind::Let => "let",
+            _ => continue,
         };
-        if declarator.init.is_none() {
-            continue;
-        }
-        let Pat::Ident(ident) = &declarator.name else {
-            continue;
+        let reserved = |declarator: &thaw_parser::ast::VarDeclarator| {
+            matches!(&declarator.name, Pat::Ident(ident)
+                if RESERVED.contains(&ident.id.sym.as_str()))
         };
-        if !RESERVED.contains(&ident.id.sym.as_str()) {
+        if !var_decl.decls.iter().any(reserved) {
             continue;
         }
-        edits.push((var_decl.span().lo.0, ident.id.span().lo.0));
-    }
-    if edits.is_empty() {
-        return source.to_string();
+        // Split in source order. Other bindings keep their lexical kind;
+        // changing the whole declaration to `var` would weaken const/TDZ.
+        let mut replacement = String::new();
+        for declarator in &var_decl.decls {
+            let text = &source[offset(declarator.span.lo.0)..offset(declarator.span.hi.0)];
+            if reserved(declarator) {
+                replacement.push_str(text);
+                if declarator.init.is_none() { replacement.push_str(" = void 0"); }
+            } else {
+                replacement.push_str(keyword);
+                replacement.push(' ');
+                replacement.push_str(text);
+            }
+            replacement.push_str(";\n");
+        }
+        edits.push((offset(var_decl.span().lo.0), offset(var_decl.span().hi.0), replacement));
     }
     let mut output = source.to_string();
-    for (lo, hi) in edits.into_iter().rev() {
-        let lo = source_map
-            .lookup_byte_offset(thaw_parser::common::BytePos(lo))
-            .pos
-            .0 as usize;
-        let hi = source_map
-            .lookup_byte_offset(thaw_parser::common::BytePos(hi))
-            .pos
-            .0 as usize;
-        output.replace_range(lo..hi, "");
+    for (start, end, replacement) in edits.into_iter().rev() {
+        output.replace_range(start..end, &replacement);
     }
     output
 }
@@ -1759,4 +1763,33 @@ fn inline_and_assigned_create_require_collect_query_instances() {
     assert!(analysis.specs.contains(&"module".to_string()));
     let unrelated = analyze_module("const fake = require('node:fs').createRequire(__filename); fake('./not-a-module.js');");
     assert!(!unrelated.specs.contains(&"./not-a-module.js".to_string()));
+}
+
+#[cfg(test)]
+mod wrapper_binding_regression {
+    use super::*;
+
+    #[test]
+    fn mixed_reserved_declarations_keep_order_and_other_const_bindings() {
+        let source = r#"
+            const first = (seen.push('first'), 1),
+                exports = (seen.push('exports'), {}),
+                keep = (seen.push('keep'), 3);
+            module.exports = [first, keep, seen.join(',')];
+            try { keep = 9; } catch (error) { module.exports.push(error instanceof TypeError); }
+        "#;
+        let rewritten = strip_reserved_wrapper_redeclarations_named(
+            source, &thaw_parser::common::FileName::Custom("mixed-wrapper.js".into()),
+        );
+        let script = format!(r#"(() => {{
+            const seen = [], target = {{exports: null}};
+            (function(module, exports, require, requireAsync, __filename, __dirname) {{
+                {rewritten}
+            }})(target, {{}});
+            if (JSON.stringify(target.exports) !== '[1,3,"first,exports,keep",true]')
+                throw new Error('mixed wrapper bindings changed');
+        }})();"#);
+        let script = std::ffi::CString::new(script).unwrap();
+        assert_eq!(thaw_quickjs::thaw_js_load(script.as_ptr()), 1);
+    }
 }
