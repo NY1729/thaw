@@ -308,8 +308,8 @@
             }
             linkage.memories.push({ module: item.module, name: item.name, value: descriptor });
           }
-          else if (item.kind === 'global') { linkage.globals.push({ module: item.module, name: item.name, value: wasmEncodeArgument(value.value, value.__thawType) }); pendingResources.push({ value, item }); }
-          else if (item.kind === 'table') { linkage.tables.push({ module: item.module, name: item.name, value: { values: value.__thawValues.map(entry => wasmEncodeArgument(entry, value.__thawElement)), maximum: Number.isFinite(value.__thawMaximum) ? value.__thawMaximum : null } }); pendingResources.push({ value, item }); }
+          else if (item.kind === 'global') { linkage.globals.push({ module: item.module, name: item.name, value: { type: value.__thawType, mutable: value.__thawMutable, value: wasmEncodeArgument(value.value, value.__thawType) } }); pendingResources.push({ value, item }); }
+          else if (item.kind === 'table') { linkage.tables.push({ module: item.module, name: item.name, value: { element: value.__thawElement, values: value.__thawValues.map(entry => wasmEncodeArgument(entry, value.__thawElement)), maximum: Number.isFinite(value.__thawMaximum) ? value.__thawMaximum : null } }); pendingResources.push({ value, item }); }
           else throw new WebAssembly.LinkError(`WebAssembly import '${item.module}.${item.name}' has an unsupported kind`);
         }
       } catch (error) { __thaw_wasm_release_pending(JSON.stringify(linkage.functions.map(value => value.handle))); throw error; }
