@@ -1359,6 +1359,56 @@ fn reject_resolvers_record_their_native_string_before_settlement() {
 }
 
 #[test]
+fn promise_constructor_guards_each_allocation_before_writing_or_invoking() {
+    let source = r#"
+        function main(): void {
+            new Promise<number>((resolve) => resolve(1));
+        }
+    "#;
+    let module = thaw_parser::parse_typescript(source).unwrap();
+    let program = thaw_hir::lower_module(&module).unwrap();
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "promise_constructor_allocation_guards");
+    compiler.compile_program(&program).unwrap();
+    compiler.module.verify().unwrap();
+    let ir = compiler.print_to_string();
+    let main = ir.lines()
+        .skip_while(|line| !(line.starts_with("define ") && line.contains("@thaw_user_main(")))
+        .take_while(|line| *line != "}")
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_eq!(main.lines().filter(|line| line.contains("special_closure_allocation_failed")
+        && line.contains("= icmp eq ptr")).count(), 2, "{ir}");
+    // LLVM prints labels as `name: ; preds = ...`. Strip the comment before
+    // recognizing each basic-block boundary.
+    let is_label = |line: &str| line.split(';').next().unwrap().trim_end().ends_with(':');
+    let block_after = |header: &str| {
+        let mut lines = main.lines().skip_while(|line| *line != header);
+        assert!(lines.next().is_some(), "{ir}");
+        lines.take_while(|line| !is_label(line)).collect::<Vec<_>>().join("\n")
+    };
+    for failed in ["promise_resolve_closure_failed", "promise_reject_closure_failed"] {
+        let label = format!("{failed}:");
+        let header = main.lines().find(|line| line.split(';').next().unwrap().trim_end()
+            == label.as_str()).expect(&ir);
+        let body = block_after(header);
+        // `thaw_promise_destroy` returns void, so its LLVM call name is not
+        // printed. Check the actual call before the failed path exits.
+        assert_eq!(body.matches("@thaw_promise_destroy(").count(), 1, "{ir}");
+        assert!(!body.contains("executor_code"), "{ir}");
+    }
+    let missing = main.lines().filter(|line| line.starts_with("special_closure_missing")
+        && is_label(line)).collect::<Vec<_>>();
+    assert_eq!(missing.len(), 2, "{ir}");
+    for missing in missing {
+        let body = block_after(missing);
+        assert!(!body.contains("store "), "{ir}");
+    }
+    assert!(main.find("promise_new_missing").unwrap() < main.find("resolver_state_missing").unwrap(), "{ir}");
+    assert!(main.find("resolver_state_missing").unwrap() < main.find("special_closure_allocation_failed").unwrap(), "{ir}");
+}
+
+#[test]
 fn async_arrow_try_returns_use_the_general_frame_path() {
     let source = r#"
         const choose = async (flag: number): Promise<number> => {

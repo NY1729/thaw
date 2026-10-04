@@ -301,6 +301,16 @@ impl<'ctx> HirCompiler<'ctx> {
             .basic()
             .unwrap()
             .into_pointer_value();
+        let function = self.current_function();
+        let missing_promise = self.context.append_basic_block(function, "promise_new_failed");
+        let have_promise = self.context.append_basic_block(function, "promise_new_ready");
+        let promise_is_null = self.builder.build_is_null(promise, "promise_new_missing")
+            .map_err(|error| error.to_string())?;
+        self.builder.build_conditional_branch(promise_is_null, missing_promise, have_promise)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(missing_promise);
+        self.compile_throw_builtin_error("Error", "Promise allocation failed")?;
+        self.builder.position_at_end(have_promise);
         // The two escaping resolver closures and the executor's thrown-error path
         // must share the same first-call decision while adoption is still pending.
         let resolver_state = self
@@ -318,6 +328,19 @@ impl<'ctx> HirCompiler<'ctx> {
             .basic()
             .ok_or("resolver state allocation returned no value")?
             .into_pointer_value();
+        let missing_state = self.context.append_basic_block(function, "resolver_state_failed");
+        let have_state = self.context.append_basic_block(function, "resolver_state_ready");
+        let state_is_null = self.builder.build_is_null(resolver_state, "resolver_state_missing")
+            .map_err(|error| error.to_string())?;
+        self.builder.build_conditional_branch(state_is_null, missing_state, have_state)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(missing_state);
+        self.builder.build_call(
+            self.module.get_function("thaw_promise_destroy").unwrap(),
+            &[promise.into()], "destroy_unescaped_promise",
+        ).map_err(|error| error.to_string())?;
+        self.compile_throw_builtin_error("Error", "Promise resolver allocation failed")?;
+        self.builder.position_at_end(have_state);
         self.builder
             .build_store(resolver_state, promise)
             .map_err(|error| error.to_string())?;
@@ -354,7 +377,31 @@ impl<'ctx> HirCompiler<'ctx> {
             vec![resolved.clone()]
         };
         let resolve = self.allocate_special_closure(resolve_fn, resolver_state, &resolve_params, "resolve_closure")?;
+        let missing_resolve = self.builder.build_is_null(resolve, "missing_resolve_closure")
+            .map_err(|error| error.to_string())?;
+        let resolve_failed = self.context.append_basic_block(function, "promise_resolve_closure_failed");
+        let resolve_ready = self.context.append_basic_block(function, "promise_resolve_closure_ready");
+        self.builder.build_conditional_branch(missing_resolve, resolve_failed, resolve_ready)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(resolve_failed);
+        self.builder.build_call(self.module.get_function("thaw_promise_destroy").unwrap(),
+            &[promise.into()], "destroy_failed_resolve_promise")
+            .map_err(|error| error.to_string())?;
+        self.compile_throw_builtin_error("Error", "Promise resolve closure allocation failed")?;
+        self.builder.position_at_end(resolve_ready);
         let reject = self.allocate_special_closure(reject_fn, resolver_state, &[HirType::Str], "reject_closure")?;
+        let missing_reject = self.builder.build_is_null(reject, "missing_reject_closure")
+            .map_err(|error| error.to_string())?;
+        let reject_failed = self.context.append_basic_block(function, "promise_reject_closure_failed");
+        let reject_ready = self.context.append_basic_block(function, "promise_reject_closure_ready");
+        self.builder.build_conditional_branch(missing_reject, reject_failed, reject_ready)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(reject_failed);
+        self.builder.build_call(self.module.get_function("thaw_promise_destroy").unwrap(),
+            &[promise.into()], "destroy_failed_reject_promise")
+            .map_err(|error| error.to_string())?;
+        self.compile_throw_builtin_error("Error", "Promise reject closure allocation failed")?;
+        self.builder.position_at_end(reject_ready);
         let code = self
             .builder
             .build_load(
