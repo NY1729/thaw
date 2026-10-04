@@ -1538,6 +1538,29 @@ fn compiles_dynamic_nullish_coalescing() {
     );
 }
 
+#[test]
+fn json_assignment_nullish_put_value_runs_rhs_before_type_error() {
+    let source = r#"
+        let order = "";
+        function key(): string { order += "k"; return "value"; }
+        function rhs(): number { order += "v"; return 7; }
+        function main(): void {
+            const absent: any = null;
+            try { absent[key()] = rhs(); }
+            catch (error) { console.log(error instanceof TypeError, order); }
+            order = "";
+            try { absent[0] = rhs(); }
+            catch (error) { console.log(error instanceof TypeError, order); }
+            order = "";
+            const present: any = {};
+            present[key()] = rhs();
+            console.log(present.value, order);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "json_assignment_nullish_put_value"),
+        "true kv\ntrue v\n7 kv\n");
+}
+
 /// `x ??= y` on a dynamic (`any`-typed) variable/property target used to
 /// silently never assign, even when `x` was really `null`/`undefined`
 /// (same root cause as plain `??` above: only `Optional`/`Nullable`/
