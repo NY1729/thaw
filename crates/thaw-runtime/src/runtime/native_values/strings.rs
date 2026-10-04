@@ -1,126 +1,4 @@
-// ---- WTF-8 <-> UTF-16 codec -------------------------------------------------
-//
-// Thaw native strings are WTF-8 with length metadata for embedded NULs:
-// ordinary UTF-8, extended so
-// a lone UTF-16 surrogate (which valid UTF-8 cannot represent) is encoded as
-// its 3-byte WTF-8 sequence. `wtf8_decode_utf16` preserves lone surrogates
-// where `std::str::from_utf8_lossy` would replace one with 3 U+FFFD (one per
-// invalid byte of the 3-byte surrogate sequence).
-
-fn wtf8_continuation(byte: u8) -> bool {
-    byte & 0xC0 == 0x80
-}
-
-/// Decodes WTF-8 bytes to UTF-16 code units, preserving lone surrogates.
-/// Malformed bytes decode as U+FFFD (one per stray byte).
-fn wtf8_decode_utf16(bytes: &[u8]) -> Vec<u16> {
-    let mut units = Vec::with_capacity(bytes.len());
-    let mut index = 0;
-    while index < bytes.len() {
-        let first = bytes[index];
-        if first < 0x80 {
-            units.push(u16::from(first));
-            index += 1;
-        } else if (0xC2..=0xDF).contains(&first) {
-            if index + 1 < bytes.len() && wtf8_continuation(bytes[index + 1]) {
-                let code =
-                    ((u32::from(first) & 0x1F) << 6) | (u32::from(bytes[index + 1]) & 0x3F);
-                units.push(code as u16);
-                index += 2;
-            } else {
-                units.push(0xFFFD);
-                index += 1;
-            }
-        } else if (0xE0..=0xEF).contains(&first) {
-            if index + 2 < bytes.len()
-                && wtf8_continuation(bytes[index + 1])
-                && wtf8_continuation(bytes[index + 2])
-            {
-                let code = ((u32::from(first) & 0x0F) << 12)
-                    | ((u32::from(bytes[index + 1]) & 0x3F) << 6)
-                    | (u32::from(bytes[index + 2]) & 0x3F);
-                // 0xD800-0xDFFF is allowed here: a lone surrogate.
-                units.push(code as u16);
-                index += 3;
-            } else {
-                units.push(0xFFFD);
-                index += 1;
-            }
-        } else if (0xF0..=0xF4).contains(&first) {
-            if index + 3 < bytes.len()
-                && wtf8_continuation(bytes[index + 1])
-                && wtf8_continuation(bytes[index + 2])
-                && wtf8_continuation(bytes[index + 3])
-            {
-                let code = ((u32::from(first) & 0x07) << 18)
-                    | ((u32::from(bytes[index + 1]) & 0x3F) << 12)
-                    | ((u32::from(bytes[index + 2]) & 0x3F) << 6)
-                    | (u32::from(bytes[index + 3]) & 0x3F);
-                if (0x10000..=0x10FFFF).contains(&code) {
-                    let code = code - 0x10000;
-                    units.push(0xD800 + (code >> 10) as u16);
-                    units.push(0xDC00 + (code & 0x3FF) as u16);
-                    index += 4;
-                } else {
-                    units.push(0xFFFD);
-                    index += 1;
-                }
-            } else {
-                units.push(0xFFFD);
-                index += 1;
-            }
-        } else {
-            units.push(0xFFFD);
-            index += 1;
-        }
-    }
-    units
-}
-
-/// Appends the WTF-8 encoding of a single code point (allowing a lone
-/// surrogate in 0xD800-0xDFFF as its 3-byte sequence).
-fn wtf8_push_code_point(bytes: &mut Vec<u8>, code: u32) {
-    if code < 0x80 {
-        bytes.push(code as u8);
-    } else if code < 0x800 {
-        bytes.push(0xC0 | (code >> 6) as u8);
-        bytes.push(0x80 | (code & 0x3F) as u8);
-    } else if code < 0x10000 {
-        bytes.push(0xE0 | (code >> 12) as u8);
-        bytes.push(0x80 | ((code >> 6) & 0x3F) as u8);
-        bytes.push(0x80 | (code & 0x3F) as u8);
-    } else {
-        bytes.push(0xF0 | (code >> 18) as u8);
-        bytes.push(0x80 | ((code >> 12) & 0x3F) as u8);
-        bytes.push(0x80 | ((code >> 6) & 0x3F) as u8);
-        bytes.push(0x80 | (code & 0x3F) as u8);
-    }
-}
-
-/// Encodes UTF-16 code units to WTF-8, combining a valid surrogate pair
-/// into one astral code point and leaving a lone surrogate as a 3-byte
-/// sequence.
-fn wtf8_encode_utf16(units: &[u16]) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(units.len());
-    let mut index = 0;
-    while index < units.len() {
-        let unit = units[index];
-        if (0xD800..=0xDBFF).contains(&unit)
-            && index + 1 < units.len()
-            && (0xDC00..=0xDFFF).contains(&units[index + 1])
-        {
-            let code = 0x10000
-                + ((u32::from(unit) - 0xD800) << 10)
-                + (u32::from(units[index + 1]) - 0xDC00);
-            wtf8_push_code_point(&mut bytes, code);
-            index += 2;
-        } else {
-            wtf8_push_code_point(&mut bytes, u32::from(unit));
-            index += 1;
-        }
-    }
-    bytes
-}
+use thaw_arena::{wtf8_decode_utf16, wtf8_encode_utf16, wtf8_push_code_point};
 
 /// `true` when the UTF-16 code units contain no lone surrogate.
 fn wtf8_is_well_formed(bytes: &[u8]) -> bool {
@@ -165,7 +43,7 @@ fn wtf8_to_well_formed(bytes: &[u8]) -> Vec<u8> {
 /// # Safety
 /// `value` must be non-null and reference a NUL-terminated byte string.
 unsafe fn wtf8_bytes<'a>(value: *const c_char) -> &'a [u8] {
-    unsafe { CStr::from_ptr(value) }.to_bytes()
+    unsafe { thaw_arena::NativeStr::from_ptr(value) }.to_bytes()
 }
 
 /// Case-maps a WTF-8 string, preserving lone surrogates (which have no
@@ -547,45 +425,7 @@ unsafe fn thaw_string_replace_impl(
     let value = wtf8_decode_utf16(unsafe { wtf8_bytes(value) });
     let search = wtf8_decode_utf16(unsafe { wtf8_bytes(search) });
     let replacement = wtf8_decode_utf16(unsafe { wtf8_bytes(replacement) });
-    let mut output = Vec::new();
-    let mut cursor = 0;
-    while cursor <= value.len() {
-        let found = if search.is_empty() {
-            Some(cursor)
-        } else {
-            value[cursor..].windows(search.len()).position(|part| part == search).map(|offset| cursor + offset)
-        };
-        let Some(start) = found else { break };
-        let end = start + search.len();
-        output.extend_from_slice(&value[cursor..start]);
-        let mut index = 0;
-        while index < replacement.len() {
-            if replacement[index] == b'$' as u16 && index + 1 < replacement.len() {
-                let fragment = match replacement[index + 1] {
-                    x if x == b'$' as u16 => Some(&replacement[index..index + 1]),
-                    x if x == b'&' as u16 => Some(&value[start..end]),
-                    x if x == b'`' as u16 => Some(&value[..start]),
-                    x if x == b'\'' as u16 => Some(&value[end..]),
-                    _ => None,
-                };
-                if let Some(fragment) = fragment {
-                    output.extend_from_slice(fragment);
-                    index += 2;
-                    continue;
-                }
-            }
-            output.push(replacement[index]);
-            index += 1;
-        }
-        cursor = end;
-        if !all { break; }
-        if search.is_empty() {
-            if cursor == value.len() { break; }
-            output.push(value[cursor]);
-            cursor += 1;
-        }
-    }
-    output.extend_from_slice(&value[cursor..]);
+    let output = thaw_arena::utf16_replace(&value, &search, &replacement, all);
     arena_wtf8(&wtf8_encode_utf16(&output)).map_or(std::ptr::null(), |value| value.cast())
 }
 
