@@ -23,6 +23,11 @@ impl<'ctx> HirCompiler<'ctx> {
                     self.collect_async_frame_locals(nested, locals)?;
                 }
             }
+            HirStmt::Finally(body, _) => {
+                for nested in body {
+                    self.collect_async_frame_locals(nested, locals)?;
+                }
+            }
             HirStmt::Try(body, _, catch_body, _) => {
                 for nested in body.iter().chain(catch_body) {
                     self.collect_async_frame_locals(nested, locals)?;

@@ -352,6 +352,7 @@ fn stmt_contains_await(stmt: &HirStmt) -> bool {
         HirStmt::While(condition, body) => {
             contains_await(condition) || body.iter().any(stmt_contains_await)
         }
+        HirStmt::Finally(body, _) => body.iter().any(stmt_contains_await),
         HirStmt::Try(body, _, catch, _) => {
             body.iter().any(stmt_contains_await) || catch.iter().any(stmt_contains_await)
         }
@@ -381,7 +382,7 @@ fn async_arrow_has_only_tail_await_returns(statements: &[HirStmt]) -> bool {
             }
             // Adopting a returned promise would move its rejection outside the
             // surrounding catch, so try/catch needs the general async frame path.
-            HirStmt::Try(..) => false,
+            HirStmt::Try(..) | HirStmt::Finally(..) => false,
             other => !stmt_contains_await(other),
         })
     }
@@ -440,6 +441,9 @@ fn rewrite_async_arrow_returns(
                 condition,
                 rewrite_async_arrow_returns(body, resolve, resolved)?,
             )),
+            HirStmt::Finally(body, suspended) => rewritten.push(HirStmt::Finally(
+                rewrite_async_arrow_returns(body, resolve, resolved)?, suspended,
+            )),
             HirStmt::Try(body, binding, catch, hidden) => rewritten.push(HirStmt::Try(
                 rewrite_async_arrow_returns(body, resolve, resolved)?,
                 binding,
@@ -491,6 +495,9 @@ fn collect_stmt_bindings_with_bound(
                 collect_expr_bindings_with_bound(cond, names, &bound);
                 collect_stmt_bindings_with_bound(body, names, &bound);
             }
+            HirStmt::Finally(body, _) => {
+                collect_stmt_bindings_with_bound(body, names, &bound);
+            }
             HirStmt::Try(body, catch_name, catch_body, _) => {
                 collect_stmt_bindings_with_bound(body, names, &bound);
                 let mut catch_bound = bound.clone();
@@ -516,62 +523,159 @@ fn collect_stmt_bindings_with_bound(
 /// `stmts`, so the innermost loop is outside the scope exactly when no loop
 /// has been entered yet, and a `BreakDepth(n)`/`ContinueDepth(n)` reaches
 /// outside when `n >= loop_depth`.
+impl<'a> FnLowerer<'a> {
 fn inject_finally_before_exits(
+    &mut self,
     stmts: Vec<HirStmt>,
     finalizer: &[HirStmt],
     inject_throws: bool,
-) -> Vec<HirStmt> {
-    inject_finally_before_exits_at(stmts, finalizer, inject_throws, 0)
+    skipped_handlers: usize,
+) -> Result<Vec<HirStmt>, String> {
+    self.inject_finally_before_exits_at(stmts, finalizer, inject_throws, 0, skipped_handlers)
 }
 
 fn inject_finally_before_exits_at(
+    &mut self,
     stmts: Vec<HirStmt>,
     finalizer: &[HirStmt],
     inject_throws: bool,
     loop_depth: usize,
-) -> Vec<HirStmt> {
+    skip_handlers: usize,
+) -> Result<Vec<HirStmt>, String> {
     let mut out = Vec::new();
     for stmt in stmts {
         match stmt {
-            HirStmt::Return(_) => {
-                out.extend(finalizer.iter().cloned());
-                out.push(stmt);
+            HirStmt::Return(Some(value)) => {
+                let ty = self.infer_expr_type_inner(&value)?;
+                let name = self.bind_local("__thaw_finally_return", ty.clone());
+                let capture = HirStmt::Let(name.clone(), ty, value);
+                out.extend(self.protect_finally_capture(vec![capture], finalizer, inject_throws, skip_handlers));
+                out.push(HirStmt::Finally(finalizer.to_vec(), skip_handlers));
+                out.push(HirStmt::Return(Some(HirExpr::Var(name))));
             }
-            HirStmt::Throw(_) if inject_throws => {
-                out.extend(finalizer.iter().cloned());
-                out.push(stmt);
+            HirStmt::Return(None) => {
+                out.push(HirStmt::Finally(finalizer.to_vec(), skip_handlers));
+                out.push(HirStmt::Return(None));
+            }
+            HirStmt::Throw(value) if inject_throws => {
+                let (captured, value) = self.capture_finally_throw(value)?;
+                out.extend(self.protect_finally_capture(captured, finalizer, true, skip_handlers));
+                out.push(HirStmt::Finally(finalizer.to_vec(), skip_handlers));
+                // An explicit rethrow from a source catch has already run the
+                // finalizer. Bypass its synthetic failure guard as well.
+                out.push(HirStmt::Finally(vec![HirStmt::Throw(value)], skip_handlers));
             }
             HirStmt::Break | HirStmt::Continue if loop_depth == 0 => {
-                out.extend(finalizer.iter().cloned());
+                out.push(HirStmt::Finally(finalizer.to_vec(), skip_handlers));
                 out.push(stmt);
             }
             HirStmt::BreakDepth(depth) | HirStmt::ContinueDepth(depth) if depth >= loop_depth => {
-                out.extend(finalizer.iter().cloned());
+                out.push(HirStmt::Finally(finalizer.to_vec(), skip_handlers));
                 out.push(stmt);
             }
             HirStmt::If(cond, then_body, else_body) => out.push(HirStmt::If(
                 cond,
-                inject_finally_before_exits_at(then_body, finalizer, inject_throws, loop_depth),
-                inject_finally_before_exits_at(else_body, finalizer, inject_throws, loop_depth),
+                self.inject_finally_before_exits_at(then_body, finalizer, inject_throws, loop_depth, skip_handlers)?,
+                self.inject_finally_before_exits_at(else_body, finalizer, inject_throws, loop_depth, skip_handlers)?,
             )),
             HirStmt::While(cond, body) => out.push(HirStmt::While(
                 cond,
-                inject_finally_before_exits_at(body, finalizer, inject_throws, loop_depth + 1),
+                self.inject_finally_before_exits_at(body, finalizer, inject_throws, loop_depth + 1, skip_handlers)?,
             )),
             HirStmt::Break
             | HirStmt::Continue
             | HirStmt::BreakDepth(_)
             | HirStmt::ContinueDepth(_) => out.push(stmt),
             HirStmt::Try(body, catch_name, catch_body, hidden) => out.push(HirStmt::Try(
-                inject_finally_before_exits_at(body, finalizer, false, loop_depth),
+                self.inject_finally_before_exits_at(body, finalizer, false, loop_depth, skip_handlers + 1)?,
                 catch_name,
-                inject_finally_before_exits_at(catch_body, finalizer, inject_throws, loop_depth),
+                self.inject_finally_before_exits_at(catch_body, finalizer, inject_throws, loop_depth, skip_handlers)?,
                 hidden,
+            )),
+            HirStmt::Finally(body, suspended) => out.push(HirStmt::Finally(
+                self.inject_finally_before_exits_at(
+                    body, finalizer, inject_throws, loop_depth,
+                    skip_handlers.saturating_sub(suspended),
+                )?,
+                suspended,
             )),
             other => out.push(other),
         }
     }
-    out
+    Ok(out)
+}
+
+fn protect_finally_capture(
+    &mut self,
+    captures: Vec<HirStmt>,
+    finalizer: &[HirStmt],
+    inject_throws: bool,
+    skip_handlers: usize,
+) -> Vec<HirStmt> {
+    if !inject_throws {
+        // The enclosing Try already catches a failing exit expression and
+        // runs this finalizer in its catch body.
+        return captures;
+    }
+    // A source catch body has no surrounding catch for its own exits. If
+    // evaluating the Return/Throw expression fails, still run `finally`;
+    // an abrupt finalizer then naturally overrides the evaluation error.
+    let catch_name = self.bind_local("__thaw_finally_capture_error", HirType::Str);
+    let mut catch_body = vec![HirStmt::Finally(finalizer.to_vec(), skip_handlers)];
+    catch_body.push(HirStmt::Finally(
+        vec![HirStmt::Throw(HirExpr::Var(catch_name.clone()))], skip_handlers,
+    ));
+    vec![HirStmt::Try(captures, catch_name.clone(), catch_body, Some(catch_name))]
+}
+
+fn capture_finally_throw(&mut self, value: HirExpr) -> Result<(Vec<HirStmt>, HirExpr), String> {
+    let mut captures = Vec::new();
+    let mut capture = |this: &mut Self, expr: HirExpr| -> Result<HirExpr, String> {
+        let ty = this.infer_expr_type_inner(&expr)?;
+        let name = this.bind_local("__thaw_finally_throw", ty.clone());
+        captures.push(HirStmt::Let(name.clone(), ty, expr));
+        Ok(HirExpr::Var(name))
+    };
+    if let HirExpr::Call(callee, args) = &value {
+        if let HirExpr::Var(marker) = callee.as_ref() {
+            if marker == "@@thaw_trusted_exception_text" && args.len() == 1 {
+                let captured = capture(self, args[0].clone())?;
+                // The preceding throw lowering has already published the
+                // scalar/object provenance channels. A nested handled throw
+                // in `finally` can clear them, so snapshot the complete
+                // tuple alongside the evaluated display text. The existing
+                // pending-rethrow marker restores the tuple after `finally`.
+                let mut snapshot = vec![captured.clone(), captured.clone(), captured];
+                for field in ["aggregate", "tag", "f64", "i64", "bool", "object"] {
+                    snapshot.push(capture(self, HirExpr::Call(
+                        Box::new(HirExpr::Var(format!("__thaw_pending_exception_{field}"))),
+                        Vec::new(),
+                    ))?);
+                }
+                return Ok((captures, HirExpr::Call(
+                    Box::new(HirExpr::Var("@@thaw_rethrow_pending_exception".into())),
+                    snapshot,
+                )));
+            }
+            if marker == "@@thaw_rethrow_pending_exception" && args.len() == 9 {
+                let captured_args = args.iter().cloned()
+                    .map(|arg| capture(self, arg))
+                    .collect::<Result<Vec<_>, _>>()?;
+                return Ok((captures, HirExpr::Call(callee.clone(), captured_args)));
+            }
+        }
+    }
+    let original = if let HirExpr::Var(name) = &value { Some(name.clone()) } else { None };
+    let literal_text = matches!(&value, HirExpr::Lit(HirLit::Str(_) | HirLit::Wtf8(_)));
+    let captured = capture(self, value)?;
+    let throw_value = if let Some(original) = original {
+        HirExpr::Call(Box::new(HirExpr::Var("@@thaw_snapshot_caught_exception".into())),
+            vec![captured, HirExpr::Lit(HirLit::Str(original))])
+    } else if literal_text {
+        HirExpr::Call(Box::new(HirExpr::Var("@@thaw_trusted_exception_text".into())), vec![captured])
+    } else { captured };
+    Ok((captures, throw_value))
+}
 }
 
 /// A classic `for (...; ...; update)` is represented as a HIR `while` with
@@ -614,6 +718,9 @@ fn inject_before_target_continue(
                 cond,
                 inject_before_target_continue(then_body, nested_depth, injected),
                 inject_before_target_continue(else_body, nested_depth, injected),
+            )),
+            HirStmt::Finally(body, suspended) => out.push(HirStmt::Finally(
+                inject_before_target_continue(body, nested_depth, injected), suspended,
             )),
             HirStmt::Try(body, catch_name, catch_body, hidden) => out.push(HirStmt::Try(
                 inject_before_target_continue(body, nested_depth, injected),
@@ -658,6 +765,9 @@ fn rewrite_switch_case_stmts(
             cond,
             rewrite_switch_case_stmts(then_body, selected, case_index, exit),
             rewrite_switch_case_stmts(else_body, selected, case_index, exit),
+        ),
+        HirStmt::Finally(body, suspended) => HirStmt::Finally(
+            rewrite_switch_case_stmts(body, selected, case_index, exit), suspended,
         ),
         HirStmt::Try(body, catch_name, catch_body, hidden) => HirStmt::Try(
             rewrite_switch_case_stmts(body, selected, case_index, exit),

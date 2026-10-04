@@ -281,8 +281,7 @@ pub enum HirStmt {
     /// `throw` unwinds through generated Thaw function calls to the nearest
     /// lexical `try`. Codegen implements this with a pending-exception slot,
     /// preserving the ordinary function and C FFI ABIs. `finally` is expanded
-    /// around normal and abrupt exits during lowering, so it does not require
-    /// a separate HIR variant.
+    /// around normal and abrupt exits during lowering.
     ///
     /// `Try(body, visible_catch, catch_body, hidden_tag)`:
     /// - `visible_catch`: the catch binding the user wrote (`catch (e)`),
@@ -296,6 +295,12 @@ pub enum HirStmt {
     ///   string, so both representations stay available without one
     ///   clobbering the other. `None` when nothing reads the raw tag.
     Try(Vec<HirStmt>, Symbol, Vec<HirStmt>, Option<Symbol>),
+    /// Execute a cloned `finally` body after suspending the indicated number
+    /// of lexical handlers entered inside the protected scope. An abrupt
+    /// finalizer must reach the enclosing handler, never a catch whose try
+    /// body is already being exited. The handlers are restored after codegen
+    /// even when this body returns, throws, breaks, or continues.
+    Finally(Vec<HirStmt>, usize),
 }
 
 #[derive(Debug, Clone, PartialEq)]

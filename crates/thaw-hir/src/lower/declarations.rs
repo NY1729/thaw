@@ -1457,11 +1457,12 @@ fn lower_function_statements(
                     Box::new(HirExpr::Lit(HirLit::Bool(true))),
                 )),
                 HirStmt::Try(
-                    inject_finally_before_exits(
+                    self.inject_finally_before_exits(
                         generator_body,
                         std::slice::from_ref(&clear_running),
                         false,
-                    ),
+                        1,
+                    )?,
                     reentry_error.clone(),
                     vec![
                         clear_running.clone(),

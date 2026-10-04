@@ -227,6 +227,9 @@ struct AsyncSegment {
     await_next: Option<usize>,
     resume_target: Option<(String, HirType)>,
     rejection_handler: Option<AsyncRejectionHandler>,
+    // `None` may be an intentional finalizer route to the promise rejection,
+    // not an unassigned handler for an enclosing Try to fill later.
+    rejection_handler_authoritative: bool,
 }
 
 #[derive(Clone)]
@@ -235,6 +238,7 @@ struct AsyncRejectionHandler {
     catch_guard: String,
     catch_binding: String,
     disable_guards: Vec<String>,
+    parent: Option<Box<AsyncRejectionHandler>>,
 }
 
 struct FrameAsyncPlan {
@@ -322,6 +326,7 @@ fn hir_contains_named_call(program: &HirProgram, name: &str) -> bool {
             HirStmt::Return(Some(expr)) => expr_has_call(expr, name),
             HirStmt::If(test, yes, no) => expr_has_call(test, name) || stmts(yes, name) || stmts(no, name),
             HirStmt::While(test, body) => expr_has_call(test, name) || stmts(body, name),
+            HirStmt::Finally(body, _) => stmts(body, name),
             HirStmt::Try(body, _, catch, _) => stmts(body, name) || stmts(catch, name),
             HirStmt::Return(None) | HirStmt::Break | HirStmt::Continue
             | HirStmt::BreakDepth(_) | HirStmt::ContinueDepth(_) => false,
@@ -871,6 +876,9 @@ impl<'ctx> HirCompiler<'ctx> {
             | HirStmt::Continue
             | HirStmt::BreakDepth(_)
             | HirStmt::ContinueDepth(_) => false,
+            HirStmt::Finally(body, _) => body
+                .iter()
+                .any(|stmt| Self::stmt_awaits_frame_source(stmt, frame_functions)),
             HirStmt::Try(body, _, catch_body, _) => body
                 .iter()
                 .chain(catch_body)

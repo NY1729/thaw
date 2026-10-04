@@ -2,6 +2,7 @@ impl<'ctx> HirCompiler<'ctx> {
     fn stmt_contains_frame_unsupported(stmt: &HirStmt) -> bool {
         match stmt {
             HirStmt::Let(..) | HirStmt::Return(..) | HirStmt::Throw(..) | HirStmt::Try(..) => true,
+            HirStmt::Finally(..) => true,
             HirStmt::If(_, then_body, else_body) => {
                 if matches!(
                     (then_body.as_slice(), else_body.as_slice()),

@@ -45,6 +45,7 @@ impl<'ctx> HirCompiler<'ctx> {
             catch_guard: catch_guard.clone(),
             catch_binding: catch_name.to_string(),
             disable_guards: Vec::new(),
+            parent: enclosing_handler.clone().map(Box::new),
         };
         for stmt in try_body {
             if let HirStmt::Try(nested_try, nested_name, nested_catch, _) = stmt {
@@ -97,9 +98,11 @@ impl<'ctx> HirCompiler<'ctx> {
                 next_temporary,
                 next_guard,
             )?;
-            for segment in &mut segments[first_new..] {
-                if segment.rejection_handler.is_none() {
-                    segment.rejection_handler = Some(handler.clone());
+            if !matches!(stmt, HirStmt::Finally(..)) {
+                for segment in &mut segments[first_new..] {
+                    if !segment.rejection_handler_authoritative && segment.rejection_handler.is_none() {
+                        segment.rejection_handler = Some(handler.clone());
+                    }
                 }
             }
         }
@@ -151,10 +154,12 @@ impl<'ctx> HirCompiler<'ctx> {
                     next_guard,
                 )?;
             }
-            if let Some(outer) = &catch_enclosing {
-                for segment in &mut segments[first_new..] {
-                    if segment.rejection_handler.is_none() {
-                        segment.rejection_handler = Some(outer.clone());
+            if !matches!(stmt, HirStmt::Finally(..)) {
+                if let Some(outer) = &catch_enclosing {
+                    for segment in &mut segments[first_new..] {
+                        if !segment.rejection_handler_authoritative && segment.rejection_handler.is_none() {
+                            segment.rejection_handler = Some(outer.clone());
+                        }
                     }
                 }
             }
