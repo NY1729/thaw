@@ -1591,8 +1591,12 @@ fn sweep_idle_connections() -> Option<Instant> {
 }
 
 fn register_server(state: *const ServerState) {
+    register_server_in(active_servers(), state);
+}
+
+fn register_server_in(servers: &Mutex<Vec<usize>>, state: *const ServerState) {
     let address = state as usize;
-    let mut servers = active_servers().lock().unwrap();
+    let mut servers = servers.lock().unwrap();
     if !servers.contains(&address) {
         servers.push(address);
     }
@@ -1633,45 +1637,74 @@ pub extern "C" fn thaw_http_run_servers() {
         // has fully unwound by now: free the husks it left behind.
         drain_pending_context_frees();
         arm_idle_wakeup(sweep_idle_connections());
-        {
-            let mut servers = active_servers().lock().unwrap();
-            servers.retain(|address| {
-                let state = unsafe { &*(*address as *const ServerState) };
-                if state.pending_listening.swap(false, Ordering::AcqRel) {
-                    emit_event(&state.listening_listeners);
-                }
-                let errors = std::mem::take(&mut *state.pending_errors.lock().unwrap());
-                for error in errors {
-                    emit_error(&state.error_listeners, &error);
-                }
-                if state.closed.load(Ordering::Acquire) {
-                    let watcher = state.watcher.swap(0, Ordering::AcqRel);
-                    if watcher != 0 {
-                        unsafe { thaw_runtime_unwatch_fd(watcher) };
-                    }
-                    *state.listener.lock().unwrap() = None;
-                    if state.connections.load(Ordering::Acquire) == 0 {
-                        if state.close_requested.swap(false, Ordering::AcqRel) {
-                            emit_event(&state.close_listeners);
-                        }
-                        false
-                    } else {
-                        true
-                    }
-                } else {
-                    true
-                }
-            });
-            if servers.is_empty() && ACTIVE_CONNECTIONS.load(Ordering::Acquire) == 0 {
-                arm_idle_wakeup(None);
-                return;
-            }
+        let (empty, pending_event) = dispatch_server_events(active_servers());
+        if empty && ACTIVE_CONNECTIONS.load(Ordering::Acquire) == 0 {
+            arm_idle_wakeup(None);
+            return;
+        }
+        if pending_event {
+            continue;
         }
         if !unsafe { thaw_runtime_run_one_event() } {
             arm_idle_wakeup(None);
             return;
         }
     }
+}
+
+/// Returns whether the server list is empty and whether a callback queued an
+/// event that must be handled before the next blocking event-loop poll.
+fn dispatch_server_events(servers: &Mutex<Vec<usize>>) -> (bool, bool) {
+    // A listening/error/close listener can call `listen`, which
+    // registers a server in this same list. Snapshot the stable
+    // ServerState pointers, then invoke user code without the list
+    // lock. A callback can also reopen the very server being closed.
+    let snapshot = servers.lock().unwrap().clone();
+    for &address in &snapshot {
+        let state = unsafe { &*(address as *const ServerState) };
+        if state.pending_listening.swap(false, Ordering::AcqRel) {
+            emit_event(&state.listening_listeners);
+        }
+        let errors = std::mem::take(&mut *state.pending_errors.lock().unwrap());
+        for error in errors {
+            emit_error(&state.error_listeners, &error);
+        }
+        if state.closed.load(Ordering::Acquire) {
+            let watcher = state.watcher.swap(0, Ordering::AcqRel);
+            if watcher != 0 {
+                unsafe { thaw_runtime_unwatch_fd(watcher) };
+            }
+            *state.listener.lock().unwrap() = None;
+            if state.connections.load(Ordering::Acquire) == 0
+                && state.close_requested.swap(false, Ordering::AcqRel)
+            {
+                emit_event(&state.close_listeners);
+            }
+        }
+    }
+    let mut current = servers.lock().unwrap();
+    current.retain(|address| {
+        let state = unsafe { &*(*address as *const ServerState) };
+        !snapshot.contains(address)
+            || !state.closed.load(Ordering::Acquire)
+            || state.connections.load(Ordering::Acquire) != 0
+            || state.close_requested.load(Ordering::Acquire)
+            || state.pending_listening.load(Ordering::Acquire)
+            || !state.pending_errors.lock().unwrap().is_empty()
+    });
+    // A callback may have registered another server or queued an
+    // event on this one. Process it before blocking in the event
+    // loop; a closed server need not have an fd watcher to wake us.
+    let pending_event = current.iter().any(|address| {
+        let state = unsafe { &*(*address as *const ServerState) };
+        !snapshot.contains(address)
+            || state.pending_listening.load(Ordering::Acquire)
+            || !state.pending_errors.lock().unwrap().is_empty()
+            || (state.closed.load(Ordering::Acquire)
+                && state.connections.load(Ordering::Acquire) == 0
+                && state.close_requested.load(Ordering::Acquire))
+    });
+    (current.is_empty(), pending_event)
 }
 
 fn emit_event(listeners: &Mutex<Vec<EventListener>>) {
@@ -2587,6 +2620,154 @@ pub extern "C" fn createServer(callback: *const c_void) -> *const c_void {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn dormant_event_server() -> Box<ServerState> {
+        Box::new(ServerState {
+            callback: 0,
+            closed: AtomicBool::new(true),
+            listener: Mutex::new(None),
+            watcher: AtomicU64::new(0),
+            connections: AtomicUsize::new(0),
+            listening_listeners: Mutex::new(Vec::new()),
+            close_listeners: Mutex::new(Vec::new()),
+            error_listeners: Mutex::new(Vec::new()),
+            pending_listening: AtomicBool::new(true),
+            pending_errors: Mutex::new(Vec::new()),
+            close_requested: AtomicBool::new(false),
+        })
+    }
+
+    // Unrun regression: both listening and error callbacks can register a
+    // server. A nonblocking lock probe reports the former deadlock instead
+    // of letting the old implementation hang the test process.
+    #[test]
+    fn listening_and_error_events_can_register_another_server() {
+        struct Probe {
+            servers: *const Mutex<Vec<usize>>,
+            second: *const ServerState,
+            lock_was_free: std::cell::Cell<bool>,
+            calls: std::cell::Cell<usize>,
+        }
+        unsafe extern "C" fn on_event(environment: *const c_void) {
+            let closure = &*(environment as *const NativeClosure);
+            let probe = &*(closure.context as *const Probe);
+            probe.calls.set(probe.calls.get() + 1);
+            let unlocked = (*probe.servers).try_lock().is_ok();
+            probe.lock_was_free.set(unlocked);
+            if unlocked {
+                register_server_in(&*probe.servers, probe.second);
+            }
+        }
+        unsafe extern "C" fn on_error(
+            environment: *const c_void,
+            _error: *const NativeServerError,
+        ) {
+            on_event(environment);
+        }
+
+        for error_event in [false, true] {
+            let servers = Mutex::new(Vec::new());
+            let first = dormant_event_server();
+            let second = dormant_event_server();
+            let probe = Box::new(Probe {
+                servers: &servers,
+                second: &*second,
+                lock_was_free: std::cell::Cell::new(false),
+                calls: std::cell::Cell::new(0),
+            });
+            let callback = Box::new(NativeClosure {
+                code: if error_event {
+                    on_error as *const c_void
+                } else {
+                    on_event as *const c_void
+                },
+                context: (&*probe as *const Probe).cast_mut().cast(),
+            });
+            let listener = EventListener {
+                callback: (&*callback as *const NativeClosure) as usize,
+                once: true,
+            };
+            if error_event {
+                first.pending_listening.store(false, Ordering::Release);
+                first.pending_errors.lock().unwrap().push(ServerError {
+                    message: "probe".into(), code: "PROBE".into(), port: 0.0,
+                });
+                first.error_listeners.lock().unwrap().push(listener);
+            } else {
+                first.listening_listeners.lock().unwrap().push(listener);
+            }
+            register_server_in(&servers, &*first);
+            assert_eq!(dispatch_server_events(&servers), (false, true));
+            assert!(probe.lock_was_free.get());
+            assert_eq!(probe.calls.get(), 1);
+            assert_eq!(dispatch_server_events(&servers), (true, false));
+        }
+    }
+
+    // Unrun regression: a close callback can reopen its own server and queue
+    // a new error. The new event must be handled before the event loop polls.
+    #[test]
+    fn close_event_can_reopen_and_queue_error_before_poll() {
+        struct Probe {
+            servers: *const Mutex<Vec<usize>>,
+            server: *const ServerState,
+            lock_was_free: std::cell::Cell<bool>,
+            error_calls: std::cell::Cell<usize>,
+        }
+        unsafe extern "C" fn on_close(environment: *const c_void) {
+            let closure = &*(environment as *const NativeClosure);
+            let probe = &*(closure.context as *const Probe);
+            let unlocked = (*probe.servers).try_lock().is_ok();
+            probe.lock_was_free.set(unlocked);
+            if unlocked {
+                (*probe.server).closed.store(false, Ordering::Release);
+                (*probe.server).pending_errors.lock().unwrap().push(ServerError {
+                    message: "reopened".into(), code: "REOPEN".into(), port: 0.0,
+                });
+                register_server_in(&*probe.servers, probe.server);
+            }
+        }
+        unsafe extern "C" fn on_error(
+            environment: *const c_void,
+            _error: *const NativeServerError,
+        ) {
+            let closure = &*(environment as *const NativeClosure);
+            let probe = &*(closure.context as *const Probe);
+            probe.error_calls.set(probe.error_calls.get() + 1);
+        }
+        let servers = Mutex::new(Vec::new());
+        let first = dormant_event_server();
+        first.pending_listening.store(false, Ordering::Release);
+        first.close_requested.store(true, Ordering::Release);
+        let probe = Box::new(Probe {
+            servers: &servers,
+            server: &*first,
+            lock_was_free: std::cell::Cell::new(false),
+            error_calls: std::cell::Cell::new(0),
+        });
+        let context = (&*probe as *const Probe).cast_mut().cast();
+        let close_callback = Box::new(NativeClosure {
+            code: on_close as *const c_void, context,
+        });
+        let error_callback = Box::new(NativeClosure {
+            code: on_error as *const c_void, context,
+        });
+        first.close_listeners.lock().unwrap().push(EventListener {
+            callback: (&*close_callback as *const NativeClosure) as usize,
+            once: true,
+        });
+        first.error_listeners.lock().unwrap().push(EventListener {
+            callback: (&*error_callback as *const NativeClosure) as usize,
+            once: true,
+        });
+        register_server_in(&servers, &*first);
+        assert_eq!(dispatch_server_events(&servers), (false, true));
+        assert!(probe.lock_was_free.get());
+        assert_eq!(dispatch_server_events(&servers), (false, false));
+        assert_eq!(probe.error_calls.get(), 1);
+        first.closed.store(true, Ordering::Release);
+        assert_eq!(dispatch_server_events(&servers), (true, false));
+    }
 
     // Unrun regression: a peer can finish sending and still receive delayed chunks.
     #[test]
