@@ -269,9 +269,10 @@ fn emit_binary_call(code: &mut Vec<u8>, function: u64, left: u8) {
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 fn emit_binary_call_reversed(code: &mut Vec<u8>, function: u64, left: u8) {
     emit_spill(code, left);
-    code.extend_from_slice(&[0xf2, 0x0f, 0x11, 0x04 | (left << 3), 0x24]);
+    // Slots below `left` hold live registers; the next slot is free.
+    code.extend_from_slice(&[0xf2, 0x0f, 0x11, 0x44 | (left << 3), 0x24, left * 8]);
     emit_move(code, 0, left + 1);
-    code.extend_from_slice(&[0xf2, 0x0f, 0x10, 0x0c, 0x24]);
+    code.extend_from_slice(&[0xf2, 0x0f, 0x10, 0x4c, 0x24, left * 8]);
     code.extend_from_slice(&[0x48, 0xb8]);
     code.extend_from_slice(&function.to_le_bytes());
     code.extend_from_slice(&[0xff, 0xd0]);
