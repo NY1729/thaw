@@ -426,7 +426,7 @@ impl<'a> FnLowerer<'a> {
                         continue;
                     };
                     if let Pat::Rest(rest) = element_pattern {
-                        let remaining = elements[index..].to_vec();
+                        let remaining = elements.get(index..).unwrap_or_default().to_vec();
                         let rest_value = HirExpr::ArrayLit(
                             remaining
                                 .iter()
@@ -442,7 +442,9 @@ impl<'a> FnLowerer<'a> {
                                 })
                                 .collect(),
                         );
-                        let rest_type = if remaining
+                        let rest_type = if remaining.is_empty() {
+                            HirType::Array(Box::new(HirType::F64))
+                        } else if remaining
                             .first()
                             .is_some_and(|first| remaining.iter().all(|element| element == first))
                         {
@@ -824,11 +826,10 @@ impl<'a> FnLowerer<'a> {
             let HirType::Tuple(tuple) = element else {
                 return Err("union array rest requires tuple members".into());
             };
-            if start > tuple.len() {
-                return Err(format!("tuple rest index {start} is out of bounds"));
-            }
-            let remaining = tuple[start..].to_vec();
-            let rest_type = if remaining
+            let remaining = tuple.get(start..).unwrap_or_default().to_vec();
+            let rest_type = if remaining.is_empty() {
+                HirType::Array(Box::new(HirType::F64))
+            } else if remaining
                 .first()
                 .is_some_and(|first| remaining.iter().all(|element| element == first))
             {
@@ -856,7 +857,7 @@ impl<'a> FnLowerer<'a> {
                 elements.to_vec(),
             );
             let rest = HirExpr::ArrayLit(
-                tuple[start..]
+                tuple.get(start..).unwrap_or_default()
                     .iter()
                     .enumerate()
                     .map(|(offset, ty)| {
@@ -1119,11 +1120,10 @@ impl<'a> FnLowerer<'a> {
                         let HirType::Tuple(tuple) = option else {
                             return Err(format!("nested array rest cannot destructure {option:?}"));
                         };
-                        if start > tuple.len() {
-                            return Err(format!("tuple rest index {start} is out of bounds"));
-                        }
-                        let remaining = tuple[start..].to_vec();
-                        let rest = if remaining
+                        let remaining = tuple.get(start..).unwrap_or_default().to_vec();
+                        let rest = if remaining.is_empty() {
+                            HirType::Array(Box::new(HirType::F64))
+                        } else if remaining
                             .first()
                             .is_some_and(|first| remaining.iter().all(|element| element == first))
                         {
