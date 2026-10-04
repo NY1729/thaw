@@ -19,6 +19,7 @@ unsafe fn positioned_string_search(value: f64, search: f64, position: f64, kind:
     };
     let value = value.encode_utf16().collect::<Vec<_>>();
     let search = search.encode_utf16().collect::<Vec<_>>();
+    let position = if kind == 4 && position.is_nan() { f64::INFINITY } else { position };
     let position = clamped_string_position(position, value.len());
     match kind {
         0 => f64::from(value.get(position..position.saturating_add(search.len())) == Some(&search)),
