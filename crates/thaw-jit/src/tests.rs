@@ -995,6 +995,12 @@ mod tests {
         for count in [-1.5, f64::NEG_INFINITY, f64::INFINITY] {
             assert!(!call(&repeat, &[f64::from_bits(repeated.as_ptr() as usize as u64), count]).error.is_null());
         }
+        let lone = CString::new(vec![0xed, 0xa0, 0x80]).unwrap();
+        let output = call(&repeat, &[f64::from_bits(lone.as_ptr() as usize as u64), 2.0]);
+        assert!(output.error.is_null());
+        let output = output.value.to_bits() as usize as *mut c_char;
+        assert_eq!(unsafe { CStr::from_ptr(output) }.to_bytes(), &[0xed, 0xa0, 0x80, 0xed, 0xa0, 0x80]);
+        unsafe { libc::free(output.cast()) };
         let sliced = CString::new("😀abcd").unwrap();
         for (operation, start, expected) in [
             ("slice", -2.0, "cd"),
@@ -1032,6 +1038,18 @@ mod tests {
             );
             unsafe { libc::free(result.cast()) };
         }
+        // UTF-16 ranges may split a surrogate pair and must preserve lone units.
+        for (operation, start, end, expected) in [
+            ("slice2", 0.0, 1.0, &[0xed, 0xa0, 0xbd][..]),
+            ("substring2", 1.0, 2.0, &[0xed, 0xb8, 0x80][..]),
+        ] {
+            let range = CString::new(format!("expr:s0,a1,a2,{operation}:{operation}")).unwrap();
+            let result = call(&range, &[f64::from_bits(sliced.as_ptr() as usize as u64), start, end]);
+            assert!(result.error.is_null());
+            let result = result.value.to_bits() as usize as *mut c_char;
+            assert_eq!(unsafe { CStr::from_ptr(result) }.to_bytes(), expected);
+            unsafe { libc::free(result.cast()) };
+        }
         let padded = CString::new("😀").unwrap();
         let padding = CString::new("ab").unwrap();
         for (operation, expected) in [("padstart", "a😀"), ("padend", "😀a")] {
@@ -1056,6 +1074,8 @@ mod tests {
             ("replace", "a", "x", "xba"),
             ("replaceall", "a", "x", "xbx"),
             ("replaceall", "", "-", "-a-b-a-"),
+            ("replace", "b", "$$:$&:$`:$'", "a$:b:a:aa"),
+            ("replaceall", "a", "$&$&", "aabaa"),
         ] {
             let search = CString::new(search).unwrap();
             let replacement = CString::new(replacement).unwrap();
