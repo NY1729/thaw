@@ -794,7 +794,15 @@ fn wasm_instantiate_inner(module_handle: u32, linkage: Option<String>) -> String
                     let Some(descriptor) = global_imports.get(&key) else {
                         return serde_json::json!({ "ok": false, "error": format!("WebAssembly global import {}.{} is not provided", import.module(), import.name()) }).to_string();
                     };
-                    let value = match wasm_runtime_value(descriptor, global_type.content(), &mut store) {
+                    if descriptor.get("type").and_then(serde_json::Value::as_str) != Some(wasm_type_name(global_type.content()))
+                        || descriptor.get("mutable").and_then(serde_json::Value::as_bool) != Some(global_type.mutability().is_mut())
+                    {
+                        return serde_json::json!({ "ok": false, "error": format!("WebAssembly global import {}.{} has incompatible type or mutability", import.module(), import.name()) }).to_string();
+                    }
+                    let Some(encoded_value) = descriptor.get("value") else {
+                        return serde_json::json!({ "ok": false, "error": "WebAssembly global import value is missing" }).to_string();
+                    };
+                    let value = match wasm_runtime_value(encoded_value, global_type.content(), &mut store) {
                         Ok(value) => value,
                         Err(error) => return serde_json::json!({ "ok": false, "error": error }).to_string(),
                     };
@@ -808,6 +816,9 @@ fn wasm_instantiate_inner(module_handle: u32, linkage: Option<String>) -> String
                     let Some(descriptor) = table_imports.get(&key) else {
                         return serde_json::json!({ "ok": false, "error": format!("WebAssembly table import {}.{} is not provided", import.module(), import.name()) }).to_string();
                     };
+                    if descriptor.get("element").and_then(serde_json::Value::as_str) != Some(wasm_type_name(expected.element())) {
+                        return serde_json::json!({ "ok": false, "error": format!("WebAssembly table import {}.{} has incompatible element type", import.module(), import.name()) }).to_string();
+                    }
                     let values = descriptor.get("values").and_then(serde_json::Value::as_array).cloned().unwrap_or_default();
                     let minimum = u32::try_from(values.len()).unwrap_or(u32::MAX);
                     let maximum = descriptor.get("maximum").and_then(serde_json::Value::as_u64).and_then(|value| u32::try_from(value).ok());
