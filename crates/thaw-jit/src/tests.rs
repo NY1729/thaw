@@ -14,6 +14,28 @@ mod tests {
         }
     }
 
+    #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+    #[test]
+    fn string_well_formed_operations_handle_lone_surrogates() {
+        let check = CString::new("expr:s0,iswellformed:iswellformed").unwrap();
+        let repair = CString::new("expr:s0,towellformed:towellformed").unwrap();
+        for (units, expected) in [
+            (vec![0xd800, b'x' as u16, 0xdc00], "\u{fffd}x\u{fffd}"),
+            (vec![0xd800, 0xdc00, 0xd800], "\u{10000}\u{fffd}"),
+        ] {
+            let input = CString::new(thaw_arena::wtf8_encode_utf16(&units)).unwrap();
+            let argument = f64::from_bits(input.as_ptr() as usize as u64);
+            let checked = call(&check, &[argument]);
+            assert!(checked.error.is_null());
+            assert_eq!(checked.value, 0.0);
+            let result = call(&repair, &[argument]);
+            assert!(result.error.is_null());
+            let output = result.value.to_bits() as usize as *mut c_char;
+            assert_eq!(unsafe { CStr::from_ptr(output) }.to_bytes(), expected.as_bytes());
+            unsafe { libc::free(output.cast()) };
+        }
+    }
+
     fn call(symbol: &CString, args: &[f64]) -> ThawJitResult {
         unsafe extern "C" fn allocate(size: usize, _: usize) -> *mut u8 {
             unsafe { libc::malloc(size).cast() }

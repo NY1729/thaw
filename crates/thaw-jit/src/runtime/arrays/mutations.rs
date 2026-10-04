@@ -1073,6 +1073,24 @@ extern "C" fn type_of_object(_: f64) -> f64 {
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
-extern "C" fn string_is_well_formed(_: f64) -> f64 {
-    1.0
+extern "C" fn string_is_well_formed(value: f64) -> f64 {
+    let Some(units) = (unsafe { string_utf16_argument(value) }) else {
+        CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
+        return 0.0;
+    };
+    f64::from(char::decode_utf16(units).all(|character| character.is_ok()))
+}
+
+#[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+extern "C" fn string_to_well_formed(value: f64) -> f64 {
+    let Some(units) = (unsafe { string_utf16_argument(value) }) else {
+        CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
+        return f64::from_bits(0);
+    };
+    if char::decode_utf16(units.iter().copied()).all(|character| character.is_ok()) {
+        return value;
+    }
+    let repaired: String = char::decode_utf16(units)
+        .map(|character| character.unwrap_or(char::REPLACEMENT_CHARACTER)).collect();
+    arena_string(repaired)
 }
