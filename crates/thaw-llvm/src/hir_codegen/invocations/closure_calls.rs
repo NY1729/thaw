@@ -483,6 +483,17 @@ impl<'ctx> HirCompiler<'ctx> {
             .basic()
             .ok_or("closure allocation returned no value")?
             .into_pointer_value();
+        let function = self.current_function();
+        let missing = self.context.append_basic_block(function, "special_closure_missing");
+        let ready = self.context.append_basic_block(function, "special_closure_ready");
+        let done = self.context.append_basic_block(function, "special_closure_done");
+        let failed = self.builder.build_is_null(closure, "special_closure_allocation_failed")
+            .map_err(|error| error.to_string())?;
+        self.builder.build_conditional_branch(failed, missing, ready)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(missing);
+        self.builder.build_unconditional_branch(done).map_err(|error| error.to_string())?;
+        self.builder.position_at_end(ready);
         self.builder
             .build_store(closure, code.as_global_value().as_pointer_value())
             .map_err(|error| error.to_string())?;
@@ -518,6 +529,15 @@ impl<'ctx> HirCompiler<'ctx> {
         self.builder
             .build_store(promise_slot, promise)
             .map_err(|error| error.to_string())?;
-        Ok(closure)
+        self.builder.build_unconditional_branch(done).map_err(|error| error.to_string())?;
+        self.builder.position_at_end(done);
+        let selected = self.builder.build_phi(
+            self.context.ptr_type(AddressSpace::default()), "special_closure_or_null",
+        ).map_err(|error| error.to_string())?;
+        selected.add_incoming(&[
+            (&self.context.ptr_type(AddressSpace::default()).const_null(), missing),
+            (&closure, ready),
+        ]);
+        Ok(selected.as_basic_value().into_pointer_value())
     }
 }
