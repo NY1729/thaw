@@ -651,13 +651,14 @@ fn render_bundle_mode(main_key: &str, modules: &[BundledModule], mixed: Option<&
     var request;
     try { request = new Request(input, init); } catch (error) { return Promise.reject(error); }
     return Promise.resolve().then(async function() {
-      var body = request.body ? await request.bytes() : new Uint8Array(), redirects = 0;
+      var redirects = 0;
       function aborted() {
         var reason = request.signal && request.signal.reason;
         if (reason !== undefined) return reason;
         var error = new Error('This operation was aborted'); error.name = 'AbortError'; return error;
       }
       if (request.signal && request.signal.aborted) throw aborted();
+      var body = request.body ? await (globalThis.__thaw_request_bytes_for_fetch ? globalThis.__thaw_request_bytes_for_fetch(request) : request.bytes()) : new Uint8Array();
       return new Promise(function(resolve, reject) {
         var active = null, settled = false;
         function finishReject(error) { if (settled) return; settled = true; cleanup(); reject(error); }
