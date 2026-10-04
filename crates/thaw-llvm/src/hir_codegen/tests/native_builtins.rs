@@ -11384,3 +11384,20 @@ fn number_nonfinite_formatting_preserves_digits_evaluation() {
         "digits\nInfinity\ndigits\n-Infinity\nNaN\nNaN\nfinite precision range\nfinite exponential range\n"
     );
 }
+
+#[test]
+fn set_intersection_uses_smaller_operand_order() {
+    let source = r#"
+        function main(): void {
+            const large = new Set<number>([1, 2, 3]);
+            const small = new Set<number>([2, 1]);
+            console.log(Array.from(large.intersection(small)).join(","));
+            console.log(Array.from(small.intersection(large)).join(","));
+            const tied = new Set<number>([1, 2]);
+            console.log(Array.from(tied.intersection(small)).join(","));
+            const keys = new Map<number, number>([[2, 20], [1, 10]]);
+            console.log(Array.from(large.intersection(keys)).join(","));
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "set_intersection_order"), "2,1\n2,1\n1,2\n2,1\n");
+}
