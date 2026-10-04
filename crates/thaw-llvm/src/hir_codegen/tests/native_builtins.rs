@@ -2759,6 +2759,88 @@ fn generator_assignment_captures_reference_before_yield_and_calls_object_setter(
 }
 
 #[test]
+fn generator_assignment_uses_class_setter_after_resume() {
+    let source = r#"
+        class Box {
+            stored: number = 0;
+            set value(next: number) { this.stored = next * 10; }
+            static storedStatic: number = 0;
+            static set current(next: number) { Box.storedStatic = next + 1; }
+        }
+        let selected = new Box();
+        const original = selected;
+        const replacement = new Box();
+        function* assignClass(): Generator<number, void, number> {
+            selected.value = yield 2;
+        }
+        let choices = 0;
+        function choose(): Box { choices++; return selected; }
+        function* assignCall(): Generator<number, void, number> {
+            choose().value = yield 6;
+        }
+        let recordCalls = 0;
+        const record = { n: 0 };
+        function chooseRecord(): { n: number } { recordCalls++; return record; }
+        function* assignPlain(): Generator<number, void, number> {
+            chooseRecord().n = yield 8;
+        }
+        function* assignStatic(): Generator<number, void, number> {
+            Box.current = yield 4;
+        }
+        function* assignStaticField(): Generator<number, void, number> {
+            Box.storedStatic = yield 11;
+        }
+        function* assignShadow(Box: { value: number }): Generator<number, void, number> {
+            Box.value = yield 5;
+        }
+        class Derived extends Box {
+            *assignSuper(): Generator<number, void, number> {
+                super.value = yield 3;
+            }
+        }
+        function main(): void {
+            const iterator = assignClass();
+            console.log(iterator.next().value);
+            selected = replacement;
+            iterator.next(7);
+            console.log(original.stored, replacement.stored);
+            selected = original;
+            const callIterator = assignCall();
+            console.log(callIterator.next().value, choices);
+            selected = replacement;
+            callIterator.next(5);
+            console.log(original.stored, replacement.stored, choices);
+            const plainIterator = assignPlain();
+            console.log(plainIterator.next().value, recordCalls);
+            plainIterator.next(4);
+            console.log(record.n, recordCalls);
+            const derived = new Derived();
+            const superIterator = derived.assignSuper();
+            console.log(superIterator.next().value);
+            superIterator.next(8);
+            console.log(derived.stored);
+            const staticIterator = assignStatic();
+            console.log(staticIterator.next().value);
+            staticIterator.next(8);
+            console.log(Box.storedStatic);
+            const staticFieldIterator = assignStaticField();
+            console.log(staticFieldIterator.next().value);
+            staticFieldIterator.next(13);
+            console.log(Box.storedStatic);
+            const shadow = { value: 0 };
+            const shadowIterator = assignShadow(shadow);
+            console.log(shadowIterator.next().value);
+            shadowIterator.next(11);
+            console.log(shadow.value, Box.storedStatic);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "generator_reference_validation"),
+        "2\n70 0\n6 1\n50 0 1\n8 1\n4 1\n3\n80\n4\n9\n11\n13\n5\n11 13\n"
+    );
+}
+
+#[test]
 fn async_generator_next_returns_promised_iterator_results() {
     let source = r#"
         async function* values(): AsyncGenerator<number, string> {

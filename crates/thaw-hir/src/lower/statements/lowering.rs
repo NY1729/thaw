@@ -862,6 +862,94 @@ impl<'a> FnLowerer<'a> {
         Ok(HirExpr::Var(name))
     }
 
+    fn lower_generator_class_setter_assignment(
+        &mut self,
+        target: &AssignTarget,
+        value: HirExpr,
+    ) -> Result<Option<(Vec<HirStmt>, Vec<HirStmt>)>, String> {
+        if let AssignTarget::Simple(SimpleAssignTarget::SuperProp(member)) = target {
+            let (_, base_type, base_name) = self.super_initializer.clone()
+                .ok_or("`super` property assignment is only valid in a derived class")?;
+            let property = super_property_name(&member.prop)?;
+            let owner = if self.class_static_context {
+                base_name
+            } else {
+                let Some(owner) = self.class_super_instance_accessor_owner(&base_type, &property)
+                else { return Ok(None) };
+                owner
+            };
+            let symbol = class_setter_symbol(&owner, &property, self.class_static_context);
+            if self.signatures.get(&symbol)
+                .filter(|signature| self.class_static_context
+                    || signature.accessor_owner.as_deref() == Some(owner.as_str()))
+                .is_none() {
+                if self.signatures.contains_key(&class_getter_symbol(
+                    &owner, &property, self.class_static_context,
+                )) {
+                    return Err(format!("cannot assign to readonly super accessor `{owner}.{property}`"));
+                }
+                return Ok(None);
+            }
+            let write = if self.class_static_context {
+                self.call_class_static_setter(symbol, value)?
+            } else {
+                self.call_class_instance_setter(
+                    &owner, symbol, HirExpr::Var(self.resolve_binding("this")), value,
+                )?
+            };
+            return Ok(Some((Vec::new(), vec![HirStmt::Expr(write)])));
+        }
+        let AssignTarget::Simple(SimpleAssignTarget::Member(member)) = target else {
+            return Ok(None);
+        };
+        let Some(property) = member_property_name(&member.prop) else {
+            return Ok(None);
+        };
+        if let Expr::Ident(receiver) = member.obj.as_ref() {
+            let static_symbol = class_setter_symbol(receiver.sym.as_ref(), &property, true);
+            if self.is_unshadowed_class_identifier(receiver.sym.as_ref()) {
+                if self.signatures.contains_key(&static_symbol) {
+                    let write = self.call_class_static_setter(static_symbol, value)?;
+                    return Ok(Some((Vec::new(), vec![HirStmt::Expr(write)])));
+                }
+                if self.scope.contains_key(&class_static_field_symbol(receiver.sym.as_ref(), &property)) {
+                    return Ok(None);
+                }
+            }
+        }
+        if matches!(member.obj.as_ref(), Expr::This(_)) && self.class_static_context {
+            let class = self.class_context.as_deref()
+                .expect("static setter retains its class context");
+            let symbol = class_setter_symbol(class, &property, true);
+            if self.signatures.contains_key(&symbol) {
+                let write = self.call_class_static_setter(symbol, value)?;
+                return Ok(Some((Vec::new(), vec![HirStmt::Expr(write)])));
+            }
+            if self.scope.contains_key(&class_static_field_symbol(class, &property)) {
+                return Ok(None);
+            }
+        }
+        let receiver = self.lower_expr(&member.obj)?;
+        let receiver_type = self.infer_expr_type(&receiver)?;
+        let Some(owner) = self.class_instance_accessor_owner(&receiver_type, &property)
+        else {
+            // Reuse the already lowered receiver in the generic target path.
+            // Lowering a call twice can consume its expected-return hint.
+            let target = self.lower_member_target_from_receiver(member, receiver, receiver_type)?;
+            return Ok(Some(self.lower_generator_resume_target(target, value)?));
+        };
+        let symbol = class_setter_symbol(&owner, &property, false);
+        self.signatures.get(&symbol)
+            .filter(|signature| signature.accessor_owner.as_deref() == Some(owner.as_str()))
+            .ok_or_else(|| format!("cannot assign to readonly instance accessor `{owner}.{property}`"))?;
+        let mut before_yield = Vec::new();
+        let receiver = self.bind_generator_assignment_reference(
+            &mut before_yield, receiver,
+        )?;
+        let write = self.call_class_instance_setter(&owner, symbol, receiver, value)?;
+        Ok(Some((before_yield, vec![HirStmt::Expr(write)])))
+    }
+
     fn lower_generator_resume_assignment(
         &mut self,
         target: &AssignTarget,
@@ -893,7 +981,21 @@ impl<'a> FnLowerer<'a> {
             return Ok((Vec::new(), statements));
         }
 
+        if let Some(class_setter) =
+            self.lower_generator_class_setter_assignment(target, value.clone())?
+        {
+            return Ok(class_setter);
+        }
+
         let target = self.lower_assign_target(target)?;
+        self.lower_generator_resume_target(target, value)
+    }
+
+    fn lower_generator_resume_target(
+        &mut self,
+        target: Target,
+        value: HirExpr,
+    ) -> Result<(Vec<HirStmt>, Vec<HirStmt>), String> {
         // A property assignment resolves its receiver and computed key before
         // evaluating the RHS. The suspended `yield` is the RHS here, so keep
         // that reference across the suspension instead of reevaluating it on

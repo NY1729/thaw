@@ -17,6 +17,15 @@ impl<'a> FnLowerer<'a> {
     ) -> Result<Target, String> {
         let object = self.lower_json_mutable_chain(&member.obj)?;
         let object_type = self.infer_expr_type(&object)?;
+        self.lower_computed_target_from_receiver(object, object_type, computed)
+    }
+
+    fn lower_computed_target_from_receiver(
+        &mut self,
+        object: HirExpr,
+        object_type: HirType,
+        computed: &ComputedPropName,
+    ) -> Result<Target, String> {
         match &object_type {
             HirType::Array(_) => {
                 let index = self.lower_expr(&computed.expr)?;
@@ -79,6 +88,50 @@ impl<'a> FnLowerer<'a> {
         }
     }
 
+
+    fn lower_member_target_from_receiver(
+        &mut self,
+        member: &MemberExpr,
+        object: HirExpr,
+        object_type: HirType,
+    ) -> Result<Target, String> {
+        match &member.prop {
+            MemberProp::Computed(computed) => {
+                self.lower_computed_target_from_receiver(object, object_type, computed)
+            }
+            MemberProp::Ident(prop) => match &object_type {
+                HirType::Object(fields)
+                    if fields.iter().any(|(name, _)| name == prop.sym.as_str()) =>
+                {
+                    Ok(Target::Prop(object, object_type.clone(), prop.sym.to_string()))
+                }
+                HirType::Dictionary(element)
+                    if matches!(element.as_ref(), HirType::F64 | HirType::Str | HirType::Bool | HirType::Json) =>
+                {
+                    Ok(Target::Dictionary(
+                        object,
+                        Box::new(HirExpr::Lit(HirLit::Str(prop.sym.to_string()))),
+                        *element.clone(),
+                    ))
+                }
+                HirType::Json => Ok(Target::Dictionary(
+                    object,
+                    Box::new(HirExpr::Lit(HirLit::Str(prop.sym.to_string()))),
+                    HirType::Json,
+                )),
+                HirType::JsValue | HirType::Dynamic => Ok(Target::DynamicProperty(
+                    object,
+                    Box::new(HirExpr::Lit(HirLit::Str(prop.sym.to_string()))),
+                )),
+                other => Err(format!(
+                    "cannot assign to `.{}` on a value of type {other:?}",
+                    prop.sym,
+                )),
+            },
+            _ => Err("only `arr[i] = ...` / `obj.field = ...` member assignment is supported".into()),
+        }
+    }
+
     fn lower_assign_target(&mut self, target: &AssignTarget) -> Result<Target, String> {
         let AssignTarget::Simple(simple) = target else {
             return Err("destructuring assignment targets are not supported".into());
@@ -108,56 +161,9 @@ impl<'a> FnLowerer<'a> {
                         return Ok(Target::Var(symbol));
                     }
                 }
-                match &member.prop {
-                    MemberProp::Computed(computed) => self.lower_computed_target(member, computed),
-                    MemberProp::Ident(prop) => {
-                        if let Expr::Ident(class) = member.obj.as_ref() {
-                            let symbol =
-                                class_static_field_symbol(class.sym.as_ref(), prop.sym.as_ref());
-                            if self.scope.contains_key(&symbol) {
-                                return Ok(Target::Var(symbol));
-                            }
-                        }
-                        let obj = self.lower_json_mutable_chain(&member.obj)?;
-                        let obj_ty = self.infer_expr_type(&obj)?;
-                        match &obj_ty {
-                            HirType::Object(fields)
-                                if fields.iter().any(|(n, _)| n == prop.sym.as_str()) =>
-                            {
-                                Ok(Target::Prop(obj, obj_ty.clone(), prop.sym.to_string()))
-                            }
-                            HirType::Dictionary(element)
-                                if matches!(
-                                    element.as_ref(),
-                                    HirType::F64 | HirType::Str | HirType::Bool | HirType::Json
-                                ) =>
-                            {
-                                Ok(Target::Dictionary(
-                                    obj,
-                                    Box::new(HirExpr::Lit(HirLit::Str(prop.sym.to_string()))),
-                                    *element.clone(),
-                                ))
-                            }
-                            HirType::Json => Ok(Target::Dictionary(
-                                obj,
-                                Box::new(HirExpr::Lit(HirLit::Str(prop.sym.to_string()))),
-                                HirType::Json,
-                            )),
-                            HirType::JsValue | HirType::Dynamic => Ok(Target::DynamicProperty(
-                                obj,
-                                Box::new(HirExpr::Lit(HirLit::Str(prop.sym.to_string()))),
-                            )),
-                            other => Err(format!(
-                                "cannot assign to `.{}` on a value of type {other:?}",
-                                prop.sym
-                            )),
-                        }
-                    }
-                    _ => Err(
-                        "only `arr[i] = ...` / `obj.field = ...` member assignment is supported"
-                            .into(),
-                    ),
-                }
+                let object = self.lower_json_mutable_chain(&member.obj)?;
+                let object_type = self.infer_expr_type(&object)?;
+                self.lower_member_target_from_receiver(member, object, object_type)
             }
             _ => Err("unsupported assignment target".into()),
         }
