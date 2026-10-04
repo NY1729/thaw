@@ -478,7 +478,6 @@ impl<'a> FnLowerer<'a> {
                     ));
                 }
                 if assign.op != AssignOp::Assign && has_setter {
-                    let signature = self.signatures[&setter].clone();
                     let rhs = self.lower_expr(&assign.right)?;
                     let current = HirExpr::Call(Box::new(HirExpr::Var(getter)), Vec::new());
                     let value = if let Some(operator) = compound_op(assign.op) {
@@ -502,8 +501,7 @@ impl<'a> FnLowerer<'a> {
                             assign.op
                         ));
                     };
-                    let value = self.coerce_to_declared(&signature.params[0], value)?;
-                    return Ok(HirExpr::Call(Box::new(HirExpr::Var(setter)), vec![value]));
+                    return self.call_class_static_setter(setter, value);
                 }
             }
         }
@@ -521,14 +519,12 @@ impl<'a> FnLowerer<'a> {
                         .ok_or_else(|| format!("base class `{base_name}` has no accessor `{property}`"))?
                 };
                 let symbol = class_setter_symbol(&owner, &property, self.class_static_context);
-                let signature = self.signatures.get(&symbol).cloned()
+                let _signature = self.signatures.get(&symbol).cloned()
                     .filter(|signature| self.class_static_context || signature.accessor_owner.as_deref() == Some(owner.as_str()))
                     .ok_or_else(|| format!("base class `{owner}` has no setter `{property}`"))?;
                 let rhs = self.lower_expr(&assign.right)?;
-                let value_index = usize::from(!self.class_static_context);
-                let rhs = self.coerce_to_declared(&signature.params[value_index], rhs)?;
                 if self.class_static_context {
-                    return Ok(HirExpr::Call(Box::new(HirExpr::Var(symbol)), vec![rhs]));
+                    return self.call_class_static_setter(symbol, rhs);
                 }
                 return self.call_class_instance_setter(
                     &owner, symbol, HirExpr::Var(self.resolve_binding("this")), rhs,
@@ -539,21 +535,19 @@ impl<'a> FnLowerer<'a> {
                     (member.obj.as_ref(), member_property_name(&member.prop))
                 {
                     let static_symbol = class_setter_symbol(receiver.sym.as_ref(), &property, true);
-                    if let Some(signature) = self.signatures.get(&static_symbol).cloned() {
+                    if self.signatures.contains_key(&static_symbol) {
                         let rhs = self.lower_expr(&assign.right)?;
-                        let rhs = self.coerce_to_declared(&signature.params[0], rhs)?;
-                        return Ok(HirExpr::Call(Box::new(HirExpr::Var(static_symbol)), vec![rhs]));
+                        return self.call_class_static_setter(static_symbol, rhs);
                     }
                     let binding = self.resolve_binding(receiver.sym.as_ref());
                     if let Some(owner) = self.scope.get(&binding)
                         .and_then(|ty| self.class_instance_accessor_owner(ty, &property))
                     {
                         let symbol = class_setter_symbol(&owner, &property, false);
-                        if let Some(signature) = self.signatures.get(&symbol).cloned()
+                        if let Some(_signature) = self.signatures.get(&symbol).cloned()
                             .filter(|signature| signature.accessor_owner.as_deref() == Some(owner.as_str()))
                         {
                             let rhs = self.lower_expr(&assign.right)?;
-                            let rhs = self.coerce_to_declared(&signature.params[1], rhs)?;
                             return self.call_class_instance_setter(
                                 &owner, symbol, HirExpr::Var(binding), rhs,
                             );
@@ -570,10 +564,9 @@ impl<'a> FnLowerer<'a> {
                             .as_deref()
                             .expect("static setter retains its class context");
                         let symbol = class_setter_symbol(class, &property, true);
-                        if let Some(signature) = self.signatures.get(&symbol).cloned() {
+                        if let Some(_signature) = self.signatures.get(&symbol).cloned() {
                             let rhs = self.lower_expr(&assign.right)?;
-                            let rhs = self.coerce_to_declared(&signature.params[0], rhs)?;
-                            return Ok(HirExpr::Call(Box::new(HirExpr::Var(symbol)), vec![rhs]));
+                            return self.call_class_static_setter(symbol, rhs);
                         }
                     }
                     let binding = self.resolve_binding("this");
@@ -581,11 +574,10 @@ impl<'a> FnLowerer<'a> {
                         .and_then(|ty| self.class_instance_accessor_owner(ty, &property))
                     {
                         let symbol = class_setter_symbol(&owner, &property, false);
-                        if let Some(signature) = self.signatures.get(&symbol).cloned()
+                        if let Some(_signature) = self.signatures.get(&symbol).cloned()
                             .filter(|signature| signature.accessor_owner.as_deref() == Some(owner.as_str()))
                         {
                             let rhs = self.lower_expr(&assign.right)?;
-                            let rhs = self.coerce_to_declared(&signature.params[1], rhs)?;
                             return self.call_class_instance_setter(
                                 &owner, symbol, HirExpr::Var(binding), rhs,
                             );

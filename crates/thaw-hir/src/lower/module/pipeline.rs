@@ -907,10 +907,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                             .collect::<Result<Vec<_>, _>>()?,
                     );
                     let ret = if method.kind == MethodKind::Setter {
-                        params
-                            .last()
-                            .expect("a setter has one declared value parameter")
-                            .clone()
+                        HirType::Void
                     } else if method.function.is_generator {
                         lower_generator_return_type(
                             method.function.is_async,

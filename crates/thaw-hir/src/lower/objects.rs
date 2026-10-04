@@ -2109,6 +2109,29 @@ impl<'a> FnLowerer<'a> {
         )
     }
 
+    fn call_class_static_setter(
+        &mut self,
+        symbol: Symbol,
+        value: HirExpr,
+    ) -> Result<HirExpr, String> {
+        let value_type = self.infer_expr_type(&value)?;
+        let value_name = format!("__thaw_static_setter_value_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(value_name.clone(), value_type.clone());
+        let parameter_type = self.signatures.get(&symbol)
+            .and_then(|signature| signature.params.first()).cloned()
+            .ok_or_else(|| format!("static setter `{symbol}` has no value parameter"))?;
+        let argument = self.coerce_to_declared(&parameter_type, HirExpr::Var(value_name.clone()))?;
+        let result = HirExpr::Block(vec![
+            HirStmt::Expr(HirExpr::Call(
+                Box::new(HirExpr::Var(symbol)),
+                vec![argument],
+            )),
+            HirStmt::Return(Some(HirExpr::Var(value_name.clone()))),
+        ]);
+        self.wrap_call_argument_bindings(result, &[(value_name, value_type, value)])
+    }
+
     fn call_class_instance_setter(
         &mut self,
         owner: &str,
@@ -2124,14 +2147,22 @@ impl<'a> FnLowerer<'a> {
         self.next_binding += 1;
         self.scope.insert(receiver_name.clone(), receiver_type.clone());
         self.scope.insert(value_name.clone(), value_type.clone());
+        let parameter_type = self.signatures.get(&symbol)
+            .and_then(|signature| signature.params.get(1)).cloned()
+            .ok_or_else(|| format!("instance setter `{symbol}` has no value parameter"))?;
+        let argument = self.coerce_to_declared(&parameter_type, HirExpr::Var(value_name.clone()))?;
         let call = HirExpr::Call(
             Box::new(HirExpr::Var(symbol)),
             vec![
                 self.assert_class_accessor_receiver(HirExpr::Var(receiver_name.clone()), owner),
-                HirExpr::Var(value_name.clone()),
+                argument,
             ],
         );
-        self.wrap_call_argument_bindings(call, &[
+        let result = HirExpr::Block(vec![
+            HirStmt::Expr(call),
+            HirStmt::Return(Some(HirExpr::Var(value_name.clone()))),
+        ]);
+        self.wrap_call_argument_bindings(result, &[
             (receiver_name, receiver_type, receiver),
             (value_name, value_type, value),
         ])
