@@ -1249,13 +1249,14 @@ extern "C" fn string_repeat(value: f64, count: f64) -> f64 {
         let Some(value) = string_argument(value) else {
             return f64::from_bits(0);
         };
+        let count = count.trunc();
         let count = if count.is_nan() || count == 0.0 {
             0
         } else if !count.is_finite() || count < 0.0 {
             CALL_ERROR.with(|error| error.set(INVALID_REPEAT_COUNT.as_ptr().cast()));
             return f64::from_bits(0);
         } else {
-            count.trunc() as usize
+            count as usize
         };
         if value.len().checked_mul(count).is_none() {
             CALL_ERROR.with(|error| error.set(INVALID_REPEAT_COUNT.as_ptr().cast()));
