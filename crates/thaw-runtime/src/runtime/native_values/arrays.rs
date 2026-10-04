@@ -2196,7 +2196,7 @@ pub unsafe extern "C" fn thaw_tagged_array_index_of(
                 let value = unsafe { payload.cast::<*const c_char>().read_unaligned() };
                 let expected = unsafe { needle.cast::<*const c_char>().read_unaligned() };
                 !value.is_null() && !expected.is_null()
-                    && unsafe { wtf8_bytes(value) == wtf8_bytes(expected) }
+                    && unsafe { thaw_string_compare(value, expected) == 0 }
             }
             2 => (unsafe { payload.read() } != 0) == (unsafe { needle.read() } != 0),
             3 => (unsafe { payload.cast::<*const u8>().read_unaligned() })
@@ -2300,7 +2300,6 @@ unsafe fn string_array_search(
     if needle.is_null() {
         return -1.0;
     }
-    let needle = unsafe { wtf8_bytes(needle) };
     for index in array_search_start(length, from_index)..length {
         if !unsafe { array_index_present(presence, index) } {
             continue;
@@ -2311,7 +2310,7 @@ unsafe fn string_array_search(
                 .cast::<*const c_char>()
                 .read_unaligned()
         };
-        if !slot.is_null() && unsafe { wtf8_bytes(slot) } == needle {
+        if !slot.is_null() && unsafe { thaw_string_compare(slot, needle) == 0 } {
             return index as f64;
         }
     }
@@ -2365,7 +2364,6 @@ pub unsafe extern "C" fn thaw_string_array_last_index_of(
     let Some(start) = array_search_end(length, from_index) else {
         return -1.0;
     };
-    let needle = unsafe { wtf8_bytes(needle) };
     for index in (0..=start).rev() {
         if !unsafe { array_index_present(presence, index) } {
             continue;
@@ -2376,7 +2374,7 @@ pub unsafe extern "C" fn thaw_string_array_last_index_of(
                 .cast::<*const c_char>()
                 .read_unaligned()
         };
-        if !slot.is_null() && unsafe { wtf8_bytes(slot) } == needle {
+        if !slot.is_null() && unsafe { thaw_string_compare(slot, needle) == 0 } {
             return index as f64;
         }
     }
@@ -2784,6 +2782,30 @@ mod array_read_ptr_tests {
             assert_eq!(array.cast::<u64>().read(), 4);
             assert_eq!(thaw_array_has_property(array, updated, c"3".as_ptr(), 1), 0);
             assert_eq!(thaw_array_has_property(array, updated, c"2".as_ptr(), 1), 1);
+        }
+    }
+
+    #[test]
+    fn string_array_search_compares_utf16_units() {
+        let canonical = arena_wtf8("😀".as_bytes()).unwrap().cast::<c_char>();
+        let split_pair = arena_wtf8(&[0xed, 0xa0, 0xbd, 0xed, 0xb8, 0x80]).unwrap().cast::<c_char>();
+        let different = arena_wtf8("😁".as_bytes()).unwrap().cast::<c_char>();
+        for (stored, needle) in [(canonical, split_pair), (split_pair, canonical)] {
+            let array = [1_u64, stored as usize as u64];
+            let tagged = [1_u64, 1, stored as usize as u64];
+            unsafe {
+                let array = array.as_ptr().cast::<u8>();
+                assert_eq!(thaw_string_array_index_of(array, std::ptr::null(), needle, 0.0), 0.0);
+                assert_eq!(thaw_string_array_includes(array, std::ptr::null(), needle, 0.0), 1);
+                assert_eq!(thaw_string_array_last_index_of(array, std::ptr::null(), needle, f64::INFINITY), 0.0);
+                assert_eq!(thaw_string_array_includes(array, std::ptr::null(), different, 0.0), 0);
+                for (reverse, includes) in [(0, 0), (0, 1), (1, 0)] {
+                    assert_eq!(thaw_tagged_array_index_of(tagged.as_ptr().cast(), std::ptr::null(),
+                        (&needle as *const *const c_char).cast(),
+                        if reverse == 0 { 0.0 } else { f64::INFINITY },
+                        reverse, includes, 1, 1, 0), 0.0);
+                }
+            }
         }
     }
 
