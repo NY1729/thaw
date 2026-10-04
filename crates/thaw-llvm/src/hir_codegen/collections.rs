@@ -584,9 +584,34 @@ impl<'ctx> HirCompiler<'ctx> {
             .basic()
             .ok_or("thaw_arena_alloc did not return an array")?
             .into_pointer_value();
+        let unavailable = self.builder.build_is_null(result, "array_alloc_unavailable")
+            .map_err(|error| error.to_string())?;
+        let function = self.current_function();
+        let failed = self.context.append_basic_block(function, "array_alloc_failed");
+        let ready = self.context.append_basic_block(function, "array_alloc_ready");
+        self.builder.build_conditional_branch(unavailable, failed, ready)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(failed);
+        self.compile_throw_type_error("Unable to allocate Array storage")?;
+        self.builder.position_at_end(ready);
         self.builder
             .build_store(result, length)
             .map_err(|error| error.to_string())?;
+        if *element == HirType::Undefined {
+            // Array.from's no-mapper path creates present undefined slots.
+            // Arena allocations are zeroed only while tracing is active.
+            let zero = self.builder.build_alloca(i64_type, "array_undefined_zero")
+                .map_err(|error| error.to_string())?;
+            self.builder.build_store(zero, i64_type.const_zero())
+                .map_err(|error| error.to_string())?;
+            self.builder.build_call(
+                self.module.get_function("thaw_array_fill").unwrap(),
+                &[result.into(), zero.into(), i64_type.const_int(8, false).into(),
+                    self.context.f64_type().const_zero().into(),
+                    self.context.f64_type().const_float(f64::INFINITY).into()],
+                "initialize_undefined_array",
+            ).map_err(|error| error.to_string())?;
+        }
         Ok(self.compile_array_wrap(result)?.into())
     }
 
