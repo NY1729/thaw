@@ -223,6 +223,14 @@
       const exports = {}, resources = pendingResources.map(resource => ({ value: resource.value, binding: resource.value.__thawBind(this.__thawHandle, resource.item.module, resource.item.name) }));
       for (const item of result.exports) {
         if (item.kind === 'function') {
+          const reference = wasmResult(__thaw_wasm_export_funcref(this.__thawHandle, item.name)).value;
+          if (reference.t === 'jsfuncref') {
+            exports[item.name] = wasmDecodeValue(reference, this.__thawHandle);
+            continue;
+          }
+          const key = this.__thawHandle + ':' + reference.v;
+          const cached = wasmCachedFuncref(key);
+          if (cached) { exports[item.name] = cached; continue; }
           const callable = (...args) => {
             for (const resource of resources) resource.value.__thawSync();
             const raw = JSON.parse(__thaw_wasm_call(this.__thawHandle, item.name, JSON.stringify(args.map(wasmEncodeValue))));
@@ -233,12 +241,11 @@
             return values.length === 0 ? undefined : (values.length === 1 ? values[0] : values);
           };
           Object.defineProperty(callable, 'length', { value: item.parameters || 0 });
-          const reference = wasmResult(__thaw_wasm_export_funcref(this.__thawHandle, item.name)).value;
           Object.defineProperty(callable, '__thawWasmInstance', { value: this.__thawHandle });
           Object.defineProperty(callable, '__thawWasmFuncref', { value: reference.v });
           Object.defineProperty(callable, '__thawWasmParameters', { value: item.parameterTypes || [] });
           Object.defineProperty(callable, '__thawWasmResults', { value: item.resultTypes || [] });
-          wasmCacheFuncref(this.__thawHandle + ':' + reference.v, callable);
+          wasmCacheFuncref(key, callable);
           exports[item.name] = callable;
         } else if (item.kind === 'memory') {
           const memory = new WasmMemory({ instance: this.__thawHandle, name: item.name }, true);

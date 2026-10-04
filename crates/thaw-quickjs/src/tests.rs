@@ -7359,3 +7359,35 @@ fn request_body_source_survives_copy_and_clone() {
     "#), 1);
     assert_eq!(call("requestBodySource", "[]"), "[true,true,false,false,true]");
 }
+
+// Unrun regression: aliases and table reads share one exported function identity.
+#[test]
+fn webassembly_export_aliases_share_function_identity() {
+    assert_eq!(load(r#"
+        function wasmExportIdentity() {
+            const bytes = new TextEncoder().encode(`(module
+                (func $f (result i32) i32.const 42)
+                (export "a" (func $f)) (export "b" (func $f))
+                (table (export "table") 1 funcref)
+                (elem (i32.const 0) $f))`);
+            const module = new WebAssembly.Module(bytes);
+            const first = new WebAssembly.Instance(module);
+            const second = new WebAssembly.Instance(module);
+            const forwarding = new WebAssembly.Module(new TextEncoder().encode(`(module
+                (import "host" "f" (func $f (result i32)))
+                (export "a" (func $f)) (export "b" (func $f))
+                (table (export "table") 1 funcref)
+                (elem (i32.const 0) $f))`));
+            const forwarded = new WebAssembly.Instance(forwarding, { host: { f: first.exports.a } });
+            return [forwarded.exports.a === first.exports.a,
+                forwarded.exports.a === forwarded.exports.b,
+                forwarded.exports.table.get(0) === first.exports.a,
+                forwarded.exports.a(), first.exports.a === first.exports.b,
+                first.exports.table.get(0) === first.exports.a,
+                second.exports.a === second.exports.b,
+                first.exports.a !== second.exports.a,
+                first.exports.a(), first.exports.b()];
+        }
+    "#), 1);
+    assert_eq!(call("wasmExportIdentity", "[]"), "[true,true,true,42,true,true,true,true,42,42]");
+}
