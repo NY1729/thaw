@@ -544,15 +544,14 @@ impl<'ctx> HirCompiler<'ctx> {
                         })
                         .expect("hidden accessor field has a known prefix");
                     let property = self
-                        .builder
-                        .build_global_string_ptr(property, "object_accessor_property")
-                        .map_err(|error| error.to_string())?;
+                        .compile_raw_string_literal(property.as_bytes())?
+                        .into_pointer_value();
                     self.builder
                         .build_call(
                             self.module.get_function("thaw_object_set_accessor").unwrap(),
                             &[
                                 object.into(),
-                                property.as_pointer_value().into(),
+                                property.into(),
                                 val.into_pointer_value().into(),
                                 self.context
                                     .bool_type()

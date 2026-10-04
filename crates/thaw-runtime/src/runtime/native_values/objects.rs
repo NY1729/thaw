@@ -382,7 +382,7 @@ pub extern "C" fn thaw_object_state(object: *const u8, query: u8) -> bool {
 
 #[no_mangle]
 /// # Safety
-/// `property` must point to a valid NUL-terminated string for the duration of
+/// `property` must point to a live native string for the duration of
 /// this call. `object` and `closure` are opaque identities and are not read.
 pub unsafe extern "C" fn thaw_object_set_accessor(
     object: *const u8,
@@ -393,7 +393,7 @@ pub unsafe extern "C" fn thaw_object_set_accessor(
     if object.is_null() || property.is_null() || closure.is_null() {
         return false;
     }
-    let Ok(property) = CStr::from_ptr(property).to_str() else {
+    let Ok(property) = thaw_arena::NativeStr::from_ptr(property).to_str() else {
         return false;
     };
     OBJECT_ACCESSORS.with(|accessors| {
@@ -411,7 +411,7 @@ pub unsafe extern "C" fn thaw_object_set_accessor(
 
 #[no_mangle]
 /// # Safety
-/// `property` must point to a valid NUL-terminated string for the duration of
+/// `property` must point to a live native string for the duration of
 /// this call. `object` is used only as an opaque identity.
 pub unsafe extern "C" fn thaw_object_accessor(
     object: *const u8,
@@ -421,7 +421,7 @@ pub unsafe extern "C" fn thaw_object_accessor(
     if object.is_null() || property.is_null() {
         return std::ptr::null_mut();
     }
-    let Ok(property) = CStr::from_ptr(property).to_str() else {
+    let Ok(property) = thaw_arena::NativeStr::from_ptr(property).to_str() else {
         return std::ptr::null_mut();
     };
     OBJECT_ACCESSORS.with(|accessors| {
@@ -806,6 +806,28 @@ mod object_state_tests {
         assert!(!thaw_object_state(identity, 0));
         clear_object_states();
         assert!(thaw_object_state(identity, 0));
+    }
+
+    #[test]
+    fn accessor_names_preserve_embedded_nul() {
+        clear_object_states();
+        let object = 0_u8;
+        let short_closure = 1_u8;
+        let long_closure = 2_u8;
+        let long_name = thaw_arena::owned_string("x\0y");
+        assert!(!long_name.is_null());
+        unsafe {
+            let short = &short_closure as *const u8 as *mut u8;
+            let long = &long_closure as *const u8 as *mut u8;
+            assert!(thaw_object_set_accessor(&object, c"x".as_ptr(), short, false));
+            assert!(thaw_object_accessor(&object, long_name, false).is_null());
+            assert!(thaw_object_set_accessor(&object, long_name, long, false));
+            assert_eq!(thaw_object_accessor(&object, c"x".as_ptr(), false), short);
+            assert_eq!(thaw_object_accessor(&object, long_name, false), long);
+            assert!(thaw_object_accessor(&object, long_name, true).is_null());
+            clear_object_states();
+            thaw_arena::destroy_string(long_name);
+        }
     }
 
     #[test]
