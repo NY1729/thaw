@@ -2196,3 +2196,71 @@ fn native_string_union_add_does_not_construct_bigint_host_calls() {
         assert!(!body.contains("getDynamicValue"), "{name}: {body}");
     }
 }
+
+// Unrun regression: a public spelling cannot collide with a normalized # slot.
+#[test]
+fn preserves_private_slot_identity_with_public_name_collision() {
+    let module = thaw_parser::parse_typescript(r#"
+        export class Vault {
+            #value: number = 1;
+            __thaw_private_Vault_value: number = 2;
+            read(): number { return this.#value; }
+        }
+    "#).unwrap();
+    PRIVATE_CLASS_SLOTS.with(|slots| slots.borrow_mut().clear());
+    let normalized = normalize_private_class_members(&module);
+    let ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export)) = &normalized.body[0] else {
+        panic!("exported class was not preserved");
+    };
+    let Decl::Class(class) = &export.decl else { panic!("expected class"); };
+    let names = class.class.body.iter().filter_map(|member| match member {
+        ClassMember::ClassProp(property) => Some(class_property_name(&property.key).unwrap()),
+        _ => None,
+    }).collect::<Vec<_>>();
+    assert_eq!(names, ["__thaw_private_Vault_value_", "__thaw_private_Vault_value"]);
+    let ClassMember::Method(method) = &class.class.body[2] else { panic!("expected method"); };
+    let Stmt::Return(returned) = &method.function.body.as_ref().unwrap().stmts[0] else {
+        panic!("expected return");
+    };
+    let Expr::Member(read) = returned.arg.as_deref().unwrap() else { panic!("expected read"); };
+    assert!(matches!(&read.prop, MemberProp::Ident(key) if key.sym == *"__thaw_private_Vault_value_"));
+}
+
+// Unrun regression: nested private declarations and reads remain in their scope.
+#[test]
+fn keeps_nested_private_class_scope_out_of_outer_normalization() {
+    let module = thaw_parser::parse_typescript(r#"
+        class Outer {
+            #value: number = 1;
+            #base: any;
+            #outerValue: number = 5;
+            inner() { return class Inner extends this.#base {
+                #value: number = 3;
+                #base: number = 4;
+                read(): number { return this.#value; }
+                outer(other: Outer): number { return other.#outerValue; }
+            }; }
+        }
+    "#).unwrap();
+    PRIVATE_CLASS_SLOTS.with(|slots| slots.borrow_mut().clear());
+    let normalized = normalize_private_class_members(&module);
+    let ModuleItem::Stmt(Stmt::Decl(Decl::Class(outer))) = &normalized.body[0] else {
+        panic!("expected outer class");
+    };
+    let ClassMember::Method(method) = &outer.class.body[3] else { panic!("expected method"); };
+    let Stmt::Return(returned) = &method.function.body.as_ref().unwrap().stmts[0] else {
+        panic!("expected return");
+    };
+    let Expr::Class(inner) = returned.arg.as_deref().unwrap() else { panic!("expected inner class"); };
+    assert!(matches!(&inner.class.body[0], ClassMember::PrivateProp(property) if property.key.name == *"value"));
+    let ClassMember::Method(read) = &inner.class.body[2] else { panic!("expected read method"); };
+    let Stmt::Return(returned) = &read.function.body.as_ref().unwrap().stmts[0] else { panic!("expected return"); };
+    let Expr::Member(read) = returned.arg.as_deref().unwrap() else { panic!("expected private read"); };
+    assert!(matches!(&read.prop, MemberProp::PrivateName(name) if name.name == *"value"));
+    let Expr::Member(heritage) = inner.class.super_class.as_deref().unwrap() else { panic!("expected heritage read"); };
+    assert!(matches!(&heritage.prop, MemberProp::Ident(name) if name.sym == *"__thaw_private_Outer_base"));
+    let ClassMember::Method(method) = &inner.class.body[3] else { panic!("expected outer read"); };
+    let Stmt::Return(returned) = &method.function.body.as_ref().unwrap().stmts[0] else { panic!("expected return"); };
+    let Expr::Member(read) = returned.arg.as_deref().unwrap() else { panic!("expected outer private read"); };
+    assert!(matches!(&read.prop, MemberProp::Ident(name) if name.sym == *"__thaw_private_Outer_outerValue"));
+}
