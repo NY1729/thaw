@@ -7855,3 +7855,48 @@ fn webassembly_import_getters_evaluated_once() {
     "#), 1);
     assert_eq!(call("wasmImportGetters", "[]"), "[42,1,1,2]");
 }
+
+// Unrun regression target: multiple import results require and consume an iterable.
+#[test]
+fn webassembly_import_multiple_results_iterable() {
+    assert_eq!(load(r#"
+        function wasmIterableResults() {
+            const bytes = new TextEncoder().encode(`(module
+                (import "host" "values" (func $values (result i32 i32)))
+                (func (export "read") (result i32 i32) call $values))`);
+            const module = new WebAssembly.Module(bytes);
+            let iterations = 0;
+            const instance = new WebAssembly.Instance(module, { host: { values() {
+                return { *[Symbol.iterator]() { iterations++; yield 42; yield 73; } };
+            } } });
+            const values = instance.exports.read();
+            const bad = new WebAssembly.Instance(module, { host: { values() { return { 0: 1, 1: 2, length: 2 }; } } });
+            let rejected = false;
+            try { bad.exports.read(); } catch (error) { rejected = error instanceof TypeError; }
+            return [values, iterations, rejected, Object.keys(WebAssembly.Module.imports(module)[0]).sort()];
+        }
+    "#), 1);
+    assert_eq!(call("wasmIterableResults", "[]"), "[[42,73],1,true,[\"kind\",\"module\",\"name\"]]");
+}
+
+// Unrun regression target: callback result coercion completes before memory sync.
+#[test]
+fn webassembly_import_result_coercion_memory() {
+    assert_eq!(load(r#"
+        function wasmResultCoercionMemory() {
+            const memory = new WebAssembly.Memory({ initial: 1 });
+            const bytes = new TextEncoder().encode(`(module
+                (import "host" "memory" (memory 1))
+                (import "host" "callback" (func $callback (result i32)))
+                (func (export "run") (result i32)
+                    i32.const 0 i32.const 42 i32.store8
+                    call $callback i32.const 1 i32.load8_u i32.add))`);
+            let observed;
+            const instance = new WebAssembly.Instance(new WebAssembly.Module(bytes), { host: {
+                memory, callback() { return { valueOf() { observed = new Uint8Array(memory.buffer)[0]; new Uint8Array(memory.buffer)[1] = 73; return 91; } }; }
+            } });
+            return [instance.exports.run(), observed, new Uint8Array(memory.buffer)[1]];
+        }
+    "#), 1);
+    assert_eq!(call("wasmResultCoercionMemory", "[]"), "[164,42,73]");
+}
