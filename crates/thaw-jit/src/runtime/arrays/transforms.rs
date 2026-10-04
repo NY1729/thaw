@@ -340,14 +340,14 @@ extern "C" fn imul_number(left: f64, right: f64) -> f64 {
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 unsafe fn string_argument(value: f64) -> Option<String> {
     let pointer = value.to_bits() as usize as *const c_char;
-    (!pointer.is_null()).then(|| CStr::from_ptr(pointer).to_string_lossy().into_owned())
+    (!pointer.is_null()).then(|| thaw_arena::NativeStr::from_ptr(pointer).to_string_lossy().into_owned())
 }
 
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 extern "C" fn string_length(value: f64) -> f64 {
     unsafe {
-        string_argument(value)
-            .map(|value| value.encode_utf16().count() as f64)
+        string_utf16_argument(value)
+            .map(|value| value.len() as f64)
             .unwrap_or(0.0)
     }
 }
