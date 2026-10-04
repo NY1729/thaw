@@ -201,8 +201,10 @@
         this.__thawType = global.type; this.__thawMutable = global.mutable;
         return;
       }
-      if (!descriptor || !['i32','i64','f32','f64','externref'].includes(String(descriptor.value))) throw new TypeError('WebAssembly.Global(): invalid value type');
-      this.__thawType = String(descriptor.value); this.__thawMutable = Boolean(descriptor.mutable);
+      if (!descriptor) throw new TypeError('WebAssembly.Global(): invalid value type');
+      const mutable = !!descriptor.mutable, type = `${descriptor.value}`;
+      if (!['i32','i64','f32','f64','externref'].includes(type)) throw new TypeError('WebAssembly.Global(): invalid value type');
+      this.__thawType = type; this.__thawMutable = mutable;
       this.__thawLocalValue = this.__thawConvert(arguments.length < 2 ? (this.__thawType === 'i64' ? 0n : this.__thawType === 'externref' ? undefined : 0) : value);
       this.__thawBindings = [];
     }
@@ -235,12 +237,14 @@
         this.__thawElement = wasmResult(__thaw_wasm_table(this.__thawInstance, this.__thawName, 'size', 0, undefined)).type;
         return;
       }
-      if (!descriptor || !['anyfunc','funcref','externref'].includes(String(descriptor.element))) throw new TypeError('WebAssembly.Table(): invalid element type');
+      if (!descriptor) throw new TypeError('WebAssembly.Table(): invalid element type');
+      const element = `${descriptor.element}`;
+      if (!['anyfunc','funcref','externref'].includes(element)) throw new TypeError('WebAssembly.Table(): invalid element type');
       const initial = wasmUnsigned32(descriptor.initial);
       const maximumValue = descriptor.maximum;
       const maximum = maximumValue === undefined ? Infinity : wasmUnsigned32(maximumValue);
       if (initial > maximum) throw new RangeError('WebAssembly.Table(): invalid table limits');
-      this.__thawElement = descriptor.element === 'externref' ? 'externref' : 'funcref'; this.__thawMaximum = maximum;
+      this.__thawElement = element === 'externref' ? 'externref' : 'funcref'; this.__thawMaximum = maximum;
       if (arguments.length < 2) value = this.__thawElement === 'externref' ? undefined : null;
       this.__thawValidate(value); this.__thawValues = Array(initial).fill(value); this.__thawBindings = [];
     }
