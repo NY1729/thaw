@@ -28,6 +28,47 @@ fn frame_split_async_main_has_resume_function_and_multiple_states() {
 }
 
 #[test]
+fn frame_async_allocations_guard_null_before_field_writes() {
+    let source = r#"
+        async function compute(): Promise<number> {
+            await sleep(1);
+            return 42;
+        }
+    "#;
+    let module = thaw_parser::parse_typescript(source).unwrap();
+    let program = thaw_hir::lower_module(&module).unwrap();
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "async_frame_allocation_guards");
+    compiler.compile_program(&program).unwrap();
+    compiler.module.verify().unwrap();
+    let ir = compiler.print_to_string();
+    let body = ir.lines()
+        .skip_while(|line| !(line.starts_with("define ") && line.contains("@compute(")))
+        .take_while(|line| *line != "}")
+        .collect::<Vec<_>>();
+    let is_label = |line: &str| line.split(';').next().unwrap().trim_end().ends_with(':');
+    let block = |name: &str| {
+        let label = format!("{name}:");
+        let start = body.iter().position(|line| line.split(';').next().unwrap().trim_end()
+            == label).expect(&ir);
+        body.iter().skip(start + 1).take_while(|line| !is_label(line))
+            .copied().collect::<Vec<_>>().join("\n")
+    };
+    let entry = block("entry");
+    let frame_failed = block("async_frame_allocation_failed");
+    let frame_ready = block("async_frame_allocation_ready");
+    let completion_failed = block("async_completion_allocation_failed");
+    assert!(entry.contains("async_frame_is_null = icmp eq ptr"), "{ir}");
+    assert!(!entry.contains("@thaw_promise_new("), "{ir}");
+    assert!(!frame_failed.contains("@thaw_promise_new("), "{ir}");
+    assert!(!frame_failed.contains("completion_slot"), "{ir}");
+    assert!(frame_ready.contains("@thaw_promise_new("), "{ir}");
+    assert!(frame_ready.contains("async_completion_is_null = icmp eq ptr"), "{ir}");
+    assert!(!completion_failed.contains("completion_slot"), "{ir}");
+    assert!(!completion_failed.contains("waiting_slot"), "{ir}");
+}
+
+#[test]
 fn frame_split_preserves_and_mutates_locals_across_awaits() {
     let source = r#"
         async function main(): Promise<void> {

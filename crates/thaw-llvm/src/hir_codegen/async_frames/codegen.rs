@@ -64,6 +64,15 @@ impl<'ctx> HirCompiler<'ctx> {
             .basic()
             .ok_or("arena allocator returned no frame")?
             .into_pointer_value();
+        let frame_missing = self.builder.build_is_null(frame, "async_frame_is_null")
+            .map_err(|error| error.to_string())?;
+        let frame_failed = self.context.append_basic_block(ramp, "async_frame_allocation_failed");
+        let frame_ready = self.context.append_basic_block(ramp, "async_frame_allocation_ready");
+        self.builder.build_conditional_branch(frame_missing, frame_failed, frame_ready)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(frame_failed);
+        self.compile_throw_type_error("Cannot allocate async frame")?;
+        self.builder.position_at_end(frame_ready);
         let completion = self
             .builder
             .build_call(
@@ -76,6 +85,15 @@ impl<'ctx> HirCompiler<'ctx> {
             .basic()
             .ok_or("promise allocator returned no value")?
             .into_pointer_value();
+        let completion_missing = self.builder.build_is_null(completion, "async_completion_is_null")
+            .map_err(|error| error.to_string())?;
+        let completion_failed = self.context.append_basic_block(ramp, "async_completion_allocation_failed");
+        let completion_ready = self.context.append_basic_block(ramp, "async_completion_allocation_ready");
+        self.builder.build_conditional_branch(completion_missing, completion_failed, completion_ready)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(completion_failed);
+        self.compile_throw_type_error("Cannot allocate async completion")?;
+        self.builder.position_at_end(completion_ready);
         let completion_slot =
             self.async_frame_field(frame, ASYNC_COMPLETION_OFFSET, "completion_slot")?;
         self.builder
