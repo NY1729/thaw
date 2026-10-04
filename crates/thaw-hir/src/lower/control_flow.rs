@@ -381,9 +381,7 @@ fn async_arrow_has_only_tail_await_returns(statements: &[HirStmt]) -> bool {
             }
             // Adopting a returned promise would move its rejection outside the
             // surrounding catch, so try/catch needs the general async frame path.
-            HirStmt::Try(body, _, catch, _) => {
-                !body.iter().any(stmt_contains_await) && !catch.iter().any(stmt_contains_await)
-            }
+            HirStmt::Try(..) => false,
             other => !stmt_contains_await(other),
         })
     }
