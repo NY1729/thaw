@@ -7646,3 +7646,23 @@ fn webassembly_nested_import_reentry() {
     "#), 1);
     assert_eq!(call("wasmNestedReentry", "[]"), "43");
 }
+
+// Unrun regression target: special export names are own properties on a null prototype.
+#[test]
+fn webassembly_special_export_names() {
+    assert_eq!(load(r#"
+        function wasmSpecialExports() {
+            const bytes = new TextEncoder().encode(`(module
+                (func $value (result i32) i32.const 42)
+                (export "__proto__" (func $value))
+                (export "constructor" (func $value)))`);
+            const instance = new WebAssembly.Instance(new WebAssembly.Module(bytes));
+            const exports = instance.exports;
+            return [Object.getPrototypeOf(exports) === null,
+                Object.prototype.hasOwnProperty.call(exports, "__proto__"),
+                exports.__proto__(), exports.constructor(),
+                exports.__proto__ === exports.constructor, Object.isFrozen(exports)];
+        }
+    "#), 1);
+    assert_eq!(call("wasmSpecialExports", "[]"), "[true,true,42,42,true,true]");
+}
