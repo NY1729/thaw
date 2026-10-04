@@ -65,6 +65,26 @@ mod tests {
         }
     }
 
+    #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+    #[test]
+    fn dynamic_array_search_type_mismatch_is_not_an_exception() {
+        let data = [0_u64];
+        let handle = data.as_ptr().cast::<u8>();
+        let array = f64::from_bits((&handle as *const *const u8) as usize as u64);
+        for (array_tag, needle_tag) in [("tagrn", "tagbool"), ("tagrb", "tagnum"), ("tagrs", "tagnum")] {
+            for (operation, expected) in [("dynarrayincludes", 0.0), ("dynarrayindexof", -1.0), ("dynarraylastindexof", -1.0)] {
+                let symbol = CString::new(format!("expr:a0,{array_tag},a1,{needle_tag},a2,{operation}:mismatch")).unwrap();
+                let result = call(&symbol, &[array, 1.0, 0.0]);
+                assert!(result.error.is_null());
+                assert_eq!(result.value, expected);
+            }
+        }
+        let invalid = CString::new("expr:a0,tagnum,a1,tagbool,a2,dynarrayincludes:invalid-receiver").unwrap();
+        assert!(!call(&invalid, &[1.0, 1.0, 0.0]).error.is_null());
+        let null_array = CString::new("expr:a0,tagrn,a1,tagbool,a2,dynarrayincludes:null-array").unwrap();
+        assert!(!call(&null_array, &[f64::from_bits(0), 1.0, 0.0]).error.is_null());
+    }
+
     fn call(symbol: &CString, args: &[f64]) -> ThawJitResult {
         unsafe extern "C" fn allocate(size: usize, _: usize) -> *mut u8 {
             unsafe { libc::malloc(size).cast() }
