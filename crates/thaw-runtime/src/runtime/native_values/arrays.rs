@@ -1491,6 +1491,15 @@ unsafe fn native_array_slots(array: *mut u8) -> Option<&'static mut [u64]> {
     Some(unsafe { std::slice::from_raw_parts_mut(array.add(8).cast::<u64>(), length) })
 }
 
+unsafe fn native_string_sort_units(value: u64) -> Vec<u16> {
+    let pointer = value as usize as *const c_char;
+    if pointer.is_null() {
+        Vec::new()
+    } else {
+        wtf8_decode_utf16(unsafe { wtf8_bytes(pointer) })
+    }
+}
+
 #[no_mangle]
 /// # Safety
 /// `array` must point to a writable Thaw number array.
@@ -1537,18 +1546,7 @@ pub unsafe extern "C" fn thaw_string_array_sort(array: *mut u8) -> *mut u8 {
         return std::ptr::null_mut();
     };
     slots.sort_by(|left, right| {
-        let string = |value: u64| {
-            let pointer = value as usize as *const c_char;
-            if pointer.is_null() {
-                Vec::new()
-            } else {
-                unsafe { CStr::from_ptr(pointer) }
-                    .to_string_lossy()
-                    .encode_utf16()
-                    .collect::<Vec<_>>()
-            }
-        };
-        string(*left).cmp(&string(*right))
+        unsafe { native_string_sort_units(*left) }.cmp(&unsafe { native_string_sort_units(*right) })
     });
     array
 }
@@ -1558,18 +1556,7 @@ unsafe fn thaw_string_array_sort_descending(array: *mut u8) -> *mut u8 {
         return std::ptr::null_mut();
     };
     slots.sort_by(|left, right| {
-        let string = |value: u64| {
-            let pointer = value as usize as *const c_char;
-            if pointer.is_null() {
-                Vec::new()
-            } else {
-                unsafe { CStr::from_ptr(pointer) }
-                    .to_string_lossy()
-                    .encode_utf16()
-                    .collect::<Vec<_>>()
-            }
-        };
-        string(*right).cmp(&string(*left))
+        unsafe { native_string_sort_units(*right) }.cmp(&unsafe { native_string_sort_units(*left) })
     });
     array
 }
@@ -2798,6 +2785,28 @@ mod array_read_ptr_tests {
             assert_eq!(array.cast::<u64>().read(), 4);
             assert_eq!(thaw_array_has_property(array, updated, c"3".as_ptr(), 1), 0);
             assert_eq!(thaw_array_has_property(array, updated, c"2".as_ptr(), 1), 1);
+        }
+    }
+
+    #[test]
+    fn string_sort_and_to_sorted_compare_lone_surrogates_as_utf16_units() {
+        let replacement = arena_wtf8(&wtf8_encode_utf16(&[0xFFFD])).expect("replacement");
+        let lone_high = arena_wtf8(&wtf8_encode_utf16(&[0xD800])).expect("lone high surrogate");
+        let array = thaw_arena::thaw_arena_alloc(24, 8);
+        assert!(!array.is_null());
+        unsafe {
+            array.cast::<u64>().write(2);
+            array.add(8).cast::<u64>().write(replacement as usize as u64);
+            array.add(16).cast::<u64>().write(lone_high as usize as u64);
+            let copy = thaw_string_array_to_sorted(array);
+            assert!(!copy.is_null());
+            assert_eq!(copy.add(8).cast::<u64>().read(), lone_high as usize as u64);
+            assert_eq!(copy.add(16).cast::<u64>().read(), replacement as usize as u64);
+            assert_eq!(array.add(8).cast::<u64>().read(), replacement as usize as u64);
+            assert_eq!(thaw_string_array_sort(array), array);
+            assert_eq!(array.add(8).cast::<u64>().read(), lone_high as usize as u64);
+            assert_eq!(thaw_jit_array_sort(5, array), array);
+            assert_eq!(array.add(8).cast::<u64>().read(), replacement as usize as u64);
         }
     }
 
