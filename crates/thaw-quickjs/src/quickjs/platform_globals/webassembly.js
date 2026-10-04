@@ -33,7 +33,7 @@
   const wasmPrepareFuncref = value => {
     if (value.__thawWasmBridge === undefined) {
       const bridge = (...args) => {
-        const called = wasmResult(__thaw_wasm_call_funcref(value.__thawWasmInstance, value.__thawWasmFuncref, JSON.stringify(args.map(wasmEncodeValue))), WebAssembly.RuntimeError);
+        const called = wasmResult(__thaw_wasm_call_funcref(value.__thawWasmInstance, value.__thawWasmFuncref, JSON.stringify(wasmEncodeArguments(args, value.__thawWasmParameters))), WebAssembly.RuntimeError);
         const values = called.values.map(item => wasmDecodeValue(item, value.__thawWasmInstance));
         return values.length === 0 ? undefined : (values.length === 1 ? values[0] : values);
       };
@@ -46,19 +46,34 @@
     ? wasmPrepareFuncref(value)
     : typeof value === 'bigint'
     ? { t: 'bigint', v: String(value) }
-    : typeof value === 'number' ? { t: 'number', v: Number.isFinite(value) ? value : null }
+    : typeof value === 'number' ? { t: 'number', v: Number.isFinite(value) && !Object.is(value, -0) ? value : String(value === 0 ? "-0" : value) }
     : { t: 'externref', v: wasmRetainExternref(value) };
+  const wasmEncodeArgument = (value, type) => {
+    if (type === 'externref') return { t: 'externref', v: wasmRetainExternref(value) };
+    if (type === 'i64') return { t: 'bigint', v: String(BigInt.asIntN(64, value)) };
+    if (type === 'i32') return wasmEncodeValue(+value | 0);
+    if (type === 'f32') return wasmEncodeValue(Math.fround(+value));
+    if (type === 'f64') return wasmEncodeValue(+value);
+    if (type === 'funcref') {
+      if (value === null) return { t: 'funcref', v: 0 };
+      if (typeof value === 'function' && value.__thawWasmFuncref !== undefined) return wasmPrepareFuncref(value);
+      throw new TypeError('WebAssembly funcref argument must be null or an exported function');
+    }
+    throw new TypeError('Unsupported WebAssembly argument type: ' + type);
+  };
+  const wasmEncodeArguments = (args, types) => types.map((type, index) => wasmEncodeArgument(args[index], type));
   const wasmDecodeValue = (value, instance) => {
     if (value.t === 'bigint') return BigInt(value.v);
     if (value.t === 'externref') return __thaw_wasm_restore_value(Number(value.v));
     if (value.t === 'jsfuncref') return __thaw_wasm_restore_import(Number(value.v));
-    if (value.t !== 'funcref') return value.v === null ? NaN : value.v;
+    if (value.t === 'number') return typeof value.v === 'string' ? Number(value.v) : value.v === null ? NaN : value.v;
+    if (value.t !== 'funcref') return value.v;
     if (!value.v) return null;
     const key = instance + ':' + value.v;
     let cached = wasmCachedFuncref(key);
     if (!cached) {
       const callable = (...args) => {
-        const called = wasmResult(__thaw_wasm_call_funcref(instance, value.v, JSON.stringify(args.map(wasmEncodeValue))), WebAssembly.RuntimeError);
+        const called = wasmResult(__thaw_wasm_call_funcref(instance, value.v, JSON.stringify(wasmEncodeArguments(args, value.parameters || []))), WebAssembly.RuntimeError);
         const values = called.values.map(item => wasmDecodeValue(item, instance));
         return values.length === 0 ? undefined : (values.length === 1 ? values[0] : values);
       };
@@ -168,17 +183,21 @@
       if (this.__thawInstance === undefined) {
         this.__thawLocalValue = converted; this.__thawSync(); return;
       }
-      wasmResult(__thaw_wasm_global(this.__thawInstance, this.__thawName, JSON.stringify(wasmEncodeValue(converted))));
+      wasmResult(__thaw_wasm_global(this.__thawInstance, this.__thawName, JSON.stringify(wasmEncodeArgument(converted, this.__thawType))));
     }
     __thawBind(instance, module, name) { const binding = { instance, name: 'import:' + module + '\x1f' + name }; this.__thawBindings.push(binding); return binding; }
     __thawUnbind(binding) { this.__thawBindings = this.__thawBindings.filter(value => value !== binding); }
-    __thawSync() { if (this.__thawInstance !== undefined) return; const encoded = JSON.stringify(wasmEncodeValue(this.__thawLocalValue)); for (const binding of this.__thawBindings) wasmResult(__thaw_wasm_global(binding.instance, binding.name, encoded)); }
-    __thawRefresh(binding) { if (!binding) return; this.__thawLocalValue = wasmDecodeValue(wasmResult(__thaw_wasm_global(binding.instance, binding.name, undefined)).value); const encoded = JSON.stringify(wasmEncodeValue(this.__thawLocalValue)); for (const other of this.__thawBindings) if (other !== binding) wasmResult(__thaw_wasm_global(other.instance, other.name, encoded)); }
+    __thawSync() { if (this.__thawInstance !== undefined) return; const encoded = JSON.stringify(wasmEncodeArgument(this.__thawLocalValue, this.__thawType)); for (const binding of this.__thawBindings) wasmResult(__thaw_wasm_global(binding.instance, binding.name, encoded)); }
+    __thawRefresh(binding) { if (!binding) return; this.__thawLocalValue = wasmDecodeValue(wasmResult(__thaw_wasm_global(binding.instance, binding.name, undefined)).value); const encoded = JSON.stringify(wasmEncodeArgument(this.__thawLocalValue, this.__thawType)); for (const other of this.__thawBindings) if (other !== binding) wasmResult(__thaw_wasm_global(other.instance, other.name, encoded)); }
     valueOf() { return this.value; }
   }
   class WasmTable {
     constructor(descriptor, value = null, internal = false) {
-      if (internal) { this.__thawInstance = descriptor.instance; this.__thawName = descriptor.name; this.__thawBindings = []; return; }
+      if (internal) {
+        this.__thawInstance = descriptor.instance; this.__thawName = descriptor.name; this.__thawBindings = [];
+        this.__thawElement = wasmResult(__thaw_wasm_table(this.__thawInstance, this.__thawName, 'size', 0, undefined)).type;
+        return;
+      }
       if (!descriptor || !['anyfunc','funcref','externref'].includes(String(descriptor.element))) throw new TypeError('WebAssembly.Table(): invalid element type');
       const initial = Number(descriptor.initial), maximum = descriptor.maximum === undefined ? Infinity : Number(descriptor.maximum);
       if (!Number.isInteger(initial) || initial < 0 || initial > maximum) throw new RangeError('WebAssembly.Table(): invalid table limits');
@@ -188,11 +207,11 @@
     __thawValidate(value) { if (this.__thawElement === 'funcref' && value !== null && (typeof value !== 'function' || value.__thawWasmFuncref === undefined)) throw new TypeError('WebAssembly.Table(): funcref value must be null or an exported WebAssembly function'); }
     get length() { return this.__thawInstance === undefined ? this.__thawValues.length : wasmResult(__thaw_wasm_table(this.__thawInstance, this.__thawName, 'size', 0, undefined)).value; }
     get(index) { index = Number(index); if (!Number.isInteger(index) || index < 0 || index >= this.length) throw new RangeError('WebAssembly.Table.get(): invalid index'); return this.__thawInstance === undefined ? this.__thawValues[index] : wasmDecodeValue(wasmResult(__thaw_wasm_table(this.__thawInstance, this.__thawName, 'get', index, undefined)).value, this.__thawInstance); }
-    set(index, value = null) { index = Number(index); if (!Number.isInteger(index) || index < 0 || index >= this.length) throw new RangeError('WebAssembly.Table.set(): invalid index'); this.__thawValidate(value); if (this.__thawInstance === undefined) { this.__thawValues[index] = value; this.__thawSync(); } else wasmResult(__thaw_wasm_table(this.__thawInstance, this.__thawName, 'set', index, JSON.stringify(wasmEncodeValue(value)))); }
-    grow(delta, value = null) { delta = Number(delta); const previous = this.length; this.__thawValidate(value); if (!Number.isInteger(delta) || delta < 0 || (this.__thawMaximum !== undefined && previous + delta > this.__thawMaximum)) throw new RangeError('WebAssembly.Table.grow(): failed to grow table'); if (this.__thawInstance !== undefined) return wasmResult(__thaw_wasm_table(this.__thawInstance, this.__thawName, 'grow', delta, JSON.stringify(wasmEncodeValue(value))), RangeError).value; this.__thawValues.push(...Array(delta).fill(value)); for (const binding of this.__thawBindings) wasmResult(__thaw_wasm_table(binding.instance, binding.name, 'grow', delta, JSON.stringify(wasmEncodeValue(value))), RangeError); return previous; }
+    set(index, value = null) { index = Number(index); if (!Number.isInteger(index) || index < 0 || index >= this.length) throw new RangeError('WebAssembly.Table.set(): invalid index'); this.__thawValidate(value); if (this.__thawInstance === undefined) { this.__thawValues[index] = value; this.__thawSync(); } else wasmResult(__thaw_wasm_table(this.__thawInstance, this.__thawName, 'set', index, JSON.stringify(wasmEncodeArgument(value, this.__thawElement)))); }
+    grow(delta, value = null) { delta = Number(delta); const previous = this.length; this.__thawValidate(value); if (!Number.isInteger(delta) || delta < 0 || (this.__thawMaximum !== undefined && previous + delta > this.__thawMaximum)) throw new RangeError('WebAssembly.Table.grow(): failed to grow table'); if (this.__thawInstance !== undefined) return wasmResult(__thaw_wasm_table(this.__thawInstance, this.__thawName, 'grow', delta, JSON.stringify(wasmEncodeArgument(value, this.__thawElement))), RangeError).value; this.__thawValues.push(...Array(delta).fill(value)); for (const binding of this.__thawBindings) wasmResult(__thaw_wasm_table(binding.instance, binding.name, 'grow', delta, JSON.stringify(wasmEncodeArgument(value, this.__thawElement))), RangeError); return previous; }
     __thawBind(instance, module, name) { const binding = { instance, name: 'import:' + module + '\x1f' + name }; this.__thawBindings.push(binding); return binding; }
     __thawUnbind(binding) { this.__thawBindings = this.__thawBindings.filter(value => value !== binding); }
-    __thawSync() { if (this.__thawInstance !== undefined) return; for (const binding of this.__thawBindings) { let size = wasmResult(__thaw_wasm_table(binding.instance, binding.name, 'size', 0, undefined)).value; if (size < this.__thawValues.length) wasmResult(__thaw_wasm_table(binding.instance, binding.name, 'grow', this.__thawValues.length - size, JSON.stringify(wasmEncodeValue(null))), RangeError); for (let index = 0; index < this.__thawValues.length; index++) wasmResult(__thaw_wasm_table(binding.instance, binding.name, 'set', index, JSON.stringify(wasmEncodeValue(this.__thawValues[index])))); } }
+    __thawSync() { if (this.__thawInstance !== undefined) return; for (const binding of this.__thawBindings) { let size = wasmResult(__thaw_wasm_table(binding.instance, binding.name, 'size', 0, undefined)).value; if (size < this.__thawValues.length) wasmResult(__thaw_wasm_table(binding.instance, binding.name, 'grow', this.__thawValues.length - size, JSON.stringify(wasmEncodeArgument(null, this.__thawElement))), RangeError); for (let index = 0; index < this.__thawValues.length; index++) wasmResult(__thaw_wasm_table(binding.instance, binding.name, 'set', index, JSON.stringify(wasmEncodeArgument(this.__thawValues[index], this.__thawElement)))); } }
     __thawRefresh(binding) { if (!binding || this.__thawInstance !== undefined) return; const size = wasmResult(__thaw_wasm_table(binding.instance, binding.name, 'size', 0, undefined)).value, values = []; for (let index = 0; index < size; index++) values.push(wasmDecodeValue(wasmResult(__thaw_wasm_table(binding.instance, binding.name, 'get', index, undefined)).value, binding.instance)); this.__thawValues = values; this.__thawSync(); }
   }
   class WasmInstance {
@@ -217,8 +236,8 @@
           const value = imports[item.module][item.name];
           if (item.kind === 'function') linkage.functions.push({ module: item.module, name: item.name, handle: __thaw_wasm_retain_import(value) });
           else if (item.kind === 'memory') { value.__thawSync(); linkage.memories.push({ module: item.module, name: item.name, value: { data: wasmHex(value.buffer), maximum: value.__thawMaximum } }); pendingResources.push({ value, item }); }
-          else if (item.kind === 'global') { linkage.globals.push({ module: item.module, name: item.name, value: wasmEncodeValue(value.value) }); pendingResources.push({ value, item }); }
-          else if (item.kind === 'table') { linkage.tables.push({ module: item.module, name: item.name, value: { values: value.__thawValues.map(wasmEncodeValue), maximum: Number.isFinite(value.__thawMaximum) ? value.__thawMaximum : null } }); pendingResources.push({ value, item }); }
+          else if (item.kind === 'global') { linkage.globals.push({ module: item.module, name: item.name, value: wasmEncodeArgument(value.value, value.__thawType) }); pendingResources.push({ value, item }); }
+          else if (item.kind === 'table') { linkage.tables.push({ module: item.module, name: item.name, value: { values: value.__thawValues.map(entry => wasmEncodeArgument(entry, value.__thawElement)), maximum: Number.isFinite(value.__thawMaximum) ? value.__thawMaximum : null } }); pendingResources.push({ value, item }); }
           else throw new WebAssembly.LinkError(`WebAssembly import '${item.module}.${item.name}' has an unsupported kind`);
         }
       } catch (error) { __thaw_wasm_release_pending(JSON.stringify(linkage.functions.map(value => value.handle))); throw error; }
@@ -239,7 +258,7 @@
           if (cached) { exports[item.name] = cached; continue; }
           const callable = (...args) => {
             for (const resource of resources) resource.value.__thawSync();
-            const raw = JSON.parse(__thaw_wasm_call(this.__thawHandle, item.name, JSON.stringify(args.map(wasmEncodeValue))));
+            const raw = JSON.parse(__thaw_wasm_call(this.__thawHandle, item.name, JSON.stringify(wasmEncodeArguments(args, item.parameterTypes || []))));
             for (const resource of resources) resource.value.__thawRefresh(resource.binding);
             if (raw.exit !== undefined) { const exit = new Error('WASI exited with code ' + raw.exit); exit.__thawWasiExit = raw.exit; throw exit; }
             const called = raw.ok ? raw : (() => { throw new WebAssembly.RuntimeError(raw.error); })();
