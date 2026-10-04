@@ -11147,3 +11147,51 @@ fn native_accessor_presence_hides_backing_closures_without_invoking_getter() {
     assert_eq!(compile_and_run(source, "native_accessor_presence"),
         "true true true\nfalse false false\n0\n");
 }
+
+#[test]
+fn iterator_yield_delegate_preserves_done_value() {
+    let source = r#"
+        function values() {
+            let step = 0;
+            return {
+                [Symbol.iterator]() {
+                    return {
+                        next() {
+                            step++;
+                            return { value: step === 1 ? 2 : 7, done: step > 1 };
+                        }
+                    };
+                }
+            };
+        }
+        function* outer(): Generator<number> {
+            const completion = yield* values();
+            yield completion;
+        }
+        function main(): void {
+            const iterator = outer();
+            console.log(iterator.next().value);
+            console.log(iterator.next().value);
+            console.log(iterator.next().done);
+            let reads = 0;
+            const empty = {
+                [Symbol.iterator]() {
+                    return {
+                        next() {
+                            return {
+                                get value(): number { reads++; return 99; },
+                                done: true
+                            };
+                        }
+                    };
+                }
+            };
+            for (const value of empty) { console.log(value); }
+            console.log(reads);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "iterator_yield_delegate_done_value"),
+        "2\n7\ntrue\n0\n"
+    );
+}
