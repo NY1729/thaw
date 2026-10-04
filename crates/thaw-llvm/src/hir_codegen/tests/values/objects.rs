@@ -1104,3 +1104,30 @@ fn frame_split_supports_fixed_object_for_in() {
         "source\nfirst\nlast\nomega\nsecond\nfirst\nten\ntwo\n0\n1\n1\ntwo\ntrue\nA\n😀\né\n雪\na\n"
     );
 }
+
+#[test]
+fn dynamic_object_key_runs_getter_once_with_receiver_and_exception() {
+    let source = r#"
+        let calls = 0;
+        function key(name: string): string { console.log("key"); return name; }
+        function source() {
+            console.log("receiver");
+            return {
+                base: 40,
+                get value(): number { calls++; return this.base + 2; },
+                get broken(): number { calls++; throw "getter throw"; return 0; },
+            };
+        }
+        function main(): void {
+            console.log(source()[key("value")], calls);
+            const object = source();
+            console.log(object[key("base")], calls);
+            console.log(object[key("absent")], calls);
+            try { console.log(object[key("broken")]); } catch (error) { console.log(error, calls); }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "dynamic_object_key_getter"),
+        "receiver\nkey\n42 1\nreceiver\nkey\n40 1\nkey\nundefined 1\nkey\ngetter throw 2\n"
+    );
+}

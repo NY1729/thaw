@@ -806,15 +806,12 @@ impl<'ctx> HirCompiler<'ctx> {
                 .map_err(|error| error.to_string())?;
 
             self.builder.position_at_end(matched);
-            let field_pointer = self.compile_field_ptr_from_pointer(object, fields, index)?;
-            let value = self
-                .builder
-                .build_load(
-                    self.basic_type(source)?,
-                    field_pointer,
-                    "dynamic_property_value",
-                )
-                .map_err(|error| error.to_string())?;
+            let value = self.compile_accessor_aware_field_read(
+                object,
+                &HirType::Object(fields.to_vec()),
+                fields,
+                index,
+            )?;
             let some = match (source, result) {
                 (HirType::Optional(source_payload), HirType::Optional(result_payload))
                     if source_payload == result_payload =>
