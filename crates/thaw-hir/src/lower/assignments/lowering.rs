@@ -1583,11 +1583,18 @@ impl<'a> FnLowerer<'a> {
                     match property {
                         ObjectPatProp::Assign(property) => {
                             let key = property.key.id.sym.to_string();
-                            let field_type =
-                                Self::fixed_object_property_read_type(fields, &key)?;
+                            let missing = !fields.iter().any(|(name, _)| name == &key);
+                            let field_type = if missing && property.value.is_some() {
+                                HirType::Undefined
+                            } else {
+                                Self::fixed_object_property_read_type(fields, &key)?
+                            };
                             used.insert(key.clone());
-                            let mut field_value = self
-                                .lower_fixed_object_property_read(value.clone(), fields, &key)?;
+                            let mut field_value = if missing && property.value.is_some() {
+                                HirExpr::Lit(HirLit::Undefined)
+                            } else {
+                                self.lower_fixed_object_property_read(value.clone(), fields, &key)?
+                            };
                             let mut binding_type = field_type.clone();
                             if let Some(default) = &property.value {
                                 let default = self.lower_expr(default)?;
@@ -1605,11 +1612,19 @@ impl<'a> FnLowerer<'a> {
                             let key = self
                                 .static_object_property_name(&property.key)
                                 .ok_or_else(|| "unsupported object destructuring key".to_string())?;
-                            let field_type =
-                                Self::fixed_object_property_read_type(fields, &key)?;
+                            let missing_default = !fields.iter().any(|(name, _)| name == &key)
+                                && matches!(property.value.as_ref(), Pat::Assign(_));
+                            let field_type = if missing_default {
+                                HirType::Undefined
+                            } else {
+                                Self::fixed_object_property_read_type(fields, &key)?
+                            };
                             used.insert(key.clone());
-                            let field_value = self
-                                .lower_fixed_object_property_read(value.clone(), fields, &key)?;
+                            let field_value = if missing_default {
+                                HirExpr::Lit(HirLit::Undefined)
+                            } else {
+                                self.lower_fixed_object_property_read(value.clone(), fields, &key)?
+                            };
                             self.lower_assignment_pattern(
                                 &property.value,
                                 field_value,
