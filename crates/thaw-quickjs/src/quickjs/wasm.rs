@@ -310,7 +310,13 @@ fn wasm_compile(value: String) -> String {
             .collect::<Vec<_>>();
         let imports = module
             .imports()
-            .map(|import| serde_json::json!({ "module": import.module(), "name": import.name(), "kind": wasm_kind(import.ty()) }))
+            .map(|import| {
+                let result_types = match import.ty() {
+                    wasmi::ExternType::Func(function) => Some(function.results().iter().copied().map(wasm_type_name).collect::<Vec<_>>()),
+                    _ => None,
+                };
+                serde_json::json!({ "module": import.module(), "name": import.name(), "kind": wasm_kind(import.ty()), "resultTypes": result_types })
+            })
             .collect::<Vec<_>>();
         let handle = table.next_module;
         table.next_module += 1;
