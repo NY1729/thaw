@@ -7496,3 +7496,24 @@ fn webassembly_start_refreshes_imported_memory() {
     "#), 1);
     assert_eq!(call("wasmStartMemory", "[]"), "[[42,65,8,0,131072],50,42]");
 }
+
+// Unrun regression: memory export aliases share the original object and one sync resource.
+#[test]
+fn webassembly_memory_export_aliases_reuse_original_buffer() {
+    assert_eq!(load(r#"
+        function wasmMemoryIdentity() {
+            const memory = new WebAssembly.Memory({ initial: 1 });
+            const bytes = new TextEncoder().encode(`(module
+                (import "host" "memory" (memory 1))
+                (export "a" (memory 0)) (export "b" (memory 0))
+                (func (export "read") (result i32) i32.const 0 i32.load8_u))`);
+            const exports = new WebAssembly.Instance(new WebAssembly.Module(bytes), { host: { memory } }).exports;
+            new Uint8Array(memory.buffer)[0] = 73;
+            const read = exports.read();
+            const own = new WebAssembly.Instance(new WebAssembly.Module(new TextEncoder().encode(`(module
+                (memory 0) (export "a" (memory 0)) (export "b" (memory 0)))`))).exports;
+            return [exports.a === memory, exports.b === memory, exports.a.buffer === memory.buffer, read, new Uint8Array(memory.buffer)[0], own.a === own.b, own.a !== memory];
+        }
+    "#), 1);
+    assert_eq!(call("wasmMemoryIdentity", "[]"), "[true,true,true,73,73,true,true]");
+}
