@@ -25,6 +25,10 @@ thread_local! {
     /// leak into this one.
     static DECORATOR_CLASS_TOKENS: RefCell<HashMap<String, Symbol>> =
         RefCell::new(HashMap::new());
+    // Original private names map to physical slots; ordinary public fields
+    // with similar spelling must retain their public property semantics.
+    static PRIVATE_CLASS_SLOTS: RefCell<HashMap<Symbol, HashMap<Symbol, Symbol>>> =
+        RefCell::new(HashMap::new());
 }
 
 fn class_has_decorators(class: &swc_ecma_ast::Class) -> bool {
@@ -152,6 +156,7 @@ fn class_names_referenced_as_values(
 
 pub fn lower_module(module: &Module) -> Result<HirProgram, String> {
     DECORATOR_CLASS_TOKENS.with(|tokens| tokens.borrow_mut().clear());
+    PRIVATE_CLASS_SLOTS.with(|slots| slots.borrow_mut().clear());
     let merged = normalize_interface_merges(module)?;
     let normalized = normalize_top_level_destructuring(&merged)?;
     let normalized = normalize_top_level_class_expressions(&normalized)?;
