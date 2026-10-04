@@ -414,6 +414,9 @@ struct RequestContext {
     /// no-ops. (A plain null `connection` -- the one-shot helpers --
     /// still buffers normally; this flag is what tells the two apart.)
     abandoned: bool,
+    // A body listener may reenter the server loop after retiring its
+    // connection. Keep the context queued until this delivery unwinds.
+    delivery_depth: usize,
     state: ResponseState,
     response: ServerResponse,
     request: IncomingMessage,
@@ -488,6 +491,7 @@ impl RequestContext {
             resumable: false,
             headers_sent: false,
             abandoned: false,
+            delivery_depth: 0,
             state: ResponseState {
                 headers: Vec::new(),
                 body: Vec::new(),
@@ -986,12 +990,25 @@ fn sync_request_body_buffer(connection: &mut ConnectionState, context: &mut Requ
 /// replay while still giving a handler that never registers `on(...)` at
 /// all synchronous access to the body via `bodyBytes()`/`body()`/
 /// `bodyHex()`.
-fn deliver_request_body_listeners(connection: &ConnectionState, context: &mut RequestContext) {
-    let new_bytes = &context._raw_body[context._delivered_offset..];
+fn deliver_request_body_listeners(body_complete: bool, context_ptr: *mut RequestContext) {
+    struct DeliveryLease(*mut RequestContext);
+    impl Drop for DeliveryLease {
+        fn drop(&mut self) {
+            unsafe { (*self.0).delivery_depth -= 1 };
+        }
+    }
+    unsafe { (*context_ptr).delivery_depth += 1 };
+    let _delivery_lease = DeliveryLease(context_ptr);
+    let (new_bytes, data_listeners) = unsafe {
+        let context = &mut *context_ptr;
+        let new_bytes = context._raw_body[context._delivered_offset..].to_vec();
+        context._delivered_offset = context._raw_body.len();
+        (new_bytes, context.request_data_listeners.clone())
+    };
     if !new_bytes.is_empty() {
-        if !context.request_data_listeners.is_empty() {
-            let chunk = native_bytes_from_slice(new_bytes);
-            for &callback in &context.request_data_listeners {
+        if !data_listeners.is_empty() {
+            let chunk = native_bytes_from_slice(&new_bytes);
+            for callback in data_listeners {
                 let callback = callback as *const c_void;
                 unsafe {
                     type Callback = unsafe extern "C" fn(*const c_void, *mut u8);
@@ -1001,10 +1018,10 @@ fn deliver_request_body_listeners(connection: &ConnectionState, context: &mut Re
                 }
             }
         }
-        context._delivered_offset = context._raw_body.len();
     }
-    if connection.body_complete {
-        let end_listeners = std::mem::take(&mut context.request_end_listeners);
+    if body_complete {
+        // Data callbacks may register an end listener for this same body.
+        let end_listeners = unsafe { std::mem::take(&mut (*context_ptr).request_end_listeners) };
         for callback in end_listeners {
             let callback = callback as *const c_void;
             unsafe {
@@ -1387,7 +1404,7 @@ fn run_server_callback(
         if connection.is_null() {
             deliver_request_body_events(&mut context);
         } else {
-            deliver_request_body_listeners(unsafe { &*connection }, &mut context);
+            deliver_request_body_listeners(unsafe { (*connection).body_complete }, &mut *context);
         }
     }
     if context.state.ended || connection.is_null() {
@@ -1555,6 +1572,12 @@ struct ConnectionState {
     /// `response.write`/`end` tears the connection down instead of
     /// rendering / streaming into a dead socket.
     client_gone: bool,
+    // Listener callbacks can finish this connection while its fd callback
+    // is still on the stack. Finish resources once; retire the Box after
+    // the outermost ready callback returns.
+    ready_depth: usize,
+    retired: bool,
+    deferred_box_free: bool,
 }
 
 impl ConnectionState {
@@ -1843,6 +1866,9 @@ fn register_connection(stream: TcpStream, server: &ServerState) {
         body_complete: false,
         dispatched: false,
         client_gone: false,
+        ready_depth: 0,
+        retired: false,
+        deferred_box_free: false,
     }));
     let watcher = unsafe {
         thaw_runtime_watch_fd(
@@ -1891,7 +1917,9 @@ enum ParkedBodyFeed {
 /// path unchanged -- `connection_ready`'s own loop picks up the resulting
 /// state change (`awaiting_handler` cleared, a response now queued) on
 /// its next iteration.
-fn feed_parked_request_body(connection: &mut ConnectionState) -> ParkedBodyFeed {
+fn feed_parked_request_body(connection_ptr: *mut ConnectionState) -> ParkedBodyFeed {
+    let (context, body_complete) = {
+        let connection = unsafe { &mut *connection_ptr };
     if connection.response_ctx.is_null() || connection.body_complete {
         return ParkedBodyFeed::Nothing;
     }
@@ -1929,26 +1957,57 @@ fn feed_parked_request_body(connection: &mut ConnectionState) -> ParkedBodyFeed 
     // Nothing between here and the entry check above can have nulled
     // `response_ctx` (only `finish_connection` does, and that already
     // returned early above).
-    let context = unsafe { &mut *connection.response_ctx };
-    sync_request_body_buffer(connection, context);
+    let context = connection.response_ctx;
+    sync_request_body_buffer(connection, unsafe { &mut *context });
     if connection.peer_read_closed && !connection.body_complete {
         finish_connection(connection);
         return ParkedBodyFeed::ConnectionClosed;
     }
     refresh_body_deadline(connection);
-    deliver_request_body_listeners(connection, context);
-    ParkedBodyFeed::Fed
+        (context, connection.body_complete)
+    };
+    // No mutable ConnectionState or RequestContext borrow spans user code.
+    deliver_request_body_listeners(body_complete, context);
+    if unsafe { (*connection_ptr).retired } {
+        ParkedBodyFeed::ConnectionClosed
+    } else {
+        ParkedBodyFeed::Fed
+    }
+}
+
+struct ConnectionReadyLease(*mut ConnectionState);
+impl ConnectionReadyLease {
+    unsafe fn new(connection: *mut ConnectionState) -> Self {
+        unsafe { (*connection).ready_depth += 1 };
+        Self(connection)
+    }
+}
+impl Drop for ConnectionReadyLease {
+    fn drop(&mut self) {
+        unsafe {
+            let connection = &mut *self.0;
+            connection.ready_depth -= 1;
+            if connection.ready_depth == 0 && connection.deferred_box_free {
+                drop(Box::from_raw(self.0));
+            }
+        }
+    }
 }
 
 extern "C" fn connection_ready(context: *mut u8, _events: i16) {
-    let connection = unsafe { &mut *(context as *mut ConnectionState) };
+    let connection_ptr = context.cast::<ConnectionState>();
+    let _ready_lease = unsafe { ConnectionReadyLease::new(connection_ptr) };
+    if unsafe { (*connection_ptr).retired } { return; }
     loop {
-        if connection.awaiting_handler || (connection.streaming && !connection.response_ended) {
-            match feed_parked_request_body(connection) {
+        let parked = unsafe { (*connection_ptr).awaiting_handler
+            || ((*connection_ptr).streaming && !(*connection_ptr).response_ended) };
+        if parked {
+            match feed_parked_request_body(connection_ptr) {
                 ParkedBodyFeed::ConnectionClosed => return,
                 ParkedBodyFeed::Fed => continue,
                 ParkedBodyFeed::Nothing => {}
             }
+            let connection = unsafe { &mut *connection_ptr };
             // An `async` handler / streaming response is still in flight.
             // Its `response.write`/`end` drives things from here -- but a
             // A fatal read error abandons the connection. Peer send EOF
@@ -1966,9 +2025,10 @@ extern "C" fn connection_ready(context: *mut u8, _events: i16) {
             }
             return;
         }
-        if connection.response.is_empty() && !read_request(connection) {
+        if unsafe { (*connection_ptr).response.is_empty() } && !read_request(connection_ptr) {
             return;
         }
+        if unsafe { (*connection_ptr).retired } { return; }
         // `write_response`, on a fully-sent keep-alive response, drains
         // the request it just answered and leaves any pipelined bytes in
         // `connection.request`. If a whole next request is already
@@ -1976,6 +2036,7 @@ extern "C" fn connection_ready(context: *mut u8, _events: i16) {
         // would otherwise trigger it may never come. Any other outcome
         // (closed, or still writing) ends this call; note `connection`
         // must not be touched after a `Closed`.
+        let connection = unsafe { &mut *connection_ptr };
         match write_response(connection) {
             FlushResult::KeptAlive
                 if connection
@@ -2097,7 +2158,9 @@ fn parse_head(head: &[u8]) -> (String, String, bool, BodyPlan, Vec<(String, Stri
 /// is still accumulated in `connection.request`/`context._raw_body`,
 /// bounded by `MAX_REQUEST_BODY` as before -- streaming here is about
 /// matching Node's actual timing/API contract, not backpressure.
-fn try_buffered_request(connection: &mut ConnectionState) -> Option<bool> {
+fn try_buffered_request(connection_ptr: *mut ConnectionState) -> Option<bool> {
+    {
+        let connection = unsafe { &mut *connection_ptr };
     if connection.head_end == 0 {
         let index = connection
             .request
@@ -2140,15 +2203,17 @@ fn try_buffered_request(connection: &mut ConnectionState) -> Option<bool> {
         return Some(true);
     }
     connection.dispatched = true;
-    Some(dispatch_request(connection))
+    }
+    Some(dispatch_request(connection_ptr))
 }
 
-fn read_request(connection: &mut ConnectionState) -> bool {
+fn read_request(connection_ptr: *mut ConnectionState) -> bool {
     let mut chunk = [0_u8; 4096];
     loop {
-        if let Some(dispatched) = try_buffered_request(connection) {
+        if let Some(dispatched) = try_buffered_request(connection_ptr) {
             return dispatched;
         }
+        let connection = unsafe { &mut *connection_ptr };
         if connection.head_end == 0 && connection.request.len() > MAX_REQUEST_HEAD {
             finish_connection(connection);
             return false;
@@ -2194,27 +2259,43 @@ fn refresh_body_deadline(connection: &mut ConnectionState) {
     };
 }
 
-fn dispatch_request(connection: &mut ConnectionState) -> bool {
-    let (method, target, keep_alive, _, headers) =
-        parse_head(&connection.request[..connection.head_end]);
-    let callback = unsafe { &*connection.server }.callback as *const c_void;
+fn dispatch_request(connection_ptr: *mut ConnectionState) -> bool {
+    let _ready_lease = unsafe { ConnectionReadyLease::new(connection_ptr) };
+    let (method, target, keep_alive, headers, callback) = {
+        let connection = unsafe { &mut *connection_ptr };
+        let (method, target, keep_alive, _, headers) =
+            parse_head(&connection.request[..connection.head_end]);
+        let callback = unsafe { &*connection.server }.callback as *const c_void;
     // The head is in and the handler is about to run -- cleared
     // unconditionally here; `run_server_callback` re-arms it as a
     // body-arrival deadline right after, once `sync_request_body_buffer`
     // has determined whether the body is actually complete yet.
-    connection.head_deadline = None;
+        connection.head_deadline = None;
     // Set before running the handler: an `async` handler that suspends
     // won't return through here, and `finish_response` needs the
     // negotiated value when it renders the response later.
-    connection.keep_alive = keep_alive;
+        connection.keep_alive = keep_alive;
+        (method, target, keep_alive, headers, callback)
+    };
     let outcome = run_server_callback(
         callback,
         &method,
         &target,
         &[],
         &headers,
-        connection as *mut ConnectionState,
+        connection_ptr,
     );
+    if unsafe { (*connection_ptr).retired } {
+        if let CallbackOutcome::Pending(context) = outcome {
+            unsafe {
+                (*context).connection = std::ptr::null_mut();
+                (*context).abandoned = true;
+            }
+            PENDING_CONTEXT_FREE.with(|list| list.borrow_mut().push(context));
+        }
+        return false;
+    }
+    let connection = unsafe { &mut *connection_ptr };
     if connection.client_gone {
         // `body()`/`bodyHex()`/`bodyBytes()` can detect EOF or timeout
         // during a synchronous callback. Their close only shuts the socket;
@@ -2342,8 +2423,17 @@ fn write_response(connection: &mut ConnectionState) -> FlushResult {
 /// `async` request left parked on the connection, if any.
 fn free_response_context(connection: &mut ConnectionState) {
     if !connection.response_ctx.is_null() {
-        unsafe { drop(Box::from_raw(connection.response_ctx)) };
+        let context = connection.response_ctx;
         connection.response_ctx = std::ptr::null_mut();
+        unsafe {
+            (*context).connection = std::ptr::null_mut();
+            (*context).abandoned = true;
+        }
+        if unsafe { (*context).delivery_depth } == 0 {
+            unsafe { drop(Box::from_raw(context)) };
+        } else {
+            PENDING_CONTEXT_FREE.with(|list| list.borrow_mut().push(context));
+        }
     }
 }
 
@@ -2360,7 +2450,11 @@ thread_local! {
 fn drain_pending_context_frees() {
     let stale = PENDING_CONTEXT_FREE.with(|list| std::mem::take(&mut *list.borrow_mut()));
     for context in stale {
-        unsafe { drop(Box::from_raw(context)) };
+        if unsafe { (*context).delivery_depth } == 0 {
+            unsafe { drop(Box::from_raw(context)) };
+        } else {
+            PENDING_CONTEXT_FREE.with(|list| list.borrow_mut().push(context));
+        }
     }
 }
 
@@ -2391,6 +2485,8 @@ fn rewatch_connection(connection: &mut ConnectionState, interests: u8) -> bool {
 }
 
 fn finish_connection(connection: &mut ConnectionState) {
+    if connection.retired { return; }
+    connection.retired = true;
     untrack_connection(connection);
     // An `async` handler that hasn't finished still holds a
     // `*mut ConnectionState` and may call `res.*` again as its
@@ -2413,7 +2509,11 @@ fn finish_connection(connection: &mut ConnectionState) {
     unsafe { &*connection.server }
         .connections
         .fetch_sub(1, Ordering::AcqRel);
-    unsafe { drop(Box::from_raw(connection as *mut ConnectionState)) };
+    if connection.ready_depth == 0 {
+        unsafe { drop(Box::from_raw(connection as *mut ConnectionState)) };
+    } else {
+        connection.deferred_box_free = true;
+    }
 }
 
 #[repr(C)]
@@ -2883,13 +2983,117 @@ mod tests {
             body_complete: false,
             dispatched: true,
             client_gone: false,
+            ready_depth: 0,
+            retired: false,
+            deferred_box_free: false,
         }));
         track_connection(connection);
         ACTIVE_CONNECTIONS.fetch_add(1, Ordering::AcqRel);
-        assert!(!dispatch_request(unsafe { &mut *connection }));
+        assert!(!dispatch_request(connection));
         assert!(HANDLER_COMPLETED.with(|completed| completed.get()));
         assert!(PARTIAL_BODY_SEEN.with(|seen| seen.get()));
         assert_eq!(server.connections.load(Ordering::Acquire), 0);
+        drain_pending_context_frees();
+    }
+
+    // Unrun regression: a body listener may register another listener and
+    // finish the response. The new listener only sees a later chunk; no
+    // borrowed Vec slice or listener iterator survives the first callback.
+    #[test]
+    fn body_listener_reentry_uses_a_stable_delivery_snapshot() {
+        thread_local! {
+            static FIRST: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+            static SECOND: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+            static SECOND_CALLBACK: std::cell::Cell<*const c_void> = const {
+                std::cell::Cell::new(std::ptr::null())
+            };
+        }
+        unsafe extern "C" fn second(_environment: *const c_void, _chunk: *mut u8) {
+            SECOND.with(|calls| calls.set(calls.get() + 1));
+        }
+        unsafe extern "C" fn first(environment: *const c_void, _chunk: *mut u8) {
+            FIRST.with(|calls| calls.set(calls.get() + 1));
+            let context = (*(environment as *const NativeClosure)).context as *mut RequestContext;
+            if FIRST.with(|calls| calls.get()) == 1 {
+                let callback = SECOND_CALLBACK.with(|callback| callback.get());
+                assert!(request_add_listener((*context).request.on.cast(), c"data".as_ptr(), callback));
+                assert!(response_end((*context).response.end.cast(), c"done".as_ptr()));
+                PENDING_CONTEXT_FREE.with(|list| list.borrow_mut().push(context));
+                drain_pending_context_frees();
+            }
+        }
+        FIRST.with(|calls| calls.set(0));
+        SECOND.with(|calls| calls.set(0));
+        let context_ptr = Box::into_raw(RequestContext::new("POST", "/", b"a", &[], std::ptr::null_mut()));
+        let first_callback = NativeClosure { code: first as *const c_void, context: context_ptr.cast() };
+        let second_callback = NativeClosure { code: second as *const c_void, context: context_ptr.cast() };
+        SECOND_CALLBACK.with(|slot| slot.set((&second_callback as *const NativeClosure).cast()));
+        unsafe { (*context_ptr).request_data_listeners.push((&first_callback as *const NativeClosure) as usize) };
+        deliver_request_body_listeners(false, context_ptr);
+        assert_eq!(FIRST.with(|calls| calls.get()), 1);
+        assert_eq!(SECOND.with(|calls| calls.get()), 0);
+        assert!(unsafe { (*context_ptr).state.ended });
+        unsafe { (*context_ptr)._raw_body.push(b'b') };
+        deliver_request_body_listeners(true, context_ptr);
+        assert_eq!(FIRST.with(|calls| calls.get()), 2);
+        assert_eq!(SECOND.with(|calls| calls.get()), 1);
+        SECOND_CALLBACK.with(|slot| slot.set(std::ptr::null()));
+        drain_pending_context_frees();
+    }
+
+    // Unrun regression: response.end from a body listener can fail to
+    // re-arm the socket and retire both the connection and parked context.
+    // Nested loop cleanup must keep both live until delivery unwinds.
+    #[test]
+    fn connection_retirement_waits_for_ready_stack() {
+        unsafe extern "C" fn end_in_data(environment: *const c_void, _chunk: *mut u8) {
+            let context = (*(environment as *const NativeClosure)).context as *mut RequestContext;
+            assert!(response_end((*context).response.end.cast(), c"done".as_ptr()));
+            drain_pending_context_frees();
+        }
+        let server = Box::new(ServerState {
+            callback: 0,
+            closed: AtomicBool::new(false),
+            listener: Mutex::new(None),
+            watcher: AtomicU64::new(0),
+            connections: AtomicUsize::new(1),
+            listening_listeners: Mutex::new(Vec::new()),
+            close_listeners: Mutex::new(Vec::new()),
+            error_listeners: Mutex::new(Vec::new()),
+            pending_listening: AtomicBool::new(false),
+            pending_errors: Mutex::new(Vec::new()),
+            close_requested: AtomicBool::new(false),
+        });
+        let connection = Box::into_raw(Box::new(ConnectionState {
+            stream: None, peer_read_closed: false, server: &*server,
+            request: Vec::new(), response: Vec::new(), written: 0,
+            watcher: 0, keep_alive: false, awaiting_handler: false,
+            response_ctx: std::ptr::null_mut(), streaming: false,
+            response_ended: false, head_deadline: None, head_end: 0,
+            body_plan: BodyPlan::None, consumed: 0, body_scan_offset: 0,
+            body_complete: false, dispatched: false, client_gone: false,
+            ready_depth: 0, retired: false, deferred_box_free: false,
+        }));
+        track_connection(connection);
+        ACTIVE_CONNECTIONS.fetch_add(1, Ordering::AcqRel);
+        let context = Box::into_raw(RequestContext::new("POST", "/", b"a", &[], connection));
+        unsafe {
+            (*context).resumable = true;
+            (*connection).response_ctx = context;
+        }
+        let callback = NativeClosure { code: end_in_data as *const c_void, context: context.cast() };
+        unsafe { (*context).request_data_listeners.push((&callback as *const NativeClosure) as usize) };
+        {
+            let _ready = unsafe { ConnectionReadyLease::new(connection) };
+            deliver_request_body_listeners(false, context);
+            unsafe {
+                assert!((*connection).retired);
+                assert!((*connection).deferred_box_free);
+                finish_connection(&mut *connection);
+                assert_eq!((*connection).ready_depth, 1);
+            }
+            assert_eq!(server.connections.load(Ordering::Acquire), 0);
+        }
         drain_pending_context_frees();
     }
 
@@ -2910,6 +3114,7 @@ mod tests {
             head_deadline: None, head_end: 0, body_plan: BodyPlan::None,
             consumed: 0, body_scan_offset: 0, body_complete: true,
             dispatched: true, client_gone: false,
+            ready_depth: 0, retired: false, deferred_box_free: false,
         };
         assert!(!client_hung_up(&mut connection));
         assert!(connection.peer_read_closed);
