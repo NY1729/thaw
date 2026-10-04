@@ -8559,3 +8559,29 @@ fn webassembly_nested_table_group_redirects_old_state() {
     assert!(std::rc::Rc::ptr_eq(&resolved.0, &latest.0));
     assert_eq!(*resolved.0.borrow(), std::collections::HashSet::from([1, 2, 3]));
 }
+
+#[test]
+fn webassembly_async_compilation_snapshots_input_views_before_returning() {
+    assert_eq!(load(r#"
+        async function wasmAsyncSnapshot() {
+            const original = new TextEncoder().encode('(module (func (export "value") (result i32) i32.const 7))');
+            const backing = new Uint8Array(original.length + 4);
+            backing.set(original, 2);
+            const view = new DataView(backing.buffer, 2, original.length);
+            const compilation = WebAssembly.compile(view);
+            backing.fill(0);
+            const module = await compilation;
+            const bytes = new Uint8Array(original);
+            const instantiation = WebAssembly.instantiate(bytes.buffer);
+            bytes.fill(0);
+            const result = await instantiation;
+            const fromModule = await WebAssembly.instantiate(module);
+            let synchronous = false, rejected = false, promise;
+            try { promise = WebAssembly.compile(null); }
+            catch (error) { synchronous = true; }
+            try { await promise; } catch (error) { rejected = error instanceof TypeError; }
+            return [new WebAssembly.Instance(module).exports.value(), result.instance.exports.value(), fromModule.exports.value(), synchronous, rejected];
+        }
+    "#), 1);
+    assert_eq!(call("wasmAsyncSnapshot", "[]"), "[7,7,7,false,true]");
+}
