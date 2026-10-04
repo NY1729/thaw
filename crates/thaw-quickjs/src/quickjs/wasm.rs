@@ -615,13 +615,20 @@ fn wasm_instantiate(module_handle: u32, linkage: Option<String>) -> String {
                     ),
                     _ => None,
                 };
-                let kind = match export.into_extern() {
-                    WasmExtern::Func(_) => "function",
-                    WasmExtern::Global(_) => "global",
-                    WasmExtern::Memory(_) => "memory",
-                    WasmExtern::Table(_) => "table",
+                // ponytail: wasmi 1.1 exposes no memory identity API; its derived
+                // handle Debug includes store and index. Replace with an identity API when available.
+                let (kind, memory_key, memory_import) = match export.into_extern() {
+                    WasmExtern::Func(_) => ("function", None, None),
+                    WasmExtern::Global(_) => ("global", None, None),
+                    WasmExtern::Table(_) => ("table", None, None),
+                    WasmExtern::Memory(memory) => {
+                        let identity = format!("{memory:?}");
+                        let import = imported_memories.iter().find_map(|(key, value)|
+                            (format!("{value:?}") == identity).then(|| key.clone()));
+                        ("memory", Some(identity), import)
+                    },
                 };
-                serde_json::json!({ "name": name, "kind": kind, "parameters": parameters, "parameterTypes": parameter_types, "resultTypes": result_types })
+                serde_json::json!({ "name": name, "kind": kind, "parameters": parameters, "parameterTypes": parameter_types, "resultTypes": result_types, "memoryKey": memory_key, "memoryImport": memory_import })
             })
             .collect::<Vec<_>>();
         let handle = table.next_instance;

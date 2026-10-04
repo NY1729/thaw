@@ -249,6 +249,7 @@
       // Instantiation runs data segments and the start function before returning.
       // Adopt their imported-memory writes before any later call can sync an old buffer.
       for (const resource of resources) if (resource.value instanceof WasmMemory) resource.value.__thawRefresh(resource.binding);
+      const memories = new Map();
       for (const item of result.exports) {
         if (item.kind === 'function') {
           const reference = wasmResult(__thaw_wasm_export_funcref(this.__thawHandle, item.name)).value;
@@ -276,8 +277,14 @@
           wasmCacheFuncref(key, callable);
           exports[item.name] = callable;
         } else if (item.kind === 'memory') {
-          const memory = new WasmMemory({ instance: this.__thawHandle, name: item.name }, true);
-          resources.push({ value: memory }); exports[item.name] = memory;
+          let memory = memories.get(item.memoryKey);
+          if (!memory) {
+            const imported = item.memoryImport === null ? undefined : resources.find(resource => resource.binding && resource.binding.name === 'import:' + item.memoryImport);
+            memory = imported ? imported.value : new WasmMemory({ instance: this.__thawHandle, name: item.name }, true);
+            memories.set(item.memoryKey, memory);
+            if (!imported) resources.push({ value: memory });
+          }
+          exports[item.name] = memory;
         } else if (item.kind === 'global') exports[item.name] = new WasmGlobal({ instance: this.__thawHandle, name: item.name }, undefined, true);
         else if (item.kind === 'table') { const table = new WasmTable({ instance: this.__thawHandle, name: item.name }, null, true); resources.push({ value: table }); exports[item.name] = table; }
       }
