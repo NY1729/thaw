@@ -8110,3 +8110,26 @@ fn webassembly_table_set_reference_before_bounds() {
     "#), 1);
     assert_eq!(call("wasmTableSetOrder", "[]"), "[true,true,true]");
 }
+
+// Unrun regression target: descriptor members are converted once and in order.
+#[test]
+fn webassembly_descriptor_member_reads() {
+    assert_eq!(load(r#"
+        function wasmDescriptorReads() {
+            let valueReads = 0, elementReads = 0, coercions = 0;
+            const order = [];
+            const global = new WebAssembly.Global({
+                get mutable() { order.push("mutable"); return true; },
+                get value() { valueReads++; order.push("value"); return {
+                    toString() { coercions++; return "i32"; }
+                }; }
+            }, 3);
+            const table = new WebAssembly.Table({
+                get element() { elementReads++; return elementReads === 1 ? "externref" : "anyfunc"; },
+                initial: 1
+            }, "entry");
+            return [valueReads, elementReads, coercions, order.join(","), global.value, table.get(0)];
+        }
+    "#), 1);
+    assert_eq!(call("wasmDescriptorReads", "[]"), "[1,1,1,\"mutable,value\",3,\"entry\"]");
+}
