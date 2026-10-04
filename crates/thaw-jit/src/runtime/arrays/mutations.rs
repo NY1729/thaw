@@ -903,6 +903,12 @@ fn dynamic_array_search(operation: u8, value: f64, needle: f64, from_index: f64)
         CALL_ERROR.with(|error| error.set(INVALID_DYNAMIC_VALUE.as_ptr().cast()));
         return 0.0;
     };
+    if !matches!(value.tag, DYNAMIC_NUMBER_ARRAY_TAG..=DYNAMIC_STRING_ARRAY_TAG)
+        || operation > 2
+    {
+        CALL_ERROR.with(|error| error.set(INVALID_DYNAMIC_VALUE.as_ptr().cast()));
+        return 0.0;
+    }
     let search = match (value.tag, needle.tag, operation) {
         (DYNAMIC_NUMBER_ARRAY_TAG, DYNAMIC_NUMBER_TAG, 0..=1) => operation,
         (DYNAMIC_STRING_ARRAY_TAG, DYNAMIC_STRING_TAG, 0..=1) => operation + 2,
@@ -911,8 +917,11 @@ fn dynamic_array_search(operation: u8, value: f64, needle: f64, from_index: f64)
         (DYNAMIC_STRING_ARRAY_TAG, DYNAMIC_STRING_TAG, 2) => 7,
         (DYNAMIC_BOOLEAN_ARRAY_TAG, DYNAMIC_BOOLEAN_TAG, 2) => 8,
         _ => {
-            CALL_ERROR.with(|error| error.set(INVALID_DYNAMIC_VALUE.as_ptr().cast()));
-            return 0.0;
+            if unsafe { array_data(f64::from_bits(value.payload)) }.is_none() {
+                CALL_ERROR.with(|error| error.set(INVALID_DYNAMIC_VALUE.as_ptr().cast()));
+                return 0.0;
+            }
+            return if operation == 1 { 0.0 } else { -1.0 };
         }
     };
     array_search(
