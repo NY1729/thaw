@@ -143,26 +143,32 @@
   }
   class WasmGlobal {
     constructor(descriptor, value, internal) {
-      if (internal) { this.__thawInstance = descriptor.instance; this.__thawName = descriptor.name; return; }
+      if (internal) {
+        this.__thawInstance = descriptor.instance; this.__thawName = descriptor.name;
+        const global = wasmResult(__thaw_wasm_global(this.__thawInstance, this.__thawName, undefined));
+        this.__thawType = global.type; this.__thawMutable = global.mutable;
+        return;
+      }
       if (!descriptor || !['i32','i64','f32','f64','externref'].includes(String(descriptor.value))) throw new TypeError('WebAssembly.Global(): invalid value type');
       this.__thawType = String(descriptor.value); this.__thawMutable = Boolean(descriptor.mutable);
-      this.__thawLocalValue = this.__thawConvert(value === undefined ? (this.__thawType === 'i64' ? 0n : 0) : value);
+      this.__thawLocalValue = this.__thawConvert(arguments.length < 2 ? (this.__thawType === 'i64' ? 0n : this.__thawType === 'externref' ? null : 0) : value);
       this.__thawBindings = [];
     }
     __thawConvert(value) {
-      if (this.__thawType === 'i64') return BigInt.asIntN(64, BigInt(value));
+      if (this.__thawType === 'i64') return BigInt.asIntN(64, value);
       if (this.__thawType === 'externref') return value;
-      if (this.__thawType === 'i32') return Number(value) | 0;
-      if (this.__thawType === 'f32') return Math.fround(Number(value));
-      return Number(value);
+      if (this.__thawType === 'i32') return +value | 0;
+      if (this.__thawType === 'f32') return Math.fround(+value);
+      return +value;
     }
     get value() { return this.__thawInstance === undefined ? this.__thawLocalValue : wasmDecodeValue(wasmResult(__thaw_wasm_global(this.__thawInstance, this.__thawName, undefined)).value); }
     set value(value) {
+      if (!this.__thawMutable) throw new TypeError('set WebAssembly.Global.value: immutable global');
+      const converted = this.__thawConvert(value);
       if (this.__thawInstance === undefined) {
-        if (!this.__thawMutable) throw new TypeError('set WebAssembly.Global.value: immutable global');
-        this.__thawLocalValue = this.__thawConvert(value); this.__thawSync(); return;
+        this.__thawLocalValue = converted; this.__thawSync(); return;
       }
-      wasmResult(__thaw_wasm_global(this.__thawInstance, this.__thawName, JSON.stringify(wasmEncodeValue(value))));
+      wasmResult(__thaw_wasm_global(this.__thawInstance, this.__thawName, JSON.stringify(wasmEncodeValue(converted))));
     }
     __thawBind(instance, module, name) { const binding = { instance, name: 'import:' + module + '\x1f' + name }; this.__thawBindings.push(binding); return binding; }
     __thawUnbind(binding) { this.__thawBindings = this.__thawBindings.filter(value => value !== binding); }
