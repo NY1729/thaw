@@ -7325,3 +7325,23 @@ fn private_iterator_helper_keeps_receiver_and_reads_getters_once() {
     assert_eq!(eval_json("iteratorIntrinsicControl"), Ok(Some("true".into())));
     assert_eq!(load("delete globalThis.iteratorIntrinsicObserved; delete globalThis.iteratorIntrinsicControl;"), 1);
 }
+
+#[test]
+fn response_headers_preserve_immutable_guard_on_clone() {
+    assert_eq!(load(r#"
+      function responseHeadersGuard() {
+        const response = new Response(null, {headers: {'x-test': 'original'}});
+        __thaw_set_response_metadata(response, 'https://example.test/', false);
+        const guarded = [response, response.clone(), Response.error(), Response.redirect('https://example.test/')];
+        const rejected = guarded.map(value => ['append', 'set', 'delete'].every(method => {
+          try { value.headers[method]('x-test', 'changed'); return false; }
+          catch (error) { return error instanceof TypeError; }
+        }));
+        const copy = new Headers(response.headers), ordinary = new Response();
+        copy.set('x-test', 'copy'); ordinary.headers.set('x-test', 'ordinary');
+        return [rejected, response.headers.get('x-test'), copy.get('x-test'), ordinary.headers.get('x-test')];
+      }
+    "#), 1);
+    assert_eq!(call("responseHeadersGuard", "[]"),
+        r#"[[true,true,true,true],"original","copy","ordinary"]"#);
+}
