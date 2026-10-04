@@ -3165,3 +3165,23 @@ fn pending_promise_all_record_array_survives_invocation_arena_reset() {
     assert_eq!(ACTIVE_PROMISE_JOINS.with(Cell::get), 0);
     unsafe { thaw_promise_destroy(joined) };
 }
+
+#[test]
+fn all_settled_consumes_distinct_inputs_on_early_failure() {
+    for invalid_size in [false, true] {
+        let first = thaw_promise_new();
+        let second = thaw_promise_new();
+        let inputs = if invalid_size { [first, first, second, second] }
+            else { [first, std::ptr::null_mut(), first, second] };
+        let output = unsafe { thaw_promise_all_settled(
+            inputs.as_ptr(), inputs.len(), if invalid_size { 0 } else { 8 },
+        ) };
+        assert_eq!(unsafe { thaw_promise_state(output) }, 2);
+        ACTIVE_PROMISES.with(|active| {
+            let active = active.borrow();
+            assert!(!active.contains(&first));
+            assert!(!active.contains(&second));
+        });
+        unsafe { thaw_promise_destroy(output) };
+    }
+}
