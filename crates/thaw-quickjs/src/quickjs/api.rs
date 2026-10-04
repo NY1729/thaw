@@ -1784,6 +1784,32 @@ fn release_dynamic_value_for_js(ctx: Ctx<'_>, handle: u64) -> u8 {
 
 struct NativeSymbolRoots(std::cell::RefCell<std::collections::HashMap<u64, NativeGraphCallbackRoots>>);
 
+struct PrivateNapiSymbolOps {
+    register: Persistent<Function<'static>>,
+    live: Persistent<Function<'static>>,
+    pin: Persistent<Function<'static>>,
+}
+
+unsafe impl<'js> rquickjs::JsLifetime<'js> for PrivateNapiSymbolOps {
+    type Changed<'to> = PrivateNapiSymbolOps;
+}
+
+fn install_private_napi_symbol_ops<'js>(
+    ctx: Ctx<'js>, register: Function<'js>, live: Function<'js>, pin: Function<'js>,
+) -> rquickjs::Result<()> {
+    if ctx.userdata::<PrivateNapiSymbolOps>().is_some() {
+        return Err(rquickjs::Error::new_from_js_message(
+            "native Symbol bridge", "Function", "Symbol bridge is already installed"));
+    }
+    let ops = PrivateNapiSymbolOps {
+        register: Persistent::save(&ctx, register),
+        live: Persistent::save(&ctx, live),
+        pin: Persistent::save(&ctx, pin),
+    };
+    ctx.store_userdata(ops).map(|_| ()).map_err(|_| rquickjs::Error::new_from_js_message(
+        "native Symbol bridge", "Function", "Cannot install Symbol bridge"))
+}
+
 unsafe impl<'js> rquickjs::JsLifetime<'js> for NativeSymbolRoots {
     // Only numeric native reference tokens are stored; their Drop handlers
     // run when this QuickJS runtime clears userdata before JS_FreeRuntime.
@@ -1830,6 +1856,82 @@ fn pin_native_graph_symbol(ctx: Ctx<'_>, id: String) -> rquickjs::Result<bool> {
     drop(roots);
     drop(redundant);
     Ok(true)
+}
+
+// A native Symbol graph pin belongs to the corresponding live JavaScript
+// Symbol, not to its stable numeric ID. A WeakRef finalizer calls this only
+// after confirming that the cache still names the same weak entry.
+fn unpin_native_graph_symbol(ctx: Ctx<'_>, id: String) -> rquickjs::Result<bool> {
+    let id = id.parse::<u64>().ok().filter(|id| *id != 0)
+        .ok_or_else(|| rquickjs::Error::new_from_js_message(
+            "String", "native Symbol ID", "Invalid native Symbol ID"))?;
+    let Some(roots) = ctx.userdata::<NativeSymbolRoots>() else { return Ok(false); };
+    let root = roots.0.borrow_mut().remove(&id);
+    // The positive-reference destructor can reenter QuickJS/N-API. Keep the
+    // userdata RefCell free while it runs.
+    drop(roots);
+    let removed = root.is_some();
+    drop(root);
+    Ok(removed)
+}
+
+// These queries address the private per-addon Symbol cache captured by the
+// platform bootstrap. A native scope collector may ask whether a local JS
+// Symbol remains reachable without holding a strong handle to that Symbol.
+#[no_mangle]
+pub extern "C" fn thaw_js_napi_graph_symbol_register(owner: u64, handle: u64) -> u64 {
+    if owner == 0 || handle == 0 { return 0; }
+    with_active_or_context(|ctx| {
+        let Ok(value) = value_for_handle(&ctx, handle) else { return 0; };
+        if !value.is_symbol() { return 0; }
+        let Some(ops) = ctx.userdata::<PrivateNapiSymbolOps>() else { return 0; };
+        let register = ops.register.clone();
+        drop(ops);
+        let Ok(register) = register.restore(&ctx) else { return 0; };
+        register.call::<_, String>((owner.to_string(), value)).ok()
+            .and_then(|id| id.parse::<u64>().ok())
+            .filter(|id| *id != 0).unwrap_or(0)
+    })
+}
+
+// Native Symbol classification for trusted N-API ownership decisions. The
+// ordinary host-query operation reads a writable JS global and cannot prove
+// that an arbitrary retained handle denotes a Symbol.
+#[no_mangle]
+pub extern "C" fn thaw_js_napi_handle_is_symbol(handle: u64) -> u8 {
+    if handle == 0 { return 2; }
+    with_active_or_context(|ctx| match value_for_handle(&ctx, handle) {
+        Ok(value) => u8::from(value.is_symbol()),
+        Err(_) => 2,
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn thaw_js_napi_symbol_weak_live(owner: u64, id: u64) -> u8 {
+    if owner == 0 || id == 0 { return 2; }
+    with_active_or_context(|ctx| {
+        let Some(ops) = ctx.userdata::<PrivateNapiSymbolOps>() else { return 2; };
+        let query = ops.live.clone();
+        drop(ops);
+        let Ok(query) = query.restore(&ctx) else { return 2; };
+        match query.call::<_, bool>((owner.to_string(), id.to_string())) {
+            Ok(live) => u8::from(live),
+            Err(_) => 2, // Unknown: callers must never treat this as dead.
+        }
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn thaw_js_napi_symbol_set_pin(owner: u64, id: u64, pin: u8) -> u8 {
+    if owner == 0 || id == 0 { return 0; }
+    with_active_or_context(|ctx| {
+        let Some(ops) = ctx.userdata::<PrivateNapiSymbolOps>() else { return 0; };
+        let update = ops.pin.clone();
+        drop(ops);
+        let Ok(update) = update.restore(&ctx) else { return 0; };
+        u8::from(update.call::<_, bool>((owner.to_string(), id.to_string(), pin != 0))
+            .unwrap_or(false))
+    })
 }
 
 fn make_native_graph_invoker<'js>(
@@ -1879,7 +1981,8 @@ fn install_graph_handle_functions(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
         Function::new(ctx.clone(), retain_dynamic_value_for_js)?)?;
     ctx.globals().set("__thaw_release_dynamic_value",
         Function::new(ctx.clone(), release_dynamic_value_for_js)?)?;
-    if ctx.userdata::<NativeSymbolRoots>().is_none() {
+    let first_symbol_install = ctx.userdata::<NativeSymbolRoots>().is_none();
+    if first_symbol_install {
         ctx.store_userdata(NativeSymbolRoots(std::cell::RefCell::new(
             std::collections::HashMap::new())))
             .expect("native Symbol roots userdata is already borrowed");
@@ -1888,11 +1991,35 @@ fn install_graph_handle_functions(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
         ctx.globals().prop("__thaw_napi_graph_invoker",
             Function::new(ctx.clone(), make_native_graph_invoker)?)?;
     }
-    if !ctx.globals().contains_key("__thaw_napi_graph_symbol_pin")? {
-        ctx.globals().prop("__thaw_napi_graph_symbol_pin",
+    if first_symbol_install {
+        ctx.globals().set("__thaw_napi_graph_symbol_pin",
             Function::new(ctx.clone(), pin_native_graph_symbol)?)?;
+        ctx.globals().set("__thaw_napi_graph_symbol_unpin",
+            Function::new(ctx.clone(), unpin_native_graph_symbol)?)?;
+        ctx.globals().set("__thaw_napi_graph_symbol_install",
+            Function::new(ctx.clone(), install_private_napi_symbol_ops)?)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+#[test]
+fn native_symbol_root_capabilities_are_private_after_platform_bootstrap() {
+    // Unrun: user code can guess a numeric Symbol ID, but must not be able
+    // to drop its native positive root or desynchronize the JS pin map.
+    with_context(|ctx| {
+        assert!(ctx.userdata::<PrivateNapiSymbolOps>().is_some());
+        install_graph_handle_functions(&ctx).expect("repeated handle registration");
+        let hidden: bool = ctx.eval(r#"
+          !('__thaw_napi_graph_symbol_unpin' in globalThis)
+          && !('__thaw_napi_graph_symbol_pin' in globalThis)
+          && !('__thaw_napi_graph_symbol_install' in globalThis)
+          && !('__thaw_json_graph_napi_symbol_pin' in globalThis)
+          && !('__thaw_json_graph_napi_symbol_register' in globalThis)
+          && !('__thaw_json_graph_napi_symbol_live' in globalThis)
+        "#).expect("private Symbol bridge surface");
+        assert!(hidden);
+    });
 }
 
 #[cfg(test)]
@@ -3331,15 +3458,24 @@ pub extern "C" fn thaw_js_native_symbol_handle_result(
                 rquickjs::Error::Exception => describe_tagged_exception(&ctx),
                 error => error.to_string(),
             })?;
-        // This direct property-key route bypasses graph `nsy` decode. The
-        // returned JS Symbol can outlive its original addon call, and later
-        // graph encoding resolves the live native handle from its identity.
-        // Give it the same runtime-owned positive root as the graph route.
-        pin_native_graph_symbol(ctx.clone(), native_handle.to_string())
+        // Native-created Symbols need an independent native root while a JS
+        // Symbol identity is live. A JS-origin Symbol already has a weak
+        // per-owner identity and would form a native-ref/JS-pin cycle here.
+        let needs_pin: Function = ctx.globals()
+            .get("__thaw_json_host_native_symbol_needs_pin")
+            .map_err(|error| error.to_string())?;
+        let needs_pin: bool = needs_pin.call((native_handle.to_string(),))
             .map_err(|error| match error {
                 rquickjs::Error::Exception => describe_tagged_exception(&ctx),
                 error => error.to_string(),
             })?;
+        if needs_pin {
+            pin_native_graph_symbol(ctx.clone(), native_handle.to_string())
+                .map_err(|error| match error {
+                    rquickjs::Error::Exception => describe_tagged_exception(&ctx),
+                    error => error.to_string(),
+                })?;
+        }
         retain_value(&ctx, value)
     });
     match result {

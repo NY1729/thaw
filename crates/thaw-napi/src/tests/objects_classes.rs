@@ -1457,3 +1457,761 @@ fn lock_async_test() -> std::sync::MutexGuard<'static, ()> {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
+
+#[test]
+fn handle_scope_retires_only_unreachable_values_and_never_reuses_raw_tokens() {
+    unsafe {
+        let mut env = Env::new();
+        let env_ptr: NapiEnv = &mut env;
+        let mut outer = ptr::null_mut();
+        let mut inner = ptr::null_mut();
+        assert_eq!(napi_open_handle_scope(env_ptr, &mut outer), NAPI_OK);
+        let parent = env.alloc(Value::Object(HashMap::new()));
+        assert_eq!(napi_open_escapable_handle_scope(env_ptr, &mut inner), NAPI_OK);
+        let abandoned = env.alloc(Value::String("temporary".into()));
+        let child = env.alloc(Value::Number(7.0));
+        let escaped = env.alloc(Value::Object(HashMap::from([(
+            PropertyKey::String("child".into()), child,
+        )])));
+        let mut result = ptr::null_mut();
+        assert_eq!(napi_escape_handle(env_ptr, inner, escaped, &mut result), NAPI_OK);
+        assert_eq!(napi_close_escapable_handle_scope(env_ptr, inner), NAPI_OK);
+        assert!(!env.values.contains(&abandoned));
+        assert_eq!(value_ref(abandoned).err(), Some(NAPI_INVALID_ARG));
+        assert_eq!(result, escaped);
+        assert!(env.values.contains(&child));
+        assert!(env.values.contains(&escaped));
+        let later = env.alloc(Value::String("later".into()));
+        assert_ne!(later, abandoned);
+        assert!(env.values.contains(&parent));
+        assert_eq!(napi_close_handle_scope(env_ptr, outer), NAPI_OK);
+        assert!(!env.values.contains(&parent));
+        assert!(!env.values.contains(&escaped));
+        assert!(!env.values.contains(&child));
+        assert!(!env.values.contains(&later));
+    }
+}
+
+#[test]
+fn handle_scope_keeps_referenced_and_object_reachable_children() {
+    unsafe {
+        let mut env = Env::new();
+        let env_ptr: NapiEnv = &mut env;
+        let owner = env.alloc(Value::Object(HashMap::new()));
+        let mut scope = ptr::null_mut();
+        assert_eq!(napi_open_handle_scope(env_ptr, &mut scope), NAPI_OK);
+        let child = env.alloc(Value::Number(9.0));
+        let referenced = env.alloc(Value::String("held".into()));
+        if let Value::Object(fields) = &mut *owner {
+            fields.insert(PropertyKey::String("child".into()), child);
+        }
+        let mut reference = ptr::null_mut();
+        assert_eq!(napi_create_reference(env_ptr, referenced, 1, &mut reference), NAPI_OK);
+        assert_eq!(napi_close_handle_scope(env_ptr, scope), NAPI_OK);
+        assert!(env.values.contains(&child));
+        assert!(env.values.contains(&referenced));
+        assert!(matches!(value_ref(child), Ok(Value::Number(9.0))));
+        assert_eq!(napi_delete_reference(env_ptr, reference), NAPI_OK);
+        assert!(!env.values.contains(&referenced));
+        assert_eq!(value_ref(referenced).err(), Some(NAPI_INVALID_ARG));
+    }
+}
+
+// Unrun: a weak reference must not resurrect a scoped value after collection.
+// The failed ref leaves both the count and the caller's output unchanged.
+#[test]
+fn collected_weak_reference_cannot_be_strengthened() {
+    unsafe {
+        let mut env = Env::new();
+        let env_ptr: NapiEnv = &mut env;
+        let mut scope = ptr::null_mut();
+        assert_eq!(napi_open_handle_scope(env_ptr, &mut scope), NAPI_OK);
+        let value = env.alloc(Value::Object(HashMap::new()));
+        let mut reference = ptr::null_mut();
+        assert_eq!(napi_create_reference(env_ptr, value, 0, &mut reference), NAPI_OK);
+        assert_eq!(napi_close_handle_scope(env_ptr, scope), NAPI_OK);
+        assert!(!env.values.contains(&value));
+        let mut referenced_value = value;
+        assert_eq!(napi_get_reference_value(env_ptr, reference, &mut referenced_value), NAPI_OK);
+        assert!(referenced_value.is_null());
+        let mut count = 77;
+        assert_eq!(napi_reference_ref(env_ptr, reference, &mut count), NAPI_GENERIC_FAILURE);
+        assert_eq!(count, 77);
+        assert_eq!((*reference).count, 0);
+        assert_eq!(napi_delete_reference(env_ptr, reference), NAPI_OK);
+    }
+}
+
+// Unrun: local Symbol metadata is weak, but a live property key holds the
+// Symbol through the same graph edge as an object field value.
+#[test]
+fn unreferenced_local_symbol_is_collected_with_its_scope() {
+    unsafe {
+        let mut env = Env::new();
+        let env_ptr: NapiEnv = &mut env;
+        let mut scope = ptr::null_mut();
+        assert_eq!(napi_open_handle_scope(env_ptr, &mut scope), NAPI_OK);
+        let mut symbol = ptr::null_mut();
+        assert_eq!(napi_create_symbol(env_ptr, ptr::null_mut(), &mut symbol), NAPI_OK);
+        let Value::Symbol { id, .. } = value_ref(symbol).unwrap() else { panic!("Symbol expected") };
+        let id = *id;
+        let mut reference = ptr::null_mut();
+        assert_eq!(napi_create_reference(env_ptr, symbol, 0, &mut reference), NAPI_OK);
+        assert_eq!(napi_close_handle_scope(env_ptr, scope), NAPI_OK);
+        let mut actual = symbol;
+        assert_eq!(napi_get_reference_value(env_ptr, reference, &mut actual), NAPI_OK);
+        assert!(actual.is_null());
+        assert!(!env.symbols.contains_key(&id));
+        assert_eq!(napi_reference_ref(env_ptr, reference, ptr::null_mut()), NAPI_GENERIC_FAILURE);
+        assert_eq!(napi_delete_reference(env_ptr, reference), NAPI_OK);
+    }
+}
+
+// Unrun: a live property key retains its otherwise weak local Symbol.
+#[test]
+fn local_symbol_weak_reference_follows_property_key_reachability() {
+    unsafe {
+        let mut env = Env::new();
+        let env_ptr: NapiEnv = &mut env;
+        let object = env.alloc(Value::Object(HashMap::new()));
+        let mut scope = ptr::null_mut();
+        assert_eq!(napi_open_handle_scope(env_ptr, &mut scope), NAPI_OK);
+        let mut symbol = ptr::null_mut();
+        assert_eq!(napi_create_symbol(env_ptr, ptr::null_mut(), &mut symbol), NAPI_OK);
+        let value = env.alloc(Value::Number(3.0));
+        assert_eq!(napi_set_property(env_ptr, object, symbol, value), NAPI_OK);
+        let mut reference = ptr::null_mut();
+        assert_eq!(napi_create_reference(env_ptr, symbol, 0, &mut reference), NAPI_OK);
+        assert_eq!(napi_close_handle_scope(env_ptr, scope), NAPI_OK);
+        let mut recipient = ptr::null_mut();
+        assert_eq!(napi_open_handle_scope(env_ptr, &mut recipient), NAPI_OK);
+        let mut actual = ptr::null_mut();
+        assert_eq!(napi_get_reference_value(env_ptr, reference, &mut actual), NAPI_OK);
+        assert_eq!(actual, symbol);
+        let mut deleted = false;
+        assert_eq!(napi_delete_property(env_ptr, object, actual, &mut deleted), NAPI_OK);
+        assert!(deleted);
+        assert!(matches!(value_ref(actual), Ok(Value::Symbol { .. })));
+        assert_eq!(napi_close_handle_scope(env_ptr, recipient), NAPI_OK);
+        assert_eq!(napi_get_reference_value(env_ptr, reference, &mut actual), NAPI_OK);
+        assert!(actual.is_null());
+        assert_eq!(napi_reference_ref(env_ptr, reference, ptr::null_mut()), NAPI_GENERIC_FAILURE);
+        assert_eq!(napi_delete_reference(env_ptr, reference), NAPI_OK);
+    }
+}
+
+// Unrun: returning an old child in a new handle scope grants that scope a
+// handle. Removing the parent edge must not retire it until the recipient
+// scope closes, even for an ordinary (non-Symbol) object.
+#[test]
+fn property_get_roots_existing_child_in_recipient_scope() {
+    unsafe {
+        let mut env = Env::new();
+        let env_ptr: NapiEnv = &mut env;
+        let parent = env.alloc(Value::Object(HashMap::new()));
+        let mut creator = ptr::null_mut();
+        assert_eq!(napi_open_handle_scope(env_ptr, &mut creator), NAPI_OK);
+        let child = env.alloc(Value::Object(HashMap::new()));
+        assert_eq!(napi_set_named_property(env_ptr, parent, c"child".as_ptr(), child), NAPI_OK);
+        assert_eq!(napi_close_handle_scope(env_ptr, creator), NAPI_OK);
+        let mut recipient = ptr::null_mut();
+        assert_eq!(napi_open_handle_scope(env_ptr, &mut recipient), NAPI_OK);
+        let mut returned = ptr::null_mut();
+        assert_eq!(napi_get_named_property(env_ptr, parent, c"child".as_ptr(), &mut returned), NAPI_OK);
+        assert_eq!(returned, child);
+        let key = env.alloc(Value::String("child".into()));
+        let mut deleted = false;
+        assert_eq!(napi_delete_property(env_ptr, parent, key, &mut deleted), NAPI_OK);
+        assert!(deleted);
+        assert!(matches!(value_ref(returned), Ok(Value::Object(_))));
+        assert_eq!(napi_close_handle_scope(env_ptr, recipient), NAPI_OK);
+        assert!(value_ref(returned).is_err());
+    }
+}
+
+// Unrun: a native callback can return a value allocated in an earlier closed
+// scope. Both call_function and make_callback must grant the caller's scope
+// a handle before the last object edge is removed.
+#[test]
+fn callback_result_roots_existing_value_in_recipient_scope() {
+    unsafe extern "C" fn return_data(_: NapiEnv, info: NapiCallbackInfo) -> NapiValue {
+        (*info).data as NapiValue
+    }
+    unsafe {
+        let mut env = Env::new();
+        let env_ptr: NapiEnv = &mut env;
+        let parent = env.alloc(Value::Object(HashMap::new()));
+        let mut creator = ptr::null_mut();
+        assert_eq!(napi_open_handle_scope(env_ptr, &mut creator), NAPI_OK);
+        let child = env.alloc(Value::Object(HashMap::new()));
+        assert_eq!(napi_set_named_property(env_ptr, parent, c"child".as_ptr(), child), NAPI_OK);
+        assert_eq!(napi_close_handle_scope(env_ptr, creator), NAPI_OK);
+        let mut function = ptr::null_mut();
+        assert_eq!(napi_create_function(env_ptr, c"returnData".as_ptr(), NAPI_AUTO_LENGTH,
+            Some(return_data), child.cast(), &mut function), NAPI_OK);
+        let mut recipient = ptr::null_mut();
+        assert_eq!(napi_open_handle_scope(env_ptr, &mut recipient), NAPI_OK);
+        let mut first = ptr::null_mut();
+        let mut second = ptr::null_mut();
+        assert_eq!(napi_call_function(env_ptr, parent, function, 0, ptr::null(), &mut first), NAPI_OK);
+        assert_eq!(napi_make_callback(env_ptr, ptr::null_mut(), parent, function, 0,
+            ptr::null(), &mut second), NAPI_OK);
+        assert_eq!((first, second), (child, child));
+        let key = env.alloc(Value::String("child".into()));
+        let mut deleted = false;
+        assert_eq!(napi_delete_property(env_ptr, parent, key, &mut deleted), NAPI_OK);
+        assert!(deleted);
+        assert!(matches!(value_ref(first), Ok(Value::Object(_))));
+        assert_eq!(napi_close_handle_scope(env_ptr, recipient), NAPI_OK);
+        assert!(value_ref(child).is_err());
+    }
+}
+
+// Unrun: clearing the exception transfers its last Env root to the caller's
+// scope. A sweep before that scope closes must leave the handle usable.
+#[test]
+fn cleared_exception_roots_returned_handle_before_removing_exception_root() {
+    unsafe {
+        let mut env = Env::new();
+        let env_ptr: NapiEnv = &mut env;
+        let mut creator = ptr::null_mut();
+        assert_eq!(napi_open_handle_scope(env_ptr, &mut creator), NAPI_OK);
+        let value = env.alloc(Value::Object(HashMap::new()));
+        env.exception = Some(value);
+        assert_eq!(napi_close_handle_scope(env_ptr, creator), NAPI_OK);
+        let mut recipient = ptr::null_mut();
+        assert_eq!(napi_open_handle_scope(env_ptr, &mut recipient), NAPI_OK);
+        let mut actual = ptr::null_mut();
+        assert_eq!(napi_get_and_clear_last_exception(env_ptr, &mut actual), NAPI_OK);
+        assert_eq!(actual, value);
+        assert!(env.exception.is_none());
+        sweep_pending_scope_values(env_ptr);
+        assert!(matches!(value_ref(actual), Ok(Value::Object(_))));
+        assert_eq!(napi_close_handle_scope(env_ptr, recipient), NAPI_OK);
+        assert!(value_ref(actual).is_err());
+    }
+}
+
+// Unrun: the identity-preserving coercion fast paths also return a new
+// handle to their caller; they cannot rely on the creating scope.
+#[test]
+fn identity_coercions_root_existing_recipient_values() {
+    unsafe {
+        for string_value in [false, true] {
+            let mut env = Env::new();
+            let env_ptr: NapiEnv = &mut env;
+            let parent = env.alloc(Value::Object(HashMap::new()));
+            let mut creator = ptr::null_mut();
+            assert_eq!(napi_open_handle_scope(env_ptr, &mut creator), NAPI_OK);
+            let child = if string_value { env.alloc(Value::String("held".into())) }
+                else { env.alloc(Value::Object(HashMap::new())) };
+            assert_eq!(napi_set_named_property(env_ptr, parent, c"child".as_ptr(), child), NAPI_OK);
+            assert_eq!(napi_close_handle_scope(env_ptr, creator), NAPI_OK);
+            let mut recipient = ptr::null_mut();
+            assert_eq!(napi_open_handle_scope(env_ptr, &mut recipient), NAPI_OK);
+            let mut actual = ptr::null_mut();
+            let status = if string_value { napi_coerce_to_string(env_ptr, child, &mut actual) }
+                else { napi_coerce_to_object(env_ptr, child, &mut actual) };
+            assert_eq!(status, NAPI_OK);
+            assert_eq!(actual, child);
+            let key = env.alloc(Value::String("child".into()));
+            let mut deleted = false;
+            assert_eq!(napi_delete_property(env_ptr, parent, key, &mut deleted), NAPI_OK);
+            assert!(deleted);
+            assert!(value_ref(actual).is_ok());
+            assert_eq!(napi_close_handle_scope(env_ptr, recipient), NAPI_OK);
+            assert!(value_ref(actual).is_err());
+        }
+    }
+}
+
+// Unrun: a later callback-info argument may reenter through Symbol pinning
+// and close the scope prepared for an earlier argument. The batch must fail
+// before writing any of its output pointers.
+#[test]
+fn callback_info_batch_revalidates_earlier_scope_roots() {
+    unsafe {
+        let mut env = Env::new();
+        let env_ptr: NapiEnv = &mut env;
+        let parent = env.alloc(Value::Object(HashMap::new()));
+        let child = env.alloc(Value::Object(HashMap::new()));
+        assert_eq!(napi_set_named_property(env_ptr, parent, c"child".as_ptr(), child), NAPI_OK);
+        let mut first_scope = ptr::null_mut();
+        assert_eq!(napi_open_handle_scope(env_ptr, &mut first_scope), NAPI_OK);
+        let first_root = root_existing_value(env_ptr, child).expect("first recipient root");
+        let generation = env.value_generations[&(child as usize)];
+        assert!(prepared_scoped_values_still_rooted(env_ptr,
+            Some(first_scope.cast()), &[(child, generation)]));
+        assert_eq!(napi_close_handle_scope(env_ptr, first_scope), NAPI_OK);
+        let mut next_scope = ptr::null_mut();
+        assert_eq!(napi_open_handle_scope(env_ptr, &mut next_scope), NAPI_OK);
+        assert!(!prepared_scoped_values_still_rooted(env_ptr,
+            Some(first_scope.cast()), &[(child, generation)]));
+        rollback_existing_value_root(env_ptr, first_root);
+        assert!(matches!(value_ref(child), Ok(Value::Object(_))));
+        assert_eq!(napi_close_handle_scope(env_ptr, next_scope), NAPI_OK);
+    }
+}
+
+// Unrun: Function owns a separate property map; Array properties live in the
+// hosted side table. Both key edges must retain a local Symbol until delete.
+#[test]
+fn local_symbol_key_survives_function_and_array_property_maps() {
+    unsafe {
+        for function_owner in [true, false] {
+            let mut env = Env::new();
+            let env_ptr: NapiEnv = &mut env;
+            let mut owner = ptr::null_mut();
+            let status = if function_owner {
+                napi_create_function(env_ptr, c"owner".as_ptr(), NAPI_AUTO_LENGTH,
+                    Some(thaw_compiled_callback), ptr::null_mut(), &mut owner)
+            } else {
+                napi_create_array(env_ptr, &mut owner)
+            };
+            assert_eq!(status, NAPI_OK);
+            let mut scope = ptr::null_mut();
+            assert_eq!(napi_open_handle_scope(env_ptr, &mut scope), NAPI_OK);
+            let mut symbol = ptr::null_mut();
+            assert_eq!(napi_create_symbol(env_ptr, ptr::null_mut(), &mut symbol), NAPI_OK);
+            let value = env.alloc(Value::Number(1.0));
+            assert_eq!(napi_set_property(env_ptr, owner, symbol, value), NAPI_OK);
+            let mut reference = ptr::null_mut();
+            assert_eq!(napi_create_reference(env_ptr, symbol, 0, &mut reference), NAPI_OK);
+            assert_eq!(napi_close_handle_scope(env_ptr, scope), NAPI_OK);
+            let mut recipient = ptr::null_mut();
+            assert_eq!(napi_open_handle_scope(env_ptr, &mut recipient), NAPI_OK);
+            let mut actual = ptr::null_mut();
+            assert_eq!(napi_get_reference_value(env_ptr, reference, &mut actual), NAPI_OK);
+            assert_eq!(actual, symbol);
+            let mut deleted = false;
+            assert_eq!(napi_delete_property(env_ptr, owner, actual, &mut deleted), NAPI_OK);
+            assert!(deleted);
+            assert!(matches!(value_ref(actual), Ok(Value::Symbol { .. })));
+            assert_eq!(napi_close_handle_scope(env_ptr, recipient), NAPI_OK);
+            assert_eq!(napi_get_reference_value(env_ptr, reference, &mut actual), NAPI_OK);
+            assert!(actual.is_null());
+            assert_eq!(napi_delete_reference(env_ptr, reference), NAPI_OK);
+        }
+    }
+}
+
+// Unrun: Symbol.for's registry is a strong root, unlike a local Symbol.
+#[test]
+fn registered_symbol_survives_a_zero_count_reference_and_scope_close() {
+    unsafe {
+        let mut env = Env::new();
+        let env_ptr: NapiEnv = &mut env;
+        let mut scope = ptr::null_mut();
+        assert_eq!(napi_open_handle_scope(env_ptr, &mut scope), NAPI_OK);
+        let mut symbol = ptr::null_mut();
+        assert_eq!(node_api_symbol_for(env_ptr, c"scope-registered".as_ptr(),
+            NAPI_AUTO_LENGTH, &mut symbol), NAPI_OK);
+        let mut reference = ptr::null_mut();
+        assert_eq!(napi_create_reference(env_ptr, symbol, 0, &mut reference), NAPI_OK);
+        assert_eq!(napi_close_handle_scope(env_ptr, scope), NAPI_OK);
+        let mut actual = ptr::null_mut();
+        assert_eq!(napi_get_reference_value(env_ptr, reference, &mut actual), NAPI_OK);
+        assert_eq!(actual, symbol);
+        assert_eq!(napi_reference_ref(env_ptr, reference, ptr::null_mut()), NAPI_OK);
+        assert_eq!(napi_delete_reference(env_ptr, reference), NAPI_OK);
+    }
+}
+
+// Unrun: absence of a trusted JS owner is an unknown weak-target state. It
+// must not be turned into a collected/null result or a successful 0->1 ref.
+#[cfg(feature = "quickjs")]
+#[test]
+fn js_origin_symbol_weak_query_failure_is_not_collection_proof() {
+    unsafe {
+        let mut env = Env::new();
+        env.graph_owner_id = next_graph_owner_id().unwrap();
+        let env_ptr: NapiEnv = &mut env;
+        let mut symbol = ptr::null_mut();
+        assert_eq!(napi_create_symbol(env_ptr, ptr::null_mut(), &mut symbol), NAPI_OK);
+        let Value::Symbol { id, .. } = value_ref(symbol).unwrap() else { panic!("Symbol expected") };
+        env.js_origin_symbol_ids.insert(*id);
+        env.js_live_symbol_ids.insert(*id);
+        let mut reference = ptr::null_mut();
+        assert_eq!(napi_create_reference(env_ptr, symbol, 0, &mut reference), NAPI_OK);
+        let mut output = symbol;
+        assert_eq!(napi_get_reference_value(env_ptr, reference, &mut output), NAPI_GENERIC_FAILURE);
+        assert_eq!(output, symbol);
+        assert_eq!((*reference).value, symbol);
+        let mut count = 73;
+        assert_eq!(napi_reference_ref(env_ptr, reference, &mut count), NAPI_GENERIC_FAILURE);
+        assert_eq!(count, 73);
+        assert_eq!((*reference).count, 0);
+        assert_eq!(napi_delete_reference(env_ptr, reference), NAPI_OK);
+    }
+}
+
+#[test]
+fn deferred_state_keeps_promise_alive_after_creating_scope_closes() {
+    unsafe {
+        let mut env = Env::new();
+        let env_ptr: NapiEnv = &mut env;
+        let mut scope = ptr::null_mut();
+        assert_eq!(napi_open_handle_scope(env_ptr, &mut scope), NAPI_OK);
+        let mut deferred = ptr::null_mut();
+        let mut promise = ptr::null_mut();
+        assert_eq!(napi_create_promise(env_ptr, &mut deferred, &mut promise), NAPI_OK);
+        assert_eq!(napi_close_handle_scope(env_ptr, scope), NAPI_OK);
+        assert!(env.values.contains(&promise));
+        assert!(matches!(value_ref(promise), Ok(Value::Promise(_))));
+    }
+}
+
+#[test]
+fn scoped_unexposed_instance_and_unrooted_wrap_both_retire() {
+    unsafe {
+        let mut env = Env::new();
+        let env_ptr: NapiEnv = &mut env;
+        let mut scope = ptr::null_mut();
+        assert_eq!(napi_open_handle_scope(env_ptr, &mut scope), NAPI_OK);
+        let native = env.alloc(Value::Object(HashMap::new()));
+        env.instances.insert(native as usize, 0);
+        let wrapped = env.alloc(Value::Object(HashMap::new()));
+        env.wraps.insert(wrapped as usize, WrapRecord {
+            data: ptr::null_mut(), finalize: None,
+            hint: ptr::null_mut(),
+        });
+        let temporary = env.alloc(Value::Number(1.0));
+        assert_eq!(napi_close_handle_scope(env_ptr, scope), NAPI_OK);
+        assert!(!env.values.contains(&native));
+        assert!(!env.instances.contains_key(&(native as usize)));
+        assert!(!env.values.contains(&wrapped));
+        assert!(!env.wraps.contains_key(&(wrapped as usize)));
+        assert!(!env.values.contains(&temporary));
+    }
+}
+
+#[test]
+fn scoped_graph_metadata_does_not_pin_an_unreachable_value() {
+    unsafe {
+        let mut env = Env::new();
+        let env_ptr: NapiEnv = &mut env;
+        let mut scope = ptr::null_mut();
+        assert_eq!(napi_open_handle_scope(env_ptr, &mut scope), NAPI_OK);
+        let wrapper = env.alloc(Value::Object(HashMap::new()));
+        let child = env.alloc(Value::Number(3.0));
+        env.graph_wrappers.insert(wrapper as usize, NapiGraphWrapperKind::Map);
+        env.host_properties.insert(wrapper as usize, HashMap::from([(
+            PropertyKey::String("child".into()), child,
+        )]));
+        assert_eq!(napi_close_handle_scope(env_ptr, scope), NAPI_OK);
+        assert!(!env.values.contains(&wrapper));
+        assert!(!env.values.contains(&child));
+        assert!(!env.graph_wrappers.contains_key(&(wrapper as usize)));
+        assert!(!env.host_properties.contains_key(&(wrapper as usize)));
+    }
+}
+
+#[test]
+fn scoped_external_without_finalizer_retires_with_its_backing() {
+    unsafe {
+        let mut env = Env::new();
+        let env_ptr: NapiEnv = &mut env;
+        let mut scope = ptr::null_mut();
+        assert_eq!(napi_open_handle_scope(env_ptr, &mut scope), NAPI_OK);
+        let temporary = env.alloc(Value::External(ptr::null_mut()));
+        let backing = env.alloc(Value::External(ptr::null_mut()));
+        env.finalizers.push(FinalizeRecord {
+            data: ptr::null_mut(), finalize: None, hint: ptr::null_mut(),
+            backing: backing.cast(),
+        });
+        assert_eq!(napi_close_handle_scope(env_ptr, scope), NAPI_OK);
+        assert!(!env.values.contains(&temporary));
+        assert!(!env.values.contains(&backing));
+        assert!(env.finalizers.is_empty());
+    }
+}
+
+#[test]
+fn scoped_accessor_metadata_retires_with_unreachable_owner() {
+    unsafe {
+        let mut env = Env::new();
+        let env_ptr: NapiEnv = &mut env;
+        let mut scope = ptr::null_mut();
+        assert_eq!(napi_open_handle_scope(env_ptr, &mut scope), NAPI_OK);
+        let owner = env.alloc(Value::Object(HashMap::new()));
+        let getter = env.alloc(Value::Number(8.0));
+        env.accessors.insert((owner as usize, PropertyKey::String("x".into())), Accessor {
+            getter: None, setter: None,
+            getter_data: ptr::null_mut(), setter_data: ptr::null_mut(),
+            getter_reflection: Some(getter), setter_reflection: None,
+            #[cfg(feature = "quickjs")]
+            js_owner: None,
+        });
+        assert_eq!(napi_close_handle_scope(env_ptr, scope), NAPI_OK);
+        assert!(!env.values.contains(&owner));
+        assert!(!env.values.contains(&getter));
+        assert!(env.accessors.is_empty());
+    }
+}
+
+#[test]
+fn root_escape_survives_host_borrow_contention_and_later_sweep() {
+    unsafe {
+        let mut env = Env::new();
+        env.host_managed = true;
+        let env_ptr: NapiEnv = &mut env;
+        let mut scope = ptr::null_mut();
+        assert_eq!(napi_open_escapable_handle_scope(env_ptr, &mut scope), NAPI_OK);
+        let escaped = env.alloc(Value::Number(19.0));
+        let mut result = ptr::null_mut();
+        assert_eq!(napi_escape_handle(env_ptr, scope, escaped, &mut result), NAPI_OK);
+        HOST.with(|host| {
+            let _occupied = host.borrow_mut();
+            assert_eq!(napi_close_escapable_handle_scope(env_ptr, scope), NAPI_OK);
+        });
+        assert_eq!(result, escaped);
+        assert!(env.pending_scope_values.iter().any(|(value, _)| *value == escaped));
+        sweep_pending_scope_values(env_ptr);
+        assert!(env.values.contains(&escaped));
+        assert!(matches!(value_ref(escaped), Ok(Value::Number(19.0))));
+    }
+}
+
+std::thread_local! {
+    static SCOPED_FINALIZER_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+unsafe extern "C" fn scoped_finalizer_creates_new_value(
+    env: NapiEnv, _: *mut c_void, _: *mut c_void,
+) {
+    SCOPED_FINALIZER_CALLS.with(|calls| calls.set(calls.get() + 1));
+    let mut next = ptr::null_mut();
+    assert_eq!(napi_create_double(env, 11.0, &mut next), NAPI_OK);
+    assert!(matches!(value_ref(next), Ok(Value::Number(11.0))));
+}
+
+#[test]
+fn unrooted_scoped_finalizer_runs_once_after_retirement_and_reentry_is_live() {
+    unsafe {
+        SCOPED_FINALIZER_CALLS.with(|calls| calls.set(0));
+        let mut env = Env::new();
+        let env_ptr: NapiEnv = &mut env;
+        let mut scope = ptr::null_mut();
+        assert_eq!(napi_open_handle_scope(env_ptr, &mut scope), NAPI_OK);
+        let object = env.alloc(Value::Object(HashMap::new()));
+        env.wraps.insert(object as usize, WrapRecord {
+            data: ptr::null_mut(), finalize: Some(scoped_finalizer_creates_new_value),
+            hint: ptr::null_mut(),
+        });
+        assert_eq!(napi_close_handle_scope(env_ptr, scope), NAPI_OK);
+        assert_eq!(SCOPED_FINALIZER_CALLS.with(|calls| calls.get()), 1);
+        assert!(!env.values.contains(&object));
+        assert!(env.finalized_handles.contains(&(object as usize)));
+        assert_eq!(value_ref(object).err(), Some(NAPI_INVALID_ARG));
+        drop(env);
+        assert_eq!(SCOPED_FINALIZER_CALLS.with(|calls| calls.get()), 1);
+    }
+}
+
+#[cfg(feature = "quickjs")]
+#[test]
+fn scoped_accessor_js_roots_drop_only_after_owner_metadata_is_removed() {
+    unsafe {
+        let mut env = Env::new();
+        let env_ptr: NapiEnv = &mut env;
+        let mut scope = ptr::null_mut();
+        assert_eq!(napi_open_handle_scope(env_ptr, &mut scope), NAPI_OK);
+        let owner = env.alloc(Value::Object(HashMap::new()));
+        let roots = Arc::new(QuickJsAccessorRoots {
+            getter: 0, setter: 0,
+            getter_native: ptr::null_mut(), setter_native: ptr::null_mut(),
+        });
+        env.accessors.insert((owner as usize, PropertyKey::String("x".into())), Accessor {
+            getter: None, setter: None,
+            getter_data: ptr::null_mut(), setter_data: ptr::null_mut(),
+            getter_reflection: None, setter_reflection: None,
+            js_owner: Some(roots.clone()),
+        });
+        assert_eq!(Arc::strong_count(&roots), 2);
+        assert_eq!(napi_close_handle_scope(env_ptr, scope), NAPI_OK);
+        assert!(!env.values.contains(&owner));
+        assert!(env.accessors.is_empty());
+        assert_eq!(Arc::strong_count(&roots), 1);
+    }
+}
+
+#[test]
+fn native_parent_edge_mutations_sweep_scoped_children_after_publication() {
+    unsafe {
+        SCOPED_FINALIZER_CALLS.with(|calls| calls.set(0));
+        let mut env = Env::new();
+        let env_ptr: NapiEnv = &mut env;
+        let parent = env.alloc(Value::Object(HashMap::new()));
+        let replacement = env.alloc(Value::Number(7.0));
+        let key = env.alloc(Value::String("child".into()));
+        let mut scope = ptr::null_mut();
+        assert_eq!(napi_open_handle_scope(env_ptr, &mut scope), NAPI_OK);
+        let child = env.alloc(Value::Object(HashMap::new()));
+        env.wraps.insert(child as usize, WrapRecord {
+            data: ptr::null_mut(), finalize: Some(scoped_finalizer_creates_new_value),
+            hint: ptr::null_mut(),
+        });
+        assert_eq!(napi_set_named_property(env_ptr, parent, c"child".as_ptr(), child), NAPI_OK);
+        assert_eq!(napi_close_handle_scope(env_ptr, scope), NAPI_OK);
+        assert!(env.values.contains(&child));
+        assert_eq!(SCOPED_FINALIZER_CALLS.with(|calls| calls.get()), 0);
+        assert_eq!(napi_set_named_property(env_ptr, parent, c"child".as_ptr(), replacement), NAPI_OK);
+        assert!(!env.values.contains(&child));
+        assert_eq!(SCOPED_FINALIZER_CALLS.with(|calls| calls.get()), 1);
+
+        let mut next_scope = ptr::null_mut();
+        assert_eq!(napi_open_handle_scope(env_ptr, &mut next_scope), NAPI_OK);
+        let next_child = env.alloc(Value::Object(HashMap::new()));
+        env.wraps.insert(next_child as usize, WrapRecord {
+            data: ptr::null_mut(), finalize: Some(scoped_finalizer_creates_new_value),
+            hint: ptr::null_mut(),
+        });
+        assert_eq!(napi_set_property(env_ptr, parent, key, next_child), NAPI_OK);
+        assert_eq!(napi_close_handle_scope(env_ptr, next_scope), NAPI_OK);
+        let mut deleted = false;
+        env.property_attributes.insert((parent as usize, PropertyKey::String("child".into())),
+            NAPI_WRITABLE | NAPI_ENUMERABLE);
+        assert_eq!(napi_delete_property(env_ptr, parent, key, &mut deleted), NAPI_OK);
+        assert!(!deleted);
+        assert!(env.values.contains(&next_child));
+        env.property_attributes.insert((parent as usize, PropertyKey::String("child".into())),
+            NAPI_DEFAULT_PROPERTY_ATTRIBUTES);
+        assert_eq!(napi_delete_property(env_ptr, parent, key, &mut deleted), NAPI_OK);
+        assert!(deleted);
+        assert!(!env.values.contains(&next_child));
+        assert_eq!(SCOPED_FINALIZER_CALLS.with(|calls| calls.get()), 2);
+    }
+}
+
+#[test]
+fn native_array_truncation_and_prototype_change_sweep_scoped_children() {
+    unsafe {
+        let mut env = Env::new();
+        let env_ptr: NapiEnv = &mut env;
+        let array = env.alloc(Value::Array(Vec::new()));
+        let object = env.alloc(Value::Object(HashMap::new()));
+        let new_length = env.alloc(Value::Number(0.0));
+        let null = env.alloc(Value::Null);
+        let mut scope = ptr::null_mut();
+        assert_eq!(napi_open_handle_scope(env_ptr, &mut scope), NAPI_OK);
+        let element = env.alloc(Value::Object(HashMap::new()));
+        let prototype = env.alloc(Value::Object(HashMap::new()));
+        assert_eq!(napi_set_element(env_ptr, array, 0, element), NAPI_OK);
+        assert_eq!(node_api_set_prototype(env_ptr, object, prototype), NAPI_OK);
+        assert_eq!(napi_close_handle_scope(env_ptr, scope), NAPI_OK);
+        assert!(env.values.contains(&element));
+        assert!(env.values.contains(&prototype));
+        assert_eq!(napi_set_named_property(env_ptr, array, c"length".as_ptr(), new_length), NAPI_OK);
+        assert!(!env.values.contains(&element));
+        assert_eq!(node_api_set_prototype(env_ptr, object, null), NAPI_OK);
+        assert!(!env.values.contains(&prototype));
+    }
+}
+
+#[test]
+fn partial_array_length_failure_still_sweeps_deleted_high_index() {
+    unsafe {
+        let mut env = Env::new();
+        let env_ptr: NapiEnv = &mut env;
+        let array = env.alloc(Value::Array(Vec::new()));
+        let blocker = env.alloc(Value::Number(1.0));
+        let zero = env.alloc(Value::Number(0.0));
+        assert_eq!(napi_set_element(env_ptr, array, 1, blocker), NAPI_OK);
+        env.property_attributes.insert((array as usize, PropertyKey::String("1".into())),
+            NAPI_WRITABLE | NAPI_ENUMERABLE);
+        let mut scope = ptr::null_mut();
+        assert_eq!(napi_open_handle_scope(env_ptr, &mut scope), NAPI_OK);
+        let child = env.alloc(Value::Object(HashMap::new()));
+        assert_eq!(napi_set_element(env_ptr, array, 2, child), NAPI_OK);
+        assert_eq!(napi_close_handle_scope(env_ptr, scope), NAPI_OK);
+        assert!(env.values.contains(&child));
+        assert_eq!(napi_set_named_property(env_ptr, array, c"length".as_ptr(), zero),
+            NAPI_GENERIC_FAILURE);
+        assert!(!env.values.contains(&child));
+        assert!(matches!(value_ref(blocker), Ok(Value::Number(1.0))));
+    }
+}
+
+std::thread_local! {
+    static THROWING_SCOPED_FINALIZER_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+unsafe extern "C" fn throwing_scoped_finalizer(
+    env: NapiEnv, data: *mut c_void, _: *mut c_void,
+) {
+    THROWING_SCOPED_FINALIZER_CALLS.with(|calls| calls.set(calls.get() + 1));
+    let mut reentrant = ptr::null_mut();
+    assert_eq!(napi_create_double(env, 13.0, &mut reentrant), NAPI_OK);
+    if !data.is_null() {
+        assert_eq!(napi_set_named_property(env, data.cast(), c"duringFinalizer".as_ptr(), reentrant), NAPI_OK);
+    }
+    assert_eq!(napi_get_named_property(env, ptr::null_mut(), c"invalid".as_ptr(), &mut reentrant),
+        NAPI_INVALID_ARG);
+    let thrown = (*env).alloc(Value::Error("scoped finalizer failure".into()));
+    assert_eq!(napi_throw(env, thrown), NAPI_OK);
+}
+
+#[test]
+fn mutation_finalizer_reports_own_error_and_preserves_original_exception() {
+    unsafe {
+        THROWING_SCOPED_FINALIZER_CALLS.with(|calls| calls.set(0));
+        let mut env = Env::new();
+        let env_ptr: NapiEnv = &mut env;
+        let parent = env.alloc(Value::Object(HashMap::new()));
+        let replacement = env.alloc(Value::Number(2.0));
+        let mut scope = ptr::null_mut();
+        assert_eq!(napi_open_handle_scope(env_ptr, &mut scope), NAPI_OK);
+        let child = env.alloc(Value::Object(HashMap::new()));
+        let original = env.alloc(Value::Error("original exception".into()));
+        env.exception = Some(original);
+        env.wraps.insert(child as usize, WrapRecord {
+            data: parent.cast(), finalize: Some(throwing_scoped_finalizer),
+            hint: ptr::null_mut(),
+        });
+        assert_eq!(napi_set_named_property(env_ptr, parent, c"child".as_ptr(), child), NAPI_OK);
+        assert_eq!(napi_close_handle_scope(env_ptr, scope), NAPI_OK);
+        assert!(env.values.contains(&child));
+        assert!(env.values.contains(&original));
+        assert_eq!(record_status(env_ptr, NAPI_NUMBER_EXPECTED), NAPI_NUMBER_EXPECTED);
+        let message = env.last_error_info.error_message;
+        assert_eq!(napi_set_named_property(env_ptr, parent, c"child".as_ptr(), replacement), NAPI_OK);
+        assert!(!env.values.contains(&child));
+        assert_eq!(THROWING_SCOPED_FINALIZER_CALLS.with(|calls| calls.get()), 1);
+        assert_eq!(env.exception, Some(original));
+        assert!(env.values.contains(&original));
+        assert_eq!(env.last_error_info.error_code, NAPI_NUMBER_EXPECTED);
+        assert_eq!(env.last_error_info.error_message, message);
+        assert!(HOST.with(|host| host.borrow().shutdown_errors.back()
+            .is_some_and(|text| text.contains("scoped finalizer failure"))));
+    }
+}
+
+#[test]
+fn partial_length_failure_preserves_failure_status_after_throwing_finalizer() {
+    unsafe {
+        let mut env = Env::new();
+        let env_ptr: NapiEnv = &mut env;
+        let array = env.alloc(Value::Array(Vec::new()));
+        let blocker = env.alloc(Value::Number(1.0));
+        let zero = env.alloc(Value::Number(0.0));
+        assert_eq!(napi_set_element(env_ptr, array, 1, blocker), NAPI_OK);
+        env.property_attributes.insert((array as usize, PropertyKey::String("1".into())),
+            NAPI_WRITABLE | NAPI_ENUMERABLE);
+        let mut scope = ptr::null_mut();
+        assert_eq!(napi_open_handle_scope(env_ptr, &mut scope), NAPI_OK);
+        let child = env.alloc(Value::Object(HashMap::new()));
+        env.wraps.insert(child as usize, WrapRecord {
+            data: array.cast(), finalize: Some(throwing_scoped_finalizer),
+            hint: ptr::null_mut(),
+        });
+        assert_eq!(napi_set_element(env_ptr, array, 2, child), NAPI_OK);
+        assert_eq!(napi_close_handle_scope(env_ptr, scope), NAPI_OK);
+        assert_eq!(napi_set_named_property(env_ptr, array, c"length".as_ptr(), zero),
+            NAPI_GENERIC_FAILURE);
+        assert!(!env.values.contains(&child));
+        assert_eq!(env.last_error_info.error_code, NAPI_GENERIC_FAILURE);
+        assert_eq!(env.exception, None);
+        assert!(HOST.with(|host| host.borrow().shutdown_errors.back()
+            .is_some_and(|text| text.contains("scoped finalizer failure"))));
+    }
+}

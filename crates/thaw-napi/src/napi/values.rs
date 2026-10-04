@@ -365,7 +365,9 @@ pub unsafe extern "C" fn node_api_create_property_key_utf8(
         std::slice::from_raw_parts(value.cast::<u8>(), length)
     };
     let key = String::from_utf8_lossy(bytes).into_owned();
-    write_value(out, intern_property_key(env, key))
+    let env_ptr = env as *mut Env;
+    let key = intern_property_key(env, key);
+    write_scoped_value(env_ptr, out, key)
 }
 
 #[no_mangle]
@@ -387,7 +389,9 @@ pub unsafe extern "C" fn node_api_create_property_key_latin1(
         std::slice::from_raw_parts(value.cast::<u8>(), length)
     };
     let key = bytes.iter().map(|byte| char::from(*byte)).collect();
-    write_value(out, intern_property_key(env, key))
+    let env_ptr = env as *mut Env;
+    let key = intern_property_key(env, key);
+    write_scoped_value(env_ptr, out, key)
 }
 
 #[no_mangle]
@@ -413,11 +417,13 @@ pub unsafe extern "C" fn node_api_create_property_key_utf16(
         length
     };
     let units = std::slice::from_raw_parts(value, length);
+    let env_ptr = env as *mut Env;
     if let Ok(key) = String::from_utf16(units) {
-        return write_value(out, intern_property_key(env, key));
+        let key = intern_property_key(env, key);
+        return write_scoped_value(env_ptr, out, key);
     }
     if let Some(key) = env.utf16_property_keys.get(units).copied() {
-        return write_value(out, key);
+        return write_scoped_value(env_ptr, out, key);
     }
     let key = env.alloc(Value::String(String::from_utf16_lossy(units)));
     env.utf16_strings.insert(key as usize, units.to_vec());
@@ -531,6 +537,7 @@ pub unsafe extern "C" fn node_api_symbol_for(
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .entry(description.encode_utf16().collect())
         .or_insert_with(|| NEXT_SYMBOL_ID.fetch_add(1, Ordering::Relaxed));
+    env.strong_symbol_ids.insert(id);
     let value = if let Some(value) = env.symbols.get(&id).copied() {
         value
     } else {
@@ -735,35 +742,89 @@ pub unsafe extern "C" fn napi_get_cb_info(
     this_arg: *mut NapiValue,
     data: *mut *mut c_void,
 ) -> NapiStatus {
+    let _foreign_dispatch = ForeignCallbackGuard::new();
     if env.is_null() {
         return NAPI_INVALID_ARG;
     }
     let Some(info) = info.as_ref() else {
         return record_status(env, NAPI_INVALID_ARG);
     };
+    let args = info.args.clone();
+    let receiver = info.this_arg;
+    let callback_data = info.data;
+    let capacity = if argc.is_null() { 0 } else { *argc };
+    let copied = if argv.is_null() { 0 } else { capacity.min(args.len()) };
+    let mut undefined = ptr::null_mut();
+    if !argc.is_null() && !argv.is_null() && copied < capacity {
+        let status = napi_get_undefined(env, &mut undefined);
+        if status != NAPI_OK { return record_status(env, status); }
+    }
+    let recipient_scope = env.as_ref().and_then(|owner|
+        owner.active_handle_scopes.last().copied());
+    let mut acquired = Vec::new();
+    let mut prepared = Vec::new();
+    if !undefined.is_null() {
+        match prepare_scoped_value(env, undefined) {
+            Ok(root) => acquired.push(root),
+            Err(status) => return record_status(env, status),
+        }
+        let Some(generation) = env.as_ref().and_then(|owner|
+            owner.value_generations.get(&(undefined as usize)).copied()) else {
+            for root in acquired.into_iter().rev() {
+                rollback_existing_value_root(env, root);
+            }
+            return record_status(env, NAPI_INVALID_ARG);
+        };
+        prepared.push((undefined, generation));
+    }
+    for value in args.iter().take(copied).copied()
+        .chain((!this_arg.is_null()).then_some(receiver)) {
+        match prepare_scoped_value(env, value) {
+            Ok(root) => {
+                acquired.push(root);
+                if !value.is_null() {
+                    let Some(generation) = env.as_ref().and_then(|owner|
+                        owner.value_generations.get(&(value as usize)).copied()) else {
+                        for root in acquired.into_iter().rev() {
+                            rollback_existing_value_root(env, root);
+                        }
+                        return record_status(env, NAPI_INVALID_ARG);
+                    };
+                    prepared.push((value, generation));
+                }
+            }
+            Err(status) => {
+                for root in acquired.into_iter().rev() {
+                    rollback_existing_value_root(env, root);
+                }
+                return record_status(env, status);
+            }
+        }
+    }
+    // A later Symbol may synchronize a native pin through QuickJS and reenter
+    // this Env. Do not publish earlier callback arguments if that reentry
+    // closed the receiving scope or retired an earlier value.
+    let still_rooted = prepared_scoped_values_still_rooted(env, recipient_scope, &prepared);
+    if !still_rooted {
+        for root in acquired.into_iter().rev() {
+            rollback_existing_value_root(env, root);
+        }
+        return record_status(env, NAPI_INVALID_ARG);
+    }
     if !argc.is_null() {
-        let capacity = *argc;
-        *argc = info.args.len();
+        *argc = args.len();
         if !argv.is_null() {
-            let copied = capacity.min(info.args.len());
-            ptr::copy_nonoverlapping(info.args.as_ptr(), argv, copied);
-            if copied < capacity {
-                let mut undefined = ptr::null_mut();
-                let status = napi_get_undefined(env, &mut undefined);
-                if status != NAPI_OK {
-                    return record_status(env, status);
-                }
-                for index in copied..capacity {
-                    *argv.add(index) = undefined;
-                }
+            ptr::copy_nonoverlapping(args.as_ptr(), argv, copied);
+            for index in copied..capacity {
+                *argv.add(index) = undefined;
             }
         }
     }
     if !this_arg.is_null() {
-        *this_arg = info.this_arg;
+        *this_arg = receiver;
     }
     if !data.is_null() {
-        *data = info.data;
+        *data = callback_data;
     }
     NAPI_OK
 }
@@ -780,6 +841,5 @@ pub unsafe extern "C" fn napi_get_new_target(
     let Some(info) = info.as_ref() else {
         return record_status(env, NAPI_INVALID_ARG);
     };
-    *result = info.new_target;
-    NAPI_OK
+    record_status(env, write_scoped_value(env, result, info.new_target))
 }
