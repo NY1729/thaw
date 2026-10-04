@@ -8133,3 +8133,66 @@ fn webassembly_descriptor_member_reads() {
     "#), 1);
     assert_eq!(call("wasmDescriptorReads", "[]"), "[1,1,1,\"mutable,value\",3,\"entry\"]");
 }
+
+// Unrun regression target: shared Globals are visible inside reentrant callbacks.
+#[test]
+fn webassembly_shared_global_native_authority() {
+    assert_eq!(load(r#"
+        function wasmSharedGlobalAuthority() {
+            const bytes = new TextEncoder().encode(`(module
+                (import "host" "value" (global $value (mut i32)))
+                (import "host" "observe" (func $observe))
+                (export "value" (global $value))
+                (func (export "read") (result i32) global.get $value)
+                (func (export "bump") (result i32)
+                    global.get $value i32.const 1 i32.add global.set $value
+                    call $observe global.get $value))`);
+            const module = new WebAssembly.Module(bytes);
+            const value = new WebAssembly.Global({ value: "i32", mutable: true }, 1);
+            const observed = [];
+            let second;
+            const first = new WebAssembly.Instance(module, { host: { value, observe() {
+                observed.push(value.value, second.exports.read());
+            } } });
+            second = new WebAssembly.Instance(module, { host: { value, observe() {} } });
+            const result = first.exports.bump();
+            const exported = first.exports.value;
+            first.dispose(); second.dispose();
+            exported.value = 7;
+            return [result, observed[0], observed[1], exported.value, value.value];
+        }
+    "#), 1);
+    assert_eq!(call("wasmSharedGlobalAuthority", "[]"), "[2,2,2,7,7]");
+}
+
+// Unrun regression target: shared externref Global preserves object identity.
+#[test]
+fn webassembly_shared_externref_global_authority() {
+    assert_eq!(load(r#"
+        function wasmSharedExternrefGlobal() {
+            const bytes = new TextEncoder().encode(`(module
+                (import "host" "value" (global $value (mut externref)))
+                (import "host" "observe" (func $observe))
+                (export "value" (global $value))
+                (func (export "read") (result externref) global.get $value)
+                (func (export "write") (param externref)
+                    local.get 0 global.set $value call $observe))`);
+            const module = new WebAssembly.Module(bytes);
+            const initial = { initial: true }, replacement = { replacement: true };
+            const value = new WebAssembly.Global({ value: "externref", mutable: true }, initial);
+            let observed = false, sibling;
+            const instance = new WebAssembly.Instance(module, { host: { value, observe() {
+                observed = value.value === replacement && sibling.exports.read() === replacement;
+            } } });
+            sibling = new WebAssembly.Instance(module, { host: { value, observe() {} } });
+            const before = instance.exports.read() === initial;
+            instance.exports.write(replacement);
+            const exported = instance.exports.value;
+            instance.dispose(); sibling.dispose();
+            const after = exported.value === replacement;
+            exported.value = undefined;
+            return [before, observed, after, value.value === undefined];
+        }
+    "#), 1);
+    assert_eq!(call("wasmSharedExternrefGlobal", "[]"), "[true,true,true,true]");
+}

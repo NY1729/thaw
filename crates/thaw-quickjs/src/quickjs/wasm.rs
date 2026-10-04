@@ -234,15 +234,22 @@ struct WasmStoreData {
     externrefs: HashMap<u32, wasmi::ExternRef>,
 }
 
+struct RetainedWasmGlobal {
+    store: SharedWasmStore,
+    global: wasmi::Global,
+}
+
 struct WasmTable {
     engine: WasmEngine,
     shared_store: SharedWasmStore,
     next_module: u32,
     next_instance: u32,
     next_memory: u32,
+    next_global: u32,
     modules: HashMap<u32, WasmModule>,
     instances: HashMap<u32, WasmInstance>,
     memories: HashMap<u32, StandaloneWasmMemory>,
+    globals: HashMap<u32, RetainedWasmGlobal>,
 }
 
 impl Default for WasmTable {
@@ -255,9 +262,11 @@ impl Default for WasmTable {
             next_module: 1,
             next_instance: 1,
             next_memory: 1,
+            next_global: 1,
             modules: HashMap::new(),
             instances: HashMap::new(),
             memories: HashMap::new(),
+            globals: HashMap::new(),
         }
     }
 }
@@ -472,7 +481,7 @@ fn wasm_sweep_inactive_values() {
     WASM_VALUE_SWEEP_PENDING.with(|pending| pending.set(false));
     let retired = WASM.with(|table| {
         let mut table = table.borrow_mut();
-        if table.instances.is_empty() && table.memories.is_empty()
+        if table.instances.is_empty() && table.memories.is_empty() && table.globals.is_empty()
             && std::rc::Rc::strong_count(&table.shared_store.inner) == 1 {
             let replacement = SharedWasmStore::new(&table.engine);
             Some(std::mem::replace(&mut table.shared_store, replacement))
@@ -532,6 +541,13 @@ fn wasm_release(kind: String, handle: u32) -> bool {
         let removed = WASM.with(|table| table.borrow_mut().memories.remove(&handle).is_some());
         if removed { wasm_sweep_inactive_values(); }
         return removed;
+    }
+    if kind == "global" {
+        let removed = WASM.with(|table| table.borrow_mut().globals.remove(&handle));
+        let existed = removed.is_some();
+        drop(removed);
+        if existed { wasm_sweep_inactive_values(); }
+        return existed;
     }
     if kind != "instance" {
         return false;
@@ -794,19 +810,14 @@ fn wasm_instantiate_inner(module_handle: u32, linkage: Option<String>) -> String
                     let Some(descriptor) = global_imports.get(&key) else {
                         return serde_json::json!({ "ok": false, "error": format!("WebAssembly global import {}.{} is not provided", import.module(), import.name()) }).to_string();
                     };
-                    if descriptor.get("type").and_then(serde_json::Value::as_str) != Some(wasm_type_name(global_type.content()))
-                        || descriptor.get("mutable").and_then(serde_json::Value::as_bool) != Some(global_type.mutability().is_mut())
-                    {
-                        return serde_json::json!({ "ok": false, "error": format!("WebAssembly global import {}.{} has incompatible type or mutability", import.module(), import.name()) }).to_string();
-                    }
-                    let Some(encoded_value) = descriptor.get("value") else {
-                        return serde_json::json!({ "ok": false, "error": "WebAssembly global import value is missing" }).to_string();
-                    };
-                    let value = match wasm_runtime_value(encoded_value, global_type.content(), &mut store) {
-                        Ok(value) => value,
+                    let global = match wasm_import_global(descriptor, &store) {
+                        Ok(global) => global,
                         Err(error) => return serde_json::json!({ "ok": false, "error": error }).to_string(),
                     };
-                    let global = wasmi::Global::new(&mut store, value, global_type.mutability());
+                    let actual = global.ty(&store);
+                    if actual.content() != global_type.content() || actual.mutability() != global_type.mutability() {
+                        return serde_json::json!({ "ok": false, "error": format!("WebAssembly global import {}.{} has incompatible type or mutability", import.module(), import.name()) }).to_string();
+                    }
                     if let Err(error) = linker.define(import.module(), import.name(), global) {
                         return serde_json::json!({ "ok": false, "error": error.to_string() }).to_string();
                     }
@@ -986,6 +997,48 @@ fn wasm_import_memory(
 fn wasm_import_key(module: &str, name: &str) -> String {
     format!("{module}\u{1f}{name}")
 }
+
+fn wasm_import_global(
+    descriptor: &serde_json::Value,
+    context: &impl wasmi::AsContext<Data = WasmStoreData>,
+) -> Result<wasmi::Global, String> {
+    let owner = descriptor.get("instance").and_then(serde_json::Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok()).ok_or("invalid WebAssembly.Global owner")?;
+    let name = descriptor.get("name").and_then(serde_json::Value::as_str)
+        .ok_or("invalid WebAssembly.Global name")?;
+    let identity = context.as_context().data().identity.clone();
+    let resolve = |state: &WasmInstanceState| {
+        if let Some(key) = name.strip_prefix("import:") {
+            state.imported_globals.get(key).copied()
+        } else {
+            state.instance.get_global(context, name)
+        }
+    };
+    if owner != 0 {
+        let active = WASM_ACTIVE_CALLERS.with(|stack| {
+            stack.borrow().iter().rev().find_map(|entry| {
+                let state = entry.state?;
+                if !std::rc::Rc::ptr_eq(&entry.store_identity, &identity) { return None; }
+                let state = unsafe { (&*state).borrow() };
+                (state.handle == owner).then(|| resolve(&state)).flatten()
+            })
+        });
+        if let Some(global) = active { return Ok(global); }
+    }
+    let global = WASM.with(|table| {
+        let table = table.borrow();
+        if owner == 0 {
+            let record = name.parse::<u32>().ok().and_then(|handle| table.globals.get(&handle))?;
+            std::rc::Rc::ptr_eq(&record.store.identity, &identity).then_some(record.global)
+        } else {
+            let record = table.instances.get(&owner)?;
+            if !std::rc::Rc::ptr_eq(&record.store.identity, &identity) { return None; }
+            resolve(&record.state.borrow())
+        }
+    });
+    global.ok_or_else(|| "WebAssembly.Global belongs to a released or different Store".to_string())
+}
+
 
 fn wasm_linkage_values(
     linkage: &serde_json::Value,
@@ -1199,7 +1252,7 @@ fn wasm_instance_runtime_value(
         .ok_or_else(|| "WebAssembly funcref belongs to a different instance".to_string())
 }
 
-fn wasm_value(value: WasmVal, record: &mut WasmInstanceState, context: &impl wasmi::AsContext<Data = WasmStoreData>) -> Result<serde_json::Value, String> {
+fn wasm_non_funcref_value(value: WasmVal, context: &impl wasmi::AsContext<Data = WasmStoreData>) -> Result<serde_json::Value, String> {
     let store = context.as_context();
     match value {
         WasmVal::I32(value) => Ok(serde_json::json!({ "t": "number", "v": value })),
@@ -1216,6 +1269,16 @@ fn wasm_value(value: WasmVal, record: &mut WasmInstanceState, context: &impl was
             };
             Ok(serde_json::json!({ "t": "externref", "v": handle }))
         }
+        other => Err(format!(
+            "unsupported WebAssembly result type {:?}",
+            other.ty()
+        )),
+    }
+}
+
+fn wasm_value(value: WasmVal, record: &mut WasmInstanceState, context: &impl wasmi::AsContext<Data = WasmStoreData>) -> Result<serde_json::Value, String> {
+    let store = context.as_context();
+    match value {
         WasmVal::FuncRef(reference) => {
             let Some(function) = reference.val().copied() else {
                 return Ok(serde_json::json!({ "t": "funcref", "v": 0 }));
@@ -1251,10 +1314,7 @@ fn wasm_value(value: WasmVal, record: &mut WasmInstanceState, context: &impl was
                 serde_json::json!({ "t": "funcref", "v": handle, "parameters": parameters, "results": results }),
             )
         }
-        other => Err(format!(
-            "unsupported WebAssembly result type {:?}",
-            other.ty()
-        )),
+        other => wasm_non_funcref_value(other, context),
     }
 }
 
@@ -1418,7 +1478,100 @@ fn wasm_instance_global(state: &mut WasmInstanceState, context: &mut impl wasmi:
         }
 }
 
+fn wasm_retain_global(
+    global: wasmi::Global,
+    context: &impl wasmi::AsContext<Data = WasmStoreData>,
+) -> Result<u32, String> {
+    let identity = context.as_context().data().identity.clone();
+    WASM.with(|table| {
+        let mut table = table.borrow_mut();
+        if !std::rc::Rc::ptr_eq(&table.shared_store.identity, &identity) {
+            return Err("WebAssembly.Global belongs to a different Store".to_string());
+        }
+        let handle = table.next_global;
+        let next = handle.checked_add(1).ok_or("WebAssembly.Global handle limit reached")?;
+        table.next_global = next;
+        let store = table.shared_store.clone();
+        table.globals.insert(handle, RetainedWasmGlobal { store, global });
+        Ok(handle)
+    })
+}
+
+fn wasm_global_create(ty: String, mutable: bool, encoded: String) -> String {
+    let ty = match ty.as_str() {
+        "i32" => WasmValType::I32,
+        "i64" => WasmValType::I64,
+        "f32" => WasmValType::F32,
+        "f64" => WasmValType::F64,
+        "externref" => WasmValType::ExternRef,
+        _ => return serde_json::json!({ "ok": false, "error": "unsupported WebAssembly.Global type" }).to_string(),
+    };
+    let encoded: serde_json::Value = match serde_json::from_str(&encoded) {
+        Ok(value) => value,
+        Err(error) => return serde_json::json!({ "ok": false, "error": error.to_string() }).to_string(),
+    };
+    let store = WASM.with(|table| table.borrow().shared_store.clone());
+    store.run(|mut context| {
+        let value = match wasm_runtime_value(&encoded, ty, &mut context) {
+            Ok(value) => value,
+            Err(error) => return serde_json::json!({ "ok": false, "error": error }).to_string(),
+        };
+        let mutability = if mutable { wasmi::Mutability::Var } else { wasmi::Mutability::Const };
+        let global = wasmi::Global::new(&mut context, value, mutability);
+        match wasm_retain_global(global, &context) {
+            Ok(handle) => serde_json::json!({ "ok": true, "handle": handle }).to_string(),
+            Err(error) => serde_json::json!({ "ok": false, "error": error }).to_string(),
+        }
+    })
+}
+
+fn wasm_global_retain(instance_handle: u32, name: String) -> String {
+    let store = WASM.with(|table| table.borrow().shared_store.clone());
+    store.run(|context| {
+        let descriptor = serde_json::json!({ "instance": instance_handle, "name": name });
+        let global = match wasm_import_global(&descriptor, &context) {
+            Ok(global) => global,
+            Err(error) => return serde_json::json!({ "ok": false, "error": error }).to_string(),
+        };
+        let ty = global.ty(&context);
+        match wasm_retain_global(global, &context) {
+            Ok(handle) => serde_json::json!({ "ok": true, "handle": handle, "type": wasm_type_name(ty.content()), "mutable": ty.mutability().is_mut() }).to_string(),
+            Err(error) => serde_json::json!({ "ok": false, "error": error }).to_string(),
+        }
+    })
+}
+
+fn wasm_retained_global(name: &str, encoded: Option<&str>) -> String {
+    let store = WASM.with(|table| table.borrow().shared_store.clone());
+    store.run(|mut context| {
+        let descriptor = serde_json::json!({ "instance": 0, "name": name });
+        let global = match wasm_import_global(&descriptor, &context) {
+            Ok(global) => global,
+            Err(error) => return serde_json::json!({ "ok": false, "error": error }).to_string(),
+        };
+        let ty = global.ty(&context);
+        if let Some(encoded) = encoded {
+            let encoded = match serde_json::from_str::<serde_json::Value>(encoded) {
+                Ok(value) => value,
+                Err(error) => return serde_json::json!({ "ok": false, "error": error.to_string() }).to_string(),
+            };
+            let value = match wasm_runtime_value(&encoded, ty.content(), &mut context) {
+                Ok(value) => value,
+                Err(error) => return serde_json::json!({ "ok": false, "error": error }).to_string(),
+            };
+            if let Err(error) = global.set(&mut context, value) {
+                return serde_json::json!({ "ok": false, "error": error.to_string() }).to_string();
+            }
+        }
+        match wasm_non_funcref_value(global.get(&context), &context) {
+            Ok(value) => serde_json::json!({ "ok": true, "value": value, "type": wasm_type_name(ty.content()), "mutable": ty.mutability().is_mut() }).to_string(),
+            Err(error) => serde_json::json!({ "ok": false, "error": error }).to_string(),
+        }
+    })
+}
+
 fn wasm_global(instance_handle: u32, name: String, value: Option<String>) -> String {
+    if instance_handle == 0 { return wasm_retained_global(&name, value.as_deref()); }
     if let Some(result) = with_active_wasm_instance(instance_handle, |state, caller| wasm_instance_global(&mut state.borrow_mut(), caller, &name, value.as_deref())) { return result; }
     WASM.with(|table| {
         let mut table = table.borrow_mut();

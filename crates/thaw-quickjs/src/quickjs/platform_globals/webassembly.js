@@ -196,17 +196,25 @@
   class WasmGlobal {
     constructor(descriptor, value, internal) {
       if (internal) {
-        this.__thawInstance = descriptor.instance; this.__thawName = descriptor.name;
-        const global = wasmResult(__thaw_wasm_global(this.__thawInstance, this.__thawName, undefined));
+        const global = wasmResult(__thaw_wasm_global(descriptor.instance, descriptor.name, undefined));
         this.__thawType = global.type; this.__thawMutable = global.mutable;
-        return;
+        // Function-reference carrier lifetime still uses the existing instance path.
+        if (global.type === 'funcref') {
+          this.__thawInstance = descriptor.instance; this.__thawName = descriptor.name;
+          return;
+        }
+        const retained = wasmResult(__thaw_wasm_global_retain(descriptor.instance, descriptor.name));
+        this.__thawInstance = 0; this.__thawName = String(retained.handle);
+      } else {
+        if (!descriptor) throw new TypeError('WebAssembly.Global(): invalid value type');
+        const mutable = !!descriptor.mutable, type = `${descriptor.value}`;
+        if (!['i32','i64','f32','f64','externref'].includes(type)) throw new TypeError('WebAssembly.Global(): invalid value type');
+        this.__thawType = type; this.__thawMutable = mutable;
+        const initial = this.__thawConvert(arguments.length < 2 ? (type === 'i64' ? 0n : type === 'externref' ? undefined : 0) : value);
+        const created = wasmResult(__thaw_wasm_global_create(type, mutable, JSON.stringify(wasmEncodeArgument(initial, type))));
+        this.__thawInstance = 0; this.__thawName = String(created.handle);
       }
-      if (!descriptor) throw new TypeError('WebAssembly.Global(): invalid value type');
-      const mutable = !!descriptor.mutable, type = `${descriptor.value}`;
-      if (!['i32','i64','f32','f64','externref'].includes(type)) throw new TypeError('WebAssembly.Global(): invalid value type');
-      this.__thawType = type; this.__thawMutable = mutable;
-      this.__thawLocalValue = this.__thawConvert(arguments.length < 2 ? (this.__thawType === 'i64' ? 0n : this.__thawType === 'externref' ? undefined : 0) : value);
-      this.__thawBindings = [];
+      if (wasmFinalizer) wasmFinalizer.register(this, { kind: 'global', handle: Number(this.__thawName) });
     }
     __thawConvert(value) {
       if (this.__thawType === 'i64') return BigInt.asIntN(64, value);
@@ -215,19 +223,16 @@
       if (this.__thawType === 'f32') return Math.fround(+value);
       return +value;
     }
-    get value() { return this.__thawInstance === undefined ? this.__thawLocalValue : wasmDecodeValue(wasmResult(__thaw_wasm_global(this.__thawInstance, this.__thawName, undefined)).value); }
+    get value() { return wasmDecodeValue(wasmResult(__thaw_wasm_global(this.__thawInstance, this.__thawName, undefined)).value, this.__thawInstance); }
     set value(value) {
       if (!this.__thawMutable) throw new TypeError('set WebAssembly.Global.value: immutable global');
       const converted = this.__thawConvert(value);
-      if (this.__thawInstance === undefined) {
-        this.__thawLocalValue = converted; this.__thawSync(); return;
-      }
       wasmResult(__thaw_wasm_global(this.__thawInstance, this.__thawName, JSON.stringify(wasmEncodeArgument(converted, this.__thawType))));
     }
-    __thawBind(instance, module, name) { const binding = { instance, name: 'import:' + module + '\x1f' + name }; this.__thawBindings.push(binding); return binding; }
-    __thawUnbind(binding) { this.__thawBindings = this.__thawBindings.filter(value => value !== binding); }
-    __thawSync() { if (this.__thawInstance !== undefined || !this.__thawMutable) return; const encoded = JSON.stringify(wasmEncodeArgument(this.__thawLocalValue, this.__thawType)); for (const binding of this.__thawBindings) wasmResult(__thaw_wasm_global(binding.instance, binding.name, encoded)); }
-    __thawRefresh(binding) { if (!binding || !this.__thawMutable) return; this.__thawLocalValue = wasmDecodeValue(wasmResult(__thaw_wasm_global(binding.instance, binding.name, undefined)).value); const encoded = JSON.stringify(wasmEncodeArgument(this.__thawLocalValue, this.__thawType)); for (const other of this.__thawBindings) if (other !== binding) wasmResult(__thaw_wasm_global(other.instance, other.name, encoded)); }
+    __thawBind() { return null; }
+    __thawUnbind() {}
+    __thawSync() {}
+    __thawRefresh() {}
     valueOf() { return this.value; }
   }
   class WasmTable {
@@ -313,7 +318,7 @@
             }
             linkage.memories.push({ module: item.module, name: item.name, value: descriptor });
           }
-          else if (item.kind === 'global') { linkage.globals.push({ module: item.module, name: item.name, value: { type: value.__thawType, mutable: value.__thawMutable, value: wasmEncodeArgument(value.value, value.__thawType) } }); pendingResources.push({ value, item }); }
+          else if (item.kind === 'global') { linkage.globals.push({ module: item.module, name: item.name, value: { instance: value.__thawInstance, name: value.__thawName } }); pendingResources.push({ value, item }); }
           else if (item.kind === 'table') { linkage.tables.push({ module: item.module, name: item.name, value: { element: value.__thawElement, values: value.__thawValues.map(entry => wasmEncodeArgument(entry, value.__thawElement)), maximum: Number.isFinite(value.__thawMaximum) ? value.__thawMaximum : null } }); pendingResources.push({ value, item }); }
           else throw new WebAssembly.LinkError(`WebAssembly import '${item.module}.${item.name}' has an unsupported kind`);
         }

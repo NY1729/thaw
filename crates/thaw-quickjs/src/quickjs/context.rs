@@ -1250,6 +1250,10 @@ fn ensure_context() {
                     .expect("failed to create WebAssembly exported function-reference reader");
                 let wasm_global_function = Function::new(ctx.clone(), wasm_global)
                     .expect("failed to create WebAssembly global accessor");
+                let wasm_global_create_function = Function::new(ctx.clone(), wasm_global_create)
+                    .expect("failed to create WebAssembly global allocator");
+                let wasm_global_retain_function = Function::new(ctx.clone(), wasm_global_retain)
+                    .expect("failed to create WebAssembly global retainer");
                 let wasm_memory_create_function = Function::new(ctx.clone(), wasm_memory_create)
                     .expect("failed to create WebAssembly memory allocator");
                 let wasm_memory_function = Function::new(ctx.clone(), wasm_memory)
@@ -1304,6 +1308,12 @@ fn ensure_context() {
                 ctx.globals()
                     .set("__thaw_wasm_global", wasm_global_function)
                     .expect("failed to install WebAssembly global accessor");
+                ctx.globals()
+                    .set("__thaw_wasm_global_create", wasm_global_create_function)
+                    .expect("failed to install WebAssembly global allocator");
+                ctx.globals()
+                    .set("__thaw_wasm_global_retain", wasm_global_retain_function)
+                    .expect("failed to install WebAssembly global retainer");
                 ctx.globals()
                     .set("__thaw_wasm_memory_create", wasm_memory_create_function)
                     .expect("failed to install WebAssembly memory allocator");
