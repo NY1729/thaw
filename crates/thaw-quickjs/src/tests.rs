@@ -8011,3 +8011,21 @@ fn webassembly_validate_input_errors() {
     "#), 1);
     assert_eq!(call("wasmValidateInputs", "[]"), "[true,true,false]");
 }
+
+// Unrun regression target: immutable imports are never synchronization writes.
+#[test]
+fn webassembly_immutable_global_import_sync() {
+    assert_eq!(load(r#"
+        function wasmImmutableGlobals() {
+            const bytes = new TextEncoder().encode(`(module
+                (import "host" "value" (global $value i32))
+                (func (export "read") (result i32) global.get $value))`);
+            const module = new WebAssembly.Module(bytes);
+            const value = new WebAssembly.Global({ value: "i32", mutable: false }, 42);
+            const first = new WebAssembly.Instance(module, { host: { value } });
+            const second = new WebAssembly.Instance(module, { host: { value } });
+            return [first.exports.read(), second.exports.read(), value.value];
+        }
+    "#), 1);
+    assert_eq!(call("wasmImmutableGlobals", "[]"), "[42,42,42]");
+}
