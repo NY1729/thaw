@@ -1,7 +1,89 @@
+#[derive(Debug)]
+struct WasmJsException {
+    handle: std::sync::atomic::AtomicU32,
+    owner: std::thread::ThreadId,
+}
+impl Drop for WasmJsException {
+    fn drop(&mut self) {
+        let handle = self.handle.load(std::sync::atomic::Ordering::Relaxed);
+        if handle != 0 && self.owner == std::thread::current().id() {
+            let _ = WASM_JS_EXCEPTIONS.try_with(|exceptions| {
+                let value = { exceptions.borrow_mut().1.remove(&handle) };
+                drop(value);
+            });
+        }
+    }
+}
+impl std::fmt::Display for WasmJsException {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("JavaScript WebAssembly callback exception")
+    }
+}
+impl wasmi::core::HostError for WasmJsException {}
+
+std::thread_local! {
+    static WASM_JS_EXCEPTIONS: std::cell::RefCell<(u32, HashMap<u32, WasmJsValue>)> =
+        std::cell::RefCell::new((1, HashMap::new()));
+}
+
+fn wasm_js_error(ctx: &Ctx<'_>, error: rquickjs::Error) -> wasmi::Error {
+    if !matches!(error, rquickjs::Error::Exception) {
+        return wasmi::Error::new(error.to_string());
+    }
+    let value = ctx.catch();
+    let persistent = Persistent::save(ctx, value);
+    let context = unsafe { std::mem::transmute::<Ctx<'_>, Ctx<'static>>(ctx.clone()) };
+    WASM_JS_EXCEPTIONS.with(|exceptions| {
+        let mut exceptions = exceptions.borrow_mut();
+        let handle = exceptions.0;
+        let Some(next) = handle.checked_add(1) else {
+            return wasmi::Error::new("WebAssembly exception handle limit reached");
+        };
+        exceptions.0 = next;
+        exceptions.1.insert(handle, WasmJsValue { context, value: persistent });
+        wasmi::Error::host(WasmJsException {
+            handle: std::sync::atomic::AtomicU32::new(handle),
+            owner: std::thread::current().id(),
+        })
+    })
+}
+
+fn wasm_take_exception<'js>(ctx: Ctx<'js>, handle: u32) -> rquickjs::Result<Value<'js>> {
+    let value = WASM_JS_EXCEPTIONS.with(|exceptions| exceptions.borrow_mut().1.remove(&handle));
+    let value = value.ok_or_else(|| rquickjs::Error::new_from_js("released WebAssembly exception", "value"))?;
+    let _owner = value.context;
+    value.value.restore(&ctx)
+}
+
+fn wasm_finish_native_result<'js>(ctx: Ctx<'js>, encoded: String) -> rquickjs::Result<String> {
+    let exception = serde_json::from_str::<serde_json::Value>(&encoded).ok()
+        .and_then(|result| result.get("exception").and_then(serde_json::Value::as_u64))
+        .and_then(|handle| u32::try_from(handle).ok());
+    if let Some(handle) = exception {
+        let value = wasm_take_exception(ctx.clone(), handle)?;
+        return Err(ctx.throw(value));
+    }
+    Ok(encoded)
+}
+
+fn wasm_error_result(error: &wasmi::Error) -> String {
+    if let Some(exception) = error.downcast_ref::<WasmJsException>() {
+        let handle = exception.handle.swap(0, std::sync::atomic::Ordering::Relaxed);
+        if handle != 0 {
+            return serde_json::json!({ "ok": false, "exception": handle }).to_string();
+        }
+    }
+    if let Some(exit) = error.i32_exit_status() {
+        return serde_json::json!({ "ok": false, "exit": exit }).to_string();
+    }
+    serde_json::json!({ "ok": false, "error": error.to_string() }).to_string()
+}
+
 #[derive(Clone)]
 struct WasmJsImport {
     context: Ctx<'static>,
     function: Persistent<Function<'static>>,
+    implementation: Persistent<Function<'static>>,
     owner: Option<u32>,
 }
 
@@ -12,7 +94,7 @@ struct WasmJsValue {
 }
 
 struct WasmInstance {
-    store: WasmStore<WasmStoreData>,
+    store: SharedWasmStore,
     state: std::cell::RefCell<WasmInstanceState>,
 }
 
@@ -35,7 +117,7 @@ struct WasmInstanceState {
 std::thread_local! {
     static WASM_VALUE_SWEEP_PENDING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static WASM_RUNNING_STATES: std::cell::RefCell<Vec<Option<*const std::cell::RefCell<WasmInstanceState>>>> = const { std::cell::RefCell::new(Vec::new()) };
-    static WASM_ACTIVE_CALLERS: std::cell::RefCell<Vec<(u32, *const std::cell::RefCell<WasmInstanceState>, *mut std::ffi::c_void)>> = const { std::cell::RefCell::new(Vec::new()) };
+    static WASM_ACTIVE_CALLERS: std::cell::RefCell<Vec<WasmActiveCallerEntry>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 struct WasmRunningState;
@@ -53,50 +135,106 @@ impl Drop for WasmRunningState {
     fn drop(&mut self) { WASM_RUNNING_STATES.with(|stack| { stack.borrow_mut().pop(); }); }
 }
 
-struct WasmActiveCaller(bool);
+struct WasmActiveCallerEntry {
+    store_identity: std::rc::Rc<()>,
+    state: Option<*const std::cell::RefCell<WasmInstanceState>>,
+    caller: *mut std::ffi::c_void,
+}
+
+struct WasmActiveCaller;
 impl WasmActiveCaller {
     fn enter(caller: &mut WasmCaller<'_, WasmStoreData>) -> Self {
         let state = WASM_RUNNING_STATES.with(|stack| stack.borrow().last().copied().flatten());
-        let Some(state) = state else { return Self(false); };
-        // The running-state guard encloses function.call; this import callback
-        // is synchronous inside that call and owns the current Caller borrow.
-        let handle = unsafe { (&*state).borrow().handle };
-        WASM_ACTIVE_CALLERS.with(|stack| stack.borrow_mut().push((handle, state,
-            (caller as *mut WasmCaller<'_, WasmStoreData>).cast())));
-        Self(true)
+        // Start callbacks also own a live Caller, even before instance metadata exists.
+        let store_identity = caller.data().identity.clone();
+        WASM_ACTIVE_CALLERS.with(|stack| stack.borrow_mut().push(WasmActiveCallerEntry {
+            store_identity,
+            state,
+            caller: (caller as *mut WasmCaller<'_, WasmStoreData>).cast(),
+        }));
+        Self
     }
 }
 impl Drop for WasmActiveCaller {
     fn drop(&mut self) {
-        if self.0 { WASM_ACTIVE_CALLERS.with(|stack| { stack.borrow_mut().pop(); }); }
+        WASM_ACTIVE_CALLERS.with(|stack| { stack.borrow_mut().pop(); });
     }
+}
+
+fn with_active_wasm_store(
+    identity: &std::rc::Rc<()>,
+    action: impl FnOnce(&mut WasmCaller<'_, WasmStoreData>) -> String,
+) -> Option<String> {
+    let caller = WASM_ACTIVE_CALLERS.with(|stack| {
+        stack.borrow().iter().rev()
+            .find(|entry| std::rc::Rc::ptr_eq(&entry.store_identity, identity))
+            .map(|entry| entry.caller)
+    })?;
+    // The newest matching Caller owns this Store's current synchronous borrow.
+    // No registry borrow crosses the action; the stack guard bounds its lifetime.
+    Some(unsafe { action(&mut *caller.cast::<WasmCaller<'_, WasmStoreData>>()) })
 }
 
 fn with_active_wasm_instance(
     handle: u32,
     action: impl FnOnce(&std::cell::RefCell<WasmInstanceState>, &mut WasmCaller<'_, WasmStoreData>) -> String,
 ) -> Option<String> {
-    let entry = WASM_ACTIVE_CALLERS.with(|stack|
-        stack.borrow().iter().rev().find(|entry| entry.0 == handle).copied());
-    let (_, state, caller) = entry?;
-    // No stack borrow survives the action. The entry cannot escape: actions
-    // return owned Strings, and nested imports install their own top entry.
-    Some(unsafe { action(&*state, &mut *caller.cast::<WasmCaller<'_, WasmStoreData>>()) })
+    let entry = WASM_ACTIVE_CALLERS.with(|stack| {
+        stack.borrow().iter().rev().find_map(|entry| {
+            let state = entry.state?;
+            (unsafe { (&*state).borrow().handle } == handle)
+                .then(|| (state, entry.store_identity.clone()))
+        })
+    })?;
+    let (state, identity) = entry;
+    with_active_wasm_store(&identity, |caller| unsafe { action(&*state, caller) })
+}
+
+#[derive(Clone)]
+struct SharedWasmStore {
+    identity: std::rc::Rc<()>,
+    inner: std::rc::Rc<std::cell::RefCell<WasmStore<WasmStoreData>>>,
+}
+impl SharedWasmStore {
+    fn new(engine: &WasmEngine) -> Self {
+        let identity = std::rc::Rc::new(());
+        let store = WasmStore::new(engine, WasmStoreData {
+            identity: identity.clone(),
+            ..Default::default()
+        });
+        Self { identity, inner: std::rc::Rc::new(std::cell::RefCell::new(store)) }
+    }
+    fn run<R>(&self, action: impl FnOnce(wasmi::StoreContextMut<'_, WasmStoreData>) -> R) -> R {
+        let caller = WASM_ACTIVE_CALLERS.with(|stack| {
+            stack.borrow().iter().rev()
+                .find(|entry| std::rc::Rc::ptr_eq(&entry.store_identity, &self.identity))
+                .map(|entry| entry.caller)
+        });
+        if let Some(caller) = caller {
+            let caller = unsafe { &mut *caller.cast::<WasmCaller<'_, WasmStoreData>>() };
+            action(wasmi::AsContextMut::as_context_mut(caller))
+        } else {
+            let mut store = self.inner.borrow_mut();
+            action(wasmi::AsContextMut::as_context_mut(&mut *store))
+        }
+    }
 }
 
 struct StandaloneWasmMemory {
-    store: WasmStore<WasmStoreData>,
+    store: SharedWasmStore,
     memory: WasmMemory,
 }
 
 #[derive(Default)]
 struct WasmStoreData {
-    wasi: Option<WasiCtx>,
+    identity: std::rc::Rc<()>,
+    wasi: HashMap<u32, WasiCtx>,
     externrefs: HashMap<u32, wasmi::ExternRef>,
 }
 
 struct WasmTable {
     engine: WasmEngine,
+    shared_store: SharedWasmStore,
     next_module: u32,
     next_instance: u32,
     next_memory: u32,
@@ -107,8 +245,11 @@ struct WasmTable {
 
 impl Default for WasmTable {
     fn default() -> Self {
+        let engine = WasmEngine::default();
+        let shared_store = SharedWasmStore::new(&engine);
         Self {
-            engine: WasmEngine::default(),
+            engine,
+            shared_store,
             next_module: 1,
             next_instance: 1,
             next_memory: 1,
@@ -192,8 +333,9 @@ fn wasm_custom_sections(module_handle: u32, name: String) -> String {
     })
 }
 
-fn wasm_retain_import<'js>(ctx: Ctx<'js>, function: Function<'js>) -> u32 {
+fn wasm_retain_import<'js>(ctx: Ctx<'js>, function: Function<'js>, implementation: Option<Function<'js>>) -> u32 {
     let persistent = Persistent::save(&ctx, function);
+    let implementation = implementation.map(|function| Persistent::save(&ctx, function)).unwrap_or_else(|| persistent.clone());
     // The cloned context owns a QuickJS context reference and the import table
     // is thread-local. It is dropped before the thread-local JS runtime that
     // created it, so extending only its Rust lifetime brand is sound.
@@ -207,6 +349,7 @@ fn wasm_retain_import<'js>(ctx: Ctx<'js>, function: Function<'js>) -> u32 {
             WasmJsImport {
                 context,
                 function: persistent,
+                implementation,
                 owner: None,
             },
         );
@@ -215,7 +358,7 @@ fn wasm_retain_import<'js>(ctx: Ctx<'js>, function: Function<'js>) -> u32 {
 }
 
 fn wasm_retain_funcref<'js>(ctx: Ctx<'js>, function: Function<'js>, owner: u32) -> u32 {
-    let handle = wasm_retain_import(ctx, function);
+    let handle = wasm_retain_import(ctx, function, None);
     WASM_JS_IMPORTS.with(|imports| {
         if let Some(import) = imports.borrow_mut().1.get_mut(&handle) {
             import.owner = Some(owner);
@@ -297,11 +440,7 @@ fn wasm_reference_stats() -> String {
         (
             table.modules.len(),
             table.instances.len(),
-            table
-                .instances
-                .values()
-                .map(|instance| instance.store.data().externrefs.len())
-                .sum::<usize>(),
+            table.shared_store.run(|context| context.data().externrefs.len()),
         )
     });
     serde_json::json!({
@@ -317,18 +456,27 @@ fn wasm_reference_stats() -> String {
 fn wasm_sweep_inactive_values() {
     // Executing instances are temporarily outside the registry. Their Store
     // remains live, so sweeping the registry alone would drop live JS values.
-    if WASM_RUNNING_STATES.with(|stack| !stack.borrow().is_empty()) {
+    if WASM_RUNNING_STATES.with(|stack| !stack.borrow().is_empty())
+        || WASM_ACTIVE_CALLERS.with(|stack| !stack.borrow().is_empty()) {
         WASM_VALUE_SWEEP_PENDING.with(|pending| pending.set(true));
         return;
     }
     WASM_VALUE_SWEEP_PENDING.with(|pending| pending.set(false));
+    let retired = WASM.with(|table| {
+        let mut table = table.borrow_mut();
+        if table.instances.is_empty() && table.memories.is_empty()
+            && std::rc::Rc::strong_count(&table.shared_store.inner) == 1 {
+            let replacement = SharedWasmStore::new(&table.engine);
+            Some(std::mem::replace(&mut table.shared_store, replacement))
+        } else {
+            None
+        }
+    });
+    // Drop the retired Store after releasing the registry borrow.
+    drop(retired);
     let active_values = WASM.with(|table| {
-        table
-            .borrow()
-            .instances
-            .values()
-            .flat_map(|instance| instance.store.data().externrefs.keys().copied())
-            .collect::<std::collections::HashSet<_>>()
+        let store = table.borrow().shared_store.clone();
+        store.run(|context| context.data().externrefs.keys().copied().collect::<std::collections::HashSet<_>>())
     });
     WASM_JS_VALUES.with(|values| {
         values
@@ -372,16 +520,20 @@ fn wasm_release(kind: String, handle: u32) -> bool {
     if kind == "module" {
         return WASM.with(|table| table.borrow_mut().modules.remove(&handle).is_some());
     }
+    if kind == "memory" {
+        let removed = WASM.with(|table| table.borrow_mut().memories.remove(&handle).is_some());
+        if removed { wasm_sweep_inactive_values(); }
+        return removed;
+    }
     if kind != "instance" {
         return false;
     }
-    let removed = WASM.with(|table| {
-        let mut table = table.borrow_mut();
-        table.instances.remove(&handle).is_some()
-    });
-    if !removed {
+    let removed = WASM.with(|table| table.borrow_mut().instances.remove(&handle));
+    let Some(record) = removed else {
         return false;
-    }
+    };
+    record.store.run(|mut store| { store.data_mut().wasi.remove(&handle); });
+    drop(record);
     WASM_JS_IMPORTS.with(|imports| {
         imports
             .borrow_mut()
@@ -446,12 +598,7 @@ fn wasm_prepare_js_value(
     ty: WasmValType,
 ) -> Result<WasmPreparedValue, wasmi::Error> {
     let ctx = value.ctx().clone();
-    let conversion_error = |error: rquickjs::Error| {
-        wasmi::Error::new(match error {
-            rquickjs::Error::Exception => describe_exception(&ctx),
-            other => other.to_string(),
-        })
-    };
+    let conversion_error = |error: rquickjs::Error| wasm_js_error(&ctx, error);
     match ty {
         WasmValType::I32 => <rquickjs::convert::Coerced<i32> as rquickjs::FromJs>::from_js(&ctx, value)
             .map(|value| WasmPreparedValue::Scalar(WasmVal::I32(value.0)))
@@ -461,7 +608,7 @@ fn wasm_prepare_js_value(
             // QuickJS applies ToBigInt and signed 64-bit wrapping directly.
             // No Caller borrow is held while user-defined coercion can reenter.
             if unsafe { rquickjs::qjs::JS_ToBigInt64(ctx.as_ptr(), &mut converted, value.as_js_value()) } < 0 {
-                return Err(wasmi::Error::new(describe_exception(&ctx)));
+                return Err(wasm_js_error(&ctx, rquickjs::Error::Exception));
             }
             Ok(WasmPreparedValue::Scalar(WasmVal::I64(converted)))
         }
@@ -495,23 +642,17 @@ fn wasm_call_js_import(
         import.ok_or_else(|| wasmi::Error::new("released JavaScript WebAssembly import"))?;
     let ctx = import.context.clone();
     let function = import
-        .function
+        .implementation
         .restore(&ctx)
-        .map_err(|error| wasmi::Error::new(error.to_string()))?;
+        .map_err(|error| wasm_js_error(&ctx, error))?;
     let mut arguments = Args::new_unsized(ctx.clone());
     for input in inputs {
         arguments
             .push_arg(wasm_js_value(input, ctx.clone(), &caller)?)
-            .map_err(|error| wasmi::Error::new(error.to_string()))?;
+            .map_err(|error| wasm_js_error(&ctx, error))?;
     }
     let active_caller = WasmActiveCaller::enter(&mut caller);
-    let result: Value = function.call_arg(arguments).map_err(|error| {
-        let message = match error {
-            rquickjs::Error::Exception => describe_exception(&ctx),
-            other => other.to_string(),
-        };
-        wasmi::Error::new(message)
-    })?;
+    let result: Value = function.call_arg(arguments).map_err(|error| wasm_js_error(&ctx, error))?;
     let mut prepared = Vec::with_capacity(outputs.len());
     if outputs.len() == 1 {
         prepared.push(wasm_prepare_js_value(result, outputs[0].ty())?);
@@ -529,7 +670,7 @@ fn wasm_call_js_import(
         for (index, output) in outputs.iter_mut().enumerate() {
             let value = array
                 .get(index)
-                .map_err(|error| wasmi::Error::new(error.to_string()))?;
+                .map_err(|error| wasm_js_error(&ctx, error))?;
             prepared.push(wasm_prepare_js_value(value, output.ty())?);
         }
     }
@@ -540,7 +681,12 @@ fn wasm_call_js_import(
     Ok(())
 }
 
-fn wasm_instantiate(module_handle: u32, linkage: Option<String>) -> String {
+fn wasm_instantiate(ctx: Ctx<'_>, module_handle: u32, linkage: Option<String>) -> rquickjs::Result<String> {
+    let result = wasm_instantiate_inner(module_handle, linkage);
+    wasm_finish_native_result(ctx, result)
+}
+
+fn wasm_instantiate_inner(module_handle: u32, linkage: Option<String>) -> String {
     // Declared before Store/state locals so they retire before deferred sweep.
     let _sweep_on_exit = WasmSweepOnExit;
     let module_and_engine = WASM.with(|table| {
@@ -571,30 +717,37 @@ fn wasm_instantiate(module_handle: u32, linkage: Option<String>) -> String {
             Ok(wasi) => wasi,
             Err(error) => return serde_json::json!({ "ok": false, "error": error }).to_string(),
         };
-        let mut store = WasmStore::new(
-            &engine,
-            WasmStoreData {
-                wasi,
-                externrefs: HashMap::new(),
-            },
-        );
+        // Reserve the owner before installing imports. A future shared Store
+        // must select WASI by this owner, including during its start callback.
+        let handle = WASM.with(|table| {
+            let mut table = table.borrow_mut();
+            let handle = table.next_instance;
+            table.next_instance += 1;
+            handle
+        });
+        let shared_store = WASM.with(|table| table.borrow().shared_store.clone());
+        let retained_store = shared_store.clone();
+        let published = std::cell::Cell::new(false);
+        let result = shared_store.run(|mut store| {
+        if let Some(wasi) = wasi {
+            store.data_mut().wasi.insert(handle, wasi);
+        }
         let mut linker = WasmLinker::new(&engine);
-        if store.data().wasi.is_some() {
-            if let Err(error) = wasmi_wasi::add_to_linker(&mut linker, |data: &mut WasmStoreData| {
-                data.wasi.as_mut().expect("WASI context must exist")
+        if store.data().wasi.contains_key(&handle) {
+            if let Err(error) = wasmi_wasi::add_to_linker(&mut linker, move |data: &mut WasmStoreData| {
+                data.wasi.get_mut(&handle).expect("owning instance WASI context must exist")
             })
             {
                 return serde_json::json!({ "ok": false, "error": error.to_string() }).to_string();
             }
         }
         let mut imported_memories = HashMap::new();
-        let mut shared_memory_imports: HashMap<u64, WasmMemory> = HashMap::new();
         let mut memory_origins: HashMap<String, String> = HashMap::new();
         let mut imported_globals = HashMap::new();
         let mut imported_tables = HashMap::new();
         let mut foreign_funcrefs = HashMap::new();
         for import in module.imports() {
-            if import.module() == "wasi_snapshot_preview1" && store.data().wasi.is_some() {
+            if import.module() == "wasi_snapshot_preview1" && store.data().wasi.contains_key(&handle) {
                 continue;
             }
             let key = (import.module().to_string(), import.name().to_string());
@@ -615,33 +768,13 @@ fn wasm_instantiate(module_handle: u32, linkage: Option<String>) -> String {
                         return serde_json::json!({ "ok": false, "error": error.to_string() }).to_string();
                     }
                 }
-                wasmi::ExternType::Memory(expected) => {
+                wasmi::ExternType::Memory(_) => {
                     let Some(descriptor) = memory_imports.get(&key) else {
                         return serde_json::json!({ "ok": false, "error": format!("WebAssembly memory import {}.{} is not provided", import.module(), import.name()) }).to_string();
                     };
-                    let bytes = hex_decode(descriptor.get("data").and_then(serde_json::Value::as_str).unwrap_or(""));
-                    let pages = u32::try_from(bytes.len() / 65_536).unwrap_or(u32::MAX);
-                    let maximum = descriptor.get("maximum").and_then(serde_json::Value::as_u64).and_then(|value| u32::try_from(value).ok());
-                    if !bytes.len().is_multiple_of(65_536)
-                        || u64::from(pages) < expected.minimum()
-                    {
-                        return serde_json::json!({ "ok": false, "error": format!("WebAssembly memory import {}.{} has incompatible limits", import.module(), import.name()) }).to_string();
-                    }
-                    let identity = descriptor.get("identity").and_then(serde_json::Value::as_u64);
-                    let memory = if let Some(memory) = identity.and_then(|id| shared_memory_imports.get(&id).copied()) {
-                        if memory.data(&store) != bytes.as_slice()
-                            || memory.ty(&store).maximum() != maximum.map(u64::from) {
-                            return serde_json::json!({ "ok": false, "error": "WebAssembly memory aliases have inconsistent descriptors" }).to_string();
-                        }
-                        memory
-                    } else {
-                        let memory = match WasmMemory::new(&mut store, WasmMemoryType::new(pages, maximum)) {
-                            Ok(memory) => memory,
-                            Err(error) => return serde_json::json!({ "ok": false, "error": error.to_string() }).to_string(),
-                        };
-                        memory.data_mut(&mut store).copy_from_slice(&bytes);
-                        if let Some(identity) = identity { shared_memory_imports.insert(identity, memory); }
-                        memory
+                    let memory = match wasm_import_memory(descriptor, &store) {
+                        Ok(memory) => memory,
+                        Err(error) => return serde_json::json!({ "ok": false, "error": error }).to_string(),
                     };
                     memory_origins.entry(format!("{memory:?}")).or_insert_with(|| encoded_key.clone());
                     if let Err(error) = linker.define(import.module(), import.name(), memory) {
@@ -708,7 +841,7 @@ fn wasm_instantiate(module_handle: u32, linkage: Option<String>) -> String {
         let start_scope = WasmRunningState::during_start();
         let instance = match linker.instantiate_and_start(&mut store, &module) {
             Ok(instance) => instance,
-            Err(error) => return serde_json::json!({ "ok": false, "error": error.to_string() }).to_string(),
+            Err(error) => return wasm_error_result(&error),
         };
         drop(start_scope);
         let exports = instance
@@ -757,12 +890,7 @@ fn wasm_instantiate(module_handle: u32, linkage: Option<String>) -> String {
                 serde_json::json!({ "name": name, "kind": kind, "parameters": parameters, "parameterTypes": parameter_types, "resultTypes": result_types, "memoryKey": memory_key, "memoryImport": memory_import })
             })
             .collect::<Vec<_>>();
-        let handle = WASM.with(|table| {
-            let mut table = table.borrow_mut();
-            let handle = table.next_instance;
-            table.next_instance += 1;
-            handle
-        });
+
         WASM_JS_IMPORTS.with(|imports| {
             let mut imports = imports.borrow_mut();
             for import_handle in function_imports.values() {
@@ -772,7 +900,7 @@ fn wasm_instantiate(module_handle: u32, linkage: Option<String>) -> String {
             }
         });
         WASM.with(|table| table.borrow_mut().instances.insert(handle, WasmInstance {
-            store,
+            store: retained_store,
             state: std::cell::RefCell::new(WasmInstanceState {
                 handle,
                 instance,
@@ -785,7 +913,55 @@ fn wasm_instantiate(module_handle: u32, linkage: Option<String>) -> String {
                 foreign_funcrefs,
             }),
         }));
+        published.set(true);
         serde_json::json!({ "ok": true, "handle": handle, "exports": exports }).to_string()
+        });
+        if !published.get() {
+            shared_store.run(|mut store| { store.data_mut().wasi.remove(&handle); });
+            WASM_VALUE_SWEEP_PENDING.with(|pending| pending.set(true));
+        }
+        result
+}
+
+fn wasm_import_memory(
+    descriptor: &serde_json::Value,
+    context: &impl wasmi::AsContext<Data = WasmStoreData>,
+) -> Result<WasmMemory, String> {
+    let owner = descriptor.get("instance").and_then(serde_json::Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok()).ok_or("invalid WebAssembly.Memory owner")?;
+    let name = descriptor.get("name").and_then(serde_json::Value::as_str)
+        .ok_or("invalid WebAssembly.Memory name")?;
+    let identity = context.as_context().data().identity.clone();
+    let resolve = |state: &WasmInstanceState| {
+        if let Some(key) = name.strip_prefix("import:") {
+            state.imported_memories.get(key).copied()
+        } else {
+            state.instance.get_memory(context, name)
+        }
+    };
+    if owner != 0 {
+        let active = WASM_ACTIVE_CALLERS.with(|stack| {
+            stack.borrow().iter().rev().find_map(|entry| {
+                let state = entry.state?;
+                if !std::rc::Rc::ptr_eq(&entry.store_identity, &identity) { return None; }
+                let state = unsafe { (&*state).borrow() };
+                (state.handle == owner).then(|| resolve(&state)).flatten()
+            })
+        });
+        if let Some(memory) = active { return Ok(memory); }
+    }
+    let memory = WASM.with(|table| {
+        let table = table.borrow();
+        if owner == 0 {
+            let record = name.parse::<u32>().ok().and_then(|handle| table.memories.get(&handle))?;
+            std::rc::Rc::ptr_eq(&record.store.identity, &identity).then_some(record.memory)
+        } else {
+            let record = table.instances.get(&owner)?;
+            if !std::rc::Rc::ptr_eq(&record.store.identity, &identity) { return None; }
+            resolve(&record.state.borrow())
+        }
+    });
+    memory.ok_or_else(|| "WebAssembly.Memory belongs to a released or different Store".to_string())
 }
 
 fn wasm_import_key(module: &str, name: &str) -> String {
@@ -1091,12 +1267,7 @@ fn wasm_call_function(record: &std::cell::RefCell<WasmInstanceState>, context: &
     let running_state = WasmRunningState::enter(record);
     let called = function.call(&mut store, &inputs, &mut outputs);
     drop(running_state);
-    if let Err(error) = called {
-        if let Some(exit) = error.i32_exit_status() {
-            return serde_json::json!({ "ok": false, "exit": exit }).to_string();
-        }
-        return serde_json::json!({ "ok": false, "error": error.to_string() }).to_string();
-    }
+    if let Err(error) = called { return wasm_error_result(&error); }
     let mut values = Vec::with_capacity(outputs.len());
     for output in outputs {
         match wasm_value(output, &mut record.borrow_mut(), &store) {
@@ -1107,7 +1278,12 @@ fn wasm_call_function(record: &std::cell::RefCell<WasmInstanceState>, context: &
     serde_json::json!({ "ok": true, "values": values }).to_string()
 }
 
-fn wasm_call(instance_handle: u32, name: String, arguments: String) -> String {
+fn wasm_call(ctx: Ctx<'_>, instance_handle: u32, name: String, arguments: String) -> rquickjs::Result<String> {
+    let result = wasm_call_inner(instance_handle, name, arguments);
+    wasm_finish_native_result(ctx, result)
+}
+
+fn wasm_call_inner(instance_handle: u32, name: String, arguments: String) -> String {
     // Declared before Store/state locals so they retire before deferred sweep.
     let _sweep_on_exit = WasmSweepOnExit;
     if let Some(result) = with_active_wasm_instance(instance_handle, |state, caller| {
@@ -1124,18 +1300,26 @@ fn wasm_call(instance_handle: u32, name: String, arguments: String) -> String {
     let Some(mut record) = record else {
         return serde_json::json!({ "ok": false, "error": "invalid or recursively entered WebAssembly.Instance" }).to_string();
     };
-    let function = record.state.borrow().instance.get_func(&record.store, &name);
-    let result = match function {
-        Some(function) => wasm_call_function(&record.state, &mut record.store, function, &arguments),
-        None => serde_json::json!({ "ok": false, "error": format!("WebAssembly export `{name}` is not a function") }).to_string(),
-    };
+    let store = record.store.clone();
+    let result = store.run(|mut context| {
+        let function = record.state.borrow().instance.get_func(&context, &name);
+        match function {
+            Some(function) => wasm_call_function(&record.state, &mut context, function, &arguments),
+            None => serde_json::json!({ "ok": false, "error": format!("WebAssembly export `{name}` is not a function") }).to_string(),
+        }
+    });
     WASM.with(|table| {
         table.borrow_mut().instances.insert(instance_handle, record);
     });
     result
 }
 
-fn wasm_call_funcref(instance_handle: u32, handle: u32, arguments: String) -> String {
+fn wasm_call_funcref(ctx: Ctx<'_>, instance_handle: u32, handle: u32, arguments: String) -> rquickjs::Result<String> {
+    let result = wasm_call_funcref_inner(instance_handle, handle, arguments);
+    wasm_finish_native_result(ctx, result)
+}
+
+fn wasm_call_funcref_inner(instance_handle: u32, handle: u32, arguments: String) -> String {
     // Declared before Store/state locals so they retire before deferred sweep.
     let _sweep_on_exit = WasmSweepOnExit;
     if let Some(result) = with_active_wasm_instance(instance_handle, |state, caller| {
@@ -1151,7 +1335,7 @@ fn wasm_call_funcref(instance_handle: u32, handle: u32, arguments: String) -> St
     };
     let function = record.state.borrow().funcrefs.get(&handle).copied();
     let result = match function {
-        Some(function) => wasm_call_function(&record.state, &mut record.store, function, &arguments),
+        Some(function) => record.store.run(|mut context| wasm_call_function(&record.state, &mut context, function, &arguments)),
         None => {
             serde_json::json!({ "ok": false, "error": "released WebAssembly function reference" })
                 .to_string()
@@ -1181,7 +1365,7 @@ fn wasm_export_funcref(instance_handle: u32, name: String) -> String {
             return serde_json::json!({ "ok": false, "error": "invalid WebAssembly.Instance" })
                 .to_string();
         };
-        wasm_instance_export_funcref(&mut record.state.borrow_mut(), &mut record.store, &name)
+        record.store.run(|mut context| wasm_instance_export_funcref(&mut record.state.borrow_mut(), &mut context, &name))
     })
 }
 
@@ -1222,61 +1406,41 @@ fn wasm_global(instance_handle: u32, name: String, value: Option<String>) -> Str
         let Some(record) = table.instances.get_mut(&instance_handle) else {
             return serde_json::json!({ "ok": false, "error": "invalid WebAssembly.Instance" }).to_string();
         };
-        wasm_instance_global(&mut record.state.borrow_mut(), &mut record.store, &name, value.as_deref())
+        record.store.run(|mut context| wasm_instance_global(&mut record.state.borrow_mut(), &mut context, &name, value.as_deref()))
     })
 }
 
 fn wasm_memory_create(initial: u32, maximum: i64) -> String {
-    WASM.with(|table| {
-        let mut table = table.borrow_mut();
-        let maximum = u32::try_from(maximum).ok();
-        if initial > 65_536 || maximum.is_some_and(|maximum| maximum < initial || maximum > 65_536) {
-            return serde_json::json!({ "ok": false, "error": "WebAssembly.Memory page limits are invalid" }).to_string();
-        }
-        let ty = WasmMemoryType::new(initial, maximum);
-        let mut store = WasmStore::new(&table.engine, WasmStoreData::default());
-        let memory = match WasmMemory::new(&mut store, ty) {
+    let maximum = u32::try_from(maximum).ok();
+    if initial > 65_536 || maximum.is_some_and(|maximum| maximum < initial || maximum > 65_536) {
+        return serde_json::json!({ "ok": false, "error": "WebAssembly.Memory page limits are invalid" }).to_string();
+    }
+    let store = WASM.with(|table| table.borrow().shared_store.clone());
+    let retained_store = store.clone();
+    store.run(|mut context| {
+        let memory = match WasmMemory::new(&mut context, WasmMemoryType::new(initial, maximum)) {
             Ok(memory) => memory,
             Err(error) => return serde_json::json!({ "ok": false, "error": error.to_string() }).to_string(),
         };
-        let handle = table.next_memory;
-        table.next_memory += 1;
-        table.memories.insert(handle, StandaloneWasmMemory { store, memory });
+        let handle = WASM.with(|table| {
+            let mut table = table.borrow_mut();
+            let handle = table.next_memory;
+            table.next_memory += 1;
+            table.memories.insert(handle, StandaloneWasmMemory { store: retained_store, memory });
+            handle
+        });
         serde_json::json!({ "ok": true, "handle": handle }).to_string()
     })
 }
 
-fn wasm_instance_memory(
-    state: &mut WasmInstanceState,
-    context: &mut impl wasmi::AsContextMut<Data = WasmStoreData>,
-    name: &str, operation: &str, value: &str,
-) -> String {
-        let memory = if let Some(key) = name.strip_prefix("import:") {
-            state.imported_memories.get(key).copied()
-        } else {
-            state.instance.get_memory(&*context, &name)
-        };
-        let Some(memory) = memory else {
-            return serde_json::json!({ "ok": false, "error": format!("WebAssembly export `{name}` is not a memory") }).to_string();
-        };
-        wasm_memory_operation(&memory, context, &operation, &value)
-}
-
 fn wasm_memory(instance_handle: u32, name: String, operation: String, value: String) -> String {
-    if let Some(result) = with_active_wasm_instance(instance_handle, |state, caller|
-        wasm_instance_memory(&mut state.borrow_mut(), caller, &name, &operation, &value)) { return result; }
-    WASM.with(|table| {
-        let mut table = table.borrow_mut();
-        if instance_handle == 0 {
-            let Some(record) = name.parse::<u32>().ok().and_then(|handle| table.memories.get_mut(&handle)) else {
-                return serde_json::json!({ "ok": false, "error": "invalid WebAssembly.Memory" }).to_string();
-            };
-            return wasm_memory_operation(&record.memory, &mut record.store, &operation, &value);
+    let store = WASM.with(|table| table.borrow().shared_store.clone());
+    store.run(|mut context| {
+        let descriptor = serde_json::json!({ "instance": instance_handle, "name": name });
+        match wasm_import_memory(&descriptor, &context) {
+            Ok(memory) => wasm_memory_operation(&memory, &mut context, &operation, &value),
+            Err(error) => serde_json::json!({ "ok": false, "error": error }).to_string(),
         }
-        let Some(record) = table.instances.get_mut(&instance_handle) else {
-            return serde_json::json!({ "ok": false, "error": "invalid WebAssembly.Instance" }).to_string();
-        };
-        wasm_instance_memory(&mut record.state.borrow_mut(), &mut record.store, &name, &operation, &value)
     })
 }
 
@@ -1287,6 +1451,23 @@ fn wasm_memory_operation(
     value: &str,
 ) -> String {
     match operation {
+        "retain" => {
+            let identity = store.as_context().data().identity.clone();
+            WASM.with(|table| {
+                let mut table = table.borrow_mut();
+                if !std::rc::Rc::ptr_eq(&table.shared_store.identity, &identity) {
+                    return serde_json::json!({ "ok": false, "error": "WebAssembly.Memory belongs to a different Store" }).to_string();
+                }
+                let handle = table.next_memory;
+                let Some(next) = handle.checked_add(1) else {
+                    return serde_json::json!({ "ok": false, "error": "WebAssembly.Memory handle limit reached" }).to_string();
+                };
+                table.next_memory = next;
+                let retained_store = table.shared_store.clone();
+                table.memories.insert(handle, StandaloneWasmMemory { store: retained_store, memory: *memory });
+                serde_json::json!({ "ok": true, "handle": handle }).to_string()
+            })
+        }
         "read" => {
             serde_json::json!({ "ok": true, "value": hex_encode(memory.data(&*store)) }).to_string()
         }
@@ -1369,6 +1550,6 @@ fn wasm_table(
         let Some(record) = table.instances.get_mut(&instance_handle) else {
             return serde_json::json!({ "ok": false, "error": "invalid WebAssembly.Instance" }).to_string();
         };
-        wasm_instance_table(&mut record.state.borrow_mut(), &mut record.store, &name, &operation, index, value.as_deref())
+        record.store.run(|mut context| wasm_instance_table(&mut record.state.borrow_mut(), &mut context, &name, &operation, index, value.as_deref()))
     })
 }
