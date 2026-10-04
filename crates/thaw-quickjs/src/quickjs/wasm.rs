@@ -726,9 +726,25 @@ fn wasm_wasi_context(options: &str) -> Result<WasiCtx, String> {
     Ok(builder.build())
 }
 
+fn wasm_encoded_number(value: f64) -> serde_json::Value {
+    let encoded = if value.is_finite() && !(value == 0.0 && value.is_sign_negative()) {
+        serde_json::json!(value)
+    } else {
+        serde_json::json!(if value.is_nan() { "NaN" } else if value == f64::INFINITY { "Infinity" } else if value == f64::NEG_INFINITY { "-Infinity" } else { "-0" })
+    };
+    serde_json::json!({ "t": "number", "v": encoded })
+}
+
 fn wasm_number(value: &serde_json::Value, ty: WasmValType) -> Result<WasmVal, String> {
     let string = value.get("v").and_then(serde_json::Value::as_str);
-    let number = value.get("v").and_then(serde_json::Value::as_f64);
+    let number = value.get("v").and_then(|v| v.as_f64().or_else(|| match v.as_str() {
+        Some("NaN") => Some(f64::NAN), Some("Infinity") => Some(f64::INFINITY),
+        Some("-Infinity") => Some(f64::NEG_INFINITY), Some("-0") => Some(-0.0), _ => None,
+    }));
+    let expected_tag = if ty == WasmValType::I64 { "bigint" } else { "number" };
+    if value.get("t").and_then(serde_json::Value::as_str) != Some(expected_tag) {
+        return Err("WebAssembly scalar argument has an incompatible encoded type".into());
+    }
     match ty {
         WasmValType::I32 => Ok(WasmVal::I32(number.unwrap_or(0.0) as i32)),
         WasmValType::I64 => string
@@ -851,8 +867,8 @@ fn wasm_value(value: WasmVal, record: &mut WasmInstance) -> Result<serde_json::V
     match value {
         WasmVal::I32(value) => Ok(serde_json::json!({ "t": "number", "v": value })),
         WasmVal::I64(value) => Ok(serde_json::json!({ "t": "bigint", "v": value.to_string() })),
-        WasmVal::F32(value) => Ok(serde_json::json!({ "t": "number", "v": f32::from(value) })),
-        WasmVal::F64(value) => Ok(serde_json::json!({ "t": "number", "v": f64::from(value) })),
+        WasmVal::F32(value) => Ok(wasm_encoded_number(f32::from(value).into())),
+        WasmVal::F64(value) => Ok(wasm_encoded_number(f64::from(value))),
         WasmVal::ExternRef(reference) => {
             let handle = match reference.val() {
                 None => 0,
@@ -1131,7 +1147,7 @@ fn wasm_table(
             return serde_json::json!({ "ok": false, "error": format!("WebAssembly export `{name}` is not a table") }).to_string();
         };
         match operation.as_str() {
-            "size" => serde_json::json!({ "ok": true, "value": table_value.size(&record.store) }).to_string(),
+            "size" => serde_json::json!({ "ok": true, "value": table_value.size(&record.store), "type": wasm_type_name(table_value.ty(&record.store).element()) }).to_string(),
             "get" => match table_value.get(&record.store, index) {
                 Some(value) => match wasm_value(value, record) {
                     Ok(value) => serde_json::json!({ "ok": true, "value": value }).to_string(),
