@@ -1365,6 +1365,11 @@ impl<'ctx> HirCompiler<'ctx> {
                     .try_as_basic_value()
                     .basic()
                     .ok_or("array search returned no value".to_string())?;
+                let result = if name.starts_with("__thaw_any_array_") {
+                    self.compile_check_json_host_error(result, None)?
+                } else {
+                    result
+                };
                 if name.ends_with("_includes") {
                     return self
                         .builder
