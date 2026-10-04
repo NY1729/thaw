@@ -247,11 +247,34 @@ impl<'a> FnLowerer<'a> {
             )
         };
 
+        let scan_other_name = format!("__thaw_set_combine_scan_other_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(scan_other_name.clone(), HirType::Bool);
+        let size = |name: &str| HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_map_size".into())),
+            vec![var(name)],
+        );
+        let scan_other = if op == "intersection" {
+            HirExpr::BinOp(BinOp::Gt, Box::new(size(&receiver_name)), Box::new(size(&other_name)))
+        } else {
+            HirExpr::Lit(HirLit::Bool(false))
+        };
+        let initial_snapshot = if op == "intersection" {
+            HirExpr::Conditional(
+                Box::new(var(&scan_other_name)),
+                Box::new(snapshot(&other_name)),
+                Box::new(snapshot(&receiver_name)),
+                elements_type.clone(),
+            )
+        } else {
+            snapshot(&receiver_name)
+        };
         let mut body_stmts = vec![
+            HirStmt::Let(scan_other_name.clone(), HirType::Bool, scan_other),
             HirStmt::Let(
                 elements_name.clone(),
                 elements_type.clone(),
-                snapshot(&receiver_name),
+                initial_snapshot,
             ),
             HirStmt::Let(
                 length_name.clone(),
@@ -276,8 +299,8 @@ impl<'a> FnLowerer<'a> {
         // Difference` passes over both too, but on each pass keeps an
         // element only when the *other* operand doesn't also have it (so a
         // value present in both is dropped from both passes).
-        // `intersection`/`difference` need only the one pass over the
-        // receiver, handled in the final `else` branch below.
+        // Intersection scans the smaller operand (receiver on a tie).
+        // Difference scans the receiver.
         if op == "union" || op == "symmetricDifference" {
             let keep_if_other_lacks = op == "symmetricDifference";
             let guarded_insert = |other_name: &str| {
@@ -315,12 +338,20 @@ impl<'a> FnLowerer<'a> {
             second_pass.push(advance_index.clone());
             body_stmts.push(HirStmt::While(loop_condition(), second_pass));
         } else {
-            // `intersection`: keep a receiver element only if `other` also
-            // has it. `difference`: keep it only if `other` doesn't.
-            let membership = HirExpr::Call(
-                Box::new(HirExpr::Var(has_intrinsic)),
-                vec![var(&other_name), var(&element_name)],
+            let has = |name: &str| HirExpr::Call(
+                Box::new(HirExpr::Var(has_intrinsic.clone())),
+                vec![var(name), var(&element_name)],
             );
+            let membership = if op == "intersection" {
+                HirExpr::Conditional(
+                    Box::new(var(&scan_other_name)),
+                    Box::new(has(&receiver_name)),
+                    Box::new(has(&other_name)),
+                    HirType::Bool,
+                )
+            } else {
+                has(&other_name)
+            };
             let (then_branch, else_branch) = if op == "intersection" {
                 (vec![insert_element], Vec::new())
             } else {
