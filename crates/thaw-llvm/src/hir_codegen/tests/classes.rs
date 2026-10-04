@@ -3745,3 +3745,56 @@ fn optional_void_callable_adapter_preserves_calls_and_void_returns() {
     "#;
     assert_eq!(compile_and_run(source, "optional_void_callable_adapter"), "7\n3\n");
 }
+
+#[test]
+fn object_setter_assignment_evaluates_receiver_once_and_returns_assigned_value() {
+    let source = r#"
+        let calls = 0;
+        let effects = "";
+        let stored = 0;
+        const box = {
+            get value(): number { effects += "G"; return stored; },
+            set value(next: number) { effects += "S"; stored = next * 10; }
+        };
+        function pick() { calls++; effects += "R"; return box; }
+        function rhs(): number { effects += "V"; return 7; }
+        function rawRhs(): any { return "7"; }
+        function main(): void {
+            const assigned = (pick().value = rhs());
+            console.log(assigned, calls, effects, stored);
+            calls = 0;
+            effects = "";
+            const compound = (pick().value += rhs());
+            console.log(compound, calls, effects, stored);
+            calls = 0;
+            effects = "";
+            const logical = (pick().value &&= rhs());
+            console.log(logical, calls, effects, stored);
+            calls = 0;
+            effects = "";
+            const postfix = pick().value++;
+            console.log(postfix, calls, effects, stored);
+            calls = 0;
+            effects = "";
+            const prefix = ++pick().value;
+            console.log(prefix, calls, effects, stored);
+            stored = 0;
+            const raw = (pick().value = rawRhs());
+            console.log(typeof raw, stored);
+            let setterCalls = 0;
+            let receivedNaN = false;
+            const writeOnly = {
+                set value(next: number) { setterCalls++; receivedNaN = Number.isNaN(next); }
+            };
+            const old = writeOnly.value++;
+            const next = ++writeOnly.value;
+            console.log(Number.isNaN(old), Number.isNaN(next), setterCalls, receivedNaN);
+            const nullish = (writeOnly.value ??= 3);
+            const orValue = (writeOnly.value ||= 4);
+            const andValue = (writeOnly.value &&= rhs());
+            console.log(nullish, orValue, typeof andValue, setterCalls);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "object_setter_assignment_result"),
+        "7 1 RVS 70\n77 1 RGVS 770\n7 1 RGVS 70\n70 1 RGS 710\n711 1 RGS 7110\nstring 70\ntrue true 2 true\n3 4 undefined 4\n");
+}
