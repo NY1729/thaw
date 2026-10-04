@@ -2193,3 +2193,53 @@ fn path_join_skips_empty_segments_before_normalizing() {
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
 }
+
+#[test]
+fn wasi_validates_command_and_optional_reactor_entrypoints() {
+    use std::ffi::{CStr, CString};
+
+    let dir = temp_registry("builtin_wasi_entrypoints");
+    fs::write(
+            dir.join("index.js"),
+            r#"var WASI = require('node:wasi').WASI;
+module.exports = function () {
+  function instance(body) { return new WebAssembly.Instance(new WebAssembly.Module(new TextEncoder().encode('(module (memory (export "memory") 1) ' + body + ')'))); }
+  var empty = instance(''), reactor = new WASI({ version: 'preview1' });
+  var absent = reactor.initialize(empty) === undefined, repeated = false;
+  try { reactor.initialize(empty); } catch (error) { repeated = error.code === 'ERR_WASI_ALREADY_STARTED'; }
+  var both = instance('(global $n (export "n") (mut i32) (i32.const 0)) (func (export "_start") i32.const 1 global.set $n) (func (export "_initialize"))');
+  var command = new WASI({ version: 'preview1', returnOnExit: true }), rejected = false;
+  try { command.start(both); } catch (error) { rejected = error.code === 'ERR_INVALID_ARG_VALUE'; }
+  var unchanged = both.exports.n.value === 0;
+  var valid = instance('(func (export "_start"))');
+  var retry = command.start(valid) === 0;
+  var invalidReactor = false;
+  try { new WASI({ version: 'preview1' }).initialize(valid); } catch (error) { invalidReactor = error.code === 'ERR_INVALID_ARG_VALUE'; }
+  return [absent, repeated, rejected, unchanged, retry, invalidReactor];
+};"#,
+        )
+        .unwrap();
+    let empty_node_modules = temp_registry("builtin_wasi_entrypoints_node_modules");
+    let (bundle, _, file_count, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(file_count, 2);
+    let script = format!(
+            "globalThis.module = {{ exports: {{}} }};\n\
+             globalThis.exports = globalThis.module.exports;\n\
+             globalThis.require = function(name) {{ throw new Error(\"require('\" + name + \"') is not supported\"); }};\n\
+             {bundle}\n\
+             globalThis.exerciseWasiEntrypoints = module.exports;\n"
+        );
+    let source = CString::new(script).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let func = CString::new("exerciseWasiEntrypoints").unwrap();
+    let args = CString::new("[]").unwrap();
+    let result_ptr = thaw_quickjs::thaw_js_call(func.as_ptr(), args.as_ptr());
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(
+        result,
+        "[true,true,true,true,true,true]"
+    );
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+}
