@@ -2443,3 +2443,68 @@ module.exports = async function () {
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
 }
+
+#[test]
+fn test_accessor_mocks_return_spies_and_restore_individually() {
+    use std::ffi::{CStr, CString};
+
+    let dir = temp_registry("builtin_test_accessor_mock");
+    fs::write(
+            dir.join("index.js"),
+            r#"var test = require('node:test');
+module.exports = async function () {
+  var value = 2, calls = [];
+  var object = { get value() { return value; }, set value(next) { value = next; } };
+  var original = Object.getOwnPropertyDescriptor(object, 'value');
+  var result = await test('accessors', function(t) {
+    var getter = t.mock.getter(object, 'value');
+    calls.push(object.value, getter.mock.callCount());
+    getter.mock.restore();
+    calls.push(Object.getOwnPropertyDescriptor(object, 'value').get === original.get);
+    var setter = t.mock.setter(object, 'value', function(next) { value = next * 2; });
+    object.value = 3;
+    calls.push(value, setter.mock.callCount(), setter.mock.calls[0].arguments[0]);
+    setter.mock.restore();
+    object.value = 4;
+    calls.push(value, Object.getOwnPropertyDescriptor(object, 'value').set === original.set);
+    var delegated = t.mock.setter(object, 'value');
+    object.value = 5;
+    calls.push(value, delegated.mock.callCount());
+    delegated.mock.restore();
+    var temporary = {}, created = t.mock.getter(temporary, 'added', function() { return 9; });
+    calls.push(temporary.added, created.mock.callCount());
+    created.mock.restore();
+    calls.push(Object.prototype.hasOwnProperty.call(temporary, 'added'));
+    t.mock.getter(object, 'value', function() { return 99; });
+    calls.push(object.value);
+  });
+  var descriptor = Object.getOwnPropertyDescriptor(object, 'value');
+  calls.push(result.status, descriptor.get === original.get, descriptor.set === original.set);
+  return calls;
+};"#,
+        )
+        .unwrap();
+    let empty_node_modules = temp_registry("builtin_test_accessor_mock_node_modules");
+    let (bundle, _, file_count, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    assert!(file_count >= 3);
+    let script = format!(
+            "globalThis.module = {{ exports: {{}} }};\n\
+             globalThis.exports = globalThis.module.exports;\n\
+             globalThis.require = function(name) {{ throw new Error(\"require('\" + name + \"') is not supported\"); }};\n\
+             {bundle}\n\
+             globalThis.exerciseTestAccessorMock = module.exports;\n"
+        );
+    let source = CString::new(script).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let func = CString::new("exerciseTestAccessorMock").unwrap();
+    let args = CString::new("[]").unwrap();
+    let result_ptr = thaw_quickjs::thaw_js_call(func.as_ptr(), args.as_ptr());
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(
+        result,
+        r#"[2,1,true,6,1,3,4,true,5,1,9,1,false,99,"passed",true,true]"#
+    );
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+}
