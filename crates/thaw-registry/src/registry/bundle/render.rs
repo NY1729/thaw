@@ -692,15 +692,15 @@ fn render_bundle_mode(main_key: &str, modules: &[BundledModule], mixed: Option<&
               var responseHeaders = new Headers();
               if (Array.isArray(incoming.rawHeaders)) for (var index = 0; index + 1 < incoming.rawHeaders.length; index += 2) responseHeaders.append(incoming.rawHeaders[index], incoming.rawHeaders[index + 1]);
               else if (incoming.headers) Object.keys(incoming.headers).forEach(function(name) { var value = incoming.headers[name]; if (Array.isArray(value)) value.forEach(function(item) { responseHeaders.append(name, item); }); else if (value !== undefined) responseHeaders.append(name, value); });
-              var noBody = method === 'HEAD' || status === 101 || status === 204 || status === 205 || status === 304, controller, bodyAbort;
+              var noBody = method === 'HEAD' || status === 101 || status === 204 || status === 205 || status === 304, controller, bodyAbort, bodyFinished = false;
               function cleanupBody() { if (request.signal && bodyAbort) request.signal.removeEventListener('abort', bodyAbort); }
-              var stream = noBody ? null : new ReadableStream({ start: function(value) { controller = value; }, cancel: function(reason) { cleanupBody(); if (incoming.destroy) incoming.destroy(reason); } });
+              var stream = noBody ? null : new ReadableStream({ start: function(value) { controller = value; }, pull: function() { if (!bodyFinished && controller.desiredSize > 0 && incoming.resume) incoming.resume(); }, cancel: function(reason) { bodyFinished = true; cleanupBody(); if (incoming.destroy) incoming.destroy(reason); } }, { highWaterMark: 16384, size: function(chunk) { return chunk.byteLength; } });
               if (stream) {
-                incoming.on('data', function(chunk) { if (controller) controller.enqueue(chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk)); });
-                incoming.on('end', function() { cleanupBody(); if (controller) controller.close(); });
-                incoming.on('error', function(error) { cleanupBody(); if (controller) controller.error(error); });
-                incoming.on('aborted', function() { cleanupBody(); if (controller) controller.error(new TypeError('terminated')); });
-                bodyAbort = function() { cleanupBody(); if (controller) controller.error(aborted()); if (incoming.destroy) incoming.destroy(); };
+                incoming.on('data', function(chunk) { if (bodyFinished || !controller) return; controller.enqueue(chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk)); if (controller.desiredSize <= 0 && incoming.pause) incoming.pause(); });
+                incoming.on('end', function() { if (bodyFinished) return; bodyFinished = true; cleanupBody(); if (controller) controller.close(); });
+                incoming.on('error', function(error) { if (bodyFinished) return; bodyFinished = true; cleanupBody(); if (controller) controller.error(error); });
+                incoming.on('aborted', function() { if (bodyFinished) return; bodyFinished = true; cleanupBody(); if (controller) controller.error(new TypeError('terminated')); });
+                bodyAbort = function() { if (bodyFinished) return; bodyFinished = true; cleanupBody(); if (controller) controller.error(aborted()); if (incoming.destroy) incoming.destroy(); };
                 if (request.signal) request.signal.addEventListener('abort', bodyAbort, { once: true });
                 var contentEncodings = String(responseHeaders.get('content-encoding') || '').toLowerCase().split(',').map(function(value) { return value.trim(); });
                 if (contentEncodings.every(function(value) { return value === 'gzip' || value === 'deflate' || value === 'br'; }))
