@@ -1828,14 +1828,8 @@ impl<'a> FnLowerer<'a> {
                         let default = self.lower_expr(default)?;
                         let default = self.coerce_to_declared(element, default)?;
                         field = self.lower_dictionary_default(
-                            HirExpr::Call(
-                                Box::new(HirExpr::Var("__thaw_json_has_own".into())),
-                                vec![value.clone(), key],
-                            ),
-                            field,
-                            default,
-                            element,
-                        );
+                            value.clone(), key, default, element,
+                        )?;
                     }
                     self.lower_assignment_pattern(
                         &Pat::Ident(property.key.clone()),
@@ -1873,14 +1867,8 @@ impl<'a> FnLowerer<'a> {
                         let default = self.lower_expr(&assign.right)?;
                         let default = self.coerce_to_declared(element, default)?;
                         field = self.lower_dictionary_default(
-                            HirExpr::Call(
-                                Box::new(HirExpr::Var("__thaw_json_has_own".into())),
-                                vec![value.clone(), key],
-                            ),
-                            field,
-                            default,
-                            element,
-                        );
+                            value.clone(), key, default, element,
+                        )?;
                         assign.left.as_ref()
                     } else {
                         &property.value

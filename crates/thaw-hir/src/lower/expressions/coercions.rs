@@ -501,7 +501,10 @@ impl<'a> FnLowerer<'a> {
     fn lower_undefined_default(&mut self, lhs: HirExpr, rhs: HirExpr) -> Result<HirExpr, String> {
         let lhs_type = self.infer_expr_type(&lhs)?;
         if lhs_type == HirType::Undefined {
-            return Ok(rhs);
+            let name = format!("__thaw_default_undefined_{}", self.next_binding);
+            self.next_binding += 1;
+            self.scope.insert(name.clone(), HirType::Undefined);
+            return self.wrap_call_argument_bindings(rhs, &[(name, HirType::Undefined, lhs)]);
         }
         if let HirType::Union(elements) = &lhs_type {
             if !elements.contains(&HirType::Undefined) {
@@ -550,6 +553,26 @@ impl<'a> FnLowerer<'a> {
             }
             return self
                 .wrap_call_argument_bindings(HirExpr::Block(body), &[(name, lhs_type, lhs)]);
+        }
+        if matches!(lhs_type, HirType::Json | HirType::JsValue) {
+            let name = format!("__thaw_default_dynamic_{}", self.next_binding);
+            self.next_binding += 1;
+            self.scope.insert(name.clone(), lhs_type.clone());
+            let left = HirExpr::Var(name.clone());
+            let absent = if lhs_type == HirType::Json {
+                HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_json_is_undefined".into())), vec![left.clone()],
+                )
+            } else {
+                self.dynamic_value_is_undefined(left.clone())
+            };
+            let rhs = self.coerce_to_declared(&lhs_type, rhs)?;
+            let result = HirExpr::Block(vec![HirStmt::If(
+                absent,
+                vec![HirStmt::Return(Some(rhs))],
+                vec![HirStmt::Return(Some(left))],
+            )]);
+            return self.wrap_call_argument_bindings(result, &[(name, lhs_type, lhs)]);
         }
         match lhs_type.clone() {
             HirType::Optional(payload) => {

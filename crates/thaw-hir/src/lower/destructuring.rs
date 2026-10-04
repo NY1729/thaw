@@ -1466,16 +1466,9 @@ impl<'a> FnLowerer<'a> {
                     if let Some(default) = &property.value {
                         let default = self.lower_expr(default)?;
                         let default = self.coerce_to_declared(element, default)?;
-                        let present = HirExpr::Call(
-                            Box::new(HirExpr::Var("__thaw_json_has_own".into())),
-                            vec![value.clone(), key],
-                        );
                         field = self.lower_dictionary_default(
-                            present,
-                            field,
-                            default,
-                            element,
-                        );
+                            value.clone(), key, default, element,
+                        )?;
                     }
                     self.lower_binding_pattern(
                         &Pat::Ident(property.key.clone()),
@@ -1533,32 +1526,40 @@ impl<'a> FnLowerer<'a> {
     }
 
     fn lower_dictionary_default(
-        &self,
-        present: HirExpr,
-        value: HirExpr,
+        &mut self,
+        object: HirExpr,
+        key: HirExpr,
         default: HirExpr,
         result_type: &HirType,
-    ) -> HirExpr {
-        let body = HirExpr::Block(vec![HirStmt::If(
-            present,
-            vec![HirStmt::Return(Some(value))],
+    ) -> Result<HirExpr, String> {
+        let name = format!("__thaw_dictionary_default_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(name.clone(), HirType::Json);
+        let raw = HirExpr::Var(name.clone());
+        let present = match result_type {
+            HirType::Optional(payload) => HirExpr::OptionalSome(
+                Box::new(Self::dictionary_value_from_json(raw.clone(), payload)?),
+                payload.as_ref().clone(),
+            ),
+            HirType::Nullable(payload) => Self::lower_nullable_dictionary_value(
+                raw.clone(), payload, false,
+            )?,
+            HirType::Nullish(payload) => Self::lower_nullable_dictionary_value(
+                raw.clone(), payload, true,
+            )?,
+            _ => Self::dictionary_value_from_json(raw.clone(), result_type)?,
+        };
+        let result = HirExpr::Block(vec![HirStmt::If(
+            HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_json_is_undefined".into())),
+                vec![raw],
+            ),
             vec![HirStmt::Return(Some(default))],
+            vec![HirStmt::Return(Some(present))],
         )]);
-        let mut referenced = BTreeSet::new();
-        collect_referenced_bindings(&body, &mut referenced);
-        let captures = referenced
-            .into_iter()
-            .filter_map(|name| self.scope.get(&name).cloned().map(|ty| HirParam { name, ty }))
-            .collect();
-        HirExpr::Call(
-            Box::new(HirExpr::Lambda(
-                captures,
-                Vec::new(),
-                result_type.clone(),
-                Box::new(body),
-            )),
-            Vec::new(),
-        )
+        self.wrap_call_argument_bindings(result, &[(
+            name, HirType::Json, HirExpr::JsonKey(Box::new(object), Box::new(key)),
+        )])
     }
 
     fn lower_dictionary_object_rest(
