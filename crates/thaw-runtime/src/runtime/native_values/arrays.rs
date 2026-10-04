@@ -2623,6 +2623,7 @@ pub unsafe extern "C" fn thaw_object_array_last_index_of(
 unsafe extern "C" {
     pub fn thaw_json_strict_equal(a: *const u8, b: *const u8) -> u8;
     fn thaw_json_same_value_zero(a: *const u8, b: *const u8) -> u8;
+    fn thaw_json_is_undefined(value: *const u8) -> u8;
 }
 
 fn json_same_value_zero(a: *const u8, b: *const u8) -> bool {
@@ -2654,8 +2655,14 @@ unsafe fn any_array_search(
     let Some(length) = (unsafe { native_array_length(array) }) else {
         return -1.0;
     };
+    let mut needle_is_undefined = None;
     for index in array_search_start(length, from_index)..length {
         if !unsafe { array_index_present(presence, index) } {
+            if (same_value_zero || unsafe { array_index_exists(presence, index) })
+                && *needle_is_undefined.get_or_insert_with(|| unsafe { thaw_json_is_undefined(needle) != 0 })
+            {
+                return index as f64;
+            }
             continue;
         }
         let slot = unsafe {
@@ -2715,8 +2722,14 @@ pub unsafe extern "C" fn thaw_any_array_last_index_of(
     let Some(start) = array_search_end(length, from_index) else {
         return -1.0;
     };
+    let mut needle_is_undefined = None;
     for index in (0..=start).rev() {
         if !unsafe { array_index_present(presence, index) } {
+            if unsafe { array_index_exists(presence, index) }
+                && *needle_is_undefined.get_or_insert_with(|| unsafe { thaw_json_is_undefined(needle) != 0 })
+            {
+                return index as f64;
+            }
             continue;
         }
         let slot = unsafe {
