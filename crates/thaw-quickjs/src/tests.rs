@@ -8585,3 +8585,44 @@ fn webassembly_async_compilation_snapshots_input_views_before_returning() {
     "#), 1);
     assert_eq!(call("wasmAsyncSnapshot", "[]"), "[7,7,7,false,true]");
 }
+
+#[test]
+fn webassembly_imports_immutable_numeric_global_values() {
+    assert_eq!(load(r#"
+        function wasmPrimitiveGlobals() {
+            function module(type, mutable) {
+                return new WebAssembly.Module(new TextEncoder().encode(`(module
+                    (import "host" "value" (global $value ${mutable ? '(mut ' + type + ')' : type}))
+                    (func (export "read") (result ${type}) global.get $value))`));
+            }
+            function read(type, value) {
+                return new WebAssembly.Instance(module(type, false), { host: { value } }).exports.read();
+            }
+            function rejects(type, mutable, value) {
+                try { new WebAssembly.Instance(module(type, mutable), { host: { value } }); return false; }
+                catch (error) { return error instanceof WebAssembly.LinkError; }
+            }
+            function rejectsForgedReference(type) {
+                const source = new TextEncoder().encode(`(module (import "host" "value" (global ${type})))`);
+                const imported = new WebAssembly.Module(source);
+                imported.__thawImports[0].valueType = 'i32';
+                imported.__thawImports[0].mutable = false;
+                try { new WebAssembly.Instance(imported, { host: { value: 0 } }); return false; }
+                catch (error) { return error instanceof WebAssembly.LinkError; }
+            }
+            const expected = module('i32', false);
+            let reads = 0;
+            const instance = new WebAssembly.Instance(expected, { host: { get value() { reads++; return 7; } } });
+            const metadata = WebAssembly.Module.imports(expected)[0];
+            const wrapped = new WebAssembly.Global({ value: 'i32', mutable: false }, 9);
+            return [read('i32', 4294967295), read('f32', 1.337) === Math.fround(1.337), read('f64', 1.5),
+                read('i64', 18446744073709551615n).toString(), instance.exports.read(), reads,
+                rejects('i64', false, 1), rejects('i32', false, 1n), rejects('i32', true, 1),
+                rejects('i32', false, '1'), rejectsForgedReference('externref'),
+                rejectsForgedReference('funcref'), read('i32', wrapped),
+                Object.keys(metadata).sort().join(',')];
+        }
+    "#), 1);
+    assert_eq!(call("wasmPrimitiveGlobals", "[]"),
+        r#"[-1,true,1.5,"-1",7,1,true,true,true,true,true,true,9,"kind,module,name"]"#);
+}
