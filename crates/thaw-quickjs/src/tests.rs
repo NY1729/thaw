@@ -7900,3 +7900,65 @@ fn webassembly_import_result_coercion_memory() {
     "#), 1);
     assert_eq!(call("wasmResultCoercionMemory", "[]"), "[164,42,73]");
 }
+
+// Unrun regression target: shared unsigned32 conversion validates limits and growth.
+#[test]
+fn webassembly_unsigned_limits_and_table_growth() {
+    assert_eq!(load(r#"
+        function wasmUnsignedLimits() {
+            const rejects = action => { try { action(); return false; } catch (error) { return error instanceof TypeError; } };
+            const invalid = [-1, NaN, Infinity, -Infinity, 4294967296, 1n];
+            const memoryLimits = invalid.every(maximum => rejects(() => new WebAssembly.Memory({ initial: 0, maximum })));
+            const tableLimits = invalid.every(maximum => rejects(() => new WebAssembly.Table({ element: "externref", initial: 0, maximum })));
+            let initialReads = 0, maximumReads = 0, coercions = 0;
+            const memory = new WebAssembly.Memory({
+                get initial() { initialReads++; return 0.9; },
+                get maximum() { maximumReads++; return { valueOf() { coercions++; return 1.9; } }; }
+            });
+            const before = memory.buffer;
+            const rejectedGrowth = invalid.every(delta => rejects(() => memory.grow(delta)));
+            const keptBuffer = memory.buffer === before;
+            const previous = memory.grow(0.9);
+            const table = new WebAssembly.Table({ element: "externref", initial: 1.9, maximum: 150001.9 });
+            const tablePrevious = table.grow(150000.9);
+            return [memoryLimits, tableLimits, rejectedGrowth, keptBuffer,
+                initialReads, maximumReads, coercions, previous, before.byteLength,
+                memory.buffer !== before, tablePrevious, table.length, table.get(150000) === null];
+        }
+    "#), 1);
+    assert_eq!(call("wasmUnsignedLimits", "[]"), "[true,true,true,true,1,1,1,0,0,true,1,150001,true]");
+}
+
+// Unrun regression target: conversion uses the captured integer operations.
+#[test]
+fn webassembly_length_conversion_captures_intrinsics() {
+    assert_eq!(load(r#"
+        function wasmCapturedLimits() {
+            const trunc = Math.trunc, finite = Number.isFinite;
+            try {
+                const memory = new WebAssembly.Memory({ initial: {
+                    valueOf() { Math.trunc = () => 1; Number.isFinite = () => false; return 0.9; }
+                } });
+                return memory.buffer.byteLength;
+            } finally { Math.trunc = trunc; Number.isFinite = finite; }
+        }
+    "#), 1);
+    assert_eq!(call("wasmCapturedLimits", "[]"), "0");
+}
+
+// Unrun regression target: table growth does not call a replaced push method.
+#[test]
+fn webassembly_table_growth_captures_push() {
+    assert_eq!(load(r#"
+        function wasmCapturedPush() {
+            const table = new WebAssembly.Table({ element: "externref", initial: 0, maximum: 3 });
+            const push = Array.prototype.push;
+            try {
+                Array.prototype.push = () => { throw new Error("unexpected push"); };
+                const previous = table.grow(3, "entry");
+                return [previous, table.length, table.get(2)];
+            } finally { Array.prototype.push = push; }
+        }
+    "#), 1);
+    assert_eq!(call("wasmCapturedPush", "[]"), "[0,3,\"entry\"]");
+}
