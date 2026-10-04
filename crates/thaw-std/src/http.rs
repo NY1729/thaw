@@ -762,7 +762,7 @@ unsafe extern "C" fn request_get_header(
 const NATIVE_ARRAY_HEADER: usize = 8;
 const NATIVE_ARRAY_ELEMENT: usize = 8;
 
-/// Reads a `HirType::Bytes` argument (a one-word handle onto a native
+/// Reads a `HirType::Bytes` argument (a two-pointer handle onto a native
 /// `[len: i64][f64 * len]` buffer, exactly what `Buffer.from` / a byte
 /// literal produce) back into raw bytes. Each element is truncated toward
 /// zero and taken mod 256, matching `Buffer`'s own `ToUint8` coercion.
@@ -788,7 +788,7 @@ unsafe fn native_bytes_to_vec(handle: *const u8) -> Vec<u8> {
 }
 
 /// Builds a native `HirType::Bytes` value from raw bytes: the
-/// `[len: i64][f64 * len]` payload, then the one-word handle onto it that
+/// `[len: i64][f64 * len]` payload, then the two-pointer handle onto it that
 /// every `Array`/`Bytes` value is (see `compile_array_wrap` /
 /// `json.rs::wrap_array_handle`). Arena-allocated, so it lives as long as
 /// every other heap value the handler sees. Returns null only if an
@@ -808,11 +808,14 @@ fn native_bytes_from_slice(bytes: &[u8]) -> *mut u8 {
                 .write(f64::from(byte));
         }
     }
-    let handle = thaw_arena::thaw_arena_alloc(NATIVE_ARRAY_HEADER, NATIVE_ARRAY_ELEMENT);
+    let handle = thaw_arena::thaw_arena_alloc(16, NATIVE_ARRAY_ELEMENT);
     if handle.is_null() {
         return std::ptr::null_mut();
     }
-    unsafe { (handle as *mut *mut u8).write(payload) };
+    unsafe {
+        (handle as *mut *mut u8).write(payload);
+        (handle.add(8) as *mut *mut u8).write(std::ptr::null_mut());
+    }
     handle
 }
 
@@ -2644,6 +2647,23 @@ pub extern "C" fn createServer(callback: *const c_void) -> *const c_void {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Unrun regression: HTTP bytes support the common sparse-array handle ABI.
+    #[test]
+    fn http_bytes_handle_supports_presence_updates() {
+        let handle = native_bytes_from_slice(&[7, 9]);
+        assert!(!handle.is_null());
+        unsafe {
+            assert!(handle.add(8).cast::<*mut u8>().read().is_null());
+            assert_eq!(native_bytes_to_vec(handle), vec![7, 9]);
+            assert_eq!(thaw_runtime::thaw_array_delete_property(handle, c"0".as_ptr()), 1);
+            let presence = handle.add(8).cast::<*mut u8>().read();
+            assert!(!presence.is_null());
+            assert_eq!(presence.cast::<u64>().read(), 2);
+            assert_eq!(presence.add(8).read(), 0);
+            assert_eq!(presence.add(9).read(), 1);
+        }
+    }
 
     fn dormant_event_server() -> Box<ServerState> {
         Box::new(ServerState {
