@@ -82,6 +82,12 @@
     throw new TypeError('Unsupported WebAssembly argument type: ' + type);
   };
   const wasmEncodeArguments = (args, types) => types.map((type, index) => wasmEncodeArgument(args[index], type));
+  const wasmConvertImportResult = (value, type) => {
+    if (type === 'i32' || type === 'i64' || type === 'f32' || type === 'f64') {
+      return wasmDecodeValue(wasmEncodeArgument(value, type));
+    }
+    return value;
+  };
   const wasmDecodeValue = (value, instance) => {
     if (value.t === 'bigint') return BigInt(value.v);
     if (value.t === 'externref') return __thaw_wasm_restore_value(Number(value.v));
@@ -122,7 +128,7 @@
     }
     static imports(module) {
       if (!(module instanceof WasmModule)) throw new TypeError('WebAssembly.Module.imports(): argument 0 must be a WebAssembly.Module');
-      return module.__thawImports.map(value => ({ ...value }));
+      return module.__thawImports.map(value => ({ module: value.module, name: value.name, kind: value.kind }));
     }
     static customSections(module, name) {
       if (!(module instanceof WasmModule)) throw new TypeError('WebAssembly.Module.customSections(): argument 0 must be a WebAssembly.Module');
@@ -256,7 +262,17 @@
             const bridge = (...args) => {
               for (const memory of linkedMemories.keys()) memory.__thawRefresh();
               let result, failed = false, primary;
-              try { result = wasmApply(value, undefined, args); }
+              try {
+                result = wasmApply(value, undefined, args);
+                const types = item.resultTypes;
+                if (types.length > 1) {
+                  result = [...result];
+                  if (result.length !== types.length) throw new TypeError('WebAssembly import returned an incorrect number of values');
+                  for (let index = 0; index < types.length; index++) result[index] = wasmConvertImportResult(result[index], types[index]);
+                } else if (types.length === 1) {
+                  result = wasmConvertImportResult(result, types[0]);
+                }
+              }
               catch (error) { failed = true; primary = error; }
               for (const memory of linkedMemories.keys()) {
                 try { memory.__thawSync(); }
