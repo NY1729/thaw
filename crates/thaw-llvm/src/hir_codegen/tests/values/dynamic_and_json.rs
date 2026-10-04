@@ -2016,3 +2016,35 @@ fn nested_tagged_values_preserve_adjacent_arena_slots() {
         "first\n71\nfirst\n82\ntuple\n83\n93\n84\n"
     );
 }
+
+#[test]
+fn object_to_string_dispatches_tagged_values_after_one_evaluation() {
+    let source = r#"
+        let calls = 0;
+        function next(): string | number | null | undefined {
+            calls += 1;
+            return "value";
+        }
+        function optional(value: string | undefined): string {
+            return Object.prototype.toString.call(value);
+        }
+        function nullable(value: number | null): string {
+            return Object.prototype.toString.call(value);
+        }
+        function mixed(value: string | number | null | undefined): string {
+            return Object.prototype.toString.call(value);
+        }
+        function arrays(value: number[] | null | undefined): string {
+            return Object.prototype.toString.call(value);
+        }
+        function main(): void {
+            console.log(optional("x"), optional(undefined));
+            console.log(nullable(7), nullable(null));
+            console.log(mixed("x"), mixed(7), mixed(null), mixed(undefined));
+            console.log(arrays([1]), arrays(null), arrays(undefined));
+            console.log(Object.prototype.toString.call(next()), calls);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "object_tagged_to_string"),
+        "[object String] [object Undefined]\n[object Number] [object Null]\n[object String] [object Number] [object Null] [object Undefined]\n[object Array] [object Null] [object Undefined]\n[object String] 1\n");
+}
