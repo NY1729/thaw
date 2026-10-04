@@ -1855,7 +1855,9 @@ impl<'a> FnLowerer<'a> {
                             self.coerce_primitive_to_string(key)?
                         }
                     };
-                    let key = if has_rest {
+                    let key = if has_rest
+                        || matches!(property.value.as_ref(), Pat::Assign(_))
+                    {
                         let name = format!("__thaw_destructure_key_{}", self.next_binding);
                         self.next_binding += 1;
                         self.scope.insert(name.clone(), HirType::Str);
