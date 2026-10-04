@@ -18,7 +18,7 @@
   const thawSymbols = new Map();
   const nativeSymbol = Symbol;
   const nativeSymbolFor = Symbol.for.bind(Symbol);
-  globalThis.__thaw_property_key = (value) => {
+  const thawPropertyKey = (value) => {
     if (typeof value !== 'string') return value;
     if (value.startsWith('\u001f@@')) return Symbol[value.slice(3)] || value;
     if (value.startsWith('__thaw_symbol_')) return Symbol[value.slice(14)] || value;
@@ -32,6 +32,12 @@
     }
     return thawSymbols.get(value);
   };
+  // Native graph and static-property callers share this bootstrap decoder.
+  // User code may run before either caller's first lookup, so publish the
+  // original function as an immutable property while the realm is starting.
+  Object.defineProperty(globalThis, '__thaw_property_key', {
+    value: thawPropertyKey, writable: false, configurable: false, enumerable: true,
+  });
   globalThis.__thaw_json_date_reviver = (key, value) => {
     if (
       typeof value === 'string' &&
