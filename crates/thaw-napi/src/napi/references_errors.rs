@@ -1,3 +1,25 @@
+#[cfg(feature = "quickjs")]
+unsafe fn rollback_provisional_js_symbol_pin(
+    env: NapiEnv, owner_id: u64, id: u64, value: NapiValue,
+    generation: Option<u64>,
+) {
+    let same_owner = generation.is_some() && env.as_ref().is_some_and(|owner|
+        owner.graph_owner_id == owner_id
+            && owner.symbols.get(&id) == Some(&value)
+            && owner.value_generations.get(&(value as usize)).copied() == generation);
+    if same_owner {
+        // The outbound callback may have established a different native root
+        // while the provisional JS pin was held. Mark the actual JS state,
+        // then let the shared reachability pass decide whether to unpin it.
+        if let Some(owner) = env.as_mut() { owner.js_pinned_symbol_ids.insert(id); }
+        sync_js_origin_symbol_pins(env);
+    } else {
+        // IDs and graph-owner IDs are monotonic. No current native value can
+        // claim this provisional pin after its original generation retired.
+        let _ = thaw_quickjs::thaw_js_napi_symbol_set_pin(owner_id, id, 0);
+    }
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn napi_create_reference(
     env: NapiEnv,
@@ -5,13 +27,65 @@ pub unsafe extern "C" fn napi_create_reference(
     initial_count: u32,
     out: *mut *mut Reference,
 ) -> NapiStatus {
+    let _dispatch = ForeignCallbackGuard::new();
     let Ok(env_ref) = env_mut(env) else {
         return NAPI_INVALID_ARG;
     };
     if value.is_null() || out.is_null() || !value_belongs_to_environment(env, value) {
         return record_status(env, NAPI_INVALID_ARG);
     }
+    let generation = env_ref.value_generations.get(&(value as usize)).copied();
+    #[cfg(feature = "quickjs")]
+    let js_symbol = match value_ref(value) {
+        Ok(Value::Symbol { id, .. }) if env_ref.js_origin_symbol_ids.contains(id) =>
+            Some((*id, env_ref.graph_owner_id)),
+        _ => None,
+    };
+    #[cfg(feature = "quickjs")]
+    if initial_count > 0 {
+        if let Some((id, owner_id)) = js_symbol {
+            if thaw_quickjs::thaw_js_napi_symbol_set_pin(owner_id, id, 1) == 0 {
+                return record_status(env, NAPI_GENERIC_FAILURE);
+            }
+        }
+    }
+    let Ok(env_ref) = env_mut(env) else {
+        #[cfg(feature = "quickjs")]
+        if initial_count > 0 {
+            if let Some((id, owner_id)) = js_symbol {
+                rollback_provisional_js_symbol_pin(env, owner_id, id, value,
+                    generation);
+            }
+        }
+        return NAPI_INVALID_ARG;
+    };
+    if !value_belongs_to_environment(env, value)
+        || env_ref.value_generations.get(&(value as usize)).copied() != generation
+        || {
+            #[cfg(feature = "quickjs")]
+            { js_symbol.is_some_and(|(id, owner_id)|
+                env_ref.graph_owner_id != owner_id
+                    || env_ref.symbols.get(&id) != Some(&value)) }
+            #[cfg(not(feature = "quickjs"))]
+            { false }
+        } {
+        #[cfg(feature = "quickjs")]
+        if initial_count > 0 {
+            if let Some((id, owner_id)) = js_symbol {
+                rollback_provisional_js_symbol_pin(env, owner_id, id, value,
+                    generation);
+            }
+        }
+        return record_status(env, NAPI_INVALID_ARG);
+    }
     *out = alloc_reference(env_ref, value, initial_count);
+    #[cfg(feature = "quickjs")]
+    if initial_count > 0 && js_symbol.is_some() {
+        if let Some((id, _)) = js_symbol {
+            if let Ok(owner) = env_mut(env) { owner.js_pinned_symbol_ids.insert(id); }
+        }
+        sync_js_origin_symbol_pins(env);
+    }
     NAPI_OK
 }
 
@@ -36,6 +110,7 @@ pub unsafe extern "C" fn napi_delete_reference(
     env: NapiEnv,
     reference: *mut Reference,
 ) -> NapiStatus {
+    let _dispatch = ForeignCallbackGuard::new();
     let Ok(reference) = reference_mut(env, reference) else {
         return record_status(env, NAPI_INVALID_ARG);
     };
@@ -43,7 +118,10 @@ pub unsafe extern "C" fn napi_delete_reference(
     let value = reference.value;
     reference.deleted = true;
     #[cfg(feature = "quickjs")]
+    sync_js_origin_symbol_pins(env);
+    #[cfg(feature = "quickjs")]
     release_pending_napi_handle_if_unreferenced(env, value);
+    sweep_pending_scope_values(env);
     NAPI_OK
 }
 
@@ -53,11 +131,41 @@ pub unsafe extern "C" fn napi_get_reference_value(
     reference: *mut Reference,
     out: *mut NapiValue,
 ) -> NapiStatus {
-    let Ok(reference) = reference_mut(env, reference) else {
+    let _dispatch = ForeignCallbackGuard::new();
+    let Ok(current) = reference_mut(env, reference) else {
         return record_status(env, NAPI_INVALID_ARG);
     };
-    let _ = reference.count;
-    let status = write_value(out, reference.value);
+    let mut value = current.value;
+    let count = current.count;
+    #[cfg(feature = "quickjs")]
+    if count == 0 && !value.is_null() {
+        let query = env_mut(env).ok().and_then(|owner| {
+            let Value::Symbol { id, .. } = value_ref(value).ok()? else { return None; };
+            owner.js_origin_symbol_ids.contains(id)
+                .then_some((owner.graph_owner_id, *id,
+                    owner.value_generations.get(&(value as usize)).copied()))
+        });
+        if let Some((owner_id, id, generation)) = query {
+            let live = thaw_quickjs::thaw_js_napi_symbol_weak_live(owner_id, id);
+            // Missing helper/owner and JS callback failures are unknown, not
+            // evidence that a weak target was collected.
+            if live == 2 { return record_status(env, NAPI_GENERIC_FAILURE); }
+            let Ok(current) = reference_mut(env, reference) else {
+                return record_status(env, NAPI_GENERIC_FAILURE);
+            };
+            if current.value != value || current.count != count
+                || env_mut(env).ok().and_then(|owner|
+                    owner.value_generations.get(&(value as usize)).copied()) != generation {
+                return record_status(env, NAPI_GENERIC_FAILURE);
+            }
+            if live == 0 {
+                current.value = ptr::null_mut();
+                value = ptr::null_mut();
+                sweep_pending_scope_values(env);
+            }
+        }
+    }
+    let status = write_scoped_value(env, out, value);
     record_status(env, status)
 }
 
@@ -67,15 +175,77 @@ pub unsafe extern "C" fn napi_reference_ref(
     reference: *mut Reference,
     result: *mut u32,
 ) -> NapiStatus {
-    let Ok(reference) = reference_mut(env, reference) else {
+    let _dispatch = ForeignCallbackGuard::new();
+    let Ok(current) = reference_mut(env, reference) else {
         return record_status(env, NAPI_INVALID_ARG);
     };
-    let Some(count) = reference.count.checked_add(1) else {
+    // A zero-count reference whose value was collected cannot be made strong
+    // again. The scope collector clears value when it retires that owner.
+    if current.value.is_null() {
+        return record_status(env, NAPI_GENERIC_FAILURE);
+    }
+    let value = current.value;
+    let old_count = current.count;
+    let generation = env_mut(env).ok()
+        .and_then(|owner| owner.value_generations.get(&(value as usize)).copied());
+    let Some(count) = old_count.checked_add(1) else {
         return record_status(env, NAPI_GENERIC_FAILURE);
     };
-    reference.count = count;
+    #[cfg(feature = "quickjs")]
+    let mut provisional_pin = None;
+    #[cfg(feature = "quickjs")]
+    if old_count == 0 {
+        let pin = env_mut(env).ok().and_then(|owner| {
+            let Value::Symbol { id, .. } = value_ref(value).ok()? else { return None; };
+            owner.js_origin_symbol_ids.contains(id).then_some((owner.graph_owner_id, *id))
+        });
+        if let Some((owner_id, id)) = pin {
+            // The JS callback may reenter this Env. Snapshot the provenance,
+            // call without an Env borrow, then validate it again below.
+            if thaw_quickjs::thaw_js_napi_symbol_weak_live(owner_id, id) != 1 {
+                return record_status(env, NAPI_GENERIC_FAILURE);
+            }
+            if thaw_quickjs::thaw_js_napi_symbol_set_pin(owner_id, id, 1) == 0 {
+                return record_status(env, NAPI_GENERIC_FAILURE);
+            }
+            provisional_pin = Some((owner_id, id));
+        }
+    }
+    let Ok(current) = reference_mut(env, reference) else {
+        #[cfg(feature = "quickjs")]
+        if let Some((owner_id, id)) = provisional_pin {
+            rollback_provisional_js_symbol_pin(env, owner_id, id, value,
+                generation);
+        }
+        return record_status(env, NAPI_GENERIC_FAILURE);
+    };
+    if current.value != value || current.count != old_count
+        || env_mut(env).ok().and_then(|owner|
+            owner.value_generations.get(&(value as usize)).copied()) != generation
+        || {
+            #[cfg(feature = "quickjs")]
+            { provisional_pin.is_some_and(|(owner_id, id)| env.as_ref().is_none_or(|owner|
+                owner.graph_owner_id != owner_id
+                    || owner.symbols.get(&id) != Some(&value))) }
+            #[cfg(not(feature = "quickjs"))]
+            { false }
+        } {
+        #[cfg(feature = "quickjs")]
+        if let Some((owner_id, id)) = provisional_pin {
+            rollback_provisional_js_symbol_pin(env, owner_id, id, value,
+                generation);
+        }
+        return record_status(env, NAPI_GENERIC_FAILURE);
+    }
+    current.count = count;
+    #[cfg(feature = "quickjs")]
+    if let Some((_, id)) = provisional_pin {
+        if let Some(owner) = env.as_mut() { owner.js_pinned_symbol_ids.insert(id); }
+    }
+    #[cfg(feature = "quickjs")]
+    sync_js_origin_symbol_pins(env);
     if !result.is_null() {
-        *result = reference.count;
+        *result = count;
     }
     NAPI_OK
 }
@@ -86,6 +256,7 @@ pub unsafe extern "C" fn napi_reference_unref(
     reference: *mut Reference,
     result: *mut u32,
 ) -> NapiStatus {
+    let _dispatch = ForeignCallbackGuard::new();
     let Ok(reference) = reference_mut(env, reference) else {
         return record_status(env, NAPI_INVALID_ARG);
     };
@@ -96,6 +267,8 @@ pub unsafe extern "C" fn napi_reference_unref(
     #[cfg(feature = "quickjs")]
     let value = reference.value;
     let remaining = reference.count;
+    #[cfg(feature = "quickjs")]
+    sync_js_origin_symbol_pins(env);
     if !result.is_null() {
         *result = remaining;
     }
@@ -103,6 +276,7 @@ pub unsafe extern "C" fn napi_reference_unref(
     if remaining == 0 {
         release_pending_napi_handle_if_unreferenced(env, value);
     }
+    if remaining == 0 { sweep_pending_scope_values(env); }
     NAPI_OK
 }
 
@@ -173,7 +347,7 @@ pub unsafe extern "C" fn napi_call_function(
     } else if result.is_null() {
         napi_get_undefined(env, out)
     } else {
-        write_value(out, result)
+        write_scoped_value(env, out, result)
     };
     record_status(env, status)
 }

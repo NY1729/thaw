@@ -155,7 +155,7 @@
     }, configurable: false, writable: false,
   });
   const thawGraphReflectDefineProperty = Reflect.defineProperty;
-  const thawGraphReflectDeleteProperty = Reflect.deleteProperty;
+  const thawNapiBootstrapDeleteProperty = Reflect.deleteProperty;
   const thawGraphReflectPreventExtensions = Reflect.preventExtensions;
   const thawGraphReflectGetOwnPropertyDescriptor = Reflect.getOwnPropertyDescriptor;
   const thawGraphObjectIsSealed = Object.isSealed;
@@ -165,32 +165,87 @@
   const thawHostNativeSymbolFor = Symbol.for;
   const thawHostNativeSymbol = Symbol;
   const thawHostNativeSymbols = new thawGraphMapConstructor();
-  const thawHostNativeSymbolIDs = new thawGraphMapConstructor();
+  const thawHostWeakRef = typeof WeakRef === 'function' ? WeakRef : null;
+  const thawHostWeakDeref = thawHostWeakRef && thawHostWeakRef.prototype.deref;
+  const thawHostFinalizationRegistry = typeof FinalizationRegistry === 'function'
+    ? FinalizationRegistry : null;
+  const thawHostFinalizerRegister = thawHostFinalizationRegistry
+    && thawHostFinalizationRegistry.prototype.register;
+  const thawHostWeakSymbols = !!thawHostWeakRef
+    && !!thawHostFinalizationRegistry;
+  const thawHostNativeSymbolIDs = new thawGraphWeakMapConstructor();
+  const thawHostRegisteredSymbolIDs = new thawGraphMapConstructor();
+  const thawHostSymbolUnpin = globalThis.__thaw_napi_graph_symbol_unpin;
+  const thawHostNativeSymbolPin = globalThis.__thaw_napi_graph_symbol_pin;
+  const thawHostSymbolFinalizer = thawHostWeakSymbols
+    ? new thawHostFinalizationRegistry(held => {
+        if (thawGraphApply(thawGraphMapGet, thawHostNativeSymbols, [held.id])
+          !== held.entry) return;
+        thawGraphApply(thawGraphMapDelete, thawHostNativeSymbols, [held.id]);
+        thawHostSymbolUnpin(held.id);
+      }) : null;
+  const thawHostNativeSymbolMetadata = handle => {
+    if (typeof handle !== 'string'
+      || !thawGraphApply(thawGraphRegExpTest,
+        thawGraphPositiveDecimalPattern, [handle]))
+      throw new thawGraphTypeError('Invalid native Symbol handle');
+    const reply = thawGraphParse(thawGraphNapiBridgeHandle('symbol_metadata',
+      handle, '', '[]'));
+    if (!reply || reply.__thaw_error__ || !reply.value
+      || typeof reply.value.id !== 'string'
+      || !thawGraphApply(thawGraphRegExpTest,
+        thawGraphPositiveDecimalPattern, [reply.value.id])
+      || reply.value.handle !== handle
+      || !thawGraphArrayIsArray(reply.value.units)
+      || typeof reply.value.registered !== 'boolean'
+      || typeof reply.value.jsOrigin !== 'boolean')
+      throw new thawGraphTypeError('Invalid native Symbol metadata');
+    return reply.value;
+  };
+  thawGraphDefineProperty(globalThis, '__thaw_json_host_native_symbol_needs_pin', {
+    value: handle => {
+      const metadata = thawHostNativeSymbolMetadata(handle);
+      return !metadata.jsOrigin && !metadata.registered;
+    },
+    configurable: false, writable: false,
+  });
+  const thawHostNativeSymbolID = symbol =>
+    thawGraphApply(thawGraphWeakMapGet, thawHostNativeSymbolIDs, [symbol])
+      ?? thawGraphApply(thawGraphMapGet, thawHostRegisteredSymbolIDs, [symbol]);
   thawGraphDefineProperty(globalThis, '__thaw_json_host_native_symbol', {
     value: handle => {
-      if (typeof handle !== 'string'
-        || !thawGraphApply(thawGraphRegExpTest,
-          thawGraphPositiveDecimalPattern, [handle]))
-        throw new thawGraphTypeError('Invalid native Symbol handle');
-      const reply = thawGraphParse(thawGraphNapiBridgeHandle('symbol_metadata',
-        handle, '', '[]'));
-      if (!reply || reply.__thaw_error__ || !reply.value
-        || typeof reply.value.id !== 'string'
-        || !thawGraphApply(thawGraphRegExpTest,
-          thawGraphPositiveDecimalPattern, [reply.value.id])
-        || reply.value.handle !== handle
-        || !thawGraphArrayIsArray(reply.value.units)
-        || typeof reply.value.registered !== 'boolean')
-        throw new thawGraphTypeError('Invalid native Symbol metadata');
-      const id = reply.value.id;
-      const previous = thawGraphApply(thawGraphMapGet, thawHostNativeSymbols, [id]);
+      const metadata = thawHostNativeSymbolMetadata(handle);
+      const id = metadata.id;
+      if (metadata.jsOrigin) {
+        const owner = thawGraphNapiOwnerOfHandle(handle);
+        const state = owner && thawGraphNapiSymbolState(owner);
+        const original = state && state.symbolForNative(id);
+        if (typeof original !== 'symbol')
+          throw new thawGraphTypeError('Original JavaScript Symbol is no longer live');
+        return original;
+      }
+      const priorEntry = thawGraphApply(thawGraphMapGet, thawHostNativeSymbols, [id]);
+      const previous = priorEntry && priorEntry.weak
+        ? thawGraphApply(thawHostWeakDeref, priorEntry.weak, [])
+        : priorEntry && priorEntry.symbol;
       if (previous !== undefined) return previous;
       const description = globalThis.__thaw_json_host_utf16_string(
-        thawGraphStringify(reply.value.units));
-      const symbol = reply.value.registered ? thawHostNativeSymbolFor(description)
+        thawGraphStringify(metadata.units));
+      if (!metadata.registered && !thawHostWeakSymbols)
+        throw new thawGraphTypeError('Local native Symbol requires weak identity support');
+      const symbol = metadata.registered ? thawHostNativeSymbolFor(description)
         : thawHostNativeSymbol(description);
-      thawGraphApply(thawGraphMapSet, thawHostNativeSymbols, [id, symbol]);
-      thawGraphApply(thawGraphMapSet, thawHostNativeSymbolIDs, [symbol, id]);
+      if (metadata.registered) {
+        thawGraphApply(thawGraphMapSet, thawHostNativeSymbols,
+          [id, { symbol }]);
+        thawGraphApply(thawGraphMapSet, thawHostRegisteredSymbolIDs, [symbol, id]);
+      } else {
+        const entry = { weak: new thawHostWeakRef(symbol) };
+        thawGraphApply(thawGraphMapSet, thawHostNativeSymbols, [id, entry]);
+        thawGraphApply(thawGraphWeakMapSet, thawHostNativeSymbolIDs, [symbol, id]);
+        thawGraphApply(thawHostFinalizerRegister, thawHostSymbolFinalizer,
+          [symbol, { id, entry }]);
+      }
       return symbol;
     }, configurable: false, writable: false,
   });
@@ -470,6 +525,8 @@
   const thawNapiSymbolConstructor = Symbol;
   const thawNapiSymbolFor = Symbol.for;
   const thawNapiSymbolKeyFor = Symbol.keyFor;
+  const thawNapiSymbolDescription = thawGraphGetOwnPropertyDescriptor(
+    Symbol.prototype, 'description').get;
   const thawNapiReflectGetOwnPropertyDescriptor = Reflect.getOwnPropertyDescriptor;
   const thawNapiReflectDefineProperty = Reflect.defineProperty;
   const thawNapiReflectIsExtensible = Reflect.isExtensible;
@@ -517,6 +574,12 @@
     try { return thawGraphApply(thawNapiWeakRefDeref, stored, []); }
     catch (_) { return stored; }
   };
+  // A failed weak dereference is unknown, never evidence for native scope
+  // retirement. This path uses the captured intrinsic and lets the trusted
+  // bridge report an error instead of manufacturing a dead Symbol.
+  const thawNapiSymbolDeref = stored =>
+    typeof stored === 'symbol' || stored === undefined ? stored
+      : thawGraphApply(thawNapiWeakRefDeref, stored, []);
   const thawNapiErrorConstructor = Error;
   const thawNapiRangeErrorConstructor = RangeError;
   const thawNapiPromiseConstructor = Promise;
@@ -549,6 +612,11 @@
     const set = new thawGraphSetConstructor(entries);
     return { has: value => thawGraphApply(thawGraphSetHas, set, [value]) };
   };
+  // Capture the well-known Symbol set before user scripts can replace fields.
+  const thawNapiWellKnownSymbols = thawNapiSafeSet(
+    Object.getOwnPropertyNames(thawNapiSymbolConstructor)
+      .map(name => thawNapiSymbolConstructor[name])
+      .filter(value => typeof value === 'symbol'));
   const thawNapiSafeWeakSet = () => {
     const set = new thawNapiWeakSetConstructor();
     return {
@@ -607,7 +675,7 @@
       if (kind === 1) // Native Function wrapper identity.
         return thawGraphNapiFunctionHandles.get(value) === nativeHandle;
       if (kind === 2 && typeof value === 'symbol') {
-        const id = thawGraphApply(thawGraphMapGet, thawHostNativeSymbolIDs, [value]);
+        const id = thawHostNativeSymbolID(value);
         if (id === undefined) return false;
         const reply = thawGraphParse(thawGraphNapiBridgeHandle('symbol_metadata',
           nativeHandle, '', '[]'));
@@ -639,11 +707,35 @@
     var __thaw_napi_handles = thawGraphNapiHandles;
     var __thaw_napi_owner_ids = thawNapiSafeSet([owner]);
     var __thaw_napi_proxies = thawNapiSafeMap();
-    var __thaw_napi_symbol_values = thawNapiSafeMap(), __thaw_napi_symbol_ids = thawNapiSafeMap();
+    var __thaw_napi_symbol_values = thawNapiSafeMap();
+    var __thaw_napi_symbol_ids = thawNapiSafeWeakMap();
+    var __thaw_napi_global_symbol_ids = thawNapiSafeMap();
+    var __thaw_napi_symbol_pins = thawNapiSafeMap();
+    var __thaw_napi_symbol_finalizers = thawNapiFinalizationRegistry
+      ? thawNapiSafeFinalizer(function(held) {
+          if (__thaw_napi_symbol_values.get(held.id) !== held.entry) return;
+          __thaw_napi_symbol_values.delete(held.id);
+          __thaw_napi_symbol_pins.delete(held.id);
+          // The native owner validates ID and generation before scope sweep.
+          try { __thaw_napi_handle('symbol_collected', owner, held.id, []); } catch (_) {}
+        }) : null;
+    var __thaw_napi_symbol_store = function(id, symbol, permanent) {
+      if (!permanent && (!thawNapiWeakRef || !__thaw_napi_symbol_finalizers))
+        throw new thawGraphTypeError('Local JavaScript Symbol requires weak identity support');
+      if (permanent) {
+        __thaw_napi_symbol_values.set(id, symbol);
+        __thaw_napi_global_symbol_ids.set(symbol, id);
+      } else {
+        var entry = new thawNapiWeakRef(symbol);
+        __thaw_napi_symbol_values.set(id, entry);
+        __thaw_napi_symbol_ids.set(symbol, id);
+        __thaw_napi_symbol_finalizers.register(symbol, { id: id, entry: entry });
+      }
+    };
     var __thaw_napi_binary_values = thawNapiSafeMap();
-    var __thaw_napi_binary_finalizers = thawNapiFinalizationRegistry ? thawNapiSafeFinalizer(function(held) { if (__thaw_napi_binary_values.get(held.id) !== held.entry) return; __thaw_napi_binary_values.delete(held.id); __thaw_napi_handle('release_handle', held.id, '', []); }) : null;
+    var __thaw_napi_binary_finalizers = thawNapiFinalizationRegistry ? thawNapiSafeFinalizer(function(held) { if (!held.active) return; held.active = false; if (__thaw_napi_binary_values.get(held.id) === held.entry) __thaw_napi_binary_values.delete(held.id); __thaw_napi_handle('release_handle', held.id, '', []); }) : null;
     var __thaw_napi_finalizers = thawNapiFinalizationRegistry ? thawNapiSafeFinalizer(function(id) { __thaw_napi_reference_values.delete(id); __thaw_napi_handle('release', id, '', []); }) : null;
-    var __thaw_napi_proxy_finalizers = thawNapiFinalizationRegistry ? thawNapiSafeFinalizer(function(held) { if (__thaw_napi_proxies.get(held.id) !== held.entry) return; __thaw_napi_proxies.delete(held.id); __thaw_napi_handle('release_handle', held.id, '', []); }) : null;
+    var __thaw_napi_proxy_finalizers = thawNapiFinalizationRegistry ? thawNapiSafeFinalizer(function(held) { if (!held.active) return; held.active = false; if (__thaw_napi_proxies.get(held.id) === held.entry) __thaw_napi_proxies.delete(held.id); __thaw_napi_handle('release_handle', held.id, '', []); }) : null;
     var __thaw_napi_reference_value = function(id, active) { var stored = __thaw_napi_reference_values.get(id), value = thawNapiDeref(stored), properties = {}; if (!value) return properties; thawNapiArrayEach(thawGraphObjectKeys(value), function(key) { properties[key] = __thaw_napi_argument(value[key], active); }); return properties; };
     var __thaw_napi_argument = function(value, active) {
     if (value === null || (typeof value !== 'function' && typeof value !== 'object')) return value;
@@ -678,7 +770,7 @@
     // nothing meaningful to "sync" for one -- skip a key the
     // assignment itself rejects instead of crashing the whole
     // call.
-    var __thaw_napi_decode = function(value, origins, path) { path = path || []; if (thawGraphArrayIsArray(origins)) origins = thawNapiSafeMap(thawNapiArrayMap(origins, function(entry) { return [thawGraphStringify(entry[0]), entry]; })); var origin = origins && origins.get(thawGraphStringify(path)); if (origin && origin[1] === 'date') return new thawGraphDateConstructor(origin[2] === null ? NaN : origin[2]); if (origin && origin[1] === 'nonfinite') return thawGraphNumber(origin[2]); var plain = origin && origin[1] === 'plain'; if (value && typeof value === 'object') { if (!plain && value['$__thaw_napi_undefined$'] === true) return undefined; if (!plain && thawGraphOwn(value, '__thaw_napi_error__')) { var ctor = value.name === 'TypeError' ? thawGraphTypeError : value.name === 'RangeError' ? thawNapiRangeErrorConstructor : thawNapiErrorConstructor, error = new ctor(value.__thaw_napi_error__); if (value.name && error.name !== value.name) error.name = value.name; return error; } if (!plain && value.__thaw_napi_symbol__) { var symbol = __thaw_napi_symbol_values.get(value.__thaw_napi_symbol__); if (!symbol) { symbol = value.global ? thawNapiSymbolFor(value.description) : thawNapiSymbolConstructor(value.description); __thaw_napi_symbol_values.set(value.__thaw_napi_symbol__, symbol); __thaw_napi_symbol_ids.set(symbol, value.__thaw_napi_symbol__); } return symbol; } if (!plain && value.__thaw_napi_ref__) { var stored = __thaw_napi_reference_values.get(value.__thaw_napi_ref__); return thawNapiDeref(stored); } if (!plain && value.__thaw_napi_handle__) return __thaw_napi_proxy(value.__thaw_napi_handle__); if (!plain && value.__thaw_napi_promise__) return __thaw_napi_result_value(value); if (!plain && value.__thaw_napi_binary__) { var id = value.__thaw_napi_binary__, stored = __thaw_napi_binary_values.get(id), existing = thawNapiDeref(stored); if (existing) return existing; var binary; if (value.kind === 'ArrayBuffer' || value.kind === 'SharedArrayBuffer') { binary = value.kind === 'SharedArrayBuffer' ? new thawNapiSharedArrayBufferConstructor(value.data.length) : new thawGraphArrayBufferConstructor(value.data.length); thawGraphApply(thawNapiUint8Set, new thawGraphUint8ArrayConstructor(binary), [value.data]); } else { var backing = __thaw_napi_decode(value.buffer, origins, thawGraphApply(thawNapiArrayConcat, path, ['buffer'])); if (value.kind === 'DataView') binary = new thawNapiDataViewConstructor(backing, value.byte_offset, value.length); else { var constructors = thawNapiTypedArrayConstructors, viewCtor = constructors[value.array_type]; if (!viewCtor) throw new thawGraphTypeError('unsupported native typed array kind'); binary = new viewCtor(backing, value.byte_offset, value.length); } } var entry = thawNapiWeakRef ? new thawNapiWeakRef(binary) : binary; __thaw_napi_binary_values.set(id, entry); __thaw_napi_handles.set(binary, id); __thaw_napi_proxy_owners.set(binary, owner); if (__thaw_napi_binary_finalizers) __thaw_napi_binary_finalizers.register(binary, { id: id, entry: entry }); return binary; } if (!plain && value.type === 'Buffer' && thawGraphArrayIsArray(value.data) && thawGraphBufferFrom) return thawGraphBufferFrom(value.data); if (thawGraphArrayIsArray(value)) return thawNapiArrayMap(value, function(child, index) { return __thaw_napi_decode(child, origins, thawGraphApply(thawNapiArrayConcat, path, [index])); }); var decoded = {}; thawNapiArrayEach(thawGraphObjectKeys(value), function(key) { thawGraphDefineProperty(decoded, key, { value: __thaw_napi_decode(value[key], origins, thawGraphApply(thawNapiArrayConcat, path, [key])), enumerable: true, configurable: true, writable: true }); }); return decoded; } return value; };
+    var __thaw_napi_decode = function(value, origins, path) { path = path || []; if (thawGraphArrayIsArray(origins)) origins = thawNapiSafeMap(thawNapiArrayMap(origins, function(entry) { return [thawGraphStringify(entry[0]), entry]; })); var origin = origins && origins.get(thawGraphStringify(path)); if (origin && origin[1] === 'date') return new thawGraphDateConstructor(origin[2] === null ? NaN : origin[2]); if (origin && origin[1] === 'nonfinite') return thawGraphNumber(origin[2]); var plain = origin && origin[1] === 'plain'; if (value && typeof value === 'object') { if (!plain && value['$__thaw_napi_undefined$'] === true) return undefined; if (!plain && thawGraphOwn(value, '__thaw_napi_error__')) { var ctor = value.name === 'TypeError' ? thawGraphTypeError : value.name === 'RangeError' ? thawNapiRangeErrorConstructor : thawNapiErrorConstructor, error = new ctor(value.__thaw_napi_error__); if (value.name && error.name !== value.name) error.name = value.name; return error; } if (!plain && value.__thaw_napi_symbol__) { var stored = __thaw_napi_symbol_values.get(value.__thaw_napi_symbol__), symbol = thawNapiDeref(stored); if (!symbol) { symbol = value.global ? thawNapiSymbolFor(value.description) : thawNapiSymbolConstructor(value.description); __thaw_napi_symbol_store(value.__thaw_napi_symbol__, symbol, value.global); } return symbol; } if (!plain && value.__thaw_napi_ref__) { var stored = __thaw_napi_reference_values.get(value.__thaw_napi_ref__); return thawNapiDeref(stored); } if (!plain && value.__thaw_napi_handle__) return __thaw_napi_proxy(value.__thaw_napi_handle__); if (!plain && value.__thaw_napi_promise__) return __thaw_napi_result_value(value); if (!plain && value.__thaw_napi_binary__) { var id = value.__thaw_napi_binary__, stored = __thaw_napi_binary_values.get(id), existing = thawNapiDeref(stored); if (existing) return existing; var binary; if (value.kind === 'ArrayBuffer' || value.kind === 'SharedArrayBuffer') { binary = value.kind === 'SharedArrayBuffer' ? new thawNapiSharedArrayBufferConstructor(value.data.length) : new thawGraphArrayBufferConstructor(value.data.length); thawGraphApply(thawNapiUint8Set, new thawGraphUint8ArrayConstructor(binary), [value.data]); } else { var backing = __thaw_napi_decode(value.buffer, origins, thawGraphApply(thawNapiArrayConcat, path, ['buffer'])); if (value.kind === 'DataView') binary = new thawNapiDataViewConstructor(backing, value.byte_offset, value.length); else { var constructors = thawNapiTypedArrayConstructors, viewCtor = constructors[value.array_type]; if (!viewCtor) throw new thawGraphTypeError('unsupported native typed array kind'); binary = new viewCtor(backing, value.byte_offset, value.length); } } var entry = thawNapiWeakRef && __thaw_napi_binary_finalizers ? new thawNapiWeakRef(binary) : binary; __thaw_napi_handles.set(binary, id); __thaw_napi_proxy_owners.set(binary, owner); __thaw_napi_handle('renew_handle', id, '', []); try { __thaw_napi_binary_values.set(id, entry); if (__thaw_napi_binary_finalizers) { var held = { id: id, entry: entry, active: true }; try { __thaw_napi_binary_finalizers.register(binary, held); } catch (error) { held.active = false; throw error; } } } catch (error) { if (__thaw_napi_binary_values.get(id) === entry) __thaw_napi_binary_values.delete(id); try { __thaw_napi_handle('release_handle', id, '', []); } catch (_) {} throw error; } return binary; } if (!plain && value.type === 'Buffer' && thawGraphArrayIsArray(value.data) && thawGraphBufferFrom) return thawGraphBufferFrom(value.data); if (thawGraphArrayIsArray(value)) return thawNapiArrayMap(value, function(child, index) { return __thaw_napi_decode(child, origins, thawGraphApply(thawNapiArrayConcat, path, [index])); }); var decoded = {}; thawNapiArrayEach(thawGraphObjectKeys(value), function(key) { thawGraphDefineProperty(decoded, key, { value: __thaw_napi_decode(value[key], origins, thawGraphApply(thawNapiArrayConcat, path, [key])), enumerable: true, configurable: true, writable: true }); }); return decoded; } return value; };
     var __thaw_napi_sync_arguments = function(args) { var seen = thawNapiSafeWeakSet(); var sync = function(value) { if (value === null || typeof value !== 'object' || seen.has(value)) return; seen.add(value); if (true && thawGraphIsView(value) && !(thawGraphBufferIsBuffer && thawGraphBufferIsBuffer(value))) { sync(value.buffer); return; } var handle = __thaw_napi_handles.get(value), id = __thaw_napi_reference_ids.get(value); if (handle && __thaw_napi_owner_metadata && !__thaw_napi_owner_ids.has(thawGraphNapiOwnerOfHandle(thawGraphString(handle)))) throw new thawGraphTypeError('native object belongs to another addon'); if (!handle && !id) return; var response = __thaw_napi_handle(handle ? 'sync_handle' : 'sync_reference', handle || id, '', []), updated = response.value, originMap = thawNapiSafeMap(thawNapiArrayMap((response.origins || []), function(entry) { return [thawGraphStringify(entry[0]), entry]; })); if (true && (thawNapiHasInstance(thawGraphArrayBufferConstructor, value) || (thawNapiSharedArrayBufferConstructor !== null && thawNapiHasInstance(thawNapiSharedArrayBufferConstructor, value)))) { thawGraphApply(thawNapiUint8Set, new thawGraphUint8ArrayConstructor(value), [thawGraphApply(thawNapiArraySlice, updated, [0, value.byteLength])]); return; } if (thawGraphBufferIsBuffer && thawGraphBufferIsBuffer(value)) { for (var i = 0; i < thawNapiMathMin(value.length, updated.length); i++) value[i] = updated[i]; return; } if (handle) return; if (thawGraphArrayIsArray(value)) value.length = updated.length; else thawNapiArrayEach(thawGraphObjectKeys(value), function(key) { if (!thawGraphOwn(updated, key)) { try { delete value[key]; } catch (e) {} } }); thawNapiArrayEach(thawGraphObjectKeys(updated), function(key) { var next = handle ? updated[key] : __thaw_napi_decode(updated[key], originMap, [thawGraphArrayIsArray(updated) ? thawGraphNumber(key) : key]); if (key === '__proto__') thawGraphDefineProperty(value, key, { value: next, writable: true, enumerable: true, configurable: true }); else if (value[key] !== next) { try { value[key] = next; } catch (e) {} } if (next && typeof next === 'object') sync(next); }); }; thawGraphApply(thawGraphArrayForEach, args, [sync]); };
     var __thaw_napi_promises = thawNapiSafeMap();
     var __thaw_napi_promise_finalizers = thawNapiFinalizationRegistry ? thawNapiSafeFinalizer(function(held) { if (__thaw_napi_promises.get(held.id) === held.entry) __thaw_napi_promises.delete(held.id); }) : null;
@@ -693,9 +785,30 @@
     else if (result && thawGraphOwn(result, 'value') && result.kind !== 'method' && operation !== 'sync_reference') result.value = __thaw_napi_result_value(result.value, result.origins);
     return result;
     };
-    var __thaw_napi_symbol_id = function(handle, symbol) { var id = __thaw_napi_symbol_ids.get(symbol), global = thawNapiSymbolKeyFor(symbol), created = __thaw_napi_handle('symbol', handle, global === undefined ? symbol.description || '' : global, [global !== undefined, id || null]); id = created.value; __thaw_napi_symbol_ids.set(symbol, id); __thaw_napi_symbol_values.set(id, symbol); return id; };
+    var __thaw_napi_symbol_id = function(handle, symbol, graph) {
+      var id = __thaw_napi_symbol_ids.get(symbol)
+          || __thaw_napi_global_symbol_ids.get(symbol);
+      var global = thawNapiSymbolKeyFor(symbol);
+      var permanent = global !== undefined || thawNapiWellKnownSymbols.has(symbol);
+      var created = __thaw_napi_handle(graph ? 'symbol_graph' : 'symbol',
+        graph ? owner : handle,
+        global === undefined ? thawGraphApply(thawNapiSymbolDescription, symbol, []) || '' : global,
+        [global !== undefined, id || null, permanent]);
+      id = created.value;
+      try {
+        __thaw_napi_symbol_store(id, symbol, permanent);
+        if (!permanent) __thaw_napi_handle('symbol_pin', owner, id, []);
+        return id;
+      } catch (error) {
+        if (!permanent) {
+          try { __thaw_napi_handle('symbol_rollback', owner, id, []); }
+          catch (_) { /* Preserve the original JS cache/pin failure. */ }
+        }
+        throw error;
+      }
+    };
     var __thaw_napi_key = function(handle, name, operation, args) { return typeof name === 'symbol' ? __thaw_napi_handle(operation + '_symbol', handle, thawGraphString(__thaw_napi_symbol_id(handle, name)), args) : __thaw_napi_handle(operation, handle, thawGraphString(name), args); };
-    var __thaw_napi_proxy = function(handle, prototype) { var stored = __thaw_napi_proxies.get(thawGraphString(handle)), existing = thawNapiDeref(stored); if (existing) return existing; __thaw_napi_handle('renew_handle', handle, '', []); var arrayKind = thawGraphParse(thawGraphNapiBridgeHandle('array_kind_graph', thawGraphString(handle), '', '[]')); if (!arrayKind || thawGraphOwn(arrayKind, '__thaw_error__') || typeof arrayKind.value !== 'boolean') throw new thawGraphTypeError('Invalid native array kind'); var target = arrayKind.value ? [] : thawGraphObjectCreate(prototype || thawNapiObjectPrototype);
+    var __thaw_napi_proxy = function(handle, prototype) { var stored = __thaw_napi_proxies.get(thawGraphString(handle)), existing = thawNapiDeref(stored); if (existing) return existing; var arrayKind = thawGraphParse(thawGraphNapiBridgeHandle('array_kind_graph', thawGraphString(handle), '', '[]')); if (!arrayKind || thawGraphOwn(arrayKind, '__thaw_error__') || typeof arrayKind.value !== 'boolean') throw new thawGraphTypeError('Invalid native array kind'); var target = arrayKind.value ? [] : thawGraphObjectCreate(prototype || thawNapiObjectPrototype);
     var graphProperty = function(operation, values) { var receiver = operation === 'get_graph' ? values[1] : operation === 'set_graph' ? values[2] : undefined, packet = thawGraphEncode(values, 0, true, false, thawGraphForeignReceiver(receiver)), result = thawGraphBridgeReply(thawGraphParse(thawGraphNapiBridgeHandle(operation, thawGraphString(handle), '', packet))); if (!result || thawGraphOwn(result, '__thaw_error__')) throw new thawGraphTypeError(result && result.__thaw_error__ ? result.__thaw_error__ : 'Native property operation failed'); return result.kind === 'graph' && typeof result.value === 'string' ? thawGraphDecodeOwned(result.value) : result.value; };
     var read = function(name, receiver) { return graphProperty('get_graph', [name, receiver]); };
     var syncArrayLength = function() {
@@ -752,9 +865,31 @@
     setPrototypeOf: function(target, next) { if (!thawNapiReflectIsExtensible(target)) return thawNapiReflectGetPrototypeOf(target) === next; var previous = thawNapiReflectGetPrototypeOf(target); if (!thawNapiReflectSetPrototypeOf(target, next)) return false; try { if (graphProperty('set_prototype_graph', [next]) === true) return true; } catch (error) { thawNapiReflectSetPrototypeOf(target, previous); throw error; } thawNapiReflectSetPrototypeOf(target, previous); return false; },
     isExtensible: function(target) { if (graphProperty('is_extensible_graph', []) === false && thawNapiReflectIsExtensible(target) && !thawGraphPreventNativeExtensions(graphProperty, proxy, target)) throw new thawGraphTypeError('Cannot synchronize native integrity'); return thawNapiReflectIsExtensible(target); },
     preventExtensions: function(target) { return thawGraphPreventNativeExtensions(graphProperty, proxy, target); }
-    }); __thaw_napi_handles.set(proxy, handle); __thaw_napi_proxy_owners.set(proxy, owner); var entry = thawNapiWeakRef ? new thawNapiWeakRef(proxy) : proxy, id = thawGraphString(handle); __thaw_napi_proxies.set(id, entry); if (__thaw_napi_proxy_finalizers) __thaw_napi_proxy_finalizers.register(proxy, { id: id, entry: entry }); return proxy; };
+    }); __thaw_napi_handles.set(proxy, handle); __thaw_napi_proxy_owners.set(proxy, owner); var entry = thawNapiWeakRef && __thaw_napi_proxy_finalizers ? new thawNapiWeakRef(proxy) : proxy, id = thawGraphString(handle); __thaw_napi_handle('renew_handle', handle, '', []); try { __thaw_napi_proxies.set(id, entry); if (__thaw_napi_proxy_finalizers) { var held = { id: id, entry: entry, active: true }; try { __thaw_napi_proxy_finalizers.register(proxy, held); } catch (error) { held.active = false; throw error; } } } catch (error) { if (__thaw_napi_proxies.get(id) === entry) __thaw_napi_proxies.delete(id); try { __thaw_napi_handle('release_handle', handle, '', []); } catch (_) {} throw error; } return proxy; };
     const state = {
       proxy: __thaw_napi_proxy,
+      registerSymbol(value) {
+        if (typeof value !== 'symbol') throw new thawGraphTypeError('Expected a JavaScript Symbol');
+        return __thaw_napi_symbol_id(owner, value, true);
+      },
+      symbolForNative(id) {
+        const value = thawNapiSymbolDeref(__thaw_napi_symbol_values.get(id));
+        return typeof value === 'symbol' ? value : undefined;
+      },
+      adoptSymbol(id, value) {
+        __thaw_napi_symbol_store(id, value,
+          thawNapiSymbolKeyFor(value) !== undefined || thawNapiWellKnownSymbols.has(value));
+      },
+      symbolLive(id) {
+        return typeof thawNapiSymbolDeref(__thaw_napi_symbol_values.get(id)) === 'symbol';
+      },
+      symbolPin(id, pin) {
+        if (!pin) { __thaw_napi_symbol_pins.delete(id); return true; }
+        const value = thawNapiSymbolDeref(__thaw_napi_symbol_values.get(id));
+        if (typeof value !== 'symbol') return false;
+        __thaw_napi_symbol_pins.set(id, value);
+        return true;
+      },
       callExport(name, args) {
         const result = thawGraphParse(thawGraphNapiBridgeCall(name,
           thawGraphStringify(__thaw_napi_arguments(args))));
@@ -774,6 +909,41 @@
     thawGraphApply(thawGraphMapSet, thawGraphNapiStates, [owner, state]);
     return state;
   };
+  const thawGraphNapiSymbolState = owner =>
+    thawGraphApply(thawGraphMapGet, thawGraphNapiStates, [owner]);
+  const thawGraphNapiSymbolForNative = id => {
+    const owner = thawGraphNapiOwnerOfHandle(id);
+    const state = owner ? thawGraphNapiState(owner) : null;
+    const existing = state && state.symbolForNative(id);
+    if (existing !== undefined) return existing;
+    const value = globalThis.__thaw_json_host_native_symbol(id);
+    if (state) state.adoptSymbol(id, value);
+    return value;
+  };
+  const thawNapiSymbolRegister = (owner, value) => {
+      const state = thawGraphNapiSymbolState(owner);
+      if (!state) throw new thawGraphTypeError('Unknown native Symbol owner');
+      return state.registerSymbol(value);
+    };
+  const thawNapiSymbolLive = (owner, id) => {
+      const state = thawGraphNapiSymbolState(owner);
+      if (!state) throw new thawGraphTypeError('Unknown native Symbol owner');
+      return state.symbolLive(id);
+    };
+  const thawNapiSymbolPin = (owner, id, pin) => {
+      const state = thawGraphNapiSymbolState(owner);
+      return !!state && state.symbolPin(id, pin);
+    };
+  // Register the owner operations once with Rust userdata, then remove every
+  // bootstrap capability from the realm before user code can run. The native
+  // positive root remains owned by the captured finalizer callback only.
+  globalThis.__thaw_napi_graph_symbol_install(
+    thawNapiSymbolRegister, thawNapiSymbolLive, thawNapiSymbolPin);
+  for (const name of ['__thaw_napi_graph_symbol_install',
+    '__thaw_napi_graph_symbol_pin', '__thaw_napi_graph_symbol_unpin']) {
+    if (!thawNapiBootstrapDeleteProperty(globalThis, name))
+      throw new thawGraphTypeError('Cannot hide native Symbol bridge');
+  }
   const thawGraphNapiProxyForHandle = (handle, prototype) => {
     if (typeof handle !== 'string'
       || !thawGraphApply(thawGraphRegExpTest, thawGraphPositiveDecimalPattern, [handle]))
@@ -887,7 +1057,7 @@
       // and Proxies are not traversed before the replacer reads them.
       if (typeof value === 'bigint') return { bi: thawGraphString(value) };
       if (typeof value === 'symbol') {
-        const nativeID = thawGraphApply(thawGraphMapGet, thawHostNativeSymbolIDs, [value]);
+        const nativeID = thawHostNativeSymbolID(value);
         if (nativeID !== undefined) {
           const resolved = thawGraphParse(thawGraphNapiBridgeHandle('symbol_handle',
             nativeID, '', '[]'));
@@ -1511,8 +1681,9 @@
       }
       if (own(token, 'nsy') && typeof token.nsy === 'string'
         && thawGraphApply(thawGraphRegExpTest, thawGraphPositiveDecimalPattern, [token.nsy])) {
-        const symbol = globalThis.__thaw_json_host_native_symbol(token.nsy);
-        globalThis.__thaw_napi_graph_symbol_pin(token.nsy);
+        const symbol = thawGraphNapiSymbolForNative(token.nsy);
+        if (globalThis.__thaw_json_host_native_symbol_needs_pin(token.nsy))
+          thawHostNativeSymbolPin(token.nsy);
         return symbol;
       }
       if (own(token, 'h') && token.h === 1) return undefined;

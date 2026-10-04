@@ -446,7 +446,7 @@ pub unsafe extern "C" fn napi_coerce_to_string(
         return record_status(env, NAPI_INVALID_ARG);
     }
     if matches!(value_ref(value), Ok(Value::String(_))) {
-        return write_value(out, value);
+        return write_scoped_value(env, out, value);
     }
     let units = match javascript_string_utf16(env, value, &mut HashSet::new(), false) {
         Ok(units) => units,
@@ -472,7 +472,7 @@ pub unsafe extern "C" fn napi_coerce_to_object(
         return record_status(env, NAPI_INVALID_ARG);
     }
     if matches!(value_ref(value), Ok(value) if is_object_value(value)) {
-        return write_value(out, value);
+        return write_scoped_value(env, out, value);
     }
     if matches!(value_ref(value), Ok(Value::Undefined | Value::Null)) {
         return record_status(env, NAPI_INVALID_ARG);
@@ -735,17 +735,24 @@ pub unsafe extern "C" fn napi_get_and_clear_last_exception(
     env: NapiEnv,
     out: *mut NapiValue,
 ) -> NapiStatus {
+    let _dispatch = ForeignCallbackGuard::new();
     if out.is_null() {
         return record_status(env, NAPI_INVALID_ARG);
     }
-    let Ok(env) = env_mut(env) else {
+    let Ok(owner) = env_mut(env) else {
         return NAPI_INVALID_ARG;
     };
-    let value = env
-        .exception
-        .take()
-        .unwrap_or_else(|| env.alloc(Value::Undefined));
-    write_value(out, value)
+    // The exception is the last native root in some callers. Acquire the
+    // recipient handle before clearing it; a weak JS Symbol may need its
+    // original target pinned during that transfer.
+    let value = owner.exception.unwrap_or_else(|| owner.alloc(Value::Undefined));
+    let status = write_scoped_value(env, out, value);
+    if status == NAPI_OK {
+        if let Ok(owner) = env_mut(env) {
+            if owner.exception == Some(value) { owner.exception = None; }
+        }
+    }
+    status
 }
 #[no_mangle]
 pub unsafe extern "C" fn napi_get_version(env: NapiEnv, out: *mut u32) -> NapiStatus {
@@ -876,7 +883,7 @@ pub unsafe extern "C" fn napi_run_script(
     let status = match evaluated {
         Ok(Some(json)) => match serde_json::from_str::<JsonValue>(&json) {
             Ok(json) => match value_from_json(env, &json) {
-                Ok(value) => write_value(result, value),
+                Ok(value) => write_scoped_value(env_ptr, result, value),
                 Err(error) => {
                     env.exception = Some(env.alloc(Value::Error(error)));
                     NAPI_PENDING_EXCEPTION
