@@ -1097,57 +1097,56 @@ fn formatted_value_to_parts(
         return None;
     }
 
-    let spans: Vec<(usize, usize, &'static str)> = positions
-        .iter()
+    formatted_positions_to_parts(text, &positions, target_category, span_category, map)
+}
+
+fn formatted_positions_to_parts(
+    text: &[u16], positions: &[(c_int, c_int, usize, usize)],
+    target_category: c_int, span_category: c_int,
+    map: impl Fn(c_int, &str) -> Option<&'static str>,
+) -> Option<Vec<serde_json::Value>> {
+    if positions.iter().any(|(_, _, begin, end)| begin > end || *end > text.len()) {
+        return None;
+    }
+    let spans: Vec<_> = positions.iter()
         .filter(|(category, _, _, _)| *category == span_category)
         .filter_map(|(_, field, begin, end)| match field {
             0 => Some((*begin, *end, "startRange")),
             1 => Some((*begin, *end, "endRange")),
             _ => None,
-        })
-        .collect();
-    let source_for = |begin: usize, end: usize| {
-        spans
-            .iter()
-            .find(|(span_begin, span_end, _)| *span_begin <= begin && end <= *span_end)
-            .map_or("shared", |(_, _, source)| *source)
-    };
-
-    let mut fields: Vec<&(c_int, c_int, usize, usize)> = positions
-        .iter()
+        }).collect();
+    let fields: Vec<_> = positions.iter()
         .filter(|(category, _, _, _)| *category == target_category)
-        .collect();
-    fields.sort_by_key(|(_, _, begin, _)| *begin);
-
-    let mut parts = Vec::new();
-    let mut cursor = 0_usize;
-    for (_, field, begin, end) in fields {
-        let (begin, end) = (*begin, (*end).min(text.len()));
-        if begin > cursor {
-            parts.push(serde_json::json!({
-                "type": "literal",
-                "value": String::from_utf16_lossy(&text[cursor..begin]),
-                "source": source_for(cursor, begin),
-            }));
-        }
-        if end > begin {
-            let value = String::from_utf16_lossy(&text[begin..end]);
-            if let Some(kind) = map(*field, &value) {
-                parts.push(serde_json::json!({
-                    "type": kind,
-                    "value": value,
-                    "source": source_for(begin, end),
-                }));
-            }
-        }
-        cursor = cursor.max(end);
+        .filter_map(|(_, field, begin, end)| {
+            map(*field, &String::from_utf16_lossy(&text[*begin..*end]))
+                .map(|kind| (kind, *begin, *end))
+        }).collect();
+    // Integer spans can contain grouping spans. Partition at every boundary
+    // and choose the innermost mapped field, rather than emitting overlaps.
+    let mut boundaries = vec![0, text.len()];
+    for (_, _, begin, end) in positions {
+        boundaries.extend([*begin, *end]);
     }
-    if cursor < text.len() {
-        parts.push(serde_json::json!({
-            "type": "literal",
-            "value": String::from_utf16_lossy(&text[cursor..]),
-            "source": source_for(cursor, text.len()),
-        }));
+    boundaries.sort_unstable();
+    boundaries.dedup();
+    let mut parts: Vec<serde_json::Value> = Vec::new();
+    // ponytail: scan ICU's short field list per interval; index it if formats become large.
+    for interval in boundaries.windows(2) {
+        let (begin, end) = (interval[0], interval[1]);
+        let kind = fields.iter().filter(|(_, start, stop)| *start <= begin && end <= *stop)
+            .min_by_key(|(_, start, stop)| *stop - *start)
+            .map_or("literal", |(kind, _, _)| *kind);
+        let source = spans.iter().find(|(start, stop, _)| *start <= begin && end <= *stop)
+            .map_or("shared", |(_, _, source)| *source);
+        let value = String::from_utf16_lossy(&text[begin..end]);
+        if let Some(previous) = parts.last_mut().filter(|previous|
+            previous["type"].as_str() == Some(kind) && previous["source"].as_str() == Some(source))
+        {
+            let combined = format!("{}{}", previous["value"].as_str().unwrap(), value);
+            previous["value"] = serde_json::Value::String(combined);
+        } else {
+            parts.push(serde_json::json!({"type":kind, "value":value, "source":source}));
+        }
     }
     Some(parts)
 }
@@ -1360,6 +1359,24 @@ fn intl_number_range_parts_icu4c_inner(
 #[cfg(test)]
 mod parts_regression_tests {
     use super::*;
+
+    #[test]
+    fn nested_range_fields_partition_each_character_once() {
+        let text = utf16("1,234–5,678");
+        let fields = [(2, 0, 0, 5), (2, 6, 1, 2), (2, 0, 6, 11),
+            (2, 6, 7, 8), (4098, 0, 0, 5), (4098, 1, 6, 11)];
+        let parts = formatted_positions_to_parts(&text, &fields, 2, 4098, number_field_type).unwrap();
+        let joined: String = parts.iter().map(|part| part["value"].as_str().unwrap()).collect();
+        assert_eq!(joined, "1,234–5,678");
+        let kinds: Vec<_> = parts.iter().map(|part| part["type"].as_str().unwrap()).collect();
+        assert_eq!(kinds, ["integer", "group", "integer", "literal", "integer", "group", "integer"]);
+        assert_eq!(parts[0]["source"], "startRange");
+        assert_eq!(parts[3]["source"], "shared");
+        assert_eq!(parts[6]["source"], "endRange");
+        assert!(formatted_positions_to_parts(&text, &[(2, 0, 0, 99)], 2, 4098,
+            number_field_type).is_none());
+    }
+
 
     #[test]
     fn unspecified_hour_cycle_uses_locale_skeleton() {
