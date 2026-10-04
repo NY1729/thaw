@@ -44,6 +44,24 @@ fn contains_js_value(ty: &HirType) -> bool {
 }
 
 impl<'a> FnLowerer<'a> {
+    fn lower_array_from_mapper_call(
+        &mut self, callback_name: &str, params: &[HirType],
+        returned: &HirType, available: &[HirExpr], this_name: Option<&str>,
+    ) -> Result<HirExpr, String> {
+        let args = available[..params.len()].iter().cloned().zip(params)
+            .map(|(value, declared)| self.coerce_primitive_array_argument(value, declared))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(if let Some(this_name) = this_name {
+            HirExpr::FunctionCallWithThis(
+                Box::new(HirExpr::Var(callback_name.into())),
+                Box::new(HirExpr::Var(this_name.into())),
+                args, params.to_vec(), returned.clone(),
+            )
+        } else {
+            HirExpr::Call(Box::new(HirExpr::Var(callback_name.into())), args)
+        })
+    }
+
     // A fixed layout can contain a hidden native marker or an ordinary user
     // field with exactly the same name. Query the bound receiver before each
     // read, then append only visible fields to a runtime-length array.
