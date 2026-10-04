@@ -627,6 +627,34 @@ fn lowers_fixed_layout_destructuring_assignments() {
 }
 
 #[test]
+fn tuple_rest_past_last_element_is_empty_for_bindings_and_assignments() {
+    let program = lower(
+        r#"function main(value: [number]): void {
+            let [first, , ...bound] = value;
+            let assigned: number[] = [9];
+            [first, , ...assigned] = value;
+            console.log(bound.length, assigned.length);
+        }"#,
+    );
+    let main = program.functions.iter().find(|function| function.name == "main").unwrap();
+    let source = format!("{:?}", main.body);
+    assert!(source.contains("ArrayLit([])"), "empty tuple rest must not index beyond the tuple: {source}");
+}
+
+#[test]
+fn union_tuple_rest_past_short_member_is_empty() {
+    let program = lower(
+        r#"function main(value: [number] | [number, number]): void {
+            const [first, , ...tail] = value;
+            console.log(first, tail.length);
+        }"#,
+    );
+    let main = program.functions.iter().find(|function| function.name == "main").unwrap();
+    let source = format!("{:?}", main.body);
+    assert!(source.contains("ArrayLit([])"), "short union member must yield an empty rest: {source}");
+}
+
+#[test]
 fn lowers_for_of_destructuring_bindings_and_assignment_heads() {
     let program = lower(
         r#"function main(): void {
