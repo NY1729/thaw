@@ -2501,6 +2501,11 @@ impl NumericProgram {
                     if depth == 0 {
                         return None;
                     }
+                    emit_unary_call(
+                        &mut code,
+                        string_to_well_formed as *const () as u64,
+                        depth - 1,
+                    );
                 }
                 NumericValue::UnaryMath(operation) => {
                     if depth == 0 {
