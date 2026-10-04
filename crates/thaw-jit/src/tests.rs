@@ -1001,6 +1001,18 @@ mod tests {
         let output = output.value.to_bits() as usize as *mut c_char;
         assert_eq!(unsafe { CStr::from_ptr(output) }.to_bytes(), &[0xed, 0xa0, 0x80, 0xed, 0xa0, 0x80]);
         unsafe { libc::free(output.cast()) };
+        let raw_case = CString::new(vec![0xed, 0xa0, 0x80, b'A', 0xc3, 0x9f, 0xed, 0xb0, 0x80]).unwrap();
+        for (operation, expected) in [
+            ("tolowercase", &[0xed, 0xa0, 0x80, b'a', 0xc3, 0x9f, 0xed, 0xb0, 0x80][..]),
+            ("touppercase", &[0xed, 0xa0, 0x80, b'A', b'S', b'S', 0xed, 0xb0, 0x80][..]),
+        ] {
+            let symbol = CString::new(format!("expr:s0,{operation}:{operation}")).unwrap();
+            let result = call(&symbol, &[f64::from_bits(raw_case.as_ptr() as usize as u64)]);
+            assert!(result.error.is_null());
+            let result = result.value.to_bits() as usize as *mut c_char;
+            assert_eq!(unsafe { CStr::from_ptr(result) }.to_bytes(), expected);
+            unsafe { libc::free(result.cast()) };
+        }
         let sliced = CString::new("😀abcd").unwrap();
         for (operation, start, expected) in [
             ("slice", -2.0, "cd"),

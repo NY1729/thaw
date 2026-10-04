@@ -1183,8 +1183,11 @@ extern "C" fn number_to_exponential_shortest(value: f64) -> f64 {
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 extern "C" fn string_to_lower_case(value: f64) -> f64 {
     unsafe {
-        string_argument(value).map_or(f64::from_bits(0), |value| {
-            arena_string(value.to_lowercase())
+        string_utf16_argument(value).map_or(f64::from_bits(0), |units| {
+            let mapped = thaw_arena::utf16_map_segments(&units, |text, output| {
+                output.extend(text.to_lowercase().encode_utf16());
+            });
+            arena_string_bytes(&thaw_arena::wtf8_encode_utf16(&mapped))
         })
     }
 }
@@ -1192,8 +1195,11 @@ extern "C" fn string_to_lower_case(value: f64) -> f64 {
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 extern "C" fn string_to_upper_case(value: f64) -> f64 {
     unsafe {
-        string_argument(value).map_or(f64::from_bits(0), |value| {
-            arena_string(value.to_uppercase())
+        string_utf16_argument(value).map_or(f64::from_bits(0), |units| {
+            let mapped = thaw_arena::utf16_map_segments(&units, |text, output| {
+                output.extend(text.to_uppercase().encode_utf16());
+            });
+            arena_string_bytes(&thaw_arena::wtf8_encode_utf16(&mapped))
         })
     }
 }

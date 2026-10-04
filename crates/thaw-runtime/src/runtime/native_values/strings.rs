@@ -53,28 +53,15 @@ unsafe fn wtf8_bytes<'a>(value: *const c_char) -> &'a [u8] {
 /// `value` must be non-null and reference a NUL-terminated WTF-8 string.
 unsafe fn wtf8_case_map(value: *const c_char, upper: bool, language: &icu_locale_core::LanguageIdentifier) -> *const c_char {
     let units = wtf8_decode_utf16(unsafe { wtf8_bytes(value) });
-    let mut out: Vec<u16> = Vec::with_capacity(units.len());
     let mapper = icu_casemap::CaseMapperBorrowed::new();
-    let mut segment = String::new();
-    let flush = |segment: &mut String, out: &mut Vec<u16>| {
+    let out = thaw_arena::utf16_map_segments(&units, |segment, output| {
         let mapped = if upper {
             mapper.uppercase_to_string(segment, language)
         } else {
             mapper.lowercase_to_string(segment, language)
         };
-        out.extend(mapped.encode_utf16());
-        segment.clear();
-    };
-    for character in char::decode_utf16(units) {
-        match character {
-            Ok(character) => segment.push(character),
-            Err(error) => {
-                flush(&mut segment, &mut out);
-                out.push(error.unpaired_surrogate());
-            }
-        }
-    }
-    flush(&mut segment, &mut out);
+        output.extend(mapped.encode_utf16());
+    });
     arena_wtf8(&wtf8_encode_utf16(&out)).map_or(std::ptr::null(), |value| value.cast())
 }
 
