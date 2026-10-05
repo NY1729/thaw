@@ -19,6 +19,21 @@ impl<'a> FnLowerer<'a> {
         // expression, which would otherwise see and wrongly consume a
         // hint meant for its parent. See `lower_expr_with_expected_type`.
         let expected_return_hint = self.expected_return_hint.take();
+        if matches!(&call.callee, Callee::Expr(callee)
+            if matches!(callee.as_ref(), Expr::Ident(name) if name.sym == "@@thaw_class_key_reference_error")) {
+            let [message] = call.args.as_slice() else {
+                return Err("internal class key error needs one message".into());
+            };
+            if message.spread.is_some() {
+                return Err("internal class key error cannot spread its message".into());
+            }
+            let message = self.lower_expr(&message.expr)?;
+            self.expect_type(&HirType::Str, &message, "class key error message")?;
+            return Ok(HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_error_frame".into())),
+                vec![HirExpr::Lit(HirLit::Str("ReferenceError".into())), message],
+            ));
+        }
         if matches!(call.callee, Callee::Super(_)) {
             let (mut symbol, _base_type, base_name) = self
                 .super_initializer
