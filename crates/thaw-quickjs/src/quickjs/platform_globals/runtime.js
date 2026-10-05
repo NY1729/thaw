@@ -2599,7 +2599,10 @@
       const absolute = path.startsWith('/'), parts = [];
       path.split('/').forEach(part => {
         if (!part || part === '.') return;
-        if (part === '..') parts.pop(); else parts.push(part);
+        if (part === '..') {
+          if (parts.length && parts[parts.length - 1] !== '..') parts.pop();
+          else if (!absolute) parts.push(part);
+        } else parts.push(part);
       });
       return (absolute ? '/' : '') + parts.join('/');
     };
