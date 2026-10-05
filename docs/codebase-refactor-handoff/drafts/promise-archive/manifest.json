@@ -1,0 +1,325 @@
+{
+  "status": "ARCHIVED_HOLD_NOT_APPLICABLE",
+  "files": [
+    {
+      "path": "drafts/promise-archive/creator466/STATUS.md",
+      "sha256": "59ec72cf8e11fa6471de718740ee02b144eca36ffdb39a9bf9e4aef9ae5f5a08"
+    },
+    {
+      "path": "drafts/promise-archive/creator466/base/crates/thaw-arena/src/lib.rs",
+      "sha256": "eeb6f85309d710cfe2b16e2ef4024ed2402e9ea067f9dfced78dde5572bcb21f"
+    },
+    {
+      "path": "drafts/promise-archive/creator466/base/crates/thaw-llvm/src/hir_codegen/async_frames/codegen.rs",
+      "sha256": "183e94d9b5c7ecd48d437222822fd82eeb3ec8ddcde592b33b47d9edb63f9bad"
+    },
+    {
+      "path": "drafts/promise-archive/creator466/base/crates/thaw-llvm/src/hir_codegen/dynamic_host/callbacks.rs",
+      "sha256": "44198d481acf4840c4159d726bd15ea51e5d38b7b7e714510a24efa6da161b29"
+    },
+    {
+      "path": "drafts/promise-archive/creator466/base/crates/thaw-llvm/src/hir_codegen/entrypoints.rs",
+      "sha256": "9589b4511b21260fb4bdc0c8dc99d19229be7ddf83efbf90cf44c510337d31dc"
+    },
+    {
+      "path": "drafts/promise-archive/creator466/base/crates/thaw-llvm/src/hir_codegen/ffi_calls.rs",
+      "sha256": "a6f30a5c885c1fb85885820d78dc0ef5c5d6b405c0fee194d95b544d2bca5095"
+    },
+    {
+      "path": "drafts/promise-archive/creator466/base/crates/thaw-llvm/src/hir_codegen/functions.rs",
+      "sha256": "dc6e44069d2231f4d6234eddd7a0568603dbecee51d2b15093ccc1ad07b43321"
+    },
+    {
+      "path": "drafts/promise-archive/creator466/base/crates/thaw-llvm/src/hir_codegen/invocations/closure_calls.rs",
+      "sha256": "9fb0b8fe94d9580f8c19acb560713b18d5da79300d0b8f3c65e541c3be83548d"
+    },
+    {
+      "path": "drafts/promise-archive/creator466/base/crates/thaw-llvm/src/hir_codegen/promises.rs",
+      "sha256": "124be01f4011beb1944f49bbf13de55a34b800f0f679f36ab7858fd0e7c7895f"
+    },
+    {
+      "path": "drafts/promise-archive/creator466/base/crates/thaw-llvm/src/hir_codegen/runtime_declarations.rs",
+      "sha256": "e35b524704a1a122c4acbfc4435e8e8156d1dbc58bff56ec49b9183a074a5d7b"
+    },
+    {
+      "path": "drafts/promise-archive/creator466/base/crates/thaw-llvm/src/hir_codegen/statements.rs",
+      "sha256": "029524fb8ad306f7a775b789d85500a25fec7b909e46831f402c6f367abcc821"
+    },
+    {
+      "path": "drafts/promise-archive/creator466/base/crates/thaw-llvm/src/hir_codegen/tests/async/promises.rs",
+      "sha256": "4ea2e8e3ff528a8d94425923f9161f88fe49fde00ceb9533d53c8649a8b12c96"
+    },
+    {
+      "path": "drafts/promise-archive/creator466/base/crates/thaw-llvm/src/hir_codegen/values/closures.rs",
+      "sha256": "45aa20374de0d0f6b8a42b89e90f139a051c52c10ebfa0a6d68cccde3644b2db"
+    },
+    {
+      "path": "drafts/promise-archive/creator466/base/crates/thaw-llvm/src/hir_codegen/values/expressions.rs",
+      "sha256": "93752554f0a4b3b6c2f43f30ee51b20443a815f09b0fd50154dd2432d2375305"
+    },
+    {
+      "path": "drafts/promise-archive/creator466/base/crates/thaw-llvm/src/hir_codegen.rs",
+      "sha256": "a11c6138183124dd03b2de25b462e62fe48fae9b0712df234dcfd58e7ef0cd92"
+    },
+    {
+      "path": "drafts/promise-archive/creator466/base/crates/thaw-runtime/src/lib.rs",
+      "sha256": "56eece68a1b383436f0e137dfa6c1ed268362a543685504a61b7a4d356c788d0"
+    },
+    {
+      "path": "drafts/promise-archive/creator466/base/crates/thaw-runtime/src/runtime/lambda.rs",
+      "sha256": "aeafb9105f5697e3b5c15e22a5a1aa7f455d2168aea3eec26861fb86bcc2a058"
+    },
+    {
+      "path": "drafts/promise-archive/creator466/base/crates/thaw-runtime/src/runtime/promises.rs",
+      "sha256": "bedf6cdafa3a385b318e0789456a69216a334d1413088fd399d97ceeb6a0d191"
+    },
+    {
+      "path": "drafts/promise-archive/creator466/base/crates/thaw-runtime/src/tests.rs",
+      "sha256": "d1f2a2d0fa8518603c8bdc7202679af0876266562b2865f2572534d6376f35d5"
+    },
+    {
+      "path": "drafts/promise-archive/creator466/base/crates/thaw-std/src/http.rs",
+      "sha256": "4ad52d51d87666b1a910477daa3c8b7a2c3b4b9825198a1b1495242aba1cbddf"
+    },
+    {
+      "path": "drafts/promise-archive/creator466/base/crates/thaw-std/src/json.rs",
+      "sha256": "ed7082abfa44e7a9ff8afb8ab1d7db1dd23a82a8572b4109d8ab999aefcfb189"
+    },
+    {
+      "path": "drafts/promise-archive/creator466/candidate/crates/thaw-arena/src/lib.rs",
+      "sha256": "b29c20caac4d842c6285aae188cb0e025d5727b7335acafc7678c4a5a075d266"
+    },
+    {
+      "path": "drafts/promise-archive/creator466/candidate/crates/thaw-llvm/src/hir_codegen/async_frames/codegen.rs",
+      "sha256": "9549236ee92bf7a16d2a0844b28751b00bf1da12c975fba603c6b0fd6eb8dc56"
+    },
+    {
+      "path": "drafts/promise-archive/creator466/candidate/crates/thaw-llvm/src/hir_codegen/dynamic_host/callbacks.rs",
+      "sha256": "34a4aff84ae5718845b297d03e6e78749e62223de87f53afdea06a176326310a"
+    },
+    {
+      "path": "drafts/promise-archive/creator466/candidate/crates/thaw-llvm/src/hir_codegen/entrypoints.rs",
+      "sha256": "1a01fb2e2e38d41e8082020b6e2376171cf595f2c486c565ace500d17e62a8d5"
+    },
+    {
+      "path": "drafts/promise-archive/creator466/candidate/crates/thaw-llvm/src/hir_codegen/ffi_calls.rs",
+      "sha256": "01e18a116f05f5593c42b35fb47ff25edb2dc465aa2de68ae3e982f782b30ca4"
+    },
+    {
+      "path": "drafts/promise-archive/creator466/candidate/crates/thaw-llvm/src/hir_codegen/functions.rs",
+      "sha256": "d2eacee3dd8b6492e90876850e7a11766d468624c71c10c61ffc21826a5a3119"
+    },
+    {
+      "path": "drafts/promise-archive/creator466/candidate/crates/thaw-llvm/src/hir_codegen/invocations/closure_calls.rs",
+      "sha256": "f14b0974b3aa78b14971f00084f9bec78d0d9a1ff1d740004c0eca2b6ab988ba"
+    },
+    {
+      "path": "drafts/promise-archive/creator466/candidate/crates/thaw-llvm/src/hir_codegen/promises.rs",
+      "sha256": "9889787d0aa0e46adf69619ca3de9aeb2573d83cfd043b08ecd4edc9a8bc2292"
+    },
+    {
+      "path": "drafts/promise-archive/creator466/candidate/crates/thaw-llvm/src/hir_codegen/runtime_declarations.rs",
+      "sha256": "a5818d1e376fb4b92b7f0c99e8e49f020798fb7ae83da51436753eb124e346b0"
+    },
+    {
+      "path": "drafts/promise-archive/creator466/candidate/crates/thaw-llvm/src/hir_codegen/statements.rs",
+      "sha256": "0a510e139793e5496f6c864e50be0628d88dd92852e7566e1f8ee8acd1d51ea2"
+    },
+    {
+      "path": "drafts/promise-archive/creator466/candidate/crates/thaw-llvm/src/hir_codegen/tests/async/promises.rs",
+      "sha256": "563a86f2e7e6694718a20f1e007fd9cb8402cac8335c480e321602ad99167609"
+    },
+    {
+      "path": "drafts/promise-archive/creator466/candidate/crates/thaw-llvm/src/hir_codegen/values/closures.rs",
+      "sha256": "d3f35a91585fd7f6d9bdb9d39f1663fa214625164a7b4caa0acc8127f3596512"
+    },
+    {
+      "path": "drafts/promise-archive/creator466/candidate/crates/thaw-llvm/src/hir_codegen/values/expressions.rs",
+      "sha256": "a775509219941220d55f4578e786580733239bf96de42cdc2614b11c80d054d1"
+    },
+    {
+      "path": "drafts/promise-archive/creator466/candidate/crates/thaw-llvm/src/hir_codegen.rs",
+      "sha256": "84496b88e0c0ed574bb77ef3f482021c9d97edbf7ecc369a3a77f3d9d3e3d00d"
+    },
+    {
+      "path": "drafts/promise-archive/creator466/candidate/crates/thaw-runtime/src/lib.rs",
+      "sha256": "93bb0b3085bf58b5cffd6a9e96efdc25ae96ef4efdd50c4a8a7d7c8d9eb8373f"
+    },
+    {
+      "path": "drafts/promise-archive/creator466/candidate/crates/thaw-runtime/src/runtime/lambda.rs",
+      "sha256": "816075935101505e76506798ce5d50109384aa56f7c81f5bef08f9f35ad1e3db"
+    },
+    {
+      "path": "drafts/promise-archive/creator466/candidate/crates/thaw-runtime/src/runtime/promises.rs",
+      "sha256": "f30996377b66ebdb7dd4b319d9440d05d7994421eede3127a9ff10188b603660"
+    },
+    {
+      "path": "drafts/promise-archive/creator466/candidate/crates/thaw-runtime/src/tests.rs",
+      "sha256": "a7368a721926b5c7f00ef67f48bf7cc24584c3e16d3aae31e9db56c4a404c614"
+    },
+    {
+      "path": "drafts/promise-archive/creator466/candidate/crates/thaw-std/src/http.rs",
+      "sha256": "24bd7647921cc0bc8052ea5a427c6cf3204edf65fdb627d198cfee241f391470"
+    },
+    {
+      "path": "drafts/promise-archive/creator466/candidate/crates/thaw-std/src/json.rs",
+      "sha256": "c1f0da4e01d7f09742ea3f21b68be883f5b05ccfb3acb6cc1f3322577b832ad2"
+    },
+    {
+      "path": "drafts/promise-archive/creator466/capture-registration-and-status0-head476.md",
+      "sha256": "a8d6dda9ae8d90b85b8263540a68e0ec7bf407b2402bceb03625978a61653ef4"
+    },
+    {
+      "path": "drafts/promise-archive/creator466/checkpoint-discarded-closure-cells-head472.md",
+      "sha256": "dd26d771ba6f18514cefd3e422e39dc35f2abb044c703551f982946a96277230"
+    },
+    {
+      "path": "drafts/promise-archive/creator466/checkpoint-generic-drain-and-replacement-head472.md",
+      "sha256": "3021b55990c0c5c39a5cf6ce2a354b0bf77ca9406f98680ea03617e2fe90ce39"
+    },
+    {
+      "path": "drafts/promise-archive/creator466/discarded-closure-ticket-owner-audit-head472.md",
+      "sha256": "07377bb3b3d87c98a8bea7716dd57db174e7cf7ee22185b0d4306ddc74f9e238"
+    },
+    {
+      "path": "drafts/promise-archive/successor/crates/thaw-arena/src/lib.rs",
+      "sha256": "b29c20caac4d842c6285aae188cb0e025d5727b7335acafc7678c4a5a075d266"
+    },
+    {
+      "path": "drafts/promise-archive/successor/crates/thaw-llvm/src/hir_codegen/async_frames/codegen.rs",
+      "sha256": "35439e892cdd2a558e09d0ab72afcf23e9e9745ea2d5b2f16acbadbf9a616b59"
+    },
+    {
+      "path": "drafts/promise-archive/successor/crates/thaw-llvm/src/hir_codegen/dynamic_host/callbacks.rs",
+      "sha256": "34a4aff84ae5718845b297d03e6e78749e62223de87f53afdea06a176326310a"
+    },
+    {
+      "path": "drafts/promise-archive/successor/crates/thaw-llvm/src/hir_codegen/entrypoints.rs",
+      "sha256": "1a01fb2e2e38d41e8082020b6e2376171cf595f2c486c565ace500d17e62a8d5"
+    },
+    {
+      "path": "drafts/promise-archive/successor/crates/thaw-llvm/src/hir_codegen/ffi_calls.rs",
+      "sha256": "01e18a116f05f5593c42b35fb47ff25edb2dc465aa2de68ae3e982f782b30ca4"
+    },
+    {
+      "path": "drafts/promise-archive/successor/crates/thaw-llvm/src/hir_codegen/functions.rs",
+      "sha256": "d2eacee3dd8b6492e90876850e7a11766d468624c71c10c61ffc21826a5a3119"
+    },
+    {
+      "path": "drafts/promise-archive/successor/crates/thaw-llvm/src/hir_codegen/invocations/closure_calls.rs",
+      "sha256": "f14b0974b3aa78b14971f00084f9bec78d0d9a1ff1d740004c0eca2b6ab988ba"
+    },
+    {
+      "path": "drafts/promise-archive/successor/crates/thaw-llvm/src/hir_codegen/promises.rs",
+      "sha256": "dc5b58d79eb24a41f1585a99709ecb1cdf72876d01ac5ff3ad405639176a54cd"
+    },
+    {
+      "path": "drafts/promise-archive/successor/crates/thaw-llvm/src/hir_codegen/runtime_declarations.rs",
+      "sha256": "8d3fe0ce1b42d31dc4fd53cffbe33142f7f9712f583ce4bb49cc391c08a34d2e"
+    },
+    {
+      "path": "drafts/promise-archive/successor/crates/thaw-llvm/src/hir_codegen/statements.rs",
+      "sha256": "0a510e139793e5496f6c864e50be0628d88dd92852e7566e1f8ee8acd1d51ea2"
+    },
+    {
+      "path": "drafts/promise-archive/successor/crates/thaw-llvm/src/hir_codegen/tests/async/promises.rs",
+      "sha256": "8a14634f03b16946ddd19f8b41993567e969cc788133bf9ccc36e5011e935227"
+    },
+    {
+      "path": "drafts/promise-archive/successor/crates/thaw-llvm/src/hir_codegen/values/closures.rs",
+      "sha256": "d3f35a91585fd7f6d9bdb9d39f1663fa214625164a7b4caa0acc8127f3596512"
+    },
+    {
+      "path": "drafts/promise-archive/successor/crates/thaw-llvm/src/hir_codegen/values/expressions.rs",
+      "sha256": "a775509219941220d55f4578e786580733239bf96de42cdc2614b11c80d054d1"
+    },
+    {
+      "path": "drafts/promise-archive/successor/crates/thaw-llvm/src/hir_codegen.rs",
+      "sha256": "70087222cdd7fcae09c7b80eada518481ddd70c8db67bed9730a9187b053d1d8"
+    },
+    {
+      "path": "drafts/promise-archive/successor/crates/thaw-runtime/src/lib.rs",
+      "sha256": "93bb0b3085bf58b5cffd6a9e96efdc25ae96ef4efdd50c4a8a7d7c8d9eb8373f"
+    },
+    {
+      "path": "drafts/promise-archive/successor/crates/thaw-runtime/src/runtime/abi.rs",
+      "sha256": "1fad4bba5a8c2d4a1fd6bdbfe2877fc27092fb63064752c410c82a3df0bd6381"
+    },
+    {
+      "path": "drafts/promise-archive/successor/crates/thaw-runtime/src/runtime/lambda.rs",
+      "sha256": "816075935101505e76506798ce5d50109384aa56f7c81f5bef08f9f35ad1e3db"
+    },
+    {
+      "path": "drafts/promise-archive/successor/crates/thaw-runtime/src/runtime/promises.rs",
+      "sha256": "5e3b796833a445bcd550d70b08e92868c80e4dea960b7a2416c53ed20ceaa87e"
+    },
+    {
+      "path": "drafts/promise-archive/successor/crates/thaw-runtime/src/tests.rs",
+      "sha256": "20ab322f406c58b70f9804921a87b968bafd828a4eb998f28cf316f3c0072943"
+    },
+    {
+      "path": "drafts/promise-archive/successor/crates/thaw-std/src/http.rs",
+      "sha256": "24bd7647921cc0bc8052ea5a427c6cf3204edf65fdb627d198cfee241f391470"
+    },
+    {
+      "path": "drafts/promise-archive/successor/crates/thaw-std/src/json.rs",
+      "sha256": "c1f0da4e01d7f09742ea3f21b68be883f5b05ccfb3acb6cc1f3322577b832ad2"
+    },
+    {
+      "path": "drafts/promise-archive/partial-rebase489/base/crates/thaw-llvm/src/hir_codegen/async_frames/codegen.rs",
+      "sha256": "6a97cd617c4ad1e004a79c6f3330520af81a1ec6099adbf3b072f2ab13d8df6b"
+    },
+    {
+      "path": "drafts/promise-archive/partial-rebase489/base/crates/thaw-llvm/src/hir_codegen/promises.rs",
+      "sha256": "b9c5d7af105cc529d56f7f2adb149cb4c57f3269aaedf63e92fb3333926a2eca"
+    },
+    {
+      "path": "drafts/promise-archive/partial-rebase489/base/crates/thaw-llvm/src/hir_codegen/runtime_declarations.rs",
+      "sha256": "0e5d46b2fed0f0844faf4ce5bd5122ad4514c2a9bc16d7835368858e28910d97"
+    },
+    {
+      "path": "drafts/promise-archive/partial-rebase489/base/crates/thaw-llvm/src/hir_codegen/tests/async/promises.rs",
+      "sha256": "4ea2e8e3ff528a8d94425923f9161f88fe49fde00ceb9533d53c8649a8b12c96"
+    },
+    {
+      "path": "drafts/promise-archive/partial-rebase489/base/crates/thaw-llvm/src/hir_codegen.rs",
+      "sha256": "d4d3c8fb430cbe43a39c34da8d31e5b57e6173afc9f6dd081dd5c108ce2746d3"
+    },
+    {
+      "path": "drafts/promise-archive/partial-rebase489/base/crates/thaw-runtime/src/runtime/promises.rs",
+      "sha256": "ff4d08d09ba01b707d210ed6103e485ff8c847ca980868312b8caddb87037f4b"
+    },
+    {
+      "path": "drafts/promise-archive/partial-rebase489/base/crates/thaw-runtime/src/tests.rs",
+      "sha256": "308b36865f3324e7d716faf79d1f09a742f412e28e7ed7441ee743cee4f9567e"
+    },
+    {
+      "path": "drafts/promise-archive/partial-rebase489/merged/crates/thaw-llvm/src/hir_codegen/async_frames/codegen.rs",
+      "sha256": "f37b73c33ffdbe93ec0a3e0db7d51e111cedd501d3b39bac273a4e76ebd2fcd9"
+    },
+    {
+      "path": "drafts/promise-archive/partial-rebase489/merged/crates/thaw-llvm/src/hir_codegen/promises.rs",
+      "sha256": "4c46d27e4b06ac89cfc753d21c98d3100f171a37be1c17e29718b350135b4a19"
+    },
+    {
+      "path": "drafts/promise-archive/partial-rebase489/merged/crates/thaw-llvm/src/hir_codegen/runtime_declarations.rs",
+      "sha256": "b3c6c111c1aed1b699f8f288124bf41f7593c65ffedb525ba4b443f5b9b08062"
+    },
+    {
+      "path": "drafts/promise-archive/partial-rebase489/merged/crates/thaw-llvm/src/hir_codegen/tests/async/promises.rs",
+      "sha256": "57ab91c85ae3c024f2ac63ef648fb28df6848db4e04b6a23dba613f6a9e7409f"
+    },
+    {
+      "path": "drafts/promise-archive/partial-rebase489/merged/crates/thaw-llvm/src/hir_codegen.rs",
+      "sha256": "7bde80731eb138aeeea74f4e18c31a634c60cc6f47dfdd46319b3b9084a8252c"
+    },
+    {
+      "path": "drafts/promise-archive/partial-rebase489/merged/crates/thaw-runtime/src/runtime/promises.rs",
+      "sha256": "11ce4a490e22385ce96be1e4982219c3e5934328c59cd987b8d51e6bdd3f39c3"
+    },
+    {
+      "path": "drafts/promise-archive/partial-rebase489/merged/crates/thaw-runtime/src/tests.rs",
+      "sha256": "f93e051f9795f968006790fcd79175afdd3258df4787049fe241b62165f451a7"
+    }
+  ]
+}

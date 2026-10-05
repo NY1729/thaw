@@ -1,0 +1,3598 @@
+impl<'ctx> HirCompiler<'ctx> {
+    /// Declares libc's `puts`/`printf` (the Phase 0 `console.log` bootstrap)
+    /// and thaw-arena's `thaw_arena_alloc` (backing Phase 1 arrays).
+    fn declare_runtime_builtins(&self) {
+        let i8_ptr = self.context.ptr_type(AddressSpace::default());
+        let i8_type = self.context.i8_type();
+        let i32_type = self.context.i32_type();
+        let i64_type = self.context.i64_type();
+
+        let puts_type = i32_type.fn_type(&[i8_ptr.into()], false);
+        self.module
+            .add_function("puts", puts_type, Some(Linkage::External));
+
+        let printf_type = i32_type.fn_type(&[i8_ptr.into()], true);
+        self.module
+            .add_function("printf", printf_type, Some(Linkage::External));
+        let dprintf_type = i32_type.fn_type(&[i32_type.into(), i8_ptr.into()], true);
+        self.module
+            .add_function("dprintf", dprintf_type, Some(Linkage::External));
+        let pow_type = self.context.f64_type().fn_type(
+            &[
+                self.context.f64_type().into(),
+                self.context.f64_type().into(),
+            ],
+            false,
+        );
+        self.module
+            .add_function("pow", pow_type, Some(Linkage::External));
+        let unary_f64_type = self
+            .context
+            .f64_type()
+            .fn_type(&[self.context.f64_type().into()], false);
+        for name in [
+            "tan", "asin", "acos", "atan", "sinh", "cosh", "tanh", "cbrt", "acosh", "asinh",
+            "atanh", "expm1", "log1p",
+        ] {
+            self.module
+                .add_function(name, unary_f64_type, Some(Linkage::External));
+        }
+        self.module.add_function(
+            "thaw_error_suppress",
+            i8_ptr.fn_type(&[i8_ptr.into(), i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_i64_to_string",
+            i8_ptr.fn_type(&[i64_type.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_i64_to_bigint_string",
+            i8_ptr.fn_type(&[i64_type.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_i64_from_number",
+            i64_type.fn_type(&[self.context.f64_type().into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_i64_from_string",
+            i64_type.fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        for name in ["thaw_i64_as_int_n", "thaw_i64_as_uint_n"] {
+            self.module.add_function(
+                name,
+                i64_type.fn_type(&[i64_type.into(), self.context.f64_type().into()], false),
+                Some(Linkage::External),
+            );
+        }
+        self.module.add_function(
+            "thaw_i64_to_radix_string",
+            i8_ptr.fn_type(&[i64_type.into(), self.context.f64_type().into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_math_sum_precise",
+            i8_type.fn_type(&[i8_ptr.into(), i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        for name in [
+            "thaw_symbol_new",
+            "thaw_symbol_to_string",
+            "thaw_symbol_key",
+            "thaw_symbol_for",
+            "thaw_symbol_key_for",
+            "thaw_symbol_description",
+        ] {
+            self.module.add_function(
+                name,
+                i8_ptr.fn_type(&[i8_ptr.into()], false),
+                Some(Linkage::External),
+            );
+        }
+        for name in ["atan2", "hypot"] {
+            self.module
+                .add_function(name, pow_type, Some(Linkage::External));
+        }
+        for name in ["thaw_math_fround", "thaw_math_clz32"] {
+            self.module
+                .add_function(name, unary_f64_type, Some(Linkage::External));
+        }
+        self.module
+            .add_function("thaw_math_imul", pow_type, Some(Linkage::External));
+        let math_random_type = self.context.f64_type().fn_type(&[], false);
+        self.module.add_function(
+            "thaw_math_random",
+            math_random_type,
+            Some(Linkage::External),
+        );
+        for name in [
+            "llvm.fabs.f64",
+            "llvm.floor.f64",
+            "llvm.ceil.f64",
+            "llvm.trunc.f64",
+            "llvm.sqrt.f64",
+            "llvm.exp.f64",
+            "llvm.log.f64",
+            "llvm.log2.f64",
+            "llvm.log10.f64",
+            "llvm.sin.f64",
+            "llvm.cos.f64",
+        ] {
+            self.module
+                .add_function(name, unary_f64_type, Some(Linkage::External));
+        }
+        let binary_f64_type = self.context.f64_type().fn_type(
+            &[
+                self.context.f64_type().into(),
+                self.context.f64_type().into(),
+            ],
+            false,
+        );
+        for name in ["llvm.minimum.f64", "llvm.maximum.f64"] {
+            self.module
+                .add_function(name, binary_f64_type, Some(Linkage::External));
+        }
+
+        let arena_alloc_type = i8_ptr.fn_type(&[i64_type.into(), i64_type.into()], false);
+        self.module.add_function(
+            "thaw_arena_alloc",
+            arena_alloc_type,
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_arena_reset",
+            self.context.void_type().fn_type(&[], false),
+            Some(Linkage::External),
+        );
+
+        let strlen_type = i64_type.fn_type(&[i8_ptr.into()], false);
+        self.module.add_function("thaw_string_byte_length", strlen_type, Some(Linkage::External));
+        self.module.add_function("thaw_string_copy_to_arena",
+            i8_ptr.fn_type(&[i8_ptr.into()], false), Some(Linkage::External));
+        for name in ["thaw_string_register", "thaw_string_register_literal"] {
+            self.module.add_function(name, i8_ptr.fn_type(&[i8_ptr.into(), i64_type.into()], false), Some(Linkage::External));
+        }
+        self.module.add_function("thaw_console_write", self.context.void_type().fn_type(&[i8_ptr.into(), i32_type.into(), self.context.bool_type().into()], false), Some(Linkage::External));
+        self.module
+            .add_function("strlen", strlen_type, Some(Linkage::External));
+        let strcmp_type = i32_type.fn_type(&[i8_ptr.into(), i8_ptr.into()], false);
+        self.module
+            .add_function("strcmp", strcmp_type, Some(Linkage::External));
+        self.module
+            .add_function("thaw_string_compare", strcmp_type, Some(Linkage::External));
+        self.module.add_function(
+            "thaw_json_strict_equal",
+            i8_type.fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        let memcpy_type = i8_ptr.fn_type(&[i8_ptr.into(), i8_ptr.into(), i64_type.into()], false);
+        self.module
+            .add_function("memcpy", memcpy_type, Some(Linkage::External));
+
+        let getenv_type = i8_ptr.fn_type(&[i8_ptr.into()], false);
+        self.module
+            .add_function("getenv", getenv_type, Some(Linkage::External));
+        self.module.add_function(
+            "thaw_runtime_report_uncaught",
+            self.context.void_type().fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_runtime_report_uncaught_exact_packet",
+            self.context.i8_type().fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_promise_release_deferred_packet_source",
+            self.context.void_type().fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_promise_materialize_deferred_packet_source_text",
+            self.context.i8_type().fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_runtime_exception_report_text",
+            i8_ptr.fn_type(&[
+                i8_ptr.into(), i8_ptr.into(), i64_type.into(), self.context.f64_type().into(),
+                i64_type.into(), self.context.bool_type().into(),
+            ], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_js_emit_uncaught",
+            self.context.i8_type().fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_js_emit_unhandled_rejection",
+            self.context.i8_type().fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_js_emit_rejection_handled",
+            self.context.void_type().fn_type(&[], false),
+            Some(Linkage::External),
+        );
+        let process_report_type = self.context.struct_type(&[i64_type.into(), i8_ptr.into()], false);
+        for name in ["thaw_js_emit_uncaught_result", "thaw_js_emit_unhandled_rejection_result"] {
+            self.module.add_function(name, process_report_type.fn_type(&[i8_ptr.into()], false), Some(Linkage::External));
+        }
+        let exact_process_report_type = self.context.struct_type(
+            &[i64_type.into(), i64_type.into(), self.context.i8_type().into(), i8_ptr.into()], false);
+        self.module.add_function(
+            "thaw_js_emit_uncaught_graph_result",
+            exact_process_report_type.fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_js_report_terminal_handle",
+            self.context.i8_type().fn_type(&[i64_type.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_js_report_terminal_scalar",
+            self.context.i8_type().fn_type(&[
+                i64_type.into(), self.context.f64_type().into(), i64_type.into(),
+                self.context.i8_type().into(), i8_ptr.into(),
+            ], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_js_emit_rejection_handled_result",
+            process_report_type.fn_type(&[], false), Some(Linkage::External),
+        );
+
+        // Lambda captures stdout via a pipe, not a TTY, so libc's stdio
+        // fully-buffers it by default -- output could sit in the buffer
+        // and never reach CloudWatch if the process is frozen/killed
+        // between invocations. `console.log` flushes after every call to
+        // avoid that (see `compile_console_log`).
+        let fflush_type = i32_type.fn_type(&[i8_ptr.into()], false);
+        self.module
+            .add_function("fflush", fflush_type, Some(Linkage::External));
+
+        let run_http_servers_type = self.context.void_type().fn_type(&[], false);
+        self.module.add_function(
+            "thaw_http_run_servers",
+            run_http_servers_type,
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_http_take_unhandled_error",
+            self.context.i8_type().fn_type(&[], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_http_mark_unhandled_error",
+            self.context.void_type().fn_type(&[], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_http_unhandled_error_pending",
+            self.context.i8_type().fn_type(&[], false),
+            Some(Linkage::External),
+        );
+
+        // thaw-std: fetch + JSON (see docs/design/async-await.md for why
+        // `fetch` is a plain blocking call under the hood).
+        let f64_type = self.context.f64_type();
+
+        let fetch_type = i8_ptr.fn_type(&[i8_ptr.into()], false);
+        self.module
+            .add_function("thaw_fetch_get", fetch_type, Some(Linkage::External));
+
+        let json_parse_type = i8_ptr.fn_type(&[i8_ptr.into()], false);
+        self.module
+            .add_function("thaw_json_parse", json_parse_type, Some(Linkage::External));
+        self.module.add_function(
+            "thaw_json_take_parse_error",
+            self.context.i8_type().fn_type(&[], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_destroy",
+            self.context.void_type().fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_typed_decode_scope_begin",
+            self.context.void_type().fn_type(&[], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_typed_decode_scope_own",
+            self.context.void_type().fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_typed_decode_scope_end",
+            self.context.void_type().fn_type(&[self.context.i8_type().into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_handle_id",
+            i64_type.fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_callback_origin_acquire",
+            i64_type.fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_register_callback_origin",
+            i8_type.fn_type(&[i8_ptr.into(), i64_type.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_borrowed_handle_id",
+            i64_type.fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_host_from_borrowed_handle",
+            i8_ptr.fn_type(&[i64_type.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_track_arena_owned_root",
+            i8_ptr.fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_reserve_arena_owned_root",
+            i8_ptr.fn_type(&[], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_reserve_deferred_exception_packet",
+            i8_ptr.fn_type(&[], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_enqueue_deferred_exception_packet",
+            self.context.void_type().fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_deferred_exception_packet_head",
+            i8_ptr.fn_type(&[], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_pop_deferred_exception_packet",
+            i8_ptr.fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_enqueue_reserved_cleanup",
+            self.context.void_type().fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_deferred_cleanup_head",
+            i8_ptr.fn_type(&[], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_pop_deferred_cleanup",
+            i8_ptr.fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_register_deferred_cleanup_driver",
+            self.context.void_type().fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_run_deferred_cleanup_turn",
+            self.context.bool_type().fn_type(&[], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_cstring_destroy",
+            self.context.void_type().fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+
+        self.module.add_function(
+            "thaw_json_take_stringify_error",
+            i8_type.fn_type(&[], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_brand_wrapper",
+            i8_ptr.fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_brand_wrapper_if",
+            i8_ptr.fn_type(&[i8_ptr.into(), self.context.bool_type().into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_graph_encode",
+            i8_ptr.fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_graph_exception_packet",
+            i8_ptr.fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_graph_exception_poll_packet",
+            i8_ptr.fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_graph_decode",
+            i8_ptr.fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_discard_graph_wire",
+            self.context.void_type().fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_register_host_operations",
+            self.context.void_type().fn_type(&[
+                i8_ptr.into(), i8_ptr.into(), i8_ptr.into(), i8_ptr.into(),
+                i8_ptr.into(), i8_ptr.into(), i8_ptr.into(), i8_ptr.into(),
+            ], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_take_host_error",
+            i8_ptr.fn_type(&[], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_take_graph_error",
+            i8_type.fn_type(&[], false),
+            Some(Linkage::External),
+        );
+        let json_stringify_type = i8_ptr.fn_type(&[i8_ptr.into()], false);
+        self.module.add_function(
+            "thaw_json_stringify",
+            json_stringify_type,
+            Some(Linkage::External),
+        );
+        // Sentinel-omitting sibling used for the *user-facing* bare
+        // `JSON.stringify(value)` call only -- see its own doc comment
+        // in `thaw-std/src/json.rs` for why it can't share `thaw_json_
+        // stringify` itself with the internal marshaling paths.
+        self.module.add_function(
+            "thaw_json_stringify_public",
+            json_stringify_type,
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_callback_error",
+            i8_ptr.fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_stringify_number_space",
+            i8_ptr.fn_type(&[i8_ptr.into(), f64_type.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_stringify_string_space",
+            i8_ptr.fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_stringify_keys",
+            i8_ptr.fn_type(&[i8_ptr.into(), i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_stringify_keys_number_space",
+            i8_ptr.fn_type(&[i8_ptr.into(), i8_ptr.into(), i8_ptr.into(), f64_type.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_stringify_keys_string_space",
+            i8_ptr.fn_type(&[i8_ptr.into(), i8_ptr.into(), i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+
+        let json_get_type = i8_ptr.fn_type(&[i8_ptr.into(), i8_ptr.into()], false);
+        self.module
+            .add_function("thaw_json_get", json_get_type, Some(Linkage::External));
+        self.module
+            .add_function("thaw_json_take", json_get_type, Some(Linkage::External));
+        self.module.add_function(
+            "thaw_json_get_mut",
+            json_get_type,
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_index_get_mut",
+            i8_ptr.fn_type(&[i8_ptr.into(), f64_type.into()], false),
+            Some(Linkage::External),
+        );
+
+        let json_index_type =
+            i8_ptr.fn_type(&[i8_ptr.into(), f64_type.into(), i8_ptr.into()], false);
+        self.module
+            .add_function("thaw_json_index", json_index_type, Some(Linkage::External));
+        let json_index_set_type = i8_ptr.fn_type(
+            &[
+                i8_ptr.into(),
+                f64_type.into(),
+                i8_ptr.into(),
+                i8_ptr.into(),
+            ],
+            false,
+        );
+        self.module.add_function(
+            "thaw_json_index_set",
+            json_index_set_type,
+            Some(Linkage::External),
+        );
+
+        let json_as_number_type = f64_type.fn_type(&[i8_ptr.into()], false);
+        self.module.add_function(
+            "thaw_json_as_number",
+            json_as_number_type,
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_jit_dictionary_get",
+            f64_type.fn_type(&[i8_type.into(), i8_ptr.into(), i8_ptr.into(), i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_jit_dictionary_mutate",
+            f64_type.fn_type(
+                &[
+                    i8_type.into(),
+                    i8_ptr.into(),
+                    i8_ptr.into(),
+                    f64_type.into(),
+                    i8_ptr.into(),
+                ],
+                false,
+            ),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_jit_dictionary_query",
+            f64_type.fn_type(&[i8_type.into(), i8_ptr.into(), i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        let number_to_string_type = i8_ptr.fn_type(&[f64_type.into()], false);
+        self.module.add_function(
+            "thaw_number_object_is",
+            i8_type.fn_type(&[f64_type.into(), f64_type.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_number_to_string",
+            number_to_string_type,
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_number_to_console_string",
+            number_to_string_type,
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_string_from_char_code",
+            number_to_string_type,
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_string_from_code_point",
+            number_to_string_type,
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_number_to_fixed",
+            i8_ptr.fn_type(&[f64_type.into(), f64_type.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_number_to_precision",
+            i8_ptr.fn_type(&[f64_type.into(), f64_type.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_number_to_exponential",
+            i8_ptr.fn_type(&[f64_type.into(), f64_type.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_number_to_radix_string",
+            i8_ptr.fn_type(&[f64_type.into(), f64_type.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_jit_format_number",
+            i8_ptr.fn_type(
+                &[i8_type.into(), f64_type.into(), f64_type.into()],
+                false,
+            ),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_jit_array_search",
+            f64_type.fn_type(
+                &[
+                    i8_type.into(),
+                    i8_ptr.into(),
+                    f64_type.into(),
+                    f64_type.into(),
+                ],
+                false,
+            ),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_jit_array_format",
+            i8_ptr.fn_type(&[i8_type.into(), i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_jit_array_to_sorted",
+            i8_ptr.fn_type(&[i8_type.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_jit_array_sort",
+            i8_ptr.fn_type(&[i8_type.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_jit_array_fill",
+            i8_ptr.fn_type(
+                &[
+                    i8_type.into(),
+                    i8_ptr.into(),
+                    f64_type.into(),
+                    f64_type.into(),
+                    f64_type.into(),
+                ],
+                false,
+            ),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_jit_array_push",
+            f64_type.fn_type(&[i8_type.into(), i8_ptr.into(), f64_type.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_jit_array_unshift",
+            f64_type.fn_type(&[i8_type.into(), i8_ptr.into(), f64_type.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_jit_array_remove",
+            i8_type.fn_type(&[i8_type.into(), i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_jit_array_splice",
+            i8_ptr.fn_type(
+                &[
+                    i8_ptr.into(),
+                    f64_type.into(),
+                    f64_type.into(),
+                    i8_ptr.into(),
+                ],
+                false,
+            ),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_jit_array_set",
+            i8_type.fn_type(
+                &[
+                    i8_type.into(),
+                    i8_ptr.into(),
+                    f64_type.into(),
+                    f64_type.into(),
+                ],
+                false,
+            ),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_array_concat",
+            i8_ptr.fn_type(&[i8_ptr.into(), i8_ptr.into(), i64_type.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_jit_array_append",
+            i8_ptr.fn_type(&[i8_type.into(), i8_ptr.into(), f64_type.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_jit_array_with",
+            i8_ptr.fn_type(
+                &[i8_type.into(), i8_ptr.into(), f64_type.into(), f64_type.into()],
+                false,
+            ),
+            Some(Linkage::External),
+        );
+        let string_to_number_type = f64_type.fn_type(&[i8_ptr.into()], false);
+        self.module.add_function(
+            "thaw_string_to_number",
+            string_to_number_type,
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_parse_float",
+            string_to_number_type,
+            Some(Linkage::External),
+        );
+        let parse_int_type = f64_type.fn_type(&[i8_ptr.into(), f64_type.into()], false);
+        self.module
+            .add_function("thaw_parse_int", parse_int_type, Some(Linkage::External));
+        let array_to_string_type = i8_ptr.fn_type(&[i8_ptr.into(), i8_ptr.into()], false);
+        for name in [
+            "thaw_number_array_to_string",
+            "thaw_string_array_to_string",
+            "thaw_bool_array_to_string",
+            "thaw_object_array_to_string",
+        ] {
+            self.module
+                .add_function(name, array_to_string_type, Some(Linkage::External));
+        }
+        let array_join_type =
+            i8_ptr.fn_type(&[i8_ptr.into(), i8_ptr.into(), i8_ptr.into()], false);
+        for name in [
+            "thaw_number_array_join",
+            "thaw_string_array_join",
+            "thaw_bool_array_join",
+            "thaw_object_array_join",
+        ] {
+            self.module
+                .add_function(name, array_join_type, Some(Linkage::External));
+        }
+        self.module.add_function(
+            "thaw_tagged_array_join",
+            i8_ptr.fn_type(
+                &[
+                    i8_ptr.into(), i8_ptr.into(), i8_ptr.into(),
+                    i8_type.into(), i8_type.into(), i8_ptr.into(),
+                ],
+                false,
+            ),
+            Some(Linkage::External),
+        );
+        let array_reverse_type = i8_ptr.fn_type(&[i8_ptr.into(), i64_type.into()], false);
+        self.module.add_function(
+            "thaw_array_reverse",
+            array_reverse_type,
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_array_presence_reverse",
+            i8_ptr.fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_array_has_property",
+            i8_type.fn_type(&[i8_ptr.into(), i8_ptr.into(), i8_ptr.into(), i8_type.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_array_presence_densify",
+            i8_ptr.fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_array_presence_mapped",
+            i8_ptr.fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_array_presence_compact",
+            i64_type.fn_type(
+                &[i8_ptr.into(), i8_ptr.into(), i64_type.into()],
+                false,
+            ),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_array_presence_tagged_sort",
+            i8_ptr.fn_type(&[i8_ptr.into(), i8_ptr.into(), i8_type.into(), i8_type.into()], false),
+            Some(Linkage::External),
+        );
+        let array_copy_within_type = i8_ptr.fn_type(
+            &[
+                i8_ptr.into(),
+                i64_type.into(),
+                f64_type.into(),
+                f64_type.into(),
+                f64_type.into(),
+            ],
+            false,
+        );
+        self.module.add_function(
+            "thaw_array_copy_within",
+            array_copy_within_type,
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_array_presence_copy_within",
+            i8_ptr.fn_type(
+                &[
+                    i8_ptr.into(),
+                    f64_type.into(),
+                    f64_type.into(),
+                    f64_type.into(),
+                ],
+                false,
+            ),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_array_presence_fill",
+            i8_ptr.fn_type(
+                &[i8_ptr.into(), i64_type.into(), f64_type.into(), f64_type.into(), i8_type.into()],
+                false,
+            ),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_array_delete_property",
+            i8_type.fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_array_presence_mark",
+            self.context
+                .void_type()
+                .fn_type(&[i8_ptr.into(), i64_type.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_array_ensure_index",
+            i8_ptr.fn_type(&[i8_ptr.into(), i64_type.into(), f64_type.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_array_read_ptr",
+            i8_ptr.fn_type(&[i8_ptr.into(), i64_type.into(), f64_type.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_any_array_flat",
+            i8_ptr.fn_type(&[i8_ptr.into(), i8_ptr.into(), f64_type.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_array_resize",
+            i8_ptr.fn_type(&[i8_ptr.into(), i64_type.into(), f64_type.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_array_presence_set_state",
+            i8_ptr.fn_type(
+                &[i8_ptr.into(), i64_type.into(), i64_type.into(), i8_type.into()],
+                false,
+            ),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_array_presence_extend",
+            i8_ptr.fn_type(
+                &[i8_ptr.into(), i64_type.into(), i64_type.into(), i8_type.into(), i8_ptr.into()],
+                false,
+            ),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_array_presence_remove",
+            i8_ptr.fn_type(
+                &[i8_ptr.into(), i64_type.into(), i8_type.into()],
+                false,
+            ),
+            Some(Linkage::External),
+        );
+        for (name, value_type) in [
+            ("thaw_number_array_fill", f64_type.into()),
+            ("thaw_pointer_array_fill", i8_ptr.into()),
+            ("thaw_bool_array_fill", i8_type.into()),
+        ] {
+            let ty = i8_ptr.fn_type(
+                &[i8_ptr.into(), value_type, f64_type.into(), f64_type.into()],
+                false,
+            );
+            self.module.add_function(name, ty, Some(Linkage::External));
+        }
+        let array_fill_type = i8_ptr.fn_type(
+            &[
+                i8_ptr.into(),
+                i8_ptr.into(),
+                i64_type.into(),
+                f64_type.into(),
+                f64_type.into(),
+            ],
+            false,
+        );
+        self.module
+            .add_function("thaw_array_fill", array_fill_type, Some(Linkage::External));
+        let array_slice_type = i8_ptr.fn_type(
+            &[
+                i8_ptr.into(),
+                i64_type.into(),
+                f64_type.into(),
+                f64_type.into(),
+            ],
+            false,
+        );
+        self.module.add_function(
+            "thaw_array_slice",
+            array_slice_type,
+            Some(Linkage::External),
+        );
+        let array_presence_slice_type = i8_ptr.fn_type(
+            &[
+                i8_ptr.into(),
+                i64_type.into(),
+                f64_type.into(),
+                f64_type.into(),
+            ],
+            false,
+        );
+        self.module.add_function(
+            "thaw_array_presence_slice",
+            array_presence_slice_type,
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_array_to_reversed",
+            array_reverse_type,
+            Some(Linkage::External),
+        );
+        let array_extend_type = i8_ptr.fn_type(
+            &[i8_ptr.into(), i64_type.into(), i8_ptr.into(), i64_type.into()],
+            false,
+        );
+        for name in ["thaw_array_push_values", "thaw_array_unshift_values"] {
+            self.module
+                .add_function(name, array_extend_type, Some(Linkage::External));
+        }
+        let array_remove_type = i8_ptr.fn_type(
+            &[i8_ptr.into(), i64_type.into(), i8_ptr.into()],
+            false,
+        );
+        for name in ["thaw_array_pop", "thaw_array_shift"] {
+            self.module
+                .add_function(name, array_remove_type, Some(Linkage::External));
+        }
+        let array_splice_type = i8_ptr.fn_type(
+            &[
+                i8_ptr.into(),
+                i64_type.into(),
+                f64_type.into(),
+                f64_type.into(),
+                i8_ptr.into(),
+                i64_type.into(),
+                i8_ptr.into(),
+            ],
+            false,
+        );
+        self.module.add_function(
+            "thaw_array_splice",
+            array_splice_type,
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_array_presence_splice",
+            i8_ptr.fn_type(
+                &[
+                    i8_ptr.into(),
+                    i64_type.into(),
+                    f64_type.into(),
+                    f64_type.into(),
+                    i64_type.into(),
+                    i8_ptr.into(),
+                    i8_ptr.into(),
+                ],
+                false,
+            ),
+            Some(Linkage::External),
+        );
+        let array_sort_type = i8_ptr.fn_type(&[i8_ptr.into()], false);
+        for name in [
+            "thaw_number_array_sort",
+            "thaw_string_array_sort",
+            "thaw_bool_array_sort",
+            "thaw_object_array_sort",
+            "thaw_number_array_to_sorted",
+            "thaw_string_array_to_sorted",
+            "thaw_bool_array_to_sorted",
+            "thaw_object_array_to_sorted",
+        ] {
+            self.module
+                .add_function(name, array_sort_type, Some(Linkage::External));
+        }
+        self.module.add_function(
+            "thaw_array_undefined_index_of",
+            f64_type.fn_type(
+                &[
+                    i8_ptr.into(), i8_ptr.into(), f64_type.into(),
+                    i8_type.into(), i8_type.into(), i8_type.into(), i8_type.into(),
+                ],
+                false,
+            ),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_tagged_array_index_of",
+            f64_type.fn_type(
+                &[
+                    i8_ptr.into(), i8_ptr.into(), i8_ptr.into(), f64_type.into(),
+                    i8_type.into(), i8_type.into(), i8_type.into(), i8_type.into(), i8_type.into(),
+                ],
+                false,
+            ),
+            Some(Linkage::External),
+        );
+        for (name, needle_type, return_type) in [
+            (
+                "thaw_number_array_index_of",
+                f64_type.into(),
+                f64_type.into(),
+            ),
+            (
+                "thaw_number_array_includes",
+                f64_type.into(),
+                i8_type.into(),
+            ),
+            ("thaw_string_array_index_of", i8_ptr.into(), f64_type.into()),
+            ("thaw_string_array_includes", i8_ptr.into(), i8_type.into()),
+            ("thaw_bool_array_index_of", i8_type.into(), f64_type.into()),
+            ("thaw_bool_array_includes", i8_type.into(), i8_type.into()),
+            ("thaw_object_array_index_of", i8_ptr.into(), f64_type.into()),
+            ("thaw_object_array_includes", i8_ptr.into(), i8_type.into()),
+            ("thaw_any_array_index_of", i8_ptr.into(), f64_type.into()),
+            ("thaw_any_array_includes", i8_ptr.into(), i8_type.into()),
+            (
+                "thaw_number_array_last_index_of",
+                f64_type.into(),
+                f64_type.into(),
+            ),
+            (
+                "thaw_string_array_last_index_of",
+                i8_ptr.into(),
+                f64_type.into(),
+            ),
+            (
+                "thaw_bool_array_last_index_of",
+                i8_type.into(),
+                f64_type.into(),
+            ),
+            (
+                "thaw_object_array_last_index_of",
+                i8_ptr.into(),
+                f64_type.into(),
+            ),
+            (
+                "thaw_any_array_last_index_of",
+                i8_ptr.into(),
+                f64_type.into(),
+            ),
+        ] {
+            let function_type = match return_type {
+                BasicTypeEnum::FloatType(return_type) => {
+                    return_type.fn_type(
+                        &[
+                            i8_ptr.into(),
+                            i8_ptr.into(),
+                            needle_type,
+                            f64_type.into(),
+                        ],
+                        false,
+                    )
+                }
+                BasicTypeEnum::IntType(return_type) => {
+                    return_type.fn_type(
+                        &[
+                            i8_ptr.into(),
+                            i8_ptr.into(),
+                            needle_type,
+                            f64_type.into(),
+                        ],
+                        false,
+                    )
+                }
+                _ => unreachable!(),
+            };
+            self.module
+                .add_function(name, function_type, Some(Linkage::External));
+        }
+        for name in [
+            "thaw_string_includes",
+            "thaw_string_starts_with",
+            "thaw_string_ends_with",
+        ] {
+            let function_type =
+                i8_type.fn_type(&[i8_ptr.into(), i8_ptr.into(), f64_type.into()], false);
+            self.module
+                .add_function(name, function_type, Some(Linkage::External));
+        }
+        let string_index_of_type =
+            f64_type.fn_type(&[i8_ptr.into(), i8_ptr.into(), f64_type.into()], false);
+        self.module.add_function(
+            "thaw_string_index_of",
+            string_index_of_type,
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_string_last_index_of",
+            string_index_of_type,
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_string_slice",
+            i8_ptr.fn_type(&[i8_ptr.into(), f64_type.into(), f64_type.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_string_substring",
+            i8_ptr.fn_type(&[i8_ptr.into(), f64_type.into(), f64_type.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_string_substr",
+            i8_ptr.fn_type(&[i8_ptr.into(), f64_type.into(), f64_type.into()], false),
+            Some(Linkage::External),
+        );
+        let string_transform_type = i8_ptr.fn_type(&[i8_ptr.into()], false);
+        for name in [
+            "thaw_string_trim",
+            "thaw_string_trim_start",
+            "thaw_string_trim_end",
+            "thaw_string_to_lower_case",
+            "thaw_string_to_upper_case",
+            "thaw_string_to_well_formed",
+            "thaw_string_to_display",
+            "thaw_atob",
+            "thaw_btoa",
+            "thaw_escape",
+            "thaw_unescape",
+        ] {
+            self.module
+                .add_function(name, string_transform_type, Some(Linkage::External));
+        }
+        self.module.add_function(
+            "thaw_string_is_well_formed",
+            self.context.bool_type().fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        let locale_string_case_type = i8_ptr.fn_type(&[i8_ptr.into(), i8_ptr.into()], false);
+        for name in [
+            "thaw_string_to_locale_lower_case",
+            "thaw_string_to_locale_upper_case",
+        ] {
+            self.module
+                .add_function(name, locale_string_case_type, Some(Linkage::External));
+        }
+        self.module.add_function(
+            "thaw_encode_uri_component",
+            string_transform_type,
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_encode_uri",
+            string_transform_type,
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_decode_uri_component",
+            string_transform_type,
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_decode_uri",
+            string_transform_type,
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_string_normalize",
+            i8_ptr.fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_string_to_array",
+            string_transform_type,
+            Some(Linkage::External),
+        );
+        // `buf.toString(enc)` / `Buffer.from(str, enc)` -- both take a
+        // (buffer-or-string, encoding) pair of pointers and return a
+        // pointer (a C string / a raw `[len][elem...]` buffer).
+        for name in ["thaw_bytes_to_string", "thaw_bytes_from_string"] {
+            self.module.add_function(
+                name,
+                i8_ptr.fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+                Some(Linkage::External),
+            );
+        }
+        self.module.add_function(
+            "thaw_bytes_alloc",
+            i8_ptr.fn_type(&[f64_type.into()], false),
+            Some(Linkage::External),
+        );
+        // `Uint8Array.prototype.setFromHex`/`setFromBase64`: writes into the
+        // buffer and returns an arena object with read/written f64 fields.
+        self.module.add_function(
+            "thaw_bytes_set_from_string",
+            i8_ptr.fn_type(&[i8_ptr.into(), i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        // `Buffer.from(number[])` clamps each element to a byte; takes a
+        // raw `[len][elem...]` buffer and returns a fresh one.
+        self.module.add_function(
+            "thaw_bytes_from_array",
+            i8_ptr.fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        // `Buffer.concat(list, totalLength)` -- outer `[len][elem...]`
+        // buffer + a length (`-1` for "no limit") to a fresh buffer.
+        self.module.add_function(
+            "thaw_bytes_concat",
+            i8_ptr.fn_type(&[i8_ptr.into(), f64_type.into()], false),
+            Some(Linkage::External),
+        );
+        // `Buffer.byteLength(str, enc)` -- two string pointers to a count.
+        self.module.add_function(
+            "thaw_bytes_byte_length",
+            f64_type.fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        // `a.equals(b)` -- two raw `[len][elem...]` buffers to an i8 bool.
+        self.module.add_function(
+            "thaw_bytes_equals",
+            i8_type.fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        // `buf.readUInt16BE(offset)` -- (buffer, offset, width, kind, le)
+        // -> value; `buf.writeUInt16BE(value, offset)` -- (buffer, offset,
+        // value, width, kind, le) -> offset + width.
+        self.module.add_function(
+            "thaw_bytes_read",
+            f64_type.fn_type(
+                &[
+                    i8_ptr.into(),
+                    f64_type.into(),
+                    f64_type.into(),
+                    f64_type.into(),
+                    f64_type.into(),
+                ],
+                false,
+            ),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_bytes_write",
+            f64_type.fn_type(
+                &[
+                    i8_ptr.into(),
+                    f64_type.into(),
+                    f64_type.into(),
+                    f64_type.into(),
+                    f64_type.into(),
+                    f64_type.into(),
+                ],
+                false,
+            ),
+            Some(Linkage::External),
+        );
+        // `buf.readBigInt64LE(offset)`/`readBigUInt64BE(offset)` &c. --
+        // (buffer, offset, le) -> a real `i64` (not `f64` -- see
+        // `thaw_bytes_read_i64`'s own doc comment for why); `writeBigInt64LE
+        // (value, offset)` -- (buffer, offset, value, le) -> offset + 8.
+        self.module.add_function(
+            "thaw_bytes_read_i64",
+            i64_type.fn_type(&[i8_ptr.into(), f64_type.into(), f64_type.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_bytes_write_i64",
+            f64_type.fn_type(
+                &[
+                    i8_ptr.into(),
+                    f64_type.into(),
+                    i64_type.into(),
+                    f64_type.into(),
+                ],
+                false,
+            ),
+            Some(Linkage::External),
+        );
+        // `source.copy(target, targetStart, sourceStart, sourceEnd)` --
+        // two raw buffers + three offsets to the count copied.
+        self.module.add_function(
+            "thaw_bytes_copy",
+            f64_type.fn_type(
+                &[
+                    i8_ptr.into(),
+                    i8_ptr.into(),
+                    f64_type.into(),
+                    f64_type.into(),
+                    f64_type.into(),
+                ],
+                false,
+            ),
+            Some(Linkage::External),
+        );
+        // `buf.indexOf(needle, from)` -- haystack + needle buffers, a
+        // start offset, and a reverse flag, to an index or `-1`.
+        self.module.add_function(
+            "thaw_bytes_index_of",
+            f64_type.fn_type(
+                &[
+                    i8_ptr.into(),
+                    i8_ptr.into(),
+                    f64_type.into(),
+                    f64_type.into(),
+                ],
+                false,
+            ),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_string_split",
+            i8_ptr.fn_type(&[i8_ptr.into(), i8_ptr.into(), f64_type.into()], false),
+            Some(Linkage::External),
+        );
+        let string_replace_type =
+            i8_ptr.fn_type(&[i8_ptr.into(), i8_ptr.into(), i8_ptr.into()], false);
+        for name in ["thaw_string_replace", "thaw_string_replace_all"] {
+            self.module
+                .add_function(name, string_replace_type, Some(Linkage::External));
+        }
+        self.module.add_function(
+            "thaw_regex_test",
+            i8_type.fn_type(&[i8_ptr.into(), i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_regex_search",
+            f64_type.fn_type(&[i8_ptr.into(), i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        let regex_match_type = i8_ptr.fn_type(
+            &[i8_ptr.into(), i8_ptr.into(), i8_ptr.into(), f64_type.into()],
+            false,
+        );
+        for name in ["thaw_regex_match", "thaw_regex_match_all"] {
+            self.module
+                .add_function(name, regex_match_type, Some(Linkage::External));
+        }
+        let regex_split_type = i8_ptr.fn_type(
+            &[i8_ptr.into(), i8_ptr.into(), i8_ptr.into(), f64_type.into()],
+            false,
+        );
+        self.module.add_function(
+            "thaw_regex_split",
+            regex_split_type,
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_regex_exec",
+            regex_split_type,
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_regex_exec_groups",
+            i8_ptr.fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_regex_exec_index",
+            f64_type.fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_regex_exec_input",
+            i8_ptr.fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_template_strings_register",
+            self.context
+                .void_type()
+                .fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_template_strings_raw",
+            i8_ptr.fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_regex_exec_advance",
+            f64_type.fn_type(
+                &[i8_ptr.into(), i8_ptr.into(), i8_ptr.into(), f64_type.into()],
+                false,
+            ),
+            Some(Linkage::External),
+        );
+        let regex_replace_type = i8_ptr.fn_type(
+            &[i8_ptr.into(), i8_ptr.into(), i8_ptr.into(), i8_ptr.into()],
+            false,
+        );
+        for name in ["thaw_regex_replace", "thaw_regex_replace_all"] {
+            self.module
+                .add_function(name, regex_replace_type, Some(Linkage::External));
+        }
+        self.module.add_function(
+            "thaw_date_now",
+            f64_type.fn_type(&[], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_performance_now",
+            f64_type.fn_type(&[], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_process_pid",
+            f64_type.fn_type(&[], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_process_ppid",
+            f64_type.fn_type(&[], false),
+            Some(Linkage::External),
+        );
+        let date_getter_type = f64_type.fn_type(&[f64_type.into()], false);
+        for name in [
+            "thaw_date_get_full_year",
+            "thaw_date_get_month",
+            "thaw_date_get_date",
+            "thaw_date_get_day",
+            "thaw_date_get_hours",
+            "thaw_date_get_minutes",
+            "thaw_date_get_seconds",
+            "thaw_date_get_milliseconds",
+            "thaw_date_get_local_full_year",
+            "thaw_date_get_local_month",
+            "thaw_date_get_local_date",
+            "thaw_date_get_local_day",
+            "thaw_date_get_local_hours",
+            "thaw_date_get_local_minutes",
+            "thaw_date_get_local_seconds",
+            "thaw_date_get_local_milliseconds",
+            "thaw_date_get_month_for_full_year",
+            "thaw_date_get_date_for_full_year",
+            "thaw_date_get_local_month_for_full_year",
+            "thaw_date_get_local_date_for_full_year",
+            "thaw_date_time_clip",
+            "thaw_date_get_timezone_offset",
+        ] {
+            self.module
+                .add_function(name, date_getter_type, Some(Linkage::External));
+        }
+        for name in [
+            "thaw_date_to_iso_string",
+            "thaw_date_to_date_string",
+            "thaw_date_to_time_string",
+            "thaw_date_to_string",
+            "thaw_date_to_utc_string",
+        ] {
+            self.module.add_function(
+                name,
+                i8_ptr.fn_type(&[f64_type.into()], false),
+                Some(Linkage::External),
+            );
+        }
+        self.module.add_function(
+            "thaw_bigint_decimal_cmp",
+            f64_type.fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        for name in [
+            "thaw_bigint_decimal_add",
+            "thaw_bigint_decimal_sub",
+            "thaw_bigint_decimal_mul",
+            "thaw_bigint_decimal_div",
+            "thaw_bigint_decimal_mod",
+            "thaw_bigint_decimal_and",
+            "thaw_bigint_decimal_or",
+            "thaw_bigint_decimal_xor",
+            "thaw_bigint_decimal_shl",
+            "thaw_bigint_decimal_shr",
+        ] {
+            self.module.add_function(
+                name,
+                i8_ptr.fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+                Some(Linkage::External),
+            );
+        }
+        // Temporal (`Temporal.Now`/`Instant`/`Plain*`/`Duration`), built on
+        // the same epoch-millisecond `f64` as `Date`.
+        for name in ["thaw_temporal_now", "thaw_temporal_now_nanos"] {
+            self.module.add_function(
+                name,
+                f64_type.fn_type(&[], false),
+                Some(Linkage::External),
+            );
+        }
+        self.module.add_function(
+            "thaw_temporal_time_zone_id",
+            i8_ptr.fn_type(&[], false),
+            Some(Linkage::External),
+        );
+        for name in [
+            "thaw_temporal_instant_from_string",
+            "thaw_temporal_instant_nanos_from_string",
+            "thaw_temporal_plain_date_time_from_string",
+            "thaw_temporal_plain_date_time_nanos_from_string",
+            "thaw_temporal_plain_time_from_string",
+            "thaw_temporal_plain_time_nanos_from_string",
+            "thaw_temporal_plain_month_day_from_string",
+            "thaw_temporal_duration_nanos_from_string",
+        ] {
+            self.module.add_function(
+                name,
+                f64_type.fn_type(&[i8_ptr.into()], false),
+                Some(Linkage::External),
+            );
+        }
+        for name in [
+            "thaw_temporal_instant_to_string",
+            "thaw_temporal_plain_date_to_string",
+            "thaw_temporal_plain_date_time_to_string",
+            "thaw_temporal_plain_time_to_string",
+            "thaw_temporal_plain_year_month_to_string",
+            "thaw_temporal_plain_month_day_to_string",
+            "thaw_temporal_duration_to_string",
+            "thaw_temporal_epoch_nanoseconds",
+        ] {
+            self.module.add_function(
+                name,
+                i8_ptr.fn_type(&[f64_type.into(), f64_type.into()], false),
+                Some(Linkage::External),
+            );
+        }
+        for name in ["thaw_temporal_shift", "thaw_temporal_duration_component"] {
+            self.module.add_function(
+                name,
+                f64_type.fn_type(&[f64_type.into(), f64_type.into()], false),
+                Some(Linkage::External),
+            );
+        }
+        self.module.add_function(
+            "thaw_temporal_compare",
+            f64_type.fn_type(
+                &[f64_type.into(), f64_type.into(), f64_type.into(), f64_type.into()],
+                false,
+            ),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_temporal_round",
+            f64_type.fn_type(
+                &[f64_type.into(), f64_type.into(), f64_type.into()],
+                false,
+            ),
+            Some(Linkage::External),
+        );
+        // `ZonedDateTime` (timezone-aware) helpers.
+        self.module.add_function(
+            "thaw_temporal_zone_valid",
+            self.context.bool_type().fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        for name in [
+            "thaw_temporal_zoned_from_string",
+            "thaw_temporal_zoned_nanos_from_string",
+        ] {
+            self.module.add_function(
+                name,
+                f64_type.fn_type(&[i8_ptr.into()], false),
+                Some(Linkage::External),
+            );
+        }
+        self.module.add_function(
+            "thaw_temporal_zoned_zone_from_string",
+            i8_ptr.fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_temporal_zoned_start_of_day",
+            f64_type.fn_type(&[f64_type.into(), f64_type.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_temporal_zoned_hours_in_day",
+            f64_type.fn_type(&[f64_type.into(), f64_type.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_temporal_zoned_transition",
+            f64_type.fn_type(
+                &[
+                    f64_type.into(),
+                    f64_type.into(),
+                    i8_ptr.into(),
+                    f64_type.into(),
+                    f64_type.into(),
+                ],
+                false,
+            ),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_temporal_plain_to_zoned",
+            f64_type.fn_type(
+                &[
+                    f64_type.into(),
+                    f64_type.into(),
+                    i8_ptr.into(),
+                    f64_type.into(),
+                ],
+                false,
+            ),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_temporal_with_fields",
+            f64_type.fn_type(&[f64_type.into(); 14], false),
+            Some(Linkage::External),
+        );
+        for name in [
+            "thaw_temporal_zoned_to_string",
+            "thaw_temporal_zoned_offset",
+        ] {
+            self.module.add_function(
+                name,
+                i8_ptr.fn_type(&[f64_type.into(), f64_type.into(), i8_ptr.into()], false),
+                Some(Linkage::External),
+            );
+        }
+        for name in [
+            "thaw_temporal_zoned_field",
+            "thaw_temporal_zoned_plain_timestamp",
+        ] {
+            self.module.add_function(
+                name,
+                f64_type.fn_type(
+                    &[
+                        f64_type.into(),
+                        f64_type.into(),
+                        i8_ptr.into(),
+                        f64_type.into(),
+                    ],
+                    false,
+                ),
+                Some(Linkage::External),
+            );
+        }
+        self.module.add_function(
+            "thaw_temporal_plain_date_field",
+            f64_type.fn_type(&[f64_type.into(), f64_type.into()], false),
+            Some(Linkage::External),
+        );
+        // Non-ISO calendar systems (ICU4X).
+        self.module.add_function(
+            "thaw_temporal_calendar_valid",
+            self.context.bool_type().fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_temporal_calendar_from_string",
+            i8_ptr.fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_temporal_calendar_field",
+            f64_type.fn_type(
+                &[f64_type.into(), i8_ptr.into(), f64_type.into()],
+                false,
+            ),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_temporal_date_difference",
+            i8_ptr.fn_type(
+                &[f64_type.into(), f64_type.into(), i8_ptr.into()],
+                false,
+            ),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_temporal_duration_balance",
+            i8_ptr.fn_type(
+                &[f64_type.into(), f64_type.into(), i8_ptr.into()],
+                false,
+            ),
+            Some(Linkage::External),
+        );
+        for name in [
+            "thaw_temporal_calendar_month_code",
+            "thaw_temporal_calendar_era",
+        ] {
+            self.module.add_function(
+                name,
+                i8_ptr.fn_type(&[f64_type.into(), i8_ptr.into()], false),
+                Some(Linkage::External),
+            );
+        }
+        self.module.add_function(
+            "thaw_temporal_month_code",
+            i8_ptr.fn_type(&[f64_type.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_temporal_duration_from_string",
+            f64_type.fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        for name in [
+            "thaw_temporal_duration_components_json",
+            "thaw_temporal_duration_to_string_components",
+        ] {
+            self.module.add_function(
+                name,
+                i8_ptr.fn_type(&[i8_ptr.into()], false),
+                Some(Linkage::External),
+            );
+        }
+        // `new Error(message)`/`new TypeError(...)`/etc. tag the thrown
+        // string with a class name ahead of the message (see
+        // `thaw_hir::lower::expressions::lowering` and
+        // `thaw_runtime::split_error_tag`); these recover either half, or
+        // check the tagged (or defaulted) name against a class, without
+        // exposing the marker byte itself to generated code.
+        for name in [
+            "thaw_error_name",
+            "thaw_error_message",
+            "thaw_error_cause",
+            "thaw_error_code",
+            "thaw_error_stack",
+            "thaw_error_suppressed_error",
+            "thaw_error_suppressed",
+            "thaw_error_to_string",
+        ] {
+            self.module.add_function(
+                name,
+                i8_ptr.fn_type(&[i8_ptr.into()], false),
+                Some(Linkage::External),
+            );
+        }
+        self.module.add_function(
+            "thaw_error_frame",
+            i8_ptr.fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_error_property",
+            i8_ptr.fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_error_is_instance",
+            self.context
+                .bool_type()
+                .fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_error_is_error",
+            self.context.bool_type().fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        for name in ["thaw_object_set_state", "thaw_object_state"] {
+            self.module.add_function(
+                name,
+                self.context.bool_type().fn_type(
+                    &[i8_ptr.into(), self.context.i8_type().into()],
+                    false,
+                ),
+                Some(Linkage::External),
+            );
+        }
+        self.module.add_function(
+            "thaw_object_property_flags",
+            self.context.i8_type().fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_object_set_property_flags",
+            self.context.bool_type().fn_type(
+                &[i8_ptr.into(), i8_ptr.into(), self.context.i8_type().into()], false,
+            ),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_object_can_set_property_flags",
+            self.context.bool_type().fn_type(
+                &[i8_ptr.into(), i8_ptr.into(), self.context.i8_type().into()], false,
+            ),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_arena_contains_allocation",
+            self.context.i8_type().fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_object_register_field_offsets",
+            self.context.bool_type().fn_type(
+                &[i8_ptr.into(), i8_ptr.into(), i8_ptr.into()], false,
+            ),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_object_field_offset",
+            self.context.i64_type().fn_type(
+                &[i8_ptr.into(), i8_ptr.into(), self.context.i64_type().into()], false,
+            ),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_object_register_projector",
+            self.context.bool_type().fn_type(
+                &[i8_ptr.into(), i8_ptr.into(), i8_ptr.into()], false,
+            ),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_object_projector",
+            i8_ptr.fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_object_copy_state",
+            self.context
+                .bool_type()
+                .fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        for name in [
+            "thaw_object_set_class_identity",
+            "thaw_object_has_class_identity",
+            "thaw_object_hide_marker",
+            "thaw_object_reveal_marker",
+            "thaw_object_marker_hidden",
+        ] {
+            self.module.add_function(
+                name,
+                self.context
+                    .bool_type()
+                    .fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+                Some(Linkage::External),
+            );
+        }
+        self.module.add_function(
+            "thaw_object_order_begin",
+            self.context.bool_type().fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_object_order_seed",
+            self.context.bool_type().fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_object_order_rank",
+            self.context.i64_type().fn_type(
+                &[i8_ptr.into(), i8_ptr.into(), self.context.i64_type().into()],
+                false,
+            ),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_object_has_full_layout",
+            self.context.bool_type().fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_object_full_has_own",
+            self.context.bool_type().fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_object_full_own_keys",
+            i8_ptr.fn_type(&[i8_ptr.into(), self.context.bool_type().into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_object_set_accessor",
+            self.context.bool_type().fn_type(
+                &[
+                    i8_ptr.into(),
+                    i8_ptr.into(),
+                    i8_ptr.into(),
+                    self.context.bool_type().into(),
+                ],
+                false,
+            ),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_object_accessor",
+            i8_ptr.fn_type(
+                &[i8_ptr.into(), i8_ptr.into(), self.context.bool_type().into()],
+                false,
+            ),
+            Some(Linkage::External),
+        );
+        let date_set_four_type = f64_type.fn_type(
+            &[f64_type.into(), f64_type.into(), f64_type.into(), f64_type.into()],
+            false,
+        );
+        for name in ["thaw_date_set_full_year", "thaw_date_set_local_full_year"] {
+            self.module
+                .add_function(name, date_set_four_type, Some(Linkage::External));
+        }
+        let date_set_three_type = f64_type.fn_type(
+            &[f64_type.into(), f64_type.into(), f64_type.into()],
+            false,
+        );
+        for name in [
+            "thaw_date_set_month",
+            "thaw_date_set_local_month",
+            "thaw_date_set_seconds",
+            "thaw_date_set_local_seconds",
+        ] {
+            self.module
+                .add_function(name, date_set_three_type, Some(Linkage::External));
+        }
+        let date_set_five_type = f64_type.fn_type(
+                &[
+                    f64_type.into(),
+                    f64_type.into(),
+                    f64_type.into(),
+                    f64_type.into(),
+                    f64_type.into(),
+                ],
+                false,
+            );
+        for name in ["thaw_date_set_hours", "thaw_date_set_local_hours"] {
+            self.module
+                .add_function(name, date_set_five_type, Some(Linkage::External));
+        }
+        for name in ["thaw_date_set_minutes", "thaw_date_set_local_minutes"] {
+            self.module
+                .add_function(name, date_set_four_type, Some(Linkage::External));
+        }
+        let date_set_two_type = f64_type.fn_type(&[f64_type.into(), f64_type.into()], false);
+        for name in [
+            "thaw_date_set_date",
+            "thaw_date_set_local_date",
+            "thaw_date_set_milliseconds",
+            "thaw_date_set_local_milliseconds",
+        ] {
+            self.module
+                .add_function(name, date_set_two_type, Some(Linkage::External));
+        }
+        let date_constructor_type = f64_type.fn_type(
+            &[
+                f64_type.into(),
+                f64_type.into(),
+                f64_type.into(),
+                f64_type.into(),
+                f64_type.into(),
+                f64_type.into(),
+                f64_type.into(),
+            ],
+            false,
+        );
+        for name in ["thaw_date_local", "thaw_date_utc"] {
+            self.module
+                .add_function(name, date_constructor_type, Some(Linkage::External));
+        }
+        self.module.add_function(
+            "thaw_date_parse",
+            f64_type.fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_map_new",
+            i8_ptr.fn_type(&[], false),
+            Some(Linkage::External),
+        );
+        for name in [
+            "thaw_map_snapshot_keys",
+            "thaw_map_snapshot_values",
+            "thaw_map_snapshot_entries",
+            "thaw_set_snapshot_entries",
+        ] {
+            self.module.add_function(
+                name,
+                i8_ptr.fn_type(&[i8_ptr.into()], false),
+                Some(Linkage::External),
+            );
+        }
+        self.module.add_function(
+            "thaw_map_iterator_next",
+            i8_ptr.fn_type(
+                &[i8_ptr.into(), f64_type.into(), f64_type.into()],
+                false,
+            ),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_map_size",
+            f64_type.fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_map_clear",
+            self.context.void_type().fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_map_num_has",
+            i8_type.fn_type(&[i8_ptr.into(), f64_type.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_map_num_set",
+            i8_type.fn_type(&[i8_ptr.into(), f64_type.into(), i64_type.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_map_num_delete",
+            i8_type.fn_type(&[i8_ptr.into(), f64_type.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_map_num_get_f64",
+            f64_type.fn_type(&[i8_ptr.into(), f64_type.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_map_num_get_bool",
+            i8_type.fn_type(&[i8_ptr.into(), f64_type.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_map_num_get_ptr",
+            i8_ptr.fn_type(&[i8_ptr.into(), f64_type.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_map_num_get_i64",
+            i64_type.fn_type(&[i8_ptr.into(), f64_type.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_map_str_has",
+            i8_type.fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_map_str_set",
+            i8_type.fn_type(&[i8_ptr.into(), i8_ptr.into(), i64_type.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_map_str_delete",
+            i8_type.fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_map_str_get_f64",
+            f64_type.fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_map_str_get_bool",
+            i8_type.fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_map_str_get_ptr",
+            i8_ptr.fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_map_str_get_i64",
+            i64_type.fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_map_ref_has",
+            i8_type.fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_map_ref_set",
+            i8_type.fn_type(&[i8_ptr.into(), i8_ptr.into(), i64_type.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_map_ref_delete",
+            i8_type.fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_map_ref_get_f64",
+            f64_type.fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_map_ref_get_bool",
+            i8_type.fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_map_ref_get_ptr",
+            i8_ptr.fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_map_ref_get_i64",
+            i64_type.fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_map_any_has",
+            i8_type.fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_map_any_set",
+            i8_type.fn_type(&[i8_ptr.into(), i8_ptr.into(), i64_type.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_map_any_delete",
+            i8_type.fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_map_any_get_f64",
+            f64_type.fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_map_any_get_bool",
+            i8_type.fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_map_any_get_ptr",
+            i8_ptr.fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_map_any_get_i64",
+            i64_type.fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_string_repeat",
+            i8_ptr.fn_type(&[i8_ptr.into(), f64_type.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_string_at",
+            i8_ptr.fn_type(&[i8_ptr.into(), f64_type.into()], false),
+            Some(Linkage::External),
+        );
+        let string_pad_type =
+            i8_ptr.fn_type(&[i8_ptr.into(), i8_ptr.into(), f64_type.into()], false);
+        for name in ["thaw_string_pad_start", "thaw_string_pad_end"] {
+            self.module
+                .add_function(name, string_pad_type, Some(Linkage::External));
+        }
+        let string_length_type = f64_type.fn_type(&[i8_ptr.into()], false);
+        self.module.add_function(
+            "thaw_string_length",
+            string_length_type,
+            Some(Linkage::External),
+        );
+        let string_char_code_type = f64_type.fn_type(&[i8_ptr.into(), f64_type.into()], false);
+        self.module.add_function(
+            "thaw_string_char_code_at",
+            string_char_code_type,
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_string_code_point_at",
+            string_char_code_type,
+            Some(Linkage::External),
+        );
+
+        let json_as_string_type = i8_ptr.fn_type(&[i8_ptr.into()], false);
+        self.module.add_function(
+            "thaw_json_as_string",
+            json_as_string_type,
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_console_string",
+            json_as_string_type,
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_typeof",
+            json_as_string_type,
+            Some(Linkage::External),
+        );
+
+        // Returns i8 (0/1), not i1 -- see thaw-std's `thaw_json_as_bool`
+        // doc comment on why it avoids relying on `bool`'s C ABI shape.
+        let json_as_bool_type = self.context.i8_type().fn_type(&[i8_ptr.into()], false);
+        self.module.add_function(
+            "thaw_json_as_bool",
+            json_as_bool_type,
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_is_date_shape",
+            json_as_bool_type,
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_is_buffer_shape",
+            json_as_bool_type,
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_has_wrapper_key",
+            self.context
+                .i8_type()
+                .fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_map_or_set_entries",
+            i8_ptr.fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_map_or_set_get",
+            i8_ptr.fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_map_or_set_has",
+            self.context
+                .i8_type()
+                .fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_map_or_set_keys",
+            i8_ptr.fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_map_or_set_values",
+            i8_ptr.fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_map_or_set_entries_view",
+            i8_ptr.fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_map_or_set_set",
+            i8_ptr.fn_type(&[i8_ptr.into(), i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_map_or_set_add",
+            i8_ptr.fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_map_or_set_delete",
+            i8_ptr.fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_map_or_set_clear",
+            i8_ptr.fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_date_timestamp",
+            f64_type.fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_date_set_timestamp",
+            f64_type.fn_type(&[i8_ptr.into(), f64_type.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_array_new",
+            i8_ptr.fn_type(&[], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_receiver_bigint",
+            i8_ptr.fn_type(&[self.context.i64_type().into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_receiver_bool",
+            i8_ptr.fn_type(&[i8_type.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_receiver_number",
+            i8_ptr.fn_type(&[self.context.f64_type().into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_receiver_string",
+            i8_ptr.fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_null",
+            i8_ptr.fn_type(&[], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_undefined",
+            i8_ptr.fn_type(&[], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_is_array",
+            self.context.i8_type().fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_array_join",
+            i8_ptr.fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_is_buffer",
+            self.context.i8_type().fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_is_null",
+            self.context.i8_type().fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_is_undefined",
+            self.context.i8_type().fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_is_nullish",
+            self.context.i8_type().fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_is_object_like",
+            self.context.i8_type().fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_clone",
+            i8_ptr.fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_state_key",
+            i8_ptr.fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_set_prototype",
+            i8_ptr.fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_take_prototype_error",
+            self.context.i8_type().fn_type(&[], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_get_prototype",
+            i8_ptr.fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_keys",
+            i8_ptr.fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_own_keys",
+            i8_ptr.fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_array_keys",
+            i8_ptr.fn_type(&[i8_ptr.into(), i8_ptr.into(), i8_type.into()], false),
+            Some(Linkage::External),
+        );
+        for name in [
+            "thaw_json_values",
+            "thaw_json_number_values",
+            "thaw_json_string_values",
+            "thaw_json_bool_values",
+            "thaw_json_entries",
+            "thaw_json_number_entries",
+            "thaw_json_string_entries",
+            "thaw_json_bool_entries",
+        ] {
+            self.module.add_function(
+                name,
+                i8_ptr.fn_type(&[i8_ptr.into()], false),
+                Some(Linkage::External),
+            );
+        }
+        for name in [
+            "thaw_json_object_from_number_entries",
+            "thaw_json_object_from_string_entries",
+            "thaw_json_object_from_bool_entries",
+            "thaw_json_object_from_json_entries",
+        ] {
+            self.module.add_function(
+                name,
+                i8_ptr.fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+                Some(Linkage::External),
+            );
+        }
+        self.module.add_function(
+            "thaw_json_take_from_entries_error",
+            self.context.i8_type().fn_type(&[], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_has_own",
+            self.context
+                .i8_type()
+                .fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_property_is_enumerable",
+            self.context
+                .i8_type()
+                .fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_has",
+            self.context
+                .i8_type()
+                .fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_object_assign",
+            i8_ptr.fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_take_assign_error",
+            self.context.i8_type().fn_type(&[], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_object_is",
+            self.context
+                .i8_type()
+                .fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        for (name, other) in [
+            ("thaw_json_object_is_number", f64_type.into()),
+            ("thaw_json_object_is_string", i8_ptr.into()),
+            (
+                "thaw_json_object_is_bool",
+                self.context.bool_type().into(),
+            ),
+        ] {
+            self.module.add_function(
+                name,
+                self.context
+                    .i8_type()
+                    .fn_type(&[i8_ptr.into(), other], false),
+                Some(Linkage::External),
+            );
+        }
+        self.module.add_function(
+            "thaw_json_array_push_hole",
+            self.context.void_type().fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        for (name, value_type) in [
+            ("thaw_json_array_push_number", f64_type.into()),
+            ("thaw_json_array_push_string", i8_ptr.into()),
+            ("thaw_json_array_push_bool", self.context.i8_type().into()),
+            ("thaw_json_array_push_json", i8_ptr.into()),
+        ] {
+            self.module.add_function(
+                name,
+                self.context
+                    .void_type()
+                    .fn_type(&[i8_ptr.into(), value_type], false),
+                Some(Linkage::External),
+            );
+        }
+        for name in ["thaw_json_from_number_array", "thaw_json_to_number_array"] {
+            self.module.add_function(
+                name,
+                i8_ptr.fn_type(&[i8_ptr.into()], false),
+                Some(Linkage::External),
+            );
+        }
+        self.module.add_function(
+            "thaw_json_array_length",
+            self.context.i64_type().fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_array_slice",
+            i8_ptr.fn_type(&[i8_ptr.into(), self.context.i64_type().into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_object_new",
+            i8_ptr.fn_type(&[], false),
+            Some(Linkage::External),
+        );
+        for (name, value_type) in [
+            ("thaw_json_object_set_number", f64_type.into()),
+            ("thaw_json_object_set_string", i8_ptr.into()),
+            ("thaw_json_object_set_bool", self.context.i8_type().into()),
+            ("thaw_json_object_set_json", i8_ptr.into()),
+            ("thaw_json_object_set_json_owned", i8_ptr.into()),
+        ] {
+            self.module.add_function(
+                name,
+                self.context
+                    .void_type()
+                    .fn_type(&[i8_ptr.into(), i8_ptr.into(), value_type], false),
+                Some(Linkage::External),
+            );
+        }
+        self.module.add_function(
+            "thaw_json_object_delete",
+            self.context
+                .i8_type()
+                .fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+
+        // thaw-quickjs: the QuickJS-NG fallback path (docs/design/bridge.md
+        // section 7). Same i8-not-i1 reasoning as `thaw_json_as_bool`.
+        let js_load_type = self.context.i8_type().fn_type(&[i8_ptr.into()], false);
+        self.module
+            .add_function("thaw_js_load", js_load_type, Some(Linkage::External));
+        self.module.add_function(
+            "thaw_js_run_event_loop",
+            self.context.i32_type().fn_type(&[], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_js_terminal_work_pending",
+            self.context.i8_type().fn_type(&[], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_js_run_cli",
+            self.context.i32_type().fn_type(&[], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_js_run_until_native_resolved",
+            self.context.void_type().fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+
+        let js_call_type = i8_ptr.fn_type(&[i8_ptr.into(), i8_ptr.into()], false);
+        self.module
+            .add_function("thaw_js_call", js_call_type, Some(Linkage::External));
+        let result_type = self
+            .context
+            .struct_type(&[i8_ptr.into(), i8_ptr.into()], false);
+        let js_call_result_type = result_type.fn_type(&[i8_ptr.into(), i8_ptr.into()], false);
+        self.module.add_function(
+            "thaw_js_call_result",
+            js_call_result_type,
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_js_get_global",
+            self.context.i64_type().fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_js_handle_to_string",
+            i8_ptr.fn_type(&[self.context.i64_type().into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_js_handle_to_console_string",
+            i8_ptr.fn_type(&[self.context.i64_type().into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_js_call_handle_result",
+            result_type.fn_type(&[self.context.i64_type().into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_js_call_handle_handle_result",
+            self.context
+                .struct_type(&[self.context.i64_type().into(), i8_ptr.into()], false)
+                .fn_type(
+                    &[
+                        self.context.i64_type().into(),
+                        i8_ptr.into(),
+                        self.context.bool_type().into(),
+                    ],
+                    false,
+                ),
+            Some(Linkage::External),
+        );
+        // `new Function(...)` -- (args_json) -> a retained function handle
+        // (or an error).
+        self.module.add_function(
+            "thaw_js_new_function",
+            self.context
+                .struct_type(&[self.context.i64_type().into(), i8_ptr.into()], false)
+                .fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_js_call_handle_value_result",
+            result_type.fn_type(
+                &[
+                    self.context.i64_type().into(),
+                    self.context.i64_type().into(),
+                ],
+                false,
+            ),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_js_retain_handle",
+            self.context
+                .i8_type()
+                .fn_type(&[self.context.i64_type().into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_js_release_handle",
+            self.context
+                .i8_type()
+                .fn_type(&[self.context.i64_type().into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_js_release_all_handles",
+            self.context.i64_type().fn_type(&[], false),
+            Some(Linkage::External),
+        );
+        let handle_result_type = self
+            .context
+            .struct_type(&[self.context.i64_type().into(), i8_ptr.into()], false);
+        self.module.add_function(
+            "thaw_js_intern_native_object",
+            handle_result_type.fn_type(&[i8_ptr.into(), i8_ptr.into(), self.context.i64_type().into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_js_register_native_method_callback_graph",
+            handle_result_type.fn_type(&[
+                i8_ptr.into(), i8_ptr.into(), self.context.i64_type().into(),
+                self.context.i64_type().into(), self.context.i8_type().into(),
+                i8_ptr.into(), self.context.i8_type().into(),
+            ], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_js_lookup_native_object",
+            handle_result_type.fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_js_native_object_pointer",
+            handle_result_type.fn_type(&[self.context.i64_type().into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_js_call_selected_method_graph_result",
+            result_type.fn_type(&[self.context.i64_type().into(), self.context.i64_type().into(), i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_js_call_selected_method_handle_graph_args_result",
+            handle_result_type.fn_type(&[
+                self.context.i64_type().into(), self.context.i64_type().into(),
+                i8_ptr.into(), i8_ptr.into(), self.context.bool_type().into(),
+            ], false),
+            Some(Linkage::External),
+        );
+        for name in [
+            "thaw_js_get_property_result",
+            "thaw_js_get_property_json_key_result",
+            "thaw_js_delete_property_result",
+            "thaw_js_has_property_result",
+        ] {
+            self.module.add_function(
+                name,
+                handle_result_type.fn_type(&[self.context.i64_type().into(), i8_ptr.into()], false),
+                Some(Linkage::External),
+            );
+        }
+        self.module.add_function(
+            "thaw_js_host_query_result",
+            result_type.fn_type(&[self.context.i64_type().into(), self.context.i8_type().into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_js_host_date_set_result",
+            result_type.fn_type(&[self.context.i64_type().into(), f64_type.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_js_set_property_graph_result",
+            handle_result_type.fn_type(&[
+                self.context.i64_type().into(), i8_ptr.into(), i8_ptr.into(),
+            ], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_js_property_predicate_json_key_result",
+            handle_result_type.fn_type(&[
+                self.context.i64_type().into(), i8_ptr.into(), self.context.i8_type().into(),
+            ], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_js_host_enumerate_result",
+            result_type.fn_type(&[self.context.i64_type().into(), self.context.i8_type().into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_js_retain_json_result",
+            handle_result_type.fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_js_set_property_result",
+            handle_result_type.fn_type(
+                &[
+                    self.context.i64_type().into(),
+                    i8_ptr.into(),
+                    self.context.i64_type().into(),
+                ],
+                false,
+            ),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_js_call_method_result",
+            result_type.fn_type(
+                &[self.context.i64_type().into(), i8_ptr.into(), i8_ptr.into()],
+                false,
+            ),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_js_set_property_json_result",
+            result_type.fn_type(
+                &[self.context.i64_type().into(), i8_ptr.into(), i8_ptr.into()],
+                false,
+            ),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_js_call_method_handle_result",
+            handle_result_type.fn_type(
+                &[
+                    self.context.i64_type().into(),
+                    i8_ptr.into(),
+                    i8_ptr.into(),
+                    self.context.bool_type().into(),
+                ],
+                false,
+            ),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_js_resolve_handle_result",
+            result_type.fn_type(&[self.context.i64_type().into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_js_resolve_handle_handle_result",
+            handle_result_type.fn_type(&[self.context.i64_type().into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_js_call_handle_mixed_result",
+            result_type.fn_type(
+                &[self.context.i64_type().into(), i8_ptr.into(), i8_ptr.into()],
+                false,
+            ),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_js_call_handle_mixed_native_json_result",
+            result_type.fn_type(
+                &[self.context.i64_type().into(), i8_ptr.into(), i8_ptr.into(), i8_ptr.into()],
+                false,
+            ),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_js_call_handle_mixed_handle_result",
+            handle_result_type.fn_type(
+                &[self.context.i64_type().into(), i8_ptr.into(), i8_ptr.into()],
+                false,
+            ),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_js_release_native_handle_array",
+            self.context.void_type().fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_js_construct_handle_result",
+            handle_result_type.fn_type(&[self.context.i64_type().into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        for (graph, plain) in [
+            ("thaw_js_call_handle_handle_graph_args_result", "thaw_js_call_handle_handle_result"),
+            ("thaw_js_call_method_handle_graph_args_result", "thaw_js_call_method_handle_result"),
+            ("thaw_js_call_handle_mixed_handle_graph_args_result", "thaw_js_call_handle_mixed_handle_result"),
+            ("thaw_js_call_handle_mixed_handle_graph_args_consuming_result", "thaw_js_call_handle_mixed_handle_result"),
+            ("thaw_js_construct_handle_graph_args_result", "thaw_js_construct_handle_result"),
+            ("thaw_js_call_graph_result", "thaw_js_call_result"),
+            ("thaw_js_set_property_json_graph_result", "thaw_js_set_property_json_result"),
+            ("thaw_js_call_handle_graph_result", "thaw_js_call_handle_result"),
+            ("thaw_js_call_handle_with_this_graph_wire_result", "thaw_js_call_handle_result"),
+            ("thaw_js_call_handle_value_graph_result", "thaw_js_call_handle_value_result"),
+            ("thaw_js_call_method_graph_result", "thaw_js_call_method_result"),
+            ("thaw_js_resolve_handle_graph_result", "thaw_js_resolve_handle_result"),
+            ("thaw_js_call_handle_mixed_graph_result", "thaw_js_call_handle_mixed_result"),
+            ("thaw_js_call_handle_mixed_native_json_graph_result", "thaw_js_call_handle_mixed_native_json_result"),
+        ] {
+            let signature = self.module.get_function(plain).unwrap().get_type();
+            self.module.add_function(graph, signature, Some(Linkage::External));
+        }
+        self.module.add_function(
+            "thaw_js_register_native_callback_graph",
+            handle_result_type.fn_type(
+                &[
+                    i8_ptr.into(),
+                    i8_ptr.into(),
+                    self.context.i64_type().into(),
+                    self.context.i64_type().into(),
+                    self.context.i8_type().into(),
+                    i8_ptr.into(),
+                    self.context.i8_type().into(),
+                ],
+                false,
+            ),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_js_register_native_callback",
+            handle_result_type.fn_type(
+                &[
+                    i8_ptr.into(),
+                    i8_ptr.into(),
+                    self.context.i64_type().into(),
+                    self.context.i64_type().into(),
+                    self.context.i8_type().into(),
+                    i8_ptr.into(),
+                    self.context.i8_type().into(),
+                ],
+                false,
+            ),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_jit_call_f64",
+            self.context
+                .struct_type(&[self.context.f64_type().into(), i8_ptr.into()], false)
+                .fn_type(
+                    &[
+                        i8_ptr.into(),
+                        i8_ptr.into(),
+                        i64_type.into(),
+                        i8_ptr.into(),
+                        i8_ptr.into(),
+                        i8_ptr.into(),
+                        i8_ptr.into(),
+                        i8_ptr.into(),
+                        i8_ptr.into(),
+                        i8_ptr.into(),
+                        i8_ptr.into(),
+                        i8_ptr.into(),
+                        i8_ptr.into(),
+                        i8_ptr.into(),
+                        i8_ptr.into(),
+                        i8_ptr.into(),
+                        i8_ptr.into(),
+                        i8_ptr.into(),
+                        i8_ptr.into(),
+                        i8_ptr.into(),
+                        i8_ptr.into(),
+                        i8_ptr.into(),
+                        i8_ptr.into(),
+                        i8_ptr.into(),
+                        i8_ptr.into(),
+                        i8_ptr.into(),
+                        i8_ptr.into(),
+                        i8_ptr.into(),
+                        i8_ptr.into(),
+                        i8_ptr.into(),
+                        i8_ptr.into(),
+                        i8_ptr.into(),
+                        i8_ptr.into(),
+                        i8_ptr.into(),
+                        i8_ptr.into(),
+                        i8_ptr.into(),
+                        i8_ptr.into(),
+                        i8_ptr.into(),
+                        i8_ptr.into(),
+                        i8_ptr.into(),
+                    ],
+                    false,
+                ),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_js_dynamic_object_query",
+            self.context.f64_type().fn_type(
+                &[self.context.i8_type().into(), i64_type.into(), i8_ptr.into()],
+                false,
+            ),
+            Some(Linkage::External),
+        );
+        self.module
+            .add_function("thaw_napi_load", js_load_type, Some(Linkage::External));
+        self.module.add_function(
+            "thaw_napi_load_named",
+            self.context
+                .i8_type()
+                .fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_napi_load_named_qualified",
+            self.context.i8_type().fn_type(&[i8_ptr.into(), i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_napi_load_embedded_hex",
+            self.context
+                .i8_type()
+                .fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_napi_load_embedded_hex_qualified",
+            self.context.i8_type().fn_type(&[i8_ptr.into(), i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_napi_load_embedded_shared_hex",
+            self.context.i8_type().fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_napi_embed_executable_hex",
+            i8_ptr.fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_js_set_process_env",
+            self.context
+                .i8_type()
+                .fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_napi_load_shared",
+            self.context.i8_type().fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_napi_call_result",
+            js_call_result_type,
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_napi_call_typed_result",
+            js_call_result_type,
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_napi_call_handle_typed_result",
+            result_type.fn_type(&[self.context.i64_type().into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_napi_call_export_handle_typed_result",
+            handle_result_type.fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_napi_call_export_handle_with_function_typed_result",
+            handle_result_type.fn_type(
+                &[
+                    i8_ptr.into(),
+                    i8_ptr.into(),
+                    self.context.i64_type().into(),
+                    i8_ptr.into(),
+                    i8_ptr.into(),
+                ],
+                false,
+            ),
+            Some(Linkage::External),
+        );
+        for (name, result) in [
+            (
+                "thaw_napi_call_export_handle_with_functions_typed_result",
+                handle_result_type,
+            ),
+            ("thaw_napi_call_with_functions_typed_result", result_type),
+        ] {
+            self.module.add_function(
+                name,
+                result.fn_type(
+                    &[
+                        i8_ptr.into(),
+                        i8_ptr.into(),
+                        i8_ptr.into(),
+                        self.context.i64_type().into(),
+                    ],
+                    false,
+                ),
+                Some(Linkage::External),
+            );
+        }
+        self.module.add_function(
+            "thaw_napi_get_export",
+            self.context.i64_type().fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_napi_get_export_typed_result",
+            handle_result_type.fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_napi_construct_handle_result",
+            handle_result_type.fn_type(&[self.context.i64_type().into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_napi_construct_handle_typed_result",
+            handle_result_type.fn_type(&[self.context.i64_type().into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_napi_call_method_result",
+            result_type.fn_type(
+                &[self.context.i64_type().into(), i8_ptr.into(), i8_ptr.into()],
+                false,
+            ),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_napi_call_method_typed_result",
+            result_type.fn_type(
+                &[self.context.i64_type().into(), i8_ptr.into(), i8_ptr.into()],
+                false,
+            ),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_napi_get_property_result",
+            result_type.fn_type(&[self.context.i64_type().into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_napi_get_property_typed_result",
+            result_type.fn_type(&[self.context.i64_type().into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_napi_set_property_result",
+            result_type.fn_type(
+                &[self.context.i64_type().into(), i8_ptr.into(), i8_ptr.into()],
+                false,
+            ),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_napi_set_property_typed_result",
+            result_type.fn_type(
+                &[self.context.i64_type().into(), i8_ptr.into(), i8_ptr.into()],
+                false,
+            ),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_napi_call_method_with_callback_result",
+            result_type.fn_type(
+                &[
+                    self.context.i64_type().into(),
+                    i8_ptr.into(),
+                    i8_ptr.into(),
+                    i8_ptr.into(),
+                    i8_ptr.into(),
+                    self.context.i8_type().into(),
+                ],
+                false,
+            ),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_napi_call_with_callback_result",
+            result_type.fn_type(
+                &[i8_ptr.into(), i8_ptr.into(), i8_ptr.into(), i8_ptr.into()],
+                false,
+            ),
+            Some(Linkage::External),
+        );
+        for (graph, plain) in [
+            ("thaw_napi_call_graph_result", "thaw_napi_call_result"),
+            ("thaw_napi_call_typed_graph_result", "thaw_napi_call_typed_result"),
+            ("thaw_napi_call_handle_typed_graph_result", "thaw_napi_call_handle_typed_result"),
+            ("thaw_napi_call_with_functions_typed_graph_result", "thaw_napi_call_with_functions_typed_result"),
+            ("thaw_napi_call_method_typed_graph_result", "thaw_napi_call_method_typed_result"),
+            ("thaw_napi_get_property_typed_graph_result", "thaw_napi_get_property_typed_result"),
+            ("thaw_napi_set_property_typed_graph_result", "thaw_napi_set_property_typed_result"),
+            ("thaw_napi_call_with_callback_graph_result", "thaw_napi_call_with_callback_result"),
+            ("thaw_napi_call_method_with_callback_graph_result", "thaw_napi_call_method_with_callback_result"),
+            ("thaw_napi_call_export_handle_typed_graph_args_result", "thaw_napi_call_export_handle_typed_result"),
+            ("thaw_napi_call_export_handle_with_functions_typed_graph_args_result", "thaw_napi_call_export_handle_with_functions_typed_result"),
+            ("thaw_napi_construct_handle_typed_graph_args_result", "thaw_napi_construct_handle_typed_result"),
+        ] {
+            let signature = self.module.get_function(plain).unwrap().get_type();
+            self.module.add_function(graph, signature, Some(Linkage::External));
+        }
+
+        self.module.add_function(
+            "thaw_napi_run_async_work",
+            self.context.i64_type().fn_type(&[], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_napi_poll_async_work",
+            self.context.i64_type().fn_type(&[], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_napi_async_work_pending",
+            self.context.i8_type().fn_type(&[], false),
+            Some(Linkage::External),
+        );
+        for name in [
+            "thaw_napi_begin_shutdown",
+            "thaw_napi_poll_shutdown",
+            "thaw_napi_finish_shutdown",
+        ] {
+            self.module.add_function(
+                name, self.context.i8_type().fn_type(&[], false), Some(Linkage::External),
+            );
+        }
+        self.module.add_function(
+            "thaw_napi_take_shutdown_error",
+            i8_ptr.fn_type(&[], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_napi_unload_all",
+            self.context.i8_type().fn_type(&[], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_napi_take_fatal_exception",
+            self.context.i8_type().fn_type(&[], false),
+            Some(Linkage::External),
+        );
+
+        let sleep_type = i8_ptr.fn_type(&[i64_type.into()], false);
+        self.module
+            .add_function("thaw_sleep_ms", sleep_type, Some(Linkage::External));
+        self.module.add_function(
+            "thaw_http_get_async",
+            i8_ptr.fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        let run_until_type = i8_ptr.fn_type(&[i8_ptr.into()], false);
+        self.module.add_function(
+            "thaw_runtime_run_until_resolved",
+            run_until_type,
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_runtime_drain_detached",
+            i64_type.fn_type(&[], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_runtime_run_until_idle",
+            i64_type.fn_type(&[], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_runtime_async_work_pending",
+            self.context.i8_type().fn_type(&[], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_runtime_shutdown_wait",
+            self.context.void_type().fn_type(&[], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_promise_new",
+            i8_ptr.fn_type(&[], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_promise_new_with_creator_ticket",
+            i8_ptr.fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_promise_new_frame_with_creator_ticket",
+            i8_ptr.fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_promise_creator_is_frame",
+            self.context.i8_type().fn_type(&[self.context.i64_type().into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_promise_destroy_creator_ticket",
+            self.context.i8_type().fn_type(&[self.context.i64_type().into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function("thaw_promise_register_capture_creator_cell",
+            self.context.i8_type().fn_type(&[i8_ptr.into(), self.context.i64_type().into()], false),
+            Some(Linkage::External));
+        self.module.add_function("thaw_promise_update_capture_creator_cell",
+            self.context.void_type().fn_type(&[i8_ptr.into(), self.context.i64_type().into()], false),
+            Some(Linkage::External));
+        self.module.add_function(
+            "thaw_promise_take_deferred_capture_creator_ticket",
+            self.context.i64_type().fn_type(&[], false), Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_promise_deferred_capture_creator_ticket_pending",
+            self.context.i8_type().fn_type(&[], false), Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_promise_register_deferred_capture_creator_driver",
+            self.context.void_type().fn_type(&[i8_ptr.into()], false), Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_promise_retain",
+            i8_ptr.fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_promise_release",
+            self.context.void_type().fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_promise_subscribe",
+            self.context
+                .i8_type()
+                .fn_type(&[i8_ptr.into(), i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_promise_subscribe_with_cancel_and_completion",
+            self.context.i8_type().fn_type(
+                &[i8_ptr.into(), i8_ptr.into(), i8_ptr.into(),
+                  i8_ptr.into(), i8_ptr.into()], false,
+            ),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_promise_resolve",
+            self.context
+                .i8_type()
+                .fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_promise_reject",
+            self.context
+                .i8_type()
+                .fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_promise_reject_native_text",
+            self.context.i8_type().fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_promise_forward_rejection",
+            self.context.i8_type().fn_type(&[i8_ptr.into(), i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_promise_reject_borrowed_source",
+            self.context.i8_type().fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_promise_reject_borrowed_source_from_subscription",
+            self.context.i8_type().fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_promise_queue_delivered_source_failure",
+            self.context.i8_type().fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_promise_take_delivered_cause_packet",
+            i8_ptr.fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_promise_reject_typed",
+            self.context.i8_type().fn_type(
+                &[
+                    i8_ptr.into(),
+                    i8_ptr.into(),
+                    i64_type.into(),
+                    f64_type.into(),
+                    i64_type.into(),
+                    self.context.bool_type().into(),
+                    i8_ptr.into(),
+                ],
+                false,
+            ),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_promise_reject_typed_with_native_text",
+            self.context.i8_type().fn_type(
+                &[
+                    i8_ptr.into(), i8_ptr.into(), i64_type.into(), f64_type.into(),
+                    i64_type.into(), self.context.bool_type().into(), i8_ptr.into(), i8_ptr.into(),
+                ], false,
+            ),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_promise_reject_typed_with_aggregate",
+            self.context.i8_type().fn_type(
+                &[i8_ptr.into(), i8_ptr.into(), i64_type.into(), f64_type.into(),
+                  i64_type.into(), self.context.bool_type().into(), i8_ptr.into(),
+                  i8_ptr.into(), i8_ptr.into()], false,
+            ),
+            Some(Linkage::External),
+        );
+        for (name, ty) in [
+            ("thaw_promise_exception_aggregate_errors", BasicTypeEnum::from(i8_ptr)),
+            ("thaw_promise_exception_tag", BasicTypeEnum::from(i64_type)),
+            ("thaw_promise_exception_f64", BasicTypeEnum::from(f64_type)),
+            ("thaw_promise_exception_i64", BasicTypeEnum::from(i64_type)),
+            (
+                "thaw_promise_exception_bool",
+                BasicTypeEnum::from(self.context.bool_type()),
+            ),
+            (
+                "thaw_promise_exception_object",
+                BasicTypeEnum::from(i8_ptr),
+            ),
+        ] {
+            self.module.add_function(
+                name,
+                ty.fn_type(&[i8_ptr.into()], false),
+                Some(Linkage::External),
+            );
+        }
+        self.module.add_function(
+            "thaw_promise_exception_pending_object",
+            i8_ptr.fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_promise_state",
+            self.context.i8_type().fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_runtime_poll_one",
+            self.context.i8_type().fn_type(&[], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_promise_destroy",
+            self.context.void_type().fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_promise_detach",
+            self.context
+                .i8_type()
+                .fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_promise_detach_for_report",
+            self.context
+                .i8_type()
+                .fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_promise_drain_unhandled",
+            self.context.i8_type().fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_promise_set_unhandled_reporter",
+            self.context.void_type().fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_promise_set_rejection_handled_reporter",
+            self.context.void_type().fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        for name in [
+            "thaw_promise_drain_unhandled_result",
+            "thaw_promise_drain_unhandled_text_result",
+        ] {
+            self.module.add_function(name, self.context.i8_type().fn_type(&[i8_ptr.into()], false), Some(Linkage::External));
+        }
+        for name in [
+            "thaw_promise_set_unhandled_reporter_result",
+            "thaw_promise_set_unhandled_reporter_text_result",
+            "thaw_promise_set_rejection_handled_reporter_result",
+        ] {
+            self.module.add_function(name, self.context.void_type().fn_type(&[i8_ptr.into()], false), Some(Linkage::External));
+        }
+        self.module.add_function(
+            "thaw_promise_take_unhandled_failure",
+            self.context.i8_type().fn_type(&[], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_promise_take_report_activity",
+            i64_type.fn_type(&[], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_promise_chain",
+            i8_ptr.fn_type(
+                &[
+                    i8_ptr.into(),
+                    i8_ptr.into(),
+                    i8_ptr.into(),
+                    self.context.i8_type().into(),
+                ],
+                false,
+            ),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_promise_chain_both",
+            i8_ptr.fn_type(
+                &[i8_ptr.into(), i8_ptr.into(), i8_ptr.into(), i8_ptr.into(), i8_ptr.into()],
+                false,
+            ),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_promise_chain_with_context",
+            i8_ptr.fn_type(
+                &[
+                    i8_ptr.into(),
+                    i8_ptr.into(),
+                    i8_ptr.into(),
+                    self.context.i8_type().into(),
+                ],
+                false,
+            ),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_promise_chain_both_with_context",
+            i8_ptr.fn_type(
+                &[i8_ptr.into(), i8_ptr.into(), i8_ptr.into(), i8_ptr.into(), i8_ptr.into()],
+                false,
+            ),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_promise_adopt",
+            self.context
+                .i8_type()
+                .fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_promise_finally",
+            i8_ptr.fn_type(&[i8_ptr.into(), i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_promise_finally_adopt",
+            self.context.i8_type().fn_type(
+                &[
+                    i8_ptr.into(),
+                    i8_ptr.into(),
+                    i8_ptr.into(),
+                    self.context.i8_type().into(),
+                    i64_type.into(),
+                    f64_type.into(),
+                    i64_type.into(),
+                    self.context.bool_type().into(),
+                    i8_ptr.into(),
+                ],
+                false,
+            ),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_promise_exception_native_text_copy",
+            i8_ptr.fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_promise_finally_adopt_with_source",
+            self.context.i8_type().fn_type(
+                &[
+                    i8_ptr.into(), i8_ptr.into(), i8_ptr.into(),
+                    self.context.i8_type().into(), i64_type.into(), f64_type.into(),
+                    i64_type.into(), self.context.bool_type().into(), i8_ptr.into(), i8_ptr.into(),
+                ], false,
+            ),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_promise_all_slots",
+            i8_ptr.fn_type(&[i8_ptr.into(), i64_type.into(), i64_type.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_promise_all_typed",
+            i8_ptr.fn_type(&[i8_ptr.into(), i8_ptr.into(), i64_type.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_promise_race",
+            i8_ptr.fn_type(&[i8_ptr.into(), i64_type.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_promise_any",
+            i8_ptr.fn_type(&[i8_ptr.into(), i64_type.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_promise_all_settled",
+            i8_ptr.fn_type(&[i8_ptr.into(), i64_type.into(), i64_type.into()], false),
+            Some(Linkage::External),
+        );
+    }
+}

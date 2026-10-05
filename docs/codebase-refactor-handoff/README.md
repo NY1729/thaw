@@ -15,7 +15,7 @@ Tests are performed by the user. Do not run tests, builds, compilers, formatters
 
 1. JIT callback ABI: wire caller input environments using actual builtin argument layouts; preserve mixed capture kinds at their producer; validate container element/field representations before pointer consumers. Review the latest optional coercion changes and roots, reachability, switch replay, reduce presence and all 16 argument imports.
 2. Native exception / Promise ownership: pair catch and loop boundaries across module initialization, function isolation and preheader promotion; route generic pending exceptions through token cleanup; preserve branch ownership snapshots. Complete supported native aggregate slot relocation and global ownership. Direct Dictionary<Promise> is not currently supported; do not expand the feature scope to implement it.
-3. Promise creator/context successor: resume only after JIT and native ownership prerequisites are reviewed. Rebase older drafts semantically against the current checkpoint; do not replace files with stale whole-file copies.
+3. Promise creator/context successor: archived dependency sources are in `drafts/promise-archive/` (including an explicitly conflicted partial rebase). Resume only after JIT and native ownership prerequisites are reviewed. Rebase older drafts semantically against the current checkpoint; do not replace files with stale whole-file copies.
 4. Continue the remaining ledger across all domains. The two current drafts do not cover all remaining findings.
 
 ## Drafts and review evidence
