@@ -1488,3 +1488,75 @@ fn file_worker_keeps_directives_and_fallback_scope_in_entry_wrapper() {
     let _ = fs::remove_dir_all(dir);
     let _ = fs::remove_dir_all(modules);
 }
+
+#[test]
+fn worker_thread_id_becomes_minus_one_after_routing_cleanup() {
+    use std::ffi::{CStr, CString};
+    let dir = temp_registry("worker_terminal_thread_id");
+    let modules = temp_registry("worker_terminal_thread_id_modules");
+    fs::write(dir.join("index.js"), r#"
+        var Worker = require('node:worker_threads').Worker;
+        module.exports = async function () {
+            var originalSpawn = globalThis.__thaw_worker_spawn;
+            var originalPoll = globalThis.__thaw_worker_poll;
+            var originalTerminate = globalThis.__thaw_worker_terminate;
+            try {
+                globalThis.__thaw_worker_spawn = undefined;
+                var normal = new Worker("require('node:worker_threads').parentPort.close();", { eval: true });
+                var normalId = normal.threadId, normalObserved;
+                await new Promise(function(resolve, reject) {
+                    normal.on('error', reject);
+                    normal.on('exit', function() { normalObserved = normal.threadId; resolve(); });
+                });
+                var stopped = new Worker("require('node:worker_threads').parentPort.on('message', function() {});", { eval: true });
+                await new Promise(function(resolve, reject) { stopped.on('error', reject); stopped.on('online', resolve); });
+                var stoppedId = stopped.threadId;
+                await stopped.terminate();
+                var stoppedAfterRepeat = await stopped.terminate();
+
+                var sendNativeExit = false, nativeExitSent = false;
+                globalThis.__thaw_worker_spawn = function() { return 48701; };
+                globalThis.__thaw_worker_terminate = function() {};
+                globalThis.__thaw_worker_poll = function() {
+                    if (!sendNativeExit || nativeExitSent) return '[]';
+                    nativeExitSent = true;
+                    return JSON.stringify([{ type: 'exit', handle: 48701, code: 0 }]);
+                };
+                var native = new Worker("void 0;", { eval: true });
+                var nativeId = native.threadId, nativeObserved, routingRemoved;
+                var nativeExit = new Promise(function(resolve, reject) {
+                    native.on('error', reject);
+                    native.on('exit', function() {
+                        nativeObserved = native.threadId;
+                        routingRemoved = !globalThis.__thaw_native_workers_by_thread.has(nativeId);
+                        resolve();
+                    });
+                });
+                var termination = native.terminate();
+                sendNativeExit = true;
+                globalThis.__thaw_poll_platform_events();
+                await Promise.all([nativeExit, termination]);
+                var nativeRepeated = await native.terminate();
+                return [normalId > 0, normalObserved, stoppedId > 0, stopped.threadId,
+                        stoppedAfterRepeat, nativeId > 0, nativeObserved, routingRemoved,
+                        native.threadId, nativeRepeated === 0];
+            } finally {
+                globalThis.__thaw_worker_spawn = originalSpawn;
+                globalThis.__thaw_worker_poll = originalPoll;
+                globalThis.__thaw_worker_terminate = originalTerminate;
+            }
+        };
+    "#).unwrap();
+    let (bundle, _, _, _) = bundle_commonjs_package(&modules, "pkg", &dir, "index.js").unwrap();
+    let script = format!(
+        "globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; \
+         globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} \
+         globalThis.workerTerminalThreadIdProbe = module.exports;"
+    );
+    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
+    let result = thaw_quickjs::thaw_js_call(c"workerTerminalThreadIdProbe".as_ptr(), c"[]".as_ptr());
+    assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(),
+        "[true,-1,true,-1,1,true,-1,true,-1,true]");
+    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(modules);
+}
