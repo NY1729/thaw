@@ -1358,6 +1358,11 @@ fn ensure_context() {
                 let worker_terminate =
                     Function::new(ctx.clone(), |handle: u32| terminate_host_worker(handle))
                         .expect("failed to create Worker terminator");
+                let worker_ref = Function::new(
+                    ctx.clone(),
+                    |handle: u32, refed: bool| set_host_worker_refed(handle, refed),
+                )
+                .expect("failed to create Worker liveness updater");
                 let worker_stdin =
                     Function::new(ctx.clone(), |handle: u32, payload: String, ended: bool| {
                         send_host_worker_stdin(handle, payload, ended)
@@ -1442,6 +1447,9 @@ fn ensure_context() {
                 ctx.globals()
                     .set("__thaw_worker_terminate", worker_terminate)
                     .expect("failed to install Worker terminator");
+                ctx.globals()
+                    .set("__thaw_worker_ref", worker_ref)
+                    .expect("failed to install Worker liveness updater");
                 ctx.globals()
                     .set("__thaw_worker_stdin", worker_stdin)
                     .expect("failed to install Worker stdin sender");
