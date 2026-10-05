@@ -2618,8 +2618,13 @@
       if (!resolved) throw new Error("Cannot find module '" + request + "'");
       if (cache[resolved]) return cache[resolved].exports;
       const module = cache[resolved] = { exports: {} }, slash = resolved.lastIndexOf('/'), dirname = slash < 0 ? '.' : slash === 0 ? '/' : resolved.slice(0, slash);
-      if (resolved.endsWith('.json')) module.exports = JSON.parse(source);
-      else Function('module', 'exports', 'require', '__filename', '__dirname', source)(module, module.exports, name => load(dirname, name), resolved, dirname);
+      try {
+        if (resolved.endsWith('.json')) module.exports = JSON.parse(source);
+        else Function('module', 'exports', 'require', '__filename', '__dirname', source).call(module.exports, module, module.exports, name => load(dirname, name), resolved, dirname);
+      } catch (error) {
+        delete cache[resolved];
+        throw error;
+      }
       return module.exports;
     };
     const slash = String(filename).lastIndexOf('/');

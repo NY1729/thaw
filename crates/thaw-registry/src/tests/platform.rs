@@ -1185,3 +1185,66 @@ fn file_worker_preserves_unresolved_parent_path_components() {
     let _ = fs::remove_dir_all(dir);
     let _ = fs::remove_dir_all(modules);
 }
+
+#[test]
+fn file_loaders_retry_failed_modules_and_bind_commonjs_this() {
+    use std::ffi::{CStr, CString};
+    let dir = temp_registry("worker_cache_lifecycle");
+    let modules = temp_registry("worker_cache_lifecycle_modules");
+    fs::write(dir.join("index.js"), r#"
+        var Worker = require('node:worker_threads').Worker;
+        module.exports = function () {
+            var originalRead = globalThis.__thaw_worker_read_source;
+            var originalSpawn = globalThis.__thaw_worker_spawn;
+            var captured, jsonReads, stop = {};
+            globalThis.__thaw_cache_control_failure = {};
+            globalThis.__thaw_worker_read_source = function(path) {
+                if (path.endsWith('entry.js')) return [
+                    "var caught = false; try { require('./child.js'); } catch (error) { caught = error === globalThis.__thaw_cache_control_failure; }",
+                    "var second = require('./child.js'), third = require('./child.js');",
+                    "var jsonFailed = false; try { require('./data.json'); } catch (error) { jsonFailed = error instanceof SyntaxError; }",
+                    "module.exports = [caught, second.cycle, second.published, second === third, globalThis.__thaw_cache_control_attempts, jsonFailed, require('./data.json').value];"
+                ].join(';');
+                if (path.endsWith('child.js')) return [
+                    "'use strict'; globalThis.__thaw_cache_control_attempts++;",
+                    "exports.started = true; this.published = 42;",
+                    "exports.cycle = require('./cycle.js');",
+                    "if (globalThis.__thaw_cache_control_attempts === 1) throw globalThis.__thaw_cache_control_failure;"
+                ].join(';');
+                if (path.endsWith('cycle.js')) return "module.exports = require('./child.js').started;";
+                if (path.endsWith('data.json')) return jsonReads++ === 0 ? '{broken' : '{"value":13}';
+                throw new Error('Unexpected read: ' + path);
+            };
+            globalThis.__thaw_worker_spawn = function(bundle, source) { captured = source; throw stop; };
+            try {
+                globalThis.__thaw_cache_control_attempts = 0; jsonReads = 0;
+                try { new Worker('/cache/entry.js'); } catch (error) { if (error !== stop) throw error; }
+                if (captured === undefined) throw new Error('Missing generated Worker source');
+                var childModule = { exports: {} };
+                Function('require', 'module', 'exports', captured)(
+                    function(name) { throw new Error(name); }, childModule, childModule.exports);
+                var workerValue = childModule.exports;
+                globalThis.__thaw_cache_control_attempts = 0; jsonReads = 0;
+                var mainValue = globalThis.__thaw_run_main_file('/cache/entry.js');
+                return [workerValue, mainValue];
+            } finally {
+                globalThis.__thaw_worker_read_source = originalRead;
+                globalThis.__thaw_worker_spawn = originalSpawn;
+                delete globalThis.__thaw_cache_control_attempts;
+                delete globalThis.__thaw_cache_control_failure;
+            }
+        };
+    "#).unwrap();
+    let (bundle, _, _, _) = bundle_commonjs_package(&modules, "pkg", &dir, "index.js").unwrap();
+    let script = format!(
+        "globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; \
+         globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} \
+         globalThis.exerciseWorkerCacheLifecycle = module.exports;"
+    );
+    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
+    let result = thaw_quickjs::thaw_js_call(c"exerciseWorkerCacheLifecycle".as_ptr(), c"[]".as_ptr());
+    assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(),
+        "[[true,true,42,true,2,true,13],[true,true,42,true,2,true,13]]");
+    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(modules);
+}
