@@ -8933,6 +8933,117 @@ fn catch_preserves_typed_primitive_values() {
     );
 }
 
+// Unrun regression controls for current carrier reads after mutation. Keep
+// source-level assertions here until product execution is permitted.
+#[test]
+fn catch_scalar_assertions_follow_mutations_and_escaped_capture_cells() {
+    let source = r#"
+        function captureArrow(): () => number {
+            let read: () => number = () => 0;
+            try {
+                throw 42;
+            } catch (error) {
+                read = () => error as number;
+                error = 7;
+                try { throw 99; } catch (error) { error = 1n; }
+            }
+            return read;
+        }
+
+        function captureFunction(): () => boolean {
+            let read: () => boolean = () => false;
+            try {
+                throw true;
+            } catch (error) {
+                read = function readCaught(): boolean { return error as boolean; };
+                error = false;
+            }
+            return read;
+        }
+
+        function main(): void {
+            try {
+                throw 42;
+            } catch (error) {
+                error = 7;
+                console.log(error as number);
+                [error] = [11];
+                console.log(error as number);
+            }
+            try { throw true; } catch (error) {
+                error = false;
+                console.log(error as boolean);
+            }
+            try { throw 9n; } catch (error) {
+                error = 10n;
+                console.log(error as bigint);
+            }
+            try { throw 42; } catch (error) {
+                error = null;
+                console.log(typeof error);
+            }
+            let error__thaw_exception_f64 = 314;
+            try { throw 42; } catch (error) {
+                error = 8;
+                console.log(error as number);
+                console.log(error__thaw_exception_f64);
+            }
+            console.log(captureArrow()());
+            console.log(captureFunction()());
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "catch_scalar_mutation_and_capture_cell"),
+        "7\n11\nfalse\n10n\nobject\n8\n314\n7\nfalse\n"
+    );
+}
+
+// Unrun source control: exact-captured scalar primitives occupy Json tag 7,
+// so typed catch assertions must check typeof before decoding current Json.
+#[test]
+fn exact_caught_json_scalars_use_checked_native_assertions() {
+    let source = r#"
+        function iterableThatThrows(reason: any): any {
+            return {
+                [Symbol.iterator]() {
+                    return { next() { throw reason; } };
+                }
+            };
+        }
+
+        function main(): void {
+            try {
+                for (const ignored of iterableThatThrows(JSON.parse("42"))) {}
+            } catch (error) { console.log(error as number); }
+            try {
+                for (const ignored of iterableThatThrows(JSON.parse("true"))) {}
+            } catch (error) { console.log(error as boolean); }
+            try {
+                for (const ignored of iterableThatThrows(9n)) {}
+            } catch (error) { console.log(error as bigint); }
+            try {
+                for (const ignored of iterableThatThrows(NaN)) {}
+            } catch (error) { console.log(Number.isNaN(error as number)); }
+            try {
+                for (const ignored of iterableThatThrows(Infinity)) {}
+            } catch (error) { console.log((error as number) === Infinity); }
+            try {
+                for (const ignored of iterableThatThrows(-0)) {}
+            } catch (error) { console.log(Object.is(error as number, -0)); }
+            try {
+                for (const ignored of iterableThatThrows(JSON.parse("\"not a number\""))) {}
+            } catch (error) {
+                try { console.log(error as number); }
+                catch (mismatch) { console.log(mismatch); }
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "exact_caught_json_scalar_assertions"),
+        "42\ntrue\n9n\ntrue\ntrue\ntrue\ncaught value is not a number\n"
+    );
+}
+
 #[test]
 fn catch_reports_string_null_and_undefined_types() {
     let source = r#"
