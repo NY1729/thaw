@@ -2626,7 +2626,7 @@ impl<'a> FnLowerer<'a> {
                                     "only a simple identifier catch binding is supported".into(),
                                 )
                             }
-                            None => "_".to_string(),
+                            None => "@@thaw_anonymous_catch".to_string(),
                         };
                         let saved = self.bindings.clone();
                         let catch_name = self.bind_local(&source_name, HirType::Str);
