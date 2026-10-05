@@ -3613,6 +3613,54 @@ pub extern "C" fn thaw_json_as_number(value: *mut Value) -> f64 {
     json_to_number(value)
 }
 
+/// Read a Json-backed BigInt into Thaw's native signed-i64 representation.
+/// Values outside that representation fail through the existing host-error
+/// channel; this must never round through f64 or wrap on overflow.
+///
+/// # Safety
+/// `value` must point to a live Json value allocated by this runtime.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_json_as_bigint_i64(value: *const Value) -> i64 {
+    let Some(value) = (unsafe { value.as_ref() }) else {
+        set_host_error("Missing Json BigInt value".into());
+        return 0;
+    };
+    let decimal = match value {
+        Value::BigInt(decimal) => decimal.clone(),
+        Value::Host(lease) => {
+            match host_query(lease, 0).as_deref() {
+                Some("bigint") => {}
+                Some(_) => {
+                    set_host_error("Json value is not a BigInt".into());
+                    return 0;
+                }
+                None => return 0,
+            }
+            let Some(decimal) = host_query(lease, 10) else {
+                // `host_query` recorded the callback error. Return immediately
+                // so the LLVM caller consumes it before any further host call.
+                return 0;
+            };
+            decimal
+        }
+        _ => {
+            set_host_error("Json value is not a BigInt".into());
+            return 0;
+        }
+    };
+    if !canonical_bigint_decimal(&decimal) {
+        set_host_error("Invalid Json BigInt decimal".into());
+        return 0;
+    }
+    match decimal.parse::<i64>() {
+        Ok(value) => value,
+        Err(_) => {
+            set_host_error("Json BigInt is outside native i64 range".into());
+            0
+        }
+    }
+}
+
 /// Real ECMAScript `ToNumber`, for every `Value` shape this file can
 /// actually produce. A missing-key/index sentinel (`is_napi_undefined`)
 /// reads as `NaN`, matching real `Number(undefined)` -- so a missing key
@@ -6017,6 +6065,29 @@ mod tests {
         unsafe { CStr::from_ptr(ptr) }
             .to_string_lossy()
             .into_owned()
+    }
+
+    #[test]
+    fn checked_json_bigint_i64_preserves_range_and_rejects_overflow() {
+        assert!(thaw_json_take_host_error().is_null());
+        let minimum = leak(Value::BigInt(i64::MIN.to_string()));
+        let maximum = leak(Value::BigInt(i64::MAX.to_string()));
+        assert_eq!(unsafe { thaw_json_as_bigint_i64(minimum) }, i64::MIN);
+        assert_eq!(unsafe { thaw_json_as_bigint_i64(maximum) }, i64::MAX);
+        unsafe {
+            thaw_json_destroy(minimum);
+            thaw_json_destroy(maximum);
+        }
+
+        let overflow = leak(Value::BigInt("9223372036854775808".into()));
+        assert_eq!(unsafe { thaw_json_as_bigint_i64(overflow) }, 0);
+        let error = thaw_json_take_host_error();
+        assert_eq!(read_c_string(error), "Json BigInt is outside native i64 range");
+        unsafe {
+            thaw_cstring_destroy(error.cast_mut());
+            thaw_json_destroy(overflow);
+        }
+        assert!(thaw_json_take_host_error().is_null());
     }
 
     #[test]

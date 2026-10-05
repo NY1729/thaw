@@ -1136,6 +1136,92 @@ impl<'a> FnLowerer<'a> {
                             .promise_catch_parameter
                             .as_deref()
                             .is_some_and(|name| self.resolve_binding(name) == resolved);
+                    if self.scope.get(&resolved)
+                        == Some(&crate::caught_exception_carrier_type())
+                    {
+                        let target = lower_ts_type(
+                            &assertion.type_ann,
+                            self.interfaces,
+                            self.generic_interfaces,
+                        )?;
+                        let projection = match &target {
+                            HirType::F64 => Some((0, "number")),
+                            HirType::I64 => Some((1, "bigint")),
+                            HirType::Bool => Some((2, "boolean")),
+                            _ => None,
+                        };
+                        if let Some((native_index, json_type)) = projection {
+                            let carrier_type = crate::caught_exception_carrier_type();
+                            let HirType::Union(members) = carrier_type else { unreachable!() };
+                            let carrier = HirExpr::Var(resolved.clone());
+                            let tag = HirExpr::UnionTag(
+                                Box::new(carrier.clone()), members.clone(),
+                            );
+                            let fail = HirExpr::ThrowValue(
+                                Box::new(HirExpr::Lit(HirLit::Str(format!(
+                                    "caught value is not a {json_type}"
+                                )))),
+                                Box::new(Self::unreachable_value(&target)?),
+                            );
+                            let native_value = HirExpr::UnionValue(
+                                Box::new(carrier.clone()), native_index, members.clone(),
+                            );
+                            let json = HirExpr::UnionValue(
+                                Box::new(carrier.clone()), 7, members.clone(),
+                            );
+                            let json_typeof = HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_json_typeof".into())),
+                                vec![json.clone()],
+                            );
+                            let json_matches = HirExpr::BinOp(
+                                BinOp::EqEqEq,
+                                Box::new(json_typeof),
+                                Box::new(HirExpr::Lit(HirLit::Str(json_type.into()))),
+                            );
+                            // Keep every Json dereference nested under the tag-7
+                            // branch. Union payload bits are otherwise opaque and
+                            // must never be passed to a Json FFI as a pointer.
+                            let projected_json = match &target {
+                                HirType::F64 => HirExpr::JsonAsNumber(Box::new(json.clone())),
+                                HirType::I64 => HirExpr::Call(
+                                    Box::new(HirExpr::Var(
+                                        "__thaw_json_as_bigint_i64".into(),
+                                    )),
+                                    vec![json.clone()],
+                                ),
+                                HirType::Bool => HirExpr::JsonAsBool(Box::new(json.clone())),
+                                _ => unreachable!("only scalar targets reach this branch"),
+                            };
+                            let json_value = HirExpr::Conditional(
+                                Box::new(json_matches),
+                                Box::new(projected_json),
+                                Box::new(fail.clone()),
+                                target.clone(),
+                            );
+                            let is_json = HirExpr::BinOp(
+                                BinOp::EqEqEq,
+                                Box::new(tag.clone()),
+                                Box::new(HirExpr::Lit(HirLit::F64(7.0))),
+                            );
+                            let is_native = HirExpr::BinOp(
+                                BinOp::EqEqEq,
+                                Box::new(tag),
+                                Box::new(HirExpr::Lit(HirLit::F64(native_index as f64))),
+                            );
+                            let json_or_error = HirExpr::Conditional(
+                                Box::new(is_json),
+                                Box::new(json_value),
+                                Box::new(fail),
+                                target.clone(),
+                            );
+                            return Ok(HirExpr::Conditional(
+                                Box::new(is_native),
+                                Box::new(native_value),
+                                Box::new(json_or_error),
+                                target,
+                            ));
+                        }
+                    }
                     if self.catch_bindings.contains(&resolved)
                         || promise_catch
                     {
