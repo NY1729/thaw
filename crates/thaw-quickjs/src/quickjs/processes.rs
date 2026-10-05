@@ -494,6 +494,7 @@ fn spawn_host_worker(
                 commands: command_sender,
                 events: event_receiver,
                 thread: Some(thread),
+                refed: true,
             },
         );
         handle
@@ -605,8 +606,19 @@ fn terminate_host_worker(handle: u32) -> bool {
     })
 }
 
+fn set_host_worker_refed(handle: u32, refed: bool) -> bool {
+    HOST_WORKERS.with(|table| {
+        let mut table = table.borrow_mut();
+        let Some(worker) = table.workers.get_mut(&handle) else {
+            return false;
+        };
+        worker.refed = refed;
+        true
+    })
+}
+
 fn host_workers_active() -> bool {
-    HOST_WORKERS.with(|table| !table.borrow().workers.is_empty())
+    HOST_WORKERS.with(|table| table.borrow().workers.values().any(|worker| worker.refed))
 }
 
 fn poll_host_workers() -> String {
@@ -1073,4 +1085,43 @@ fn run_child_process(command: String, arguments_json: String, options_json: Stri
         })
         .to_string(),
     }
+}
+
+
+#[cfg(test)]
+#[test]
+fn host_worker_late_ref_keeps_queued_terminal_events_alive_until_poll() {
+    let (commands, _command_receiver) = std::sync::mpsc::channel();
+    let (event_sender, events) = std::sync::mpsc::channel();
+    let (release_sender, release_receiver) = std::sync::mpsc::channel();
+    let thread = std::thread::spawn(move || {
+        release_receiver.recv().unwrap();
+        event_sender.send(HostWorkerEvent::Message("queued".into())).unwrap();
+        event_sender.send(HostWorkerEvent::Exit(0)).unwrap();
+    });
+    let handle = u32::MAX;
+    HOST_WORKERS.with(|table| {
+        table.borrow_mut().workers.insert(
+            handle,
+            HostWorker { commands, events, thread: Some(thread), refed: false },
+        );
+    });
+
+    assert!(!host_workers_active());
+    assert_eq!(poll_host_workers(), "[]");
+    release_sender.send(()).unwrap();
+    HOST_WORKERS.with(|table| {
+        while !table.borrow().workers[&handle].thread.as_ref().unwrap().is_finished() {
+            std::thread::yield_now();
+        }
+    });
+
+    // A sibling callback can re-ref after the previous poll, once this thread
+    // has queued terminal events but before the public Exit is dispatched.
+    assert!(set_host_worker_refed(handle, true));
+    assert!(host_workers_active());
+    let events = poll_host_workers();
+    assert!(events.contains("queued"));
+    assert!(events.contains("\"type\":\"exit\""));
+    assert!(!host_workers_active());
 }
