@@ -1125,12 +1125,30 @@ fn ensure_context() {
                     let _ = io::stderr().flush();
                 })
                 .expect("failed to create JavaScript stderr writer");
+                let raw_process_write = Function::new(ctx.clone(), |fd: i32, encoded: String| -> rquickjs::Result<()> {
+                    if !matches!(fd, 1 | 2) || encoded.len() % 2 != 0 || !encoded.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                        return Err(rquickjs::Error::new_from_js_message("process stream", "fd 1/2 and valid hex bytes", "invalid raw process output"));
+                    }
+                    let bytes = hex_decode(&encoded);
+                    let result = if fd == 1 {
+                        let mut output = io::stdout().lock();
+                        output.write_all(&bytes).and_then(|()| output.flush())
+                    } else {
+                        let mut output = io::stderr().lock();
+                        output.write_all(&bytes).and_then(|()| output.flush())
+                    };
+                    result.map_err(|error| rquickjs::Error::new_from_js_message("process stream", "writable fd 1/2", error.to_string()))
+                })
+                .expect("failed to create raw process stream writer");
                 ctx.globals()
                     .set("__thaw_console_stdout", stdout)
                     .expect("failed to install JavaScript stdout writer");
                 ctx.globals()
                     .set("__thaw_console_stderr", stderr)
                     .expect("failed to install JavaScript stderr writer");
+                ctx.globals()
+                    .set("__thaw_process_write_bytes", raw_process_write)
+                    .expect("failed to install raw process stream writer");
                 let stdin_start = Function::new(ctx.clone(), start_host_stdin)
                     .expect("failed to create process stdin starter");
                 let stdin_poll = Function::new(ctx.clone(), poll_host_stdin)

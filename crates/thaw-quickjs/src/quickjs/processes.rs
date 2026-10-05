@@ -126,15 +126,37 @@ fn host_worker_bootstrap(worker_data_json: &str, config_json: &str, thread_id: u
         process.argv = Array.from(__thaw_host_worker_config.argv || []);
         process.execArgv = Array.from(__thaw_host_worker_config.execArgv || []);
         const __thaw_stdin_listeners = new Map();
+        let __thaw_stdin_decoder = null, __thaw_stdin_decoder_type = null, __thaw_stdin_ended = false;
+        function __thaw_emit_stdin(name, value) {{ for (const listener of (__thaw_stdin_listeners.get(name) || []).slice()) listener(value); }}
+        function __thaw_get_stdin_decoder_type() {{
+          if (__thaw_stdin_decoder_type) return __thaw_stdin_decoder_type;
+          if (typeof globalThis.require !== 'function') throw new Error('StringDecoder is not available in this Worker');
+          const loaded = globalThis.require('node:string_decoder');
+          if (!loaded || typeof loaded.StringDecoder !== 'function') throw new Error('StringDecoder is not available in this Worker');
+          __thaw_stdin_decoder_type = loaded.StringDecoder;
+          return __thaw_stdin_decoder_type;
+        }}
         process.stdin = {{
-          setEncoding(encoding) {{ this.encoding = String(encoding); return this; }},
+          setEncoding(encoding) {{ const next = new (__thaw_get_stdin_decoder_type())(encoding); if (__thaw_stdin_decoder) {{ const tail = __thaw_stdin_decoder.end(); if (tail) __thaw_emit_stdin('data', tail); }} __thaw_stdin_decoder = next; this.encoding = next.encoding; return this; }},
           on(name, listener) {{ const key = String(name), list = __thaw_stdin_listeners.get(key) || []; list.push(listener); __thaw_stdin_listeners.set(key, list); return this; }},
           once(name, listener) {{ const wrapped = value => {{ this.off(name, wrapped); listener(value); }}; wrapped.listener = listener; return this.on(name, wrapped); }},
           off(name, listener) {{ const key = String(name), list = __thaw_stdin_listeners.get(key) || []; __thaw_stdin_listeners.set(key, list.filter(item => item !== listener && item.listener !== listener)); return this; }},
           resume() {{ return this; }}, pause() {{ return this; }}
         }};
-        process.stdout = {{ write(value) {{ __thaw_host_worker_events.push({{ type: 'stdout', payload: String(value) }}); return true; }} }};
-        process.stderr = {{ write(value) {{ __thaw_host_worker_events.push({{ type: 'stderr', payload: String(value) }}); return true; }} }};
+        function __thaw_worker_output_bytes(value, encoding) {{
+          if (typeof value === 'string') return Buffer.from(value, encoding || 'utf8');
+          if (ArrayBuffer.isView(value)) return Buffer.from(value.buffer, value.byteOffset, value.byteLength);
+          const error = new TypeError('The chunk argument must be a string, Buffer, TypedArray, or DataView'); error.code = 'ERR_INVALID_ARG_TYPE'; throw error;
+        }}
+        function __thaw_worker_write_output(type, value, encoding, callback) {{
+          if (typeof encoding === 'function') {{ callback = encoding; encoding = undefined; }}
+          const bytes = __thaw_worker_output_bytes(value, encoding);
+          __thaw_enqueue_host_event({{ type, payload: bytes.toString('hex') }});
+          if (typeof callback === 'function') queueMicrotask(callback);
+          return true;
+        }}
+        process.stdout = {{ write(value, encoding, callback) {{ return __thaw_worker_write_output('stdout', value, encoding, callback); }} }};
+        process.stderr = {{ write(value, encoding, callback) {{ return __thaw_worker_write_output('stderr', value, encoding, callback); }} }};
         if (__thaw_host_worker_config.stdout) console.log = console.info = (...values) => process.stdout.write(values.map(String).join(' ') + '\n');
         if (__thaw_host_worker_config.stderr) console.warn = console.error = (...values) => process.stderr.write(values.map(String).join(' ') + '\n');
         function __thaw_host_post_message_to_thread(target, value, transferList, timeout) {{
@@ -161,8 +183,16 @@ fn host_worker_bootstrap(worker_data_json: &str, config_json: &str, thread_id: u
           for (const listener of (__thaw_host_worker_listeners.get('message') || []).slice()) listener(value);
         }};
         globalThis.__thaw_host_worker_stdin = function(payload, ended) {{
-          const name = ended ? 'end' : 'data';
-          for (const listener of (__thaw_stdin_listeners.get(name) || []).slice()) listener(ended ? undefined : payload);
+          if (__thaw_stdin_ended) return;
+          if (ended) {{
+            __thaw_stdin_ended = true;
+            if (__thaw_stdin_decoder) {{ const tail = __thaw_stdin_decoder.end(); if (tail) __thaw_emit_stdin('data', tail); }}
+            __thaw_emit_stdin('end', undefined);
+            return;
+          }}
+          const bytes = Buffer.from(payload, 'hex');
+          const value = __thaw_stdin_decoder ? __thaw_stdin_decoder.write(bytes) : bytes;
+          if (!__thaw_stdin_decoder || value.length) __thaw_emit_stdin('data', value);
         }};
         globalThis.__thaw_host_worker_port = function(id, payload) {{
           const port = __thaw_host_ports.get(String(id)); if (!port) return;
