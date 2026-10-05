@@ -10163,6 +10163,35 @@ fn json_stringify_cycle_replacer_runs_before_cycle_error() {
 }
 
 #[test]
+fn json_stringify_direct_js_value_uses_live_replacer_and_space() {
+    let source = r#"
+        function main(): void {
+            loadScript("globalThis.directStringifyValue = {data:1,ignored:2}; globalThis.directStringifyFunction = function(k,v) { return k === 'ignored' ? undefined : v; }; globalThis.directStringifyKeys = ['data'];");
+            const direct: JsValue = getDynamicValue("directStringifyValue");
+            const liveFunction: JsValue = getDynamicValue("directStringifyFunction");
+            const liveKeys: JsValue = getDynamicValue("directStringifyKeys");
+            try {
+                console.log(JSON.stringify(direct, ["data"], 2));
+                console.log(JSON.stringify(direct, true, false));
+                console.log(JSON.stringify(direct, liveKeys, 2));
+                console.log(JSON.stringify(direct, liveFunction));
+                console.log(JSON.stringify(direct, function(key: string, value: any): any {
+                    return key === "ignored" ? undefined : value;
+                }));
+            } finally {
+                releaseDynamicValue(liveKeys);
+                releaseDynamicValue(liveFunction);
+                releaseDynamicValue(direct);
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "json_stringify_direct_js_value"),
+        "{\n  \"data\": 1\n}\n{\"data\":1,\"ignored\":2}\n{\n  \"data\": 1\n}\n{\"data\":1}\n{\"data\":1}\n"
+    );
+}
+
+#[test]
 fn json_stringify_function_replacer_observes_live_holder_and_saved_this() {
     let source = r#"
         function main(): void {
@@ -11400,4 +11429,25 @@ fn set_intersection_uses_smaller_operand_order() {
         }
     "#;
     assert_eq!(compile_and_run(source, "set_intersection_order"), "2,1\n2,1\n1,2\n2,1\n");
+}
+
+// Unrun regression: exact iterator throws keep the original JS value through a lexical catch.
+#[test]
+fn exact_iterator_catch_preserves_thrown_identity() {
+    let source = r#"
+        function main(): void {
+            const reason = () => 1;
+            const iterable: any = {
+                [Symbol.iterator]() {
+                    return { next() { throw reason; } };
+                }
+            };
+            try {
+                for (const value of iterable) { console.log(value); }
+            } catch (error) {
+                console.log(error === reason);
+            }
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "exact_iterator_catch_identity"), "true\n");
 }

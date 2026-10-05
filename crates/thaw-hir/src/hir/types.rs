@@ -196,6 +196,10 @@ pub enum HirType {
     Tuple(Vec<HirType>),
     Object(Vec<(Symbol, HirType)>),
     Function(Vec<HirType>, Box<HirType>),
+    /// Native callable with a separate physical `this` parameter. Its value
+    /// is still one closure pointer; `signature` describes visible values
+    /// (Function or CallableFunction), never the receiver ABI slot.
+    FunctionWithThis(Box<HirType>, Box<HirType>),
     // A callable whose fixed prefix can contain omittable slots and can be
     // followed by a packed native rest array. The bit mask is parallel to the
     // fixed parameters and records logical optional/default positions.
@@ -218,6 +222,24 @@ pub enum HirType {
     /// Type inference failed / not yet supported for this expression ->
     /// falls back to QuickJS-NG at runtime (see design doc section 3.1).
     Dynamic,
+}
+
+/// The ordinary value stored in a `catch` binding. Its member order is also
+/// the compact exception tag understood by synchronous and split async
+/// catches. Keep the original native owner/Json pointer or live JS handle;
+/// display text is a separate channel and must never become identity.
+pub fn caught_exception_carrier_type() -> HirType {
+    HirType::Union(vec![
+        HirType::F64,
+        HirType::I64,
+        HirType::Bool,
+        HirType::Str,
+        HirType::Undefined,
+        HirType::Null,
+        HirType::Object(Vec::new()),
+        HirType::Json,
+        HirType::JsValue,
+    ])
 }
 
 #[derive(Debug, Clone, PartialEq)]

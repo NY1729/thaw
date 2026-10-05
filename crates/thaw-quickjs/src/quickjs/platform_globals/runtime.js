@@ -86,6 +86,24 @@
       };
     }, enumerable: true, configurable: false, writable: false,
   });
+  thawBootstrapDefineProperty(globalThis, '__thaw_iterator_step_exact', {
+    value: (iterator, mode, error) => {
+      const method = iterator[mode === 2 ? 'throw' : mode === 1 ? 'return' : 'next'];
+      // IteratorClose permits an absent return method. Its result must be an
+      // object, but close does not inspect that object's done or value fields.
+      if (mode === 1 && method == null) return { done: true };
+      if (typeof method !== 'function') throw new TypeError('Iterator method is not callable');
+      const step = mode === 2
+        ? thawDateApply(method, iterator, [error])
+        : thawDateApply(method, iterator, []);
+      if (step === null || (typeof step !== 'object' && typeof step !== 'function')) {
+        throw new TypeError('Iterator result is not an object');
+      }
+      if (mode === 1) return { done: true };
+      const done = !!step.done;
+      return done ? { done: true } : { done: false, value: step.value };
+    }, enumerable: false, configurable: false, writable: false,
+  });
   globalThis.__thaw_json_stringify_replacer = (value, space, replacer) =>
     JSON.stringify(value, function (key, item) {
       return thawDateApply(replacer, this, [key, item]);
@@ -2003,8 +2021,30 @@
     enumerable: !!(flags & 2),
     configurable: !!(flags & 4),
   });
-  globalThis.__thaw_json_stringify_native_accessors = (replacer, space, value) =>
-    JSON.stringify(value, replacer, space);
+  thawGraphDefineProperty(globalThis, '__thaw_json_stringify_native_accessors', {
+    value: (replacer, space, value) => thawGraphStringify(value, replacer, space),
+    writable: false, configurable: false, enumerable: true,
+  });
+  thawGraphDefineProperty(globalThis, '__thaw_json_stringify_direct', {
+    value: value => thawGraphStringify(value),
+    writable: false, configurable: false,
+  });
+  // A native function replacer receives the live native owner as its `this`
+  // source. The captured apply/stringify intrinsics remain stable if user
+  // code changes JSON.stringify or Function.prototype.apply later.
+  thawGraphDefineProperty(globalThis, '__thaw_json_stringify_live_replacer', {
+    value: (space, value, replacer) => thawGraphStringify(value, function (key, item) {
+      return thawGraphApply(replacer, this, [key, item]);
+    }, space),
+    writable: false, configurable: false,
+  });
+  // A retained JsValue replacer may be either a function or an array. Let
+  // the captured intrinsic perform its ordinary callable/array distinction
+  // on the live value, including its exact getter and proxy throws.
+  thawGraphDefineProperty(globalThis, '__thaw_json_stringify_live_dynamic_replacer', {
+    value: (space, value, replacer) => thawGraphStringify(value, replacer, space),
+    writable: false, configurable: false,
+  });
   globalThis.__thaw_iterator_from = source => {
     if (source?.__thawNativeIterator) {
       return Object.assign(Object.create(Iterator.prototype), source, {

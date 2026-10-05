@@ -2140,7 +2140,12 @@ fn write_graph_token(
 pub extern "C" fn thaw_json_graph_encode(value: *const Value) -> *const c_char {
     begin_stringify();
     let Some(value) = (unsafe { value.as_ref() }) else {
-        return CString::new("{\"root\":{\"v\":null},\"nodes\":[]}").unwrap().into_raw();
+        let wire = CString::new("{\"root\":{\"v\":null},\"nodes\":[]}").unwrap().into_raw();
+        if !unsafe { thaw_arena::register_owned_graph_wire(wire) } {
+            unsafe { thaw_arena::destroy_string(wire) };
+            return std::ptr::null();
+        }
+        return wire;
     };
     let mut ids = HashMap::new();
     let mut nodes = Vec::new();
@@ -2327,7 +2332,19 @@ pub extern "C" fn thaw_json_graph_encode(value: *const Value) -> *const c_char {
         write_json_string(reference.to_string().as_bytes(), &mut out);
     }
     out.extend_from_slice(b"]}");
-    CString::new(out).expect("JSON graph envelope contains no raw NUL").into_raw()
+    let wire = CString::new(out).expect("JSON graph envelope contains no raw NUL").into_raw();
+    if !unsafe { thaw_arena::register_owned_graph_wire(wire) } {
+        if let Some(ops) = HOST_OPERATIONS.with(|slot| slot.get()) {
+            for handle in output_leases { without_typed_decode_scope(|| (ops.release)(handle)); }
+        }
+        if let Some(ops) = NAPI_HANDLE_OPERATIONS.with(|slot| slot.get()) {
+            for reference in napi_output_leases { without_typed_decode_scope(|| (ops.release)(reference)); }
+        }
+        unsafe { thaw_arena::destroy_string(wire) };
+        set_host_error("\u{1}TypeError\u{1}Unable to transfer JSON graph".into());
+        return std::ptr::null();
+    }
+    wire
 }
 
 fn graph_field<'a>(value: &'a Value, key: &[u8]) -> Option<&'a Value> {
@@ -2340,6 +2357,13 @@ fn napi_wire_lease_tokens(graph: &Value) -> Vec<u64> {
             .filter_map(|token| token.parse::<u64>().ok())
             .filter(|token| *token != 0).collect())
         .unwrap_or_default()
+}
+
+fn parse_graph_grant_snapshot(bytes: &[u8]) -> *mut Value {
+    let source = thaw_arena::owned_string(bytes);
+    let graph = thaw_json_parse(source);
+    unsafe { thaw_arena::destroy_string(source) };
+    graph
 }
 
 fn graph_token_value(token: &Value, nodes: &[Value]) -> Option<Value> {
@@ -2532,10 +2556,17 @@ pub extern "C" fn thaw_json_take_graph_error() -> u8 {
 #[no_mangle]
 pub extern "C" fn thaw_json_discard_graph_wire(source: *const c_char) {
     if source.is_null() { return; }
+    // Consume before parsing or releasing: callbacks may re-enter with the
+    // same pointer, but only this invocation owns the one-shot grant. Parse
+    // the producer snapshot so a mutated live buffer cannot redirect cleanup
+    // to attacker-selected lease IDs or strand the original transfer.
+    let Some((bytes, _bytes_match)) = (unsafe {
+        thaw_arena::take_owned_graph_wire_snapshot(source)
+    }) else { return; };
     // A producer already failed before dispatch. Release callbacks for its
     // unconsumed wire must not replace that error or poison a later call.
     let original_host_error = HOST_ERROR.with(|slot| slot.borrow_mut().take());
-    let graph = thaw_json_parse(source);
+    let graph = parse_graph_grant_snapshot(&bytes);
     let parse_error = thaw_json_take_parse_error() != 0;
     if !parse_error {
         if let Some(ops) = HOST_OPERATIONS.with(|slot| slot.get()) {
@@ -2560,7 +2591,16 @@ pub extern "C" fn thaw_json_discard_graph_wire(source: *const c_char) {
 #[no_mangle]
 pub extern "C" fn thaw_json_graph_decode(source: *const c_char) -> *mut Value {
     GRAPH_ERROR.with(|error| error.set(false));
-    let graph = thaw_json_parse(source);
+    if source.is_null() {
+        GRAPH_ERROR.with(|error| error.set(true));
+        return leak(Value::Null);
+    }
+    let grant = unsafe { thaw_arena::take_owned_graph_wire_snapshot(source) };
+    let bytes_match = grant.as_ref().is_some_and(|(_, bytes_match)| *bytes_match);
+    let graph = match grant.as_ref() {
+        Some((bytes, _)) => parse_graph_grant_snapshot(bytes),
+        None => thaw_json_parse(source),
+    };
     let parse_error = thaw_json_take_parse_error() != 0;
     let leases = if parse_error { Vec::new() } else {
         graph_field(unsafe { &*graph }, b"leases")
@@ -2573,14 +2613,20 @@ pub extern "C" fn thaw_json_graph_decode(source: *const c_char) -> *mut Value {
     };
     let napi_leases = if parse_error { Vec::new() }
         else { napi_wire_lease_tokens(unsafe { &*graph }) };
-    let decoded = if parse_error { None } else { decode_graph_value(unsafe { &*graph }) };
+    let decoded = if parse_error
+        || (grant.is_some() && !bytes_match)
+        || (grant.is_none() && (!leases.is_empty() || !napi_leases.is_empty())) {
+        None
+    } else { decode_graph_value(unsafe { &*graph }) };
     // The JS encoder owns these initial references. A decoded Host node
     // independently retains its handle, including when it escapes the call.
-    if let Some(ops) = HOST_OPERATIONS.with(|slot| slot.get()) {
+    if grant.is_some() {
+      if let Some(ops) = HOST_OPERATIONS.with(|slot| slot.get()) {
         for handle in leases { without_typed_decode_scope(|| (ops.release)(handle)); }
-    }
-    if let Some(ops) = NAPI_HANDLE_OPERATIONS.with(|slot| slot.get()) {
+      }
+      if let Some(ops) = NAPI_HANDLE_OPERATIONS.with(|slot| slot.get()) {
         for reference in napi_leases { without_typed_decode_scope(|| (ops.release)(reference)); }
+      }
     }
     unsafe { thaw_json_destroy(graph) };
     match decoded {
@@ -2590,6 +2636,86 @@ pub extern "C" fn thaw_json_graph_decode(source: *const c_char) -> *mut Value {
             leak(Value::Null)
         }
     }
+}
+
+#[cfg(test)]
+#[test]
+fn unregistered_graph_wire_cannot_transfer_napi_lease_tokens() {
+    std::thread::spawn(|| {
+        thaw_json_register_napi_handle_operations(
+            mutated_graph_retain, mutated_graph_release,
+        );
+        let wire = CString::new(
+            r#"{"root":{"v":null},"nodes":[],"leases":[],"napiLeases":["73"]}"#,
+        ).unwrap();
+        let decoded = thaw_json_graph_decode(wire.as_ptr());
+        assert_eq!(thaw_json_take_graph_error(), 1);
+        MUTATED_GRAPH_RELEASES_73.with(|count| assert_eq!(count.get(), 0));
+        MUTATED_GRAPH_RELEASES_79.with(|count| assert_eq!(count.get(), 0));
+        unsafe { thaw_json_destroy(decoded) };
+    }).join().unwrap();
+}
+
+#[cfg(test)]
+thread_local! {
+    static MUTATED_GRAPH_RELEASES_73: std::cell::Cell<u8> = const {
+        std::cell::Cell::new(0)
+    };
+    static MUTATED_GRAPH_RELEASES_79: std::cell::Cell<u8> = const {
+        std::cell::Cell::new(0)
+    };
+}
+
+#[cfg(test)]
+extern "C" fn mutated_graph_retain(reference: u64) -> u64 { reference }
+
+#[cfg(test)]
+extern "C" fn mutated_graph_release(reference: u64) -> u8 {
+    match reference {
+        73 => MUTATED_GRAPH_RELEASES_73.with(|count| count.set(count.get() + 1)),
+        79 => MUTATED_GRAPH_RELEASES_79.with(|count| count.set(count.get() + 1)),
+        _ => {}
+    }
+    u8::from(matches!(reference, 73 | 79))
+}
+
+#[cfg(test)]
+#[test]
+fn mutated_graph_wire_retires_only_registered_snapshot_leases() {
+    std::thread::spawn(|| {
+        thaw_json_register_napi_handle_operations(
+            mutated_graph_retain, mutated_graph_release,
+        );
+        let wire = thaw_arena::owned_string(
+            br#"{"root":{"v":null},"nodes":[],"leases":[],"napiLeases":["73"]}"#,
+        );
+        assert!(unsafe { thaw_arena::register_owned_graph_wire(wire) });
+        let offset = unsafe { CStr::from_ptr(wire) }.to_bytes()
+            .windows(2).position(|pair| pair == b"73").unwrap();
+        unsafe { wire.cast::<u8>().add(offset + 1).write(b'9') };
+
+        thaw_json_discard_graph_wire(wire);
+        MUTATED_GRAPH_RELEASES_73.with(|count| assert_eq!(count.get(), 1));
+        MUTATED_GRAPH_RELEASES_79.with(|count| assert_eq!(count.get(), 0));
+        thaw_json_discard_graph_wire(wire);
+        MUTATED_GRAPH_RELEASES_73.with(|count| assert_eq!(count.get(), 1));
+        MUTATED_GRAPH_RELEASES_79.with(|count| assert_eq!(count.get(), 0));
+        unsafe { thaw_arena::destroy_string(wire) };
+
+        let wire = thaw_arena::owned_string(
+            br#"{"root":{"v":null},"nodes":[],"leases":[],"napiLeases":["73"]}"#,
+        );
+        assert!(unsafe { thaw_arena::register_owned_graph_wire(wire) });
+        let offset = unsafe { CStr::from_ptr(wire) }.to_bytes()
+            .windows(2).position(|pair| pair == b"73").unwrap();
+        unsafe { wire.cast::<u8>().add(offset + 1).write(b'9') };
+        let decoded = thaw_json_graph_decode(wire);
+        assert_eq!(thaw_json_take_graph_error(), 1);
+        unsafe { thaw_json_destroy(decoded) };
+        MUTATED_GRAPH_RELEASES_73.with(|count| assert_eq!(count.get(), 2));
+        MUTATED_GRAPH_RELEASES_79.with(|count| assert_eq!(count.get(), 0));
+        unsafe { thaw_arena::destroy_string(wire) };
+    }).join().unwrap();
 }
 
 #[no_mangle]

@@ -15,6 +15,49 @@ fn owned_lengths() -> &'static Mutex<HashMap<usize, usize>> {
     OWNED.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+fn graph_transfers() -> &'static Mutex<HashMap<usize, Vec<u8>>> {
+    static TRANSFERS: OnceLock<Mutex<HashMap<usize, Vec<u8>>>> = OnceLock::new();
+    TRANSFERS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Grants one decoder invocation authority over an owned graph string.
+/// The exact pointer and bytes bind the transfer; embedded lease IDs alone
+/// never authorize retaining a host handle.
+/// # Safety
+/// `pointer` must be a live owned string from a trusted graph producer.
+pub unsafe fn register_owned_graph_wire(pointer: *const c_char) -> bool {
+    if pointer.is_null() { return false; }
+    let bytes = unsafe { NativeStr::from_ptr(pointer) }.to_bytes().to_vec();
+    let mut transfers = graph_transfers().lock().unwrap();
+    if transfers.contains_key(&(pointer as usize)) { return false; }
+    transfers.insert(pointer as usize, bytes);
+    true
+}
+
+/// Consumes a grant only when both the pointer identity and bytes match.
+/// # Safety
+/// `pointer` must be a live native string for this call.
+pub unsafe fn take_owned_graph_wire(pointer: *const c_char) -> bool {
+    unsafe { take_owned_graph_wire_snapshot(pointer) }
+        .is_some_and(|(_, bytes_match)| bytes_match)
+}
+
+/// Consumes a grant and returns its trusted producer snapshot together with
+/// whether the live bytes still match. Consumers can reject mutations while
+/// retiring only leases from the original snapshot.
+/// # Safety
+/// `pointer` must be a live native string for this call.
+pub unsafe fn take_owned_graph_wire_snapshot(
+    pointer: *const c_char,
+) -> Option<(Vec<u8>, bool)> {
+    if pointer.is_null() { return None; }
+    let expected = graph_transfers().lock().unwrap().remove(&(pointer as usize));
+    expected.map(|bytes| {
+        let bytes_match = bytes == unsafe { NativeStr::from_ptr(pointer) }.to_bytes();
+        (bytes, bytes_match)
+    })
+}
+
 /// A borrowed native string; unregistered pointers retain ordinary C semantics.
 pub struct NativeStr<'a>(&'a [u8]);
 
@@ -124,6 +167,7 @@ pub unsafe fn destroy_string(pointer: *mut c_char) {
     if pointer.is_null() {
         return;
     }
+    graph_transfers().lock().unwrap().remove(&(pointer as usize));
     if let Some(length) = owned_lengths().lock().unwrap().remove(&(pointer as usize)) {
         unsafe {
             drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(

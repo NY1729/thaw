@@ -33,6 +33,17 @@ fn absent_after(value: HirExpr, absent: HirExpr) -> HirExpr {
 }
 
 impl<'a> FnLowerer<'a> {
+    /// Preserve the active member with the same HIR adapter used by compiler-
+    /// generated Promise reason materializers. The adapter returns an
+    /// arena-managed Json cell; callers must share before consuming it.
+    pub(crate) fn caught_carrier_as_json(
+        &mut self, value: HirExpr,
+    ) -> Result<HirExpr, String> {
+        Ok(HirExpr::Call(
+            Box::new(crate::caught_exception_json_adapter()), vec![value],
+        ))
+    }
+
     /// Preserve the allocation's full typed view before structural narrowing.
     /// Nonprefix views also record physical field offsets before type erasure;
     /// the QuickJS factory itself remains lazy in native-only programs.
@@ -133,6 +144,24 @@ impl<'a> FnLowerer<'a> {
         if *declared == HirType::Dynamic {
             return Ok(value);
         }
+        if matches!(declared, HirType::Function(..)
+            | HirType::CallableFunction(_, _, None, _))
+        {
+            let actual = self.infer_expr_type(&value)?;
+            if matches!(actual, HirType::Json | HirType::JsValue) {
+                let json = if actual == HirType::JsValue {
+                    self.coerce_to_declared(&HirType::Json, value)?
+                } else {
+                    value
+                };
+                return Ok(HirExpr::JsonAsNative(Box::new(json), declared.clone()));
+            }
+        }
+        if *declared == HirType::Void
+            && self.infer_expr_type(&value)? == HirType::Json
+        {
+            return Ok(HirExpr::JsonAsNative(Box::new(value), declared.clone()));
+        }
         if let HirExpr::Var(name) = &value {
             if self.native_class_aliases.get(name) == Some(declared) {
                 return Ok(value);
@@ -182,6 +211,20 @@ impl<'a> FnLowerer<'a> {
             HirType::Array(_) | HirType::Tuple(_) | HirType::Object(_) | HirType::Bytes
         ) {
             let actual = self.infer_expr_type(&value)?;
+            // Object.values/entries expose every runtime own value through
+            // a dynamic array. A contextual tuple/array annotation is a
+            // typed view of that same source, not permission to truncate its
+            // runtime tail. Route through the existing JSON array decoder;
+            // tuple decoding retains its complete dynamic authority.
+            if matches!(declared, HirType::Array(_) | HirType::Tuple(_))
+                && declared != &actual
+                && !matches!(value, HirExpr::ArrayLit(_))
+                && matches!(&actual, HirType::Array(element)
+                    if matches!(element.as_ref(), HirType::Json | HirType::Tuple(_)))
+            {
+                let json = self.wrap_native_value_as_json(value, actual)?;
+                return Ok(HirExpr::JsonAsNative(Box::new(json), declared.clone()));
+            }
             // `Bytes` and `Array(F64)` share a layout -- pass either
             // straight through as the other.
             if matches!(
@@ -262,7 +305,7 @@ impl<'a> FnLowerer<'a> {
         if callable_abi_compatible(declared, &inferred) {
             return Ok(value);
         }
-        if *declared == HirType::JsValue && matches!(inferred, HirType::Function(_, _) | HirType::CallableFunction(..)) {
+        if *declared == HirType::JsValue && matches!(inferred, HirType::Function(_, _) | HirType::CallableFunction(..) | HirType::FunctionWithThis(_, _)) {
             return Ok(HirExpr::Call(
                 Box::new(HirExpr::Var("registerNativeCallback".to_string())),
                 vec![HirExpr::TypedClosure(inferred, Box::new(value))],
@@ -308,6 +351,19 @@ impl<'a> FnLowerer<'a> {
         if let (HirType::Object(declared_fields), HirType::Object(actual_fields)) =
             (declared, self.infer_expr_type(&value)?)
         {
+            // A user class extending Error has its own first marker name,
+            // but the first three physical slots retain the same Bool/Json/Json
+            // prefix. An Error-annotated alias must keep its allocation
+            // pointer; nominal ancestry remains checked in the native table.
+            if *declared == builtin_error_object_type()
+                && object_type_is_error_family(&HirType::Object(actual_fields.clone()))
+                && actual_fields.len() >= 3
+                && actual_fields[0].1 == HirType::Bool
+                && actual_fields[1] == ("message".to_string(), HirType::Json)
+                && actual_fields[2] == ("name".to_string(), HirType::Json)
+            {
+                return Ok(value);
+            }
             if actual_fields.as_slice() != declared_fields.as_slice()
                 && actual_fields.iter().any(|(name, _)| is_hidden_accessor_field(name))
             {
@@ -404,6 +460,9 @@ impl<'a> FnLowerer<'a> {
             let actual = self.infer_expr_type(&value)?;
             if actual == HirType::Json {
                 return Ok(value);
+            }
+            if actual == crate::caught_exception_carrier_type() {
+                return self.caught_carrier_as_json(value);
             }
             // A `JsValue` (an opaque handle to a live QuickJS-retained
             // object, e.g. zod's `z.string()` returning a `ZodString`
@@ -527,7 +586,7 @@ impl<'a> FnLowerer<'a> {
                     "cannot coerce a Generator to a dynamic (any) value".into(),
                 );
             }
-            if matches!(&actual, HirType::Function(_, _) | HirType::CallableFunction(..)) {
+            if matches!(&actual, HirType::Function(_, _) | HirType::CallableFunction(..) | HirType::FunctionWithThis(_, _)) {
                 // `registerNativeCallback`'s own inferred type is always
                 // `HirType::JsValue` (`inference/types.rs`'s hardcoded
                 // intrinsic-name case) -- a raw `i64` handle, not the
@@ -587,9 +646,9 @@ impl<'a> FnLowerer<'a> {
             // already-recognized-in-principle shape rather than a new
             // one, even though this crosses a different boundary
             // (`callDynamic`'s JSON argument array, not a NAPI result).
-            // `__thaw_json_date_reviver` (QuickJS-NG, `dates.js`) is
-            // taught to convert it back to the real literal on the far
-            // side, the same way it already does for `Date`/`JsValue`.
+            // The branded wrapper becomes an `u` token in the trusted
+            // graph codec. The plain JSON boundary treats the same user
+            // object shape as ordinary data.
             // Built via `HirExpr::JsonObjectLit` -- an existing, already-
             // exercised construct (a dictionary literal, `Bool` element
             // type covers the one `true` field) -- rather than new
@@ -692,11 +751,9 @@ impl<'a> FnLowerer<'a> {
             // a Buffer" the same way it already was. Wrapped instead as
             // the same `{"type":"Buffer","data":[...]}` shape Node's own
             // `Buffer.prototype.toJSON`/`JSON.stringify` already use --
-            // `__thaw_json_date_reviver` (`platform_globals/dates.js`)
-            // already recognizes this exact shape and reconstructs a
-            // real `Buffer` from it (previously only reachable via a
-            // native addon's own JSON round trip, never a `callDynamic`
-            // argument). The `data` field's own elements erasing to plain
+            // The trusted graph codec recognizes this branded shape as a
+            // Buffer node while leaving an ordinary user object with the
+            // same keys alone. The `data` field's own elements erasing to plain
             // JSON numbers is correct and expected here -- the `"type"`
             // wrapper is what carries "this was a Buffer", not the
             // erased element type, so losing `Bytes` as a type tag after
@@ -737,7 +794,11 @@ impl<'a> FnLowerer<'a> {
             // have a decorator -- an ordinary class's instances keep
             // marshaling exactly as before, so this can't regress any
             // existing (pre-decorator) dynamic-call argument shape.
+            // Error-family allocations must reach the live pointer-keyed
+            // projection below; a decorator snapshot would split their
+            // caught/Promise aliases from the original object.
             if let HirType::Object(fields) = &actual {
+              if !object_type_is_error_family(&actual) {
                 if let Some(token_symbol) = fields.first().and_then(|(marker, _)| {
                     DECORATOR_CLASS_TOKENS.with(|tokens| tokens.borrow().get(marker).cloned())
                 }) {
@@ -762,6 +823,7 @@ impl<'a> FnLowerer<'a> {
                         &[(temp, HirType::Json, object_json)],
                     );
                 }
+              }
             }
             if let HirType::Object(fields) = &actual {
                 // A plain fixed object crossing into Json can be borrowed by
@@ -769,8 +831,13 @@ impl<'a> FnLowerer<'a> {
                 // arena pointer and let the existing JsValue-to-Json wrapper
                 // keep the live identity; class instances retain their
                 // dedicated nominal/Date conversion path.
-                if !fields.iter().any(|(name, _)|
-                    name.starts_with("__thaw_class_identity_\u{1e}"))
+                // An Error-family ClassAlloc is also an identity-bearing
+                // object: a Json snapshot would turn Promise rejection
+                // aliases into unrelated plain records. Keep its original
+                // pointer behind the live Host projection instead.
+                if (object_type_is_error_family(&actual)
+                    || !fields.iter().any(|(name, _)|
+                        name.starts_with("__thaw_class_identity_\u{1e}")))
                     && Self::fixed_object_supports_live_projection(&actual) {
                     let projected = self.lower_fixed_object_as_dynamic_accessor_object(value, fields, false)?;
                     return self.coerce_to_declared(&HirType::Json, projected);

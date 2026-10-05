@@ -105,6 +105,7 @@ pub enum HirExpr {
     NonArrowFunction(Box<HirExpr>),
     /// A top-level function adapted to the closure ABI when used as a value.
     FunctionRef(String, Vec<HirType>, HirType),
+    FunctionRefThis(String, HirType, Vec<HirType>, HirType),
     /// A native method value with separate unbound and explicit-receiver entries.
     /// The optional nominal receiver is the class expected by an instance
     /// method; static methods ignore their explicit receiver.
@@ -303,6 +304,96 @@ pub enum HirStmt {
     Finally(Vec<HirStmt>, usize),
 }
 
+/// Reserve an ordinary value slot for a catch before entering its Try. The
+/// compiler replaces this initializer with the pending exception's active
+/// value when control reaches the handler; predeclaring the slot also lets
+/// async frame planning preserve it across suspension.
+pub fn caught_exception_carrier_prelude(name: Symbol) -> HirStmt {
+    let carrier = caught_exception_carrier_type();
+    let HirType::Union(members) = &carrier else { unreachable!() };
+    HirStmt::Let(name, carrier, HirExpr::UnionInject(
+        Box::new(HirExpr::Lit(HirLit::Undefined)), 4, members.clone(),
+    ))
+}
+
+/// One source of truth for converting an active caught value to live Json.
+/// Compiler-generated consumers (including Promise.allSettled) can compile
+/// this capture-free HIR closure and feed it the same carrier as lexical
+/// catches.  Its result is arena-owned but borrowed by callers: a consumer
+/// that calls `thaw_json_destroy` must first acquire `thaw_json_share`.
+pub fn caught_exception_json_adapter() -> HirExpr {
+    fn call(name: &str, args: Vec<HirExpr>) -> HirExpr {
+        HirExpr::Call(Box::new(HirExpr::Var(name.into())), args)
+    }
+    let carrier = caught_exception_carrier_type();
+    let HirType::Union(members) = &carrier else { unreachable!() };
+    let value_name = "__thaw_caught_adapter_value".to_string();
+    let value = HirExpr::Var(value_name.clone());
+    let mut selected: Option<HirExpr> = None;
+    for index in (0..members.len()).rev() {
+        let active = HirExpr::UnionValue(Box::new(value.clone()), index, members.clone());
+        let arm = match index {
+            0 => call("__thaw_json_receiver_number", vec![active]),
+            1 => call("__thaw_json_receiver_bigint", vec![active]),
+            2 => call("__thaw_json_receiver_bool", vec![active]),
+            3 => call("__thaw_json_receiver_string", vec![active]),
+            4 => call("__thaw_json_undefined", Vec::new()),
+            5 => call("__thaw_json_null", Vec::new()),
+            6 => {
+                let projector_type = HirType::Function(Vec::new(), Box::new(HirType::JsValue));
+                let optional_projector = HirType::Optional(Box::new(projector_type.clone()));
+                let projector_name = "__thaw_caught_adapter_projector".to_string();
+                let projector = HirExpr::Var(projector_name.clone());
+                let body = HirExpr::Conditional(
+                    Box::new(HirExpr::OptionalIsNone(
+                        Box::new(projector.clone()), projector_type.clone(),
+                    )),
+                    Box::new(HirExpr::ThrowValue(
+                        Box::new(HirExpr::Lit(HirLit::Str(
+                            "caught native object has no live projection".into(),
+                        ))),
+                        Box::new(HirExpr::JsonObjectLit(Vec::new(), HirType::Json)),
+                    )),
+                    Box::new(call("__thaw_json_host_from_dynamic", vec![
+                        HirExpr::Call(
+                            Box::new(HirExpr::OptionalValue(
+                                Box::new(projector), projector_type,
+                            )),
+                            Vec::new(),
+                        ),
+                    ])),
+                    HirType::Json,
+                );
+                HirExpr::Call(Box::new(HirExpr::Lambda(
+                    Vec::new(), vec![HirParam { name: projector_name, ty: optional_projector }],
+                    HirType::Json, Box::new(body),
+                )), vec![call("__thaw_lookup_native_projector", vec![
+                    active, HirExpr::Lit(HirLit::Str(String::new())),
+                ])])
+            }
+            7 => active,
+            8 => call("__thaw_json_host_from_borrowed_dynamic", vec![active]),
+            _ => unreachable!(),
+        };
+        selected = Some(match selected {
+            None => arm,
+            Some(other) => HirExpr::Conditional(
+                Box::new(HirExpr::BinOp(
+                    BinOp::EqEqEq,
+                    Box::new(HirExpr::UnionTag(Box::new(value.clone()), members.clone())),
+                    Box::new(HirExpr::Lit(HirLit::F64(index as f64))),
+                )),
+                Box::new(arm), Box::new(other), HirType::Json,
+            ),
+        });
+    }
+    let body = call("__thaw_json_track_owned", vec![selected.expect("catch layout is nonempty")]);
+    HirExpr::Lambda(
+        Vec::new(), vec![HirParam { name: value_name, ty: carrier }],
+        HirType::Json, Box::new(body),
+    )
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct HirFunction {
     pub name: Symbol,
@@ -341,4 +432,18 @@ pub enum HirInitStep {
         runtime: bool,
         static_dependencies: Vec<usize>,
     },
+}
+
+pub fn promise_settled_result_type(value: HirType) -> HirType {
+    let value = if value == HirType::Void { HirType::Undefined } else { value };
+    HirType::Union(vec![
+        HirType::Object(vec![
+            ("status".into(), HirType::Str),
+            ("value".into(), value),
+        ]),
+        HirType::Object(vec![
+            ("status".into(), HirType::Str),
+            ("reason".into(), HirType::JsValue),
+        ]),
+    ])
 }

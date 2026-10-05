@@ -1056,6 +1056,137 @@ impl<'ctx> HirCompiler<'ctx> {
         self.compile_decode_quickjs_graph(value.into())
     }
 
+    fn compile_call_dynamic_value_mixed_exact(
+        &mut self,
+        args: &[HirExpr],
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        self.uses_quickjs = true;
+        self.uses_quickjs_handles = true;
+        let [callable, json_args, handles] = args else {
+            return Err("callDynamicValueMixedExact expects callable, JSON arguments, and owned handle array".into());
+        };
+        // This path can be the first QuickJS operation on the thread. Json
+        // arguments may carry Host/function/Symbol leases, so install the
+        // retained-value callbacks before graph encoding or decoding them.
+        self.compile_register_js_callback_host_operations()?;
+        let HirExpr::ArrayLit(direct) = handles else {
+            return Err("callDynamicValueMixedExact requires a compiler-built direct-handle array".into());
+        };
+        // A regular ArrayLit evaluates every element before publishing its
+        // buffer. If a later element throws, earlier owned JS handles are
+        // invisible to the consuming FFI and leak. Stage them separately in
+        // local cells so the pending-exception path can retire exactly those
+        // already acquired. The final raw array exists only for this call.
+        let i64_type = self.context.i64_type();
+        let ptr_type = self.context.ptr_type(inkwell::AddressSpace::default());
+        let direct_cells = direct.iter().map(|_| {
+            let cell = self.builder.build_alloca(i64_type, "exact_mixed_direct_cell")
+                .map_err(|error| error.to_string())?;
+            self.builder.build_store(cell, i64_type.const_zero())
+                .map_err(|error| error.to_string())?;
+            Ok::<_, String>(cell)
+        }).collect::<Result<Vec<_>, _>>()?;
+        let json_cell = self.builder.build_alloca(ptr_type, "exact_mixed_json_cell")
+            .map_err(|error| error.to_string())?;
+        self.builder.build_store(json_cell, ptr_type.const_null())
+            .map_err(|error| error.to_string())?;
+        let callable_cell = self.builder.build_alloca(i64_type, "exact_mixed_callable_cell")
+            .map_err(|error| error.to_string())?;
+        self.builder.build_store(callable_cell, i64_type.const_zero())
+            .map_err(|error| error.to_string())?;
+        let cleanup = self.context.append_basic_block(self.current_function(),
+            "exact_mixed_staging_failed");
+        self.catch_stack.push(cleanup);
+        let staged = (|| -> Result<_, String> {
+            let callable = self.compile_expr(callable)?.into_int_value();
+            self.builder.build_store(callable_cell, callable)
+                .map_err(|error| error.to_string())?;
+            let json = self.compile_expr(json_args)?.into_pointer_value();
+            self.builder.build_store(json_cell, json)
+                .map_err(|error| error.to_string())?;
+            for (expression, cell) in direct.iter().zip(&direct_cells) {
+                let value = self.compile_expr(expression)?.into_int_value();
+                self.builder.build_store(*cell, value)
+                    .map_err(|error| error.to_string())?;
+            }
+            Ok((callable, json))
+        })();
+        self.catch_stack.pop();
+        let success = self.builder.get_insert_block().unwrap();
+        self.builder.position_at_end(cleanup);
+        for cell in &direct_cells {
+            let value = self.builder.build_load(i64_type, *cell, "failed_direct_handle")
+                .map_err(|error| error.to_string())?.into_int_value();
+            self.builder.build_call(self.module.get_function("thaw_js_release_handle").unwrap(),
+                &[value.into()], "release_staged_direct_handle")
+                .map_err(|error| error.to_string())?;
+        }
+        let staged_callable = self.builder.build_load(i64_type, callable_cell,
+            "failed_mixed_callable").map_err(|error| error.to_string())?.into_int_value();
+        self.builder.build_call(self.module.get_function("thaw_js_release_handle").unwrap(),
+            &[staged_callable.into()], "release_staged_callable")
+            .map_err(|error| error.to_string())?;
+        let staged_json = self.builder.build_load(ptr_type, json_cell, "failed_mixed_json")
+            .map_err(|error| error.to_string())?.into_pointer_value();
+        let has_json = self.builder.build_is_not_null(staged_json, "has_staged_mixed_json")
+            .map_err(|error| error.to_string())?;
+        let destroy_json = self.context.append_basic_block(self.current_function(),
+            "destroy_staged_mixed_json");
+        let propagate = self.context.append_basic_block(self.current_function(),
+            "propagate_exact_mixed_staging_failure");
+        self.builder.build_conditional_branch(has_json, destroy_json, propagate)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(destroy_json);
+        self.builder.build_call(self.module.get_function("thaw_json_destroy").unwrap(),
+            &[staged_json.into()], "destroy_staged_mixed_json")
+            .map_err(|error| error.to_string())?;
+        self.builder.build_unconditional_branch(propagate)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(propagate);
+        self.branch_on_pending_exception()?;
+        self.builder.position_at_end(success);
+        let (callable, json_args) = staged?;
+        let raw = self.builder.build_alloca(i64_type.array_type((direct.len() + 1) as u32),
+            "exact_mixed_direct_array").map_err(|error| error.to_string())?;
+        self.builder.build_store(raw, i64_type.const_int(direct.len() as u64, false))
+            .map_err(|error| error.to_string())?;
+        for (index, cell) in direct_cells.iter().enumerate() {
+            let value = self.builder.build_load(i64_type, *cell, "exact_mixed_direct")
+                .map_err(|error| error.to_string())?;
+            let slot = unsafe { self.builder.build_in_bounds_gep(i64_type, raw,
+                &[i64_type.const_int((index + 1) as u64, false)], "exact_mixed_direct_slot") }
+                .map_err(|error| error.to_string())?;
+            self.builder.build_store(slot, value).map_err(|error| error.to_string())?;
+        }
+        let handles = raw;
+        let text = self.builder.build_call(
+            self.module.get_function("thaw_json_graph_encode").unwrap(),
+            &[json_args.into()], "exact_mixed_args_json",
+        ).map_err(|error| error.to_string())?
+            .try_as_basic_value().basic().unwrap();
+        // Before the consuming call, an encoder failure must retire every
+        // staged JS reference as well as the temporary Json graph.
+        let text = self.compile_check_json_stringify_error_with_inputs_and_handles(
+            text, &[json_args.into()], &[], &[handles], &[callable],
+        )?;
+        let result = self.builder.build_call(
+            self.module.get_function("thaw_js_call_handle_mixed_exact_consuming_result").unwrap(),
+            &[callable.into(), text.into(), handles.into()], "exact_mixed_result",
+        ).map_err(|error| error.to_string())?
+            .try_as_basic_value().basic()
+            .ok_or("exact mixed call returned no result")?.into_struct_value();
+        self.builder.build_call(
+            self.module.get_function("thaw_cstring_destroy").unwrap(),
+            &[text.into()], "destroy_exact_mixed_args_string",
+        ).map_err(|error| error.to_string())?;
+        self.builder.build_call(
+            self.module.get_function("thaw_json_destroy").unwrap(),
+            &[json_args.into()], "destroy_exact_mixed_args_json",
+        ).map_err(|error| error.to_string())?;
+        let value = self.compile_exact_iterator_handle_result(result, "exact_mixed_call")?;
+        self.compile_original_quickjs_exception_handle(value, true)
+    }
+
     fn compile_call_dynamic_value_mixed(
         &mut self,
         args: &[HirExpr],
