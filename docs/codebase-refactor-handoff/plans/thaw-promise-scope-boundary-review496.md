@@ -1,0 +1,25 @@
+# Promise scope boundary source review — unit496
+
+HOLD, mutable partial implementation. Source reads only; no execution or product edits. Scratch `/tmp/thaw-throw-provenance-head494/candidate`, baseline unit496 `f4e2faf98b6973306ac634f2d78968904b846480`.
+
+Read SHA256: hir_codegen.rs `6d57431106a859e358f6d7454f4d10a7f7b19ae9ed644e2d4ccee2065167059c`; statements.rs `3e614b571c7b2a4bca23647ad159502394e4f17e4a26261654469904fdd63f22`; values/closures.rs `6e47fa1908868bfbec1b6a3d4263dd5e87a93f64190968c8bffede2eea3ff118`; async_frames/codegen.rs `a9d7763603e6a213a7f52c6808e797333409ee331503d3e146cb51536f339ccf`. These are live read snapshots, not freeze acceptance.
+
+## Concrete boundaries still incomplete
+
+1. `branch_on_pending_exception` hir_codegen1293 branches directly to the selected catch, bypassing the selective Promise cleanup now present in explicit Throw statements524. The escaping propagate block also returns without stack cleanup. A generic builtin/host failure after an owned local is acquired therefore bypasses its external-token release. Emit an error trampoline that cleans only slots outside the paired catch boundary, or all stack tokens when escaping; then branch/return. Preserve pending exception provenance before destroying owners.
+
+2. Parallel catch boundary indexing is not yet a global invariant. Module evaluation raw catch_stack.push/pop802/826 does not push/pop a boundary, while Throw524 indexes by catch_stack length. Function/module catch_stack.clear667/800/1365 does not clear boundaries. Closures save/take/restore catch_stack at312/322,443/462,557/560,981/984,1063/1171,1362/1365 without matching boundary state. Loop stack isolation also needs its boundary vector. The async frame clear sites45/168/437 must use the same invariant even if particular handlers are now paired elsewhere. Minimal repair: pair all mutation/isolation sites, not just compile_try; restore on error as well as success.
+
+3. Preheader promotion closures129–157 replaces only catch_stack with the loop's saved catch stack. The preheader can be outside an inner try currently being compiled: current cleanup boundary state cannot describe the saved outer handler. Extend the existing loop-preheader saved context with matching catch boundaries and physical stack ownership map (plus loop boundaries where relevant), install/restore these alongside the builder and catch targets. No second terminator or ignored helper status is acceptable.
+
+4. `compile_if` statements578+ snapshots variables/native text/arena bindings but not stack_promise_slots. Promotion removes a physical stack token record at statements96 while compiling one branch; that removal must not change cleanup bookkeeping for the sibling branch where promotion never executes. Likewise abrupt branch compilation leaves new slot records behind. Snapshot physical ownership records before each arm and merge records for live continuations; runtime owned flags remain the authority for whether a token exists, not compiler branch history. Dominating flag allocation alone does not restore a removed record.
+
+## Scope semantics and corrected paths
+
+compile_block221 snapshots existing physical slots, cleans new slots on normal completion and removes their records. Explicit Throw, Break/Continue and depth variants now emit boundary-based cleanup before jumping. Try867 snapshots/restores slot records between body and catch. Finally539 suspends/restores both catch targets and boundaries together; that local pairing is coherent. Early-return paths must clean before compile_block returns early, and sibling compilation must restore its record snapshot.
+
+HIR `Stmt::Block` lowers through lower_scoped_stmts and flattens its returned statement vector into its surrounding HIR list (base statements/lowering1366); therefore compile_block is not a one-to-one source lexical Block destructor boundary. The original checkout's declarations/narrowing siblings show bind_local plus restored block bindings and no general var-kind hoisting in lower_var_decl (kind is used for constant-string policy). These sibling reads are supplementary, not a new claim that JavaScript function-scoped var support is complete. Do not introduce function-var lifetime changes based merely on compile_block: establish exact current lowered binding escape/hoisting evidence first. Keeping a flattened inner-block owner until the enclosing HIR list exits is conservative; releasing an actually live binding at a synthetic list boundary is not.
+
+Unrun controls: owned local then generic host failure into local catch; outer owner used after handler; module explicit throw with owned local; nested function inside outer catch/loop; capture promotion in only one conditional arm followed by sibling/merge use and cleanup; preheader promotion under an inner catch; labeled break/continue releasing only exited scopes; finally overriding return/throw. Full aggregate/union/global ownership and return ABI remain separate unresolved gates.
+
+Marker: PROMISE_SCOPE_BOUNDARIES_HOLD

@@ -1,0 +1,3363 @@
+--- a/crates/thaw-hir/src/hir/types.rs
++++ b/crates/thaw-hir/src/hir/types.rs
+@@ -195,6 +195,10 @@
+     WeakSet(Box<HirType>),
+     Tuple(Vec<HirType>),
+     Object(Vec<(Symbol, HirType)>),
++    /// Compiler-private pointer to an immutable native exception descriptor.
++    /// It is never interpreted as an Object; checked projections recover the
++    /// original owner only after category and static-layout validation.
++    NativeException,
+     Function(Vec<HirType>, Box<HirType>),
+     /// Native callable with a separate physical `this` parameter. Its value
+     /// is still one closure pointer; `signature` describes visible values
+@@ -239,7 +243,31 @@
+         HirType::Object(Vec::new()),
+         HirType::Json,
+         HirType::JsValue,
++        HirType::NativeException,
+     ])
++}
++
++/// Native exception category codes are shared by HIR publication and the
++/// runtime's non-assimilating exception descriptor.
++pub fn native_exception_tag(ty: &HirType) -> Option<u64> {
++    Some(match ty {
++        HirType::Symbol => 20,
++        HirType::Array(_) => 21,
++        HirType::Bytes => 22,
++        HirType::Map(_, _) => 23,
++        HirType::WeakMap(_, _) => 24,
++        HirType::Set(_) => 25,
++        HirType::WeakSet(_) => 26,
++        HirType::Tuple(_) => 27,
++        HirType::Function(_, _) | HirType::FunctionWithThis(_, _)
++        | HirType::CallableFunction(..) => 28,
++        HirType::Promise(_) => 29,
++        _ => return None,
++    })
++}
++
++pub fn native_exception_layout_token(ty: &HirType) -> Option<String> {
++    native_exception_tag(ty).map(|_| format!("{ty:?}"))
+ }
+ 
+ #[derive(Debug, Clone, PartialEq)]
+--- a/crates/thaw-hir/src/lower/control_flow.rs
++++ b/crates/thaw-hir/src/lower/control_flow.rs
+@@ -646,7 +646,7 @@
+                 // tuple alongside the evaluated display text. The existing
+                 // pending-rethrow marker restores the tuple after `finally`.
+                 let mut snapshot = vec![captured.clone(), captured.clone(), captured];
+-                for field in ["aggregate", "tag", "f64", "i64", "bool", "object"] {
++                for field in ["aggregate", "tag", "f64", "i64", "bool", "object", "native"] {
+                     snapshot.push(capture(self, HirExpr::Call(
+                         Box::new(HirExpr::Var(format!("__thaw_pending_exception_{field}"))),
+                         Vec::new(),
+@@ -657,7 +657,7 @@
+                     snapshot,
+                 )));
+             }
+-            if marker == "@@thaw_rethrow_pending_exception" && args.len() == 9 {
++            if marker == "@@thaw_rethrow_pending_exception" && args.len() == 10 {
+                 let captured_args = args.iter().cloned()
+                     .map(|arg| capture(self, arg))
+                     .collect::<Result<Vec<_>, _>>()?;
+@@ -846,6 +846,7 @@
+         HirType::Symbol => Some("symbol"),
+         HirType::Bool => Some("boolean"),
+         HirType::Function(_, _) => Some("function"),
++        HirType::FunctionWithThis(_, _) => Some("function"),
+         HirType::CallableFunction(..) => Some("function"),
+         HirType::Array(_)
+         | HirType::Bytes
+@@ -870,7 +871,8 @@
+         | HirType::Nullish(_)
+         | HirType::Void
+         | HirType::Dynamic
+-        | HirType::JsValue => None,
++        | HirType::JsValue
++        | HirType::NativeException => None,
+     }
+ }
+ 
+--- a/crates/thaw-hir/src/lower/expressions/lowering.rs
++++ b/crates/thaw-hir/src/lower/expressions/lowering.rs
+@@ -1051,6 +1051,36 @@
+                             .or_else(|| lower_ts_type(&assertion.type_ann,
+                                 self.interfaces, self.generic_interfaces).ok());
+                         if self.scope.get(&resolved) == Some(&crate::caught_exception_carrier_type()) {
++                            if let Some(expected_tag) = crate::native_exception_tag(&target.clone().unwrap_or(HirType::Void)) {
++                                let target = target.clone().unwrap();
++                                let layout = crate::native_exception_layout_token(&target).unwrap();
++                                let HirType::Union(members) = crate::caught_exception_carrier_type()
++                                    else { unreachable!() };
++                                let carrier = HirExpr::Var(resolved.clone());
++                                let descriptor = HirExpr::UnionValue(
++                                    Box::new(carrier.clone()), 9, members,
++                                );
++                                let owner = HirExpr::Call(
++                                    Box::new(HirExpr::Var("__thaw_native_exception_owner".into())),
++                                    vec![descriptor, HirExpr::Lit(HirLit::I64(expected_tag as i64)),
++                                        HirExpr::Lit(HirLit::Str(layout))],
++                                );
++                                let present = HirExpr::Call(
++                                    Box::new(HirExpr::Var("__thaw_native_exception_owner_present".into())),
++                                    vec![owner.clone()],
++                                );
++                                return Ok(HirExpr::Conditional(
++                                    Box::new(present),
++                                    Box::new(HirExpr::TypedClosure(target.clone(), Box::new(owner))),
++                                    Box::new(HirExpr::ThrowValue(
++                                        Box::new(HirExpr::Lit(HirLit::Str(
++                                            "caught native value has an incompatible category or layout".into(),
++                                        ))),
++                                        Box::new(Self::unreachable_value(&target)?),
++                                    )),
++                                    target,
++                                ));
++                            }
+                             if let Some(target @ HirType::Object(_)) = target.clone() {
+                                 let HirType::Object(target_fields) = &target else { unreachable!() };
+                                 let HirType::Union(members) = crate::caught_exception_carrier_type()
+@@ -2656,6 +2686,13 @@
+                                             ],
+                                         ),
+                                     ))),
++                                    HirType::NativeException => Ok(HirExpr::Call(
++                                        Box::new(HirExpr::Var("__thaw_exception_typeof".into())),
++                                        vec![HirExpr::Call(
++                                            Box::new(HirExpr::Var("__thaw_native_exception_tag".into())),
++                                            vec![projected],
++                                        )],
++                                    )),
+                                     _ => native_typeof_name(member)
+                                         .map(|name| HirExpr::Lit(HirLit::Str(name.into())))
+                                         .ok_or_else(|| format!(
+--- a/crates/thaw-hir/src/lower/inference/types.rs
++++ b/crates/thaw-hir/src/lower/inference/types.rs
+@@ -1483,8 +1483,67 @@
+                         let [value] = args.as_slice() else {
+                             return Err(format!("{name} expects one operand"));
+                         };
+-                        if !matches!(self.infer_expr_type(value)?, HirType::Object(_) | HirType::Json) {
++                        if !matches!(self.infer_expr_type(value)?, HirType::Object(_)) {
+                             return Err(format!("{name} expects an object operand"));
++                        }
++                        return Ok(HirType::Void);
++                    }
++                    "__thaw_set_pending_exception_json" => {
++                        let [value] = args.as_slice() else {
++                            return Err(format!("{name} expects one operand"));
++                        };
++                        if !matches!(self.infer_expr_type(value)?, HirType::Json | HirType::Dictionary(_)) {
++                            return Err(format!("{name} expects a JSON-backed operand"));
++                        }
++                        return Ok(HirType::Void);
++                    }
++                    "__thaw_set_pending_exception_native" => {
++                        if args.len() != 3
++                            || crate::native_exception_tag(&self.infer_expr_type(&args[0])?).is_none()
++                            || self.infer_expr_type(&args[1])? != HirType::I64
++                            || self.infer_expr_type(&args[2])? != HirType::Str
++                        {
++                            return Err("native exception publication requires a supported native value, category, and layout token".into());
++                        }
++                        return Ok(HirType::Void);
++                    }
++                    "__thaw_set_pending_exception_native_value" => {
++                        if args.len() != 1 || self.infer_expr_type(&args[0])? != HirType::NativeException {
++                            return Err("native exception restoration requires its private descriptor".into());
++                        }
++                        return Ok(HirType::Void);
++                    }
++                    "__thaw_native_exception_owner" => {
++                        if args.len() != 3 || self.infer_expr_type(&args[0])? != HirType::NativeException
++                            || self.infer_expr_type(&args[1])? != HirType::I64
++                            || self.infer_expr_type(&args[2])? != HirType::Str
++                        {
++                            return Err("native exception projection requires descriptor, category, and layout".into());
++                        }
++                        return Ok(HirType::NativeException);
++                    }
++                    "__thaw_native_exception_owner_present" => {
++                        if args.len() != 1 || self.infer_expr_type(&args[0])? != HirType::NativeException {
++                            return Err("native exception owner check requires its projected pointer".into());
++                        }
++                        return Ok(HirType::Bool);
++                    }
++                    "__thaw_native_exception_tag" => {
++                        if args.len() != 1 || self.infer_expr_type(&args[0])? != HirType::NativeException {
++                            return Err("native exception category requires its descriptor".into());
++                        }
++                        return Ok(HirType::I64);
++                    }
++                    "__thaw_capture_exception_js_value" => {
++                        let [value] = args.as_slice() else {
++                            return Err(format!("{name} expects one operand"));
++                        };
++                        self.expect_type(&HirType::JsValue, value, name)?;
++                        return Ok(HirType::Json);
++                    }
++                    "__thaw_clear_pending_exception_provenance" => {
++                        if !args.is_empty() {
++                            return Err(format!("{name} expects no operands"));
+                         }
+                         return Ok(HirType::Void);
+                     }
+@@ -1516,6 +1575,7 @@
+                     "__thaw_pending_exception_object" => {
+                         return Ok(HirType::Object(Vec::new()));
+                     }
++                    "__thaw_pending_exception_native" => return Ok(HirType::NativeException),
+                     "__thaw_exception_object_present" => {
+                         let [value] = args.as_slice() else {
+                             return Err(format!("{name} expects one operand"));
+--- a/crates/thaw-hir/src/lower/invocations/calls.rs
++++ b/crates/thaw-hir/src/lower/invocations/calls.rs
+@@ -1423,63 +1423,19 @@
+                 self.next_binding += 1;
+                 self.scope.insert(value_name.clone(), value_type.clone());
+                 let value_var = HirExpr::Var(value_name.clone());
+-                let setter = match &value_type {
+-                    HirType::Object(_) => HirExpr::Call(
+-                        Box::new(HirExpr::Var(
+-                            "__thaw_set_pending_exception_object".to_string(),
+-                        )),
+-                        vec![value_var.clone()],
+-                    ),
+-                    HirType::F64 => HirExpr::Call(
+-                        Box::new(HirExpr::Var(
+-                            "__thaw_set_pending_exception_f64".to_string(),
+-                        )),
+-                        vec![value_var.clone()],
+-                    ),
+-                    HirType::I64 => HirExpr::Call(
+-                        Box::new(HirExpr::Var(
+-                            "__thaw_set_pending_exception_i64".to_string(),
+-                        )),
+-                        vec![value_var.clone()],
+-                    ),
+-                    HirType::Bool => HirExpr::Call(
+-                        Box::new(HirExpr::Var(
+-                            "__thaw_set_pending_exception_bool".to_string(),
+-                        )),
+-                        vec![value_var.clone()],
+-                    ),
+-                    HirType::Str | HirType::StrLiteral(_) => HirExpr::Call(
+-                        Box::new(HirExpr::Var(
+-                            "__thaw_set_pending_exception_tag".to_string(),
+-                        )),
+-                        vec![HirExpr::Lit(HirLit::I64(4))],
+-                    ),
+-                    HirType::Undefined | HirType::Void => HirExpr::Call(
+-                        Box::new(HirExpr::Var(
+-                            "__thaw_set_pending_exception_tag".to_string(),
+-                        )),
+-                        vec![HirExpr::Lit(HirLit::I64(5))],
+-                    ),
+-                    HirType::Null => HirExpr::Call(
+-                        Box::new(HirExpr::Var("__thaw_set_pending_exception_tag".to_string())),
+-                        vec![HirExpr::Lit(HirLit::I64(6))],
+-                    ),
+-                    _ => HirExpr::Call(
+-                        Box::new(HirExpr::Var(
+-                            "__thaw_set_pending_exception_tag".to_string(),
+-                        )),
+-                        vec![HirExpr::Lit(HirLit::I64(0))],
+-                    ),
+-                };
+-                let message = self.coerce_primitive_to_string(value_var)?;
+-                HirExpr::Block(vec![
+-                    HirStmt::Let(value_name, value_type, value),
+-                    HirStmt::Expr(setter),
+-                    HirStmt::Expr(HirExpr::Call(
+-                        Box::new(HirExpr::Var(callee.to_string())),
+-                        vec![message],
+-                    )),
+-                ])
++                let setters = self.rejection_provenance_statements(value_var.clone(), &value_type)?;
++                let message = self.rejection_display_without_user_coercion(value_var, &value_type)?;
++                let mut rejection = vec![HirStmt::Let(value_name, value_type, value)];
++                rejection.push(HirStmt::Expr(HirExpr::Call(
++                    Box::new(HirExpr::Var("__thaw_clear_pending_exception_provenance".into())),
++                    Vec::new(),
++                )));
++                rejection.extend(setters);
++                rejection.push(HirStmt::Expr(HirExpr::Call(
++                    Box::new(HirExpr::Var(callee.to_string())),
++                    vec![message],
++                )));
++                HirExpr::Block(rejection)
+             } else {
+                 HirExpr::Call(Box::new(HirExpr::Var(callee.to_string())), vec![value])
+             };
+--- a/crates/thaw-hir/src/lower/promises.rs
++++ b/crates/thaw-hir/src/lower/promises.rs
+@@ -85,6 +85,7 @@
+             ("i64", HirType::I64, Some("__thaw_pending_exception_i64")),
+             ("bool", HirType::Bool, Some("__thaw_pending_exception_bool")),
+             ("object", HirType::Object(Vec::new()), Some("__thaw_pending_exception_object")),
++            ("native", HirType::NativeException, Some("__thaw_pending_exception_native")),
+         ];
+         fields.into_iter().map(|(field, ty, getter)| {
+             let name = Self::promise_rejection_snapshot_name(binding, field);
+--- a/crates/thaw-hir/src/lower/statements/lowering.rs
++++ b/crates/thaw-hir/src/lower/statements/lowering.rs
+@@ -278,31 +278,190 @@
+         self.next_binding += 1;
+         self.scope.insert(name.clone(), value_type.clone());
+         let original = HirExpr::Var(name.clone());
+-        let setters = Self::rejection_provenance_statements(original.clone(), &value_type);
+-        let display = self.rejection_display_without_user_coercion(original, &value_type)?;
++        let setters = self.rejection_provenance_statements(original.clone(), &value_type)?;
++        let display = self.rejection_display_without_user_coercion(original.clone(), &value_type)?;
+         let mut statements = vec![
+             HirStmt::Let(name, value_type.clone(), value),
+         ];
+-        // A thrown fixed object may never have crossed a typed narrowing
+-        // site.  Register the full physical view while its source type is
+-        // still known; the catch tuple carries only the allocation pointer.
+-        if let HirType::Object(fields) = &value_type {
+-            if Self::fixed_object_supports_live_projection(&value_type) {
+-                statements.push(HirStmt::Expr(self.retain_full_native_object_projection(
+-                    original.clone(), fields, false,
+-                )?));
+-            }
+-        }
+         statements.push(HirStmt::Expr(HirExpr::Call(
+-                Box::new(HirExpr::Var("__thaw_clear_pending_exception_object".into())),
+-                Vec::new(),
+-            )));
++            Box::new(HirExpr::Var("__thaw_clear_pending_exception_provenance".into())),
++            Vec::new(),
++        )));
+         statements.extend(setters);
+         statements.push(HirStmt::Throw(HirExpr::Call(
+             Box::new(HirExpr::Var("@@thaw_trusted_exception_text".into())),
+             vec![display],
+         )));
+         Ok(statements)
++    }
++
++    /// Build the tagged, owned provenance tuple for a source throw or
++    /// Promise rejection. Union payload reads stay inside their matching arm.
++    pub(crate) fn rejection_provenance_statements(
++        &mut self,
++        value: HirExpr,
++        ty: &HirType,
++    ) -> Result<Vec<HirStmt>, String> {
++        let call = |name: &str, args: Vec<HirExpr>| HirStmt::Expr(HirExpr::Call(
++            Box::new(HirExpr::Var(name.into())), args));
++        let tag = |value| call("__thaw_set_pending_exception_tag", vec![HirExpr::Lit(HirLit::I64(value))]);
++        let mut out = Vec::new();
++        match ty {
++            HirType::F64 => out.push(call("__thaw_set_pending_exception_f64", vec![value])),
++            HirType::I64 => out.push(call("__thaw_set_pending_exception_i64", vec![value])),
++            HirType::Bool => out.push(call("__thaw_set_pending_exception_bool", vec![value])),
++            HirType::Str | HirType::StrLiteral(_) => out.push(tag(4)),
++            HirType::Undefined | HirType::Void => out.push(tag(5)),
++            HirType::Null => out.push(tag(6)),
++            HirType::Object(fields) => {
++                if Self::fixed_object_supports_live_projection(ty) {
++                    out.push(HirStmt::Expr(self.retain_full_native_object_projection(
++                        value.clone(), fields, false,
++                    )?));
++                }
++                out.push(call("__thaw_set_pending_exception_object", vec![value]));
++            }
++            HirType::Json | HirType::Dictionary(_) => out.push(call("__thaw_set_pending_exception_json", vec![value])),
++            HirType::JsValue => {
++                let captured = HirExpr::Call(
++                    Box::new(HirExpr::Var("__thaw_capture_exception_js_value".into())),
++                    vec![value],
++                );
++                out.push(call("__thaw_set_pending_exception_json", vec![captured]));
++            }
++            HirType::NativeException => {
++                out.push(call("__thaw_set_pending_exception_native_value", vec![value]));
++            }
++            native if crate::native_exception_tag(native).is_some() => {
++                let tag = crate::native_exception_tag(native).unwrap();
++                let layout = crate::native_exception_layout_token(native).unwrap();
++                out.push(call("__thaw_set_pending_exception_native", vec![
++                    value,
++                    HirExpr::Lit(HirLit::I64(tag as i64)),
++                    HirExpr::Lit(HirLit::Str(layout)),
++                ]));
++            }
++            HirType::Union(members) => {
++                if members.is_empty() {
++                    return Err("cannot publish provenance for an empty union".into());
++                }
++                for (index, member) in members.iter().enumerate() {
++                    let active = HirExpr::BinOp(
++                        BinOp::EqEqEq,
++                        Box::new(HirExpr::UnionTag(Box::new(value.clone()), members.clone())),
++                        Box::new(HirExpr::Lit(HirLit::F64(index as f64))),
++                    );
++                    let member_value = HirExpr::UnionValue(
++                        Box::new(value.clone()), index, members.clone(),
++                    );
++                    let arm = self.rejection_provenance_statements(member_value, member)?;
++                    out.push(HirStmt::If(active, arm, Vec::new()));
++                }
++            }
++            HirType::Optional(payload) => {
++                let none = HirExpr::OptionalIsNone(Box::new(value.clone()), payload.as_ref().clone());
++                let present = self.rejection_provenance_statements(
++                    HirExpr::OptionalValue(Box::new(value.clone()), payload.as_ref().clone()), payload,
++                )?;
++                out.push(HirStmt::If(none, vec![tag(5)], present));
++            }
++            HirType::Nullable(payload) => {
++                let none = HirExpr::NullableIsNone(Box::new(value.clone()), payload.as_ref().clone());
++                let present = self.rejection_provenance_statements(
++                    HirExpr::NullableValue(Box::new(value.clone()), payload.as_ref().clone()), payload,
++                )?;
++                out.push(HirStmt::If(none, vec![tag(6)], present));
++            }
++            HirType::Nullish(payload) => {
++                let is_null = HirExpr::NullishIsNull(Box::new(value.clone()), payload.as_ref().clone());
++                let is_undefined = HirExpr::NullishIsUndefined(Box::new(value.clone()), payload.as_ref().clone());
++                let present = self.rejection_provenance_statements(
++                    HirExpr::NullishValue(Box::new(value.clone()), payload.as_ref().clone()), payload,
++                )?;
++                out.push(HirStmt::If(is_null, vec![tag(6)], vec![HirStmt::If(
++                    is_undefined, vec![tag(5)], present,
++                )]));
++            }
++            // The current caught carrier has no member for these distinct
++            // native layouts. Do not reinterpret their pointer bits as Object.
++            _ => return Err(format!("exception provenance is unavailable for {ty:?}")),
++        }
++        Ok(out)
++    }
++
++    /// Exception transport must not invoke an opaque value's valueOf or
++    /// toString. Keep scalar diagnostics useful and use a fixed description
++    /// for payloads whose formatting could execute user code.
++    pub(crate) fn rejection_display_without_user_coercion(
++        &mut self,
++        value: HirExpr,
++        ty: &HirType,
++    ) -> Result<HirExpr, String> {
++        match ty {
++            HirType::F64 | HirType::I64 | HirType::Bool | HirType::Str
++            | HirType::StrLiteral(_) | HirType::Null | HirType::Undefined => {
++                self.coerce_primitive_to_string(value)
++            }
++            HirType::Void => Ok(HirExpr::Lit(HirLit::Str("undefined".into()))),
++            HirType::Json | HirType::Dictionary(_) => Ok(HirExpr::Lit(HirLit::Str("[exception value]".into()))),
++            HirType::Union(members) => {
++                let mut result = HirExpr::Lit(HirLit::Str("[exception value]".into()));
++                for (index, member) in members.iter().enumerate().rev() {
++                    let condition = HirExpr::BinOp(
++                        BinOp::EqEqEq,
++                        Box::new(HirExpr::UnionTag(Box::new(value.clone()), members.clone())),
++                        Box::new(HirExpr::Lit(HirLit::F64(index as f64))),
++                    );
++                    let member_value = HirExpr::UnionValue(
++                        Box::new(value.clone()), index, members.clone(),
++                    );
++                    let display = self.rejection_display_without_user_coercion(member_value, member)?;
++                    result = HirExpr::Conditional(
++                        Box::new(condition), Box::new(display), Box::new(result), HirType::Str,
++                    );
++                }
++                Ok(result)
++            }
++            HirType::Optional(payload) => {
++                let is_none = HirExpr::OptionalIsNone(Box::new(value.clone()), payload.as_ref().clone());
++                let present = self.rejection_display_without_user_coercion(
++                    HirExpr::OptionalValue(Box::new(value), payload.as_ref().clone()), payload,
++                )?;
++                Ok(HirExpr::Conditional(
++                    Box::new(is_none),
++                    Box::new(HirExpr::Lit(HirLit::Str("undefined".into()))),
++                    Box::new(present), HirType::Str,
++                ))
++            }
++            HirType::Nullable(payload) => {
++                let is_none = HirExpr::NullableIsNone(Box::new(value.clone()), payload.as_ref().clone());
++                let present = self.rejection_display_without_user_coercion(
++                    HirExpr::NullableValue(Box::new(value), payload.as_ref().clone()), payload,
++                )?;
++                Ok(HirExpr::Conditional(
++                    Box::new(is_none),
++                    Box::new(HirExpr::Lit(HirLit::Str("null".into()))),
++                    Box::new(present), HirType::Str,
++                ))
++            }
++            HirType::Nullish(payload) => {
++                let is_null = HirExpr::NullishIsNull(Box::new(value.clone()), payload.as_ref().clone());
++                let is_undefined = HirExpr::NullishIsUndefined(Box::new(value.clone()), payload.as_ref().clone());
++                let present = self.rejection_display_without_user_coercion(
++                    HirExpr::NullishValue(Box::new(value), payload.as_ref().clone()), payload,
++                )?;
++                Ok(HirExpr::Conditional(
++                    Box::new(is_null),
++                    Box::new(HirExpr::Lit(HirLit::Str("null".into()))),
++                    Box::new(HirExpr::Conditional(
++                        Box::new(is_undefined),
++                        Box::new(HirExpr::Lit(HirLit::Str("undefined".into()))),
++                        Box::new(present), HirType::Str,
++                    )), HirType::Str,
++                ))
++            }
++            _ => Ok(HirExpr::Lit(HirLit::Str("[exception value]".into()))),
++        }
+     }
+     /// The `HirType::JsValue` sibling of `iterator_object_adapter` above --
+     /// same job (adapt something following the JS iterator protocol into
+@@ -2629,7 +2788,7 @@
+                         .map(|ident| self.resolve_binding(ident.sym.as_ref()))
+                         .ok_or("Promise rejection rethrow needs a binding")?;
+                     let mut args = vec![value];
+-                    for field in ["original", "native_text", "aggregate", "tag", "f64", "i64", "bool", "object"] {
++                    for field in ["original", "native_text", "aggregate", "tag", "f64", "i64", "bool", "object", "native"] {
+                         args.push(HirExpr::Var(Self::promise_rejection_snapshot_name(&binding, field)));
+                     }
+                     return Ok(vec![HirStmt::Throw(HirExpr::Call(
+--- a/crates/thaw-hir/src/lower/tests/control_flow.rs
++++ b/crates/thaw-hir/src/lower/tests/control_flow.rs
+@@ -381,29 +381,53 @@
+         }"#,
+     );
+     let f = &program.functions[0];
+-    assert_eq!(
+-        f.body,
+-        vec![HirStmt::Try(
+-            vec![
+-                HirStmt::Expr(HirExpr::Call(
+-                    Box::new(HirExpr::Var(
+-                        "__thaw_set_pending_exception_tag".into()
+-                    )),
+-                    vec![HirExpr::Lit(HirLit::I64(4))],
+-                )),
+-                HirStmt::Throw(HirExpr::Call(
+-                    Box::new(HirExpr::Var("@@thaw_trusted_exception_text".into())),
+-                    vec![HirExpr::Lit(HirLit::Str("boom".into()))],
+-                )),
+-            ],
+-            "e".into(),
+-            vec![HirStmt::Expr(HirExpr::Call(
+-                Box::new(HirExpr::Var("console.log".into())),
+-                vec![HirExpr::Var("e".into())],
+-            ))],
+-            Some("e".into()),
+-        )]
+-    );
++    let text = format!("{:?}", f.body);
++    assert!(text.contains("__thaw_clear_pending_exception_provenance"), "{text}");
++    assert!(text.contains("__thaw_set_pending_exception_tag"), "{text}");
++    assert!(text.contains("I64(4)"), "{text}");
++    assert!(text.contains("@@thaw_trusted_exception_text"), "{text}");
++    assert!(text.contains("boom"), "{text}");
++    assert!(text.contains("console.log"), "{text}");
++}
++
++#[test]
++fn throw_union_publishes_only_active_member_and_uses_safe_diagnostics() {
++    let program = lower(r#"
++        function main(reason: number | string | { value: number }): void {
++            try { throw reason; } catch (error) { console.log(error); }
++        }
++    "#);
++    let text = format!("{:?}", program.functions[0].body);
++    assert!(text.contains("UnionTag"), "{text}");
++    assert!(text.contains("UnionValue"), "{text}");
++    assert!(text.contains("__thaw_set_pending_exception_f64"), "{text}");
++    assert!(text.contains("__thaw_set_pending_exception_object"), "{text}");
++    assert!(text.contains("[exception value]"), "{text}");
++    assert!(!text.contains("__thaw_js_handle_to_string"), "{text}");
++}
++
++#[test]
++fn promise_reject_uses_the_same_json_exception_owner_without_coercion() {
++    let program = lower(r#"
++        function main(reason: any): void { Promise.reject(reason); }
++    "#);
++    let text = format!("{:?}", program.functions[0].body);
++    assert!(text.contains("__thaw_clear_pending_exception_provenance"), "{text}");
++    assert!(text.contains("__thaw_set_pending_exception_json"), "{text}");
++    assert!(text.contains("[exception value]"), "{text}");
++    assert!(!text.contains("__thaw_js_handle_to_string"), "{text}");
++}
++
++#[test]
++fn throw_borrowed_jsvalue_uses_exact_capture_instead_of_placeholder_json() {
++    let program = lower(r#"
++        declare function reason(): JsValue;
++        function main(): void { try { throw reason(); } catch (error) { console.log(error); } }
++    "#);
++    let text = format!("{:?}", program.functions[0].body);
++    assert!(text.contains("__thaw_capture_exception_js_value"), "{text}");
++    assert!(text.contains("__thaw_set_pending_exception_json"), "{text}");
++    assert!(!text.contains("JsValueAsJson"), "{text}");
+ }
+ 
+ #[test]
+@@ -471,7 +495,7 @@
+                         if matches!(throw.as_slice(), [HirStmt::Throw(_)]))
+                     && matches!(rethrow.as_slice(), [HirStmt::Throw(HirExpr::Call(callee, args))]
+                         if matches!(callee.as_ref(), HirExpr::Var(name)
+-                            if name == "@@thaw_rethrow_pending_exception") && args.len() == 9))
++                            if name == "@@thaw_rethrow_pending_exception") && args.len() == 10))
+             && matches!(failure.as_slice(), [HirStmt::Let(..), HirStmt::Finally(_, 0), HirStmt::Throw(_)])),
+         "{throw_body:?}");
+ }
+@@ -524,7 +548,7 @@
+     };
+     assert!(matches!(callee.as_ref(), HirExpr::Var(name)
+         if name == "@@thaw_rethrow_pending_exception"));
+-    assert_eq!(args.len(), 9);
++    assert_eq!(args.len(), 10);
+ }
+ 
+ #[test]
+@@ -577,11 +601,49 @@
+ }
+ 
+ #[test]
++fn native_promise_throw_publishes_its_typed_identity_without_string_coercion() {
++    let program = lower(r#"
++        function rejectPromise(value: Promise<number>): void {
++            try { throw value; } catch (error) { console.log(error); }
++        }
++    "#);
++    let text = format!("{:?}", program.functions.iter()
++        .find(|function| function.name == "rejectPromise").unwrap().body);
++    assert!(text.contains("__thaw_set_pending_exception_native"), "{text}");
++    assert!(text.contains("I64(29)"), "{text}");
++    assert!(text.contains("Promise"), "{text}");
++}
++
++#[test]
++fn native_exception_tags_cover_native_categories_and_exact_layouts() {
++    let cases = [
++        (HirType::Symbol, 20),
++        (HirType::Array(Box::new(HirType::F64)), 21),
++        (HirType::Bytes, 22),
++        (HirType::Map(Box::new(HirType::Str), Box::new(HirType::F64)), 23),
++        (HirType::WeakMap(Box::new(HirType::Str), Box::new(HirType::F64)), 24),
++        (HirType::Set(Box::new(HirType::F64)), 25),
++        (HirType::WeakSet(Box::new(HirType::F64)), 26),
++        (HirType::Tuple(vec![HirType::F64, HirType::Str]), 27),
++        (HirType::FunctionWithThis(Box::new(HirType::F64), Box::new(HirType::Str)), 28),
++    ];
++    for (ty, expected_tag) in cases {
++        assert_eq!(native_exception_tag(&ty), Some(expected_tag));
++        assert!(native_exception_layout_token(&ty).is_some());
++    }
++    assert_ne!(
++        native_exception_layout_token(&HirType::Array(Box::new(HirType::F64))),
++        native_exception_layout_token(&HirType::Array(Box::new(HirType::Str))),
++    );
++}
++
++#[test]
+ fn promise_catch_direct_rethrow_uses_binding_snapshot_marker() {
+     let program = lower(r#"function main(): void { Promise.reject<number>(1).catch(error => { throw error; }); }"#);
+     let text = format!("{:?}", program);
+     assert!(text.contains("@@thaw_rethrow_pending_exception"), "{text}");
+     assert!(text.contains("@@thaw_promise_rejection:"), "{text}");
++    assert!(text.contains("@@thaw_promise_rejection:") && text.contains(":native"), "{text}");
+ }
+ 
+ #[test]
+--- a/crates/thaw-llvm/src/hir_codegen/async_frames/codegen.rs
++++ b/crates/thaw-llvm/src/hir_codegen/async_frames/codegen.rs
+@@ -103,7 +103,7 @@
+         self.builder
+             .build_store(waiting_slot, ptr_ty.const_null())
+             .map_err(|e| e.to_string())?;
+-        for (index, (name, _)) in plan.locals.iter().enumerate() {
++        for (index, (name, ty)) in plan.locals.iter().enumerate() {
+             if name.starts_with("@@thaw_for_iteration_") {
+                 let slot = self.async_frame_field(
+                     frame,
+@@ -112,12 +112,20 @@
+                 )?;
+                 self.builder.build_store(slot, ptr_ty.const_null())
+                     .map_err(|error| error.to_string())?;
++            } else if matches!(ty, HirType::Promise(_)) {
++                let slot = self.async_frame_field(
++                    frame,
++                    self.async_local_offset(plan, index)?,
++                    &format!("frame_{name}"),
++                )?;
++                self.builder.build_store(slot, ptr_ty.const_null())
++                    .map_err(|error| error.to_string())?;
+             }
+         }
+         self.bind_async_frame_locals(frame, plan)?;
+         // Arena allocation is not zeroed outside tracing mode. Initialize
+         // compiler-private provenance before any source statement executes.
+-        for (_, native_slot, original_slot, valid_slot) in self.catch_native_text.values() {
++        for (_, native_slot, original_slot, valid_slot, _) in self.catch_native_text.values() {
+             for slot in [native_slot, original_slot] {
+                 self.builder.build_store(*slot, ptr_ty.const_null())
+                     .map_err(|error| error.to_string())?;
+@@ -146,9 +154,7 @@
+             let (slot, _) = self.variables.get(&param.name).copied().ok_or_else(|| {
+                 format!("missing async frame parameter slot for `{}`", param.name)
+             })?;
+-            self.builder
+-                .build_store(slot, param_value)
+-                .map_err(|e| e.to_string())?;
++            self.store_arena_promise_slot(frame, slot, &param.ty, param_value)?;
+         }
+         self.emit_async_segment(&segments[0], frame, completion, resume, 1, true, plan, None)?;
+ 
+@@ -285,7 +291,7 @@
+                     .map_err(|e| e.to_string())?;
+             }
+             let binding_slot = self.catch_native_text.get(&handler.catch_binding)
+-                .map(|(binding, _, _, _)| *binding)
++                .map(|(binding, _, _, _, _)| *binding)
+                 .ok_or_else(|| format!("missing catch provenance for `{}`", handler.catch_binding))?;
+             let native_text = self.builder.build_call(
+                 self.module.get_function("thaw_promise_exception_native_text_copy").unwrap(),
+@@ -300,17 +306,17 @@
+             self.builder.build_store(binding_slot, caught_value)
+                 .map_err(|e| e.to_string())?;
+             let original_slot = self.catch_native_text.get(&handler.catch_binding)
+-                .map(|(_, _, original, _)| *original)
++                .map(|(_, _, original, _, _)| *original)
+                 .ok_or_else(|| format!("missing catch original for `{}`", handler.catch_binding))?;
+             self.builder.build_store(original_slot, caught_value)
+                 .map_err(|e| e.to_string())?;
+             let valid_slot = self.catch_native_text.get(&handler.catch_binding)
+-                .map(|(_, _, _, valid)| *valid)
++                .map(|(_, _, _, valid, _)| *valid)
+                 .ok_or_else(|| format!("missing catch validity for `{}`", handler.catch_binding))?;
+             self.builder.build_store(valid_slot, self.context.bool_type().const_int(1, false))
+                 .map_err(|e| e.to_string())?;
+             let native_slot = self.catch_native_text.get(&handler.catch_binding)
+-                .map(|(_, native, _, _)| *native)
++                .map(|(_, native, _, _, _)| *native)
+                 .ok_or_else(|| format!("missing catch provenance for `{}`", handler.catch_binding))?;
+             self.builder.build_store(native_slot, native_text).map_err(|e| e.to_string())?;
+             for (suffix, getter) in [
+@@ -320,6 +326,7 @@
+                 ("f64", "thaw_promise_exception_f64"),
+                 ("i64", "thaw_promise_exception_i64"),
+                 ("bool", "thaw_promise_exception_bool"),
++                ("native", "thaw_promise_exception_native"),
+             ] {
+                 let name = format!("{}__thaw_exception_{suffix}", handler.catch_binding);
+                 let index = plan
+@@ -565,15 +572,16 @@
+             let sync_rejection = self
+                 .context
+                 .append_basic_block(function, "await_operand_rejected");
+-            self.catch_stack.push(sync_rejection);
++            self.push_catch_target(sync_rejection);
+             let waiting = match awaited {
+                 HirExpr::Call(callee, args) if matches!(callee.as_ref(), HirExpr::Var(name) if name == "fetch") => {
+                     self.compile_single_arg_call("thaw_http_get_async", args, "async_fetch")
+                 }
+                 _ => self.compile_expr(awaited),
+             };
+-            self.catch_stack.pop();
+             let waiting = waiting?.into_pointer_value();
++            let waiting = self.retain_borrowed_promise_for_consumption(awaited, waiting)?;
++            self.pop_catch_target();
+             let fulfilled_block = self.builder.get_insert_block().unwrap();
+             let await_ready = self.context.append_basic_block(function, "await_operand_ready");
+             self.builder
+@@ -733,6 +741,7 @@
+                 &format!("frame_{name}"),
+             )?;
+             self.async_frame_cells.insert(slot);
++            self.async_frame_slot_owners.insert(slot, frame);
+             if name.starts_with("@@thaw_for_iteration_") {
+                 let cell = self.builder.build_load(
+                     self.context.ptr_type(AddressSpace::default()), slot,
+@@ -758,7 +767,12 @@
+             let valid_name = Self::async_catch_valid_name(binding);
+             let valid_slot = self.variables.get(&valid_name).map(|(slot, _)| *slot)
+                 .ok_or_else(|| format!("missing async catch validity cell `{valid_name}`"))?;
+-            self.catch_native_text.insert(binding.clone(), (catch_slot, native_slot, original_slot, valid_slot));
++            let exception_native_name = format!("{binding}__thaw_exception_native");
++            let exception_native_slot = self.variables.get(&exception_native_name)
++                .map(|(slot, _)| *slot)
++                .ok_or_else(|| format!("missing async native exception descriptor cell `{exception_native_name}`"))?;
++            self.catch_native_text.insert(binding.clone(),
++                (catch_slot, native_slot, original_slot, valid_slot, exception_native_slot));
+         }
+         Ok(())
+     }
+@@ -767,13 +781,17 @@
+         &mut self,
+         name: &str,
+         ty: &HirType,
+-        value: BasicValueEnum<'ctx>,
++        expression: &HirExpr,
+     ) -> Result<(), String> {
+         let frame_slot = *self.for_iteration_frame_slots.get(name)
+             .ok_or_else(|| format!("missing iteration frame slot for `{name}`"))?;
+         let llvm_ty = self.basic_type(ty)?;
+         let cell = self.build_arena_cell(&self.builder, llvm_ty, name)?;
+-        self.builder.build_store(cell, value).map_err(|error| error.to_string())?;
++        if matches!(ty, HirType::Promise(_)) {
++            let ptr_ty = self.context.ptr_type(AddressSpace::default());
++            self.builder.build_store(cell, ptr_ty.const_null()).map_err(|error| error.to_string())?;
++        }
++        self.compile_and_store_arena_promise_expression(cell, cell, ty, expression)?;
+         self.builder.build_store(frame_slot, cell).map_err(|error| error.to_string())?;
+         self.variables.insert(name.to_string(), (cell, llvm_ty));
+         self.variable_hir_types.insert(name.to_string(), ty.clone());
+@@ -848,7 +866,7 @@
+                 _ => None,
+             };
+             if let Some((catch_block, _, _)) = &synchronous_catch {
+-                self.catch_stack.push(*catch_block);
++                self.push_catch_target(*catch_block);
+             }
+             if let HirStmt::If(guard, then_body, else_body) = stmt {
+                 let guarded = match (then_body.as_slice(), else_body.as_slice()) {
+@@ -871,10 +889,10 @@
+                         .build_conditional_branch(condition, initialize, continue_block)
+                         .map_err(|e| e.to_string())?;
+                     self.builder.position_at_end(initialize);
+-                    let value = self.compile_expr(expr)?;
+                     if self.for_iteration_frame_slots.contains_key(name) {
+-                        self.store_for_iteration_cell(name, ty, value)?;
++                        self.store_for_iteration_cell(name, ty, expr)?;
+                     } else {
++                        let value = self.compile_expr(expr)?;
+                         let (slot, slot_ty) = self.variables.get(name).copied()
+                             .ok_or_else(|| format!("missing async frame slot for `{name}`"))?;
+                         if slot_ty != self.basic_type(ty)? {
+@@ -1073,9 +1091,8 @@
+                 return Ok(AsyncBlockExit::Rejected);
+             }
+             if let HirStmt::Let(name, ty, expr) = stmt {
+-                let value = self.compile_expr(expr)?;
+                 if self.for_iteration_frame_slots.contains_key(name) {
+-                    self.store_for_iteration_cell(name, ty, value)?;
++                    self.store_for_iteration_cell(name, ty, expr)?;
+                 } else {
+                     let index = plan.locals.iter().position(|(local, _)| local == name)
+                         .ok_or_else(|| format!("missing async frame slot for `{name}`"))?;
+@@ -1085,7 +1102,8 @@
+                         &format!("frame_{name}"),
+                     )?;
+                     self.async_frame_cells.insert(slot);
+-                    self.builder.build_store(slot, value).map_err(|e| e.to_string())?;
++                    self.async_frame_slot_owners.insert(slot, frame);
++                    self.compile_and_store_arena_promise_expression(frame, slot, ty, expr)?;
+                     self.variables.insert(name.clone(), (slot, self.basic_type(ty)?));
+                 }
+             } else if self.compile_stmt(stmt)? {
+@@ -1106,19 +1124,19 @@
+     ) -> Result<(), String> {
+         let ptr_ty = self.context.ptr_type(AddressSpace::default());
+         let binding_slot = self.catch_native_text.get(&handler.catch_binding)
+-            .map(|(binding, _, _, _)| *binding)
++            .map(|(binding, _, _, _, _)| *binding)
+             .ok_or_else(|| format!("missing catch provenance for `{}`", handler.catch_binding))?;
+         self.builder.build_store(binding_slot, pending).map_err(|e| e.to_string())?;
+         let original_slot = self.catch_native_text.get(&handler.catch_binding)
+-            .map(|(_, _, original, _)| *original)
++            .map(|(_, _, original, _, _)| *original)
+             .ok_or_else(|| format!("missing catch original for `{}`", handler.catch_binding))?;
+         self.builder.build_store(original_slot, pending).map_err(|e| e.to_string())?;
+         let valid_slot = self.catch_native_text.get(&handler.catch_binding)
+-            .map(|(_, _, _, valid)| *valid)
++            .map(|(_, _, _, valid, _)| *valid)
+             .ok_or_else(|| format!("missing catch validity for `{}`", handler.catch_binding))?;
+         self.builder.build_store(valid_slot, self.context.bool_type().const_int(1, false))
+             .map_err(|e| e.to_string())?;
+-        let pending_metadata: [(&str, &str, BasicTypeEnum<'ctx>); 7] = [
++        let pending_metadata: [(&str, &str, BasicTypeEnum<'ctx>); 8] = [
+             ("native_text", PENDING_EXCEPTION_NATIVE_TEXT_SYMBOL, ptr_ty.into()),
+             ("object", PENDING_EXCEPTION_OBJECT_SYMBOL, ptr_ty.into()),
+             ("aggregate", PENDING_EXCEPTION_AGGREGATE_SYMBOL, ptr_ty.into()),
+@@ -1126,6 +1144,7 @@
+             ("f64", PENDING_EXCEPTION_F64_SYMBOL, self.context.f64_type().into()),
+             ("i64", PENDING_EXCEPTION_I64_SYMBOL, self.context.i64_type().into()),
+             ("bool", PENDING_EXCEPTION_BOOL_SYMBOL, self.context.bool_type().into()),
++            ("native", PENDING_EXCEPTION_NATIVE_SYMBOL, ptr_ty.into()),
+         ];
+         for (suffix, symbol, ty) in pending_metadata {
+             let name = if suffix == "native_text" {
+@@ -1162,7 +1181,7 @@
+         let Some((catch_block, next_block, handler)) = boundary else {
+             return Ok(());
+         };
+-        self.catch_stack.pop();
++        self.pop_catch_target();
+         if self.builder.get_insert_block().unwrap().get_terminator().is_none() {
+             self.builder.build_unconditional_branch(*next_block).map_err(|e| e.to_string())?;
+         }
+--- a/crates/thaw-llvm/src/hir_codegen/async_frames/planning/plan.rs
++++ b/crates/thaw-llvm/src/hir_codegen/async_frames/planning/plan.rs
+@@ -11,6 +11,7 @@
+             ("f64", HirType::F64),
+             ("i64", HirType::I64),
+             ("bool", HirType::Bool),
++            ("native", HirType::NativeException),
+         ] {
+             locals.push((format!("{name}__thaw_exception_{suffix}"), ty));
+         }
+@@ -36,7 +37,7 @@
+             Self::async_catch_valid_name(name),
+             Box::new(HirExpr::Lit(HirLit::Bool(true))),
+         )));
+-        for suffix in ["native_text", "object", "aggregate", "tag", "f64", "i64", "bool"] {
++        for suffix in ["native_text", "object", "aggregate", "tag", "f64", "i64", "bool", "native"] {
+             assignments.push(HirStmt::Expr(HirExpr::Assign(
+                 if suffix == "native_text" { Self::async_catch_native_name(name) }
+                 else { format!("{name}__thaw_exception_{suffix}") },
+--- a/crates/thaw-llvm/src/hir_codegen/functions.rs
++++ b/crates/thaw-llvm/src/hir_codegen/functions.rs
+@@ -94,6 +94,7 @@
+             HirType::Json | HirType::Dictionary(_) => {
+                 Ok(self.context.ptr_type(AddressSpace::default()).into())
+             }
++            HirType::NativeException => Ok(self.context.ptr_type(AddressSpace::default()).into()),
+             HirType::JsValue => Ok(self.context.i64_type().into()),
+             HirType::Null => Ok(self.context.bool_type().into()),
+             HirType::Function(_, _) | HirType::CallableFunction(..) => {
+--- a/crates/thaw-llvm/src/hir_codegen/invocations/calls.rs
++++ b/crates/thaw-llvm/src/hir_codegen/invocations/calls.rs
+@@ -1746,6 +1746,7 @@
+                     return Err(format!("{name} expects one operand"));
+                 };
+                 let value = self.compile_expr(value)?;
++                self.clear_pending_native_text()?;
+                 self.builder
+                     .build_store(self.pending_exception_object().as_pointer_value(), value)
+                     .map_err(|error| error.to_string())?;
+@@ -1759,6 +1760,129 @@
+                         self.context.i64_type().const_zero(),
+                     )
+                     .map_err(|error| error.to_string())?;
++                return Ok(self.context.i32_type().const_int(0, false).into());
++            }
++            "__thaw_set_pending_exception_native" => {
++                let [value, tag, layout] = args else {
++                    return Err(format!("{name} expects value, category, and layout"));
++                };
++                let value = self.compile_expr(value)?.into_pointer_value();
++                let tag = self.compile_expr(tag)?.into_int_value();
++                let layout = self.compile_expr(layout)?.into_pointer_value();
++                let descriptor = self.builder.build_call(
++                    self.module.get_function("thaw_exception_native_provenance_new").unwrap(),
++                    &[tag.into(), value.into(), layout.into()],
++                    "pending_native_exception_descriptor",
++                ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
++                    .ok_or("native exception descriptor returned no value")?.into_pointer_value();
++                self.clear_pending_native_text()?;
++                self.builder.build_store(self.pending_exception_native().as_pointer_value(), descriptor)
++                    .map_err(|error| error.to_string())?;
++                self.builder.build_store(self.pending_exception_object().as_pointer_value(), value)
++                    .map_err(|error| error.to_string())?;
++                self.builder.build_store(self.pending_exception_aggregate_errors().as_pointer_value(),
++                    self.context.ptr_type(AddressSpace::default()).const_null())
++                    .map_err(|error| error.to_string())?;
++                self.builder.build_store(self.pending_exception_value(PENDING_EXCEPTION_VALUE_TAG_SYMBOL).as_pointer_value(), tag)
++                    .map_err(|error| error.to_string())?;
++                return Ok(self.context.i32_type().const_int(0, false).into());
++            }
++            "__thaw_set_pending_exception_native_value" => {
++                let [descriptor] = args else {
++                    return Err(format!("{name} expects one descriptor"));
++                };
++                let descriptor = self.compile_expr(descriptor)?.into_pointer_value();
++                let tag = self.builder.build_call(
++                    self.module.get_function("thaw_exception_native_tag").unwrap(),
++                    &[descriptor.into()], "pending_native_exception_tag",
++                ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
++                    .ok_or("native exception tag returned no value")?.into_int_value();
++                self.clear_pending_native_text()?;
++                self.builder.build_store(self.pending_exception_native().as_pointer_value(), descriptor)
++                    .map_err(|error| error.to_string())?;
++                self.builder.build_store(self.pending_exception_object().as_pointer_value(),
++                    self.context.ptr_type(AddressSpace::default()).const_null())
++                    .map_err(|error| error.to_string())?;
++                self.builder.build_store(self.pending_exception_aggregate_errors().as_pointer_value(),
++                    self.context.ptr_type(AddressSpace::default()).const_null())
++                    .map_err(|error| error.to_string())?;
++                self.builder.build_store(self.pending_exception_value(PENDING_EXCEPTION_VALUE_TAG_SYMBOL).as_pointer_value(), tag)
++                    .map_err(|error| error.to_string())?;
++                return Ok(self.context.i32_type().const_int(0, false).into());
++            }
++            "__thaw_capture_exception_js_value" => {
++                let [value] = args else {
++                    return Err(format!("{name} expects one operand"));
++                };
++                let handle = self.compile_expr(value)?;
++                return self.compile_original_quickjs_exception_handle(handle, false);
++            }
++            "__thaw_set_pending_exception_json" => {
++                let [value] = args else {
++                    return Err(format!("{name} expects one operand"));
++                };
++                self.tracks_owned_json_roots = true;
++                let value = self.compile_expr(value)?.into_pointer_value();
++                let shared = self.builder.build_call(
++                    self.module.get_function("thaw_json_share").unwrap(),
++                    &[value.into()], "pending_exception_json_share",
++                ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
++                    .ok_or("JSON exception share returned no value")?;
++                let rooted = self.builder.build_call(
++                    self.module.get_function("thaw_json_track_arena_owned_root").unwrap(),
++                    &[shared.into()], "pending_exception_json_root",
++                ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
++                    .ok_or("JSON exception root returned no value")?;
++                let rooted = self.compile_check_json_host_error(rooted, None)?.into_pointer_value();
++                self.builder.build_store(self.pending_exception_object().as_pointer_value(), rooted)
++                    .map_err(|error| error.to_string())?;
++                self.builder.build_store(self.pending_exception_aggregate_errors().as_pointer_value(),
++                    self.context.ptr_type(AddressSpace::default()).const_null())
++                    .map_err(|error| error.to_string())?;
++                self.clear_pending_native_text()?;
++                self.builder.build_store(
++                    self.pending_exception_value(PENDING_EXCEPTION_F64_SYMBOL).as_pointer_value(),
++                    self.context.f64_type().const_zero(),
++                ).map_err(|error| error.to_string())?;
++                self.builder.build_store(
++                    self.pending_exception_value(PENDING_EXCEPTION_I64_SYMBOL).as_pointer_value(),
++                    self.context.i64_type().const_zero(),
++                ).map_err(|error| error.to_string())?;
++                self.builder.build_store(
++                    self.pending_exception_value(PENDING_EXCEPTION_BOOL_SYMBOL).as_pointer_value(),
++                    self.context.bool_type().const_zero(),
++                ).map_err(|error| error.to_string())?;
++                self.builder.build_store(
++                    self.pending_exception_value(PENDING_EXCEPTION_VALUE_TAG_SYMBOL).as_pointer_value(),
++                    self.context.i64_type().const_int(7, false),
++                ).map_err(|error| error.to_string())?;
++                return Ok(self.context.i32_type().const_int(0, false).into());
++            }
++            "__thaw_clear_pending_exception_provenance" => {
++                let null = self.context.ptr_type(AddressSpace::default()).const_null();
++                self.builder.build_store(self.pending_exception_object().as_pointer_value(), null)
++                    .map_err(|error| error.to_string())?;
++                self.builder.build_store(self.pending_exception_native().as_pointer_value(), null)
++                    .map_err(|error| error.to_string())?;
++                self.builder.build_store(self.pending_exception_aggregate_errors().as_pointer_value(), null)
++                    .map_err(|error| error.to_string())?;
++                self.builder.build_store(
++                    self.pending_exception_value(PENDING_EXCEPTION_VALUE_TAG_SYMBOL).as_pointer_value(),
++                    self.context.i64_type().const_zero(),
++                ).map_err(|error| error.to_string())?;
++                self.builder.build_store(
++                    self.pending_exception_value(PENDING_EXCEPTION_F64_SYMBOL).as_pointer_value(),
++                    self.context.f64_type().const_zero(),
++                ).map_err(|error| error.to_string())?;
++                self.builder.build_store(
++                    self.pending_exception_value(PENDING_EXCEPTION_I64_SYMBOL).as_pointer_value(),
++                    self.context.i64_type().const_zero(),
++                ).map_err(|error| error.to_string())?;
++                self.builder.build_store(
++                    self.pending_exception_value(PENDING_EXCEPTION_BOOL_SYMBOL).as_pointer_value(),
++                    self.context.bool_type().const_zero(),
++                ).map_err(|error| error.to_string())?;
++                self.clear_pending_native_text()?;
+                 return Ok(self.context.i32_type().const_int(0, false).into());
+             }
+             "__thaw_pending_exception_aggregate" => {
+@@ -1777,6 +1901,38 @@
+                         "pending_exception_object_value",
+                     )
+                     .map_err(|error| error.to_string());
++            }
++            "__thaw_pending_exception_native" => {
++                return self.builder.build_load(self.context.ptr_type(AddressSpace::default()),
++                    self.pending_exception_native().as_pointer_value(),
++                    "pending_exception_native_descriptor")
++                    .map_err(|error| error.to_string());
++            }
++            "__thaw_native_exception_tag" => {
++                let [descriptor] = args else { return Err(format!("{name} expects one descriptor")); };
++                let descriptor = self.compile_expr(descriptor)?.into_pointer_value();
++                return self.builder.build_call(
++                    self.module.get_function("thaw_exception_native_tag").unwrap(),
++                    &[descriptor.into()], "native_exception_tag",
++                ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
++                    .ok_or("native exception tag returned no value".into());
++            }
++            "__thaw_native_exception_owner" => {
++                let [descriptor, tag, layout] = args else { return Err(format!("{name} expects descriptor, category, and layout")); };
++                let descriptor = self.compile_expr(descriptor)?.into_pointer_value();
++                let tag = self.compile_expr(tag)?.into_int_value();
++                let layout = self.compile_expr(layout)?.into_pointer_value();
++                return self.builder.build_call(
++                    self.module.get_function("thaw_exception_native_owner").unwrap(),
++                    &[descriptor.into(), tag.into(), layout.into()], "native_exception_owner",
++                ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
++                    .ok_or("native exception owner returned no value".into());
++            }
++            "__thaw_native_exception_owner_present" => {
++                let [owner] = args else { return Err(format!("{name} expects one owner")); };
++                let owner = self.compile_expr(owner)?.into_pointer_value();
++                return self.builder.build_is_not_null(owner, "native_exception_owner_present")
++                    .map(Into::into).map_err(|error| error.to_string());
+             }
+             "__thaw_exception_object_present" => {
+                 let [value] = args else {
+@@ -1834,6 +1990,7 @@
+                     _ => (PENDING_EXCEPTION_BOOL_SYMBOL, 3),
+                 };
+                 let value = self.compile_expr(value)?;
++                self.clear_pending_native_text()?;
+                 self.builder.build_store(self.pending_exception_aggregate_errors().as_pointer_value(),
+                     self.context.ptr_type(AddressSpace::default()).const_null())
+                     .map_err(|error| error.to_string())?;
+@@ -1863,6 +2020,8 @@
+                     (3, "boolean"),
+                     (4, "string"),
+                     (5, "undefined"),
++                    (20, "symbol"),
++                    (28, "function"),
+                 ];
+                 let mut result = self.compile_expr(&HirExpr::Lit(HirLit::Str("object".into())))?;
+                 for (expected, label) in choices.into_iter().rev() {
+--- a/crates/thaw-llvm/src/hir_codegen/json_values.rs
++++ b/crates/thaw-llvm/src/hir_codegen/json_values.rs
+@@ -9,7 +9,7 @@
+     /// Capture one already-retained QuickJS exception as an owned JSON value.
+     /// The graph encoder preserves the original JS identity and never assimilates
+     /// thrown promises or thenables.
+-    fn compile_original_quickjs_exception_handle(
++    pub(super) fn compile_original_quickjs_exception_handle(
+         &mut self,
+         handle: BasicValueEnum<'ctx>,
+         consume_handle: bool,
+--- a/crates/thaw-llvm/src/hir_codegen/promises.rs
++++ b/crates/thaw-llvm/src/hir_codegen/promises.rs
+@@ -1,4 +1,426 @@
+ impl<'ctx> HirCompiler<'ctx> {
++    fn expression_returns_promise_union(&self, expression: &HirExpr) -> bool {
++        matches!(self.expr_hir_type(expression), Some(HirType::Union(members))
++            if members.iter().any(|member| matches!(member, HirType::Promise(_))))
++    }
++
++    pub(super) fn split_promise_conditional(
++        &self,
++        expression: &HirExpr,
++    ) -> Option<(HirExpr, HirExpr, HirExpr)> {
++        match expression {
++            HirExpr::Conditional(test, consequent, alternate, _) => Some((
++                (**test).clone(), (**consequent).clone(), (**alternate).clone(),
++            )),
++            HirExpr::TypedClosure(ty, inner) => self
++                .split_promise_conditional(inner)
++                .map(|(test, consequent, alternate)| (
++                    test,
++                    HirExpr::TypedClosure(ty.clone(), Box::new(consequent)),
++                    HirExpr::TypedClosure(ty.clone(), Box::new(alternate)),
++                )),
++            HirExpr::UnionInject(inner, index, members) => self
++                .split_promise_conditional(inner)
++                .map(|(test, consequent, alternate)| (
++                    test,
++                    HirExpr::UnionInject(Box::new(consequent), *index, members.clone()),
++                    HirExpr::UnionInject(Box::new(alternate), *index, members.clone()),
++                )),
++            HirExpr::UnionValue(inner, index, members) => self
++                .split_promise_conditional(inner)
++                .map(|(test, consequent, alternate)| (
++                    test,
++                    HirExpr::UnionValue(Box::new(consequent), *index, members.clone()),
++                    HirExpr::UnionValue(Box::new(alternate), *index, members.clone()),
++                )),
++            HirExpr::OptionalValue(inner, payload) => self
++                .split_promise_conditional(inner)
++                .map(|(test, consequent, alternate)| (
++                    test,
++                    HirExpr::OptionalValue(Box::new(consequent), payload.clone()),
++                    HirExpr::OptionalValue(Box::new(alternate), payload.clone()),
++                )),
++            HirExpr::NullableValue(inner, payload) => self
++                .split_promise_conditional(inner)
++                .map(|(test, consequent, alternate)| (
++                    test,
++                    HirExpr::NullableValue(Box::new(consequent), payload.clone()),
++                    HirExpr::NullableValue(Box::new(alternate), payload.clone()),
++                )),
++            HirExpr::NullishValue(inner, payload) => self
++                .split_promise_conditional(inner)
++                .map(|(test, consequent, alternate)| (
++                    test,
++                    HirExpr::NullishValue(Box::new(consequent), payload.clone()),
++                    HirExpr::NullishValue(Box::new(alternate), payload.clone()),
++                )),
++            _ => None,
++        }
++    }
++
++    pub(super) fn promise_expression_returns_owned(&self, expression: &HirExpr) -> bool {
++        match expression {
++            HirExpr::PromiseAll(..)
++            | HirExpr::PromiseAllArray(..)
++            | HirExpr::PromiseAllTuple(..)
++            | HirExpr::PromiseRace(..)
++            | HirExpr::PromiseRaceArray(..)
++            | HirExpr::PromiseAny(..)
++            | HirExpr::PromiseAnyArray(..)
++            | HirExpr::PromiseAllSettled(..)
++            | HirExpr::PromiseAllSettledArray(..)
++            | HirExpr::PromiseNew(..)
++            | HirExpr::PromiseNewMixed(..)
++            | HirExpr::PromiseThen(..)
++            | HirExpr::PromiseThenBoth(..)
++            | HirExpr::PromiseFinally(..) => true,
++            HirExpr::Call(_, _) if matches!(self.expr_hir_type(expression), Some(HirType::Promise(_)))
++                || self.expression_returns_promise_union(expression) => {
++                true
++            }
++            HirExpr::FunctionCallWithThis(_, _, _, _, result) => {
++                matches!(result, HirType::Promise(_))
++                    || matches!(result, HirType::Union(members)
++                        if members.iter().any(|member| matches!(member, HirType::Promise(_))))
++            }
++            HirExpr::UnionInject(value, _, _)
++            | HirExpr::UnionValue(value, _, _)
++            | HirExpr::OptionalValue(value, _)
++            | HirExpr::NullableValue(value, _)
++            | HirExpr::NullishValue(value, _)
++            | HirExpr::TypedClosure(_, value) => self.promise_expression_returns_owned(value),
++            HirExpr::Conditional(_, consequent, alternate, _) => {
++                self.promise_expression_returns_owned(consequent)
++                    && self.promise_expression_returns_owned(alternate)
++            }
++            _ => false,
++        }
++    }
++
++    pub(super) fn retain_borrowed_promise_for_consumption(
++        &mut self,
++        expression: &HirExpr,
++        promise: PointerValue<'ctx>,
++    ) -> Result<PointerValue<'ctx>, String> {
++        if self.promise_expression_returns_owned(expression) { return Ok(promise); }
++        let retained = self.builder.build_call(
++            self.module.get_function("thaw_promise_retain").unwrap(),
++            &[promise.into()], "retain_borrowed_await_promise",
++        ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
++            .ok_or("native Promise retain returned no value")?.into_int_value();
++        let failed = self.builder.build_int_compare(
++            IntPredicate::EQ, retained, self.context.i8_type().const_zero(),
++            "borrowed_await_retain_failed",
++        ).map_err(|error| error.to_string())?;
++        let function = self.current_function();
++        let failed_block = self.context.append_basic_block(function, "borrowed_await_retain_error");
++        let ready_block = self.context.append_basic_block(function, "borrowed_await_retain_ready");
++        self.builder.build_conditional_branch(failed, failed_block, ready_block)
++            .map_err(|error| error.to_string())?;
++        self.builder.position_at_end(failed_block);
++        self.compile_throw_type_error("Unable to retain borrowed Promise for await")?;
++        self.builder.position_at_end(ready_block);
++        Ok(promise)
++    }
++
++    fn compile_promise_for_consumption(
++        &mut self,
++        expression: &HirExpr,
++    ) -> Result<PointerValue<'ctx>, String> {
++        if let Some((test, consequent, alternate)) = self.split_promise_conditional(expression) {
++            self.prepromote_branch_captures(&test, &[
++                HirStmt::Expr(consequent.clone()),
++                HirStmt::Expr(alternate.clone()),
++            ])?;
++            let function = self.current_function();
++            let consequent_block = self.context.append_basic_block(function, "await_promise_then");
++            let alternate_block = self.context.append_basic_block(function, "await_promise_else");
++            let merge_block = self.context.append_basic_block(function, "await_promise_end");
++            let condition = self.compile_expr(&test)?.into_int_value();
++            self.builder.build_conditional_branch(condition, consequent_block, alternate_block)
++                .map_err(|error| error.to_string())?;
++
++            self.builder.position_at_end(consequent_block);
++            let consequent = self.compile_promise_for_consumption(&consequent)?;
++            let consequent_end = self.builder.get_insert_block().unwrap();
++            self.builder.build_unconditional_branch(merge_block)
++                .map_err(|error| error.to_string())?;
++
++            self.builder.position_at_end(alternate_block);
++            let alternate = self.compile_promise_for_consumption(&alternate)?;
++            let alternate_end = self.builder.get_insert_block().unwrap();
++            self.builder.build_unconditional_branch(merge_block)
++                .map_err(|error| error.to_string())?;
++
++            self.builder.position_at_end(merge_block);
++            let phi = self.builder.build_phi(self.context.ptr_type(AddressSpace::default()),
++                "await_owned_promise").map_err(|error| error.to_string())?;
++            phi.add_incoming(&[(&consequent, consequent_end), (&alternate, alternate_end)]);
++            return Ok(phi.as_basic_value().into_pointer_value());
++        }
++        let promise = self.compile_expr(expression)?.into_pointer_value();
++        self.retain_borrowed_promise_for_consumption(expression, promise)
++    }
++
++    pub(super) fn compile_and_store_arena_promise_expression(
++        &mut self,
++        owner: PointerValue<'ctx>,
++        slot: PointerValue<'ctx>,
++        ty: &HirType,
++        expression: &HirExpr,
++    ) -> Result<BasicValueEnum<'ctx>, String> {
++        if !matches!(ty, HirType::Promise(_)) {
++            let value = self.compile_expr(expression)?;
++            self.store_arena_promise_slot(owner, slot, ty, value)?;
++            return Ok(value);
++        }
++        if let Some((test, consequent, alternate)) = self.split_promise_conditional(expression) {
++            self.prepromote_branch_captures(&test, &[
++                HirStmt::Expr(consequent.clone()),
++                HirStmt::Expr(alternate.clone()),
++            ])?;
++            let function = self.current_function();
++            let consequent_block = self.context.append_basic_block(function, "promise_store_then");
++            let alternate_block = self.context.append_basic_block(function, "promise_store_else");
++            let merge_block = self.context.append_basic_block(function, "promise_store_end");
++            let condition = self.compile_expr(&test)?.into_int_value();
++            self.builder.build_conditional_branch(condition, consequent_block, alternate_block)
++                .map_err(|error| error.to_string())?;
++
++            self.builder.position_at_end(consequent_block);
++            let consequent_value = self.compile_and_store_arena_promise_expression(
++                owner, slot, ty, &consequent,
++            )?;
++            let consequent_end = self.builder.get_insert_block().unwrap();
++            self.builder.build_unconditional_branch(merge_block)
++                .map_err(|error| error.to_string())?;
++
++            self.builder.position_at_end(alternate_block);
++            let alternate_value = self.compile_and_store_arena_promise_expression(
++                owner, slot, ty, &alternate,
++            )?;
++            let alternate_end = self.builder.get_insert_block().unwrap();
++            self.builder.build_unconditional_branch(merge_block)
++                .map_err(|error| error.to_string())?;
++
++            self.builder.position_at_end(merge_block);
++            let phi = self.builder.build_phi(self.basic_type(ty)?, "stored_promise_value")
++                .map_err(|error| error.to_string())?;
++            phi.add_incoming(&[(&consequent_value, consequent_end), (&alternate_value, alternate_end)]);
++            return Ok(phi.as_basic_value());
++        }
++        let value = self.compile_expr(expression)?;
++        self.store_arena_promise_slot_with_token(
++            owner,
++            slot,
++            ty,
++            value,
++            self.promise_expression_returns_owned(expression),
++        )?;
++        Ok(value)
++    }
++
++    pub(super) fn compile_and_discard_promise_expression(
++        &mut self,
++        expression: &HirExpr,
++    ) -> Result<(), String> {
++        if let Some((test, consequent, alternate)) = self.split_promise_conditional(expression) {
++            self.prepromote_branch_captures(&test, &[
++                HirStmt::Expr(consequent.clone()),
++                HirStmt::Expr(alternate.clone()),
++            ])?;
++            let function = self.current_function();
++            let consequent_block = self.context.append_basic_block(function, "discard_promise_then");
++            let alternate_block = self.context.append_basic_block(function, "discard_promise_else");
++            let merge_block = self.context.append_basic_block(function, "discard_promise_end");
++            let condition = self.compile_expr(&test)?.into_int_value();
++            self.builder.build_conditional_branch(condition, consequent_block, alternate_block)
++                .map_err(|error| error.to_string())?;
++            self.builder.position_at_end(consequent_block);
++            self.compile_and_discard_promise_expression(&consequent)?;
++            self.builder.build_unconditional_branch(merge_block)
++                .map_err(|error| error.to_string())?;
++            self.builder.position_at_end(alternate_block);
++            self.compile_and_discard_promise_expression(&alternate)?;
++            self.builder.build_unconditional_branch(merge_block)
++                .map_err(|error| error.to_string())?;
++            self.builder.position_at_end(merge_block);
++            return Ok(());
++        }
++        let value = self.compile_expr(expression)?;
++        if matches!(self.expr_hir_type(expression), Some(HirType::Promise(_)))
++            && self.promise_expression_returns_owned(expression)
++        {
++            self.builder.build_call(
++                self.module.get_function("thaw_promise_destroy").unwrap(),
++                &[value.into_pointer_value().into()],
++                "release_discarded_promise",
++            ).map_err(|error| error.to_string())?;
++        }
++        Ok(())
++    }
++
++    pub(super) fn compile_promise_union_for_escape(
++        &mut self,
++        expression: &HirExpr,
++        members: &[HirType],
++    ) -> Result<BasicValueEnum<'ctx>, String> {
++        if let Some((test, consequent, alternate)) = self.split_promise_conditional(expression) {
++            self.prepromote_branch_captures(&test, &[
++                HirStmt::Expr(consequent.clone()),
++                HirStmt::Expr(alternate.clone()),
++            ])?;
++            let function = self.current_function();
++            let consequent_block = self.context.append_basic_block(function, "escape_union_then");
++            let alternate_block = self.context.append_basic_block(function, "escape_union_else");
++            let merge_block = self.context.append_basic_block(function, "escape_union_end");
++            let condition = self.compile_expr(&test)?.into_int_value();
++            self.builder.build_conditional_branch(condition, consequent_block, alternate_block)
++                .map_err(|error| error.to_string())?;
++            self.builder.position_at_end(consequent_block);
++            let consequent_value = self.compile_promise_union_for_escape(&consequent, members)?;
++            let consequent_end = self.builder.get_insert_block().unwrap();
++            self.builder.build_unconditional_branch(merge_block)
++                .map_err(|error| error.to_string())?;
++            self.builder.position_at_end(alternate_block);
++            let alternate_value = self.compile_promise_union_for_escape(&alternate, members)?;
++            let alternate_end = self.builder.get_insert_block().unwrap();
++            self.builder.build_unconditional_branch(merge_block)
++                .map_err(|error| error.to_string())?;
++            self.builder.position_at_end(merge_block);
++            let union_ty = HirType::Union(members.to_vec());
++            let phi = self.builder.build_phi(self.basic_type(&union_ty)?, "escaped_promise_union")
++                .map_err(|error| error.to_string())?;
++            phi.add_incoming(&[(&consequent_value, consequent_end), (&alternate_value, alternate_end)]);
++            return Ok(phi.as_basic_value());
++        }
++        if let HirExpr::UnionInject(value, index, _) = expression {
++            if matches!(members.get(*index), Some(HirType::Promise(_))) {
++                let promise = self.compile_promise_for_consumption(value)?;
++                return self.build_union_value(promise.into(), *index, members);
++            }
++            return self.compile_expr(expression);
++        }
++
++        let has_promise = members.iter().any(|member| matches!(member, HirType::Promise(_)));
++        let union_value = self.compile_expr(expression)?;
++        if !has_promise || self.promise_expression_returns_owned(expression) {
++            return Ok(union_value);
++        }
++        let union = union_value.into_struct_value();
++        let tag = self.builder.build_extract_value(union, 0, "escaped_union_tag")
++            .map_err(|error| error.to_string())?.into_int_value();
++        let mut incoming = Vec::new();
++        let function = self.current_function();
++        let merge_block = self.context.append_basic_block(function, "escaped_union_merge");
++        let mut test_block = self.builder.get_insert_block().unwrap();
++        for (index, member) in members.iter().enumerate() {
++            let HirType::Promise(resolved) = member else { continue; };
++            self.builder.position_at_end(test_block);
++            let selected = self.builder.build_int_compare(
++                IntPredicate::EQ, tag, tag.get_type().const_int(index as u64, false),
++                "escaped_union_is_promise",
++            ).map_err(|error| error.to_string())?;
++            let selected_block = self.context.append_basic_block(function, "escape_union_promise");
++            let next_block = self.context.append_basic_block(function, "escape_union_next");
++            self.builder.build_conditional_branch(selected, selected_block, next_block)
++                .map_err(|error| error.to_string())?;
++
++            self.builder.position_at_end(selected_block);
++            let payload = self.builder.build_extract_value(union, 1, "escaped_union_payload")
++                .map_err(|error| error.to_string())?.into_int_value();
++            let promise = self.unpack_union_payload(
++                payload, &HirType::Promise(resolved.clone()),
++            )?.into_pointer_value();
++            let promise = self.retain_borrowed_promise_for_consumption(expression, promise)?;
++            let rebuilt = self.build_union_value(promise.into(), index, members)?;
++            let rebuilt_end = self.builder.get_insert_block().unwrap();
++            self.builder.build_unconditional_branch(merge_block)
++                .map_err(|error| error.to_string())?;
++            incoming.push((rebuilt, rebuilt_end));
++            test_block = next_block;
++        }
++        self.builder.position_at_end(test_block);
++        self.builder.build_unconditional_branch(merge_block)
++            .map_err(|error| error.to_string())?;
++        incoming.push((union_value, test_block));
++        self.builder.position_at_end(merge_block);
++        let union_ty = HirType::Union(members.to_vec());
++        let phi = self.builder.build_phi(self.basic_type(&union_ty)?, "escaped_union")
++            .map_err(|error| error.to_string())?;
++        let incoming_refs = incoming.iter()
++            .map(|(value, block)| (value as &dyn BasicValue<'ctx>, *block))
++            .collect::<Vec<_>>();
++        phi.add_incoming(&incoming_refs);
++        Ok(phi.as_basic_value())
++    }
++
++    pub(super) fn compile_and_store_stack_promise_expression(
++        &mut self,
++        slot: PointerValue<'ctx>,
++        expression: &HirExpr,
++    ) -> Result<BasicValueEnum<'ctx>, String> {
++        if let Some((test, consequent, alternate)) = self.split_promise_conditional(expression) {
++            self.prepromote_branch_captures(&test, &[
++                HirStmt::Expr(consequent.clone()),
++                HirStmt::Expr(alternate.clone()),
++            ])?;
++            let function = self.current_function();
++            let consequent_block = self.context.append_basic_block(function, "stack_promise_then");
++            let alternate_block = self.context.append_basic_block(function, "stack_promise_else");
++            let merge_block = self.context.append_basic_block(function, "stack_promise_end");
++            let condition = self.compile_expr(&test)?.into_int_value();
++            self.builder.build_conditional_branch(condition, consequent_block, alternate_block)
++                .map_err(|error| error.to_string())?;
++            self.builder.position_at_end(consequent_block);
++            let consequent_value = self.compile_and_store_stack_promise_expression(slot, &consequent)?;
++            let consequent_end = self.builder.get_insert_block().unwrap();
++            self.builder.build_unconditional_branch(merge_block)
++                .map_err(|error| error.to_string())?;
++            self.builder.position_at_end(alternate_block);
++            let alternate_value = self.compile_and_store_stack_promise_expression(slot, &alternate)?;
++            let alternate_end = self.builder.get_insert_block().unwrap();
++            self.builder.build_unconditional_branch(merge_block)
++                .map_err(|error| error.to_string())?;
++            self.builder.position_at_end(merge_block);
++            let phi = self.builder.build_phi(self.context.ptr_type(AddressSpace::default()),
++                "stack_stored_promise").map_err(|error| error.to_string())?;
++            phi.add_incoming(&[(&consequent_value, consequent_end), (&alternate_value, alternate_end)]);
++            return Ok(phi.as_basic_value());
++        }
++        let flag = *self.stack_promise_slots.get(&slot)
++            .ok_or("Promise stack slot was not registered as an owner")?;
++        let value = self.compile_expr(expression)?.into_pointer_value();
++        let value = self.retain_borrowed_promise_for_consumption(expression, value)?;
++        let previous_owned = self.builder.build_load(self.context.bool_type(), flag, "old_stack_promise_owned")
++            .map_err(|error| error.to_string())?.into_int_value();
++        let function = self.current_function();
++        let release_old = self.context.append_basic_block(function, "release_replaced_stack_promise");
++        let replace_without_old = self.context.append_basic_block(function, "replace_unowned_stack_promise");
++        let store_done = self.context.append_basic_block(function, "stack_promise_replace_done");
++        self.builder.build_conditional_branch(previous_owned, release_old, replace_without_old)
++            .map_err(|error| error.to_string())?;
++        self.builder.position_at_end(release_old);
++        let old = self.builder.build_load(self.context.ptr_type(AddressSpace::default()),
++            slot, "replaced_stack_promise").map_err(|error| error.to_string())?.into_pointer_value();
++        self.builder.build_store(slot, value).map_err(|error| error.to_string())?;
++        self.builder.build_store(flag, self.context.bool_type().const_all_ones())
++            .map_err(|error| error.to_string())?;
++        self.builder.build_call(self.module.get_function("thaw_promise_destroy").unwrap(),
++            &[old.into()], "release_replaced_stack_promise_owner")
++            .map_err(|error| error.to_string())?;
++        self.builder.build_unconditional_branch(store_done)
++            .map_err(|error| error.to_string())?;
++        self.builder.position_at_end(replace_without_old);
++        self.builder.build_store(slot, value).map_err(|error| error.to_string())?;
++        self.builder.build_store(flag, self.context.bool_type().const_all_ones())
++            .map_err(|error| error.to_string())?;
++        self.builder.build_unconditional_branch(store_done)
++            .map_err(|error| error.to_string())?;
++        self.builder.position_at_end(store_done);
++        Ok(value.into())
++    }
++
+     fn compile_promise_resolver(
+         &mut self,
+         resolved: &HirType,
+@@ -1391,6 +1813,46 @@
+         promise_index: usize,
+         resolved: &HirType,
+     ) -> Result<BasicValueEnum<'ctx>, String> {
++        if let Some((test, consequent, alternate)) = self.split_promise_conditional(inner) {
++            self.prepromote_branch_captures(&test, &[
++                HirStmt::Expr(consequent.clone()),
++                HirStmt::Expr(alternate.clone()),
++            ])?;
++            let function = self.current_function();
++            let consequent_block = self.context.append_basic_block(function, "await_union_then");
++            let alternate_block = self.context.append_basic_block(function, "await_union_else");
++            let merge_block = self.context.append_basic_block(function, "await_union_conditional_end");
++            let condition = self.compile_expr(&test)?.into_int_value();
++            self.builder.build_conditional_branch(condition, consequent_block, alternate_block)
++                .map_err(|error| error.to_string())?;
++
++            self.builder.position_at_end(consequent_block);
++            let consequent = self.compile_await_promise_union(&consequent, promise_index, resolved)?;
++            let consequent_end = self.builder.get_insert_block().unwrap();
++            self.builder.build_unconditional_branch(merge_block)
++                .map_err(|error| error.to_string())?;
++
++            self.builder.position_at_end(alternate_block);
++            let alternate = self.compile_await_promise_union(&alternate, promise_index, resolved)?;
++            let alternate_end = self.builder.get_insert_block().unwrap();
++            self.builder.build_unconditional_branch(merge_block)
++                .map_err(|error| error.to_string())?;
++
++            self.builder.position_at_end(merge_block);
++            let phi = self.builder.build_phi(self.basic_type(resolved)?, "await_union_conditional_result")
++                .map_err(|error| error.to_string())?;
++            phi.add_incoming(&[(&consequent, consequent_end), (&alternate, alternate_end)]);
++            return Ok(phi.as_basic_value());
++        }
++
++        if let HirExpr::UnionInject(value, index, _) = inner {
++            if *index == promise_index {
++                let promise = self.compile_promise_for_consumption(value)?;
++                return self.drive_promise_to_resolved_value(promise, resolved);
++            }
++            return self.compile_expr(value);
++        }
++
+         let union = self.compile_expr(inner)?.into_struct_value();
+         let tag = self
+             .builder
+@@ -1424,6 +1886,7 @@
+         let promise_ptr = self
+             .unpack_union_payload(payload, &HirType::Promise(Box::new(resolved.clone())))?
+             .into_pointer_value();
++        let promise_ptr = self.retain_borrowed_promise_for_consumption(inner, promise_ptr)?;
+         let promise_result = self.drive_promise_to_resolved_value(promise_ptr, resolved)?;
+         let promise_bb_end = self.builder.get_insert_block().unwrap();
+         self.builder
+@@ -1459,7 +1922,7 @@
+         inner: &HirExpr,
+         resolved: &HirType,
+     ) -> Result<BasicValueEnum<'ctx>, String> {
+-        let promise = self.compile_expr(inner)?.into_pointer_value();
++        let promise = self.compile_promise_for_consumption(inner)?;
+         self.drive_promise_to_resolved_value(promise, resolved)
+     }
+ 
+--- a/crates/thaw-llvm/src/hir_codegen/runtime_declarations.rs
++++ b/crates/thaw-llvm/src/hir_codegen/runtime_declarations.rs
+@@ -291,6 +291,26 @@
+         self.module.add_function(
+             "thaw_json_track_arena_owned_root",
+             i8_ptr.fn_type(&[i8_ptr.into()], false),
++            Some(Linkage::External),
++        );
++        self.module.add_function(
++            "thaw_exception_native_provenance_new",
++            i8_ptr.fn_type(&[i64_type.into(), i8_ptr.into(), i8_ptr.into()], false),
++            Some(Linkage::External),
++        );
++        self.module.add_function(
++            "thaw_exception_native_tag",
++            i64_type.fn_type(&[i8_ptr.into()], false),
++            Some(Linkage::External),
++        );
++        self.module.add_function(
++            "thaw_exception_native_owner",
++            i8_ptr.fn_type(&[i8_ptr.into(), i64_type.into(), i8_ptr.into()], false),
++            Some(Linkage::External),
++        );
++        self.module.add_function(
++            "thaw_exception_native_same",
++            i8_type.fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+             Some(Linkage::External),
+         );
+         self.module.add_function(
+@@ -3164,6 +3184,16 @@
+             Some(Linkage::External),
+         );
+         self.module.add_function(
++            "thaw_promise_retain",
++            i8_type.fn_type(&[i8_ptr.into()], false),
++            Some(Linkage::External),
++        );
++        self.module.add_function(
++            "thaw_promise_arena_slot_replace",
++            i8_type.fn_type(&[i8_ptr.into(), i8_ptr.into(), i8_ptr.into()], false),
++            Some(Linkage::External),
++        );
++        self.module.add_function(
+             "thaw_promise_subscribe",
+             self.context
+                 .i8_type()
+@@ -3373,6 +3403,11 @@
+             Some(Linkage::External),
+         );
+         self.module.add_function(
++            "thaw_promise_exception_native",
++            i8_ptr.fn_type(&[i8_ptr.into()], false),
++            Some(Linkage::External),
++        );
++        self.module.add_function(
+             "thaw_promise_finally_adopt_with_source",
+             self.context.i8_type().fn_type(
+                 &[
+--- a/crates/thaw-llvm/src/hir_codegen/statements.rs
++++ b/crates/thaw-llvm/src/hir_codegen/statements.rs
+@@ -1,4 +1,159 @@
+ impl<'ctx> HirCompiler<'ctx> {
++    pub(super) fn register_stack_promise_slot(
++        &mut self,
++        slot: PointerValue<'ctx>,
++        name: &str,
++    ) -> Result<(), String> {
++        if self.stack_promise_slots.contains_key(&slot) { return Ok(()); }
++        let flag = self.allocate_variable_cell(self.context.bool_type().into(),
++            &format!("{name}_promise_owned"))?;
++        let entry = self.current_function().get_first_basic_block()
++            .ok_or("Promise ownership flag requires a function entry")?;
++        let initializer = self.context.create_builder();
++        if let Some(terminator) = entry.get_terminator() {
++            initializer.position_before(&terminator);
++        } else {
++            initializer.position_at_end(entry);
++        }
++        initializer.build_store(flag, self.context.bool_type().const_zero())
++            .map_err(|error| error.to_string())?;
++        self.stack_promise_slots.insert(slot, flag);
++        Ok(())
++    }
++
++    pub(super) fn emit_stack_promise_cleanup(&mut self) -> Result<(), String> {
++        self.emit_stack_promise_cleanup_except(&HashSet::new())
++    }
++
++    pub(super) fn emit_stack_promise_cleanup_except(
++        &mut self,
++        preserved: &HashSet<PointerValue<'ctx>>,
++    ) -> Result<(), String> {
++        let owners = self.stack_promise_slots.iter()
++            .filter(|(slot, _)| !preserved.contains(slot))
++            .map(|(slot, flag)| (*slot, *flag))
++            .collect::<Vec<_>>();
++        let ptr_ty = self.context.ptr_type(AddressSpace::default());
++        for (slot, flag) in owners {
++            let owned = self.builder.build_load(self.context.bool_type(), flag, "promise_slot_owned")
++                .map_err(|error| error.to_string())?
++                .into_int_value();
++            let function = self.current_function();
++            let release = self.context.append_basic_block(function, "release_stack_promise");
++            let next = self.context.append_basic_block(function, "stack_promise_cleanup_next");
++            self.builder.build_conditional_branch(owned, release, next)
++                .map_err(|error| error.to_string())?;
++            self.builder.position_at_end(release);
++            let promise = self.builder.build_load(ptr_ty, slot, "owned_stack_promise")
++                .map_err(|error| error.to_string())?
++                .into_pointer_value();
++            self.builder.build_store(flag, self.context.bool_type().const_zero())
++                .map_err(|error| error.to_string())?;
++            self.builder.build_call(
++                self.module.get_function("thaw_promise_destroy").unwrap(),
++                &[promise.into()], "release_stack_promise_owner",
++            ).map_err(|error| error.to_string())?;
++            self.builder.build_unconditional_branch(next)
++                .map_err(|error| error.to_string())?;
++            self.builder.position_at_end(next);
++        }
++        Ok(())
++    }
++
++    pub(super) fn push_catch_target(&mut self, target: inkwell::basic_block::BasicBlock<'ctx>) {
++        self.catch_stack.push(target);
++        self.catch_promise_boundaries.push(self.stack_promise_slots.keys().copied().collect());
++    }
++
++    pub(super) fn pop_catch_target(&mut self) {
++        self.catch_stack.pop();
++        self.catch_promise_boundaries.pop();
++    }
++
++    pub(super) fn release_stack_promise_after_promotion(
++        &mut self,
++        slot: PointerValue<'ctx>,
++        flag: PointerValue<'ctx>,
++    ) -> Result<(), String> {
++        let owned = self.builder.build_load(self.context.bool_type(), flag, "promoted_stack_promise_owned")
++            .map_err(|error| error.to_string())?.into_int_value();
++        let function = self.current_function();
++        let release = self.context.append_basic_block(function, "release_promoted_stack_promise");
++        let ready = self.context.append_basic_block(function, "promoted_stack_promise_ready");
++        self.builder.build_conditional_branch(owned, release, ready)
++            .map_err(|error| error.to_string())?;
++        self.builder.position_at_end(release);
++        let promise = self.builder.build_load(self.context.ptr_type(AddressSpace::default()),
++            slot, "promoted_stack_promise").map_err(|error| error.to_string())?.into_pointer_value();
++        self.builder.build_store(flag, self.context.bool_type().const_zero())
++            .map_err(|error| error.to_string())?;
++        self.builder.build_call(self.module.get_function("thaw_promise_destroy").unwrap(),
++            &[promise.into()], "release_promoted_stack_promise_owner")
++            .map_err(|error| error.to_string())?;
++        self.builder.build_unconditional_branch(ready)
++            .map_err(|error| error.to_string())?;
++        self.builder.position_at_end(ready);
++        self.stack_promise_slots.remove(&slot);
++        Ok(())
++    }
++
++    pub(super) fn store_arena_promise_slot(
++        &mut self,
++        owner: PointerValue<'ctx>,
++        slot: PointerValue<'ctx>,
++        ty: &HirType,
++        value: BasicValueEnum<'ctx>,
++    ) -> Result<(), String> {
++        self.store_arena_promise_slot_with_token(owner, slot, ty, value, false)
++    }
++
++    pub(super) fn store_arena_promise_slot_with_token(
++        &mut self,
++        owner: PointerValue<'ctx>,
++        slot: PointerValue<'ctx>,
++        ty: &HirType,
++        value: BasicValueEnum<'ctx>,
++        consume_external_token: bool,
++    ) -> Result<(), String> {
++        if !matches!(ty, HirType::Promise(_)) {
++            self.builder.build_store(slot, value).map_err(|error| error.to_string())?;
++            return Ok(());
++        }
++        let stored = self.builder.build_call(
++            self.module.get_function("thaw_promise_arena_slot_replace").unwrap(),
++            &[owner.into(), slot.into(), value.into_pointer_value().into()],
++            "replace_arena_promise_slot",
++        ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
++            .ok_or("native Promise arena slot replacement returned no value")?.into_int_value();
++        let failed = self.builder.build_int_compare(
++            IntPredicate::EQ, stored, self.context.i8_type().const_zero(),
++            "arena_promise_slot_replace_failed",
++        ).map_err(|error| error.to_string())?;
++        let function = self.current_function();
++        let failed_block = self.context.append_basic_block(function, "arena_promise_slot_error");
++        let ready_block = self.context.append_basic_block(function, "arena_promise_slot_ready");
++        self.builder.build_conditional_branch(failed, failed_block, ready_block)
++            .map_err(|error| error.to_string())?;
++        self.builder.position_at_end(failed_block);
++        if consume_external_token {
++            self.builder.build_call(
++                self.module.get_function("thaw_promise_destroy").unwrap(),
++                &[value.into_pointer_value().into()],
++                "release_failed_promise_slot_adoption",
++            ).map_err(|error| error.to_string())?;
++        }
++        self.compile_throw_type_error("Unable to store native Promise in arena slot")?;
++        self.builder.position_at_end(ready_block);
++        if consume_external_token {
++            self.builder.build_call(
++                self.module.get_function("thaw_promise_destroy").unwrap(),
++                &[value.into_pointer_value().into()],
++                "release_adopted_promise_token",
++            ).map_err(|error| error.to_string())?;
++        }
++        Ok(())
++    }
++
+     fn prepromote_branch_captures(
+         &mut self,
+         condition: &HirExpr,
+@@ -64,11 +219,14 @@
+     /// branches all do). Returns `true` when that happened, so callers know
+     /// not to fall through past this block.
+     fn compile_block(&mut self, stmts: &[HirStmt]) -> Result<bool, String> {
++        let entry_slots = self.stack_promise_slots.keys().copied().collect::<HashSet<_>>();
+         for stmt in stmts {
+             if self.compile_stmt(stmt)? {
+                 return Ok(true);
+             }
+         }
++        self.emit_stack_promise_cleanup_except(&entry_slots)?;
++        self.stack_promise_slots.retain(|slot, _| entry_slots.contains(slot));
+         Ok(false)
+     }
+ 
+@@ -88,7 +246,7 @@
+         };
+         let pending_rethrow = if let HirExpr::Call(callee, args) = expr {
+             if matches!(callee.as_ref(), HirExpr::Var(name) if name == "@@thaw_rethrow_pending_exception")
+-                && args.len() == 9 { Some(args.as_slice()) } else { None }
++                && args.len() == 10 { Some(args.as_slice()) } else { None }
+         } else { None };
+         // The exit injector has already evaluated the visible catch binding.
+         // Keep its original binding only as provenance for the caught tuple;
+@@ -122,6 +280,7 @@
+             let i64_value = self.compile_expr(&args[6])?.into_int_value();
+             let bool_value = self.compile_expr(&args[7])?.into_int_value();
+             let object = self.compile_expr(&args[8])?.into_pointer_value();
++            let native = self.compile_expr(&args[9])?.into_pointer_value();
+             self.clear_pending_native_text()?;
+             for (slot, value) in [
+                 (self.pending_exception_native_text().as_pointer_value(),
+@@ -146,6 +305,10 @@
+                 .map_err(|error| error.to_string())?;
+             self.builder.build_store(self.pending_exception_value(PENDING_EXCEPTION_BOOL_SYMBOL).as_pointer_value(), bool_value)
+                 .map_err(|error| error.to_string())?;
++            let native = self.builder.build_select(same, native, ptr.const_null(), "rethrow_native_exception")
++                .map_err(|error| error.to_string())?;
++            self.builder.build_store(self.pending_exception_native().as_pointer_value(), native)
++                .map_err(|error| error.to_string())?;
+             return Ok(val);
+         }
+         let snapshot_origin = snapshot_caught.and_then(|args| {
+@@ -161,7 +324,7 @@
+         if trusted_text.is_some() || matches!(expr, HirExpr::Lit(HirLit::Str(_) | HirLit::Wtf8(_))) {
+             self.mark_pending_native_text(val)?;
+         } else if let HirExpr::Var(name) = provenance_expr {
+-            if let Some((catch_slot, native_slot, _, _)) = self.catch_native_text.get(name) {
++            if let Some((catch_slot, native_slot, _, _, _)) = self.catch_native_text.get(name) {
+                 if self.variables.get(name).map(|(slot, _)| slot) == Some(catch_slot) {
+                     let provenance = self.builder.build_load(
+                         self.context.ptr_type(AddressSpace::default()), *native_slot,
+@@ -191,6 +354,10 @@
+                         return Ok(false);
+                     }
+                 }
++                if matches!(self.expr_hir_type(expr), Some(HirType::Promise(_))) {
++                    self.compile_and_discard_promise_expression(expr)?;
++                    return Ok(false);
++                }
+                 let value = self.compile_expr(expr)?;
+                 if matches!(expr, HirExpr::Call(..) | HirExpr::DynamicCall(..))
+                     && self.expr_hir_type(expr) == Some(HirType::JsValue)
+@@ -209,12 +376,23 @@
+             HirStmt::Return(value) => {
+                 match value {
+                     Some(expr) => {
+-                        let val = self.compile_expr(expr)?;
++                        let expr_ty = self.expr_hir_type(expr);
++                        let val = match expr_ty {
++                            Some(HirType::Promise(_)) => self.compile_promise_for_consumption(expr)?.into(),
++                            Some(HirType::Union(members))
++                                if members.iter().any(|member| matches!(member, HirType::Promise(_))) =>
++                            {
++                                self.compile_promise_union_for_escape(expr, &members)?
++                            }
++                            _ => self.compile_expr(expr)?,
++                        };
++                        self.emit_stack_promise_cleanup()?;
+                         self.builder
+                             .build_return(Some(&val))
+                             .map_err(|e| e.to_string())?;
+                     }
+                     None => {
++                        self.emit_stack_promise_cleanup()?;
+                         self.builder.build_return(None).map_err(|e| e.to_string())?;
+                     }
+                 }
+@@ -222,9 +400,8 @@
+             }
+ 
+             HirStmt::Let(name, ty, expr) => {
+-                let val = self.compile_expr(expr)?;
+                 if self.for_iteration_frame_slots.contains_key(name) {
+-                    self.store_for_iteration_cell(name, ty, val)?;
++                    self.store_for_iteration_cell(name, ty, expr)?;
+                     return Ok(false);
+                 }
+                 let llvm_ty = self.basic_type(ty)?;
+@@ -255,16 +432,25 @@
+                     .get(name)
+                     .filter(|(cell, _)| self.async_frame_cells.contains(cell))
+                     .map(|(cell, _)| *cell);
+-                let slot = match existing_frame_cell {
++                let existing_arena_cell = self.arena_variables.contains(name)
++                    .then(|| self.variables.get(name).map(|(cell, _)| *cell)).flatten();
++                let slot = match existing_frame_cell.or(existing_arena_cell) {
+                     Some(cell) => cell,
+                     None => self.allocate_variable_cell(llvm_ty, name)?,
+                 };
+                 if existing_frame_cell.is_some() {
+-                    self.retain_native_promise_cell_value(slot, ty, val)?;
++                    let owner = *self.async_frame_slot_owners.get(&slot)
++                        .ok_or_else(|| format!("missing async frame owner for `{name}`"))?;
++                    self.compile_and_store_arena_promise_expression(owner, slot, ty, expr)?;
++                } else if existing_arena_cell.is_some() {
++                    self.compile_and_store_arena_promise_expression(slot, slot, ty, expr)?;
++                } else if matches!(ty, HirType::Promise(_)) {
++                    self.register_stack_promise_slot(slot, name)?;
++                    self.compile_and_store_stack_promise_expression(slot, expr)?;
++                } else {
++                    let val = self.compile_expr(expr)?;
++                    self.builder.build_store(slot, val).map_err(|e| e.to_string())?;
+                 }
+-                self.builder
+-                    .build_store(slot, val)
+-                    .map_err(|e| e.to_string())?;
+                 self.variables.insert(name.clone(), (slot, llvm_ty));
+                 self.variable_hir_types.insert(name.clone(), ty.clone());
+                 Ok(false)
+@@ -277,11 +463,11 @@
+             HirStmt::While(cond, body) => self.compile_while(cond, body),
+ 
+             HirStmt::Break => {
++                let index = self.loop_stack.len().checked_sub(1).ok_or("`break` used outside a loop")?;
+                 let (_, break_target) = self
+                     .loop_stack
+-                    .last()
+-                    .copied()
+-                    .ok_or("`break` used outside a loop")?;
++                    .get(index).copied().unwrap();
++                self.emit_stack_promise_cleanup_except(&self.loop_promise_boundaries[index].clone())?;
+                 self.builder
+                     .build_unconditional_branch(break_target)
+                     .map_err(|e| e.to_string())?;
+@@ -295,6 +481,7 @@
+                     .checked_sub(depth + 1)
+                     .ok_or("labeled `break` target is outside the active loop stack")?;
+                 let (_, break_target) = self.loop_stack[index];
++                self.emit_stack_promise_cleanup_except(&self.loop_promise_boundaries[index].clone())?;
+                 self.builder
+                     .build_unconditional_branch(break_target)
+                     .map_err(|e| e.to_string())?;
+@@ -302,11 +489,11 @@
+             }
+ 
+             HirStmt::Continue => {
++                let index = self.loop_stack.len().checked_sub(1).ok_or("`continue` used outside a loop")?;
+                 let (continue_target, _) = self
+                     .loop_stack
+-                    .last()
+-                    .copied()
+-                    .ok_or("`continue` used outside a loop")?;
++                    .get(index).copied().unwrap();
++                self.emit_stack_promise_cleanup_except(&self.loop_promise_boundaries[index].clone())?;
+                 self.builder
+                     .build_unconditional_branch(continue_target)
+                     .map_err(|e| e.to_string())?;
+@@ -320,6 +507,7 @@
+                     .checked_sub(depth + 1)
+                     .ok_or("labeled `continue` target is outside the active loop stack")?;
+                 let (continue_target, _) = self.loop_stack[index];
++                self.emit_stack_promise_cleanup_except(&self.loop_promise_boundaries[index].clone())?;
+                 self.builder
+                     .build_unconditional_branch(continue_target)
+                     .map_err(|e| e.to_string())?;
+@@ -332,10 +520,13 @@
+                     .build_store(self.pending_exception().as_pointer_value(), val)
+                     .map_err(|e| e.to_string())?;
+                 if let Some(catch_bb) = self.catch_stack.last().copied() {
++                    let index = self.catch_stack.len() - 1;
++                    self.emit_stack_promise_cleanup_except(&self.catch_promise_boundaries[index].clone())?;
+                     self.builder
+                         .build_unconditional_branch(catch_bb)
+                         .map_err(|e| e.to_string())?;
+                 } else {
++                    self.emit_stack_promise_cleanup()?;
+                     self.build_default_return()?;
+                 }
+                 Ok(true)
+@@ -350,11 +541,14 @@
+                 }
+                 let at = self.catch_stack.len() - suspended;
+                 let handlers = self.catch_stack.split_off(at);
++                let boundaries = self.catch_promise_boundaries.split_off(at);
+                 let result = self.compile_block(body);
+                 // Nested compilation may return an error before its own pop.
+                 // Restore the lexical stack exactly on both paths.
+                 self.catch_stack.truncate(at);
+                 self.catch_stack.extend(handlers);
++                self.catch_promise_boundaries.truncate(at);
++                self.catch_promise_boundaries.extend(boundaries);
+                 result
+             }
+         }
+@@ -470,17 +664,23 @@
+             .map_err(|e| e.to_string())?;
+ 
+         let variables_before_body = self.variables.clone();
++        let promise_slots_before_body = self.stack_promise_slots.clone();
+         let native_text_before_body = self.catch_native_text.clone();
+         let variable_types_before_body = self.variable_hir_types.clone();
+         let arena_variables_before_body = self.arena_variables.clone();
+         self.builder.position_at_end(body_bb);
+         self.loop_stack.push((header_bb, after_bb));
++        self.loop_promise_boundaries.push(promise_slots_before_body.keys().copied().collect());
+         self.loop_promotion_scopes.push((
+             preheader_bb,
+             variables_before_body.keys().cloned().collect(),
++            self.catch_stack.clone(),
++            self.catch_promise_boundaries.clone(),
+         ));
+         let body_terminated = self.compile_block(body)?;
+         self.loop_stack.pop();
++        self.loop_promise_boundaries.pop();
++        self.stack_promise_slots = promise_slots_before_body;
+         if !body_terminated {
+             self.builder
+                 .build_unconditional_branch(header_bb)
+@@ -530,6 +730,7 @@
+         &mut self,
+         text: PointerValue<'ctx>,
+         owner: PointerValue<'ctx>,
++        native: PointerValue<'ctx>,
+         exception_tag: IntValue<'ctx>,
+         number: FloatValue<'ctx>,
+         bigint: IntValue<'ctx>,
+@@ -586,7 +787,8 @@
+         };
+         let json_bits = self.builder.build_ptr_to_int(selected_owner,
+             i64_ty, "caught_json_bits").map_err(|e| e.to_string())?;
+-        // Exception tags 1..8 map to union members 0..5,7,8.
++        // Exception tags 1..8 map to union members 0..5,7,8; native tags
++        // 20..29 map to the private checked-projection member 9.
+         // Tag 0 with an owner pointer is the native Object member (6);
+         // legacy text-only tag 0 remains a String member (3).
+         let owner_present = self.builder.build_is_not_null(owner, "caught_owner_present")
+@@ -615,6 +817,22 @@
+             payload = self.builder.build_select(active, bits, payload, "select_caught_payload")
+                 .map_err(|e| e.to_string())?.into_int_value();
+         }
++        let native_low = self.builder.build_int_compare(
++            inkwell::IntPredicate::UGE, exception_tag, i64_ty.const_int(20, false),
++            "caught_native_tag_low",
++        ).map_err(|e| e.to_string())?;
++        let native_high = self.builder.build_int_compare(
++            inkwell::IntPredicate::ULE, exception_tag, i64_ty.const_int(29, false),
++            "caught_native_tag_high",
++        ).map_err(|e| e.to_string())?;
++        let native_active = self.builder.build_and(native_low, native_high, "caught_native_tag")
++            .map_err(|e| e.to_string())?;
++        let native_bits = self.builder.build_ptr_to_int(native, i64_ty, "caught_native_bits")
++            .map_err(|e| e.to_string())?;
++        union_tag = self.builder.build_select(native_active, i8_ty.const_int(9, false), union_tag,
++            "select_native_caught_tag").map_err(|e| e.to_string())?.into_int_value();
++        payload = self.builder.build_select(native_active, native_bits, payload,
++            "select_native_caught_payload").map_err(|e| e.to_string())?.into_int_value();
+         let union_ty = self.basic_type(&thaw_hir::caught_exception_carrier_type())?.into_struct_type();
+         let tagged = self.builder.build_insert_value(union_ty.get_undef(), union_tag,
+             0, "caught_union_tag").map_err(|e| e.to_string())?.into_struct_value();
+@@ -647,10 +865,12 @@
+             .build_unconditional_branch(try_bb)
+             .map_err(|e| e.to_string())?;
+ 
++        let promise_slots_before_try = self.stack_promise_slots.clone();
+         self.builder.position_at_end(try_bb);
+-        self.catch_stack.push(catch_bb);
++        self.push_catch_target(catch_bb);
+         let try_terminated = self.compile_block(body)?;
+-        self.catch_stack.pop();
++        self.pop_catch_target();
++        self.stack_promise_slots = promise_slots_before_try.clone();
+         if !try_terminated {
+             self.builder
+                 .build_unconditional_branch(merge_bb)
+@@ -688,8 +908,15 @@
+             ptr_ty, self.pending_exception_aggregate_errors().as_pointer_value(),
+             "caught_aggregate_errors",
+         ).map_err(|e| e.to_string())?;
++        let native_descriptor = self.builder.build_load(
++            ptr_ty, self.pending_exception_native().as_pointer_value(),
++            "caught_native_exception_descriptor",
++        ).map_err(|e| e.to_string())?.into_pointer_value();
++        let native_slot = self.builder.build_alloca(str_ty, "catch_native_exception_slot")
++            .map_err(|e| e.to_string())?;
++        self.builder.build_store(native_slot, native_descriptor).map_err(|e| e.to_string())?;
+         let previous_native_text = self.catch_native_text.insert(
+-            catch_name.to_string(), (catch_slot, native_text_slot, original_slot, valid_slot),
++            catch_name.to_string(), (catch_slot, native_text_slot, original_slot, valid_slot, native_slot),
+         );
+         self.builder
+             .build_store(
+@@ -744,6 +971,8 @@
+             .map_err(|e| e.to_string())?;
+         self.builder.build_store(aggregate_slot, aggregate).map_err(|e| e.to_string())?;
+         self.variables.insert(format!("{catch_name}__thaw_exception_aggregate"), (aggregate_slot, str_ty));
++        self.variables.insert(format!("{catch_name}__thaw_exception_native"), (native_slot, str_ty));
++        self.variable_hir_types.insert(format!("{catch_name}__thaw_exception_native"), HirType::NativeException);
+         for (suffix, symbol, ty) in [
+             (
+                 "tag",
+@@ -801,7 +1030,7 @@
+             let boolean = self.builder.build_load(self.context.bool_type(), stored_bool, "caught_value_bool")
+                 .map_err(|e| e.to_string())?.into_int_value();
+             let tagged = self.build_caught_exception_carrier(
+-                thrown, thrown_object, exception_tag, number, bigint, boolean, true,
++                thrown, thrown_object, native_descriptor, exception_tag, number, bigint, boolean, true,
+             )?;
+             self.builder.build_store(carrier_slot, tagged).map_err(|e| e.to_string())?;
+         }
+@@ -821,6 +1050,7 @@
+                 .insert(hidden_tag.to_string(), (catch_slot, str_ty));
+         }
+         let catch_terminated = self.compile_block(catch_body)?;
++        self.stack_promise_slots = promise_slots_before_try;
+         if let Some(previous) = previous_native_text {
+             self.catch_native_text.insert(catch_name.to_string(), previous);
+         } else {
+--- a/crates/thaw-llvm/src/hir_codegen/tests/async/expressions.rs
++++ b/crates/thaw-llvm/src/hir_codegen/tests/async/expressions.rs
+@@ -31,6 +31,20 @@
+         compile_and_run(source, "async_aggregate_branch_returns"),
+         "12\n22\n32\nsecond\n"
+     );
++}
++
++#[test]
++fn frame_split_borrowed_promise_survives_repeated_await_consumers() {
++    let source = r#"
++        async function main(): Promise<void> {
++            const pending: Promise<number> = Promise.resolve(42);
++            const first: number = await pending;
++            const second: number = await pending;
++            console.log(first);
++            console.log(second);
++        }
++    "#;
++    assert_eq!(compile_and_run(source, "borrowed_promise_repeated_await"), "42\n42\n");
+ }
+ 
+ #[test]
+@@ -571,3 +585,87 @@
+     "#;
+     assert_eq!(compile_and_run(source, "async_capture_identity"), "1 2 2\n");
+ }
++
++#[test]
++fn conditional_promise_awaits_preserve_selected_arm_ownership() {
++    let source = r#"
++        async function main(): Promise<void> {
++            const borrowed: Promise<number> = Promise.resolve(40);
++            const first: number = await (true ? Promise.resolve(1) : borrowed);
++            const second: number = await (false ? Promise.resolve(2) : borrowed);
++            const nested: number = await (
++                true
++                    ? (false ? Promise.resolve(3) : borrowed)
++                    : Promise.resolve(4)
++            );
++            const unionPromise: number = await (true ? Promise.resolve(5) : 6);
++            const unionValue: number = await (false ? Promise.resolve(7) : 8);
++            const nestedUnion: number = await (
++                true
++                    ? (false ? Promise.resolve(9) : 10)
++                    : Promise.resolve(11)
++            );
++            console.log(first, second, nested, unionPromise, unionValue, nestedUnion);
++        }
++    "#;
++    let module = thaw_parser::parse_typescript(source).unwrap();
++    let program = thaw_hir::lower_module(&module).unwrap();
++    let context = Context::create();
++    let mut compiler = HirCompiler::new(&context, "conditional_promise_awaits");
++    compiler.compile_program(&program).unwrap();
++    assert_eq!(compile_and_run(source, "conditional_promise_awaits"), "1 40 40 5 8 10\n");
++}
++
++#[test]
++fn named_and_closure_returns_retain_borrowed_promises() {
++    let source = r#"
++        function named(value: Promise<number>, early: boolean): Promise<number> {
++            if (early) { return value; }
++            return value;
++        }
++        async function main(): Promise<void> {
++            const original: Promise<number> = Promise.resolve(42);
++            const arrow = (value: Promise<number>): Promise<number> => value;
++            const block = (value: Promise<number>): Promise<number> => {
++                if (true) { return value; }
++                return Promise.resolve(0);
++            };
++            const first: number = await named(original, true);
++            const second: number = await arrow(original);
++            const third: number = await block(original);
++            console.log(first, second, third);
++        }
++    "#;
++    let module = thaw_parser::parse_typescript(source).unwrap();
++    let program = thaw_hir::lower_module(&module).unwrap();
++    let context = Context::create();
++    let mut compiler = HirCompiler::new(&context, "borrowed_promise_returns");
++    compiler.compile_program(&program).unwrap();
++    let ir = compiler.print_to_string();
++    assert!(ir.contains("borrowed_await_retain"));
++    assert_eq!(compile_and_run(source, "borrowed_promise_returns"), "42 42 42\n");
++}
++
++#[test]
++fn discarded_promise_results_release_only_the_selected_owned_value() {
++    let source = r#"
++        let calls: number = 0;
++        function make(): Promise<number> {
++            calls += 1;
++            return Promise.resolve(calls);
++        }
++        async function main(): Promise<void> {
++            const borrowed: Promise<number> = Promise.resolve(7);
++            make();
++            borrowed;
++            true ? make() : borrowed;
++            console.log(calls, await borrowed);
++        }
++    "#;
++    let module = thaw_parser::parse_typescript(source).unwrap();
++    let program = thaw_hir::lower_module(&module).unwrap();
++    let context = Context::create();
++    let mut compiler = HirCompiler::new(&context, "discarded_promise_results");
++    compiler.compile_program(&program).unwrap();
++    assert_eq!(compile_and_run(source, "discarded_promise_results"), "2 7\n");
++}
+--- a/crates/thaw-llvm/src/hir_codegen/values/closures.rs
++++ b/crates/thaw-llvm/src/hir_codegen/values/closures.rs
+@@ -11,9 +11,11 @@
+         self.variables.insert(name.to_string(), (cell, llvm_ty));
+         self.variable_hir_types.insert(name.to_string(), ty.clone());
+         let value = self.compile_expr(closure)?;
+-        self.builder
+-            .build_store(cell, value)
+-            .map_err(|error| error.to_string())?;
++        if matches!(ty, HirType::Promise(_)) {
++            self.builder.build_store(cell, self.context.ptr_type(AddressSpace::default()).const_null())
++                .map_err(|error| error.to_string())?;
++        }
++        self.store_arena_promise_slot(cell, cell, ty, value)?;
+         Ok(value)
+     }
+ 
+@@ -50,6 +52,7 @@
+         let Some((variable_cell, ty)) = self.variables.get(name).copied() else {
+             return Ok(());
+         };
++        let stack_promise_flag = self.stack_promise_slots.get(&variable_cell).copied();
+         let frame_backed = self.async_frame_cells.contains(&variable_cell);
+         if self.arena_variables.contains(name)
+             || self.global_variables.contains_key(name)
+@@ -60,14 +63,14 @@
+         let promotion_scope = self
+             .loop_promotion_scopes
+             .iter()
+-            .find(|(_, variables)| variables.contains(name))
+-            .map(|(preheader, _)| *preheader);
++            .find(|(_, variables, _, _)| variables.contains(name))
++            .map(|(preheader, _, catch_stack, boundaries)| (*preheader, catch_stack.clone(), boundaries.clone()));
+         let cell = if promotion_scope.is_none() && !self.loop_promotion_scopes.is_empty() {
+             self.build_arena_cell(&self.builder, ty, name)?
+         } else {
+             self.allocate_arena_cell(ty, name)?
+         };
+-        let promotion_builder = promotion_scope.map(|preheader| {
++        let promotion_builder = promotion_scope.as_ref().map(|(preheader, _, _)| {
+             let builder = self.context.create_builder();
+             builder.position_before(&preheader.get_terminator().unwrap());
+             builder
+@@ -110,9 +113,60 @@
+         } else {
+             None
+         };
+-        builder
+-            .build_store(cell, value)
+-            .map_err(|error| error.to_string())?;
++        if matches!(hir_ty, HirType::Promise(_)) {
++            builder.build_store(cell, self.context.ptr_type(AddressSpace::default()).const_null())
++                .map_err(|error| error.to_string())?;
++            if let (Some((preheader, saved_catch_stack, saved_boundaries)), Some(promotion_builder)) =
++                (promotion_scope, promotion_builder)
++            {
++                // Split the exact loop-entry edge so the checked retain runs once
++                // before the loop. The selected successor is compile_while's
++                // memory-variable header, which currently has no PHIs.
++                let terminator = preheader.get_terminator()
++                    .ok_or("loop promotion preheader has no terminator")?;
++                terminator.remove_from_basic_block();
++                let original_builder = std::mem::replace(&mut self.builder, promotion_builder);
++                let original_catch_stack = std::mem::replace(
++                    &mut self.catch_stack,
++                    saved_catch_stack,
++                );
++                let original_boundaries = std::mem::replace(&mut self.catch_promise_boundaries, saved_boundaries);
++                self.builder.position_at_end(preheader);
++                let split_result = (|| {
++                    self.store_arena_promise_slot(cell, cell, hir_ty, value)?;
++                    if let Some(flag) = stack_promise_flag {
++                        self.release_stack_promise_after_promotion(variable_cell, flag)?;
++                    }
++                    let ready = self.builder.get_insert_block()
++                        .ok_or("checked Promise promotion has no ready block")?;
++                    self.builder.insert_instruction(&terminator, None);
++                    for (scope_preheader, _, _, _) in &mut self.loop_promotion_scopes {
++                        if *scope_preheader == preheader {
++                            *scope_preheader = ready;
++                        }
++                    }
++                    Ok::<(), String>(())
++                })();
++                if split_result.is_err() {
++                    if preheader.get_terminator().is_none() {
++                        let restore_builder = self.context.create_builder();
++                        restore_builder.position_at_end(preheader);
++                        restore_builder.insert_instruction(&terminator, None);
++                    }
++                }
++                self.builder = original_builder;
++                self.catch_stack = original_catch_stack;
++                self.catch_promise_boundaries = original_boundaries;
++                split_result?;
++            } else {
++                self.store_arena_promise_slot(cell, cell, hir_ty, value)?;
++                if let Some(flag) = stack_promise_flag {
++                    self.release_stack_promise_after_promotion(variable_cell, flag)?;
++                }
++            }
++        } else {
++            builder.build_store(cell, value).map_err(|error| error.to_string())?;
++        }
+         if let Some(claim) = pending_claim {
+             self.pending_js_capture_claims.insert(cell, claim);
+         }
+@@ -252,6 +306,7 @@
+             .map_err(|error| format!("async lambda `{name}`: {error}"))?;
+ 
+         let saved_variables = std::mem::take(&mut self.variables);
++        let saved_stack_promise_slots = std::mem::take(&mut self.stack_promise_slots);
+         let saved_for_iteration_frame_slots = std::mem::take(&mut self.for_iteration_frame_slots);
+         let saved_catch_native_text = std::mem::take(&mut self.catch_native_text);
+         let saved_variable_hir_types = std::mem::take(&mut self.variable_hir_types);
+@@ -261,6 +316,7 @@
+         let saved_async_completion = self.active_async_completion.take();
+         let compiled = self.compile_function_body(&lifted);
+         self.variables = saved_variables;
++        self.stack_promise_slots = saved_stack_promise_slots;
+         self.for_iteration_frame_slots = saved_for_iteration_frame_slots;
+         self.catch_native_text = saved_catch_native_text;
+         self.variable_hir_types = saved_variable_hir_types;
+@@ -1001,6 +1057,7 @@
+             .collect::<HashSet<_>>();
+ 
+         let saved_variables = std::mem::take(&mut self.variables);
++        let saved_stack_promise_slots = std::mem::take(&mut self.stack_promise_slots);
+         let saved_for_iteration_frame_slots = std::mem::take(&mut self.for_iteration_frame_slots);
+         let saved_catch_native_text = std::mem::take(&mut self.catch_native_text);
+         let saved_variable_hir_types = std::mem::take(&mut self.variable_hir_types);
+@@ -1056,6 +1113,9 @@
+                 self.variables.insert(param.name.clone(), (slot, ty));
+                 self.variable_hir_types
+                     .insert(param.name.clone(), param.ty.clone());
++                if matches!(param.ty, HirType::Promise(_)) {
++                    self.register_stack_promise_slot(slot, &param.name)?;
++                }
+             }
+ 
+             match body {
+@@ -1063,6 +1123,7 @@
+                     let terminated = self.compile_block(stmts)?;
+                     if !terminated {
+                         if *ret == HirType::Void {
++                            self.emit_stack_promise_cleanup()?;
+                             self.builder
+                                 .build_return(None)
+                                 .map_err(|error| error.to_string())?;
+@@ -1075,12 +1136,26 @@
+                 }
+                 expr => {
+                     if *ret == HirType::Void {
+-                        self.compile_expr(expr)?;
++                        if matches!(self.expr_hir_type(expr), Some(HirType::Promise(_))) {
++                            self.compile_and_discard_promise_expression(expr)?;
++                        } else {
++                            self.compile_expr(expr)?;
++                        }
++                        self.emit_stack_promise_cleanup()?;
+                         self.builder
+                             .build_return(None)
+                             .map_err(|error| error.to_string())?;
+                     } else {
+-                        let value = self.compile_expr(expr)?;
++                        let value = match ret {
++                            HirType::Promise(_) => self.compile_promise_for_consumption(expr)?.into(),
++                            HirType::Union(members)
++                                if members.iter().any(|member| matches!(member, HirType::Promise(_))) =>
++                            {
++                                self.compile_promise_union_for_escape(expr, members)?
++                            }
++                            _ => self.compile_expr(expr)?,
++                        };
++                        self.emit_stack_promise_cleanup()?;
+                         self.builder
+                             .build_return(Some(&value))
+                             .map_err(|error| error.to_string())?;
+@@ -1090,6 +1165,7 @@
+             Ok(())
+         })();
+         self.variables = saved_variables;
++        self.stack_promise_slots = saved_stack_promise_slots;
+         self.for_iteration_frame_slots = saved_for_iteration_frame_slots;
+         self.catch_native_text = saved_catch_native_text;
+         self.variable_hir_types = saved_variable_hir_types;
+--- a/crates/thaw-llvm/src/hir_codegen/values/expressions.rs
++++ b/crates/thaw-llvm/src/hir_codegen/values/expressions.rs
+@@ -68,6 +68,8 @@
+                 .map_err(|error| error.to_string())?;
+         }
+         if let Some(catch_bb) = self.catch_stack.last().copied() {
++            let index = self.catch_stack.len() - 1;
++            self.emit_stack_promise_cleanup_except(&self.catch_promise_boundaries[index].clone())?;
+             self.builder.build_unconditional_branch(catch_bb)
+                 .map_err(|error| error.to_string())?;
+         } else if let Some(completion) = self.active_async_completion {
+@@ -77,12 +79,14 @@
+                 self.context.ptr_type(AddressSpace::default()).const_null(),
+             ).map_err(|error| error.to_string())?;
+             self.clear_pending_native_text()?;
++            self.emit_stack_promise_cleanup()?;
+             if self.current_function().get_type().get_return_type().is_some() {
+                 self.builder.build_return(Some(&completion)).map_err(|error| error.to_string())?;
+             } else {
+                 self.builder.build_return(None).map_err(|error| error.to_string())?;
+             }
+         } else {
++            self.emit_stack_promise_cleanup()?;
+             self.build_default_return()?;
+         }
+         Ok(())
+@@ -128,15 +132,26 @@
+             }
+ 
+             HirExpr::Assign(name, value) => {
+-                let val = self.compile_expr(value)?;
+                 let (ptr, _ty) = *self
+                     .variables
+                     .get(name)
+                     .ok_or_else(|| format!("assignment to undeclared variable `{name}`"))?;
+-                self.builder
+-                    .build_store(ptr, val)
+-                    .map_err(|e| e.to_string())?;
+-                if let Some((catch_slot, _, _, valid_slot)) = self.catch_native_text.get(name) {
++                let hir_ty = self.variable_hir_types.get(name).cloned();
++                if let Some(ty @ HirType::Promise(_)) = hir_ty {
++                    if let Some(owner) = self.async_frame_slot_owners.get(&ptr).copied() {
++                        let val = self.compile_and_store_arena_promise_expression(owner, ptr, &ty, value)?;
++                        return Ok(val);
++                    } else if self.arena_variables.contains(name) {
++                        let val = self.compile_and_store_arena_promise_expression(ptr, ptr, &ty, value)?;
++                        return Ok(val);
++                    } else if self.stack_promise_slots.contains_key(&ptr) {
++                        let val = self.compile_and_store_stack_promise_expression(ptr, value)?;
++                        return Ok(val);
++                    }
++                }
++                let val = self.compile_expr(value)?;
++                self.builder.build_store(ptr, val).map_err(|e| e.to_string())?;
++                if let Some((catch_slot, _, _, valid_slot, _)) = self.catch_native_text.get(name) {
+                     if *catch_slot == ptr {
+                         self.builder.build_store(*valid_slot,
+                             self.context.bool_type().const_zero())
+@@ -448,9 +463,9 @@
+                     self.module.get_function("thaw_json_typed_decode_scope_begin").unwrap(),
+                     &[], "begin_json_as_native_scope",
+                 ).map_err(|error| error.to_string())?;
+-                self.catch_stack.push(failed);
++                self.push_catch_target(failed);
+                 let value = self.compile_json_to_native(json, ty);
+-                self.catch_stack.pop();
++                self.pop_catch_target();
+                 let value = value?;
+                 self.builder.build_call(
+                     self.module.get_function("thaw_json_typed_decode_scope_end").unwrap(),
+@@ -703,6 +718,8 @@
+                     .map_err(|error| error.to_string())?;
+                 self.clear_pending_native_text()?;
+                 if let Some(catch_block) = self.catch_stack.last().copied() {
++                    let index = self.catch_stack.len() - 1;
++                    self.emit_stack_promise_cleanup_except(&self.catch_promise_boundaries[index].clone())?;
+                     self.builder
+                         .build_unconditional_branch(catch_block)
+                         .map_err(|error| error.to_string())?;
+--- a/crates/thaw-llvm/src/hir_codegen/values/unions.rs
++++ b/crates/thaw-llvm/src/hir_codegen/values/unions.rs
+@@ -225,7 +225,16 @@
+                 .build_int_compare(IntPredicate::EQ, left, right, "union_int_equal")
+                 .map_err(|error| error.to_string()),
+             (BasicValueEnum::PointerValue(left), BasicValueEnum::PointerValue(right)) => {
+-                if ty == &HirType::Json {
++                if ty == &HirType::NativeException {
++                    let compared = self.builder.build_call(
++                        self.module.get_function("thaw_exception_native_same").unwrap(),
++                        &[left.into(), right.into()], "union_native_exception_identity",
++                    ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
++                        .ok_or("native exception identity check returned no value")?.into_int_value();
++                    self.builder.build_int_compare(IntPredicate::NE, compared,
++                        self.context.i8_type().const_zero(), "union_native_exception_equal")
++                        .map_err(|error| error.to_string())
++                } else if ty == &HirType::Json {
+                     let compared = self.builder.build_call(
+                         self.module.get_function("thaw_json_strict_equal").unwrap(),
+                         &[left.into(), right.into()],
+--- a/crates/thaw-llvm/src/hir_codegen.rs
++++ b/crates/thaw-llvm/src/hir_codegen.rs
+@@ -72,6 +72,7 @@
+ /// `Promise.reject`) only ever looks at the string channel and stays
+ /// completely unaware this one exists.
+ const PENDING_EXCEPTION_OBJECT_SYMBOL: &str = "__thaw_pending_exception_object";
++const PENDING_EXCEPTION_NATIVE_SYMBOL: &str = "__thaw_pending_exception_native";
+ const PENDING_EXCEPTION_AGGREGATE_SYMBOL: &str = "__thaw_pending_exception_aggregate_errors";
+ const PENDING_EXCEPTION_NATIVE_TEXT_SYMBOL: &str = "__thaw_pending_exception_native_text";
+ const PENDING_EXCEPTION_VALUE_TAG_SYMBOL: &str = "__thaw_pending_exception_value_tag";
+@@ -120,7 +121,8 @@
+         | HirType::Bytes | HirType::Map(_, _) | HirType::WeakMap(_, _)
+         | HirType::Set(_) | HirType::WeakSet(_) | HirType::Tuple(_)
+         | HirType::Object(_) | HirType::Function(_, _)
+-        | HirType::CallableFunction(..) => Ok((8, 8)),
++        | HirType::CallableFunction(..) | HirType::NativeException
++        | HirType::FunctionWithThis(_, _) => Ok((8, 8)),
+         HirType::Union(members) if !members.is_empty() => Ok((16, 8)),
+         HirType::Optional(payload) | HirType::Nullable(payload)
+         | HirType::Nullish(payload) => {
+@@ -264,13 +266,15 @@
+     variables: HashMap<String, (PointerValue<'ctx>, BasicTypeEnum<'ctx>)>,
+     /// Only compiler-created catch cells enter this map; source-visible names
+     /// (including a matching metadata suffix) never establish provenance.
+-    catch_native_text: HashMap<String, (PointerValue<'ctx>, PointerValue<'ctx>, PointerValue<'ctx>, PointerValue<'ctx>)>,
++    catch_native_text: HashMap<String, (PointerValue<'ctx>, PointerValue<'ctx>, PointerValue<'ctx>, PointerValue<'ctx>, PointerValue<'ctx>)>,
+     variable_hir_types: HashMap<String, HirType>,
+     arena_variables: HashSet<String>,
+     /// Only prepromoted JsValue cells have a pending first-capture retain.
+     /// Key by the exact LLVM cell value so branch/function map swaps need no mirror.
+     pending_js_capture_claims: HashMap<PointerValue<'ctx>, PointerValue<'ctx>>,
+     async_frame_cells: HashSet<PointerValue<'ctx>>,
++    async_frame_slot_owners: HashMap<PointerValue<'ctx>, PointerValue<'ctx>>,
++    stack_promise_slots: HashMap<PointerValue<'ctx>, PointerValue<'ctx>>,
+     /// Frame slots holding the current fresh cell of captured `for (let ...)`
+     /// bindings. A resume reloads the pointer rather than sharing a value slot.
+     for_iteration_frame_slots: HashMap<String, PointerValue<'ctx>>,
+@@ -282,8 +286,10 @@
+     /// call target the innermost entry; an empty stack propagates by returning
+     /// from the current function with the pending exception left intact.
+     catch_stack: Vec<BasicBlock<'ctx>>,
++    catch_promise_boundaries: Vec<HashSet<PointerValue<'ctx>>>,
+     loop_stack: Vec<(BasicBlock<'ctx>, BasicBlock<'ctx>)>,
+-    loop_promotion_scopes: Vec<(BasicBlock<'ctx>, HashSet<String>)>,
++    loop_promise_boundaries: Vec<HashSet<PointerValue<'ctx>>>,
++    loop_promotion_scopes: Vec<(BasicBlock<'ctx>, HashSet<String>, Vec<BasicBlock<'ctx>>, Vec<HashSet<PointerValue<'ctx>>>)>,
+     /// Functions whose async ABI is a Promise-returning ramp rather than the
+     /// legacy synchronous V1 ABI. Seeded to a fixed point before declarations
+     /// so callers and callees agree on the LLVM signature.
+@@ -433,13 +439,17 @@
+             arena_variables: HashSet::new(),
+             pending_js_capture_claims: HashMap::new(),
+             async_frame_cells: HashSet::new(),
++            async_frame_slot_owners: HashMap::new(),
++            stack_promise_slots: HashMap::new(),
+             for_iteration_frame_slots: HashMap::new(),
+             global_variables: HashMap::new(),
+             module_exception_roots: Vec::new(),
+             function_return_types: HashMap::new(),
+             ffi_signatures: HashMap::new(),
+             catch_stack: Vec::new(),
++            catch_promise_boundaries: Vec::new(),
+             loop_stack: Vec::new(),
++            loop_promise_boundaries: Vec::new(),
+             loop_promotion_scopes: Vec::new(),
+             frame_async_functions: HashMap::new(),
+             async_lambda_captures: HashMap::new(),
+@@ -545,6 +555,9 @@
+             .add_global(ptr_ty, None, PENDING_EXCEPTION_OBJECT_SYMBOL);
+         pending_object.set_linkage(Linkage::Internal);
+         pending_object.set_initializer(&ptr_ty.const_null());
++        let pending_native = self.module.add_global(ptr_ty, None, PENDING_EXCEPTION_NATIVE_SYMBOL);
++        pending_native.set_linkage(Linkage::Internal);
++        pending_native.set_initializer(&ptr_ty.const_null());
+         let pending_aggregate = self.module.add_global(ptr_ty, None, PENDING_EXCEPTION_AGGREGATE_SYMBOL);
+         pending_aggregate.set_linkage(Linkage::Internal);
+         pending_aggregate.set_initializer(&ptr_ty.const_null());
+@@ -646,11 +659,13 @@
+             .build_store(guard.as_pointer_value(), bool_type.const_int(1, false))
+             .map_err(|error| error.to_string())?;
+         self.variables.clear();
++        self.stack_promise_slots.clear();
+         self.for_iteration_frame_slots.clear();
+         self.catch_native_text.clear();
+         self.variable_hir_types.clear();
+         self.arena_variables.clear();
+         self.catch_stack.clear();
++        self.catch_promise_boundaries.clear();
+         self.seed_global_variables();
+         let mut execute = true;
+         for step in &common {
+@@ -730,6 +745,7 @@
+             (PENDING_EXCEPTION_SYMBOL, self.context.ptr_type(AddressSpace::default()).into()),
+             (PENDING_EXCEPTION_NATIVE_TEXT_SYMBOL, self.context.ptr_type(AddressSpace::default()).into()),
+             (PENDING_EXCEPTION_OBJECT_SYMBOL, self.context.ptr_type(AddressSpace::default()).into()),
++            (PENDING_EXCEPTION_NATIVE_SYMBOL, self.context.ptr_type(AddressSpace::default()).into()),
+             (PENDING_EXCEPTION_AGGREGATE_SYMBOL, self.context.ptr_type(AddressSpace::default()).into()),
+             (PENDING_EXCEPTION_VALUE_TAG_SYMBOL, self.context.i64_type().into()),
+             (PENDING_EXCEPTION_F64_SYMBOL, self.context.f64_type().into()),
+@@ -741,7 +757,8 @@
+             let slot = self.module.add_global(ty, None, &format!("{name}_{symbol}"));
+             slot.set_linkage(Linkage::Internal);
+             slot.set_initializer(&ty.const_zero());
+-            if symbol == PENDING_EXCEPTION_SYMBOL || symbol == PENDING_EXCEPTION_OBJECT_SYMBOL || symbol == PENDING_EXCEPTION_AGGREGATE_SYMBOL {
++            if symbol == PENDING_EXCEPTION_SYMBOL || symbol == PENDING_EXCEPTION_OBJECT_SYMBOL
++                || symbol == PENDING_EXCEPTION_NATIVE_SYMBOL || symbol == PENDING_EXCEPTION_AGGREGATE_SYMBOL {
+                 self.module_exception_roots.push(slot.as_pointer_value());
+             }
+             cached.push((self.module.get_global(symbol).unwrap(), slot, ty));
+@@ -782,8 +799,9 @@
+         self.variable_hir_types.clear();
+         self.arena_variables.clear();
+         self.catch_stack.clear();
++        self.catch_promise_boundaries.clear();
+         self.seed_global_variables();
+-        self.catch_stack.push(failed);
++        self.push_catch_target(failed);
+         for dependency in dependencies {
+             let initializer = self.module.get_function(&format!("__thaw_lazy_module_{dependency}"))
+                 .ok_or_else(|| format!("missing static dependency initializer {dependency}"))?;
+@@ -807,7 +825,7 @@
+                 }
+             }
+         }
+-        self.catch_stack.pop();
++        self.pop_catch_target();
+         if self.builder.get_insert_block().is_some_and(|block| block.get_terminator().is_none()) {
+             self.builder.build_store(state.as_pointer_value(), state_ty.const_int(2, false))
+                 .map_err(|error| error.to_string())?;
+@@ -984,6 +1002,8 @@
+ 
+     fn clear_pending_native_text(&self) -> Result<(), String> {
+         let null = self.context.ptr_type(AddressSpace::default()).const_null();
++        self.builder.build_store(self.pending_exception_native().as_pointer_value(), null)
++            .map_err(|error| error.to_string())?;
+         self.builder.build_store(self.pending_exception_native_text().as_pointer_value(), null)
+             .map_err(|error| error.to_string())?;
+         // Every fresh native/FFI/host error already clears text provenance.
+@@ -1022,7 +1042,7 @@
+         expression: &HirExpr,
+     ) -> Result<bool, String> {
+         let HirExpr::Var(binding) = expression else { return Ok(false) };
+-        let Some((catch_slot, native_slot, original_slot, valid_slot)) = self.catch_native_text.get(binding) else {
++        let Some((catch_slot, native_slot, original_slot, valid_slot, exception_native_slot)) = self.catch_native_text.get(binding) else {
+             return Ok(false);
+         };
+         if self.variables.get(binding).map(|(slot, _)| slot) != Some(catch_slot) {
+@@ -1061,6 +1081,12 @@
+         let native = self.builder.build_select(trusted, native, ptr.const_null(), "rethrow_native_text")
+             .map_err(|error| error.to_string())?;
+         self.builder.build_store(self.pending_exception_native_text().as_pointer_value(), native)
++            .map_err(|error| error.to_string())?;
++        let exception_native = self.builder.build_load(ptr, *exception_native_slot, "caught_native_exception_descriptor")
++            .map_err(|error| error.to_string())?.into_pointer_value();
++        let exception_native = self.builder.build_select(same, exception_native, ptr.const_null(), "rethrow_native_descriptor")
++            .map_err(|error| error.to_string())?;
++        self.builder.build_store(self.pending_exception_native().as_pointer_value(), exception_native)
+             .map_err(|error| error.to_string())?;
+         let metadata: [(&str, PointerValue<'ctx>, BasicTypeEnum<'ctx>, BasicValueEnum<'ctx>, bool); 6] = [
+             ("aggregate", self.pending_exception_aggregate_errors().as_pointer_value(),
+@@ -1126,6 +1152,11 @@
+         self.module
+             .get_global(PENDING_EXCEPTION_OBJECT_SYMBOL)
+             .expect("exception state is declared before code generation")
++    }
++
++    fn pending_exception_native(&self) -> inkwell::values::GlobalValue<'ctx> {
++        self.module.get_global(PENDING_EXCEPTION_NATIVE_SYMBOL)
++            .expect("native exception state is declared before code generation")
+     }
+ 
+     fn pending_exception_value(&self, name: &str) -> inkwell::values::GlobalValue<'ctx> {
+@@ -1262,9 +1293,14 @@
+         let continue_bb = self.context.append_basic_block(function, "call_ok");
+ 
+         if let Some(catch_bb) = self.catch_stack.last().copied() {
++            let propagate_bb = self.context.append_basic_block(function, "cleanup_before_catch");
+             self.builder
+-                .build_conditional_branch(has_exception, catch_bb, continue_bb)
++                .build_conditional_branch(has_exception, propagate_bb, continue_bb)
+                 .map_err(|e| e.to_string())?;
++            self.builder.position_at_end(propagate_bb);
++            let index = self.catch_stack.len() - 1;
++            self.emit_stack_promise_cleanup_except(&self.catch_promise_boundaries[index].clone())?;
++            self.builder.build_unconditional_branch(catch_bb).map_err(|e| e.to_string())?;
+         } else {
+             let propagate_bb = self
+                 .context
+@@ -1328,11 +1364,13 @@
+         self.builder.position_at_end(entry);
+ 
+         self.variables.clear();
++        self.stack_promise_slots.clear();
+         self.for_iteration_frame_slots.clear();
+         self.catch_native_text.clear();
+         self.variable_hir_types.clear();
+         self.arena_variables.clear();
+         self.catch_stack.clear();
++        self.catch_promise_boundaries.clear();
+         self.seed_global_variables();
+         for (param_val, hir_param) in function.get_param_iter().zip(func.params.iter()) {
+             let ty = self.basic_type(&hir_param.ty)?;
+@@ -1343,12 +1381,16 @@
+             self.variables.insert(hir_param.name.clone(), (slot, ty));
+             self.variable_hir_types
+                 .insert(hir_param.name.clone(), hir_param.ty.clone());
++            if matches!(hir_param.ty, HirType::Promise(_)) {
++                self.register_stack_promise_slot(slot, &hir_param.name)?;
++            }
+         }
+ 
+         let terminated = self.compile_block(&func.body)?;
+ 
+         if !terminated {
+             if func.ret == HirType::Void {
++                self.emit_stack_promise_cleanup()?;
+                 self.builder.build_return(None).map_err(|e| e.to_string())?;
+             } else {
+                 return Err(format!(
+--- a/crates/thaw-runtime/src/lib.rs
++++ b/crates/thaw-runtime/src/lib.rs
+@@ -715,10 +715,14 @@
+     exception_i64: i64,
+     exception_bool: bool,
+     exception_object: *const u8,
++    exception_native: *const ExceptionProvenance,
+     aggregate_errors: *const u8,
+     handled: bool,
+     reported_unhandled: bool,
+     subscribers: Vec<PromiseSubscription>,
++    internal_references: usize,
++    references: usize,
++    external_root: Option<thaw_arena::ArenaRoot>,
+ }
+ 
+ include!("runtime/promises.rs");
+--- a/crates/thaw-runtime/src/runtime/promises.rs
++++ b/crates/thaw-runtime/src/runtime/promises.rs
+@@ -10,8 +10,9 @@
+     pub i64_value: i64,
+     pub bool_value: u64,
+     pub object: *const u8,
+-}
+-const _: [(); 64] = [(); std::mem::size_of::<ExceptionProvenance>()];
++    pub native_layout: *const std::ffi::c_char,
++}
++const _: [(); 72] = [(); std::mem::size_of::<ExceptionProvenance>()];
+ 
+ /// Allocates one immutable compiler-private tuple. Null means allocation
+ /// failed, not a provenance-free value. The caller must handle that failure.
+@@ -33,9 +34,112 @@
+     if allocation.is_null() { return std::ptr::null(); }
+     unsafe { allocation.write(ExceptionProvenance {
+         original, native_text, aggregate_errors, tag, f64_value, i64_value,
+-        bool_value, object,
++        bool_value, object, native_layout: std::ptr::null(),
+     }) };
+     allocation
++}
++
++thread_local! {
++    static NATIVE_PROMISE_REASON_OWNERS: RefCell<HashMap<usize, *mut ThawPromise>> =
++        RefCell::new(HashMap::new());
++    static PROMISE_ARENA_SLOT_OWNERS: RefCell<HashMap<usize, (usize, *mut ThawPromise)>> =
++        RefCell::new(HashMap::new());
++}
++
++fn release_reclaimed_native_promise_internal_owners(tracing: bool) {
++    let released = NATIVE_PROMISE_REASON_OWNERS.with(|owners| {
++        let mut owners = owners.borrow_mut();
++        let released = owners.iter()
++            .filter_map(|(&record, &promise)|
++                (!tracing || thaw_arena::was_reclaimed(record)).then_some((record, promise)))
++            .collect::<Vec<_>>();
++        for &(record, _) in &released {
++            owners.remove(&record);
++        }
++        released
++    });
++    let released_slots = PROMISE_ARENA_SLOT_OWNERS.with(|owners| {
++        let mut owners = owners.borrow_mut();
++        let released = owners.iter()
++            .filter_map(|(&slot, &(_, promise))|
++                (!tracing || thaw_arena::was_reclaimed(slot)).then_some((slot, promise)))
++            .collect::<Vec<_>>();
++        for &(slot, _) in &released { owners.remove(&slot); }
++        released
++    });
++    for (_, promise) in released.into_iter().chain(released_slots) {
++        unsafe { release_native_promise_internal(promise) };
++    }
++}
++
++/// Build a private native exception descriptor. `owner` is the original
++/// native value pointer; `tag` preserves its actual JS typeof category and
++/// `layout` is a compiler-generated, static type token used for checked casts.
++#[no_mangle]
++pub unsafe extern "C" fn thaw_exception_native_provenance_new(
++    tag: u64,
++    owner: *const u8,
++    layout: *const std::ffi::c_char,
++) -> *const ExceptionProvenance {
++    if owner.is_null() || layout.is_null() { return std::ptr::null(); }
++    let allocation = thaw_arena::thaw_arena_alloc(
++        std::mem::size_of::<ExceptionProvenance>(),
++        std::mem::align_of::<ExceptionProvenance>(),
++    ).cast::<ExceptionProvenance>();
++    if allocation.is_null() { return std::ptr::null(); }
++    unsafe { allocation.write(ExceptionProvenance {
++        original: std::ptr::null(), native_text: std::ptr::null(),
++        aggregate_errors: std::ptr::null(), tag, f64_value: 0.0,
++        i64_value: 0, bool_value: 0, object: owner, native_layout: layout,
++    }) };
++    if tag == 29 {
++        let promise = owner.cast_mut().cast::<ThawPromise>();
++        if unsafe { retain_native_promise_internal(promise) } == 0 {
++            return std::ptr::null();
++        }
++        thaw_arena::register_reset_hook(release_reclaimed_native_promise_internal_owners);
++        NATIVE_PROMISE_REASON_OWNERS.with(|owners| {
++            owners.borrow_mut().insert(allocation as usize, promise);
++        });
++    }
++    allocation
++}
++
++/// Return the original owner only when both native category and exact HIR
++/// token match. The returned pointer is never interpreted as an Object first.
++#[no_mangle]
++pub unsafe extern "C" fn thaw_exception_native_owner(
++    provenance: *const ExceptionProvenance,
++    tag: u64,
++    layout: *const std::ffi::c_char,
++) -> *const u8 {
++    let Some(provenance) = (unsafe { provenance.as_ref() }) else { return std::ptr::null(); };
++    if layout.is_null() || provenance.native_layout.is_null() || provenance.tag != tag {
++        return std::ptr::null();
++    }
++    let expected = unsafe { std::ffi::CStr::from_ptr(layout) }.to_bytes();
++    let actual = unsafe { std::ffi::CStr::from_ptr(provenance.native_layout) }.to_bytes();
++    if expected == actual { provenance.object } else { std::ptr::null() }
++}
++
++/// Native strict equality is identity equality on the original owner, not on
++/// descriptor allocations which may be copied at catch/rethrow boundaries.
++#[no_mangle]
++pub unsafe extern "C" fn thaw_exception_native_same(
++    left: *const ExceptionProvenance,
++    right: *const ExceptionProvenance,
++) -> u8 {
++    match (unsafe { left.as_ref() }, unsafe { right.as_ref() }) {
++        (Some(left), Some(right)) => u8::from(left.tag == right.tag && left.object == right.object),
++        _ => 0,
++    }
++}
++
++#[no_mangle]
++pub unsafe extern "C" fn thaw_exception_native_tag(
++    provenance: *const ExceptionProvenance,
++) -> u64 {
++    unsafe { provenance.as_ref() }.map_or(0, |value| value.tag)
+ }
+ 
+ /// Allocates an unresolved promise. Pair every successful call with
+@@ -52,11 +156,18 @@
+         exception_i64: 0,
+         exception_bool: false,
+         exception_object: std::ptr::null(),
++        exception_native: std::ptr::null(),
+         aggregate_errors: std::ptr::null(),
+         handled: false,
+         reported_unhandled: false,
+         subscribers: Vec::new(),
++        internal_references: 0,
++        references: 1,
++        external_root: None,
+     }));
++    if thaw_arena::is_tracing() {
++        unsafe { (*promise).external_root = Some(thaw_arena::ArenaRoot::new(promise as usize)); }
++    }
+     ACTIVE_PROMISES.with(|active| active.borrow_mut().push(promise));
+     promise
+ }
+@@ -291,6 +402,29 @@
+     settled
+ }
+ 
++/// Typed rejection handoff that preserves the immutable native value
++/// descriptor alongside the legacy scalar/object channels.
++#[no_mangle]
++pub unsafe extern "C" fn thaw_promise_reject_typed_with_native_provenance(
++    promise: *mut ThawPromise,
++    error: *const u8,
++    tag: u64,
++    f64_value: f64,
++    i64_value: i64,
++    bool_value: bool,
++    object: *const u8,
++    native_text: *const u8,
++    aggregate_errors: *const u8,
++    native: *const ExceptionProvenance,
++) -> u8 {
++    let settled = unsafe { thaw_promise_reject_typed_with_aggregate(
++        promise, error, tag, f64_value, i64_value, bool_value, object,
++        native_text, aggregate_errors,
++    ) };
++    if settled != 0 { unsafe { thaw_promise_set_exception_native(promise, native) }; }
++    settled
++}
++
+ /// Tracks the Promise's aggregate handle beside its ordinary result edge.
+ /// `replace_reference` takes the previous child pointer, not a slot number;
+ /// retaining both children under the same boxed Promise owner lets a rooted
+@@ -326,6 +460,12 @@
+     std::ptr::null()
+ );
+ promise_exception_getter!(
++    thaw_promise_exception_native,
++    exception_native,
++    *const ExceptionProvenance,
++    std::ptr::null()
++);
++promise_exception_getter!(
+     thaw_promise_exception_aggregate_errors,
+     aggregate_errors,
+     *const u8,
+@@ -353,6 +493,7 @@
+         return thaw_promise_reject(output, error);
+     };
+     let text = input.rejection_text.clone();
++    let native = input.exception_native;
+     let settled = unsafe { thaw_promise_reject_typed(
+         output,
+         error,
+@@ -366,6 +507,7 @@
+         unsafe {
+             (*output).rejection_text = text;
+             set_promise_aggregate_errors(output, input.aggregate_errors);
++            let _ = thaw_promise_set_exception_native(output, native);
+         }
+     }
+     settled
+@@ -686,6 +828,7 @@
+     original_i64: i64,
+     original_bool: bool,
+     original_object: *const u8,
++    original_native: *const ExceptionProvenance,
+     original_aggregate_errors: *const u8,
+     original_provenance: *const ExceptionProvenance,
+     original_text: Option<Vec<u8>>,
+@@ -718,6 +861,7 @@
+             unsafe {
+                 (*state.output).rejection_text = state.original_text.clone();
+                 set_promise_aggregate_errors(state.output, state.original_aggregate_errors);
++                let _ = thaw_promise_set_exception_native(state.output, state.original_native);
+             }
+         }
+     } else {
+@@ -785,11 +929,13 @@
+     }
+     let aggregate_errors = unsafe { source.as_ref() }
+         .map_or(std::ptr::null(), |source| source.aggregate_errors);
++    let original_native = unsafe { source.as_ref() }
++        .map_or(std::ptr::null(), |source| source.exception_native);
+     let original_provenance = if original_rejected == 0 {
+         unsafe { thaw_promise_fulfilled_provenance(source) }
+     } else { std::ptr::null() };
+     let mut original_roots = Vec::new();
+-    for pointer in [original, original_object, aggregate_errors, original_provenance.cast()] {
++    for pointer in [original, original_object, aggregate_errors, original_provenance.cast(), original_native.cast()] {
+         pin_promise_pointer_once(&mut original_roots, pointer as usize);
+     }
+     let state = Box::into_raw(Box::new(PromiseFinallyAdoptState {
+@@ -802,6 +948,7 @@
+         original_i64,
+         original_bool,
+         original_object,
++        original_native,
+         original_aggregate_errors: aggregate_errors,
+         original_provenance,
+         original_text: unsafe { source.as_ref() }.and_then(|source| source.rejection_text.clone()),
+@@ -1521,8 +1668,36 @@
+     1
+ }
+ 
+-/// Destroys a promise handle. Passing null is a no-op. The caller must not
+-/// destroy a promise from inside one of its resume callbacks.
++fn destroy_promise_box(promise: *mut ThawPromise) {
++    ACTIVE_PROMISES.with(|active| active.borrow_mut().retain(|current| *current != promise));
++    TIMERS.with(|timers| timers.borrow_mut().retain(|timer| timer.promise != promise));
++    FD_WAITS.with(|waits| waits.borrow_mut().retain(|wait| wait.promise != promise));
++    thaw_arena::forget_references(promise as usize);
++    unsafe { drop(Box::from_raw(promise)); }
++}
++
++unsafe fn retain_native_promise_internal(promise: *mut ThawPromise) -> u8 {
++    let Some(promise) = (unsafe { promise.as_mut() }) else { return 0; };
++    let (Some(references), Some(internal_references)) = (
++        promise.references.checked_add(1),
++        promise.internal_references.checked_add(1),
++    ) else { return 0; };
++    promise.references = references;
++    promise.internal_references = internal_references;
++    1
++}
++
++unsafe fn release_native_promise_internal(promise: *mut ThawPromise) {
++    let Some(promise_ref) = (unsafe { promise.as_mut() }) else { return; };
++    if promise_ref.internal_references == 0 || promise_ref.references == 0 { return; }
++    promise_ref.internal_references -= 1;
++    promise_ref.references -= 1;
++    if promise_ref.references == 0 {
++        destroy_promise_box(promise);
++    }
++}
++
++/// Destroys an externally owned Promise handle. Passing null is a no-op.
+ ///
+ /// # Safety
+ ///
+@@ -1531,12 +1706,92 @@
+ #[no_mangle]
+ pub unsafe extern "C" fn thaw_promise_destroy(promise: *mut ThawPromise) {
+     if !promise.is_null() {
+-        ACTIVE_PROMISES.with(|active| active.borrow_mut().retain(|current| *current != promise));
+-        TIMERS.with(|timers| timers.borrow_mut().retain(|timer| timer.promise != promise));
+-        FD_WAITS.with(|waits| waits.borrow_mut().retain(|wait| wait.promise != promise));
+-        thaw_arena::forget_references(promise as usize);
+-        drop(Box::from_raw(promise));
+-    }
++        let Some(promise_ref) = (unsafe { promise.as_mut() }) else { return; };
++        if promise_ref.references <= promise_ref.internal_references { return; }
++        promise_ref.references -= 1;
++        if promise_ref.references == promise_ref.internal_references {
++            promise_ref.external_root.take();
++        }
++        if promise_ref.references == 0 { destroy_promise_box(promise); }
++    }
++}
++
++/// Retain a Promise as an externally owned alias. This changes only ownership;
++/// it does not subscribe, inspect `then`, or mark it handled.
++#[no_mangle]
++pub unsafe extern "C" fn thaw_promise_retain(promise: *mut ThawPromise) -> u8 {
++    let Some(promise) = (unsafe { promise.as_mut() }) else { return 0; };
++    let Some(references) = promise.references.checked_add(1) else { return 0; };
++    if promise.references == promise.internal_references && thaw_arena::is_tracing() {
++        promise.external_root = Some(thaw_arena::ArenaRoot::new(promise as *mut ThawPromise as usize));
++    }
++    promise.references = references;
++    1
++}
++
++/// Replace a Promise pointer stored in an arena-owned cell or frame slot.
++/// The owner allocation keeps the Promise as an internal tracing edge; the
++/// reset hook releases one internal token when that slot is reclaimed.
++///
++/// # Safety
++/// `owner` and `slot` must point into the same live arena allocation, and
++/// `slot` must already contain an initialized null or live Promise pointer.
++#[no_mangle]
++pub unsafe extern "C" fn thaw_promise_arena_slot_replace(
++    owner: *mut u8,
++    slot: *mut *mut ThawPromise,
++    replacement: *mut ThawPromise,
++) -> u8 {
++    if owner.is_null() || slot.is_null() || (thaw_arena::is_tracing()
++        && (!thaw_arena::contains_allocation(owner as usize)
++            || !thaw_arena::contains_allocation(slot as usize)))
++    {
++        return 0;
++    }
++    let previous = unsafe { slot.read() };
++    let key = slot as usize;
++    let current = PROMISE_ARENA_SLOT_OWNERS.with(|owners| owners.borrow().get(&key).copied());
++    if current.is_some_and(|(current_owner, current_promise)|
++        current_owner != owner as usize || current_promise != previous)
++        || (previous.is_null() && current.is_some())
++        || (!previous.is_null() && current.is_none())
++    {
++        return 0;
++    }
++    if previous == replacement { return 1; }
++    if !replacement.is_null() && unsafe { retain_native_promise_internal(replacement) } == 0 {
++        return 0;
++    }
++    thaw_arena::replace_reference(owner as usize, previous as usize, replacement as usize);
++    PROMISE_ARENA_SLOT_OWNERS.with(|owners| {
++        let mut owners = owners.borrow_mut();
++        owners.remove(&key);
++        if !replacement.is_null() {
++            owners.insert(key, (owner as usize, replacement));
++        }
++    });
++    unsafe { slot.write(replacement) };
++    if !previous.is_null() { unsafe { release_native_promise_internal(previous) }; }
++    thaw_arena::register_reset_hook(release_reclaimed_native_promise_internal_owners);
++    1
++}
++
++/// Attach a native exception descriptor to a rejected Promise and keep its
++/// arena record reachable for the Promise's lifetime.
++#[no_mangle]
++pub unsafe extern "C" fn thaw_promise_set_exception_native(
++    promise: *mut ThawPromise,
++    provenance: *const ExceptionProvenance,
++) -> u8 {
++    let Some(promise) = (unsafe { promise.as_mut() }) else { return 0; };
++    let previous = promise.exception_native;
++    thaw_arena::replace_reference(
++        promise as *mut ThawPromise as usize,
++        previous as usize,
++        provenance as usize,
++    );
++    promise.exception_native = provenance;
++    1
+ }
+ 
+ pub type PromiseUnhandledFn = extern "C" fn(*const u8) -> u8;
+--- a/crates/thaw-runtime/src/tests.rs
++++ b/crates/thaw-runtime/src/tests.rs
+@@ -2974,15 +2974,15 @@
+ }
+ 
+ #[test]
+-fn private_exception_provenance_has_stable_eight_word_layout() {
+-    assert_eq!(std::mem::size_of::<ExceptionProvenance>(), 64);
++fn private_exception_provenance_has_stable_nine_word_layout() {
++    assert_eq!(std::mem::size_of::<ExceptionProvenance>(), 72);
+     assert_eq!(std::mem::align_of::<ExceptionProvenance>(), 8);
+     let original = thaw_arena::thaw_arena_alloc(8, 8);
+     let text = thaw_arena::thaw_arena_alloc(8, 8);
+     let errors = thaw_arena::thaw_arena_alloc(8, 8);
+     let object = thaw_arena::thaw_arena_alloc(8, 8);
+     let record = thaw_exception_provenance_new(
+-        original, text, errors, 7, 1.25, 19, 1, object,
++        original, text, errors, 7, 1.25, 19, 1, object, std::ptr::null(),
+     );
+     assert!(!record.is_null());
+     let record = unsafe { &*record };
+@@ -2994,6 +2994,7 @@
+     assert_eq!(record.i64_value, 19);
+     assert_eq!(record.bool_value, 1);
+     assert_eq!(record.object, object.cast_const());
++    assert!(record.native_layout.is_null());
+ }
+ 
+ #[test]
+@@ -3216,3 +3217,146 @@
+     assert!(!thaw_runtime_unwatch_fd(other_id));
+     unsafe { libc::close(fds[0]); libc::close(fds[1]); }
+ }
++
++#[test]
++fn native_promise_reason_cycle_releases_after_arena_reclaims_its_descriptor() {
++    thaw_arena::thaw_arena_enable_tracing();
++    let promise = thaw_promise_new();
++    let layout = b"Promise\0";
++    let descriptor = unsafe { thaw_exception_native_provenance_new(
++        29, promise.cast(), layout.as_ptr().cast(),
++    ) };
++    assert!(!descriptor.is_null());
++    assert_eq!(unsafe { thaw_promise_set_exception_native(promise, descriptor) }, 1);
++    assert_eq!(unsafe { (*promise).internal_references }, 1);
++    assert_eq!(unsafe { (*promise).references }, 2);
++
++    // The descriptor and Promise refer to each other. Dropping the sole
++    // external owner unpins the Box; arena sweep then releases the internal
++    // reason owner without retaining a cycle forever.
++    unsafe { thaw_promise_destroy(promise) };
++    assert_eq!(unsafe { (*promise).references }, 1);
++    thaw_arena::thaw_arena_reset();
++    ACTIVE_PROMISES.with(|active| assert!(!active.borrow().contains(&promise)));
++    NATIVE_PROMISE_REASON_OWNERS.with(|owners| assert!(owners.borrow().is_empty()));
++}
++
++#[test]
++fn external_native_promise_owner_keeps_its_exception_descriptor_live() {
++    thaw_arena::thaw_arena_enable_tracing();
++    let promise = thaw_promise_new();
++    let layout = b"Promise\0";
++    let descriptor = unsafe { thaw_exception_native_provenance_new(
++        29, promise.cast(), layout.as_ptr().cast(),
++    ) };
++    assert!(!descriptor.is_null());
++    assert_eq!(unsafe { thaw_promise_set_exception_native(promise, descriptor) }, 1);
++
++    thaw_arena::thaw_arena_reset();
++    assert!(!thaw_arena::was_reclaimed(descriptor as usize));
++    assert_eq!(unsafe { thaw_exception_native_owner(
++        descriptor, 29, layout.as_ptr().cast(),
++    ) }, promise.cast());
++
++    unsafe { thaw_promise_destroy(promise) };
++    thaw_arena::thaw_arena_reset();
++    assert!(thaw_arena::was_reclaimed(descriptor as usize));
++    ACTIVE_PROMISES.with(|active| assert!(!active.borrow().contains(&promise)));
++}
++
++#[test]
++fn native_exception_descriptor_preserves_category_identity_and_checked_layout() {
++    let mut owners = [0u8; 9];
++    for (owner_index, (name, tag)) in [
++        ("Symbol", 20),
++        ("Array", 21),
++        ("Bytes", 22),
++        ("Map", 23),
++        ("WeakMap", 24),
++        ("Set", 25),
++        ("WeakSet", 26),
++        ("Tuple", 27),
++        ("FunctionWithThis", 28),
++    ].into_iter().enumerate() {
++        let owner = (&mut owners[owner_index]) as *mut u8;
++        let layout = format!("{name}\0");
++        let same_layout = format!("{name}\0");
++        let other_layout = format!("Other{name}\0");
++        let first = unsafe {
++            thaw_exception_native_provenance_new(tag, owner, layout.as_ptr().cast())
++        };
++        let duplicate = unsafe {
++            thaw_exception_native_provenance_new(tag, owner, same_layout.as_ptr().cast())
++        };
++        assert!(!first.is_null());
++        assert!(!duplicate.is_null());
++        assert_eq!(unsafe { thaw_exception_native_tag(first) }, tag);
++        assert_eq!(unsafe { thaw_exception_native_owner(
++            first, tag, layout.as_ptr().cast(),
++        ) }, owner);
++        assert!(unsafe { thaw_exception_native_owner(
++            first, tag + 1, layout.as_ptr().cast(),
++        ) }.is_null());
++        assert!(unsafe { thaw_exception_native_owner(
++            first, tag, other_layout.as_ptr().cast(),
++        ) }.is_null());
++        assert_eq!(unsafe { thaw_exception_native_same(first, duplicate) }, 1);
++    }
++}
++
++#[test]
++fn arena_promise_slot_replacement_is_balanced_and_reclaimed_with_its_owner() {
++    thaw_arena::thaw_arena_enable_tracing();
++    let owner = unsafe { thaw_arena::thaw_arena_alloc(32, std::mem::align_of::<usize>()) };
++    assert!(!owner.is_null());
++    let first_slot = owner.cast::<*mut ThawPromise>();
++    let second_slot = unsafe { owner.add(std::mem::size_of::<usize>()) }.cast::<*mut ThawPromise>();
++    unsafe {
++        first_slot.write(std::ptr::null_mut());
++        second_slot.write(std::ptr::null_mut());
++    }
++    let promise = thaw_promise_new();
++
++    assert_eq!(unsafe { thaw_promise_arena_slot_replace(owner, first_slot, promise) }, 1);
++    assert_eq!(unsafe { thaw_promise_arena_slot_replace(owner, second_slot, promise) }, 1);
++    assert_eq!(unsafe { (*promise).internal_references }, 2);
++    assert_eq!(unsafe { (*promise).references }, 3);
++    assert_eq!(unsafe { thaw_promise_arena_slot_replace(owner, first_slot, promise) }, 1);
++    assert_eq!(unsafe { (*promise).internal_references }, 2);
++
++    let replacement = thaw_promise_new();
++    assert_eq!(unsafe { thaw_promise_arena_slot_replace(owner, first_slot, replacement) }, 1);
++    assert_eq!(unsafe { (*promise).internal_references }, 1);
++    assert_eq!(unsafe { (*replacement).internal_references }, 1);
++    unsafe { thaw_promise_destroy(promise) };
++    assert_eq!(unsafe { thaw_promise_arena_slot_replace(owner, second_slot, std::ptr::null_mut()) }, 1);
++    ACTIVE_PROMISES.with(|active| assert!(!active.borrow().contains(&promise)));
++    unsafe { thaw_promise_destroy(replacement) };
++    let owner_root = thaw_arena::ArenaRoot::new(owner as usize);
++    thaw_arena::thaw_arena_reset();
++    ACTIVE_PROMISES.with(|active| assert!(active.borrow().contains(&replacement)));
++    assert_eq!(unsafe { (*replacement).internal_references }, 1);
++    drop(owner_root);
++    thaw_arena::thaw_arena_reset();
++    ACTIVE_PROMISES.with(|active| assert!(!active.borrow().contains(&replacement)));
++    PROMISE_ARENA_SLOT_OWNERS.with(|owners| assert!(owners.borrow().is_empty()));
++}
++
++#[test]
++fn arena_promise_slot_rejects_untracked_same_pointer_as_a_noop() {
++    thaw_arena::thaw_arena_enable_tracing();
++    let owner = unsafe { thaw_arena::thaw_arena_alloc(32, std::mem::align_of::<usize>()) };
++    assert!(!owner.is_null());
++    let slot = owner.cast::<*mut ThawPromise>();
++    let promise = thaw_promise_new();
++    unsafe { slot.write(promise) };
++
++    assert_eq!(unsafe { thaw_promise_arena_slot_replace(owner, slot, promise) }, 0);
++    assert_eq!(unsafe { (*promise).internal_references }, 0);
++    assert_eq!(unsafe { (*promise).references }, 1);
++    unsafe {
++        slot.write(std::ptr::null_mut());
++        thaw_promise_destroy(promise);
++    }
++    thaw_arena::thaw_arena_reset();
++}

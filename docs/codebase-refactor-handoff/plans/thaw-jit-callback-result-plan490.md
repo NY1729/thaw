@@ -1,0 +1,13 @@
+# JIT callback result contract — Sol source plan
+
+Authority broad17owner /tmp/thaw-jit-array-callback-draft469 plus reducer correction /tmp/thaw-jit-reduce-state-successor487. All HOLD/unrun. Latest managed HEADbd4565fa048400309f923681614839b3951192a6.
+
+Source correction to broad handoff: CLI jit/expressions.rs does not discard kind in every path. Primitive/dynamic map encodes n/b/s target in the enclosing mapjit opcode, primitive number map restricts Number. Seeded dynamic reduce restricts Number and6slots. Unseeded dynamic reduce explicitly appends tagnum/tagbool/tagstr when needed to return Dynamic and7slots. Predicate scan CLI restricts Number or Boolean. These attested constraints must be preserved before introducing a new descriptor.
+
+Runtime compile_jit_callback returns only machine fn, required_args, tagged_arg0. jit_callback_truthy guesses dynamic wrapper by DYNAMIC_VALUES registry membership on rawf64 bits then otherwise treats number. Numeric bits may coincide with a registered pointer; this is not resultkind proof. Raw custom NumericProgram callback strings can also return tagged dynamic/string while CLI subset is narrower. Distinguish supported producer contract and direct runtime ABI inputs.
+
+Luna implementation order: inventory all enclosing parser NumericValue variants and machine/runtimedispatch args; reuse existing map targetkind for map conversion. Trace predicate results and if possible normalize compilerknownNumber/Boolean to one canonical Boolean before callback serialization using existing conversion token, so runtime scan has an explicit contract and never registryguesses. For Dynamic-supported generic callback lane carry validated resultkind through existing parser/program representation or a minimal internal callback descriptor only when normalization is insufficient; synchronize all producer/capture/branch/return paths. Do not remove support for typed callbacks just to make controls pass.
+
+Reduce input state2 source fix preserved. Unseeded result dynamicboxing is existing compiler contract, enforce it without infer-by-bitpattern. Own roots for wrapper/string results before any allocation or callbackreentry and preserve original exacterror; CALL_ERROR text alone is not full exactthrow repair. Full results/exacterror/lifetime/nativealiases gate remains open.
+
+Unrun controls distinguish raw numeric bitpattern vs live dynamic pointer, explicitundefined vs NaN, boolfalse, emptystring, boxedstring, taggedresult, callbackfirsterror and capture mutation. Productexecution forbidden, scratch editsLuna, immutable paired source review before integration.

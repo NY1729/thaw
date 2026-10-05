@@ -1,0 +1,1208 @@
+impl<'ctx> HirCompiler<'ctx> {
+    /// An `HirType::Array`/`Tuple` value is a pointer to a one-word "handle"
+    /// cell holding the *current* raw `[length][elem...]` buffer pointer,
+    /// not the buffer itself -- this indirection is what lets `.push()`/
+    /// `.pop()`/`.shift()`/`.unshift()`/`.splice()` grow or shrink an array
+    /// by replacing the buffer the handle points to, while every alias of
+    /// the same array (another variable, a field, a captured closure
+    /// value) shares the same handle pointer and so observes the new
+    /// buffer on its next read, matching JavaScript's array reference
+    /// semantics. Every array/tuple-typed `HirExpr` compiles to a handle;
+    /// `compile_array_data` unwraps one to the buffer a specific operation
+    /// actually needs to read/write, and `compile_array_wrap` allocates a
+    /// fresh handle around a freshly built buffer.
+    fn compile_array_wrap_with_presence(
+        &mut self,
+        buffer: PointerValue<'ctx>,
+        presence: PointerValue<'ctx>,
+    ) -> Result<PointerValue<'ctx>, String> {
+        let i64_type = self.context.i64_type();
+        let handle = self
+            .builder
+            .build_call(
+                self.module.get_function("thaw_arena_alloc").unwrap(),
+                &[i64_type.const_int(16, false).into(), i64_type.const_int(8, false).into()],
+                "array_handle",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("thaw_arena_alloc did not return an array handle")?
+            .into_pointer_value();
+        self.builder
+            .build_store(handle, buffer)
+            .map_err(|error| error.to_string())?;
+        let presence_slot = unsafe {
+            self.builder
+                .build_in_bounds_gep(
+                    self.context.i8_type(),
+                    handle,
+                    &[i64_type.const_int(8, false)],
+                    "array_presence_slot",
+                )
+                .map_err(|error| error.to_string())?
+        };
+        self.builder
+            .build_store(presence_slot, presence)
+            .map_err(|error| error.to_string())?;
+        Ok(handle)
+    }
+
+    fn compile_array_wrap(
+        &mut self,
+        buffer: PointerValue<'ctx>,
+    ) -> Result<PointerValue<'ctx>, String> {
+        self.compile_array_wrap_with_presence(
+            buffer,
+            self.context.ptr_type(AddressSpace::default()).const_null(),
+        )
+    }
+
+    /// Normalizes an `HirType::Array` value returned across the residual
+    /// JIT boundary into the app's `{buffer, presence}` handle. thaw-jit
+    /// represents an array as a tagged dense raw buffer (bit `1`), a
+    /// sparse two-word handle (bit `2`), or a legacy untagged handle.
+    /// Preserve the sparse handle's presence mask; normalize the other
+    /// forms to an app-owned dense `{buffer, presence}` handle.
+    fn compile_jit_array_result(
+        &mut self,
+        bits: IntValue<'ctx>,
+    ) -> Result<PointerValue<'ctx>, String> {
+        let i64_type = self.context.i64_type();
+        let ptr_type = self.context.ptr_type(AddressSpace::default());
+        // Bit 2 marks a JIT-owned two-word sparse result. Unlike an older
+        // untagged one-word JIT handle, it already carries the presence mask
+        // and must not be normalized through `compile_array_wrap`.
+        let sparse_tag = self.builder.build_and(bits, i64_type.const_int(2, false),
+            "jit_sparse_array_tag").map_err(|error| error.to_string())?;
+        let sparse = self.builder.build_int_compare(inkwell::IntPredicate::NE,
+            sparse_tag, i64_type.const_zero(), "jit_array_is_sparse")
+            .map_err(|error| error.to_string())?;
+        let function = self.current_function();
+        let sparse_bb = self.context.append_basic_block(function, "jit_sparse_array");
+        let regular_bb = self.context.append_basic_block(function, "jit_regular_array");
+        let final_bb = self.context.append_basic_block(function, "jit_array_result_end");
+        self.builder.build_conditional_branch(sparse, sparse_bb, regular_bb)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(sparse_bb);
+        let sparse_bits = self.builder.build_and(bits, i64_type.const_int(!2u64, false),
+            "jit_sparse_array_handle_bits").map_err(|error| error.to_string())?;
+        let sparse_handle = self.builder.build_int_to_ptr(sparse_bits, ptr_type,
+            "jit_sparse_array_handle").map_err(|error| error.to_string())?;
+        self.builder.build_unconditional_branch(final_bb).map_err(|error| error.to_string())?;
+        self.builder.position_at_end(regular_bb);
+        let tag = self
+            .builder
+            .build_and(bits, i64_type.const_int(1, false), "jit_array_tag")
+            .map_err(|error| error.to_string())?;
+        let tagged = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::NE,
+                tag,
+                i64_type.const_zero(),
+                "jit_array_is_tagged",
+            )
+            .map_err(|error| error.to_string())?;
+        let tagged_buffer = self
+            .builder
+            .build_and(
+                bits,
+                i64_type.const_int(!1u64, false),
+                "jit_array_strip_tag",
+            )
+            .map_err(|error| error.to_string())?;
+        let tagged_buffer = self
+            .builder
+            .build_int_to_ptr(tagged_buffer, ptr_type, "jit_array_tagged_buffer")
+            .map_err(|error| error.to_string())?;
+        let tagged_bb = self.context.append_basic_block(function, "jit_array_tagged");
+        let handle_bb = self.context.append_basic_block(function, "jit_array_handle");
+        let merge_bb = self.context.append_basic_block(function, "jit_array_merge");
+        self.builder.build_conditional_branch(tagged, tagged_bb, handle_bb).map_err(|error| error.to_string())?;
+        self.builder.position_at_end(tagged_bb);
+        self.builder.build_unconditional_branch(merge_bb).map_err(|error| error.to_string())?;
+        self.builder.position_at_end(handle_bb);
+        let guard = self
+            .builder
+            .build_alloca(i64_type, "jit_array_null_guard")
+            .map_err(|error| error.to_string())?;
+        self.builder
+            .build_store(guard, i64_type.const_zero())
+            .map_err(|error| error.to_string())?;
+        let is_null = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::EQ,
+                bits,
+                i64_type.const_zero(),
+                "jit_array_is_null",
+            )
+            .map_err(|error| error.to_string())?;
+        let handle_pointer = self
+            .builder
+            .build_select(
+                is_null,
+                guard,
+                self.builder
+                    .build_int_to_ptr(bits, ptr_type, "jit_array_handle")
+                    .map_err(|error| error.to_string())?,
+                "jit_array_handle_pointer",
+            )
+            .map_err(|error| error.to_string())?
+            .into_pointer_value();
+        let handle_buffer = self.compile_array_data(handle_pointer)?;
+        self.builder.build_unconditional_branch(merge_bb).map_err(|error| error.to_string())?;
+        self.builder.position_at_end(merge_bb);
+        let buffer = self.builder.build_phi(ptr_type, "jit_array_buffer").map_err(|error| error.to_string())?;
+        buffer.add_incoming(&[(&tagged_buffer, tagged_bb), (&handle_buffer, handle_bb)]);
+        let buffer = buffer.as_basic_value().into_pointer_value();
+        let regular_handle = self.compile_array_wrap(buffer)?;
+        let regular_end = self.builder.get_insert_block().unwrap();
+        self.builder.build_unconditional_branch(final_bb).map_err(|error| error.to_string())?;
+        self.builder.position_at_end(final_bb);
+        let merged = self.builder.build_phi(ptr_type, "jit_array_result_handle")
+            .map_err(|error| error.to_string())?;
+        merged.add_incoming(&[(&sparse_handle, sparse_bb), (&regular_handle, regular_end)]);
+        Ok(merged.as_basic_value().into_pointer_value())
+    }
+
+    /// Loads the current raw `[length][elem...]` buffer pointer out of an
+    /// array/tuple handle. See `compile_array_wrap`.
+    fn compile_array_data(
+        &mut self,
+        handle: PointerValue<'ctx>,
+    ) -> Result<PointerValue<'ctx>, String> {
+        let ptr_type = self.context.ptr_type(AddressSpace::default());
+        self.builder
+            .build_load(ptr_type, handle, "array_data")
+            .map_err(|error| error.to_string())
+            .map(BasicValueEnum::into_pointer_value)
+    }
+
+    fn compile_array_presence(
+        &mut self,
+        handle: PointerValue<'ctx>,
+    ) -> Result<PointerValue<'ctx>, String> {
+        let slot = unsafe {
+            self.builder
+                .build_in_bounds_gep(
+                    self.context.i8_type(),
+                    handle,
+                    &[self.context.i64_type().const_int(8, false)],
+                    "array_presence_slot",
+                )
+                .map_err(|error| error.to_string())?
+        };
+        self.builder
+            .build_load(
+                self.context.ptr_type(AddressSpace::default()),
+                slot,
+                "array_presence",
+            )
+            .map_err(|error| error.to_string())
+            .map(BasicValueEnum::into_pointer_value)
+    }
+
+    fn compile_array_set_presence(
+        &mut self,
+        handle: PointerValue<'ctx>,
+        presence: PointerValue<'ctx>,
+    ) -> Result<(), String> {
+        let slot = unsafe {
+            self.builder
+                .build_in_bounds_gep(
+                    self.context.i8_type(),
+                    handle,
+                    &[self.context.i64_type().const_int(8, false)],
+                    "array_presence_slot",
+                )
+                .map_err(|error| error.to_string())?
+        };
+        self.builder
+            .build_store(slot, presence)
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    fn compile_array_index_state(
+        &mut self,
+        handle: PointerValue<'ctx>,
+        index: IntValue<'ctx>,
+    ) -> Result<IntValue<'ctx>, String> {
+        let i64_type = self.context.i64_type();
+        let data = self.compile_array_data(handle)?;
+        let length = self.builder
+            .build_load(i64_type, data, "array_current_length")
+            .map_err(|error| error.to_string())?
+            .into_int_value();
+        let in_range = self.builder
+            .build_int_compare(IntPredicate::ULT, index, length, "array_index_in_current_length")
+            .map_err(|error| error.to_string())?;
+        let function = self.current_function();
+        let check_presence = self.context.append_basic_block(function, "array_check_presence");
+        let out_of_range = self.context.append_basic_block(function, "array_out_of_range");
+        let dense = self.context.append_basic_block(function, "array_dense");
+        let sparse = self.context.append_basic_block(function, "array_sparse");
+        let sparse_present = self.context.append_basic_block(function, "array_sparse_present");
+        let beyond_mask = self.context.append_basic_block(function, "array_beyond_presence_mask");
+        let done = self.context.append_basic_block(function, "array_presence_done");
+        self.builder
+            .build_conditional_branch(in_range, check_presence, out_of_range)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(check_presence);
+        let presence = self.compile_array_presence(handle)?;
+        let is_dense = self
+            .builder
+            .build_is_null(presence, "array_is_dense")
+            .map_err(|error| error.to_string())?;
+        self.builder
+            .build_conditional_branch(is_dense, dense, sparse)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(dense);
+        self.builder
+            .build_unconditional_branch(done)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(sparse);
+        let mask_length = self
+            .builder
+            .build_load(i64_type, presence, "array_presence_length")
+            .map_err(|error| error.to_string())?
+            .into_int_value();
+        let in_mask = self
+            .builder
+            .build_int_compare(IntPredicate::ULT, index, mask_length, "array_index_in_presence_mask")
+            .map_err(|error| error.to_string())?;
+        self.builder
+            .build_conditional_branch(in_mask, sparse_present, beyond_mask)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(sparse_present);
+        let element = unsafe {
+            self.builder
+                .build_in_bounds_gep(
+                    self.context.i8_type(),
+                    presence,
+                    &[index],
+                    "array_presence_element",
+                )
+                .map_err(|error| error.to_string())?
+        };
+        let element = unsafe {
+            self.builder
+                .build_in_bounds_gep(
+                    self.context.i8_type(),
+                    element,
+                    &[i64_type.const_int(8, false)],
+                    "array_presence_payload",
+                )
+                .map_err(|error| error.to_string())?
+        };
+        let state = self
+            .builder
+            .build_load(self.context.i8_type(), element, "array_element_state")
+            .map_err(|error| error.to_string())?
+            .into_int_value();
+        self.builder
+            .build_unconditional_branch(done)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(beyond_mask);
+        self.builder
+            .build_unconditional_branch(done)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(out_of_range);
+        self.builder
+            .build_unconditional_branch(done)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(done);
+        let phi = self
+            .builder
+            .build_phi(self.context.i8_type(), "array_index_state")
+            .map_err(|error| error.to_string())?;
+        let present_by_default = self.context.i8_type().const_int(1, false);
+        let absent = self.context.i8_type().const_zero();
+        phi.add_incoming(&[
+            (&absent, out_of_range),
+            (&present_by_default, dense),
+            (&state, sparse_present),
+            (&present_by_default, beyond_mask),
+        ]);
+        Ok(phi.as_basic_value().into_int_value())
+    }
+
+    fn compile_array_has_index(
+        &mut self,
+        handle: PointerValue<'ctx>,
+        index: IntValue<'ctx>,
+    ) -> Result<IntValue<'ctx>, String> {
+        let state = self.compile_array_index_state(handle, index)?;
+        self.builder
+            .build_int_compare(
+                IntPredicate::NE,
+                state,
+                self.context.i8_type().const_zero(),
+                "array_has_index",
+            )
+            .map_err(|error| error.to_string())
+    }
+
+    fn compile_array_copy_presence(
+        &mut self,
+        target: PointerValue<'ctx>,
+        source: PointerValue<'ctx>,
+    ) -> Result<PointerValue<'ctx>, String> {
+        let offset = self.context.i64_type().const_int(8, false);
+        let target_slot = unsafe {
+            self.builder
+                .build_in_bounds_gep(self.context.i8_type(), target, &[offset], "array_presence_target")
+                .map_err(|error| error.to_string())?
+        };
+        let source_slot = unsafe {
+            self.builder
+                .build_in_bounds_gep(self.context.i8_type(), source, &[offset], "array_presence_source")
+                .map_err(|error| error.to_string())?
+        };
+        let presence = self
+            .builder
+            .build_load(
+                self.context.ptr_type(AddressSpace::default()),
+                source_slot,
+                "array_presence",
+            )
+            .map_err(|error| error.to_string())?;
+        let source_data = self.compile_array_data(source)?;
+        let length = self
+            .builder
+            .build_load(self.context.i64_type(), source_data, "array_presence_length")
+            .map_err(|error| error.to_string())?;
+        let presence = self
+            .builder
+            .build_call(
+                self.module
+                    .get_function("thaw_array_presence_slice")
+                    .unwrap(),
+                &[
+                    presence.into(),
+                    length.into(),
+                    self.context.f64_type().const_zero().into(),
+                    self.context.f64_type().const_float(f64::INFINITY).into(),
+                ],
+                "array_presence_copy",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("array presence copy returned no value")?;
+        self.builder
+            .build_store(target_slot, presence)
+            .map_err(|error| error.to_string())?;
+        Ok(target)
+    }
+
+    /// Like `compile_array_wrap`, but for a runtime call that signals
+    /// failure with a null buffer pointer (regex `exec`/`split`/`match`/
+    /// `matchAll`, checked afterward via `__thaw_array_is_null`) -- wrapping
+    /// unconditionally would turn that null into a handle pointing at a
+    /// cell holding null, which is never itself null, breaking that check.
+    /// Only wraps when `buffer` is non-null; a null buffer passes through
+    /// as a null "handle" so the null check still means what it always did.
+    fn compile_array_wrap_nullable(
+        &mut self,
+        buffer: PointerValue<'ctx>,
+    ) -> Result<PointerValue<'ctx>, String> {
+        let handle = self.compile_array_wrap(buffer)?;
+        let is_null = self
+            .builder
+            .build_is_null(buffer, "array_wrap_is_null")
+            .map_err(|error| error.to_string())?;
+        let null_ptr = self.context.ptr_type(AddressSpace::default()).const_null();
+        self.builder
+            .build_select(is_null, null_ptr, handle, "array_wrap_nullable")
+            .map_err(|error| error.to_string())
+            .map(|value| value.into_pointer_value())
+    }
+
+    fn compile_array_lit(&mut self, elems: &[HirExpr]) -> Result<BasicValueEnum<'ctx>, String> {
+        let mut element_bytes = elems
+            .iter()
+            .filter_map(|element| self.expr_hir_type(element))
+            .try_fold(ARRAY_ELEM_BYTES, |width, element| {
+                Ok::<_, String>(width.max(array_element_storage_bytes(&element)?))
+            })?;
+        let elem_vals = elems
+            .iter()
+            .map(|e| self.compile_expr(e))
+            .collect::<Result<Vec<_>, _>>()?;
+        for (expr, value) in elems.iter().zip(&elem_vals) {
+            let bytes = compiled_value_layout(value.get_type())?.0;
+            let actual = align_storage(bytes, 8)?
+                .max(if value.is_struct_value() { ASYNC_SLOT_BYTES } else { ARRAY_ELEM_BYTES });
+            if let Some(declared) = self.expr_hir_type(expr) {
+                if actual > array_element_storage_bytes(&declared)? {
+                    return Err("array element exceeds its declared storage".into());
+                }
+            }
+            element_bytes = element_bytes.max(actual);
+        }
+
+        let size = checked_storage_add(ARRAY_HEADER_BYTES,
+            checked_storage_mul(element_bytes, elem_vals.len() as u64)?)?;
+        let i64_type = self.context.i64_type();
+        let size_val = i64_type.const_int(size, false);
+        let align_val = i64_type.const_int(element_bytes.min(8), false);
+
+        let alloc_fn = self.module.get_function("thaw_arena_alloc").unwrap();
+        let call = self
+            .builder
+            .build_call(alloc_fn, &[size_val.into(), align_val.into()], "arr_alloc")
+            .map_err(|e| e.to_string())?;
+        let base_ptr = call
+            .try_as_basic_value()
+            .basic()
+            .ok_or("thaw_arena_alloc did not return a value")?
+            .into_pointer_value();
+
+        self.builder
+            .build_store(base_ptr, i64_type.const_int(elem_vals.len() as u64, false))
+            .map_err(|e| e.to_string())?;
+
+        for (i, val) in elem_vals.into_iter().enumerate() {
+            let offset = i64_type.const_int(checked_array_offset(element_bytes, i)?, false);
+            let elem_ptr = unsafe {
+                self.builder
+                    .build_in_bounds_gep(self.context.i8_type(), base_ptr, &[offset], "elem_ptr")
+                    .map_err(|e| e.to_string())?
+            };
+            self.builder
+                .build_store(elem_ptr, val)
+                .map_err(|e| e.to_string())?;
+        }
+
+        let holes = elems
+            .iter()
+            .map(|element| matches!(element, HirExpr::Lit(HirLit::ArrayHole)))
+            .collect::<Vec<_>>();
+        if !holes.iter().any(|hole| *hole) {
+            return Ok(self.compile_array_wrap(base_ptr)?.into());
+        }
+        let presence = self
+            .builder
+            .build_call(
+                alloc_fn,
+                &[
+                    i64_type.const_int(elems.len() as u64 + 8, false).into(),
+                    i64_type.const_int(1, false).into(),
+                ],
+                "array_presence",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("thaw_arena_alloc did not return an array presence mask")?
+            .into_pointer_value();
+        self.builder
+            .build_store(presence, i64_type.const_int(elems.len() as u64, false))
+            .map_err(|error| error.to_string())?;
+        for (index, hole) in holes.into_iter().enumerate() {
+            let slot = unsafe {
+                self.builder
+                    .build_in_bounds_gep(
+                        self.context.i8_type(),
+                        presence,
+                        &[i64_type.const_int(index as u64 + 8, false)],
+                        "array_presence_element",
+                    )
+                    .map_err(|error| error.to_string())?
+            };
+            self.builder
+                .build_store(
+                    slot,
+                    self.context.i8_type().const_int((!hole) as u64, false),
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(self
+            .compile_array_wrap_with_presence(base_ptr, presence)?
+            .into())
+    }
+
+    fn checked_array_allocation_size(
+        &mut self,
+        length: IntValue<'ctx>,
+        stride: u64,
+        name: &str,
+    ) -> Result<IntValue<'ctx>, String> {
+        let i64_type = self.context.i64_type();
+        let max_length = ((isize::MAX as u64) - ARRAY_HEADER_BYTES) / stride;
+        let too_long = self.builder.build_int_compare(
+            IntPredicate::UGT, length, i64_type.const_int(max_length, false),
+            &format!("{name}_too_long"),
+        ).map_err(|error| error.to_string())?;
+        let function = self.current_function();
+        let valid = self.context.append_basic_block(function, &format!("{name}_valid"));
+        let invalid = self.context.append_basic_block(function, &format!("{name}_invalid"));
+        self.builder.build_conditional_branch(too_long, invalid, valid)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(invalid);
+        self.compile_throw_type_error("Array allocation exceeds addressable storage")?;
+        self.builder.position_at_end(valid);
+        let payload = self.builder.build_int_mul(length, i64_type.const_int(stride, false),
+            &format!("{name}_payload")).map_err(|error| error.to_string())?;
+        self.builder.build_int_add(payload, i64_type.const_int(ARRAY_HEADER_BYTES, false),
+            &format!("{name}_size")).map_err(|error| error.to_string())
+    }
+
+    fn checked_array_length_add(
+        &mut self,
+        left: IntValue<'ctx>,
+        right: IntValue<'ctx>,
+    ) -> Result<IntValue<'ctx>, String> {
+        let i64_type = self.context.i64_type();
+        let max = i64_type.const_int(isize::MAX as u64, false);
+        let right_invalid = self.builder.build_int_compare(IntPredicate::UGT, right, max,
+            "array_part_length_invalid").map_err(|error| error.to_string())?;
+        let remaining = self.builder.build_int_sub(max, right, "array_length_remaining")
+            .map_err(|error| error.to_string())?;
+        let sum_invalid = self.builder.build_int_compare(IntPredicate::UGT, left, remaining,
+            "array_total_length_invalid").map_err(|error| error.to_string())?;
+        let invalid = self.builder.build_or(right_invalid, sum_invalid, "array_length_invalid")
+            .map_err(|error| error.to_string())?;
+        let function = self.current_function();
+        let valid_block = self.context.append_basic_block(function, "array_length_valid");
+        let invalid_block = self.context.append_basic_block(function, "array_length_overflow");
+        self.builder.build_conditional_branch(invalid, invalid_block, valid_block)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(invalid_block);
+        self.compile_throw_type_error("Array length exceeds addressable storage")?;
+        self.builder.position_at_end(valid_block);
+        self.builder.build_int_add(left, right, "spread_total")
+            .map_err(|error| error.to_string())
+    }
+
+    fn compile_array_alloc(
+        &mut self,
+        length: &HirExpr,
+        element: &HirType,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let i64_type = self.context.i64_type();
+        let length = self.compile_expr(length)?.into_float_value();
+        let length = self
+            .builder
+            .build_float_to_signed_int(length, i64_type, "array_alloc_length")
+            .map_err(|error| error.to_string())?;
+        let allocation_size = self.checked_array_allocation_size(
+            length, array_element_storage_bytes(element)?, "array_alloc")?;
+        let result = self
+            .builder
+            .build_call(
+                self.module.get_function("thaw_arena_alloc").unwrap(),
+                &[
+                    allocation_size.into(),
+                    i64_type
+                        .const_int((array_element_storage_bytes(element)?).min(8), false)
+                        .into(),
+                ],
+                "array_alloc",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("thaw_arena_alloc did not return an array")?
+            .into_pointer_value();
+        let unavailable = self.builder.build_is_null(result, "array_alloc_unavailable")
+            .map_err(|error| error.to_string())?;
+        let function = self.current_function();
+        let failed = self.context.append_basic_block(function, "array_alloc_failed");
+        let ready = self.context.append_basic_block(function, "array_alloc_ready");
+        self.builder.build_conditional_branch(unavailable, failed, ready)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(failed);
+        self.compile_throw_type_error("Unable to allocate Array storage")?;
+        self.builder.position_at_end(ready);
+        self.builder
+            .build_store(result, length)
+            .map_err(|error| error.to_string())?;
+        if *element == HirType::Undefined {
+            // Array.from's no-mapper path creates present undefined slots.
+            // Arena allocations are zeroed only while tracing is active.
+            let zero = self.builder.build_alloca(i64_type, "array_undefined_zero")
+                .map_err(|error| error.to_string())?;
+            self.builder.build_store(zero, i64_type.const_zero())
+                .map_err(|error| error.to_string())?;
+            self.builder.build_call(
+                self.module.get_function("thaw_array_fill").unwrap(),
+                &[result.into(), zero.into(), i64_type.const_int(8, false).into(),
+                    self.context.f64_type().const_zero().into(),
+                    self.context.f64_type().const_float(f64::INFINITY).into()],
+                "initialize_undefined_array",
+            ).map_err(|error| error.to_string())?;
+        }
+        Ok(self.compile_array_wrap(result)?.into())
+    }
+
+    /// Evaluates each array part once from left to right and copies their
+    /// uniform type-sized element slots into one arena-owned result array.
+    fn compile_array_concat(
+        &mut self,
+        parts: &[HirExpr],
+        element: &HirType,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let i64_type = self.context.i64_type();
+        let mut arrays = Vec::with_capacity(parts.len());
+        let mut total = i64_type.const_zero();
+        for part in parts {
+            let handle = self.compile_expr(part)?.into_pointer_value();
+            let array = self.compile_array_data(handle)?;
+            let length = self
+                .builder
+                .build_load(i64_type, array, "spread_length")
+                .map_err(|error| error.to_string())?
+                .into_int_value();
+            total = self.checked_array_length_add(total, length)?;
+            arrays.push((handle, array, length));
+        }
+
+        let element_width = array_element_storage_bytes(element)?;
+        let allocation_size = self.checked_array_allocation_size(
+            total, element_width, "spread_allocation")?;
+        let result = self
+            .builder
+            .build_call(
+                self.module.get_function("thaw_arena_alloc").unwrap(),
+                &[
+                    allocation_size.into(),
+                    i64_type.const_int(element_width.min(8), false).into(),
+                ],
+                "spread_array_alloc",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("thaw_arena_alloc did not return a spread array")?
+            .into_pointer_value();
+        self.builder
+            .build_store(result, total)
+            .map_err(|error| error.to_string())?;
+
+        // Array spread must retain holes from every source. Keep one mask for
+        // the result; dense inputs simply contribute `true` entries.
+        let presence = self
+            .builder
+            .build_call(
+                self.module.get_function("thaw_arena_alloc").unwrap(),
+                &[
+                    self.builder
+                        .build_int_add(total, i64_type.const_int(8, false), "spread_presence_size")
+                        .map_err(|error| error.to_string())?
+                        .into(),
+                    i64_type.const_int(1, false).into(),
+                ],
+                "spread_presence",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("thaw_arena_alloc did not return a spread presence mask")?
+            .into_pointer_value();
+        self.builder
+            .build_store(presence, total)
+            .map_err(|error| error.to_string())?;
+
+        let mut destination_offset = i64_type.const_int(ARRAY_HEADER_BYTES, false);
+        let mut destination_index = i64_type.const_zero();
+        for (handle, array, length) in arrays {
+            let bytes = self
+                .builder
+                .build_int_mul(length, element_bytes, "spread_copy_size")
+                .map_err(|error| error.to_string())?;
+            let source = unsafe {
+                self.builder
+                    .build_in_bounds_gep(
+                        self.context.i8_type(),
+                        array,
+                        &[i64_type.const_int(ARRAY_HEADER_BYTES, false)],
+                        "spread_source",
+                    )
+                    .map_err(|error| error.to_string())?
+            };
+            let destination = unsafe {
+                self.builder
+                    .build_in_bounds_gep(
+                        self.context.i8_type(),
+                        result,
+                        &[destination_offset],
+                        "spread_destination",
+                    )
+                    .map_err(|error| error.to_string())?
+            };
+            self.builder
+                .build_call(
+                    self.module.get_function("memcpy").unwrap(),
+                    &[destination.into(), source.into(), bytes.into()],
+                    "copy_spread_part",
+                )
+                .map_err(|error| error.to_string())?;
+            self.compile_array_presence_copy(handle, length, presence, destination_index)?;
+            destination_offset = self
+                .builder
+                .build_int_add(destination_offset, bytes, "next_spread_destination")
+                .map_err(|error| error.to_string())?;
+            destination_index = self
+                .builder
+                .build_int_add(destination_index, length, "next_spread_presence_offset")
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(self.compile_array_wrap_with_presence(result, presence)?.into())
+    }
+
+    fn compile_array_presence_copy(
+        &mut self,
+        source: PointerValue<'ctx>,
+        length: IntValue<'ctx>,
+        destination: PointerValue<'ctx>,
+        destination_offset: IntValue<'ctx>,
+    ) -> Result<(), String> {
+        let i64_type = self.context.i64_type();
+        let function = self.current_function();
+        let entry = self.builder.get_insert_block().ok_or("array spread has no block")?;
+        let condition = self.context.append_basic_block(function, "spread_presence_next");
+        let body = self.context.append_basic_block(function, "spread_presence_element");
+        let done = self.context.append_basic_block(function, "spread_presence_done");
+        self.builder.build_unconditional_branch(condition).map_err(|e| e.to_string())?;
+        self.builder.position_at_end(condition);
+        let index = self.builder.build_phi(i64_type, "spread_presence_index").map_err(|e| e.to_string())?;
+        index.add_incoming(&[(&i64_type.const_zero(), entry)]);
+        let current = index.as_basic_value().into_int_value();
+        let more = self.builder.build_int_compare(IntPredicate::ULT, current, length, "spread_presence_more").map_err(|e| e.to_string())?;
+        self.builder.build_conditional_branch(more, body, done).map_err(|e| e.to_string())?;
+        self.builder.position_at_end(body);
+        let state = self.compile_array_index_state(source, current)?;
+        let target_index = self.builder.build_int_add(destination_offset, current, "spread_presence_target").map_err(|e| e.to_string())?;
+        let target = unsafe { self.builder.build_in_bounds_gep(self.context.i8_type(), destination, &[self.builder.build_int_add(target_index, i64_type.const_int(8, false), "spread_presence_payload").map_err(|e| e.to_string())?], "spread_presence_slot").map_err(|e| e.to_string())? };
+        self.builder.build_store(target, state).map_err(|e| e.to_string())?;
+        let next = self.builder.build_int_add(current, i64_type.const_int(1, false), "spread_presence_increment").map_err(|e| e.to_string())?;
+        let body_end = self.builder.get_insert_block().ok_or("array spread lost its body block")?;
+        self.builder.build_unconditional_branch(condition).map_err(|e| e.to_string())?;
+        index.add_incoming(&[(&next, body_end)]);
+        self.builder.position_at_end(done);
+        Ok(())
+    }
+
+    /// Computes the address of `array[index]` (past the length header).
+    fn compile_element_ptr(
+        &mut self,
+        array: &HirExpr,
+        index: &HirExpr,
+    ) -> Result<PointerValue<'ctx>, String> {
+        self.compile_element_parts(array, index).map(|parts| parts.0)
+    }
+
+    fn compile_element_parts(
+        &mut self,
+        array: &HirExpr,
+        index: &HirExpr,
+    ) -> Result<(PointerValue<'ctx>, PointerValue<'ctx>, IntValue<'ctx>), String> {
+        let handle = self.compile_expr(array)?.into_pointer_value();
+        let arr_ptr = self.compile_array_data(handle)?;
+        let idx_val = self.compile_expr(index)?.into_float_value();
+
+        let i64_type = self.context.i64_type();
+        let idx_int = self
+            .builder
+            .build_float_to_signed_int(idx_val, i64_type, "idx")
+            .map_err(|e| e.to_string())?;
+        let element_bytes = match self.expr_hir_type(array) {
+            Some(HirType::Array(element)) => array_element_storage_bytes(&element)?,
+            Some(HirType::Tuple(elements)) => tuple_element_storage_bytes(&elements)?,
+            _ => ARRAY_ELEM_BYTES,
+        };
+        // Bounds/negative/non-integer-checked in `thaw_array_read_ptr`
+        // itself rather than with raw pointer arithmetic here, so an
+        // out-of-range index (e.g. a scalar-element array read that skips
+        // `lower_array_index`'s HIR-level presence/bounds check for a
+        // "conservative" parameter) reads a zeroed scratch slot instead of
+        // memory outside the array's own arena allocation.
+        let element = self
+            .builder
+            .build_call(
+                self.module.get_function("thaw_array_read_ptr").unwrap(),
+                &[
+                    arr_ptr.into(),
+                    i64_type.const_int(element_bytes, false).into(),
+                    idx_val.into(),
+                ],
+                "elem_ptr",
+            )
+            .map_err(|e| e.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("thaw_array_read_ptr did not return a pointer")?
+            .into_pointer_value();
+        Ok((element, handle, idx_int))
+    }
+
+    /// Preserve the existing static order for marker-capable allocations.
+    /// A fixed copy explicitly resets this list before creating its keys.
+    fn compile_initial_object_order(
+        &mut self,
+        object: PointerValue<'ctx>,
+        names: &[String],
+    ) -> Result<(), String> {
+        if !names.iter().any(|name| name.starts_with("__thaw_class_identity_\u{1e}")) {
+            return Ok(());
+        }
+        self.builder.build_call(
+            self.module.get_function("thaw_object_order_begin").unwrap(),
+            &[object.into()],
+            "object_order_begin",
+        ).map_err(|error| error.to_string())?;
+        let mut indices = names.iter().enumerate()
+            .filter_map(|(index, name)| (!is_hidden_accessor_field(name))
+                .then_some((index, object_array_index_key(name))))
+            .collect::<Vec<_>>();
+        indices.sort_by_key(|(index, numeric)| (numeric.is_none(), numeric.unwrap_or(*index as u32)));
+        for (index, _) in indices {
+            let key = self.compile_expr(&HirExpr::Lit(HirLit::Str(names[index].clone())))?
+                .into_pointer_value();
+            self.builder.build_call(
+                self.module.get_function("thaw_object_order_seed").unwrap(),
+                &[object.into(), key.into()],
+                "object_order_seed",
+            ).map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    }
+
+    /// Allocates native fields from the arena in the order `fields` lists
+    /// them (thaw-hir's lowering already reordered the literal to match its
+    /// declared type). Marker-capable values also seed their visible key order.
+    fn compile_object_lit(
+        &mut self,
+        fields: &[(String, HirExpr)],
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let field_vals = fields
+            .iter()
+            .map(|(_, expr)| self.compile_expr(expr))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let field_sizes = field_vals.iter().enumerate()
+            .map(|(index, value)| {
+                let declared = self.expr_hir_type(&fields[index].1)
+                    .map(|ty| object_field_storage_bytes(&ty))
+                    .transpose()?;
+                let actual = compiled_value_layout(value.get_type())?.0;
+                let actual = align_storage(actual, 8)?
+                    .max(if value.is_struct_value() { ASYNC_SLOT_BYTES } else { OBJECT_FIELD_BYTES });
+                if let Some(declared) = declared {
+                    if actual > declared {
+                        return Err(format!("object field `{}` exceeds its declared storage", fields[index].0));
+                    }
+                    Ok::<_, String>(declared)
+                } else {
+                    Ok(actual)
+                }
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let size = field_sizes.iter().try_fold(0, |total, width| checked_storage_add(total, *width))?;
+        let i64_type = self.context.i64_type();
+        let size_val = i64_type.const_int(size.max(1), false);
+        let align_val = i64_type.const_int(OBJECT_FIELD_BYTES, false);
+
+        let alloc_fn = self.module.get_function("thaw_arena_alloc").unwrap();
+        let call = self
+            .builder
+            .build_call(alloc_fn, &[size_val.into(), align_val.into()], "obj_alloc")
+            .map_err(|e| e.to_string())?;
+        let base_ptr = call
+            .try_as_basic_value()
+            .basic()
+            .ok_or("thaw_arena_alloc did not return a value")?
+            .into_pointer_value();
+
+        let mut byte_offset = 0;
+        for (i, val) in field_vals.into_iter().enumerate() {
+            let offset = i64_type.const_int(byte_offset, false);
+            let field_ptr = unsafe {
+                self.builder
+                    .build_in_bounds_gep(self.context.i8_type(), base_ptr, &[offset], "field_ptr")
+                    .map_err(|e| e.to_string())?
+            };
+            self.builder
+                .build_store(field_ptr, val)
+                .map_err(|e| e.to_string())?;
+            let (property, setter) = if let Some(property) = fields[i].0.strip_prefix("__thaw_getter_") {
+                (Some(property), false)
+            } else if let Some(property) = fields[i].0.strip_prefix("__thaw_setter_") {
+                (Some(property), true)
+            } else {
+                (None, false)
+            };
+            if let Some(property) = property {
+                let property = self
+                    .compile_raw_string_literal(property.as_bytes())?
+                    .into_pointer_value();
+                self.builder
+                    .build_call(
+                        self.module.get_function("thaw_object_set_accessor").unwrap(),
+                        &[
+                            base_ptr.into(),
+                            property.into(),
+                            val.into_pointer_value().into(),
+                            self.context.bool_type().const_int(setter as u64, false).into(),
+                        ],
+                        "register_object_accessor",
+                    )
+                    .map_err(|error| error.to_string())?;
+            }
+            byte_offset = checked_storage_add(byte_offset, field_sizes[i])?;
+        }
+
+        self.compile_initial_object_order(
+            base_ptr,
+            &fields.iter().map(|(name, _)| name.clone()).collect::<Vec<_>>(),
+        )?;
+        Ok(base_ptr.into())
+    }
+
+    fn compile_object_alloc(
+        &mut self,
+        object_type: &HirType,
+        class_constructor: bool,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let HirType::Object(fields) = object_type else {
+            return Err(format!(
+                "object allocation requires an object type, got {object_type:?}"
+            ));
+        };
+        let size = object_storage_bytes(fields)?.max(1);
+        let i64_type = self.context.i64_type();
+        let allocation = self
+            .builder
+            .build_call(
+                self.module.get_function("thaw_arena_alloc").unwrap(),
+                &[
+                    i64_type.const_int(size, false).into(),
+                    i64_type.const_int(OBJECT_FIELD_BYTES, false).into(),
+                ],
+                "object_alloc",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("thaw_arena_alloc did not return an object allocation")?
+            .into_pointer_value();
+        let mut byte_offset = 0u64;
+        for (_, field_type) in fields {
+            let field_pointer = unsafe {
+                self.builder
+                    .build_in_bounds_gep(
+                        self.context.i8_type(),
+                        allocation,
+                        &[i64_type.const_int(byte_offset, false)],
+                        "object_zero_field",
+                    )
+                    .map_err(|error| error.to_string())?
+            };
+            let zero = self.compile_zero_value(field_type)?;
+            self.builder
+                .build_store(field_pointer, zero)
+                .map_err(|error| error.to_string())?;
+            byte_offset = checked_storage_add(byte_offset, object_field_storage_bytes(field_type)?)?;
+        }
+        // Only a constructor's ClassAlloc may register nominal identity.
+        // Ordinary ObjectAlloc can originate from typed fallback values,
+        // even when a user supplied a marker-like field name.
+        if let Some((marker, HirType::Bool)) = fields.first().filter(|_| class_constructor) {
+            if marker.starts_with("__thaw_class_identity_\u{1e}") {
+                let marker = self
+                    .builder
+                    .build_global_string_ptr(marker, "class_identity_marker")
+                    .map_err(|error| error.to_string())?;
+                self.builder
+                    .build_call(
+                        self.module
+                            .get_function("thaw_object_set_class_identity")
+                            .unwrap(),
+                        &[allocation.into(), marker.as_pointer_value().into()],
+                        "register_class_identity",
+                    )
+                    .map_err(|error| error.to_string())?;
+            }
+        }
+        self.compile_initial_object_order(
+            allocation,
+            &fields.iter().map(|(name, _)| name.clone()).collect::<Vec<_>>(),
+        )?;
+        Ok(allocation.into())
+    }
+
+    fn compile_field_ptr_from_pointer(
+        &mut self,
+        object: PointerValue<'ctx>,
+        fields: &[(String, HirType)],
+        index: usize,
+    ) -> Result<PointerValue<'ctx>, String> {
+        let static_offset = self.context.i64_type()
+            .const_int(object_field_offset(fields, index)?, false);
+        if !self.tracks_physical_object_layouts {
+            return unsafe { self.builder.build_in_bounds_gep(
+                self.context.i8_type(), object, &[static_offset], "field_ptr",
+            ) }.map_err(|error| error.to_string());
+        }
+        let field_hex = fields[index].0.as_bytes().iter()
+            .map(|byte| format!("{byte:02x}")).collect::<String>();
+        let field_hex = self.builder.build_global_string_ptr(&field_hex, "native_field_name_hex")
+            .map_err(|error| error.to_string())?;
+        let offset = self.builder.build_call(
+            self.module.get_function("thaw_object_field_offset").unwrap(),
+            &[object.into(), field_hex.as_pointer_value().into(), static_offset.into()],
+            "native_physical_field_offset",
+        ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+            .ok_or("native field offset returned no value")?.into_int_value();
+        let missing = self.builder.build_int_compare(
+            IntPredicate::EQ, offset, self.context.i64_type().const_all_ones(),
+            "native_physical_field_missing",
+        ).map_err(|error| error.to_string())?;
+        let function = self.current_function();
+        let invalid = self.context.append_basic_block(function, "native_field_invalid");
+        let valid = self.context.append_basic_block(function, "native_field_valid");
+        self.builder.build_conditional_branch(missing, invalid, valid)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(invalid);
+        self.compile_throw_builtin_error("TypeError", "Incompatible native object field layout")?;
+        self.builder.position_at_end(valid);
+        unsafe {
+            self.builder
+                .build_in_bounds_gep(self.context.i8_type(), object, &[offset], "field_ptr")
+                .map_err(|e| e.to_string())
+        }
+    }
+
+    fn compile_object_accessor(
+        &mut self,
+        object: PointerValue<'ctx>,
+        property: &str,
+        setter: bool,
+    ) -> Result<PointerValue<'ctx>, String> {
+        let property = self
+            .compile_raw_string_literal(property.as_bytes())?
+            .into_pointer_value();
+        self.builder
+            .build_call(
+                self.module.get_function("thaw_object_accessor").unwrap(),
+                &[
+                    object.into(),
+                    property.into(),
+                    self.context.bool_type().const_int(setter as u64, false).into(),
+                ],
+                "object_accessor_lookup",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("object accessor lookup returned no value".into())
+            .map(BasicValueEnum::into_pointer_value)
+    }
+
+    fn compile_registered_accessor_call(
+        &mut self,
+        closure: PointerValue<'ctx>,
+        params: &[HirType],
+        ret: &HirType,
+        args: &[BasicMetadataValueEnum<'ctx>],
+        name: &str,
+    ) -> Result<Option<BasicValueEnum<'ctx>>, String> {
+        let function_pointer = self
+            .builder
+            .build_load(
+                self.context.ptr_type(AddressSpace::default()),
+                closure,
+                "object_accessor_code",
+            )
+            .map_err(|error| error.to_string())?
+            .into_pointer_value();
+        let mut compiled = vec![closure.into()];
+        compiled.extend_from_slice(args);
+        let call = self
+            .builder
+            .build_indirect_call(
+                self.function_type(params, ret)?,
+                function_pointer,
+                &compiled,
+                name,
+            )
+            .map_err(|error| error.to_string())?;
+        let value = call.try_as_basic_value().basic();
+        self.branch_on_pending_exception()?;
+        Ok(value)
+    }
+
+    fn compile_accessor_aware_field_read(
+        &mut self,
+        object: PointerValue<'ctx>,
+        object_type: &HirType,
+        fields: &[(String, HirType)],
+        index: usize,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let (field, field_type) = &fields[index];
+        let llvm_type = self.basic_type(field_type)?;
+        let field_pointer = self.compile_field_ptr_from_pointer(object, fields, index)?;
+        if is_hidden_accessor_field(field) {
+            return self
+                .builder
+                .build_load(llvm_type, field_pointer, "field")
+                .map_err(|error| error.to_string());
+        }
+        let getter = self.compile_object_accessor(object, field, false)?;
+        let function = self.current_function();
+        let call_getter = self.context.append_basic_block(function, "object_getter");
+        let load_field = self.context.append_basic_block(function, "object_data_read");
+        let done = self.context.append_basic_block(function, "object_read_done");
+        let has_getter = self
+            .builder
+            .build_is_not_null(getter, "object_has_getter")
+            .map_err(|error| error.to_string())?;
+        self.builder
+            .build_conditional_branch(has_getter, call_getter, load_field)
+            .map_err(|error| error.to_string())?;
+
+        self.builder.position_at_end(call_getter);
+        let getter_value = self
+            .compile_registered_accessor_call(
+                getter,
+                std::slice::from_ref(object_type),
+                field_type,
+                &[object.into()],
+                "object_getter_call",
+            )?
+            .ok_or("object getter returned no value")?;
+        let getter_end = self
+            .builder
+            .get_insert_block()
+            .ok_or("object getter call has no insertion block")?;
+        self.builder
+            .build_unconditional_branch(done)
+            .map_err(|error| error.to_string())?;
+
+        self.builder.position_at_end(load_field);
+        let field_value = self
+            .builder
+            .build_load(llvm_type, field_pointer, "field")
+            .map_err(|error| error.to_string())?;
+        let field_end = self
+            .builder
+            .get_insert_block()
+            .ok_or("object field read has no insertion block")?;
+        self.builder
+            .build_unconditional_branch(done)
+            .map_err(|error| error.to_string())?;
+
+        self.builder.position_at_end(done);
+        let result = self
+            .builder
+            .build_phi(llvm_type, "object_read")
+            .map_err(|error| error.to_string())?;
+        result.add_incoming(&[(&getter_value, getter_end), (&field_value, field_end)]);
+        Ok(result.as_basic_value())
+    }
+
+}

@@ -1,0 +1,306 @@
+{
+  "base_commit": "f4e2faf98b6973306ac634f2d78968904b846480",
+  "execution_verified": false,
+  "drafts": {
+    "jit": {
+      "status": "HOLD_UNREVIEWED_DO_NOT_APPLY_AS_COMPLETE",
+      "owners": [
+        {
+          "path": "crates/thaw-cli/src/registry_integration/jit/callables.rs",
+          "base_sha256": "05cc869cccc281e11bd700ae58238f099a91359b40e0efd8248db34eaedbfaa2",
+          "candidate_sha256": "4727deab10b478a638199cbe953086e1e511913a0fb7f049c7d3006ee23345a5",
+          "base_matches_checkpoint": true
+        },
+        {
+          "path": "crates/thaw-cli/src/registry_integration/jit/conditions.rs",
+          "base_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "candidate_sha256": "4429a365c08289fa410ab3edf4b1aab49d4a24487ac2ed5135b9d8421974274f",
+          "base_matches_checkpoint": false
+        },
+        {
+          "path": "crates/thaw-cli/src/registry_integration/jit/expressions.rs",
+          "base_sha256": "87590167c3efefecc83bb897341f2bafc3b23405287316f2e62e5fa517fcb8ed",
+          "candidate_sha256": "b0857eb69250674cba10aa6299c5ad555d96e74408265ed45ee266969c30662f",
+          "base_matches_checkpoint": true
+        },
+        {
+          "path": "crates/thaw-cli/src/registry_integration/jit/returns.rs",
+          "base_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "candidate_sha256": "f162cadc990922319e6ac447af4225e6ae8fb6dc2ed0e18ad618402b866e2266",
+          "base_matches_checkpoint": false
+        },
+        {
+          "path": "crates/thaw-cli/src/registry_integration/jit_validation/expression.rs",
+          "base_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "candidate_sha256": "22fbe9bb66df4a527b0966b7a66a6bb37594e327ced958526e8b8d1fb8ba4874",
+          "base_matches_checkpoint": false
+        },
+        {
+          "path": "crates/thaw-cli/src/registry_integration/jit_validation/kinds.rs",
+          "base_sha256": "4ba7c195e11cd2d7e7bf02b2abaa9cde7e4b8acd777cd42247d981f2ce31c1a1",
+          "candidate_sha256": "a23ae5446f6dbd962c8766c4307693f65c6f1afdd771f7453c39662514ad0473",
+          "base_matches_checkpoint": true
+        },
+        {
+          "path": "crates/thaw-cli/src/tests/jit_exports.rs",
+          "base_sha256": "7f1c82f3cbe21c288aed54f465250d8579f6856d51c3efcd803bd8a665ae798d",
+          "candidate_sha256": "5122ca6c6c46511140960a2c91a207b5266acc83afaee0965a8fba013a80338d",
+          "base_matches_checkpoint": true
+        },
+        {
+          "path": "crates/thaw-jit/src/compiler/machine.rs",
+          "base_sha256": "fd9d8f58dca197b7a3b796152dc47d613f21f8d8cb55e0f92472876ce39257c3",
+          "candidate_sha256": "9ebb715d84a00e32602db0f4cf7de4a88052fb2a3f00fe133060d2627fce63aa",
+          "base_matches_checkpoint": true
+        },
+        {
+          "path": "crates/thaw-jit/src/compiler/program/analysis.rs",
+          "base_sha256": "3c0d7f3dc85b67ac82bd0d3f78bfd4adfdf74a72f5e2cf248638859d5729267c",
+          "candidate_sha256": "8d7be30c65d30d755faef03d2002ccc9889c67352b6fb736e137bef244c0c473",
+          "base_matches_checkpoint": true
+        },
+        {
+          "path": "crates/thaw-jit/src/compiler/program/codegen.rs",
+          "base_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "candidate_sha256": "dee0c7234fe434302168623de05b5a3d67032774c7a2e537b5a7f86de39c3923",
+          "base_matches_checkpoint": false
+        },
+        {
+          "path": "crates/thaw-jit/src/compiler/program/ir.rs",
+          "base_sha256": "72ab4ccc5758198bc968d19ad1029c4d9f0ac5b625b97644c2993e944c7a4115",
+          "candidate_sha256": "e1b812086b4ddfa3c65f3c859548df48783236e498b287e15613ea8b4bfa6834",
+          "base_matches_checkpoint": true
+        },
+        {
+          "path": "crates/thaw-jit/src/compiler/program/parser.rs",
+          "base_sha256": "9f17b4e22e4669127dc33c315cafbf2e9e18ac254da3b036ad7a9a576377d195",
+          "candidate_sha256": "9ac6122b5c9be174741abe4ec8c460b62ac6dcab6569468b78f296b1e1e1756a",
+          "base_matches_checkpoint": true
+        },
+        {
+          "path": "crates/thaw-jit/src/runtime/arrays/callbacks/basic.rs",
+          "base_sha256": "9f9af2a5e8531dd33aaf7deaca128e4a44951f144fd19036504c8d571d1d6b64",
+          "candidate_sha256": "e2ed9d2fe1400d510fd476282b7f7b1b2b74df4da5a63073a7cdd9080a854157",
+          "base_matches_checkpoint": true
+        },
+        {
+          "path": "crates/thaw-jit/src/runtime/arrays/callbacks/jit.rs",
+          "base_sha256": "fe5e5c9f6fe0470c1286ffd437c5700b473a1a65a37ad88f188f72fdfd09d594",
+          "candidate_sha256": "31c2188d94ebd210b31ad841fe42359c1df2ec00e52e0a78a50483f4a5cfad3b",
+          "base_matches_checkpoint": true
+        },
+        {
+          "path": "crates/thaw-jit/src/runtime/arrays/mutations.rs",
+          "base_sha256": "769b9a53df5f5df4ec546e9d3739ec65dd1f08d5254fc851cae2900e7204b0f9",
+          "candidate_sha256": "6d9ae9eee1a816a003f39e3f24ee366c4c5f8a17bb3de06e016b62f873de23f2",
+          "base_matches_checkpoint": true
+        },
+        {
+          "path": "crates/thaw-jit/src/runtime/arrays/transforms.rs",
+          "base_sha256": "d917031e842253684d77fa2addb8af42f624b404cf0194529ec823972d03ba2e",
+          "candidate_sha256": "75d83c85b0416684bcb99908403ce519a768ecb704cdbba63bdad280ba6c00f5",
+          "base_matches_checkpoint": true
+        },
+        {
+          "path": "crates/thaw-jit/src/runtime/globals.rs",
+          "base_sha256": "3f6a85b406e8a4a4d12a3090b2ccb4827706742f818efd533d5c2ce53c984442",
+          "candidate_sha256": "23a1b710e5724878dc0798a118643a54851598b979b0085ae29865d85bd0b691",
+          "base_matches_checkpoint": true
+        },
+        {
+          "path": "crates/thaw-jit/src/runtime/values.rs",
+          "base_sha256": "e4cf5213f0013cdc3f302ca8c598b8d9ef9ebdf5a5b230a6ab93d8683a16a43d",
+          "candidate_sha256": "c6ee6d2e584188d055c89238601d5ba448c08c4a239b6e74aeba61cd8ef49e7d",
+          "base_matches_checkpoint": true
+        },
+        {
+          "path": "crates/thaw-jit/src/tests.rs",
+          "base_sha256": "e8ad6489ac30ee54b57791a963cbad3ed0a7fdeaddeb6ed2ae3c1dddda90cbeb",
+          "candidate_sha256": "425084a430bb85f3b35f9304adfc7ff5646a605a54951b1a2050da6dd6dbf5c1",
+          "base_matches_checkpoint": true
+        },
+        {
+          "path": "crates/thaw-llvm/src/hir_codegen/collections.rs",
+          "base_sha256": "d3b3b094dbb3d87672e3f4958e96c4d5d11fb48a37f99dd1dc7eb62db2809571",
+          "candidate_sha256": "cbdc59b341250a3ebf28bb08c990e4942cb21fffb504a6242678de10b9f6aaa4",
+          "base_matches_checkpoint": true
+        },
+        {
+          "path": "crates/thaw-llvm/src/hir_codegen/dynamic_host/support.rs",
+          "base_sha256": "1d654053dd7cb555c246e8c906513b40d6c8eaa6c9308c917dcf8a771971be03",
+          "candidate_sha256": "83e4b7851dce0e31b36a3ecfd26d91b7ba5d51f560357ee26323b811105798f4",
+          "base_matches_checkpoint": true
+        },
+        {
+          "path": "crates/thaw-llvm/src/hir_codegen/dynamic_host/typed_calls.rs",
+          "base_sha256": "75254b8d7545b4c44619bdda601c4d16173a2b788411c39fdfe702bcd8559882",
+          "candidate_sha256": "1e06d5b46a29910639d02624d959d8726ff24a560030fbc138451ad2f04b7bac",
+          "base_matches_checkpoint": true
+        },
+        {
+          "path": "crates/thaw-llvm/src/hir_codegen/runtime_declarations.rs",
+          "base_sha256": "da43390d9354c5dc0124ec290f1738a8ce08ee8629660f290ff4a709ff3f21eb",
+          "candidate_sha256": "75a5c7930ab7b4cc6e73eaa1bc55b2aaefabf4f5832bbbcfbf08b58c82575737",
+          "base_matches_checkpoint": true
+        },
+        {
+          "path": "crates/thaw-runtime/src/runtime/native_values/arrays.rs",
+          "base_sha256": "7897dc042cea6d1ee922399f189b17917704fb4a0a98b2b76c226eec0c9fc046",
+          "candidate_sha256": "dc993ddfed423fd28dc643b5f0d330aef81380059c9f8377df3efd282e8c12ca",
+          "base_matches_checkpoint": true
+        }
+      ],
+      "patch_sha256": "65052273c58e1e513d8f939724d136eb8cae53e9d1788993ff0d5a715b2375d7"
+    },
+    "native": {
+      "status": "HOLD_UNREVIEWED_DO_NOT_APPLY_AS_COMPLETE",
+      "owners": [
+        {
+          "path": "crates/thaw-hir/src/hir/types.rs",
+          "base_sha256": "e96aa5e241bccf23ec61aa6400a7932bdac4a5fe59c87de5682d15d19c23089b",
+          "candidate_sha256": "8ae6eaecfb9a7027efad2d6e1cd6264be9aa4d3372753d24c52f12537a339653",
+          "base_matches_checkpoint": true
+        },
+        {
+          "path": "crates/thaw-hir/src/lower/control_flow.rs",
+          "base_sha256": "70dd091efd75b2020a89b838e4158804ea599844c8b48163b6256990be157ec1",
+          "candidate_sha256": "5d7fb80839500db433dd857823a0ba09f68590fd20f8be882114f73c06faaf78",
+          "base_matches_checkpoint": true
+        },
+        {
+          "path": "crates/thaw-hir/src/lower/expressions/lowering.rs",
+          "base_sha256": "40b375338598d41357adb6007511345982846555ccfd8985ded55c1c17786223",
+          "candidate_sha256": "03c839fb1c46519ea4811bf5876d573b3e2f153478b3b93f8190ec36e9abb528",
+          "base_matches_checkpoint": true
+        },
+        {
+          "path": "crates/thaw-hir/src/lower/inference/types.rs",
+          "base_sha256": "2f78eb742f698a8eec7c0935006890edfb0a8149623e2a757638c40f6d6fbf40",
+          "candidate_sha256": "bd193e0a863d521e8975a1e11f7a8c2d43ae76fee0981383f6d2514627954bc4",
+          "base_matches_checkpoint": true
+        },
+        {
+          "path": "crates/thaw-hir/src/lower/invocations/calls.rs",
+          "base_sha256": "d4454389153d8dc377dfacfdb8d89c0036bf8b8e25208b77ef064831166364fe",
+          "candidate_sha256": "099842ace8b36e43f946e341a36f935f507e412c950c83f97ceee18e62184e69",
+          "base_matches_checkpoint": true
+        },
+        {
+          "path": "crates/thaw-hir/src/lower/promises.rs",
+          "base_sha256": "49aba818312da21954fead036ddf01a636fc5f21fd66b799d268a18ada465a1d",
+          "candidate_sha256": "a6b645dfe302cb5be37a685b1d2697a9bb5f75def3cd83459523e0282d59f7f9",
+          "base_matches_checkpoint": true
+        },
+        {
+          "path": "crates/thaw-hir/src/lower/statements/lowering.rs",
+          "base_sha256": "bcd6f7f57fa9e956db2bf11b6f75481ddccf1d715952d42148fbc1a418d76524",
+          "candidate_sha256": "b8f3c78598e0195802218b84b6e0313a2f99b96ff8f9e9213930cf9c42e1c423",
+          "base_matches_checkpoint": true
+        },
+        {
+          "path": "crates/thaw-hir/src/lower/tests/control_flow.rs",
+          "base_sha256": "4cb953e5fb8b4bd1009ebda1299356d76102b294b99ee31346633d73362c2f7a",
+          "candidate_sha256": "949da50ab6d115d667fc42a55c30b7aac550cd5c94664a855a4c2a568b1d83c8",
+          "base_matches_checkpoint": true
+        },
+        {
+          "path": "crates/thaw-llvm/src/hir_codegen/async_frames/codegen.rs",
+          "base_sha256": "6a97cd617c4ad1e004a79c6f3330520af81a1ec6099adbf3b072f2ab13d8df6b",
+          "candidate_sha256": "a9d7763603e6a213a7f52c6808e797333409ee331503d3e146cb51536f339ccf",
+          "base_matches_checkpoint": true
+        },
+        {
+          "path": "crates/thaw-llvm/src/hir_codegen/async_frames/planning/plan.rs",
+          "base_sha256": "4c082a67c8b313dfdeaae278cdf8656ff71bae89c51dc55bdc25f455f6deae82",
+          "candidate_sha256": "750fdd196261a33246813e262318d5086962b70477478d61a551b481ec97bf29",
+          "base_matches_checkpoint": true
+        },
+        {
+          "path": "crates/thaw-llvm/src/hir_codegen/functions.rs",
+          "base_sha256": "eb3f2c93e7e5456432a5aa043bb5f90b6ae18414029a0b87af466b4e5481f251",
+          "candidate_sha256": "d8a5b4f23a4627b88361a66a4f9a63b68dbc7e58f90faaf091d1200a355239d1",
+          "base_matches_checkpoint": true
+        },
+        {
+          "path": "crates/thaw-llvm/src/hir_codegen/invocations/calls.rs",
+          "base_sha256": "d1cdf301426d064180bb26e0d6eb5cab4250601eaff27e8b6ea09c7af06c6c5c",
+          "candidate_sha256": "aec037e3813f022fc2c57d86932ea3ee19c1bf731397e483b09514c35e6922b6",
+          "base_matches_checkpoint": true
+        },
+        {
+          "path": "crates/thaw-llvm/src/hir_codegen/json_values.rs",
+          "base_sha256": "186ff6b2c6b1a5018a7f14a396441dc4a6e0d8940531e11d06588c945903b8e9",
+          "candidate_sha256": "8bfefa80a5c47f3a7f1c3178afd36e1faeea351d2337ff4adba8c6bea9c8fe5c",
+          "base_matches_checkpoint": true
+        },
+        {
+          "path": "crates/thaw-llvm/src/hir_codegen/promises.rs",
+          "base_sha256": "b9c5d7af105cc529d56f7f2adb149cb4c57f3269aaedf63e92fb3333926a2eca",
+          "candidate_sha256": "58d74d14d915428958e61587f8f721592a432c0e225d84dd97d222c7d05bb09f",
+          "base_matches_checkpoint": true
+        },
+        {
+          "path": "crates/thaw-llvm/src/hir_codegen/runtime_declarations.rs",
+          "base_sha256": "da43390d9354c5dc0124ec290f1738a8ce08ee8629660f290ff4a709ff3f21eb",
+          "candidate_sha256": "f30c349f31c38cb27ee95730ede80206f715f2d4e86dbac2222772f0c3f4905a",
+          "base_matches_checkpoint": true
+        },
+        {
+          "path": "crates/thaw-llvm/src/hir_codegen/statements.rs",
+          "base_sha256": "a7ec10e4c88a957c70dc7eca237add9f679188662cb81c11e2add3a7ff1d44f4",
+          "candidate_sha256": "c4ca917db33794ca2104baa3e4466cc19a56c48a3b9d5c0749dc4bd57568fe3d",
+          "base_matches_checkpoint": true
+        },
+        {
+          "path": "crates/thaw-llvm/src/hir_codegen/tests/async/expressions.rs",
+          "base_sha256": "2ada3ed248cfc1aee26efe30e333d3a7297648e1da8c88418ad903e862b12229",
+          "candidate_sha256": "c420c55d2f9f045ce57ad2e2dc436bff618a55311a000aa361335cc854fae9a1",
+          "base_matches_checkpoint": true
+        },
+        {
+          "path": "crates/thaw-llvm/src/hir_codegen/values/closures.rs",
+          "base_sha256": "45aa20374de0d0f6b8a42b89e90f139a051c52c10ebfa0a6d68cccde3644b2db",
+          "candidate_sha256": "db7c97898eebf2323c6a87441894edc902dca2baa3de10a0584eea4165b68a56",
+          "base_matches_checkpoint": true
+        },
+        {
+          "path": "crates/thaw-llvm/src/hir_codegen/values/expressions.rs",
+          "base_sha256": "93752554f0a4b3b6c2f43f30ee51b20443a815f09b0fd50154dd2432d2375305",
+          "candidate_sha256": "4168f60dbdbc42f80e5e0fe5273e107c00551c0fbe31d3f5bf2140543b769a93",
+          "base_matches_checkpoint": true
+        },
+        {
+          "path": "crates/thaw-llvm/src/hir_codegen/values/unions.rs",
+          "base_sha256": "50ebe7c89d70e4f481a329f7bd89e067d1115e95f74a0d2a0fb0e62b7ff0c4c5",
+          "candidate_sha256": "c88f9cada47bbfe0c4d0da6b75e98bf1c6da5e82d6115b9d8fea02f60bebaf25",
+          "base_matches_checkpoint": true
+        },
+        {
+          "path": "crates/thaw-llvm/src/hir_codegen.rs",
+          "base_sha256": "d4d3c8fb430cbe43a39c34da8d31e5b57e6173afc9f6dd081dd5c108ce2746d3",
+          "candidate_sha256": "42ccbbcf946b986b135d383d3c26254013af51c29b814d620b0423f9297583f0",
+          "base_matches_checkpoint": true
+        },
+        {
+          "path": "crates/thaw-runtime/src/lib.rs",
+          "base_sha256": "ebb610d19e384b12461e677868c1dae17f9f7542256949613d5e8e5f22fc60b1",
+          "candidate_sha256": "a1d329dda73189b4d0f7fe2efe7dd01c51c70388d50a3d49085d2ecf1acb81aa",
+          "base_matches_checkpoint": true
+        },
+        {
+          "path": "crates/thaw-runtime/src/runtime/promises.rs",
+          "base_sha256": "ff4d08d09ba01b707d210ed6103e485ff8c847ca980868312b8caddb87037f4b",
+          "candidate_sha256": "e322721353ad122e435466952416a6af213bf9861081a96d942643efadfc5330",
+          "base_matches_checkpoint": true
+        },
+        {
+          "path": "crates/thaw-runtime/src/tests.rs",
+          "base_sha256": "308b36865f3324e7d716faf79d1f09a742f412e28e7ed7441ee743cee4f9567e",
+          "candidate_sha256": "2077a6c4782983e484fd4f45661a211ee527ce8fd5e3d7e36c237c4fdbe69915",
+          "base_matches_checkpoint": true
+        }
+      ],
+      "patch_sha256": "359172c41195eb98f687f5f36d4ed9a07d8d5ff38e5e3564ce609552994a6506"
+    }
+  }
+}
