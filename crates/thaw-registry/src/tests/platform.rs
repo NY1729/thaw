@@ -1300,3 +1300,61 @@ fn file_loaders_accept_hashbangs_without_stripping_json_or_interior_text() {
     let _ = fs::remove_dir_all(dir);
     let _ = fs::remove_dir_all(modules);
 }
+
+#[test]
+fn file_worker_package_main_rethrows_initialization_and_syntax_errors() {
+    use std::ffi::{CStr, CString};
+    let dir = temp_registry("worker_package_main_errors");
+    let modules = temp_registry("worker_package_main_errors_modules");
+    fs::write(dir.join("index.js"), r#"
+        var Worker = require('node:worker_threads').Worker;
+        module.exports = function () {
+            var originalRead = globalThis.__thaw_worker_read_source;
+            var originalSpawn = globalThis.__thaw_worker_spawn;
+            var captured, stop = {};
+            globalThis.__thaw_package_control_failure = {};
+            globalThis.__thaw_package_control_attempts = Object.create(null);
+            globalThis.__thaw_worker_read_source = function(path) {
+                if (path === '/package/entry.js') return [
+                    "function retry(request) { var caught = false; try { require(request); } catch (error) { caught = error === globalThis.__thaw_package_control_failure; } return [caught, require(request)]; }",
+                    "var syntaxFailed = false; try { require('./syntax-package'); } catch (error) { syntaxFailed = error instanceof SyntaxError; }",
+                    "module.exports = [retry('./local-package'), retry('bare-package'), syntaxFailed];"
+                ].join(';');
+                if (path === '/package/syntax-package/package.json') return '{"main":"broken.js"}';
+                if (path === '/package/syntax-package/broken.js') return 'module.exports = (';
+                if (path === '/package/local-package/package.json' ||
+                    path === '/package/node_modules/bare-package/package.json') return '{"main":"main.js"}';
+                if (path === '/package/local-package/main.js' ||
+                    path === '/package/node_modules/bare-package/main.js') return 'var key = ' + JSON.stringify(path) + '; var counts = globalThis.__thaw_package_control_attempts;' +
+                    'if ((counts[key] = (counts[key] || 0) + 1) === 1) throw globalThis.__thaw_package_control_failure;' +
+                    'module.exports = 42;';
+                throw new Error('Unexpected read: ' + path);
+            };
+            globalThis.__thaw_worker_spawn = function(bundle, source) { captured = source; throw stop; };
+            try {
+                try { new Worker('/package/entry.js'); } catch (error) { if (error !== stop) throw error; }
+                if (captured === undefined) throw new Error('Missing generated Worker source');
+                var childModule = { exports: {} };
+                Function('require', 'module', 'exports', captured)(
+                    function(name) { throw new Error(name); }, childModule, childModule.exports);
+                return childModule.exports;
+            } finally {
+                globalThis.__thaw_worker_read_source = originalRead;
+                globalThis.__thaw_worker_spawn = originalSpawn;
+                delete globalThis.__thaw_package_control_failure;
+                delete globalThis.__thaw_package_control_attempts;
+            }
+        };
+    "#).unwrap();
+    let (bundle, _, _, _) = bundle_commonjs_package(&modules, "pkg", &dir, "index.js").unwrap();
+    let script = format!(
+        "globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; \
+         globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} \
+         globalThis.exerciseWorkerPackageMainErrors = module.exports;"
+    );
+    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
+    let result = thaw_quickjs::thaw_js_call(c"exerciseWorkerPackageMainErrors".as_ptr(), c"[]".as_ptr());
+    assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[[true,42],[true,42],true]");
+    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(modules);
+}
