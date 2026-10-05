@@ -1,6 +1,12 @@
+  const uncloneable = globalThis.__thaw_uncloneable_objects
+    || (globalThis.__thaw_uncloneable_objects = new WeakSet());
   globalThis.__thaw_worker_encode = value => {
     const seen = new Map(), nodes = [];
     const encode = input => {
+      if (((typeof input === 'object' && input !== null) || typeof input === 'function')
+          && uncloneable.has(input)) {
+        throw new DOMException('Object is marked as uncloneable', 'DataCloneError');
+      }
       if (input === undefined) return { p: 'undefined' };
       if (typeof input === 'number' && !Number.isFinite(input)) return { p: String(input) };
       if (typeof input === 'bigint') return { p: 'bigint', v: String(input) };

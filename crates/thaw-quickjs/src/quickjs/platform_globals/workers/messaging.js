@@ -17,6 +17,7 @@
         let copy;
         try { copy = structuredClone(value, { transfer }); }
         catch (error) {
+          if (workerUncloneableErrors.has(error)) throw error;
           const peer = this.__thawPeer;
           queueMicrotask(() => peer.__thawDispatchError(error));
           return;
@@ -83,6 +84,7 @@
       get onmessageerror() { return this.__thawOnMessageError; }
     }
     globalThis.MessagePort = MessagePort;
+    globalThis.__thaw_message_port_postmessage_with_uncloneable_checks = MessagePort.prototype.postMessage;
     globalThis.MessageChannel = class MessageChannel {
       constructor() {
         this.port1 = new MessagePort();
