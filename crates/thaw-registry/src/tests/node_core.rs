@@ -2831,6 +2831,17 @@ module.exports = async function () {
   setTimeEffect.push(Date.now(), setTimeEffect.length);
   test.mock.timers.tick(0);
   test.mock.timers.reset();
+  test.mock.timers.enable({ apis: ['setImmediate'] });
+  var immediateOnly = [];
+  timers.setImmediate(function() { immediateOnly.push('ran'); });
+  test.mock.timers.runAll();
+  test.mock.timers.reset();
+  test.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 1000 });
+  var overdue = [];
+  timers.setTimeout(function() { overdue.push(Date.now()); }, 5);
+  test.mock.timers.setTime(1010);
+  test.mock.timers.runAll();
+  test.mock.timers.reset();
   test.mock.timers.enable({ apis: ['Date'] });
   var dateOnly = [Date.now()];
   test.mock.timers.setTime(42);
@@ -2847,7 +2858,7 @@ module.exports = async function () {
     test.mock.timers[Symbol.dispose]();
     disposeOk = Date === nativeDate;
   }
-  return [seen, result.status, saved.enabled, closed, Date === nativeDate, setTimeEffect, dateOnly, disposeOk];
+  return [seen, result.status, saved.enabled, closed, Date === nativeDate, setTimeEffect, immediateOnly, overdue, dateOnly, disposeOk];
 };"#,
     )
     .unwrap();
@@ -2870,7 +2881,7 @@ module.exports = async function () {
     let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
     assert_eq!(
         result,
-        r#"[[true,1000,"immediate@1000","interval@1010","early","equal","interval@1010","late","promise",1010,true,"interval@1030","interval@1030","interval@1030","interval@1030","interval@1030","last",true,1030,2,true,0],"passed",false,true,true,[1006,0,"fired"],[0,42,43,0,true],true]"#
+        r#"[[true,1000,"immediate@1000","interval@1010","early","equal","interval@1010","late","promise",1010,true,"interval@1030","interval@1030","interval@1030","interval@1030","interval@1030","last",true,1030,2,true,0],"passed",false,true,true,[1006,0,"fired"],["ran"],[1010],[0,42,43,0,true],true]"#
     );
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
