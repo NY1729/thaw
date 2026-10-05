@@ -27,11 +27,13 @@
         this.__thawPeer.__thawQueue.push({ data: copy, ports });
         this.__thawPeer.__thawSchedule();
       }
-      __thawTransfer() {
+      __thawValidateTransfer() {
         if (this.__thawClosed || !this.__thawPeer) {
           throw new DOMException('MessagePort is already detached', 'DataCloneError');
         }
-        const transferred = new MessagePort();
+      }
+      __thawTransferTo(transferred) {
+        this.__thawValidateTransfer();
         transferred.__thawPeer = this.__thawPeer;
         transferred.__thawQueue = this.__thawQueue;
         this.__thawPeer.__thawPeer = transferred;
@@ -40,6 +42,10 @@
         this.__thawClosed = true;
         this.__thawTransferredPort = transferred;
         return transferred;
+      }
+      __thawTransfer() {
+        this.__thawValidateTransfer();
+        return this.__thawTransferTo(new MessagePort());
       }
       __thawSchedule() {
         if (!this.__thawStarted || this.__thawScheduled || this.__thawClosed) return;

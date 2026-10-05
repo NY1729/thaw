@@ -1,6 +1,6 @@
   const uncloneable = globalThis.__thaw_uncloneable_objects
     || (globalThis.__thaw_uncloneable_objects = new WeakSet());
-  globalThis.__thaw_worker_encode = value => {
+  globalThis.__thaw_worker_encode = (value, transferPortIds) => {
     const seen = new Map(), nodes = [];
     const encode = input => {
       if (((typeof input === 'object' && input !== null) || typeof input === 'function')
@@ -27,8 +27,10 @@
       else if (input instanceof Map) node = { t: 'Map', v: Array.from(input, entry => [encode(entry[0]), encode(entry[1])]) };
       else if (input instanceof Set) node = { t: 'Set', v: Array.from(input, encode) };
       else if (typeof globalThis.MessagePort === 'function' && input instanceof globalThis.MessagePort) {
-        if (!input.__thawHostPortId) throw new DOMException('MessagePort requires a transfer list', 'DataCloneError');
-        node = { t: 'MessagePort', v: String(input.__thawHostPortId) };
+        const stagedId = transferPortIds && transferPortIds.get(input);
+        const portId = stagedId === undefined ? input.__thawHostPortId : stagedId;
+        if (!portId) throw new DOMException('MessagePort requires a transfer list', 'DataCloneError');
+        node = { t: 'MessagePort', v: String(portId) };
       }
       else if (input instanceof ArrayBuffer) node = { t: 'ArrayBuffer', v: Array.from(new Uint8Array(input), byte => byte.toString(16).padStart(2, '0')).join('') };
       else if (ArrayBuffer.isView(input)) node = { t: input instanceof DataView ? 'DataView' : 'TypedArray', c: input.constructor.name, b: encode(input.buffer), o: input.byteOffset, l: input instanceof DataView ? input.byteLength : input.length };
