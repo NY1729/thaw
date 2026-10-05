@@ -2524,6 +2524,106 @@ module.exports = async function () {
 }
 
 #[test]
+fn node_test_root_hooks_finalize_without_run_and_replay_once() {
+    use std::ffi::{CStr, CString};
+
+    let dir = temp_registry("builtin_test_root_hooks");
+    fs::write(
+        dir.join("index.js"),
+        r#"var test = require('node:test');
+module.exports = async function () {
+  var effects = [], first = test('first', function() { effects.push('first'); });
+  test.before(function() { effects.push('before'); });
+  test.after(function() { effects.push('after'); });
+  await first;
+  await new Promise(function(resolve) { setTimeout(resolve, 20); });
+  await test('second', function() { effects.push('second'); });
+  globalThis.inspectRootHooks = async function() {
+    var firstHistory = [], secondHistory = [];
+    for await (var event of test.run()) firstHistory.push(event.name + ':' + event.status);
+    for await (var event of test.run()) secondHistory.push(event.name + ':' + event.status);
+    var lateTest = false, lateHook = false;
+    try { test('late', function() {}); } catch (error) { lateTest = true; }
+    try { test.after(function() {}); } catch (error) { lateHook = true; }
+    return [effects, firstHistory, secondHistory, lateTest, lateHook];
+  };
+  return 'registered';
+};"#,
+    ).unwrap();
+    let empty_node_modules = temp_registry("builtin_test_root_hooks_modules");
+    let (bundle, _, file_count, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    assert!(file_count >= 4);
+    let script = format!(
+        "globalThis.module = {{ exports: {{}} }};\n\
+         globalThis.exports = globalThis.module.exports;\n\
+         globalThis.require = function(name) {{ throw new Error(\"require('\" + name + \"') is not supported\"); }};\n\
+         {bundle}\n\
+         globalThis.exerciseRootHooks = module.exports;\n"
+    );
+    let source = CString::new(script).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let func = CString::new("exerciseRootHooks").unwrap();
+    let args = CString::new("[]").unwrap();
+    let result_ptr = thaw_quickjs::thaw_js_call(func.as_ptr(), args.as_ptr());
+    assert_eq!(unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy(), "\"registered\"");
+    assert_eq!(thaw_quickjs::thaw_js_run_event_loop(), 0);
+    let inspect = CString::new("inspectRootHooks").unwrap();
+    let result_ptr = thaw_quickjs::thaw_js_call(inspect.as_ptr(), args.as_ptr());
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(result, r#"[["before","first","second","after"],["first:passed","second:passed"],["first:passed","second:passed"],true,true]"#);
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+}
+
+#[test]
+fn node_test_root_before_failure_publishes_and_runs_after() {
+    use std::ffi::{CStr, CString};
+
+    let dir = temp_registry("builtin_test_root_before_failure");
+    fs::write(
+        dir.join("index.js"),
+        r#"var test = require('node:test');
+module.exports = async function () {
+  var effects = [];
+  test.before(function() { effects.push('before'); throw new Error('before failed'); });
+  test.after(function() { effects.push('after'); throw new Error('after failed'); });
+  test.describe('blocked suite', async function() {
+    await new Promise(function(resolve) { setTimeout(resolve, 20); });
+    effects.push('declared');
+    test.before(function() { effects.push('suite before'); });
+    test.after(function() { effects.push('suite after'); });
+    test('inner', function() { effects.push('inner body'); });
+  });
+  var result = await test('blocked', function() { effects.push('body'); });
+  var history = [];
+  for await (var event of test.run()) history.push(event.name + ':' + event.status + ':' + (event.message || ''));
+  return [effects, result.status, result.message, history];
+};"#,
+    ).unwrap();
+    let empty_node_modules = temp_registry("builtin_test_root_before_failure_modules");
+    let (bundle, _, file_count, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    assert!(file_count >= 4);
+    let script = format!(
+        "globalThis.module = {{ exports: {{}} }};\n\
+         globalThis.exports = globalThis.module.exports;\n\
+         globalThis.require = function(name) {{ throw new Error(\"require('\" + name + \"') is not supported\"); }};\n\
+         {bundle}\n\
+         globalThis.exerciseRootBeforeFailure = module.exports;\n"
+    );
+    let source = CString::new(script).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let func = CString::new("exerciseRootBeforeFailure").unwrap();
+    let args = CString::new("[]").unwrap();
+    let result_ptr = thaw_quickjs::thaw_js_call(func.as_ptr(), args.as_ptr());
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(result, r#"[["before","declared","after"],"failed","before failed",["blocked suite:failed:before failed","blocked:failed:before failed","<root after>:failed:after failed"]]"#);
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+}
+
+#[test]
 fn test_timeout_aborts_body_hooks_and_children_without_stalling_queue() {
     use std::ffi::{CStr, CString};
 
