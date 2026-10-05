@@ -2614,13 +2614,13 @@
       }
       if (!resolved) throw new Error("Cannot find module '" + request + "'");
       if (cache[resolved]) return cache[resolved].exports;
-      const module = cache[resolved] = { exports: {} }, slash = resolved.lastIndexOf('/'), dirname = slash < 0 ? '.' : resolved.slice(0, slash);
+      const module = cache[resolved] = { exports: {} }, slash = resolved.lastIndexOf('/'), dirname = slash < 0 ? '.' : slash === 0 ? '/' : resolved.slice(0, slash);
       if (resolved.endsWith('.json')) module.exports = JSON.parse(source);
       else Function('module', 'exports', 'require', '__filename', '__dirname', source)(module, module.exports, name => load(dirname, name), resolved, dirname);
       return module.exports;
     };
     const slash = String(filename).lastIndexOf('/');
-    return load(slash < 0 ? '.' : String(filename).slice(0, slash), String(filename));
+    return load(slash < 0 ? '.' : slash === 0 ? '/' : String(filename).slice(0, slash), String(filename));
   };
   Object.assign(globalThis.process, {
     argv: globalThis.process.argv || JSON.parse(globalThis.__thaw_host_argv_json || '[]'),
