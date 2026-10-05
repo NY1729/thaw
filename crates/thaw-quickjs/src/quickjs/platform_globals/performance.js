@@ -171,7 +171,8 @@
     globalThis.structuredClone = (value, options = {}) => {
       const seen = new Map();
       const transfer = new Set();
-      for (const item of options.transfer || []) {
+      const ports = new Map(), buffers = [];
+      for (const item of Array.from(options.transfer || [])) {
         if (transfer.has(item)) {
           throw new DOMException('transfer list contains duplicate values',
                                  'DataCloneError');
@@ -182,6 +183,18 @@
           throw new DOMException('value is not transferable', 'DataCloneError');
         }
         transfer.add(item);
+        if (globalThis.__thaw_untransferable_objects
+            && globalThis.__thaw_untransferable_objects.has(item)) {
+          throw new DOMException('Object is marked as untransferable', 'DataCloneError');
+        }
+        if (item instanceof ArrayBuffer) {
+          // Constructing a view also distinguishes a detached zero-length buffer.
+          new Uint8Array(item);
+          buffers.push(item);
+        } else {
+          item.__thawValidateTransfer();
+          ports.set(item, new globalThis.MessagePort());
+        }
       }
       const clone = input => {
         if (((typeof input === 'object' && input !== null) || typeof input === 'function')
@@ -204,7 +217,7 @@
             throw new DOMException('MessagePort requires a transfer list',
                                    'DataCloneError');
           }
-          const output = input.__thawTransfer();
+          const output = ports.get(input);
           seen.set(input, output);
           return output;
         }
@@ -244,9 +257,12 @@
         return output;
       };
       const output = clone(value);
-      for (const item of transfer) {
-        if (item instanceof ArrayBuffer) __thaw_detach_array_buffer(item);
-      }
+      // Getters above may have changed a staged endpoint. Revalidate the whole
+      // list before the first irreversible transfer, preserving those effects.
+      for (const [port] of ports) port.__thawValidateTransfer();
+      for (const buffer of buffers) new Uint8Array(buffer);
+      for (const [port, shell] of ports) port.__thawTransferTo(shell);
+      for (const buffer of buffers) __thaw_detach_array_buffer(buffer);
       return output;
     };
     globalThis.__thaw_structured_clone_with_uncloneable_checks = globalThis.structuredClone;

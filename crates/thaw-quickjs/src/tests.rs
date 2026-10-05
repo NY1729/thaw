@@ -783,6 +783,45 @@ fn message_port_transfer_detaches_the_source_port() {
 }
 
 #[test]
+fn structured_clone_failure_keeps_staged_transfers_attached() {
+    assert_eq!(
+        load(r#"function failedTransferIsAtomic() {
+            const channel = new MessageChannel(), buffer = new ArrayBuffer(3);
+            const thrown = new Error('getter failed'); let reads = 0, sameError = false;
+            const value = { port: channel.port1, get fail() { reads++; throw thrown; } };
+            try { structuredClone(value, { transfer: [channel.port1, buffer] }); }
+            catch (error) { sameError = error === thrown; }
+            const attached = [channel.port1.__thawClosed,
+                              channel.port1.__thawPeer === channel.port2,
+                              channel.port2.__thawPeer === channel.port1,
+                              buffer.byteLength];
+            const moved = structuredClone(channel.port1, { transfer: [channel.port1] });
+            const success = [channel.port1.__thawClosed,
+                             moved.__thawPeer === channel.port2];
+            const first = new MessageChannel(), second = new MessageChannel();
+            let reentryRejected = false;
+            const reentrant = { first: first.port1, get closeOther() {
+              second.port2.close(); return 1;
+            } };
+            try { structuredClone(reentrant, { transfer: [first.port1, second.port2] }); }
+            catch (error) { reentryRejected = error.name === 'DataCloneError'; }
+            const reentryState = [first.port1.__thawClosed,
+                                  first.port1.__thawPeer === first.port2,
+                                  second.port2.__thawClosed,
+                                  second.port1.__thawClosed];
+            moved.close(); channel.port2.close();
+            first.port1.close(); first.port2.close(); second.port2.close();
+            return [sameError, reads, attached, success, reentryRejected, reentryState];
+        }"#),
+        1
+    );
+    assert_eq!(
+        call("failedTransferIsAtomic", "[]"),
+        "[true,1,[false,true,true,3],[true,true],true,[false,true,true,false]]"
+    );
+}
+
+#[test]
 fn message_port_retains_messages_until_started() {
     assert_eq!(
         load(r#"async function portStartQueue() {
