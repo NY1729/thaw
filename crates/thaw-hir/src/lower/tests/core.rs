@@ -977,3 +977,20 @@ fn explicit_this_default_wrappers_keep_receiver_and_default_binding() {
         )));
     }
 }
+
+#[test]
+fn switch_cases_do_not_inherit_presence_guards_from_other_entries() {
+    for source in [
+        "function read(x: number | undefined, key: number): number { switch (key) { case 0: if (x === undefined) return 0; break; default: return x; } return 0; }",
+        "function read(x: number | null, key: number): number { switch (key) { case 0: if (x === null) return 0; break; default: return x; } return 0; }",
+        "function read(x: number | null | undefined, key: number): number { switch (key) { case 0: if (x == null) return 0; break; default: return x; } return 0; }",
+        "function read(x: number | undefined, key: number): number { switch (key) { case 0: if (x === undefined) return 0; default: return x; } }",
+        "function read(x: number | undefined, key: number): number { switch (key) { case 0: if (x === undefined) return 0; break; } return x; }",
+        "function read(x: number | undefined, key: number): number { if (x === undefined) return 0; switch (key) { case 0: x = undefined; break; } return x; }",
+    ] {
+        let module = thaw_parser::parse_typescript(source).unwrap();
+        assert!(lower_module(&module).is_err(), "{source}");
+    }
+    lower("function read(x: number | undefined, key: number): number { if (x === undefined) return 0; switch (key) { case 0: return x; default: return x; } }");
+    lower("function read(x: number | undefined, key: number): number { switch (key) { case 0: if (x === undefined) return 0; return x; default: if (x === undefined) return 0; return x; } }");
+}
