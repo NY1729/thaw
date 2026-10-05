@@ -699,6 +699,52 @@ fn structured_clone_copies_cycles_and_builtins() {
 }
 
 #[test]
+fn clone_traversals_read_getters_once_and_check_marked_nodes_in_place() {
+    assert_eq!(
+        load(r#"async function cloneReadAndMarkControls() {
+            let reads = 0;
+            const copy = structuredClone({ get value() { reads++; return reads; } });
+            const thrown = {}, throwing = { get value() { throw thrown; } };
+            let threwOriginal = false;
+            try { structuredClone(throwing); } catch (error) { threwOriginal = error === thrown; }
+            const marked = {};
+            globalThis.__thaw_uncloneable_objects.add(marked);
+            let nestedReads = 0, markedNested = false;
+            try { structuredClone({ get child() { nestedReads++; return marked; } }); }
+            catch (error) { markedNested = error.name === 'DataCloneError'; }
+            const cycle = {}; cycle.self = cycle;
+            const map = new Map([[cycle, marked]]), set = new Set([cycle, marked]);
+            let markedMap = false, markedSet = false;
+            try { structuredClone(map); } catch (error) { markedMap = error.name === 'DataCloneError'; }
+            try { structuredClone(set); } catch (error) { markedSet = error.name === 'DataCloneError'; }
+            const cycleCopy = structuredClone(cycle);
+            let codecReads = 0;
+            const codec = __thaw_worker_decode(__thaw_worker_encode({ get value() { codecReads++; return codecReads; } }));
+            let codecNestedReads = 0, codecMarked = false;
+            try { __thaw_worker_encode({ get child() { codecNestedReads++; return marked; } }); }
+            catch (error) { codecMarked = error.name === 'DataCloneError'; }
+            const channel = new MessageChannel(); let portReads = 0;
+            const delivered = new Promise(resolve => { channel.port2.onmessage = event => resolve(event.data.value); });
+            channel.port1.postMessage({ get value() { portReads++; return portReads; } });
+            const portValue = await delivered; let portMarked = false;
+            const originalCloneErrors = globalThis.__thaw_uncloneable_clone_errors;
+            globalThis.__thaw_uncloneable_clone_errors = new WeakSet();
+            try { channel.port1.postMessage({ child: marked }); }
+            catch (error) { portMarked = error.name === 'DataCloneError'; }
+            finally { globalThis.__thaw_uncloneable_clone_errors = originalCloneErrors; }
+            channel.port1.close(); channel.port2.close();
+            return [reads, copy.value, threwOriginal, nestedReads, markedNested,
+                    markedMap, markedSet, cycleCopy.self === cycleCopy,
+                    codecReads, codec.value, codecNestedReads, codecMarked,
+                    portReads, portValue, portMarked];
+        }"#),
+        1
+    );
+    assert_eq!(call("cloneReadAndMarkControls", "[]"),
+        "[1,1,true,1,true,true,true,true,1,1,1,true,1,1,true]");
+}
+
+#[test]
 fn structured_clone_transfer_detaches_array_buffers() {
     assert_eq!(
             load(

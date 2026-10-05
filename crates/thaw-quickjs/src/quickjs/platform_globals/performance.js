@@ -163,6 +163,10 @@
   globalThis.PerformanceMeasure = PerformanceMeasure;
   globalThis.PerformanceObserver = PerformanceObserver;
   globalThis.PerformanceObserverEntryList = PerformanceObserverEntryList;
+  const workerUncloneableObjects = globalThis.__thaw_uncloneable_objects
+    || (globalThis.__thaw_uncloneable_objects = new WeakSet());
+  const workerUncloneableErrors = globalThis.__thaw_uncloneable_clone_errors
+    || (globalThis.__thaw_uncloneable_clone_errors = new WeakSet());
   if (typeof globalThis.structuredClone !== 'function') {
     globalThis.structuredClone = (value, options = {}) => {
       const seen = new Map();
@@ -180,6 +184,12 @@
         transfer.add(item);
       }
       const clone = input => {
+        if (((typeof input === 'object' && input !== null) || typeof input === 'function')
+            && workerUncloneableObjects.has(input)) {
+          const error = new DOMException('Object is marked as uncloneable', 'DataCloneError');
+          workerUncloneableErrors.add(error);
+          throw error;
+        }
         if (input === null || typeof input !== 'object') {
           if (typeof input === 'function' || typeof input === 'symbol') {
             throw new DOMException('value cannot be structured-cloned',
@@ -239,4 +249,5 @@
       }
       return output;
     };
+    globalThis.__thaw_structured_clone_with_uncloneable_checks = globalThis.structuredClone;
   }
