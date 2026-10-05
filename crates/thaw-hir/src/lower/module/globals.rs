@@ -229,7 +229,11 @@ fn lower_top_level_initializers(
                                 }
                                 _ => continue,
                             };
-                            for decorator in decorators {
+                            let mut evaluated = decorators.clone();
+                            for decorator in &mut evaluated {
+                                capture_class_decorator_expression(&mut lowerer, decorator, &mut steps)?;
+                            }
+                            for decorator in evaluated.iter().rev() {
                                 let call = lower_member_decorator_call(
                                     &mut lowerer,
                                     decorator,
@@ -239,7 +243,11 @@ fn lower_top_level_initializers(
                                 steps.push(HirInitStep::Statement(HirStmt::Expr(call)));
                             }
                         }
-                        for decorator in &declaration.class.decorators {
+                        let mut evaluated = declaration.class.decorators.clone();
+                        for decorator in &mut evaluated {
+                            capture_class_decorator_expression(&mut lowerer, decorator, &mut steps)?;
+                        }
+                        for decorator in evaluated.iter().rev() {
                             let call = lower_class_decorator_call(
                                 &mut lowerer,
                                 decorator,
@@ -965,6 +973,21 @@ fn lower_class_decorator_tokens(
 /// exact token when it crosses a dynamic-call boundary, `object.
 /// constructor`-keyed metadata (real class-validator's own storage key)
 /// round-trips correctly too.
+fn capture_class_decorator_expression(
+    lowerer: &mut FnLowerer,
+    decorator: &mut Decorator,
+    steps: &mut Vec<HirInitStep>,
+) -> Result<(), String> {
+    let expression = lowerer.lower_expr(&decorator.expr)?;
+    let ty = lowerer.infer_expr_type(&expression)?;
+    let source_name = format!("@@thaw_evaluated_decorator_{}", lowerer.next_binding);
+    lowerer.next_binding += 1;
+    let name = lowerer.bind_local(&source_name, ty.clone());
+    steps.push(HirInitStep::Statement(HirStmt::Let(name.clone(), ty, expression)));
+    decorator.expr = Box::new(Expr::Ident(swc_ecma_ast::Ident::new_no_ctxt(name.into(), decorator.span)));
+    Ok(())
+}
+
 fn lower_member_decorator_call(
     lowerer: &mut FnLowerer,
     decorator: &Decorator,

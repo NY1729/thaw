@@ -3828,3 +3828,28 @@ fn class_setter_assignment_result_survives_parameter_mutation_and_early_return()
     assert_eq!(compile_and_run(source, "class_setter_original_rhs"),
         "7 8\n-1 8\n7 9\n-1 9\n7 8\n7 9\nstring string 9\n");
 }
+
+#[test]
+fn legacy_decorator_factories_evaluate_forward_and_apply_backward_per_target() {
+    let source = r#"
+        function member(tag: string): (target: JsValue, key: string) => void {
+            console.log("eval", tag);
+            return function(target: JsValue, key: string): void { console.log("apply", tag, key); };
+        }
+        function owner(tag: string): (target: JsValue) => void {
+            console.log("eval", tag);
+            return function(target: JsValue): void { console.log("apply", tag); };
+        }
+        @owner("C1")
+        @owner("C2")
+        class C {
+            static { console.log("static"); }
+            @member("M1")
+            @member("M2")
+            method(): void {}
+        }
+        function main(): void { console.log("main"); }
+    "#;
+    assert_eq!(compile_and_run(source, "legacy_decorator_composition_order"),
+        "static\neval M1\neval M2\napply M2 method\napply M1 method\neval C1\neval C2\napply C2\napply C1\nmain\n");
+}
