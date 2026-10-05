@@ -692,3 +692,24 @@ fn rethrow_tag_preserves_object_text_in_catch_binding() {
         assert!(body.contains(&format!("Var(\"{binding}__thaw_exception_tag\")")), "{body}");
     }
 }
+
+#[test]
+fn anonymous_catch_preserves_outer_underscore_binding() {
+    let program = lower(r#"function main(): string {
+        const _ = "outer";
+        try { throw "first"; } catch { console.log(_); }
+        try { throw "second"; } catch { return _; }
+        return _;
+    }"#);
+    let body = &program.functions[0].body;
+    let HirStmt::Let(outer, _, _) = &body[0] else { panic!("expected outer binding"); };
+    let mut catch_names = Vec::new();
+    for statement in &body[1..3] {
+        let HirStmt::Try(_, name, catch_body, _) = statement else { panic!("expected catch"); };
+        assert!(name.starts_with("@@thaw_anonymous_catch"), "{name}");
+        assert_ne!(name, outer);
+        assert!(format!("{catch_body:?}").contains(&format!("Var(\"{outer}\")")), "{catch_body:?}");
+        catch_names.push(name);
+    }
+    assert_ne!(catch_names[0], catch_names[1]);
+}
