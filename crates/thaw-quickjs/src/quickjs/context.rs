@@ -1387,7 +1387,13 @@ fn ensure_context() {
                     .expect("failed to create Worker port sender");
                 let worker_read_source =
                     Function::new(ctx.clone(), |path: String| -> rquickjs::Result<String> {
-                        std::fs::read_to_string(&path).map_err(|error| {
+                        std::fs::read_to_string(&path).map(|mut source| {
+                            // All worker JSON and package manifest readers share this boundary.
+                            if source.starts_with('\u{feff}') {
+                                source.drain(..'\u{feff}'.len_utf8());
+                            }
+                            source
+                        }).map_err(|error| {
                             rquickjs::Error::new_from_js_message(
                                 "Worker path",
                                 "JavaScript source",
