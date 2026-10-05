@@ -375,9 +375,11 @@ fn nullish_absence_coercions_preserve_source_effects_once() {
         function main(): void {
             const a: number | null | undefined = missing();
             const b: number | null | undefined = nil();
-            console.log(a, b);
+            const c: number | undefined = missing();
+            const d: number | null = nil();
+            console.log(a, b, c, d);
         }
     "#;
     assert_eq!(compile_and_run(source, "nullish_absence_effects"),
-        "missing\nnil\nundefined null\n");
+        "missing\nnil\nmissing\nnil\nundefined null undefined null\n");
 }
