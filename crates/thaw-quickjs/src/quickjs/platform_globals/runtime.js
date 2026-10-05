@@ -2551,13 +2551,31 @@
     return [seconds, remainder];
   };
   hrtime.bigint = () => BigInt(Date.now() - processStart) * 1000000n;
-  const processStream = (fd, writer) => ({
+  const processApply = Reflect.apply, processBufferFrom = Buffer.from,
+    processIsView = ArrayBuffer.isView, processQueueMicrotask = queueMicrotask,
+    processRawWrite = globalThis.__thaw_process_write_bytes, processHexDigits = '0123456789abcdef';
+  const processToBytes = (value, encoding) => {
+    if (typeof value === 'string') return processApply(processBufferFrom, Buffer, [value, encoding || 'utf8']);
+    if (processIsView(value)) return processApply(processBufferFrom, Buffer, [value.buffer, value.byteOffset, value.byteLength]);
+    throw new TypeError('The chunk argument must be a string, Buffer, TypedArray, or DataView');
+  };
+  const processHex = bytes => {
+    let value = '';
+    for (let index = 0; index < bytes.length; index++) value += processHexDigits[bytes[index] >> 4] + processHexDigits[bytes[index] & 15];
+    return value;
+  };
+  const processStream = (fd, byteWriter) => ({
     fd,
     isTTY: globalThis.__thaw_process_is_tty(fd) ? true : undefined,
     write(value, encoding, callback) {
-      if (typeof encoding === 'function') callback = encoding;
-      writer(String(value));
-      if (typeof callback === 'function') queueMicrotask(callback);
+      if (typeof encoding === 'function') { callback = encoding; encoding = undefined; }
+      try {
+        byteWriter(fd, processHex(processToBytes(value, encoding)));
+      } catch (error) {
+        if (typeof callback === 'function') { processQueueMicrotask(() => callback(error)); return false; }
+        throw error;
+      }
+      if (typeof callback === 'function') processQueueMicrotask(callback);
       return true;
     },
     on() { return this; },
@@ -2683,8 +2701,8 @@
     versions: Object.assign({ node: '', modules: '', uv: '' },
                             globalThis.process.versions || {}),
     stdin: globalThis.process.stdin || stdin,
-    stdout: globalThis.process.stdout || processStream(1, globalThis.__thaw_console_stdout),
-    stderr: globalThis.process.stderr || processStream(2, globalThis.__thaw_console_stderr),
+    stdout: globalThis.process.stdout || processStream(1, processRawWrite),
+    stderr: globalThis.process.stderr || processStream(2, processRawWrite),
     cwd: () => globalThis.__thaw_process_cwd(),
     chdir: directory => globalThis.__thaw_process_chdir(String(directory)),
     exit: code => {
