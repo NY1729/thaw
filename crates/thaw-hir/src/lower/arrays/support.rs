@@ -195,6 +195,10 @@ impl<'a> FnLowerer<'a> {
                 self.wrap_call_argument_bindings(result, &[(source_name, source_type, value)])
             }
             HirType::Tuple(elements) => {
+                let source_type = HirType::Tuple(elements.clone());
+                let source_name = format!("__thaw_promise_tuple_{}", self.next_binding);
+                self.next_binding += 1;
+                self.scope.insert(source_name.clone(), source_type.clone());
                 let mut resolved = Vec::with_capacity(elements.len());
                 let mut promises = Vec::with_capacity(elements.len());
                 for (index, element) in elements.into_iter().enumerate() {
@@ -210,14 +214,17 @@ impl<'a> FnLowerer<'a> {
                     }
                     resolved.push(payload.as_ref().clone());
                     promises.push(HirExpr::TypedIndex(
-                        Box::new(value.clone()),
+                        Box::new(HirExpr::Var(source_name.clone())),
                         Box::new(HirExpr::Lit(HirLit::F64(index as f64))),
                         element,
                     ));
                 }
                 let first = resolved.first().cloned().unwrap_or(HirType::F64);
                 if combinator == "all" && resolved.iter().any(|element| element != &first) {
-                    return Ok(HirExpr::PromiseAllTuple(promises, resolved));
+                    return self.wrap_call_argument_bindings(
+                        HirExpr::PromiseAllTuple(promises, resolved),
+                        &[(source_name, source_type, value)],
+                    );
                 }
                 if let Some((index, actual)) = resolved
                     .iter()
@@ -228,13 +235,14 @@ impl<'a> FnLowerer<'a> {
                         "Promise.{combinator} element {index} resolves to {actual:?}, expected {first:?}"
                     ));
                 }
-                Ok(match combinator {
+                let result = match combinator {
                     "all" => HirExpr::PromiseAll(promises, first),
                     "allSettled" => HirExpr::PromiseAllSettled(promises, first),
                     "race" => HirExpr::PromiseRace(promises, first),
                     "any" => HirExpr::PromiseAny(promises, first),
                     _ => unreachable!(),
-                })
+                };
+                self.wrap_call_argument_bindings(result, &[(source_name, source_type, value)])
             }
             other => Err(format!(
                 "`Promise.{combinator}` expects an array of promises, got {other:?}"

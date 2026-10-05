@@ -562,3 +562,32 @@ fn inferred_async_returns_include_undefined_for_fallthrough_and_bare_return() {
     };
     assert_eq!(ret.as_ref(), &HirType::Promise(Box::new(expected)));
 }
+
+#[test]
+fn promise_tuple_combinators_evaluate_sources_once_even_when_empty() {
+    let program = lower(r#"
+        function pending(): [Promise<number>, Promise<number>] {
+            return [Promise.resolve(1), Promise.resolve(2)];
+        }
+        function empty(): [] { return []; }
+        function mixed(): [Promise<number>, Promise<string>] {
+            return [Promise.resolve(1), Promise.resolve("two")];
+        }
+        async function main(): Promise<void> {
+            await Promise.all(pending());
+            await Promise.allSettled(pending());
+            await Promise.race(pending());
+            await Promise.any(pending());
+            await Promise.all(empty());
+            await Promise.allSettled(empty());
+            await Promise.race(empty());
+            await Promise.any(empty());
+            await Promise.all(mixed());
+        }
+    "#);
+    let main = program.functions.iter().find(|function| function.name == "main").unwrap();
+    let body = format!("{:?}", main.body);
+    assert_eq!(body.matches("\"pending\"").count(), 4, "{body}");
+    assert_eq!(body.matches("\"empty\"").count(), 4, "{body}");
+    assert_eq!(body.matches("\"mixed\"").count(), 1, "{body}");
+}
