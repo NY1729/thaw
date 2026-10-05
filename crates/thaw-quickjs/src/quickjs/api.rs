@@ -744,6 +744,19 @@ fn platform_activity_pending(ctx: &Ctx<'_>) -> bool {
         || napi_bridge_pending()
 }
 
+/// A root node:test run closes only after the host event loop has no work.
+/// The registry callback returns null until a root test or hook was declared,
+/// and a Promise exactly once when its root after hooks need to finish.
+fn finish_root_test_hooks_at_idle(ctx: &Ctx<'_>) -> rquickjs::Result<bool> {
+    let Ok(finalize) = ctx.globals().get::<_, Function>("__thaw_test_finalize_root") else {
+        return Ok(false);
+    };
+    let result: Value = finalize.call(())?;
+    let Some(promise) = result.as_promise() else { return Ok(false); };
+    finish_with_platform_events(ctx, &promise)?;
+    Ok(true)
+}
+
 #[no_mangle]
 pub extern "C" fn thaw_js_run_event_loop() -> i32 {
     with_context(|ctx| loop {
@@ -837,6 +850,14 @@ pub extern "C" fn thaw_js_run_event_loop() -> i32 {
             if platform_activity_pending(&ctx) {
                 std::thread::sleep(Duration::from_millis(1));
                 continue;
+            }
+            match finish_root_test_hooks_at_idle(&ctx) {
+                Ok(true) => continue,
+                Ok(false) => {}
+                Err(error) => {
+                    eprintln!("root test finalization failed: {error}");
+                    return 1;
+                }
             }
             return process_exit_code(&ctx);
         }
