@@ -1419,3 +1419,72 @@ fn file_loaders_resolve_dotted_files_and_directories_in_file_first_order() {
     let _ = fs::remove_dir_all(dir);
     let _ = fs::remove_dir_all(modules);
 }
+
+#[test]
+fn file_worker_keeps_directives_and_fallback_scope_in_entry_wrapper() {
+    use std::ffi::{CStr, CString};
+    let dir = temp_registry("worker_entry_directives");
+    let modules = temp_registry("worker_entry_directives_modules");
+    fs::write(dir.join("index.js"), r#"
+        var Worker = require('node:worker_threads').Worker;
+        module.exports = async function () {
+            var originalRead = globalThis.__thaw_worker_read_source;
+            var originalSpawn = globalThis.__thaw_worker_spawn;
+            var captured, stop = {};
+            globalThis.__thaw_worker_read_source = function(path) {
+                if (path === '/scope/dep.js') return "'use strict'; module.exports = (function() { return this === undefined; })();";
+                var directive;
+                if (path === '/scope/strict.js') directive = "/* leading comment */ 'other directive'; 'use strict';";
+                else if (path === '/scope/sloppy.js') directive = '';
+                else if (path === '/scope/escaped.js') directive = "'use\\x20strict';";
+                else throw new Error('Unexpected read: ' + path);
+                return directive +
+                    "var object = {}; Object.defineProperty(object, 'fixed', { value: 1, writable: false });" +
+                    "var rejectedWrite = false; try { object.fixed = 2; } catch (error) { rejectedWrite = error instanceof TypeError; }" +
+                    "var values = [rejectedWrite, (function() { return this === undefined; })(), this === exports, require('./dep.js')];" +
+                    "module.exports = values; var port = require('node:worker_threads').parentPort; port.postMessage(values); port.close();";
+            };
+            globalThis.__thaw_worker_spawn = function(bundle, source) { captured = source; throw stop; };
+            try {
+                var capturedValues = ['/scope/strict.js', '/scope/sloppy.js', '/scope/escaped.js'].map(function(path) {
+                    captured = undefined;
+                    try { new Worker(path); } catch (error) { if (error !== stop) throw error; }
+                    if (captured === undefined) throw new Error('Missing generated Worker source');
+                    var childModule = { exports: {} }, posted;
+                    Function('require', 'module', 'exports', captured)(function(name) {
+                        if (name === 'node:worker_threads') return { parentPort: {
+                            postMessage: function(value) { posted = value; }, close: function() {}
+                        } };
+                        throw new Error(name);
+                    }, childModule, childModule.exports);
+                    if (posted !== childModule.exports) throw new Error('Entry lost its module exports');
+                    return posted;
+                });
+                globalThis.__thaw_worker_spawn = undefined;
+                var fallback = new Worker('/scope/strict.js');
+                var message = new Promise(function(resolve, reject) {
+                    fallback.on('message', resolve); fallback.on('error', reject);
+                });
+                var exit = new Promise(function(resolve, reject) {
+                    fallback.on('exit', resolve); fallback.on('error', reject);
+                });
+                return [capturedValues, await message, await exit];
+            } finally {
+                globalThis.__thaw_worker_read_source = originalRead;
+                globalThis.__thaw_worker_spawn = originalSpawn;
+            }
+        };
+    "#).unwrap();
+    let (bundle, _, _, _) = bundle_commonjs_package(&modules, "pkg", &dir, "index.js").unwrap();
+    let script = format!(
+        "globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; \
+         globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} \
+         globalThis.exerciseWorkerEntryDirectives = module.exports;"
+    );
+    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
+    let result = thaw_quickjs::thaw_js_call(c"exerciseWorkerEntryDirectives".as_ptr(), c"[]".as_ptr());
+    assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(),
+        "[[[true,true,true,true],[false,false,true,true],[false,false,true,true]],[true,true,true,true],0]");
+    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(modules);
+}
