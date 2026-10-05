@@ -5,31 +5,86 @@ fn host_worker_bootstrap(worker_data_json: &str, config_json: &str, thread_id: u
         r#"
         globalThis.__thaw_host_worker_events = [];
         globalThis.__thaw_host_worker_closed = false;
+        const __thaw_host_event_queue = globalThis.__thaw_host_worker_events;
+        const __thaw_array_push = Array.prototype.push;
+        const __thaw_apply = Reflect.apply;
+        const __thaw_detach_buffer = __thaw_detach_array_buffer;
+        const __thaw_enqueue_host_event = event => __thaw_apply(__thaw_array_push, __thaw_host_event_queue, [event]);
+        const __thaw_validate_port_transfer = MessagePort.prototype.__thawValidateTransfer;
+
+        const __thaw_get_own_descriptor = Object.getOwnPropertyDescriptor;
+        const __thaw_has_own = Object.prototype.hasOwnProperty;
+        const __thaw_is_extensible = Object.isExtensible;
+        const __thaw_define_property = Object.defineProperty;
+        const __thaw_map_get = Map.prototype.get;
+        const __thaw_map_set = Map.prototype.set;
+        const __thaw_map_delete = Map.prototype.delete;
+        const __thaw_clear_timeout = clearTimeout;
+        const __thaw_uint8_array = Uint8Array;
+        const __thaw_is_message_port = globalThis.__thaw_is_message_port;
+        const __thaw_transfer_port = MessagePort.prototype.__thawTransferToValidated;
         const __thaw_host_worker_listeners = new Map();
         const __thaw_host_ports = new Map();
         let __thaw_host_port_sequence = 1;
-        function __thaw_configure_worker_port_bridge(port, id) {{
-          port.__thawHostPortId = id;
-          port.__thawSchedule = function() {{
-            while (port.__thawQueue.length) {{ const record = port.__thawQueue.shift(); __thaw_host_worker_events.push({{ type: 'port', port: id, payload: __thaw_worker_encode(record.data) }}); }}
-          }};
-        }}
-        function __thaw_prepare_worker_ports(transfer) {{
-          for (const port of transfer || []) {{
-            if (!(port instanceof MessagePort)) continue;
-            if (port.__thawHostPortId) continue;
-            const id = 'w:{thread_id}:' + (__thaw_host_port_sequence++), moved = port.__thawTransfer();
-            port.__thawHostPortId = id; __thaw_configure_worker_port_bridge(moved, id);
-            const receiver = moved.__thawPeer, close = receiver.close.bind(receiver); receiver.close = function() {{ __thaw_host_ports.delete(id); close(); }};
-            __thaw_host_ports.set(id, receiver);
+        function __thaw_stage_worker_ports(transfer) {{
+          const entries = [], portIds = new Map(), buffers = [], seen = new Set();
+          for (const value of Array.from(transfer || [])) {{
+            if (seen.has(value)) throw new DOMException('transfer list contains duplicate values', 'DataCloneError');
+            seen.add(value);
+            if (globalThis.__thaw_untransferable_objects && globalThis.__thaw_untransferable_objects.has(value)) throw new DOMException('Object is marked as untransferable', 'DataCloneError');
+            if (value instanceof ArrayBuffer) {{ new __thaw_uint8_array(value); buffers.push(value); continue; }}
+            if (!__thaw_is_message_port || !__thaw_is_message_port(value)) throw new DOMException('value is not transferable', 'DataCloneError');
+            const id = value.__thawHostPortId;
+            if (id) {{
+              if (__thaw_apply(__thaw_map_get, __thaw_host_ports, [String(id)]) !== value || value.__thawClosed) throw new DOMException('MessagePort is already detached', 'DataCloneError');
+              entries.push({{ source: value, id: String(id), host: true }});
+            }} else {{
+              __thaw_apply(__thaw_validate_port_transfer, value, []);
+              entries.push({{ source: value, id: 'w:{thread_id}:' + (__thaw_host_port_sequence++), shell: new MessagePort(), host: false }});
+            }}
+            portIds.set(value, entries[entries.length - 1].id);
           }}
+          return {{ entries, portIds, buffers }};
+        }}
+        function __thaw_validate_worker_ports(stage) {{
+          for (const entry of stage.entries) {{
+            if (entry.host) {{
+              const closed = __thaw_get_own_descriptor(entry.source, '__thawClosed'), queue = __thaw_get_own_descriptor(entry.source, '__thawQueue'), peer = __thaw_get_own_descriptor(entry.source, '__thawPeer');
+              if (__thaw_apply(__thaw_map_get, __thaw_host_ports, [entry.id]) !== entry.source || !closed || !__thaw_apply(__thaw_has_own, closed, ['value']) || closed.value || !closed.writable || !queue || !__thaw_apply(__thaw_has_own, queue, ['value']) || !queue.writable || !peer || !__thaw_apply(__thaw_has_own, peer, ['value']) || !peer.writable) throw new DOMException('MessagePort is already detached', 'DataCloneError');
+              const length = __thaw_get_own_descriptor(queue.value, 'length'); if (!length || !length.writable) throw new DOMException('MessagePort is already detached', 'DataCloneError');
+            }} else {{
+              const closed = __thaw_get_own_descriptor(entry.source, '__thawClosed'), queue = __thaw_get_own_descriptor(entry.source, '__thawQueue'), peer = __thaw_get_own_descriptor(entry.source, '__thawPeer');
+              if (!closed || !closed.writable || !queue || !queue.writable || !peer || !peer.writable || !__thaw_is_message_port(peer.value)) throw new DOMException('MessagePort is already detached', 'DataCloneError');
+              __thaw_apply(__thaw_validate_port_transfer, entry.source, []);
+              const transferred = __thaw_get_own_descriptor(entry.source, '__thawTransferredPort'); entry.hasTransferReference = !!transferred; if (transferred ? !transferred.writable : !__thaw_is_extensible(entry.source)) throw new DOMException('MessagePort is already detached', 'DataCloneError'); const hostId = __thaw_get_own_descriptor(entry.source, '__thawHostPortId'); entry.hadHostId = !!hostId; if (hostId ? !hostId.writable : !__thaw_is_extensible(entry.source)) throw new DOMException('MessagePort is already detached', 'DataCloneError');
+              const peerField = __thaw_get_own_descriptor(peer.value, '__thawPeer'); if (!peerField || !peerField.writable) throw new DOMException('MessagePort is already detached', 'DataCloneError');
+            }}
+          }}
+          for (const buffer of stage.buffers) new __thaw_uint8_array(buffer);
+        }}
+        function __thaw_commit_worker_ports(stage) {{
+          for (const entry of stage.entries) {{
+            if (entry.host) {{ entry.source.__thawClosed = true; entry.source.__thawQueue = []; entry.source.__thawPeer = null; __thaw_apply(__thaw_map_delete, __thaw_host_ports, [entry.id]); }}
+            else {{
+              const moved = __thaw_apply(__thaw_transfer_port, entry.source, [entry.shell, entry.hasTransferReference]);
+              if (entry.hadHostId) entry.source.__thawHostPortId = entry.id; else __thaw_define_property(entry.source, '__thawHostPortId', {{ value: entry.id, writable: true, configurable: true }}); __thaw_configure_worker_port_bridge(moved, entry.id);
+              __thaw_apply(__thaw_map_set, __thaw_host_ports, [entry.id, moved.__thawPeer]);
+            }}
+          }}
+          for (const buffer of stage.buffers) __thaw_detach_buffer(buffer);
+        }}
+        function __thaw_configure_worker_port_bridge(port, id) {{
+          __thaw_define_property(port, '__thawHostPortId', {{ value: id, writable: true, configurable: true }});
+          __thaw_define_property(port, '__thawSchedule', {{ value: function() {{
+            while (port.__thawQueue.length) {{ const record = port.__thawQueue.shift(), stage = __thaw_stage_worker_ports(record.ports), payload = __thaw_worker_encode(record.data, stage.portIds), ports = stage.entries.map(entry => entry.id); __thaw_validate_worker_ports(stage); __thaw_enqueue_host_event({{ type: 'port', port: id, payload, ports }}); __thaw_commit_worker_ports(stage); }}
+          }}, writable: true, configurable: true }});
         }}
         globalThis.__thaw_create_worker_port = function(id) {{
           id = String(id); if (__thaw_host_ports.has(id)) return __thaw_host_ports.get(id);
-          const port = new MessagePort(); port.__thawHostPortId = id;
-          port.postMessage = function(value, transfer) {{ __thaw_prepare_worker_ports(transfer); __thaw_host_worker_events.push({{ type: 'port', port: id, payload: __thaw_worker_encode(value) }}); }};
+          const port = new MessagePort(); __thaw_define_property(port, '__thawHostPortId', {{ value: id, writable: true, configurable: true }});
+          port.postMessage = function(value, transfer) {{ const stage = __thaw_stage_worker_ports(transfer), payload = __thaw_worker_encode(value, stage.portIds), ports = stage.entries.map(entry => entry.id); __thaw_validate_worker_ports(stage); __thaw_enqueue_host_event({{ type: 'port', port: id, payload, ports }}); __thaw_commit_worker_ports(stage); }};
           const close = port.close.bind(port); port.close = function() {{ __thaw_host_ports.delete(id); close(); }};
-          __thaw_host_ports.set(id, port); return port;
+          __thaw_apply(__thaw_map_set, __thaw_host_ports, [id, port]); return port;
         }};
         function __thaw_host_worker_on(name, listener) {{
           const key = String(name), list = __thaw_host_worker_listeners.get(key) || [];
@@ -41,9 +96,10 @@ fn host_worker_bootstrap(worker_data_json: &str, config_json: &str, thread_id: u
         }}
         const parentPort = {{
           postMessage(value, transfer) {{
-            __thaw_prepare_worker_ports(transfer);
-            const payload = __thaw_worker_encode(value);
-            __thaw_host_worker_events.push({{ type: 'message', payload }});
+            const stage = __thaw_stage_worker_ports(transfer), payload = __thaw_worker_encode(value, stage.portIds), ports = stage.entries.map(entry => entry.id);
+            __thaw_validate_worker_ports(stage);
+            __thaw_enqueue_host_event({{ type: 'message', payload, ports }});
+            __thaw_commit_worker_ports(stage);
           }},
           on: __thaw_host_worker_on,
           addListener: __thaw_host_worker_on,
@@ -84,12 +140,14 @@ fn host_worker_bootstrap(worker_data_json: &str, config_json: &str, thread_id: u
         function __thaw_host_post_message_to_thread(target, value, transferList, timeout) {{
           target = Number(target);
           if (target === {thread_id}) {{ const error = new Error('Cannot send a message to the same thread'); error.code = 'ERR_WORKER_MESSAGING_SAME_THREAD'; return Promise.reject(error); }}
-          const cloned = structuredClone(value, {{ transfer: transferList || [] }}), payload = __thaw_worker_encode(cloned), request = __thaw_direct_request++;
+          const timeoutMs = timeout === undefined ? undefined : Number(timeout), stage = __thaw_stage_worker_ports(transferList), payload = __thaw_worker_encode(value, stage.portIds), ports = stage.entries.map(entry => entry.id), request = __thaw_direct_request++;
           return new Promise((resolve, reject) => {{
             let timer;
-            if (timeout !== undefined && Number(timeout) >= 0) timer = setTimeout(() => {{ if (__thaw_direct_pending.delete(request)) {{ const error = new Error('The destination thread did not process the message'); error.code = 'ERR_WORKER_MESSAGING_TIMEOUT'; reject(error); }} }}, Number(timeout));
-            __thaw_direct_pending.set(request, {{ resolve, reject, timer }});
-            __thaw_host_worker_events.push({{ type: 'direct', target, source: {thread_id}, request, payload }});
+            if (timeoutMs !== undefined && timeoutMs >= 0) timer = setTimeout(() => {{ if (__thaw_apply(__thaw_map_delete, __thaw_direct_pending, [request])) {{ const error = new Error('The destination thread did not process the message'); error.code = 'ERR_WORKER_MESSAGING_TIMEOUT'; reject(error); }} }}, timeoutMs);
+            __thaw_apply(__thaw_map_set, __thaw_direct_pending, [request, {{ resolve, reject, timer }}]);
+            try {{ __thaw_validate_worker_ports(stage); }} catch (error) {{ __thaw_apply(__thaw_map_delete, __thaw_direct_pending, [request]); if (timer) __thaw_clear_timeout(timer); reject(error); return; }}
+            __thaw_enqueue_host_event({{ type: 'direct', target, source: {thread_id}, request, payload, ports }});
+            __thaw_commit_worker_ports(stage);
           }});
         }}
         globalThis.__thaw_worker_module = {{ isMainThread: false, threadId: {thread_id}, threadName: String(__thaw_host_worker_config.threadName || ''), workerData, parentPort, resourceLimits: Object.assign({{}}, __thaw_host_worker_config.resourceLimits || {{}}), MessageChannel, MessagePort, BroadcastChannel, receiveMessageOnPort(port) {{ const record = port && port.__thawQueue && port.__thawQueue.shift(); return record ? {{ message: record.data }} : undefined; }}, postMessageToThread: __thaw_host_post_message_to_thread }};
@@ -117,7 +175,7 @@ fn host_worker_bootstrap(worker_data_json: &str, config_json: &str, thread_id: u
         }};
         globalThis.__thaw_host_worker_direct_result = function(request, errorText) {{
           const pending = __thaw_direct_pending.get(Number(request)); if (!pending) return;
-          __thaw_direct_pending.delete(Number(request)); if (pending.timer) clearTimeout(pending.timer);
+          __thaw_apply(__thaw_map_delete, __thaw_direct_pending, [Number(request)]); if (pending.timer) __thaw_clear_timeout(pending.timer);
           if (!errorText) pending.resolve(); else {{ const separator = errorText.indexOf(':'), code = separator < 0 ? errorText : errorText.slice(0, separator), message = separator < 0 ? errorText : errorText.slice(separator + 1), error = new Error(message); error.code = code; if (code === 'ERR_WORKER_MESSAGING_ERRORED') error.cause = new Error(message); pending.reject(error); }}
         }};
         globalThis.__thaw_host_worker_drain = function() {{ return JSON.stringify(__thaw_host_worker_events.splice(0)); }};
@@ -137,6 +195,7 @@ fn drain_host_worker_events(ctx: &Ctx<'_>, events: &Sender<HostWorkerEvent>) -> 
     let payloads: Vec<serde_json::Value> =
         serde_json::from_str(&payloads).map_err(|error| error.to_string())?;
     for event in payloads {
+        let ports = event.get("ports").and_then(|value| value.as_array()).map(|values| values.iter().filter_map(|value| value.as_str().map(str::to_string)).collect()).unwrap_or_default();
         let kind = event.get("type").and_then(|value| value.as_str());
         let payload = event
             .get("payload")
@@ -160,6 +219,7 @@ fn drain_host_worker_events(ctx: &Ctx<'_>, events: &Sender<HostWorkerEvent>) -> 
                     .and_then(|value| value.as_u64())
                     .unwrap_or_default(),
                 payload,
+                ports,
             },
             Some("port") => HostWorkerEvent::PortMessage {
                 port: event
@@ -168,8 +228,9 @@ fn drain_host_worker_events(ctx: &Ctx<'_>, events: &Sender<HostWorkerEvent>) -> 
                     .unwrap_or_default()
                     .to_string(),
                 payload,
+                ports,
             },
-            _ => HostWorkerEvent::Message(payload),
+            _ => HostWorkerEvent::Message { payload, ports },
         };
         let _ = events.send(event);
     }
@@ -636,10 +697,8 @@ fn poll_host_workers() -> String {
                     Ok(HostWorkerEvent::Online) => {
                         output.push(serde_json::json!({ "handle": handle, "type": "online" }));
                     }
-                    Ok(HostWorkerEvent::Message(payload)) => {
-                        output.push(
-                            serde_json::json!({ "handle": handle, "type": "message", "payload": payload }),
-                        );
+                    Ok(HostWorkerEvent::Message { payload, ports }) => {
+                        output.push(serde_json::json!({ "handle": handle, "type": "message", "payload": payload, "ports": ports }));
                     }
                     Ok(HostWorkerEvent::Stdout(payload)) => {
                         output.push(
@@ -656,14 +715,15 @@ fn poll_host_workers() -> String {
                         source,
                         request,
                         payload,
+                        ports,
                     }) => {
-                        output.push(serde_json::json!({ "handle": handle, "type": "direct", "target": target, "source": source, "request": request, "payload": payload }));
+                        output.push(serde_json::json!({ "handle": handle, "type": "direct", "target": target, "source": source, "request": request, "payload": payload, "ports": ports }));
                     }
                     Ok(HostWorkerEvent::ParentDirectResult { request, error }) => {
                         output.push(serde_json::json!({ "handle": handle, "type": "directResult", "request": request, "error": error }));
                     }
-                    Ok(HostWorkerEvent::PortMessage { port, payload }) => {
-                        output.push(serde_json::json!({ "handle": handle, "type": "port", "port": port, "payload": payload }));
+                    Ok(HostWorkerEvent::PortMessage { port, payload, ports }) => {
+                        output.push(serde_json::json!({ "handle": handle, "type": "port", "port": port, "payload": payload, "ports": ports }));
                     }
                     Ok(HostWorkerEvent::Error(error)) => {
                         output.push(
@@ -1096,7 +1156,7 @@ fn host_worker_late_ref_keeps_queued_terminal_events_alive_until_poll() {
     let (release_sender, release_receiver) = std::sync::mpsc::channel();
     let thread = std::thread::spawn(move || {
         release_receiver.recv().unwrap();
-        event_sender.send(HostWorkerEvent::Message("queued".into())).unwrap();
+        event_sender.send(HostWorkerEvent::Message { payload: "queued".into(), ports: Vec::new() }).unwrap();
         event_sender.send(HostWorkerEvent::Exit(0)).unwrap();
     });
     let handle = u32::MAX;

@@ -486,6 +486,126 @@ fn worker_threads_transfer_message_ports_from_native_workers() {
 }
 
 #[test]
+fn worker_threads_native_failed_clone_keeps_transfer_endpoints_attached() {
+    use std::ffi::{CStr, CString};
+    let dir = temp_registry("builtin_worker_native_failed_transfer");
+    fs::write(
+        dir.join("index.js"),
+        "var wt = require('node:worker_threads'); module.exports = async function () { var worker = new wt.Worker(\"require('node:worker_threads').parentPort.on('message', function() {});\", { eval: true }); var channel = new wt.MessageChannel(), buffer = new ArrayBuffer(3), reads = 0, thrown = new Error('getter failed'), same = false; var value = { port: channel.port1, get fail() { reads++; throw thrown; } }; try { worker.postMessage(value, [channel.port1, buffer]); } catch (error) { same = error === thrown; } var attached = !channel.port1.__thawClosed && channel.port1.__thawPeer === channel.port2 && channel.port2.__thawPeer === channel.port1 && buffer.byteLength === 3, delivered = new Promise(function(resolve) { channel.port1.once('message', resolve); }); channel.port2.postMessage('still-connected'); var ping = await delivered; await worker.terminate(); channel.port1.close(); channel.port2.close(); return [same, reads, attached, ping]; };",
+    )
+    .unwrap();
+    let node_modules = temp_registry("builtin_worker_native_failed_transfer_node_modules");
+    let (bundle, _, file_count, _) =
+        bundle_commonjs_package(&node_modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(file_count, 3);
+    let script = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseNativeFailedTransfer = module.exports;")).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(script.as_ptr()), 1);
+    let function = CString::new("exerciseNativeFailedTransfer").unwrap();
+    let arguments = CString::new("[]").unwrap();
+    let result = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+    let result = unsafe { CStr::from_ptr(result) }.to_string_lossy();
+    assert_eq!(result, r#"[true,1,true,"still-connected"]"#);
+    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(node_modules);
+}
+
+#[test]
+fn worker_threads_native_reentrant_transfer_invalidation_is_rejected_before_delivery() {
+    use std::ffi::{CStr, CString};
+    let dir = temp_registry("builtin_worker_native_reentrant_transfer");
+    fs::write(
+        dir.join("index.js"),
+        "var wt = require('node:worker_threads'); module.exports = async function () { var worker = new wt.Worker(\"var wt = require('node:worker_threads'); wt.parentPort.on('message', function(value) { wt.parentPort.postMessage(value === 'barrier' ? 'barrier' : 'unexpected'); });\", { eval: true }), unexpected = 0, barrier; await new Promise(function(resolve, reject) { worker.once('online', resolve); worker.once('error', reject); }); var drained = new Promise(function(resolve) { worker.on('message', function(value) { if (value === 'barrier') resolve(); else unexpected++; }); }); var first = new wt.MessageChannel(), second = new wt.MessageChannel(), value = { first: first.port1, get invalidate() { second.port1.close(); return true; } }, threw = false; try { worker.postMessage(value, [first.port1, second.port1]); } catch (_) { threw = true; } worker.postMessage('barrier'); await drained; var unchanged = !first.port1.__thawClosed && first.port1.__thawPeer === first.port2 && first.port2.__thawPeer === first.port1, getterEffect = second.port1.__thawClosed; await worker.terminate(); first.port1.close(); first.port2.close(); second.port2.close(); return [threw, unexpected, unchanged, getterEffect]; };",
+    )
+    .unwrap();
+    let node_modules = temp_registry("builtin_worker_native_reentrant_transfer_node_modules");
+    let (bundle, _, file_count, _) =
+        bundle_commonjs_package(&node_modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(file_count, 3);
+    let script = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseNativeReentrantTransfer = module.exports;")).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(script.as_ptr()), 1);
+    let function = CString::new("exerciseNativeReentrantTransfer").unwrap();
+    let arguments = CString::new("[]").unwrap();
+    let result = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+    let result = unsafe { CStr::from_ptr(result) }.to_string_lossy();
+    assert_eq!(result, r#"[true,0,true,true]"#);
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(node_modules);
+}
+
+#[test]
+fn worker_threads_child_direct_invalid_transfer_does_not_pin_worker_exit() {
+    use std::ffi::{CStr, CString};
+    let dir = temp_registry("builtin_worker_child_direct_invalid_transfer");
+    fs::write(
+        dir.join("index.js"),
+        "var wt = require('node:worker_threads'); module.exports = async function () { var delivered = 0, listener = function() { delivered++; }; process.on('workerMessage', listener); var source = \"var wt = require('node:worker_threads'), first = new wt.MessageChannel(), second = new wt.MessageChannel(); wt.postMessageToThread(0, { first: first.port1, get invalidate() { second.port1.close(); return true; } }, [first.port1, second.port1]).then(function() { wt.parentPort.postMessage('unexpected'); wt.parentPort.close(); }, function() { first.port1.close(); first.port2.close(); second.port2.close(); wt.parentPort.postMessage('rejected'); });\", worker = new wt.Worker(source, { eval: true }), exited = new Promise(function(resolve) { worker.once('exit', resolve); }), message = await new Promise(function(resolve, reject) { worker.once('message', resolve); worker.once('error', reject); }), code = await exited; process.off('workerMessage', listener); return [message, code, delivered]; };",
+    )
+    .unwrap();
+    let node_modules = temp_registry("builtin_worker_child_direct_invalid_transfer_node_modules");
+    let (bundle, _, file_count, _) =
+        bundle_commonjs_package(&node_modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(file_count, 3);
+    let script = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseChildDirectInvalidTransfer = module.exports;")).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(script.as_ptr()), 1);
+    let function = CString::new("exerciseChildDirectInvalidTransfer").unwrap();
+    let arguments = CString::new("[]").unwrap();
+    let result = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+    let result = unsafe { CStr::from_ptr(result) }.to_string_lossy();
+    assert_eq!(result, r#"["rejected",0,0]"#);
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(node_modules);
+}
+
+#[test]
+fn worker_threads_native_direct_failed_clone_keeps_buffer_attached() {
+    use std::ffi::{CStr, CString};
+    let dir = temp_registry("builtin_worker_native_direct_failed_transfer");
+    fs::write(
+        dir.join("index.js"),
+        "var wt = require('node:worker_threads'); module.exports = async function () { var worker = new wt.Worker(\"process.on('workerMessage', function() {});\", { eval: true }); await new Promise(function(resolve, reject) { worker.once('online', resolve); worker.once('error', reject); }); var buffer = new ArrayBuffer(2), reads = 0, thrown = new Error('getter failed'), same = false, value = { get fail() { reads++; throw thrown; } }; try { await wt.postMessageToThread(worker.threadId, value, [buffer]); } catch (error) { same = error === thrown; } var length = buffer.byteLength; await worker.terminate(); return [same, reads, length]; };",
+    )
+    .unwrap();
+    let node_modules = temp_registry("builtin_worker_native_direct_failed_transfer_node_modules");
+    let (bundle, _, file_count, _) =
+        bundle_commonjs_package(&node_modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(file_count, 3);
+    let script = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseNativeDirectFailedTransfer = module.exports;")).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(script.as_ptr()), 1);
+    let function = CString::new("exerciseNativeDirectFailedTransfer").unwrap();
+    let arguments = CString::new("[]").unwrap();
+    let result = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+    let result = unsafe { CStr::from_ptr(result) }.to_string_lossy();
+    assert_eq!(result, r#"[true,1,2]"#);
+    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(node_modules);
+}
+
+#[test]
+fn worker_threads_transfers_native_ports_between_workers_in_both_directions() {
+    use std::ffi::{CStr, CString};
+    let dir = temp_registry("builtin_worker_native_port_forward");
+    fs::write(
+        dir.join("index.js"),
+        "var Worker = require('node:worker_threads').Worker; module.exports = async function () { var sourceA = \"var wt = require('node:worker_threads'), channel = new wt.MessageChannel(); channel.port2.on('message', function(value) { channel.port2.postMessage(value === 'ping' ? 'pong' : value); channel.port2.close(); wt.parentPort.close(); }); wt.parentPort.postMessage({ port: channel.port1 }, [channel.port1]);\"; var sourceB = \"var wt = require('node:worker_threads'); wt.parentPort.once('message', function(value) { var port = value.port; port.on('message', function(message) { wt.parentPort.postMessage(message); port.close(); wt.parentPort.close(); }); port.postMessage('ping'); });\"; var a = new Worker(sourceA, { eval: true }), b = new Worker(sourceB, { eval: true }), exits = Promise.all([new Promise(function(resolve) { a.once('exit', resolve); }), new Promise(function(resolve) { b.once('exit', resolve); })]); var port = await new Promise(function(resolve, reject) { a.once('message', function(value) { resolve(value.port); }); a.once('error', reject); }); var result = new Promise(function(resolve, reject) { b.once('message', resolve); b.once('error', reject); }); b.postMessage({ port: port }, [port]); var detached = port.__thawClosed; var value = await result; await exits; return [value, detached, typeof a._nativeHandle, typeof b._nativeHandle]; };",
+    )
+    .unwrap();
+    let node_modules = temp_registry("builtin_worker_native_port_forward_node_modules");
+    let (bundle, _, file_count, _) =
+        bundle_commonjs_package(&node_modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(file_count, 3);
+    let script = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseNativePortForward = module.exports;")).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(script.as_ptr()), 1);
+    let function = CString::new("exerciseNativePortForward").unwrap();
+    let arguments = CString::new("[]").unwrap();
+    let result = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+    let result = unsafe { CStr::from_ptr(result) }.to_string_lossy();
+    assert_eq!(result, r#"["pong",true,"number","number"]"#);
+    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(node_modules);
+}
+
+#[test]
 fn worker_threads_redirects_stdin_stdout_and_stderr() {
     use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_worker_stdio");

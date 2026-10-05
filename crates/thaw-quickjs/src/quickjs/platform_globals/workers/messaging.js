@@ -1,7 +1,13 @@
   if (typeof globalThis.MessageChannel !== 'function') {
+    const __thawDefineProperty = Object.defineProperty;
+    const __thawMessagePortBrand = new WeakSet();
+    const __thawWeakSetHas = WeakSet.prototype.has;
+    const __thawApply = Reflect.apply;
+    const __thawIsMessagePort = value => __thawApply(__thawWeakSetHas, __thawMessagePortBrand, [value]);
     class MessagePort extends EventTarget {
       constructor() {
         super();
+        __thawMessagePortBrand.add(this);
         this.__thawPeer = null;
         this.__thawQueue = [];
         this.__thawScheduled = false;
@@ -28,20 +34,27 @@
         this.__thawPeer.__thawSchedule();
       }
       __thawValidateTransfer() {
-        if (this.__thawClosed || !this.__thawPeer) {
+        if (!__thawIsMessagePort(this)
+            || this.__thawClosed || !this.__thawPeer) {
           throw new DOMException('MessagePort is already detached', 'DataCloneError');
         }
       }
-      __thawTransferTo(transferred) {
-        this.__thawValidateTransfer();
+      __thawTransferToValidated(transferred, hasTransferReference) {
         transferred.__thawPeer = this.__thawPeer;
         transferred.__thawQueue = this.__thawQueue;
         this.__thawPeer.__thawPeer = transferred;
         this.__thawQueue = [];
         this.__thawPeer = null;
         this.__thawClosed = true;
-        this.__thawTransferredPort = transferred;
+        if (hasTransferReference) this.__thawTransferredPort = transferred;
+        else __thawDefineProperty(this, '__thawTransferredPort', {
+          value: transferred, writable: true, configurable: true
+        });
         return transferred;
+      }
+      __thawTransferTo(transferred) {
+        this.__thawValidateTransfer();
+        return this.__thawTransferToValidated(transferred, Object.prototype.hasOwnProperty.call(this, '__thawTransferredPort'));
       }
       __thawTransfer() {
         this.__thawValidateTransfer();
@@ -90,6 +103,7 @@
       get onmessageerror() { return this.__thawOnMessageError; }
     }
     globalThis.MessagePort = MessagePort;
+    globalThis.__thaw_is_message_port = __thawIsMessagePort;
     globalThis.__thaw_message_port_postmessage_with_uncloneable_checks = MessagePort.prototype.postMessage;
     globalThis.MessageChannel = class MessageChannel {
       constructor() {
