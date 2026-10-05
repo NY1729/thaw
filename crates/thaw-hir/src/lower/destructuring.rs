@@ -77,11 +77,19 @@ impl<'a> FnLowerer<'a> {
     }
 
     fn lower_binding_pattern(
+        &mut self, pattern: &Pat, value: HirExpr, ty: &HirType,
+        statements: &mut Vec<HirStmt>,
+    ) -> Result<(), String> {
+        self.lower_binding_pattern_impl(pattern, value, ty, statements, false)
+    }
+
+    fn lower_binding_pattern_impl(
         &mut self,
         pattern: &Pat,
         value: HirExpr,
         ty: &HirType,
         statements: &mut Vec<HirStmt>,
+        immutable: bool,
     ) -> Result<(), String> {
         let value = if matches!(pattern, Pat::Object(_) | Pat::Array(_)) {
             self.bind_destructure_source_once(value, ty, statements)
@@ -114,12 +122,11 @@ impl<'a> FnLowerer<'a> {
                     payload.as_ref().clone(),
                     HirExpr::OptionalValue(Box::new(value), payload.as_ref().clone()),
                 ));
-                return self.lower_binding_pattern(
+                return self.lower_binding_pattern_impl(
                     pattern,
                     HirExpr::Var(unwrapped),
                     payload,
-                    statements,
-                );
+                    statements, immutable);
             }
         }
         match pattern {
@@ -140,7 +147,7 @@ impl<'a> FnLowerer<'a> {
                 } else {
                     ty.clone()
                 };
-                let name = self.bind_local(binding.id.sym.as_ref(), binding_type.clone());
+                let name = self.bind_decl_local(binding.id.sym.as_ref(), binding_type.clone(), immutable);
                 if let Some(discriminants) = array_discriminants {
                     self.array_element_discriminants
                         .insert(name.clone(), discriminants);
@@ -184,8 +191,7 @@ impl<'a> FnLowerer<'a> {
                         pattern,
                         value,
                         element,
-                        statements,
-                    );
+                        statements, immutable);
                 }
                 if ty == &HirType::Json {
                     // A `Json`-typed (`any`) object has no compile-time-
@@ -203,12 +209,11 @@ impl<'a> FnLowerer<'a> {
                         pattern,
                         value,
                         &HirType::Json,
-                        statements,
-                    );
+                        statements, immutable);
                 }
                 if let HirType::Union(elements) = ty {
                     return self
-                        .lower_union_object_binding_pattern(pattern, value, elements, statements);
+                        .lower_union_object_binding_pattern(pattern, value, elements, statements, immutable);
                 }
                 let HirType::Object(fields) = ty else {
                     return Err(format!("object pattern cannot destructure {ty:?}"));
@@ -228,12 +233,11 @@ impl<'a> FnLowerer<'a> {
                                     .ok_or_else(|| format!("object has no field `{key}`"))?;
                                 let default = self.lower_expr(default)?;
                                 let default_type = self.infer_expr_type(&default)?;
-                                self.lower_binding_pattern(
+                                self.lower_binding_pattern_impl(
                                     &Pat::Ident(property.key.clone()),
                                     default,
                                     &default_type,
-                                    statements,
-                                )?;
+                                    statements, immutable)?;
                                 continue;
                             }
                             let field_type = field_type.expect("missing field handled above");
@@ -245,12 +249,11 @@ impl<'a> FnLowerer<'a> {
                                 field_value = self.lower_undefined_default(field_value, default)?;
                                 binding_type = self.infer_expr_type(&field_value)?;
                             }
-                            self.lower_binding_pattern(
+                            self.lower_binding_pattern_impl(
                                 &Pat::Ident(property.key.clone()),
                                 field_value,
                                 &binding_type,
-                                statements,
-                            )?;
+                                statements, immutable)?;
                         }
                         ObjectPatProp::KeyValue(property) => {
                             let key = self
@@ -265,35 +268,32 @@ impl<'a> FnLowerer<'a> {
                                 };
                                 let value = self.lower_expr(&default.right)?;
                                 let value_type = self.infer_expr_type(&value)?;
-                                self.lower_binding_pattern(
+                                self.lower_binding_pattern_impl(
                                     &default.left,
                                     value,
                                     &value_type,
-                                    statements,
-                                )?;
+                                    statements, immutable)?;
                                 continue;
                             }
                             let field_type = field_type.expect("missing field handled above");
                             let field_value = self
                                 .lower_fixed_object_property_read(value.clone(), fields, &key)?;
-                            self.lower_binding_pattern(
+                            self.lower_binding_pattern_impl(
                                 &property.value,
                                 field_value,
                                 &field_type,
-                                statements,
-                            )?;
+                                statements, immutable)?;
                         }
                         ObjectPatProp::Rest(rest) => {
                             let omitted = used.iter().cloned().collect::<Vec<_>>();
                             let (rest_value, rest_type) = self.lower_fixed_object_rest_copy(
                                 value.clone(), fields, &omitted,
                             )?;
-                            self.lower_binding_pattern(
+                            self.lower_binding_pattern_impl(
                                 &rest.arg,
                                 rest_value,
                                 &rest_type,
-                                statements,
-                            )?;
+                                statements, immutable)?;
                         }
                     }
                 }
@@ -306,8 +306,7 @@ impl<'a> FnLowerer<'a> {
                         .all(|element| matches!(element, HirType::Tuple(_)))
                     {
                         return self.lower_union_tuple_binding_pattern(
-                            pattern, value, elements, statements,
-                        );
+                            pattern, value, elements, statements, immutable);
                     }
                     if elements
                         .iter()
@@ -319,12 +318,11 @@ impl<'a> FnLowerer<'a> {
                         self.next_binding += 1;
                         self.scope.insert(name.clone(), flattened_type.clone());
                         statements.push(HirStmt::Let(name.clone(), flattened_type.clone(), flattened));
-                        return self.lower_binding_pattern(
+                        return self.lower_binding_pattern_impl(
                             &Pat::Array(pattern.clone()),
                             HirExpr::Var(name),
                             &flattened_type,
-                            statements,
-                        );
+                            statements, immutable);
                     }
                 }
                 if let HirType::Array(element) = ty {
@@ -360,12 +358,11 @@ impl<'a> FnLowerer<'a> {
                                     HirExpr::Lit(HirLit::F64(f64::INFINITY)),
                                 ],
                             );
-                            self.lower_binding_pattern(
+                            self.lower_binding_pattern_impl(
                                 &rest.arg,
                                 rest_value,
                                 ty,
-                                statements,
-                            )?;
+                                statements, immutable)?;
                             break;
                         }
                         let read_type = Self::array_read_type(element);
@@ -375,12 +372,11 @@ impl<'a> FnLowerer<'a> {
                             element.as_ref().clone(),
                             HirExpr::Lit(HirLit::F64(index as f64)),
                         )?;
-                        self.lower_binding_pattern(
+                        self.lower_binding_pattern_impl(
                             element_pattern,
                             read,
                             &read_type,
-                            statements,
-                        )?;
+                            statements, immutable)?;
                     }
                     return Ok(());
                 }
@@ -390,7 +386,7 @@ impl<'a> FnLowerer<'a> {
                             continue;
                         };
                         if let Pat::Rest(rest) = element_pattern {
-                            self.lower_binding_pattern(
+                            self.lower_binding_pattern_impl(
                                 &rest.arg,
                                 HirExpr::Call(
                                     Box::new(HirExpr::Var("__thaw_json_array_slice".into())),
@@ -400,19 +396,17 @@ impl<'a> FnLowerer<'a> {
                                     ],
                                 ),
                                 &HirType::Json,
-                                statements,
-                            )?;
+                                statements, immutable)?;
                             break;
                         }
-                        self.lower_binding_pattern(
+                        self.lower_binding_pattern_impl(
                             element_pattern,
                             HirExpr::JsonIndex(
                                 Box::new(value.clone()),
                                 Box::new(HirExpr::Lit(HirLit::F64(index as f64))),
                             ),
                             &HirType::Json,
-                            statements,
-                        )?;
+                            statements, immutable)?;
                     }
                     return Ok(());
                 }
@@ -454,14 +448,14 @@ impl<'a> FnLowerer<'a> {
                         } else {
                             HirType::Tuple(remaining)
                         };
-                        self.lower_binding_pattern(&rest.arg, rest_value, &rest_type, statements)?;
+                        self.lower_binding_pattern_impl(&rest.arg, rest_value, &rest_type, statements, immutable)?;
                         break;
                     }
                     let element_type = elements
                         .get(index)
                         .cloned()
                         .ok_or_else(|| format!("tuple pattern index {index} is out of bounds"))?;
-                    self.lower_binding_pattern(
+                    self.lower_binding_pattern_impl(
                         element_pattern,
                         HirExpr::TypedIndex(
                             Box::new(value.clone()),
@@ -469,8 +463,7 @@ impl<'a> FnLowerer<'a> {
                             element_type.clone(),
                         ),
                         &element_type,
-                        statements,
-                    )?;
+                        statements, immutable)?;
                 }
                 Ok(())
             }
@@ -479,7 +472,7 @@ impl<'a> FnLowerer<'a> {
                 let default_type = self.infer_expr_type(&default)?;
                 let value = self.lower_undefined_default(value, default)?;
                 let value_type = self.infer_expr_type(&value)?;
-                self.lower_binding_pattern(&assign.left, value, &value_type, statements)?;
+                self.lower_binding_pattern_impl(&assign.left, value, &value_type, statements, immutable)?;
                 if let Pat::Ident(binding) = assign.left.as_ref() {
                     self.destructuring_default_types
                         .insert(self.resolve_binding(binding.id.sym.as_ref()), default_type);
@@ -497,6 +490,7 @@ impl<'a> FnLowerer<'a> {
         value: HirExpr,
         elements: &[HirType],
         statements: &mut Vec<HirStmt>,
+        immutable: bool,
     ) -> Result<(), String> {
         let discriminants = match &value {
             HirExpr::Var(name) => self.union_discriminants.get(name).cloned(),
@@ -525,12 +519,11 @@ impl<'a> FnLowerer<'a> {
                             &default_type,
                         )?;
                     }
-                    self.lower_binding_pattern(
+                    self.lower_binding_pattern_impl(
                         &Pat::Ident(property.key.clone()),
                         field_value,
                         &field_type,
-                        statements,
-                    )?;
+                        statements, immutable)?;
                     if property.value.is_none() {
                         let name = self.resolve_binding(property.key.id.sym.as_ref());
                         discriminant_bindings.push((key, name.clone()));
@@ -551,12 +544,11 @@ impl<'a> FnLowerer<'a> {
                         self.lower_union_property_read(value.clone(), elements, &key)?;
                     let field_type = self.infer_expr_type(&field_value)?;
                     used.insert(key.clone());
-                    self.lower_binding_pattern(
+                    self.lower_binding_pattern_impl(
                         &property.value,
                         field_value,
                         &field_type,
-                        statements,
-                    )?;
+                        statements, immutable)?;
                     if let Pat::Ident(binding) = property.value.as_ref() {
                         discriminant_bindings
                             .push((key.clone(), self.resolve_binding(binding.id.sym.as_ref())));
@@ -571,7 +563,7 @@ impl<'a> FnLowerer<'a> {
                     let source_types = Self::union_destructured_rest_source_types(elements, &used)?;
                     let (rest_value, rest_type) =
                         self.lower_union_object_rest(value.clone(), elements, &used)?;
-                    self.lower_binding_pattern(&rest.arg, rest_value, &rest_type, statements)?;
+                    self.lower_binding_pattern_impl(&rest.arg, rest_value, &rest_type, statements, immutable)?;
                     self.collect_correlated_destructured_bindings(
                         &rest.arg,
                         &source_types,
@@ -597,6 +589,7 @@ impl<'a> FnLowerer<'a> {
         value: HirExpr,
         elements: &[HirType],
         statements: &mut Vec<HirStmt>,
+        immutable: bool,
     ) -> Result<(), String> {
         for (index, element_pattern) in pattern.elems.iter().enumerate() {
             let Some(element_pattern) = element_pattern else {
@@ -605,13 +598,13 @@ impl<'a> FnLowerer<'a> {
             if let Pat::Rest(rest) = element_pattern {
                 let (rest_value, rest_type) =
                     self.lower_union_tuple_rest(value.clone(), elements, index)?;
-                self.lower_binding_pattern(&rest.arg, rest_value, &rest_type, statements)?;
+                self.lower_binding_pattern_impl(&rest.arg, rest_value, &rest_type, statements, immutable)?;
                 break;
             }
             let element_value =
                 self.lower_union_tuple_index_read(value.clone(), elements, index)?;
             let element_type = self.infer_expr_type(&element_value)?;
-            self.lower_binding_pattern(element_pattern, element_value, &element_type, statements)?;
+            self.lower_binding_pattern_impl(element_pattern, element_value, &element_type, statements, immutable)?;
         }
         Ok(())
     }
@@ -1472,6 +1465,7 @@ impl<'a> FnLowerer<'a> {
         value: HirExpr,
         element: &HirType,
         statements: &mut Vec<HirStmt>,
+        immutable: bool,
     ) -> Result<(), String> {
         let has_rest = pattern
             .props
@@ -1492,12 +1486,11 @@ impl<'a> FnLowerer<'a> {
                             value.clone(), key, default, element,
                         )?;
                     }
-                    self.lower_binding_pattern(
+                    self.lower_binding_pattern_impl(
                         &Pat::Ident(property.key.clone()),
                         field,
                         element,
-                        statements,
-                    )?;
+                        statements, immutable)?;
                 }
                 ObjectPatProp::KeyValue(property) => {
                     let key = match self.static_object_property_name(&property.key) {
@@ -1521,12 +1514,11 @@ impl<'a> FnLowerer<'a> {
                     };
                     used_keys.push(key.clone());
                     let field = self.typed_dictionary_read(value.clone(), key, element)?;
-                    self.lower_binding_pattern(
+                    self.lower_binding_pattern_impl(
                         &property.value,
                         field,
                         element,
-                        statements,
-                    )?;
+                        statements, immutable)?;
                 }
                 ObjectPatProp::Rest(rest) => {
                     let rest_type = HirType::Dictionary(Box::new(element.clone()));
@@ -1535,12 +1527,11 @@ impl<'a> FnLowerer<'a> {
                         &rest_type,
                         &used_keys,
                     );
-                    self.lower_binding_pattern(
+                    self.lower_binding_pattern_impl(
                         &rest.arg,
                         rest_value,
                         &rest_type,
-                        statements,
-                    )?;
+                        statements, immutable)?;
                 }
             }
         }

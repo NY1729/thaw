@@ -94,6 +94,39 @@ fn rejects_top_level_const_reassignment() {
 }
 
 #[test]
+fn local_const_and_using_bindings_reject_writes_without_freezing_shadowed_let() {
+    let rejected = [
+        "function main(): void { const value = 1; value = 2; }",
+        "function main(): void { const value = 1; value++; }",
+        "function main(): void { const first = 1, second = (first = 2); }",
+        "function main(): void { const [first] = [1]; first = 2; }",
+        "function main(): void { const [first, second = (first = 2)] = [1, undefined]; }",
+        "function main(): void { const { first } = { first: 1 }; first++; }",
+        "function main(): void { const value: () => number = function value(): number { value = value; return 1; }; }",
+        "function main(): void { const value: () => number = function inner(): number { value = value; return 1; }; }",
+        "function main(): void { const value: () => void = (): void => { value = value; }; }",
+        "function main(): void { const value: () => void = (): void => { const nested = (): void => { value = value; }; nested(); }; }",
+        "declare function acquire(): JsValue; function main(): void { using resource = acquire(); resource = resource; }",
+        "function main(): void { for (const item of [1]) { item = 2; } }",
+        "function main(): void { for (const item in { a: 1 }) { item = 'b'; } }",
+    ];
+    for source in rejected {
+        let module = thaw_parser::parse_typescript(source).expect("parse error");
+        let error = lower_module(&module).unwrap_err();
+        assert!(error.contains("constant"), "{source}: {error}");
+    }
+    lower("function main(): number { const value = 1; { let value = 2; value++; } return value; }");
+    lower("function main(): number { let value = 1; value++; return value; }");
+    lower("function main(): number { const value = 1; for (let value of [2]) { value++; } return value; }");
+    lower("function main(): number { const value = 1; for (let value = 0; value < 1; value++) {} return value; }");
+    lower("function main(): void { function local(): number { return 1; } local = local; }");
+    lower("function main(): void { const value: (value: number) => number = (value: number): number => value; }");
+    lower("function main(): void { const value: () => number = (): number => { let value = 1; value++; return value; }; }");
+    lower("function main(): void { const value: () => number = (): number => { const item = { value: 1 }; return item.value; }; }");
+    lower("function main(): void { const value: () => number = function inner(): number { return value(); }; }");
+}
+
+#[test]
 fn rejects_direct_forward_references_between_top_level_bindings() {
     let module = thaw_parser::parse_typescript(
         "const answer: number = base + 2; const base = 40; function main(): void {}",
