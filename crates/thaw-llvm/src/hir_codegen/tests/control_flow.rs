@@ -202,6 +202,11 @@ fn switch_cases_use_strict_kind_matching_in_source_order() {
                 case probe("number", 1): console.log("matched"); break;
                 case probe("late", 1): console.log("wrong-late"); break;
             }
+            switch (false) {
+                case probe("zero", 0): console.log("wrong-zero"); break;
+                case probe("empty", ""): console.log("wrong-empty"); break;
+                case probe("false", false): console.log("matched-false"); break;
+            }
             const dynamic: any = "1";
             switch (dynamic) {
                 case 1: console.log("wrong-number"); break;
@@ -211,7 +216,7 @@ fn switch_cases_use_strict_kind_matching_in_source_order() {
     "#;
     assert_eq!(
         compile_and_run(source, "strict_switch_case_kinds"),
-        "text\nbool\nnumber\nmatched\nmatched-text\n"
+        "text\nbool\nnumber\nmatched\nzero\nempty\nfalse\nmatched-false\nmatched-text\n"
     );
 }
 
