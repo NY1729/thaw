@@ -2292,7 +2292,7 @@
     requireMockClock(clock);
     let lastDue = -Infinity;
     for (const timer of timers.values()) if (timer.clock === clock) lastDue = Math.max(lastDue, timer.due);
-    if (lastDue !== -Infinity) globalThis.__thaw_test_mock_timers_tick(clock, lastDue - clock.now);
+    if (lastDue !== -Infinity) globalThis.__thaw_test_mock_timers_tick(clock, Math.max(0, lastDue - clock.now));
   };
   globalThis.__thaw_test_mock_timers_set_time = (clock, milliseconds) => {
     requireMockClock(clock);
