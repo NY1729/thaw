@@ -60,9 +60,20 @@ impl<'a> FnLowerer<'a> {
         hir_name
     }
 
+    // Source declarations record immutability on the resolved storage name.
+    // Compiler-created Let temporaries continue to use bind_local directly.
+    fn bind_decl_local(&mut self, source_name: &str, ty: HirType, immutable: bool) -> Symbol {
+        let hir_name = self.bind_local(source_name, ty);
+        if immutable {
+            self.immutable_bindings.insert(hir_name.clone());
+        }
+        hir_name
+    }
+
     // The name marks a binding whose cell must be replaced on every for-loop
     // iteration, including when an async function resumes in a new frame call.
     fn bind_for_iteration_local(&mut self, source_name: &str, ty: HirType) -> Symbol {
+        let immutable = self.immutable_bindings.contains(&self.resolve_binding(source_name));
         let hir_name = format!("@@thaw_for_iteration_{}", self.next_binding);
         self.next_binding += 1;
         self.scope.insert(hir_name.clone(), ty);
@@ -71,6 +82,9 @@ impl<'a> FnLowerer<'a> {
             .entry(source_name.to_string())
             .or_default()
             .push(hir_name.clone());
+        if immutable {
+            self.immutable_bindings.insert(hir_name.clone());
+        }
         hir_name
     }
 
