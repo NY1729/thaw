@@ -1080,3 +1080,57 @@ fn worker_saved_url_keeps_bundle_affinity_across_packages_and_nested_workers() {
     let _ = fs::remove_dir_all(package_b);
     let _ = fs::remove_dir_all(modules);
 }
+
+#[test]
+fn file_worker_and_main_keep_root_dirname_for_entry_and_dependencies() {
+    use std::ffi::{CStr, CString};
+    let dir = temp_registry("worker_root_dirname");
+    let modules = temp_registry("worker_root_dirname_modules");
+    fs::write(dir.join("index.js"), r#"
+        var Worker = require('node:worker_threads').Worker;
+        module.exports = function () {
+            var originalRead = globalThis.__thaw_worker_read_source;
+            var originalSpawn = globalThis.__thaw_worker_spawn;
+            var captured, stop = {};
+            globalThis.__thaw_worker_read_source = function(path) {
+                if (path.endsWith('entry.js')) return "module.exports = [__dirname, require('./child.js')];";
+                if (path.endsWith('child.js')) return 'module.exports = __dirname;';
+                throw new Error('Unexpected read: ' + path);
+            };
+            globalThis.__thaw_worker_spawn = function(bundle, source) {
+                captured = source;
+                throw stop; // Capture generated source without starting a host worker.
+            };
+            try {
+                var workerValues = ['/entry.js', '/nested/entry.js', 'entry.js'].map(function(path) {
+                    captured = undefined;
+                    try { new Worker(path); } catch (error) { if (error !== stop) throw error; }
+                    if (captured === undefined) throw new Error('Missing generated Worker source');
+                    var childModule = { exports: {} };
+                    Function('require', 'module', 'exports', captured)(
+                        function(name) { throw new Error(name); }, childModule, childModule.exports);
+                    return childModule.exports;
+                });
+                var mainValues = ['/entry.js', '/nested/entry.js'].map(function(path) {
+                    return globalThis.__thaw_run_main_file(path);
+                });
+                return [workerValues, mainValues];
+            } finally {
+                globalThis.__thaw_worker_read_source = originalRead;
+                globalThis.__thaw_worker_spawn = originalSpawn;
+            }
+        };
+    "#).unwrap();
+    let (bundle, _, _, _) = bundle_commonjs_package(&modules, "pkg", &dir, "index.js").unwrap();
+    let script = format!(
+        "globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; \
+         globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} \
+         globalThis.exerciseWorkerRootDirname = module.exports;"
+    );
+    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
+    let result = thaw_quickjs::thaw_js_call(c"exerciseWorkerRootDirname".as_ptr(), c"[]".as_ptr());
+    assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(),
+        "[[[\"/\",\"/\"],[\"/nested\",\"/nested\"],[\".\",\".\"]],[[\"/\",\"/\"],[\"/nested\",\"/nested\"]]]");
+    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(modules);
+}
