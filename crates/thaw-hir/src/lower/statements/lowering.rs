@@ -2430,6 +2430,7 @@ impl<'a> FnLowerer<'a> {
                         } else {
                             None
                         };
+                        let saved_case_narrowings = self.save_narrowings();
                         let saved_union_narrowings = self.union_narrowings.clone();
                         if let Some(targets) = &case_union {
                             for target in targets {
@@ -2440,6 +2441,7 @@ impl<'a> FnLowerer<'a> {
                             }
                         }
                         let lowered_case = self.lower_stmts(&case.cons);
+                        self.restore_narrowings(saved_case_narrowings);
                         self.union_narrowings = saved_union_narrowings;
                         let mut body = lowered_case?;
                         body = rewrite_switch_case_stmts(
