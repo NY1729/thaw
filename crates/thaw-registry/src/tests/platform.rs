@@ -1248,3 +1248,55 @@ fn file_loaders_retry_failed_modules_and_bind_commonjs_this() {
     let _ = fs::remove_dir_all(dir);
     let _ = fs::remove_dir_all(modules);
 }
+
+#[test]
+fn file_loaders_accept_hashbangs_without_stripping_json_or_interior_text() {
+    use std::ffi::{CStr, CString};
+    let dir = temp_registry("worker_hashbang_lines");
+    let modules = temp_registry("worker_hashbang_lines_modules");
+    fs::write(dir.join("index.js"), r##"
+        var Worker = require('node:worker_threads').Worker;
+        module.exports = function () {
+            var originalRead = globalThis.__thaw_worker_read_source;
+            var originalSpawn = globalThis.__thaw_worker_spawn;
+            var captured, stop = {};
+            globalThis.__thaw_worker_read_source = function(path) {
+                if (path.endsWith('entry.js')) return '#!/usr/bin/env node\n' +
+                    "var invalidJson = false; try { require('./invalid.json'); } catch (error) { invalidJson = error instanceof SyntaxError; }" +
+                    "module.exports = [require('./lf.js'), require('./crlf.cjs'), require('./ls.js'), require('./ps.js'), Object.keys(require('./empty.js')).length, require('./text.js'), invalidJson];";
+                if (path.endsWith('lf.js')) return '#!/usr/bin/env node\nmodule.exports = 1;';
+                if (path.endsWith('crlf.cjs')) return '#!/usr/bin/env node\r\nmodule.exports = 2;';
+                if (path.endsWith('ls.js')) return '#!/usr/bin/env node\u2028module.exports = 3;';
+                if (path.endsWith('ps.js')) return '#!/usr/bin/env node\u2029module.exports = 4;';
+                if (path.endsWith('empty.js')) return '#!/usr/bin/env node';
+                if (path.endsWith('text.js')) return 'module.exports = "#!kept";';
+                if (path.endsWith('invalid.json')) return '#!/usr/bin/env node\n{"value":1}';
+                throw new Error('Unexpected read: ' + path);
+            };
+            globalThis.__thaw_worker_spawn = function(bundle, source) { captured = source; throw stop; };
+            try {
+                try { new Worker('/hashbang/entry.js'); } catch (error) { if (error !== stop) throw error; }
+                if (captured === undefined) throw new Error('Missing generated Worker source');
+                var childModule = { exports: {} };
+                Function('require', 'module', 'exports', captured)(
+                    function(name) { throw new Error(name); }, childModule, childModule.exports);
+                return [childModule.exports, globalThis.__thaw_run_main_file('/hashbang/entry.js')];
+            } finally {
+                globalThis.__thaw_worker_read_source = originalRead;
+                globalThis.__thaw_worker_spawn = originalSpawn;
+            }
+        };
+    "##).unwrap();
+    let (bundle, _, _, _) = bundle_commonjs_package(&modules, "pkg", &dir, "index.js").unwrap();
+    let script = format!(
+        "globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; \
+         globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} \
+         globalThis.exerciseWorkerHashbangLines = module.exports;"
+    );
+    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
+    let result = thaw_quickjs::thaw_js_call(c"exerciseWorkerHashbangLines".as_ptr(), c"[]".as_ptr());
+    assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(),
+        "[[1,2,3,4,0,\"#!kept\",true],[1,2,3,4,0,\"#!kept\",true]]");
+    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(modules);
+}

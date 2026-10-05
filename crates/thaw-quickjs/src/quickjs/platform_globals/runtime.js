@@ -2620,7 +2620,7 @@
       const module = cache[resolved] = { exports: {} }, slash = resolved.lastIndexOf('/'), dirname = slash < 0 ? '.' : slash === 0 ? '/' : resolved.slice(0, slash);
       try {
         if (resolved.endsWith('.json')) module.exports = JSON.parse(source);
-        else Function('module', 'exports', 'require', '__filename', '__dirname', source).call(module.exports, module, module.exports, name => load(dirname, name), resolved, dirname);
+        else Function('module', 'exports', 'require', '__filename', '__dirname', source.replace(/^#![^\r\n\u2028\u2029]*/, '')).call(module.exports, module, module.exports, name => load(dirname, name), resolved, dirname);
       } catch (error) {
         delete cache[resolved];
         throw error;
