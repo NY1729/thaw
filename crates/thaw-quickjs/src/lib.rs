@@ -411,7 +411,7 @@ enum HostWorkerCommand {
 
 enum HostWorkerEvent {
     Online,
-    Message(String),
+    Message { payload: String, ports: Vec<String> },
     Stdout(String),
     Stderr(String),
     DirectRequest {
@@ -419,6 +419,7 @@ enum HostWorkerEvent {
         source: u32,
         request: u64,
         payload: String,
+        ports: Vec<String>,
     },
     ParentDirectResult {
         request: u64,
@@ -427,6 +428,7 @@ enum HostWorkerEvent {
     PortMessage {
         port: String,
         payload: String,
+        ports: Vec<String>,
     },
     Error(String),
     Exit(i32),
