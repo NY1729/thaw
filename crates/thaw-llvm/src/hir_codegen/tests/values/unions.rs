@@ -319,7 +319,9 @@ fn flattened_union_property_reads_accessor_once_per_selected_value() {
     let source = r#"
         type Mixed =
             { kind: number; value: number | undefined } |
-            { kind: string; value: string | null };
+            { kind: string; value: string | null } |
+            { kind: boolean; value: number | null | undefined } |
+            { kind: number[]; value: number | string };
         let reads = 0;
         function show(value: Mixed): void { console.log(value.value, reads); }
         function main(): void {
@@ -331,12 +333,22 @@ fn flattened_union_property_reads_accessor_once_per_selected_value() {
                 kind: "text",
                 get value(): string | null { reads++; return "ready"; },
             };
+            const nullishValue: { kind: boolean; value: number | null | undefined } = {
+                kind: true,
+                get value(): number | null | undefined { reads++; return 24; },
+            };
+            const unionValue: { kind: number[]; value: number | string } = {
+                kind: [1],
+                get value(): number | string { reads++; return "union"; },
+            };
             show(numberValue);
             show(textValue);
+            show(nullishValue);
+            show(unionValue);
         }
     "#;
     assert_eq!(compile_and_run(source, "flattened_union_accessor_once"),
-        "12 1\nready 2\n");
+        "12 1\nready 2\n24 3\nunion 4\n");
 }
 
 #[test]
