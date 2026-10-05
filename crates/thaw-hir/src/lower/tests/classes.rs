@@ -2264,3 +2264,87 @@ fn keeps_nested_private_class_scope_out_of_outer_normalization() {
     let Expr::Member(read) = returned.arg.as_deref().unwrap() else { panic!("expected outer private read"); };
     assert!(matches!(&read.prop, MemberProp::Ident(name) if name.sym == *"__thaw_private_Outer_outerValue"));
 }
+
+#[test]
+fn computed_class_key_folding_respects_initialized_declaration_order() {
+    for (source, expected) in [
+        ("const KEY = 'm'; class C { [KEY](): number { return 1; } }", Some("m")),
+        ("class C { [KEY](): number { return 1; } } const KEY = 'm';", None),
+        ("const A = 'm', KEY = A; class C { [KEY](): number { return 1; } }", Some("m")),
+        ("const KEY = A, A = 'm'; class C { [KEY](): number { return 1; } }", None),
+        ("export class C { [KEY](): number { return 1; } } export const KEY = 'm';", None),
+    ] {
+        let module = thaw_parser::parse_typescript(source).unwrap();
+        let normalized = normalize_static_computed_class_members(&module);
+        let class = normalized.body.iter().find_map(|item| match item {
+            ModuleItem::Stmt(Stmt::Decl(Decl::Class(class))) => Some(class),
+            ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export)) => match &export.decl {
+                Decl::Class(class) => Some(class),
+                _ => None,
+            },
+            _ => None,
+        }).unwrap();
+        let method = class.class.body.iter().find_map(|member| match member {
+            ClassMember::Method(method) => Some(method),
+            _ => None,
+        }).unwrap();
+        match expected {
+            Some(expected) => {
+                let PropName::Str(name) = &method.key else { panic!("key not folded: {source}"); };
+                assert_eq!(name.value.to_string_lossy(), expected);
+            }
+            None => {
+                let ClassMember::StaticBlock(block) = &class.class.body[0] else { panic!("missing runtime TDZ guard: {source}"); };
+                assert!(matches!(&block.body.stmts[0], Stmt::Throw(_)), "{source}");
+            },
+        }
+    }
+}
+
+#[test]
+fn class_key_order_guard_preserves_object_keys_in_method_bodies() {
+    struct Keys(Vec<String>);
+    impl Visit for Keys {
+        fn visit_prop_name(&mut self, property: &PropName) {
+            if let PropName::Str(key) = property {
+                self.0.push(key.value.to_string_lossy().into_owned());
+            }
+            property.visit_children_with(self);
+        }
+    }
+    let module = thaw_parser::parse_typescript(
+        "const K = 'x'; class C { m(): { x: number } { return { [K]: 1 }; } }",
+    ).unwrap();
+    let normalized = normalize_static_computed_class_members(&module);
+    let mut keys = Keys(Vec::new());
+    normalized.visit_with(&mut keys);
+    assert!(keys.0.iter().any(|key| key == "x"));
+}
+
+#[test]
+fn forward_class_key_throws_during_initialization_even_when_class_is_unused() {
+    let program = lower(
+        "const ReferenceError = 17; class C { [KEY](): number { return 1; } } const KEY = 'm'; function main(): void {}",
+    );
+    let thrown = program.initializers.iter().position(|step|
+        matches!(step, HirInitStep::Statement(HirStmt::Throw(_)))
+    ).unwrap();
+    let key_initialized = program.initializers.iter().position(|step|
+        matches!(step, HirInitStep::StoreGlobal(name, _) if name == "KEY")
+    ).unwrap();
+    assert!(thrown < key_initialized);
+    let message = format!("{:?}", program.initializers[thrown]);
+    assert!(message.contains("ReferenceError"));
+    assert!(message.contains("before initialization"));
+}
+
+#[test]
+fn initialized_class_key_does_not_gain_a_synthetic_tdz_throw() {
+    let program = lower(
+        "const KEY = 'm'; class C { [KEY](): number { return 1; } } function main(): number { return new C().m(); }",
+    );
+    assert!(!program.initializers.iter().any(|step|
+        matches!(step, HirInitStep::Statement(HirStmt::Throw(_)))
+    ));
+    assert!(program.functions.iter().any(|function| function.name == class_method_symbol("C", "m")));
+}
