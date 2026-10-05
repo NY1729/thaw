@@ -2524,6 +2524,94 @@ module.exports = async function () {
 }
 
 #[test]
+fn test_timeout_aborts_body_hooks_and_children_without_stalling_queue() {
+    use std::ffi::{CStr, CString};
+
+    let dir = temp_registry("builtin_test_timeout");
+    fs::write(
+        dir.join("index.js"),
+        r#"var test = require('node:test');
+module.exports = async function () {
+  var effects = [], releaseBody, releaseHook, bodySignal, childSignal, nextSignal;
+  var mockTarget = { value: function() { return 1; } }, cleanupCount = 0;
+  var gate = new Promise(function(resolve) { releaseBody = resolve; });
+  var body = await test('body timeout', { timeout: 10 }, async function(t) {
+    bodySignal = t.signal;
+    t.after(function() { return new Promise(function() {}); });
+    t.after(function() { cleanupCount++; });
+    await gate;
+    effects.push('late body');
+    try { await t.test('late child', function() { effects.push('late child body ran'); }); }
+    catch (error) { effects.push('late child blocked'); }
+    try { t.mock.method(mockTarget, 'value', function() { return 99; }); }
+    catch (error) { effects.push('late mock blocked'); }
+    try { t.after(function() { effects.push('late cleanup ran'); }); }
+    catch (error) { effects.push('late after blocked'); }
+  });
+  releaseBody();
+  await Promise.resolve();
+  var hook = await test.describe('hook suite', { timeout: 10 }, function() {
+    test.before(function() { return new Promise(function() {}); });
+    test.after(function() { effects.push('hook suite cleanup'); });
+    test('blocked', function() { effects.push('blocked body'); });
+  });
+  var hookGate = new Promise(function(resolve) { releaseHook = resolve; });
+  var lateHook = await test.describe('late hook suite', { timeout: 10 }, function() {
+    test.before(function() { return hookGate; });
+    test.after(function() { effects.push('late hook suite cleanup'); });
+    test('blocked after late hook', function() { effects.push('late hook body ran'); });
+  });
+  releaseHook();
+  await Promise.resolve();
+  var parent = await test('child timeout', { timeout: 10 }, async function(t) {
+    t.test('child', function(child) {
+      childSignal = child.signal;
+      return new Promise(function() {});
+    });
+    await new Promise(function() {});
+  });
+  var after = await test('after timeout', { timeout: 10 }, function(t) {
+    t.after(function() { return new Promise(function() {}); });
+    t.after(function() { effects.push('second teardown'); });
+  });
+  var next = await test('next', { timeout: 10 }, function(t) {
+    nextSignal = t.signal;
+    effects.push('next');
+  });
+  var unlimited = await test('unlimited', { timeout: Infinity }, function() {
+    effects.push('unlimited');
+  });
+  await new Promise(function(resolve) { setTimeout(resolve, 25); });
+  var records = [];
+  for await (var event of test.run()) records.push(event.name + ':' + event.status);
+  return [body.status, body.message, bodySignal.aborted, cleanupCount, mockTarget.value(), hook.status, lateHook.status,
+    parent.status, childSignal.aborted, after.status, next.status, unlimited.status,
+    nextSignal.aborted, effects, records];
+};"#,
+    ).unwrap();
+    let empty_node_modules = temp_registry("builtin_test_timeout_modules");
+    let (bundle, _, file_count, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    assert!(file_count >= 4);
+    let script = format!(
+        "globalThis.module = {{ exports: {{}} }};\n\
+         globalThis.exports = globalThis.module.exports;\n\
+         globalThis.require = function(name) {{ throw new Error(\"require('\" + name + \"') is not supported\"); }};\n\
+         {bundle}\n\
+         globalThis.exerciseTestTimeout = module.exports;\n"
+    );
+    let source = CString::new(script).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let func = CString::new("exerciseTestTimeout").unwrap();
+    let args = CString::new("[]").unwrap();
+    let result_ptr = thaw_quickjs::thaw_js_call(func.as_ptr(), args.as_ptr());
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(result, r#"["failed","test timed out",true,1,1,"failed","failed","failed",true,"failed","passed","passed",false,["late body","late child blocked","late mock blocked","late after blocked","hook suite cleanup","late hook suite cleanup","second teardown","next","unlimited"],["body timeout:failed","hook suite:failed","late hook suite:failed","child:failed","child timeout:failed","after timeout:failed","next:passed","unlimited:passed"]]"#);
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+}
+
+#[test]
 fn test_accessor_mocks_return_spies_and_restore_individually() {
     use std::ffi::{CStr, CString};
 
