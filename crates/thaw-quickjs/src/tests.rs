@@ -8626,3 +8626,35 @@ fn webassembly_imports_immutable_numeric_global_values() {
     assert_eq!(call("wasmPrimitiveGlobals", "[]"),
         r#"[-1,true,1.5,"-1",7,1,true,true,true,true,true,true,9,"kind,module,name"]"#);
 }
+
+#[test]
+fn worker_source_reader_removes_only_the_leading_bom() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw_worker_bom_{}_{}", std::process::id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+    ));
+    std::fs::create_dir(&dir).unwrap();
+    let json = dir.join("data.json");
+    let package = dir.join("package.json");
+    let plain = dir.join("plain.json");
+    let double = dir.join("double.json");
+    std::fs::write(&json, "\u{feff}{\"value\":\"inside\u{feff}\"}").unwrap();
+    std::fs::write(&package, "\u{feff}{\"main\":\"./entry.js\"}").unwrap();
+    std::fs::write(&plain, "{\"value\":3}").unwrap();
+    std::fs::write(&double, "\u{feff}\u{feff}{}").unwrap();
+    assert_eq!(load(r#"
+        function workerBomFiles(json, packageFile, plain, double) {
+            const read = globalThis.__thaw_worker_read_source;
+            const value = JSON.parse(read(json));
+            const manifest = JSON.parse(read(packageFile));
+            return [value.value, manifest.main, JSON.parse(read(plain)).value,
+                    read(double).charCodeAt(0)];
+        }
+    "#), 1);
+    let args = serde_json::to_string(&[
+        json.to_str().unwrap(), package.to_str().unwrap(),
+        plain.to_str().unwrap(), double.to_str().unwrap()
+    ]).unwrap();
+    assert_eq!(call("workerBomFiles", &args), "[\"inside\u{feff}\",\"./entry.js\",3,65279]");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
