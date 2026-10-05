@@ -130,6 +130,7 @@ impl<'a> FnLowerer<'a> {
         outer_name: &str,
         expression: &swc_ecma_ast::FnExpr,
         annotated: Option<&HirType>,
+        immutable: bool,
     ) -> Result<Option<(Symbol, HirType, HirExpr)>, String> {
         if !named_function_is_recursive(expression) {
             return Ok(None);
@@ -177,7 +178,7 @@ impl<'a> FnLowerer<'a> {
         let HirType::Function(params, ret) = &ty else {
             return Err("recursive named function expression needs a function type".into());
         };
-        let hir_name = self.bind_local(outer_name, ty.clone());
+        let hir_name = self.bind_decl_local(outer_name, ty.clone(), immutable);
         let saved_internal = (internal != outer_name)
             .then(|| self.bindings.get(&internal).cloned())
             .flatten();

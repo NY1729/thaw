@@ -1258,7 +1258,7 @@ impl<'a> FnLowerer<'a> {
                     function: fn_decl.function.clone(),
                 };
                 if let Some((hir_name, ty, value)) =
-                    self.lower_recursive_function_expression(&name, &expression, None)?
+                    self.lower_recursive_function_expression(&name, &expression, None, false)?
                 {
                     return Ok(vec![HirStmt::Let(hir_name, ty, value)]);
                 }
@@ -1795,6 +1795,9 @@ impl<'a> FnLowerer<'a> {
                                     .entry(source_name)
                                     .or_default()
                                     .push(item_name.clone());
+                                if decl.kind == VarDeclKind::Const {
+                                    self.immutable_bindings.insert(item_name.clone());
+                                }
                                 let declared_discriminants = binding.type_ann.as_ref().map(
                                     |annotation| {
                                         object_union_discriminants(
@@ -1849,11 +1852,12 @@ impl<'a> FnLowerer<'a> {
                                     item_type.clone(),
                                     item_value(),
                                 )];
-                                self.lower_binding_pattern(
+                                self.lower_binding_pattern_impl(
                                     &declarator.name,
                                     HirExpr::Var(temporary),
                                     &item_type,
                                     &mut statements,
+                                    decl.kind == VarDeclKind::Const,
                                 )?;
                                 statements
                             } else {
@@ -1871,6 +1875,9 @@ impl<'a> FnLowerer<'a> {
                                         "`for...of` assignment target has type {item_ty:?}, expected {:?}",
                                         item_type
                                     ));
+                                }
+                                if self.immutable_bindings.contains(&item_name) {
+                                    return Err(format!("cannot assign to constant `{item_name}`"));
                                 }
                                 self.record_binding_write(&item_name);
                                 vec![HirStmt::Expr(HirExpr::Assign(
@@ -1942,6 +1949,7 @@ impl<'a> FnLowerer<'a> {
                                 .entry(source_name.clone())
                                 .or_default()
                                 .push(item_name.clone());
+                            self.immutable_bindings.insert(item_name.clone());
                             let flag = self.bind_local("__thaw_using_acquired", HirType::Bool);
                             iteration_using_flags.push(HirStmt::Let(flag.clone(), HirType::Bool,
                                 HirExpr::Lit(HirLit::Bool(false))));
@@ -2194,6 +2202,9 @@ impl<'a> FnLowerer<'a> {
                                 .entry(source_name)
                                 .or_default()
                                 .push(binding_name.clone());
+                            if decl.kind == VarDeclKind::Const {
+                                self.immutable_bindings.insert(binding_name.clone());
+                            }
                             HirStmt::Let(binding_name, HirType::Str, key_value())
                         }
                         ForHead::Pat(pattern) => {
@@ -2210,6 +2221,9 @@ impl<'a> FnLowerer<'a> {
                                 return Err(format!(
                                     "`for...in` assignment target must be Str, got {binding_type:?}"
                                 ));
+                            }
+                            if self.immutable_bindings.contains(&binding_name) {
+                                return Err(format!("cannot assign to constant `{binding_name}`"));
                             }
                             self.record_binding_write(&binding_name);
                             HirStmt::Expr(HirExpr::Assign(
