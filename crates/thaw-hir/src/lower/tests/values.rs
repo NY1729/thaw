@@ -1020,17 +1020,29 @@ fn reorders_object_literal_fields_to_match_the_declared_type() {
         }"#,
     );
     let f = &program.functions[0];
-    assert_eq!(
-        f.body[0],
-        HirStmt::Let(
-            "p".into(),
-            HirType::Object(vec![("x".into(), HirType::F64), ("y".into(), HirType::F64)]),
-            HirExpr::ObjectLit(vec![
-                ("x".into(), HirExpr::Lit(HirLit::F64(1.0))),
-                ("y".into(), HirExpr::Lit(HirLit::F64(2.0))),
-            ]),
-        )
-    );
+    let HirStmt::Let(_, ty, initializer) = &f.body[0] else { panic!("missing p binding"); };
+    assert_eq!(*ty, HirType::Object(vec![("x".into(), HirType::F64), ("y".into(), HirType::F64)]));
+    let mut expression = initializer;
+    let mut captured = std::collections::HashMap::new();
+    while let HirExpr::Call(callee, arguments) = expression {
+        let HirExpr::Lambda(_, parameters, _, body) = callee.as_ref() else { panic!("unexpected field wrapper"); };
+        assert_eq!(parameters.len(), 1);
+        assert_eq!(arguments.len(), 1);
+        captured.insert(parameters[0].name.clone(), arguments[0].clone());
+        expression = body.as_ref();
+    }
+    let HirExpr::ObjectLit(fields) = expression else { panic!("missing declared layout"); };
+    let resolved = fields.iter().map(|(name, value)| {
+        let value = match value {
+            HirExpr::Var(binding) => captured.get(binding).unwrap().clone(),
+            other => other.clone(),
+        };
+        (name.clone(), value)
+    }).collect::<Vec<_>>();
+    assert_eq!(resolved, vec![
+        ("x".into(), HirExpr::Lit(HirLit::F64(1.0))),
+        ("y".into(), HirExpr::Lit(HirLit::F64(2.0))),
+    ]);
 }
 
 #[test]
