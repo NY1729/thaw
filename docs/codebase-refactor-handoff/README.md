@@ -25,3 +25,7 @@ Tests are performed by the user. Do not run tests, builds, compilers, formatters
 `plans/` contains source-backed plans and reviews. References to `/tmp` describe this session; use the copied documents here where available. Latest native scope review: `plans/thaw-promise-scope-boundary-review496.md`. All HOLD findings must be addressed and the resulting immutable patch reviewed before integration.
 
 For continuation, reconstruct separate scratch candidates from this checkpoint, compare the paired snapshots, and rebase each draft there. Keep JIT and native ownership edits separate. Review complete affected caller flows, freeze exact reviewed bytes, commit suitable completed units with `feat(scope): ...`, and update the ledger with evidence. Preserve unrelated current user edits. Static patch checks do not prove compilation or behavior.
+
+## 2026-10-05 native scope-boundary continuation
+
+The [reviewed incremental draft](drafts/native/scope-boundary-continuation-20261005/README.md) continues the archived native candidate without changing product source. Its bounded source review is ACCEPT; package compilation and tests have not been verified, and broader native/JIT/creator ownership integration remains HOLD. The archive includes exact paired changed-owner snapshots, a replayable delta, manifests, the final source review, and the required focused test list. Historical finding statuses and counts are unchanged.

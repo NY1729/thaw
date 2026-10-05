@@ -1,0 +1,2913 @@
+type GeneratorYieldEmission = (Vec<HirStmt>, Option<(HirExpr, HirType)>);
+
+/// Reads the `value`/`done` field off a `next()` result. A single object
+/// shape uses a plain `PropAccess`; a `Union` of object shapes (TypeScript's
+/// own discriminated `IteratorResult<T>`, reachable now that an unannotated
+/// function's divergent `return`s infer a union) goes through
+/// `lower_union_property_read`, which dispatches on the runtime tag.
+fn read_iterator_result_field(
+    lowerer: &mut FnLowerer<'_>,
+    result_name: &Symbol,
+    result_type: &HirType,
+    union_elements: &Option<Vec<HirType>>,
+    field: &str,
+) -> Option<HirExpr> {
+    match union_elements {
+        Some(elements) => lowerer
+            .lower_union_property_read(HirExpr::Var(result_name.clone()), elements, field)
+            .ok(),
+        None => Some(HirExpr::PropAccess(
+            Box::new(HirExpr::Var(result_name.clone())),
+            result_type.clone(),
+            field.to_string(),
+        )),
+    }
+}
+
+fn iterator_object_adapter(
+    lowerer: &mut FnLowerer<'_>,
+    iterator: HirExpr,
+    iterator_type: &HirType,
+    iterator_name: Symbol,
+    capture_completion: bool,
+) -> Option<(HirExpr, HirType)> {
+    let HirType::Object(fields) = iterator_type else {
+        return None;
+    };
+    let HirType::Function(params, result_type) = fields
+        .iter()
+        .find_map(|(name, ty)| (name == "next").then_some(ty))?
+    else {
+        return None;
+    };
+    if !params.is_empty() {
+        return None;
+    }
+    // Accept either a single `{ value, done }` object result or a union of
+    // them (a discriminated `IteratorResult<T>`): every member must expose a
+    // `value` field and a boolean `done`, and the yielded element type is the
+    // union of every member's `value` type.
+    let union_elements = match result_type.as_ref() {
+        HirType::Union(elements) if !elements.is_empty() => Some(elements.clone()),
+        _ => None,
+    };
+    let members: Vec<&HirType> = match &union_elements {
+        Some(elements) => elements.iter().collect(),
+        None => vec![result_type.as_ref()],
+    };
+    let mut value_types = Vec::new();
+    for member in members {
+        let HirType::Object(result_fields) = member else {
+            return None;
+        };
+        let value = result_fields
+            .iter()
+            .find_map(|(name, ty)| (name == "value").then_some(ty))?
+            .clone();
+        if result_fields
+            .iter()
+            .find_map(|(name, ty)| (name == "done").then_some(ty))
+            != Some(&HirType::Bool)
+        {
+            return None;
+        }
+        if !value_types.contains(&value) {
+            value_types.push(value);
+        }
+    }
+    let value_type = match value_types.as_slice() {
+        [single] => single.clone(),
+        _ => HirType::Union(value_types),
+    };
+    let result_name = format!("{iterator_name}_result");
+    let control = format!("{iterator_name}_control");
+    let error = format!("{iterator_name}_error");
+    let returns = format!("{iterator_name}_returns");
+    let return_request = format!("{iterator_name}_return_request");
+    let forced_return = format!("{iterator_name}_forced_return");
+    let channel = HirType::Array(Box::new(value_type.clone()));
+    let producer_type = generator_function_type(
+        false,
+        value_type.clone(),
+        value_type.clone(),
+        HirType::Undefined,
+    );
+    let call_method = |name: &str, args: Vec<HirExpr>| {
+        HirExpr::Call(
+            Box::new(HirExpr::PropAccess(
+                Box::new(HirExpr::Var(iterator_name.clone())),
+                iterator_type.clone(),
+                name.into(),
+            )),
+            args,
+        )
+    };
+    let result_statements =
+        |lowerer: &mut FnLowerer<'_>, name: Symbol, call: HirExpr| -> Option<Vec<HirStmt>> {
+            let done = read_iterator_result_field(
+                lowerer,
+                &name,
+                result_type.as_ref(),
+                &union_elements,
+                "done",
+            )?;
+            let value = read_iterator_result_field(
+                lowerer,
+                &name,
+                result_type.as_ref(),
+                &union_elements,
+                "value",
+            )?;
+            Some(vec![
+                HirStmt::Let(name.clone(), result_type.as_ref().clone(), call),
+                HirStmt::If(
+                    done,
+                    if capture_completion {
+                        vec![
+                            HirStmt::Expr(HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_array_push".into())),
+                                vec![HirExpr::Var(returns.clone()), value.clone()],
+                            )),
+                            HirStmt::Return(Some(HirExpr::ArrayLit(Vec::new()))),
+                        ]
+                    } else {
+                        vec![HirStmt::Return(Some(HirExpr::ArrayLit(Vec::new())))]
+                    },
+                    Vec::new(),
+                ),
+                HirStmt::Return(Some(HirExpr::ArrayLit(vec![value]))),
+            ])
+        };
+    let return_method = fields.iter().any(|(name, ty)| {
+        name == "return"
+            && matches!(ty, HirType::Function(params, result) if params.is_empty() && result.as_ref() == result_type.as_ref())
+    });
+    let throw_method = fields.iter().any(|(name, ty)| {
+        name == "throw"
+            && matches!(ty, HirType::Function(params, result) if params == &[HirType::Str] && result.as_ref() == result_type.as_ref())
+    });
+    let mut producer_body = Vec::new();
+    producer_body.push(HirStmt::If(
+        HirExpr::BinOp(
+            BinOp::EqEqEq,
+            Box::new(HirExpr::Var(control.clone())),
+            Box::new(HirExpr::Lit(HirLit::I64(2))),
+        ),
+        if throw_method {
+            result_statements(
+                lowerer,
+                format!("{result_name}_throw"),
+                call_method("throw", vec![HirExpr::Var(error.clone())]),
+            )?
+        } else {
+            vec![HirStmt::Throw(HirExpr::Var(error.clone()))]
+        },
+        Vec::new(),
+    ));
+    let mut return_body = Vec::new();
+    if return_method {
+        let name = format!("{result_name}_return");
+        let done = read_iterator_result_field(
+            lowerer,
+            &name,
+            result_type.as_ref(),
+            &union_elements,
+            "done",
+        )?;
+        let value = read_iterator_result_field(
+            lowerer,
+            &name,
+            result_type.as_ref(),
+            &union_elements,
+            "value",
+        )?;
+        return_body.extend([
+            HirStmt::Let(
+                name.clone(),
+                result_type.as_ref().clone(),
+                call_method("return", Vec::new()),
+            ),
+            HirStmt::If(
+                done,
+                vec![
+                    HirStmt::Expr(HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_array_push".into())),
+                        vec![HirExpr::Var(returns.clone()), value.clone()],
+                    )),
+                    HirStmt::Return(Some(HirExpr::ArrayLit(Vec::new()))),
+                ],
+                Vec::new(),
+            ),
+            HirStmt::Return(Some(HirExpr::ArrayLit(vec![value]))),
+        ]);
+    }
+    return_body.push(HirStmt::Return(Some(HirExpr::ArrayLit(Vec::new()))));
+    producer_body.push(HirStmt::If(
+        HirExpr::BinOp(
+            BinOp::EqEqEq,
+            Box::new(HirExpr::Var(control.clone())),
+            Box::new(HirExpr::Lit(HirLit::I64(1))),
+        ),
+        return_body,
+        Vec::new(),
+    ));
+    producer_body.extend(result_statements(
+        lowerer,
+        result_name,
+        call_method("next", Vec::new()),
+    )?);
+    let producer = HirExpr::Lambda(
+        vec![HirParam {
+            name: iterator_name.clone(),
+            ty: iterator_type.clone(),
+        }],
+        vec![
+            HirParam {
+                name: control.clone(),
+                ty: HirType::I64,
+            },
+            HirParam {
+                name: error.clone(),
+                ty: HirType::Str,
+            },
+            HirParam {
+                name: format!("{iterator_name}_input"),
+                ty: HirType::Undefined,
+            },
+            HirParam {
+                name: returns,
+                ty: channel.clone(),
+            },
+            HirParam {
+                name: return_request,
+                ty: channel.clone(),
+            },
+            HirParam {
+                name: forced_return,
+                ty: channel.clone(),
+            },
+        ],
+        channel.clone(),
+        Box::new(HirExpr::Block(producer_body)),
+    );
+    Some((
+        HirExpr::Call(
+            Box::new(HirExpr::Lambda(
+                Vec::new(),
+                vec![HirParam {
+                    name: iterator_name,
+                    ty: iterator_type.clone(),
+                }],
+                producer_type.clone(),
+                Box::new(HirExpr::Block(vec![HirStmt::Return(Some(producer))])),
+            )),
+            vec![iterator],
+        ),
+        producer_type,
+    ))
+}
+
+impl<'a> FnLowerer<'a> {
+    /// Publish a value's active exception member, then throw only its trusted
+    /// display text through the legacy pointer ABI. Generated cleanup catches
+    /// use this as well as source `throw`, so their rethrow keeps identity.
+    pub(crate) fn lower_throw_value_statements(
+        &mut self, value: HirExpr, value_type: HirType,
+    ) -> Result<Vec<HirStmt>, String> {
+        let name = format!("__thaw_thrown_value_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(name.clone(), value_type.clone());
+        let original = HirExpr::Var(name.clone());
+        let setters = self.rejection_provenance_statements(original.clone(), &value_type)?;
+        let display = self.rejection_display_without_user_coercion(original.clone(), &value_type)?;
+        let mut statements = vec![
+            HirStmt::Let(name, value_type.clone(), value),
+        ];
+        statements.push(HirStmt::Expr(HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_clear_pending_exception_provenance".into())),
+            Vec::new(),
+        )));
+        statements.extend(setters);
+        statements.push(HirStmt::Throw(HirExpr::Call(
+            Box::new(HirExpr::Var("@@thaw_trusted_exception_text".into())),
+            vec![display],
+        )));
+        Ok(statements)
+    }
+
+    /// Build the tagged, owned provenance tuple for a source throw or
+    /// Promise rejection. Union payload reads stay inside their matching arm.
+    pub(crate) fn rejection_provenance_statements(
+        &mut self,
+        value: HirExpr,
+        ty: &HirType,
+    ) -> Result<Vec<HirStmt>, String> {
+        let call = |name: &str, args: Vec<HirExpr>| HirStmt::Expr(HirExpr::Call(
+            Box::new(HirExpr::Var(name.into())), args));
+        let tag = |value| call("__thaw_set_pending_exception_tag", vec![HirExpr::Lit(HirLit::I64(value))]);
+        let mut out = Vec::new();
+        match ty {
+            HirType::F64 => out.push(call("__thaw_set_pending_exception_f64", vec![value])),
+            HirType::I64 => out.push(call("__thaw_set_pending_exception_i64", vec![value])),
+            HirType::Bool => out.push(call("__thaw_set_pending_exception_bool", vec![value])),
+            HirType::Str | HirType::StrLiteral(_) => out.push(tag(4)),
+            HirType::Undefined | HirType::Void => out.push(tag(5)),
+            HirType::Null => out.push(tag(6)),
+            HirType::Object(fields) => {
+                if Self::fixed_object_supports_live_projection(ty) {
+                    out.push(HirStmt::Expr(self.retain_full_native_object_projection(
+                        value.clone(), fields, false,
+                    )?));
+                }
+                out.push(call("__thaw_set_pending_exception_object", vec![value]));
+            }
+            HirType::Json | HirType::Dictionary(_) => out.push(call("__thaw_set_pending_exception_json", vec![value])),
+            HirType::JsValue => {
+                let captured = HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_capture_exception_js_value".into())),
+                    vec![value],
+                );
+                out.push(call("__thaw_set_pending_exception_json", vec![captured]));
+            }
+            HirType::NativeException => {
+                out.push(call("__thaw_set_pending_exception_native_value", vec![value]));
+            }
+            native if crate::native_exception_tag(native).is_some() => {
+                let tag = crate::native_exception_tag(native).unwrap();
+                let layout = crate::native_exception_layout_token(native).unwrap();
+                out.push(call("__thaw_set_pending_exception_native", vec![
+                    value,
+                    HirExpr::Lit(HirLit::I64(tag as i64)),
+                    HirExpr::Lit(HirLit::Str(layout)),
+                ]));
+            }
+            HirType::Union(members) => {
+                if members.is_empty() {
+                    return Err("cannot publish provenance for an empty union".into());
+                }
+                for (index, member) in members.iter().enumerate() {
+                    let active = HirExpr::BinOp(
+                        BinOp::EqEqEq,
+                        Box::new(HirExpr::UnionTag(Box::new(value.clone()), members.clone())),
+                        Box::new(HirExpr::Lit(HirLit::F64(index as f64))),
+                    );
+                    let member_value = HirExpr::UnionValue(
+                        Box::new(value.clone()), index, members.clone(),
+                    );
+                    let arm = self.rejection_provenance_statements(member_value, member)?;
+                    out.push(HirStmt::If(active, arm, Vec::new()));
+                }
+            }
+            HirType::Optional(payload) => {
+                let none = HirExpr::OptionalIsNone(Box::new(value.clone()), payload.as_ref().clone());
+                let present = self.rejection_provenance_statements(
+                    HirExpr::OptionalValue(Box::new(value.clone()), payload.as_ref().clone()), payload,
+                )?;
+                out.push(HirStmt::If(none, vec![tag(5)], present));
+            }
+            HirType::Nullable(payload) => {
+                let none = HirExpr::NullableIsNone(Box::new(value.clone()), payload.as_ref().clone());
+                let present = self.rejection_provenance_statements(
+                    HirExpr::NullableValue(Box::new(value.clone()), payload.as_ref().clone()), payload,
+                )?;
+                out.push(HirStmt::If(none, vec![tag(6)], present));
+            }
+            HirType::Nullish(payload) => {
+                let is_null = HirExpr::NullishIsNull(Box::new(value.clone()), payload.as_ref().clone());
+                let is_undefined = HirExpr::NullishIsUndefined(Box::new(value.clone()), payload.as_ref().clone());
+                let present = self.rejection_provenance_statements(
+                    HirExpr::NullishValue(Box::new(value.clone()), payload.as_ref().clone()), payload,
+                )?;
+                out.push(HirStmt::If(is_null, vec![tag(6)], vec![HirStmt::If(
+                    is_undefined, vec![tag(5)], present,
+                )]));
+            }
+            // The current caught carrier has no member for these distinct
+            // native layouts. Do not reinterpret their pointer bits as Object.
+            _ => return Err(format!("exception provenance is unavailable for {ty:?}")),
+        }
+        Ok(out)
+    }
+
+    /// Exception transport must not invoke an opaque value's valueOf or
+    /// toString. Keep scalar diagnostics useful and use a fixed description
+    /// for payloads whose formatting could execute user code.
+    pub(crate) fn rejection_display_without_user_coercion(
+        &mut self,
+        value: HirExpr,
+        ty: &HirType,
+    ) -> Result<HirExpr, String> {
+        match ty {
+            HirType::F64 | HirType::I64 | HirType::Bool | HirType::Str
+            | HirType::StrLiteral(_) | HirType::Null | HirType::Undefined => {
+                self.coerce_primitive_to_string(value)
+            }
+            HirType::Void => Ok(HirExpr::Lit(HirLit::Str("undefined".into()))),
+            HirType::Json | HirType::Dictionary(_) => Ok(HirExpr::Lit(HirLit::Str("[exception value]".into()))),
+            HirType::Union(members) => {
+                let mut result = HirExpr::Lit(HirLit::Str("[exception value]".into()));
+                for (index, member) in members.iter().enumerate().rev() {
+                    let condition = HirExpr::BinOp(
+                        BinOp::EqEqEq,
+                        Box::new(HirExpr::UnionTag(Box::new(value.clone()), members.clone())),
+                        Box::new(HirExpr::Lit(HirLit::F64(index as f64))),
+                    );
+                    let member_value = HirExpr::UnionValue(
+                        Box::new(value.clone()), index, members.clone(),
+                    );
+                    let display = self.rejection_display_without_user_coercion(member_value, member)?;
+                    result = HirExpr::Conditional(
+                        Box::new(condition), Box::new(display), Box::new(result), HirType::Str,
+                    );
+                }
+                Ok(result)
+            }
+            HirType::Optional(payload) => {
+                let is_none = HirExpr::OptionalIsNone(Box::new(value.clone()), payload.as_ref().clone());
+                let present = self.rejection_display_without_user_coercion(
+                    HirExpr::OptionalValue(Box::new(value), payload.as_ref().clone()), payload,
+                )?;
+                Ok(HirExpr::Conditional(
+                    Box::new(is_none),
+                    Box::new(HirExpr::Lit(HirLit::Str("undefined".into()))),
+                    Box::new(present), HirType::Str,
+                ))
+            }
+            HirType::Nullable(payload) => {
+                let is_none = HirExpr::NullableIsNone(Box::new(value.clone()), payload.as_ref().clone());
+                let present = self.rejection_display_without_user_coercion(
+                    HirExpr::NullableValue(Box::new(value), payload.as_ref().clone()), payload,
+                )?;
+                Ok(HirExpr::Conditional(
+                    Box::new(is_none),
+                    Box::new(HirExpr::Lit(HirLit::Str("null".into()))),
+                    Box::new(present), HirType::Str,
+                ))
+            }
+            HirType::Nullish(payload) => {
+                let is_null = HirExpr::NullishIsNull(Box::new(value.clone()), payload.as_ref().clone());
+                let is_undefined = HirExpr::NullishIsUndefined(Box::new(value.clone()), payload.as_ref().clone());
+                let present = self.rejection_display_without_user_coercion(
+                    HirExpr::NullishValue(Box::new(value), payload.as_ref().clone()), payload,
+                )?;
+                Ok(HirExpr::Conditional(
+                    Box::new(is_null),
+                    Box::new(HirExpr::Lit(HirLit::Str("null".into()))),
+                    Box::new(HirExpr::Conditional(
+                        Box::new(is_undefined),
+                        Box::new(HirExpr::Lit(HirLit::Str("undefined".into()))),
+                        Box::new(present), HirType::Str,
+                    )), HirType::Str,
+                ))
+            }
+            _ => Ok(HirExpr::Lit(HirLit::Str("[exception value]".into()))),
+        }
+    }
+    /// The `HirType::JsValue` sibling of `iterator_object_adapter` above --
+    /// same job (adapt something following the JS iterator protocol into
+    /// thaw's own generator-producer ABI, so `Stmt::ForOf`'s existing
+    /// `HirType::Function(...)` recognition and its whole batching/close-
+    /// on-exit machinery picks it up unchanged), but for a receiver with
+    /// no static shape at all -- real trigger: a real npm class's method
+    /// documented `Generator<T>`/`IterableIterator<T>` in its `.d.ts`
+    /// (e.g. `lru-cache`'s `LRUCache.keys()`), which thaw-bridge's own
+    /// `.d.ts` classifier (unlike `thaw-hir`'s `lower_ts_type`) has no
+    /// `Generator`/`IterableIterator` case for at all, so it falls back
+    /// to the generic dynamic escape hatch, `HirType::JsValue`.
+    ///
+    /// Unlike `iterator_object_adapter`, this always succeeds (there's no
+    /// static shape to fail to match) and needs `&mut self` (`coerce_to_
+    /// declared`, to marshal call arguments into `Json` the same way an
+    /// ordinary `.method()` call on a `JsValue` receiver already does --
+    /// see `lower_dynamic_value_method_call`, `invocations/dynamic_
+    /// values.rs`). `next`/`return`/`throw` are called unconditionally,
+    /// with no static existence check possible for a fully dynamic
+    /// value: every real `Generator` object -- the only shape a real
+    /// `.d.ts` ever declares this way -- is spec-guaranteed to have all
+    /// three. A hand-rolled plain iterable *without* `.return`/`.throw`,
+    /// reached this dynamically, would throw a dynamic "not a function"
+    /// error, but only if the consuming loop exits early.
+    fn dynamic_iterator_adapter(
+        &mut self,
+        iterator: HirExpr,
+        iterator_name: Symbol,
+    ) -> Result<(HirExpr, HirType), String> {
+        let value_type = HirType::Json;
+        let result_name = format!("{iterator_name}_result");
+        let control = format!("{iterator_name}_control");
+        let error = format!("{iterator_name}_error");
+        let returns = format!("{iterator_name}_returns");
+        let return_request = format!("{iterator_name}_return_request");
+        let forced_return = format!("{iterator_name}_forced_return");
+        let channel = HirType::Array(Box::new(value_type.clone()));
+        let producer_type = generator_function_type(
+            false,
+            value_type.clone(),
+            value_type.clone(),
+            HirType::Undefined,
+        );
+        // `coerce_to_declared` (used below, to marshal `error` into the
+        // dynamic `throw()` call's Json argument array) infers its
+        // input's type from `self.scope` -- unlike `iterator_object_
+        // adapter`'s static `PropAccess`-only construction, which never
+        // needs a type lookup at all, so this hand-built producer's own
+        // synthetic parameters need registering here first. Restored
+        // below: these names are scoped only to this producer's own
+        // body, not the surrounding function actually being lowered.
+        let saved_scope = self.scope.clone();
+        self.scope.insert(iterator_name.clone(), HirType::JsValue);
+        self.scope.insert(control.clone(), HirType::I64);
+        self.scope.insert(error.clone(), HirType::Str);
+        // The iterator result is an ordinary JS object. Reading it through
+        // callDynamicMethod would assimilate a Promise/thenable and snapshot
+        // its value before the protocol's done/value property reads.
+        let call_method = |name: &str| HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_dynamic_iterator_step_exact".into())),
+            vec![HirExpr::Var(iterator_name.clone()),
+                HirExpr::Lit(HirLit::I64(match name {
+                    "next" => 0, "return" => 1, "throw" => 2,
+                    _ => unreachable!(),
+                })), HirExpr::Var(error.clone())],
+        );
+        let result_statements = |name: Symbol, call: HirExpr| {
+            vec![
+                HirStmt::Let(name.clone(), HirType::Json, call),
+                HirStmt::If(
+                    HirExpr::JsonAsBool(Box::new(HirExpr::JsonGet(
+                        Box::new(HirExpr::Var(name.clone())),
+                        "done".into(),
+                    ))),
+                    vec![HirStmt::Return(Some(HirExpr::ArrayLit(Vec::new())))],
+                    Vec::new(),
+                ),
+                HirStmt::Return(Some(HirExpr::ArrayLit(vec![HirExpr::JsonGet(
+                    Box::new(HirExpr::Var(name)),
+                    "value".into(),
+                )]))),
+            ]
+        };
+        let mut producer_body = Vec::new();
+        let throw_call = call_method("throw");
+        producer_body.push(HirStmt::If(
+            HirExpr::BinOp(
+                BinOp::EqEqEq,
+                Box::new(HirExpr::Var(control.clone())),
+                Box::new(HirExpr::Lit(HirLit::I64(2))),
+            ),
+            result_statements(format!("{result_name}_throw"), throw_call),
+            Vec::new(),
+        ));
+        let return_call = call_method("return");
+        producer_body.push(HirStmt::If(
+            HirExpr::BinOp(
+                BinOp::EqEqEq,
+                Box::new(HirExpr::Var(control.clone())),
+                Box::new(HirExpr::Lit(HirLit::I64(1))),
+            ),
+            result_statements(format!("{result_name}_return"), return_call),
+            Vec::new(),
+        ));
+        let next_call = call_method("next");
+        producer_body.extend(result_statements(result_name, next_call));
+        let producer = HirExpr::Lambda(
+            vec![HirParam {
+                name: iterator_name.clone(),
+                ty: HirType::JsValue,
+            }],
+            vec![
+                HirParam {
+                    name: control.clone(),
+                    ty: HirType::I64,
+                },
+                HirParam {
+                    name: error.clone(),
+                    ty: HirType::Str,
+                },
+                HirParam {
+                    name: format!("{iterator_name}_input"),
+                    ty: HirType::Undefined,
+                },
+                HirParam {
+                    name: returns,
+                    ty: channel.clone(),
+                },
+                HirParam {
+                    name: return_request,
+                    ty: channel.clone(),
+                },
+                HirParam {
+                    name: forced_return,
+                    ty: channel.clone(),
+                },
+            ],
+            channel.clone(),
+            Box::new(HirExpr::Block(producer_body)),
+        );
+        self.scope = saved_scope;
+        Ok((
+            HirExpr::Call(
+                Box::new(HirExpr::Lambda(
+                    Vec::new(),
+                    vec![HirParam {
+                        name: iterator_name,
+                        ty: HirType::JsValue,
+                    }],
+                    producer_type.clone(),
+                    Box::new(HirExpr::Block(vec![HirStmt::Return(Some(producer))])),
+                )),
+                vec![iterator],
+            ),
+            producer_type,
+        ))
+    }
+
+    fn collect_pattern_bindings(pattern: &Pat, names: &mut Vec<String>) {
+        match pattern {
+            Pat::Ident(binding) => names.push(binding.id.sym.to_string()),
+            Pat::Array(array) => {
+                for element in array.elems.iter().flatten() {
+                    Self::collect_pattern_bindings(element, names);
+                }
+            }
+            Pat::Object(object) => {
+                for property in &object.props {
+                    match property {
+                        ObjectPatProp::KeyValue(property) => {
+                            Self::collect_pattern_bindings(&property.value, names)
+                        }
+                        ObjectPatProp::Assign(property) => {
+                            names.push(property.key.id.sym.to_string())
+                        }
+                        ObjectPatProp::Rest(rest) => {
+                            Self::collect_pattern_bindings(&rest.arg, names)
+                        }
+                    }
+                }
+            }
+            Pat::Assign(assignment) => {
+                Self::collect_pattern_bindings(&assignment.left, names)
+            }
+            Pat::Rest(rest) => Self::collect_pattern_bindings(&rest.arg, names),
+            Pat::Expr(_) | Pat::Invalid(_) => {}
+        }
+    }
+
+    fn loop_closure_references(
+        stmt: &Stmt,
+        test: Option<&Box<Expr>>,
+        update: Option<&Box<Expr>>,
+        name: &str,
+    ) -> bool {
+        struct Finder<'a> {
+            name: &'a str,
+            closure_depth: usize,
+            found: bool,
+        }
+
+        impl Visit for Finder<'_> {
+            fn visit_arrow_expr(&mut self, arrow: &swc_ecma_ast::ArrowExpr) {
+                self.closure_depth += 1;
+                arrow.visit_children_with(self);
+                self.closure_depth -= 1;
+            }
+
+            fn visit_function(&mut self, function: &swc_ecma_ast::Function) {
+                self.closure_depth += 1;
+                function.visit_children_with(self);
+                self.closure_depth -= 1;
+            }
+
+            fn visit_ident(&mut self, identifier: &swc_ecma_ast::Ident) {
+                self.found |= self.closure_depth > 0 && identifier.sym == self.name;
+            }
+        }
+
+        let mut finder = Finder {
+            name,
+            closure_depth: 0,
+            found: false,
+        };
+        stmt.visit_with(&mut finder);
+        if let Some(test) = test {
+            test.visit_with(&mut finder);
+        }
+        if let Some(update) = update {
+            update.visit_with(&mut finder);
+        }
+        finder.found
+    }
+
+    /// Lowers a control-flow condition (`if`/`while`/`do`/`for`) with the
+    /// same truthiness coercion JS itself applies there -- any value is
+    /// a valid condition, not just a literal `boolean` (`truthiness_expr`
+    /// already backs `!x`, `Boolean(x)`, and `console.assert(x)`; these
+    /// four control-flow conditions just never routed through it, always
+    /// requiring an exact `Bool` instead). Real example: `if (result.
+    /// success)` against a dynamic-call result's own `Json`-typed
+    /// `.success` field (`schema.safeParse(...).success`, real zod) --
+    /// used to fail outright ("if condition has type Json, expected
+    /// Bool") even though the exact same value printed or compared fine.
+    fn lower_condition_expr(&mut self, expr: &Expr) -> Result<HirExpr, String> {
+        let cond = self.lower_expr(expr)?;
+        let cond = self.lower_primitive_array_operand(cond)?;
+        let ty = self.infer_expr_type(&cond)?;
+        self.truthiness_expr(cond, &ty)
+    }
+
+    fn lower_generator_yield_emission(
+        &mut self,
+        yield_expr: &swc_ecma_ast::YieldExpr,
+        values: &str,
+        element: &HirType,
+        input: &str,
+        returns: &str,
+    ) -> Result<GeneratorYieldEmission, String> {
+        if yield_expr.delegate {
+            let value = yield_expr
+                .arg
+                .as_ref()
+                .ok_or("generator `yield*` requires a value")?;
+            let expected_array_type = HirType::Array(Box::new(element.clone()));
+            let source = value.as_ref();
+            let mut value = self.lower_expr(source)?;
+            let mut value_type = self.infer_expr_type(&value)?;
+            if let HirType::Union(members) = &value_type {
+                if members.iter().all(|member| matches!(member, HirType::Array(_))) {
+                    (value, value_type) = self.lower_union_array_sequence(value, members)?;
+                }
+            }
+            if value_type == HirType::Str && matches!(element, HirType::Str | HirType::Dynamic) {
+                return Ok((
+                    vec![HirStmt::Expr(HirExpr::Assign(
+                        values.into(),
+                        Box::new(HirExpr::ArrayConcat(
+                            vec![
+                                HirExpr::Var(values.into()),
+                                HirExpr::Call(
+                                    Box::new(HirExpr::Var("__thaw_string_to_array".into())),
+                                    vec![value],
+                                ),
+                            ],
+                            HirType::Str,
+                        )),
+                    ))],
+                    Some((HirExpr::Lit(HirLit::Undefined), HirType::Undefined)),
+                ));
+            }
+            if let HirType::Array(actual_element) = &value_type {
+                if element == &HirType::Dynamic || actual_element.as_ref() == element {
+                    let concat_element = actual_element.as_ref().clone();
+                    return Ok((
+                        vec![HirStmt::Expr(HirExpr::Assign(
+                            values.into(),
+                            Box::new(HirExpr::ArrayConcat(
+                                vec![HirExpr::Var(values.into()), value],
+                                concat_element,
+                            )),
+                        ))],
+                        Some((HirExpr::Lit(HirLit::Undefined), HirType::Undefined)),
+                    ));
+                }
+            }
+            if value_type == expected_array_type {
+                return Ok((
+                    vec![HirStmt::Expr(HirExpr::Assign(
+                        values.into(),
+                        Box::new(HirExpr::ArrayConcat(
+                            vec![HirExpr::Var(values.into()), value],
+                            element.clone(),
+                        )),
+                    ))],
+                    Some((HirExpr::Lit(HirLit::Undefined), HirType::Undefined)),
+                ));
+            }
+            if matches!(value_type, HirType::Object(_)) {
+                let iterator = Expr::Call(CallExpr {
+                    span: swc_common::DUMMY_SP,
+                    ctxt: Default::default(),
+                    callee: Callee::Expr(Box::new(Expr::Member(MemberExpr {
+                        span: swc_common::DUMMY_SP,
+                        obj: Box::new(source.clone()),
+                        prop: MemberProp::Ident(swc_ecma_ast::IdentName::new(
+                            "__thaw_symbol_iterator".into(),
+                            swc_common::DUMMY_SP,
+                        )),
+                    }))),
+                    args: Vec::new(),
+                    type_args: None,
+                });
+                value = self.lower_expr(&iterator)?;
+                value_type = self.infer_expr_type(&value)?;
+            }
+            if matches!(value_type, HirType::Object(_)) {
+                let name = format!("__thaw_iterator_{}", self.next_binding);
+                self.next_binding += 1;
+                if let Some((producer, producer_type)) =
+                    iterator_object_adapter(self, value.clone(), &value_type, name, true)
+                {
+                    value = producer;
+                    value_type = producer_type;
+                }
+            }
+            let HirType::Function(params, result) = &value_type else {
+                return Err(format!(
+                    "`yield*` requires an array or generator, got {value_type:?}"
+                ));
+            };
+            let [
+                HirType::I64,
+                HirType::Str,
+                input_type,
+                return_channel @ HirType::Array(return_type),
+                HirType::Array(_return_request),
+                HirType::Array(_forced_return),
+            ] = params.as_slice()
+            else {
+                return Err(format!("`yield*` requires a generator, got {value_type:?}"));
+            };
+            let generated = match result.as_ref() {
+                HirType::Array(_) => result.as_ref(),
+                HirType::Promise(generated) => generated.as_ref(),
+                _ => result.as_ref(),
+            };
+            let HirType::Array(delegate_element) = generated else {
+                return Err(format!("`yield*` requires a generator, got {value_type:?}"));
+            };
+            let array_type = HirType::Array(Box::new(delegate_element.as_ref().clone()));
+            let async_delegate = matches!(result.as_ref(), HirType::Promise(inner) if inner.as_ref() == &array_type);
+            if element != &HirType::Dynamic
+                && result.as_ref() != &expected_array_type
+                && !matches!(result.as_ref(), HirType::Promise(inner) if inner.as_ref() == &expected_array_type)
+            {
+                return Err(format!(
+                    "delegated generator yields {:?}, expected {element:?}",
+                    result.as_ref()
+                ));
+            }
+            if async_delegate
+                && !matches!(
+                    &self.ret_type,
+                    HirType::Function(_, result)
+                        if matches!(result.as_ref(), HirType::Promise(_))
+                )
+            {
+                return Err("a synchronous generator cannot delegate to an async generator".into());
+            }
+            let input = self.coerce_to_declared(input_type, HirExpr::Var(input.into()))?;
+            let producer = format!("__thaw_yield_delegate_{}", self.next_binding);
+            self.next_binding += 1;
+            let chunk = format!("__thaw_yield_delegate_chunk_{}", self.next_binding);
+            self.next_binding += 1;
+            let completion = format!("__thaw_yield_delegate_return_{}", self.next_binding);
+            self.next_binding += 1;
+            let returning = format!("__thaw_yield_delegate_returning_{}", self.next_binding);
+            self.next_binding += 1;
+            let producer_array = HirType::Array(Box::new(value_type.clone()));
+            self.scope.insert(producer.clone(), producer_array.clone());
+            self.scope.insert(chunk.clone(), array_type.clone());
+            self.scope
+                .insert(completion.clone(), return_channel.clone());
+            self.scope.insert(returning.clone(), HirType::Bool);
+            let fallback = generator_placeholder(return_type).ok_or_else(|| {
+                format!("generator return type {return_type:?} has no default value")
+            })?;
+            let completed = HirExpr::Conditional(
+                Box::new(HirExpr::BinOp(
+                    BinOp::Gt,
+                    Box::new(HirExpr::ArrayLen(Box::new(HirExpr::Var(
+                        completion.clone(),
+                    )))),
+                    Box::new(HirExpr::Lit(HirLit::F64(0.0))),
+                )),
+                Box::new(HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_array_shift".into())),
+                    vec![HirExpr::Var(completion.clone())],
+                )),
+                Box::new(fallback),
+                return_type.as_ref().clone(),
+            );
+            return Ok((vec![
+                HirStmt::Let(producer.clone(), producer_array, HirExpr::ArrayLit(vec![value])),
+                HirStmt::Let(
+                    completion.clone(),
+                    return_channel.clone(),
+                    HirExpr::ArrayLit(Vec::new()),
+                ),
+                HirStmt::Let(
+                    returning.clone(),
+                    HirType::Bool,
+                    HirExpr::Lit(HirLit::Bool(false)),
+                ),
+                HirStmt::While(
+                    HirExpr::Lit(HirLit::Bool(true)),
+                    vec![
+                        HirStmt::Let(
+                            chunk.clone(),
+                            array_type.clone(),
+                            if async_delegate {
+                                HirExpr::AwaitPromise(
+                                    Box::new(HirExpr::Call(
+                                        Box::new(HirExpr::TypedIndex(
+                                            Box::new(HirExpr::Var(producer)),
+                                            Box::new(HirExpr::Lit(HirLit::F64(0.0))),
+                                            value_type.clone(),
+                                        )),
+                                        vec![
+                                            HirExpr::Var("__thaw_generator_control".into()),
+                                            HirExpr::Var("__thaw_generator_error".into()),
+                                            input.clone(),
+                                            HirExpr::Var(completion.clone()),
+                                            HirExpr::Var(
+                                                "__thaw_generator_return_request".into(),
+                                            ),
+                                            HirExpr::Var(
+                                                "__thaw_generator_forced_return".into(),
+                                            ),
+                                        ],
+                                    )),
+                                    array_type.clone(),
+                                )
+                            } else {
+                                HirExpr::Call(
+                                Box::new(HirExpr::TypedIndex(
+                                    Box::new(HirExpr::Var(producer)),
+                                    Box::new(HirExpr::Lit(HirLit::F64(0.0))),
+                                    value_type.clone(),
+                                )),
+                                vec![
+                                    HirExpr::Var("__thaw_generator_control".into()),
+                                    HirExpr::Var("__thaw_generator_error".into()),
+                                    input.clone(),
+                                    HirExpr::Var(completion.clone()),
+                                    HirExpr::Var("__thaw_generator_return_request".into()),
+                                    HirExpr::Var("__thaw_generator_forced_return".into()),
+                                ],
+                                )
+                            },
+                        ),
+                        HirStmt::If(
+                            HirExpr::BinOp(
+                                BinOp::EqEqEq,
+                                Box::new(HirExpr::Var("__thaw_generator_control".into())),
+                                Box::new(HirExpr::Lit(HirLit::I64(1))),
+                            ),
+                            vec![HirStmt::Expr(HirExpr::Assign(
+                                returning.clone(),
+                                Box::new(HirExpr::Lit(HirLit::Bool(true))),
+                            ))],
+                            Vec::new(),
+                        ),
+                        HirStmt::Expr(HirExpr::Assign(
+                            "__thaw_generator_control".into(),
+                            Box::new(HirExpr::Lit(HirLit::I64(0))),
+                        )),
+                        HirStmt::If(
+                            HirExpr::BinOp(
+                                BinOp::EqEqEq,
+                                Box::new(HirExpr::ArrayLen(Box::new(HirExpr::Var(
+                                    chunk.clone(),
+                                )))),
+                                Box::new(HirExpr::Lit(HirLit::F64(0.0))),
+                            ),
+                            vec![
+                                HirStmt::If(
+                                    HirExpr::Var(returning.clone()),
+                                    vec![
+                                        HirStmt::If(
+                                            HirExpr::BinOp(
+                                                BinOp::Gt,
+                                                Box::new(HirExpr::ArrayLen(Box::new(
+                                                    HirExpr::Var(completion.clone()),
+                                                ))),
+                                                Box::new(HirExpr::Lit(HirLit::F64(0.0))),
+                                            ),
+                                            vec![HirStmt::Expr(HirExpr::Call(
+                                                Box::new(HirExpr::Var(
+                                                    "__thaw_array_push".into(),
+                                                )),
+                                                vec![
+                                                    HirExpr::Var(returns.into()),
+                                                    HirExpr::Call(
+                                                        Box::new(HirExpr::Var(
+                                                            "__thaw_array_shift".into(),
+                                                        )),
+                                                        vec![HirExpr::Var(completion.clone())],
+                                                    ),
+                                                ],
+                                            ))],
+                                            Vec::new(),
+                                        ),
+                                        HirStmt::Expr(HirExpr::Assign(
+                                            "__thaw_generator_control".into(),
+                                            Box::new(HirExpr::Lit(HirLit::I64(1))),
+                                        )),
+                                    ],
+                                    Vec::new(),
+                                ),
+                                HirStmt::Break,
+                            ],
+                            Vec::new(),
+                        ),
+                        HirStmt::Expr(HirExpr::Assign(
+                            values.into(),
+                            Box::new(HirExpr::ArrayConcat(
+                                vec![
+                                    HirExpr::Var(values.into()),
+                                    HirExpr::Var(chunk.clone()),
+                                ],
+                                delegate_element.as_ref().clone(),
+                            )),
+                        )),
+                        HirStmt::Expr(HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_array_shift".into())),
+                            vec![HirExpr::Var(chunk)],
+                        )),
+                    ],
+                ),
+            ], Some((completed, return_type.as_ref().clone()))));
+        }
+        let value = match &yield_expr.arg {
+            Some(value) => self.lower_expr_with_expected_type(value, Some(element))?,
+            None => HirExpr::Lit(HirLit::Undefined),
+        };
+        let value = self.coerce_to_declared(element, value)?;
+        Ok((
+            vec![HirStmt::Expr(HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_array_push".into())),
+                vec![HirExpr::Var(values.into()), value],
+            ))],
+            None,
+        ))
+    }
+
+    fn bind_generator_assignment_reference(
+        &mut self,
+        statements: &mut Vec<HirStmt>,
+        value: HirExpr,
+    ) -> Result<HirExpr, String> {
+        let ty = self.infer_expr_type(&value)?;
+        let name = format!("__thaw_generator_reference_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(name.clone(), ty.clone());
+        statements.push(HirStmt::Let(name.clone(), ty, value));
+        Ok(HirExpr::Var(name))
+    }
+
+    fn lower_generator_class_setter_assignment(
+        &mut self,
+        target: &AssignTarget,
+        value: HirExpr,
+    ) -> Result<Option<(Vec<HirStmt>, Vec<HirStmt>)>, String> {
+        if let AssignTarget::Simple(SimpleAssignTarget::SuperProp(member)) = target {
+            let (_, base_type, base_name) = self.super_initializer.clone()
+                .ok_or("`super` property assignment is only valid in a derived class")?;
+            let property = super_property_name(&member.prop)?;
+            if self.class_static_context {
+                if let (Some(selected_base), Some(receiver)) = (
+                    self.static_super_base_handle(), self.static_this_token_expr(),
+                ) {
+                    // `super.x = yield value` writes with the live derived
+                    // constructor as receiver. Select HomeObject's current
+                    // prototype before suspending; resume must not reselect.
+                    let mut before_yield = Vec::new();
+                    let base = self.bind_generator_assignment_reference(
+                        &mut before_yield, selected_base,
+                    )?;
+                    let HirExpr::Var(base_owner) = &base else {
+                        return Err("generator static-super base has no owner cell".into());
+                    };
+                    let Some(HirStmt::Let(_, _, selected)) = before_yield.last_mut() else {
+                        return Err("generator static-super selection is missing".into());
+                    };
+                    let selected = std::mem::replace(selected, HirExpr::Lit(HirLit::I64(0)));
+                    before_yield.push(HirStmt::Expr(HirExpr::Assign(
+                        base_owner.clone(), Box::new(HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_track_generator_super_base".into())),
+                        vec![selected, HirExpr::Var(base_owner.clone())],
+                    )))));
+                    let receiver = self.bind_generator_assignment_reference(
+                        &mut before_yield, receiver,
+                    )?;
+                    let encoded = self.coerce_to_declared(&HirType::Json, value)?;
+                    let write = HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_set_super_static_property_json".into())),
+                        vec![base, receiver,
+                            HirExpr::Lit(HirLit::Str(property)), encoded],
+                    );
+                    return Ok(Some((before_yield, vec![HirStmt::Expr(write)])));
+                }
+            }
+            let owner = if self.class_static_context {
+                base_name
+            } else {
+                let Some(owner) = self.class_super_instance_accessor_owner(&base_type, &property)
+                else { return Ok(None) };
+                owner
+            };
+            let symbol = class_setter_symbol(&owner, &property, self.class_static_context);
+            if self.signatures.get(&symbol)
+                .filter(|signature| self.class_static_context
+                    || signature.accessor_owner.as_deref() == Some(owner.as_str()))
+                .is_none() {
+                if self.signatures.contains_key(&class_getter_symbol(
+                    &owner, &property, self.class_static_context,
+                )) {
+                    return Err(format!("cannot assign to readonly super accessor `{owner}.{property}`"));
+                }
+                return Ok(None);
+            }
+            let write = if self.class_static_context {
+                self.call_class_static_setter(symbol, value)?
+            } else {
+                self.call_class_instance_setter(
+                    &owner, symbol, HirExpr::Var(self.resolve_binding("this")), value,
+                )?
+            };
+            return Ok(Some((Vec::new(), vec![HirStmt::Expr(write)])));
+        }
+        let AssignTarget::Simple(SimpleAssignTarget::Member(member)) = target else {
+            return Ok(None);
+        };
+        let Some(property) = member_property_name(&member.prop) else {
+            return Ok(None);
+        };
+        if let Expr::Ident(receiver) = member.obj.as_ref() {
+            let static_symbol = class_setter_symbol(receiver.sym.as_ref(), &property, true);
+            if self.is_unshadowed_class_identifier(receiver.sym.as_ref()) {
+                if self.signatures.contains_key(&static_symbol) {
+                    if self.class_value_token(receiver.sym.as_ref()).is_some() {
+                        let target = self.lower_assign_target(target)?;
+                        return Ok(Some(self.lower_generator_resume_target(target, value)?));
+                    }
+                    let write = self.call_class_static_setter(static_symbol, value)?;
+                    return Ok(Some((Vec::new(), vec![HirStmt::Expr(write)])));
+                }
+                if self.scope.contains_key(&class_static_field_symbol(receiver.sym.as_ref(), &property)) {
+                    return Ok(None);
+                }
+            }
+        }
+        if matches!(member.obj.as_ref(), Expr::This(_)) && self.class_static_context {
+            let class = self.class_context.as_deref()
+                .expect("static setter retains its class context");
+            let symbol = class_setter_symbol(class, &property, true);
+            if self.signatures.contains_key(&symbol) {
+                if self.class_value_token(class).is_some() {
+                    let target = self.lower_assign_target(target)?;
+                    return Ok(Some(self.lower_generator_resume_target(target, value)?));
+                }
+                let write = self.call_class_static_setter(symbol, value)?;
+                return Ok(Some((Vec::new(), vec![HirStmt::Expr(write)])));
+            }
+            if self.scope.contains_key(&class_static_field_symbol(class, &property)) {
+                return Ok(None);
+            }
+        }
+        let receiver = self.lower_expr(&member.obj)?;
+        let receiver_type = self.infer_expr_type(&receiver)?;
+        let Some(owner) = self.class_instance_accessor_owner(&receiver_type, &property)
+        else {
+            // Reuse the already lowered receiver in the generic target path.
+            // Lowering a call twice can consume its expected-return hint.
+            let target = self.lower_member_target_from_receiver(member, receiver, receiver_type)?;
+            return Ok(Some(self.lower_generator_resume_target(target, value)?));
+        };
+        let symbol = class_setter_symbol(&owner, &property, false);
+        self.signatures.get(&symbol)
+            .filter(|signature| signature.accessor_owner.as_deref() == Some(owner.as_str()))
+            .ok_or_else(|| format!("cannot assign to readonly instance accessor `{owner}.{property}`"))?;
+        let mut before_yield = Vec::new();
+        let receiver = self.bind_generator_assignment_reference(
+            &mut before_yield, receiver,
+        )?;
+        let write = self.call_class_instance_setter(&owner, symbol, receiver, value)?;
+        Ok(Some((before_yield, vec![HirStmt::Expr(write)])))
+    }
+
+    fn lower_generator_resume_assignment(
+        &mut self,
+        target: &AssignTarget,
+        value: HirExpr,
+    ) -> Result<(Vec<HirStmt>, Vec<HirStmt>), String> {
+        if let AssignTarget::Pat(pattern) = target {
+            let pattern = match pattern {
+                swc_ecma_ast::AssignTargetPat::Array(pattern) => Pat::Array(pattern.clone()),
+                swc_ecma_ast::AssignTargetPat::Object(pattern) => Pat::Object(pattern.clone()),
+                swc_ecma_ast::AssignTargetPat::Invalid(_) => {
+                    return Err("invalid generator destructuring assignment target".into())
+                }
+            };
+            let ty = self.infer_expr_type(&value)?;
+            let temporary = format!("__thaw_generator_resume_{}", self.next_binding);
+            self.next_binding += 1;
+            self.scope.insert(temporary.clone(), ty.clone());
+            let mut statements = vec![HirStmt::Let(
+                temporary.clone(),
+                ty.clone(),
+                value,
+            )];
+            self.lower_assignment_pattern(
+                &pattern,
+                HirExpr::Var(temporary),
+                &ty,
+                &mut statements,
+            )?;
+            return Ok((Vec::new(), statements));
+        }
+
+        if let Some(class_setter) =
+            self.lower_generator_class_setter_assignment(target, value.clone())?
+        {
+            return Ok(class_setter);
+        }
+
+        let target = self.lower_assign_target(target)?;
+        self.lower_generator_resume_target(target, value)
+    }
+
+    fn lower_generator_resume_target(
+        &mut self,
+        target: Target,
+        value: HirExpr,
+    ) -> Result<(Vec<HirStmt>, Vec<HirStmt>), String> {
+        // A property assignment resolves its receiver and computed key before
+        // evaluating the RHS. The suspended `yield` is the RHS here, so keep
+        // that reference across the suspension instead of reevaluating it on
+        // resume. A variable target has no reference expression to capture.
+        let mut before_yield = Vec::new();
+        let target = match target {
+            Target::Var(name) => Target::Var(name),
+            Target::ParameterCell(cell, payload) => Target::ParameterCell(cell, payload),
+            Target::StaticProperty(token, property, ty) => Target::StaticProperty(
+                self.bind_generator_assignment_reference(&mut before_yield, token)?,
+                property, ty,
+            ),
+            Target::Prop(object, ty, field) => Target::Prop(
+                self.bind_generator_assignment_reference(&mut before_yield, object)?,
+                ty,
+                field,
+            ),
+            Target::Index(object, key) => Target::Index(
+                self.bind_generator_assignment_reference(&mut before_yield, object)?,
+                Box::new(self.bind_generator_assignment_reference(&mut before_yield, *key)?),
+            ),
+            Target::Dictionary(object, key, element) => Target::Dictionary(
+                self.bind_generator_assignment_reference(&mut before_yield, object)?,
+                Box::new(self.bind_generator_assignment_reference(&mut before_yield, *key)?),
+                element,
+            ),
+            Target::JsonIndex(object, key) => Target::JsonIndex(
+                self.bind_generator_assignment_reference(&mut before_yield, object)?,
+                Box::new(self.bind_generator_assignment_reference(&mut before_yield, *key)?),
+            ),
+            Target::DynamicProperty(object, key) => Target::DynamicProperty(
+                self.bind_generator_assignment_reference(&mut before_yield, object)?,
+                Box::new(self.bind_generator_assignment_reference(&mut before_yield, *key)?),
+            ),
+        };
+        if let Target::Var(name) = &target {
+            if self.immutable_bindings.contains(name) {
+                return Err(format!("cannot assign to constant `{name}`"));
+            }
+        }
+        if let Target::Prop(_, HirType::Object(fields), field) = &target {
+            if fields.iter().any(|(name, _)| name == &format!("__thaw_setter_{field}")) {
+                return Ok((before_yield, vec![HirStmt::Expr(
+                    self.lower_assignment_target_write(target, value)?,
+                )]));
+            }
+        }
+        let value = match &target {
+            Target::ParameterCell(_, payload) => self.coerce_to_declared(payload, value)?,
+            Target::Var(name) => match self.scope.get(name).cloned() {
+                Some(ty) => self.coerce_to_declared(&ty, value)?,
+                None => value,
+            },
+            Target::Prop(_, HirType::Object(fields), field) => {
+                let ty = fields
+                    .iter()
+                    .find(|(name, _)| name == field)
+                    .map(|(_, ty)| ty.clone())
+                    .ok_or_else(|| format!("object has no field `{field}`"))?;
+                self.coerce_to_declared(&ty, value)?
+            }
+            Target::Index(array, index) => {
+                self.expect_type(&HirType::F64, index, "array index")?;
+                let HirType::Array(element) = self.infer_expr_type(array)? else {
+                    return Err("index assignment target is not an array".into());
+                };
+                self.coerce_to_declared(&element, value)?
+            }
+            Target::Dictionary(_, _, element) => self.coerce_to_declared(element, value)?,
+            Target::JsonIndex(_, index) => {
+                self.expect_type(&HirType::F64, index, "JSON array index")?;
+                self.coerce_to_declared(&HirType::Json, value)?
+            }
+            Target::StaticProperty(token, property, _) => {
+                return Ok((before_yield, vec![HirStmt::Expr(self.lower_static_property_write(
+                    token.clone(), property, value,
+                )?)]));
+            }
+            Target::DynamicProperty(object, key) => {
+                let value = self.coerce_to_declared(&HirType::Json, value)?;
+                return Ok((before_yield, vec![HirStmt::Expr(HirExpr::Call(
+                    Box::new(HirExpr::Var("setDynamicPropertyJson".into())),
+                    vec![object.clone(), key.as_ref().clone(), value],
+                ))]));
+            }
+            Target::Prop(_, other, field) => {
+                return Err(format!(
+                    "cannot assign to field `{field}` on value of type {other:?}"
+                ))
+            }
+        };
+        if let Target::Var(name) = &target {
+            self.record_binding_write(name);
+        }
+        Ok((before_yield, vec![HirStmt::Expr(
+            self.lower_assignment_target_write(target, value)?,
+        )]))
+    }
+
+    fn lower_stmt_seq(&mut self, stmt: &Stmt) -> Result<Vec<HirStmt>, String> {
+        match stmt {
+            // Empty statements have no runtime effect. `debugger` only has an
+            // observable effect when a JavaScript debugger is attached; a
+            // native Thaw executable therefore treats it as a no-op.
+            Stmt::Empty(_) | Stmt::Debugger(_) => Ok(Vec::new()),
+            Stmt::Return(ret) => {
+                if let Some((values, _, _, _, returns, return_type)) =
+                    self.generator_yields.clone()
+                {
+                    let mut statements = Vec::new();
+                    if let Some(value) = &ret.arg {
+                        let value =
+                            self.lower_expr_with_expected_type(value, Some(&return_type))?;
+                        let value = self.coerce_to_declared(&return_type, value)?;
+                        statements.push(HirStmt::Expr(HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_array_push".into())),
+                            vec![HirExpr::Var(returns), value],
+                        )));
+                    }
+                    statements.push(HirStmt::Return(Some(HirExpr::Var(values))));
+                    return Ok(statements);
+                }
+                if let Some(arg) = &ret.arg {
+                    if self.expression_never_returns(arg) {
+                        let call = self.lower_expr(arg)?;
+                        return Ok(vec![
+                            HirStmt::Expr(call),
+                            HirStmt::Throw(HirExpr::Lit(HirLit::Str(
+                                "a function declared as `never` returned".into(),
+                            ))),
+                        ]);
+                    }
+                }
+                let value = match &ret.arg {
+                    Some(arg) => {
+                        // Hint the declared return type through, mirroring
+                        // `lower_expr_with_expected_type`'s other sink
+                        // points (a `let`/`const` annotation, `await`) --
+                        // without it, `return c.text(...)` inside an arrow
+                        // typed `(c: JsValue): JsValue => ...` (real hono
+                        // handler) lowered its dynamic method call with no
+                        // hint at all, defaulting to the untyped/JSON
+                        // dispatch and silently snapshotting the live
+                        // `Response` into JSON instead of returning it live.
+                        let ret_type = self.ret_type.clone();
+                        let value = self.lower_expr_with_expected_type(arg, Some(&ret_type))?;
+                        if self.ret_type == HirType::Void {
+                            if self.infer_expr_type(&value)? != HirType::Void {
+                                return Ok(vec![
+                                    HirStmt::Expr(value),
+                                    HirStmt::Return(None),
+                                ]);
+                            }
+                            Some(value)
+                        } else {
+                            Some(self.coerce_to_declared(&self.ret_type.clone(), value)?)
+                        }
+                    }
+                    None => {
+                        if !matches!(
+                            self.ret_type,
+                            HirType::Void | HirType::Dynamic | HirType::JsValue
+                        ) {
+                            return Err(format!(
+                                "bare `return` is not valid for return type {:?}",
+                                self.ret_type
+                            ));
+                        }
+                        None
+                    }
+                };
+                Ok(vec![HirStmt::Return(value)])
+            }
+            Stmt::Expr(expr_stmt) => {
+                let assignment = match expr_stmt.expr.as_ref() {
+                    Expr::Assign(assign) => Some(assign),
+                    Expr::Paren(paren) => match paren.expr.as_ref() {
+                        Expr::Assign(assign) => Some(assign),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                if let Some(assign) = assignment {
+                    if assign.op == AssignOp::Assign {
+                        if let Expr::Yield(yield_expr) = assign.right.as_ref() {
+                    let Some((values, element, input, _, returns, _)) =
+                        self.generator_yields.clone()
+                    else {
+                        return Err("`yield` is only valid inside a generator function".into());
+                    };
+                            let (emission, delegated) = self.lower_generator_yield_emission(
+                                yield_expr, &values, &element, &input, &returns,
+                            )?;
+                            let resumed = delegated
+                                .map(|(value, _)| value)
+                                .unwrap_or_else(|| HirExpr::Var(input));
+                            let (mut statements, resumed_assignment) =
+                                self.lower_generator_resume_assignment(&assign.left, resumed)?;
+                            // A compiler-selected static-super base is a retained
+                            // handle. Its reference survives the yield, and the
+                            // generator plan must release it on resume, throw,
+                            // return, or cancellation rather than at the yield.
+                            let selected_base = statements.iter().find_map(|statement| {
+                                let HirStmt::Expr(HirExpr::Assign(name, value)) = statement
+                                    else { return None };
+                                let HirExpr::Call(callee, _) = value.as_ref() else { return None };
+                                matches!(callee.as_ref(), HirExpr::Var(marker)
+                                    if marker == "__thaw_track_generator_super_base")
+                                    .then_some(name.clone())
+                            });
+                            let mut continuation = emission;
+                            continuation.extend(resumed_assignment);
+                            if let Some(base) = selected_base {
+                                let cleanup = vec![HirStmt::Expr(HirExpr::Call(
+                                    Box::new(HirExpr::Var("__thaw_release_generator_super_base".into())),
+                                    vec![HirExpr::Var(base)],
+                                ))];
+                                let guarded = self.inject_finally_before_exits(
+                                    continuation, &cleanup, false, 1)?;
+                                let failure = self.bind_local("__thaw_generator_super_failure", HirType::Str);
+                                // Generator cancellation skips ordinary catch
+                                // execution. Its plan consults this table to
+                                // run the same release before dropping a
+                                // suspended selected reference.
+                                self.generator_finalizers.insert(failure.clone(), cleanup.clone());
+                                let (mut captured, original) = self.capture_finally_throw(
+                                    HirExpr::Var(failure.clone()))?;
+                                captured.push(HirStmt::Finally(cleanup.clone(), 0));
+                                captured.push(HirStmt::Throw(original));
+                                statements.push(HirStmt::Try(guarded, failure.clone(), captured, Some(failure)));
+                                statements.push(HirStmt::Finally(cleanup, 0));
+                            } else {
+                                statements.extend(continuation);
+                            }
+                            return Ok(statements);
+                    }
+                    }
+                }
+                if let Expr::Yield(yield_expr) = expr_stmt.expr.as_ref() {
+                    let Some((values, element, input, _, returns, _)) =
+                        self.generator_yields.clone()
+                    else {
+                        return Err("`yield` is only valid inside a generator function".into());
+                    };
+                    return self
+                        .lower_generator_yield_emission(
+                            yield_expr,
+                            &values,
+                            &element,
+                            &input,
+                            &returns,
+                        )
+                        .map(|(statements, _)| statements);
+                }
+                let discarded_dynamic_call = |expr: &Expr| {
+                    matches!(
+                        expr,
+                        Expr::Call(call)
+                            if matches!(
+                                &call.callee,
+                                Callee::Expr(callee)
+                                    if matches!(
+                                        callee.as_ref(),
+                                        Expr::Member(member)
+                                            if self.infer_member_receiver_type(&member.obj)
+                                                == Some(HirType::JsValue)
+                                    )
+                            )
+                    )
+                };
+                let discarded_dynamic_result = discarded_dynamic_call(&expr_stmt.expr);
+                let discarded_dynamic_await = matches!(
+                        expr_stmt.expr.as_ref(),
+                        Expr::Await(awaited) if discarded_dynamic_call(&awaited.arg)
+                    );
+                let value = if discarded_dynamic_result {
+                    self.lower_expr_with_expected_type(&expr_stmt.expr, Some(&HirType::Dynamic))?
+                } else if discarded_dynamic_await {
+                    self.lower_expr_with_expected_type(&expr_stmt.expr, Some(&HirType::JsValue))?
+                } else {
+                    self.lower_expr(&expr_stmt.expr)?
+                };
+                let value = if matches!(self.infer_expr_type(&value)?, HirType::Promise(_)) {
+                    HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_detach_rejection".into())),
+                        vec![value],
+                    )
+                } else {
+                    value
+                };
+                Ok(vec![HirStmt::Expr(value)])
+            }
+            Stmt::Block(block) => self.lower_scoped_stmts(&block.stmts),
+            Stmt::Decl(Decl::Var(var_decl)) => self.lower_var_decl(var_decl),
+            Stmt::Decl(Decl::Using(using_decl)) => self.lower_using_decl(using_decl),
+            // A nested `function name(...) {...}` declaration. Top-level ones
+            // are hoisted into the module's function table; an inner one is
+            // lowered in place as a local closure, capturing the enclosing
+            // scope the same way `let name = function name(...) {...}` does
+            // (reusing the recursive/named function-expression path).
+            Stmt::Decl(Decl::Fn(fn_decl)) => {
+                let name = fn_decl.ident.sym.to_string();
+                let expression = swc_ecma_ast::FnExpr {
+                    ident: Some(fn_decl.ident.clone()),
+                    function: fn_decl.function.clone(),
+                };
+                if let Some((hir_name, ty, value)) =
+                    self.lower_recursive_function_expression(&name, &expression, None)?
+                {
+                    return Ok(vec![HirStmt::Let(hir_name, ty, value)]);
+                }
+                let value = self.lower_expr(&Expr::Fn(expression))?;
+                let ty = self.infer_expr_type(&value)?;
+                let hir_name = self.bind_local(&name, ty.clone());
+                Ok(vec![HirStmt::Let(hir_name, ty, value)])
+            }
+
+            Stmt::If(if_stmt) => {
+                let narrowing = self.optional_undefined_narrowing(&if_stmt.test);
+                let union_narrowing = self.union_narrowing(&if_stmt.test);
+                let json_narrowing = self.json_typeof_narrowing(&if_stmt.test);
+                let exception_narrowing =
+                    self.exception_instanceof_narrowing(&if_stmt.test);
+                let condition_versions = self.narrowing_write_versions.clone();
+                let cond = self.lower_condition_expr(&if_stmt.test)?;
+                let narrowing = narrowing.filter(|(name, _, _, _)| {
+                    condition_versions.get(name) == self.narrowing_write_versions.get(name)
+                });
+                let then_narrowing = narrowing
+                    .as_ref()
+                    .filter(|(_, _, present, _)| *present)
+                    .map(|(name, payload, _, nullable)| {
+                        (name.clone(), payload.clone(), *nullable)
+                    });
+                let else_narrowing = narrowing
+                    .as_ref()
+                    .filter(|(_, _, present, _)| !*present)
+                    .map(|(name, payload, _, nullable)| {
+                        (name.clone(), payload.clone(), *nullable)
+                    });
+                let branch_union = |truth: bool| {
+                    union_narrowing.as_ref().map(|(targets, equal, complement)| {
+                        targets
+                            .iter()
+                            .map(|target| UnionNarrowingTarget {
+                                name: target.name.clone(),
+                                matching: if truth == *equal {
+                                    target.matching.clone()
+                                } else if !complement {
+                                    target.allowed.clone()
+                                } else {
+                                    target
+                                        .allowed
+                                        .iter()
+                                        .filter(|index| !target.matching.contains(index))
+                                        .copied()
+                                        .collect()
+                                },
+                                allowed: target.allowed.clone(),
+                                elements: target.elements.clone(),
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                };
+                let then_union = branch_union(true);
+                let else_union = branch_union(false);
+                let saved_narrowings = self.save_narrowings();
+                let then_branch = self
+                    .lower_body_with_union_narrowing(
+                        &if_stmt.cons,
+                        then_union.as_deref(),
+                        then_narrowing.as_ref(),
+                        json_narrowing
+                            .as_ref()
+                            .filter(|(_, _, equal)| *equal)
+                            .map(|(name, ty, _)| (name.clone(), ty.clone()))
+                            .as_ref(),
+                        exception_narrowing.as_ref(),
+                    )?;
+                self.restore_narrowings_for_sibling(&saved_narrowings);
+                let else_branch = match &if_stmt.alt {
+                    Some(alt) => self.lower_body_with_union_narrowing(
+                        alt,
+                        else_union.as_deref(),
+                        else_narrowing.as_ref(),
+                        json_narrowing
+                            .as_ref()
+                                .filter(|(_, _, equal)| !*equal)
+                                .map(|(name, ty, _)| (name.clone(), ty.clone()))
+                                .as_ref(),
+                            None,
+                        )?,
+                    None => Vec::new(),
+                };
+                self.restore_narrowings(saved_narrowings);
+                self.last_if_condition_narrowing = narrowing;
+                Ok(vec![HirStmt::If(cond, then_branch, else_branch)])
+            }
+
+            Stmt::While(while_stmt) => {
+                let cond = self.lower_condition_expr(&while_stmt.test)?;
+                let body = self.lower_loop_body(&while_stmt.body)?;
+                Ok(vec![HirStmt::While(cond, body)])
+            }
+
+            Stmt::DoWhile(do_while) => {
+                let cond = self.lower_condition_expr(&do_while.test)?;
+                let guard = HirStmt::If(cond.clone(), Vec::new(), vec![HirStmt::Break]);
+                let mut body = self.lower_loop_body(&do_while.body)?;
+                body = inject_do_while_guard_before_continue(body, &cond);
+                body.push(guard);
+                Ok(vec![HirStmt::While(
+                    HirExpr::Lit(HirLit::Bool(true)),
+                    body,
+                )])
+            }
+
+            Stmt::Break(break_stmt) => {
+                if let Some(label) = &break_stmt.label {
+                    let name = label.sym.as_ref();
+                    let (_, target_depth, _) = self
+                        .labels
+                        .iter()
+                        .rev()
+                        .find(|(candidate, _, _)| candidate == name)
+                        .ok_or_else(|| format!("unknown break label `{name}`"))?;
+                    return Ok(vec![HirStmt::BreakDepth(self.loop_depth - target_depth)]);
+                }
+                Ok(vec![HirStmt::Break])
+            }
+
+            Stmt::Continue(continue_stmt) => {
+                if let Some(label) = &continue_stmt.label {
+                    let name = label.sym.as_ref();
+                    let (_, target_depth, continuable) = self
+                        .labels
+                        .iter()
+                        .rev()
+                        .find(|(candidate, _, _)| candidate == name)
+                        .ok_or_else(|| format!("unknown continue label `{name}`"))?;
+                    if !continuable {
+                        return Err(format!("continue label `{name}` does not name a loop"));
+                    }
+                    return Ok(vec![HirStmt::ContinueDepth(
+                        self.loop_depth - target_depth,
+                    )]);
+                }
+                Ok(vec![HirStmt::Continue])
+            }
+
+            Stmt::Labeled(labeled) => {
+                let name = labeled.label.sym.to_string();
+                if self.labels.iter().any(|(candidate, _, _)| candidate == &name) {
+                    return Err(format!("duplicate active label `{name}`"));
+                }
+                let is_loop = Self::stmt_is_iteration(&labeled.body);
+                let target_depth = self.loop_depth + 1;
+                self.labels.push((name, target_depth, is_loop));
+                let lowered = if is_loop {
+                    self.lower_stmt_seq(&labeled.body)
+                } else {
+                    self.loop_depth += 1;
+                    let body_result = self.lower_body(&labeled.body);
+                    self.loop_depth -= 1;
+                    body_result.map(|mut body| {
+                        body.push(HirStmt::Break);
+                        vec![HirStmt::While(HirExpr::Lit(HirLit::Bool(true)), body)]
+                    })
+                };
+                self.labels.pop();
+                lowered
+            }
+
+            Stmt::For(for_stmt) => {
+                let saved = self.bindings.clone();
+                let lowered = (|| -> Result<Vec<HirStmt>, String> {
+                    let mut out = Vec::new();
+                    if let Some(init) = &for_stmt.init {
+                        match init {
+                            VarDeclOrExpr::VarDecl(var_decl) => {
+                                out.extend(self.lower_var_decl(var_decl)?)
+                            }
+                            VarDeclOrExpr::Expr(expr) => {
+                                out.push(HirStmt::Expr(self.lower_expr(expr)?))
+                            }
+                        }
+                    }
+
+                    let iteration_sources = match &for_stmt.init {
+                        Some(VarDeclOrExpr::VarDecl(declaration))
+                            if declaration.kind != VarDeclKind::Var =>
+                        {
+                            let mut names = Vec::new();
+                            for declarator in &declaration.decls {
+                                Self::collect_pattern_bindings(&declarator.name, &mut names);
+                            }
+                            names
+                                .into_iter()
+                                .filter(|name| Self::loop_closure_references(
+                                    &for_stmt.body,
+                                    for_stmt.test.as_ref(),
+                                    for_stmt.update.as_ref(),
+                                    name,
+                                ))
+                                .collect::<Vec<_>>()
+                        }
+                        _ => Vec::new(),
+                    };
+
+                    let loop_bindings = self.bindings.clone();
+                    let mut iteration_bindings = Vec::new();
+                    for source in iteration_sources {
+                        let outer = self.resolve_binding(&source);
+                        let ty = self.scope.get(&outer).cloned().ok_or_else(|| {
+                            format!("unknown `for` iteration binding `{source}`")
+                        })?;
+                        let inner = self.bind_for_iteration_local(&source, ty.clone());
+                        iteration_bindings.push((outer, inner, ty));
+                    }
+                    let cond = match &for_stmt.test {
+                        Some(test) => self.lower_condition_expr(test)?,
+                        None => HirExpr::Lit(HirLit::Bool(true)),
+                    };
+                    let mut body = self.lower_loop_body(&for_stmt.body)?;
+                    let update = for_stmt.update.as_ref().map(|expr| self.lower_expr(expr)).transpose()?;
+                    self.bindings = loop_bindings;
+                    let prefix = iteration_bindings
+                        .iter()
+                        .map(|(outer, inner, ty)| {
+                            HirStmt::Let(inner.clone(), ty.clone(), HirExpr::Var(outer.clone()))
+                        })
+                        .collect::<Vec<_>>();
+                    let advance = iteration_bindings
+                        .iter()
+                        .map(|(outer, inner, _)| {
+                            HirStmt::Expr(HirExpr::Assign(
+                                outer.clone(),
+                                Box::new(HirExpr::Var(inner.clone())),
+                            ))
+                        })
+                        .collect::<Vec<_>>();
+                    if iteration_bindings.is_empty() {
+                        let mut advance = advance;
+                        if let Some(update) = update {
+                            advance.push(HirStmt::Expr(update));
+                        }
+                        if !advance.is_empty() {
+                            body = inject_for_advance_before_continue(body, &advance);
+                            body.extend(advance);
+                        }
+                        out.push(HirStmt::While(cond, body));
+                    } else {
+                        // The first environment exists before the first test. Each
+                        // following environment is copied from the preceding body's
+                        // final values before update, then retained by that test and
+                        // body (including closures created in either expression).
+                        let first = format!("@@thaw_for_first_{}", self.next_binding);
+                        self.next_binding += 1;
+                        out.push(HirStmt::Let(first.clone(), HirType::Bool,
+                            HirExpr::Lit(HirLit::Bool(true))));
+                        let mut next = prefix;
+                        let mut update_branch = Vec::new();
+                        if let Some(update) = update {
+                            update_branch.push(HirStmt::Expr(update));
+                        }
+                        next.push(HirStmt::If(
+                            HirExpr::Var(first.clone()),
+                            vec![HirStmt::Expr(HirExpr::Assign(first,
+                                Box::new(HirExpr::Lit(HirLit::Bool(false)))))],
+                            update_branch,
+                        ));
+                        next.push(HirStmt::If(cond, Vec::new(), vec![HirStmt::Break]));
+                        body = inject_for_advance_before_continue(body, &advance);
+                        next.extend(body);
+                        next.extend(advance);
+                        out.push(HirStmt::While(HirExpr::Lit(HirLit::Bool(true)), next));
+                    }
+                    Ok(out)
+                })();
+                self.bindings = saved;
+                lowered
+            }
+
+            Stmt::ForOf(for_of) => {
+                let saved = self.bindings.clone();
+                let saved_scope = self.scope.clone();
+                let saved_correlations = self.destructured_union_correlations.clone();
+                let lowered = (|| -> Result<Vec<HirStmt>, String> {
+                    let item_discriminants =
+                        self.expression_array_element_discriminants(&for_of.right);
+                    let expected = (self.infer_member_receiver_type(&for_of.right)
+                        == Some(HirType::JsValue))
+                    .then_some(HirType::JsValue);
+                    let mut values = self
+                        .lower_expr_with_expected_type(&for_of.right, expected.as_ref())?;
+                    let mut values_type = self.infer_expr_type(&values)?;
+                    let array_holes_possible =
+                        self.expression_may_be_sparse_array(&for_of.right);
+                    let mut generator_producer = None;
+                    if values_type == HirType::Str {
+                        values = HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_string_to_array".into())),
+                            vec![values],
+                        );
+                        values_type = HirType::Array(Box::new(HirType::Str));
+                    }
+                    // Reuse the live cursor used by Map/Set `.entries()` and
+                    // `.values()`: each resume checks current entries, so
+                    // additions and deletions during the body are visible.
+                    let collection_item = match &values_type {
+                        HirType::Map(key, value) => Some((HirType::Tuple(vec![
+                            key.as_ref().clone(), value.as_ref().clone(),
+                        ]), 2.0)),
+                        HirType::Set(element) => Some((element.as_ref().clone(), 0.0)),
+                        _ => None,
+                    };
+                    if let Some((item_type, mode)) = collection_item {
+                        values = self.lower_map_iterator(values, values_type.clone(), item_type, mode)?;
+                        values_type = self.infer_expr_type(&values)?;
+                    }
+                    if matches!(values_type, HirType::Object(_))
+                        && matches!(for_of.right.as_ref(), Expr::Ident(_))
+                    {
+                        let iterator = Expr::Call(CallExpr {
+                            span: swc_common::DUMMY_SP,
+                            ctxt: Default::default(),
+                            callee: Callee::Expr(Box::new(Expr::Member(MemberExpr {
+                                span: swc_common::DUMMY_SP,
+                                obj: Box::new(for_of.right.as_ref().clone()),
+                                prop: MemberProp::Ident(swc_ecma_ast::IdentName::new(
+                                    "__thaw_symbol_iterator".into(),
+                                    swc_common::DUMMY_SP,
+                                )),
+                            }))),
+                            args: Vec::new(),
+                            type_args: None,
+                        });
+                        values = self.lower_expr(&iterator)?;
+                        values_type = self.infer_expr_type(&values)?;
+                    }
+                    if matches!(values_type, HirType::Object(_)) {
+                        let name = format!("__thaw_iterator_{}", self.next_binding);
+                        self.next_binding += 1;
+                        if let Some((producer, producer_type)) =
+                            iterator_object_adapter(self, values.clone(), &values_type, name, false)
+                        {
+                            values = producer;
+                            values_type = producer_type;
+                        }
+                    }
+                    if values_type == HirType::JsValue {
+                        values = HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_to_iterator_exact".into())),
+                            vec![values.clone()],
+                        );
+                        let name = format!("__thaw_iterator_{}", self.next_binding);
+                        self.next_binding += 1;
+                        let (producer, producer_type) =
+                            self.dynamic_iterator_adapter(values.clone(), name)?;
+                        values = producer;
+                        values_type = producer_type;
+                    }
+                    if let HirType::Function(_, result) = &values_type {
+                        let (result, async_generator) = match result.as_ref() {
+                            HirType::Array(_) => (Some(result.as_ref().clone()), false),
+                            HirType::Promise(result)
+                                if for_of.is_await
+                                    && matches!(result.as_ref(), HirType::Array(_)) =>
+                            {
+                                (Some(result.as_ref().clone()), true)
+                            }
+                            _ => (None, false),
+                        };
+                        if let Some(result) =
+                            result.filter(|_| is_generator_producer_type(&values_type))
+                        {
+                            let producer_type = values_type.clone();
+                            let producer =
+                                format!("__thaw_generator_producer_{}", self.next_binding);
+                            self.next_binding += 1;
+                            self.scope.insert(producer.clone(), producer_type.clone());
+                            generator_producer =
+                                Some((producer, producer_type, values, async_generator));
+                            values_type = result;
+                            values = HirExpr::ArrayLit(Vec::new());
+                        }
+                    }
+                    // A tuple remains an ordinary iterable array at runtime.
+                    // Its declared prefix can be shorter than a reflected
+                    // owner array, so read the canonical Json array rather
+                    // than indexing only the tuple's typed native prefix.
+                    if matches!(&values_type, HirType::Tuple(elements)
+                        if elements.iter().all(Self::spread_json_encodable_type))
+                    {
+                        values = self.coerce_to_declared(&HirType::Json, values)?;
+                        values_type = HirType::Json;
+                    }
+                    // A `Map`/`Set` value stored in `any` is wrapped as
+                    // `{"__thaw_map_entries__"/"__thaw_set_values__":
+                    // [...]}` (`coerce_to_declared`, `inference/
+                    // coercions.rs`) -- unwrap it to the plain JSON
+                    // array underneath before falling into the
+                    // existing bare-JSON-array `for...of` case just
+                    // below, matching its own default iterator (`Map`
+                    // yields `[key, value]` pairs, already this array's
+                    // own shape; `Set` yields its values, likewise).
+                    // A no-op for anything that isn't one of those two
+                    // sentinel shapes (returns the value unchanged).
+                    if values_type == HirType::Json {
+                        values = HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_json_map_or_set_entries".to_string())),
+                            vec![values],
+                        );
+                    }
+                    let (element, json_array) = match &values_type {
+                        HirType::Array(element) => (element.as_ref().clone(), false),
+                        HirType::Union(members)
+                            if members.iter().all(|member| matches!(member, HirType::Array(_))) =>
+                        {
+                            let mut elements = Vec::new();
+                            for member in members {
+                                let HirType::Array(element) = member else { unreachable!() };
+                                Self::flatten_property_union_members(element, &mut elements)?;
+                            }
+                            let element = match elements.as_slice() {
+                                [element] => element.clone(),
+                                _ => HirType::Union(elements),
+                            };
+                            (element, false)
+                        }
+                        HirType::Json if !for_of.is_await => (HirType::Json, true),
+                        HirType::Json => {
+                            return Err("`for await...of` cannot await dynamic JSON values".into())
+                        }
+                        _ => return Err("`for...of` currently requires a typed array".into()),
+                    };
+                    let (mut item_type, await_item) = if for_of.is_await {
+                        match &element {
+                            HirType::Promise(resolved) => (resolved.as_ref().clone(), true),
+                            synchronous => (synchronous.clone(), false),
+                        }
+                    } else {
+                        (element.clone(), false)
+                    };
+                    if array_holes_possible && !await_item {
+                        item_type = HirType::Optional(Box::new(item_type));
+                    }
+                    let values_name = format!("__thaw_for_of_values_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope
+                        .insert(values_name.clone(), values_type.clone());
+                    let index_name = format!("__thaw_for_of_index_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope.insert(index_name.clone(), HirType::F64);
+                    let array_item_value = if let HirType::Union(members) = &values_type {
+                        Some(self.lower_union_array_index(
+                            HirExpr::Var(values_name.clone()),
+                            members,
+                            HirExpr::Var(index_name.clone()),
+                            array_holes_possible,
+                            false,
+                        )?)
+                    } else if array_holes_possible
+                        && !await_item
+                        && generator_producer.is_none()
+                        && !json_array
+                    {
+                        Some(self.lower_array_at(
+                            HirExpr::Var(values_name.clone()),
+                            values_type.clone(),
+                            element.clone(),
+                            HirExpr::Var(index_name.clone()),
+                        )?)
+                    } else {
+                        None
+                    };
+                    if let Some(value) = &array_item_value {
+                        item_type = self.infer_expr_type(value)?;
+                    }
+                    let item_value = || {
+                        let indexed = if let Some(value) = &array_item_value {
+                            value.clone()
+                        } else if generator_producer.is_some() {
+                            HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_array_shift".into())),
+                                vec![HirExpr::Var(values_name.clone())],
+                            )
+                        } else if json_array {
+                            HirExpr::JsonIndex(
+                                Box::new(HirExpr::Var(values_name.clone())),
+                                Box::new(HirExpr::Var(index_name.clone())),
+                            )
+                        } else {
+                            HirExpr::TypedIndex(
+                                Box::new(HirExpr::Var(values_name.clone())),
+                                Box::new(HirExpr::Var(index_name.clone())),
+                                element.clone(),
+                            )
+                        };
+                        if await_item {
+                            HirExpr::AwaitPromise(Box::new(indexed), item_type.clone())
+                        } else {
+                            indexed
+                        }
+                    };
+                    let mut iteration_disposals = Vec::new();
+                    let mut iteration_using_flags = Vec::new();
+                    let item_stmts = match &for_of.left {
+                        ForHead::VarDecl(decl) => {
+                            let [declarator] = decl.decls.as_slice() else {
+                                return Err("`for...of` requires exactly one loop binding".into());
+                            };
+                            if declarator.init.is_some() {
+                                return Err(
+                                    "`for...of` loop bindings cannot have an initializer".into(),
+                                );
+                            }
+                            if let Pat::Ident(binding) = &declarator.name {
+                                let item_ty = match &binding.type_ann {
+                                    Some(annotation) => {
+                                        let declared = lower_ts_type(
+                                            &annotation.type_ann,
+                                            self.interfaces,
+                                            self.generic_interfaces,
+                                        )?;
+                                        if declared != item_type {
+                                            return Err(format!(
+                                                "`for...of` binding has type {declared:?}, expected {:?}",
+                                                item_type
+                                            ));
+                                        }
+                                        declared
+                                    }
+                                    None => item_type.clone(),
+                                };
+                                let source_name = binding.id.sym.to_string();
+                                let item_name =
+                                    format!("{source_name}__thaw_{}", self.next_binding);
+                                self.next_binding += 1;
+                                self.scope.insert(item_name.clone(), item_ty.clone());
+                                self.bindings
+                                    .entry(source_name)
+                                    .or_default()
+                                    .push(item_name.clone());
+                                let declared_discriminants = binding.type_ann.as_ref().map(
+                                    |annotation| {
+                                        object_union_discriminants(
+                                            &annotation.type_ann,
+                                            self.generic_interfaces,
+                                        )
+                                    },
+                                );
+                                let discriminants = declared_discriminants
+                                    .filter(|metadata| !metadata.is_empty())
+                                    .or_else(|| item_discriminants.clone());
+                                if let Some(mut discriminants) = discriminants {
+                                    if let HirType::Union(members) = &item_ty {
+                                        for values in discriminants.values_mut() {
+                                            values.resize(members.len(), None);
+                                        }
+                                    }
+                                    self.union_discriminants
+                                        .insert(item_name.clone(), discriminants);
+                                }
+                                vec![HirStmt::Let(item_name, item_ty, item_value())]
+                            } else if matches!(declarator.name, Pat::Object(_) | Pat::Array(_)) {
+                                let temporary =
+                                    format!("__thaw_for_of_item_{}", self.next_binding);
+                                self.next_binding += 1;
+                                self.scope.insert(temporary.clone(), item_type.clone());
+                                let annotation = match &declarator.name {
+                                    Pat::Object(pattern) => pattern.type_ann.as_ref(),
+                                    Pat::Array(pattern) => pattern.type_ann.as_ref(),
+                                    _ => None,
+                                };
+                                let declared_discriminants = annotation.map(|annotation| {
+                                    object_union_discriminants(
+                                        &annotation.type_ann,
+                                        self.generic_interfaces,
+                                    )
+                                });
+                                let discriminants = declared_discriminants
+                                    .filter(|metadata| !metadata.is_empty())
+                                    .or_else(|| item_discriminants.clone());
+                                if let Some(mut discriminants) = discriminants {
+                                    if let HirType::Union(members) = &item_type {
+                                        for values in discriminants.values_mut() {
+                                            values.resize(members.len(), None);
+                                        }
+                                    }
+                                    self.union_discriminants
+                                        .insert(temporary.clone(), discriminants);
+                                }
+                                let mut statements = vec![HirStmt::Let(
+                                    temporary.clone(),
+                                    item_type.clone(),
+                                    item_value(),
+                                )];
+                                self.lower_binding_pattern(
+                                    &declarator.name,
+                                    HirExpr::Var(temporary),
+                                    &item_type,
+                                    &mut statements,
+                                )?;
+                                statements
+                            } else {
+                                return Err("unsupported `for...of` binding pattern".into());
+                            }
+                        }
+                        ForHead::Pat(pattern) => {
+                            if let Pat::Ident(binding) = pattern.as_ref() {
+                                let item_name = self.resolve_binding(binding.id.sym.as_ref());
+                                let item_ty = self.scope.get(&item_name).cloned().ok_or_else(|| {
+                                    format!("unknown `for...of` assignment target `{item_name}`")
+                                })?;
+                                if item_ty != item_type {
+                                    return Err(format!(
+                                        "`for...of` assignment target has type {item_ty:?}, expected {:?}",
+                                        item_type
+                                    ));
+                                }
+                                self.record_binding_write(&item_name);
+                                vec![HirStmt::Expr(HirExpr::Assign(
+                                    item_name,
+                                    Box::new(item_value()),
+                                ))]
+                            } else if matches!(pattern.as_ref(), Pat::Object(_) | Pat::Array(_)) {
+                                let temporary =
+                                    format!("__thaw_for_of_item_{}", self.next_binding);
+                                self.next_binding += 1;
+                                self.scope.insert(temporary.clone(), item_type.clone());
+                                if let Some(mut discriminants) = item_discriminants.clone() {
+                                    if let HirType::Union(members) = &item_type {
+                                        for values in discriminants.values_mut() {
+                                            values.resize(members.len(), None);
+                                        }
+                                    }
+                                    self.union_discriminants
+                                        .insert(temporary.clone(), discriminants);
+                                }
+                                let mut statements = vec![HirStmt::Let(
+                                    temporary.clone(),
+                                    item_type.clone(),
+                                    item_value(),
+                                )];
+                                self.lower_assignment_pattern(
+                                    pattern,
+                                    HirExpr::Var(temporary),
+                                    &item_type,
+                                    &mut statements,
+                                )?;
+                                statements
+                            } else {
+                                return Err("unsupported `for...of` assignment pattern".into());
+                            }
+                        }
+                        ForHead::UsingDecl(using_decl) => {
+                            let [declarator] = using_decl.decls.as_slice() else {
+                                return Err("`for...of` requires exactly one `using` binding".into());
+                            };
+                            if declarator.init.is_some() {
+                                return Err("`for...of` `using` bindings cannot have an initializer".into());
+                            }
+                            let Pat::Ident(binding) = &declarator.name else {
+                                return Err("`for...of` `using` requires an identifier binding".into());
+                            };
+                            let item_ty = match &binding.type_ann {
+                                Some(annotation) => {
+                                    let declared = lower_ts_type(
+                                        &annotation.type_ann,
+                                        self.interfaces,
+                                        self.generic_interfaces,
+                                    )?;
+                                    if declared != item_type {
+                                        return Err(format!(
+                                            "`for...of` `using` binding has type {declared:?}, expected {:?}",
+                                            item_type
+                                        ));
+                                    }
+                                    declared
+                                }
+                                None => item_type.clone(),
+                            };
+                            let source_name = binding.id.sym.to_string();
+                            let item_name = format!("{source_name}__thaw_{}", self.next_binding);
+                            self.next_binding += 1;
+                            self.scope.insert(item_name.clone(), item_ty.clone());
+                            self.bindings
+                                .entry(source_name.clone())
+                                .or_default()
+                                .push(item_name.clone());
+                            let flag = self.bind_local("__thaw_using_acquired", HirType::Bool);
+                            iteration_using_flags.push(HirStmt::Let(flag.clone(), HirType::Bool,
+                                HirExpr::Lit(HirLit::Bool(false))));
+                            let disposal = self.lower_using_disposal(
+                                &source_name,
+                                using_decl.is_await,
+                            )?;
+                            iteration_disposals.push(Self::guard_using_disposal(flag.clone(), disposal));
+                            vec![HirStmt::Let(item_name, item_ty, item_value()),
+                                HirStmt::Expr(HirExpr::Assign(flag,
+                                    Box::new(HirExpr::Lit(HirLit::Bool(true)))))]
+                        }
+                    };
+                    let resume_generator = |control| -> Result<HirExpr, String> {
+                        let Some((producer, producer_type, _, async_generator)) =
+                            &generator_producer
+                        else {
+                            return Err("missing generator producer".into());
+                        };
+                        let HirType::Function(params, _) = producer_type else {
+                            unreachable!("generator producer type was checked above");
+                        };
+                        let call = HirExpr::Call(
+                            Box::new(HirExpr::Var(producer.clone())),
+                            vec![
+                                HirExpr::Lit(HirLit::I64(control)),
+                                HirExpr::Lit(HirLit::Str(String::new())),
+                                generator_placeholder(&params[2]).ok_or_else(|| {
+                                    format!(
+                                        "generator input type {:?} has no default value",
+                                        params[2]
+                                    )
+                                })?,
+                                HirExpr::TypedClosure(
+                                    params[3].clone(),
+                                    Box::new(HirExpr::ArrayLit(Vec::new())),
+                                ),
+                                HirExpr::TypedClosure(
+                                    params[4].clone(),
+                                    Box::new(HirExpr::ArrayLit(Vec::new())),
+                                ),
+                                HirExpr::TypedClosure(
+                                    params[5].clone(),
+                                    Box::new(HirExpr::ArrayLit(Vec::new())),
+                                ),
+                            ],
+                        );
+                        Ok(if *async_generator {
+                            HirExpr::AwaitPromise(Box::new(call), values_type.clone())
+                        } else {
+                            call
+                        })
+                    };
+                    let mut body = Vec::new();
+                    if generator_producer.is_some() {
+                        body.extend([
+                            HirStmt::Expr(HirExpr::Assign(
+                                values_name.clone(),
+                                Box::new(resume_generator(0)?),
+                            )),
+                            HirStmt::If(
+                                HirExpr::BinOp(
+                                    BinOp::EqEqEq,
+                                    Box::new(HirExpr::ArrayLen(Box::new(HirExpr::Var(
+                                        values_name.clone(),
+                                    )))),
+                                    Box::new(HirExpr::Lit(HirLit::F64(0.0))),
+                                ),
+                                vec![HirStmt::Break],
+                                Vec::new(),
+                            ),
+                        ]);
+                    }
+                    body.extend(item_stmts);
+                    body.extend(self.lower_loop_body(&for_of.body)?);
+                    body = self.lower_using_scope(body, iteration_disposals, iteration_using_flags)?;
+                    if generator_producer.is_none() {
+                        let update = HirExpr::Assign(
+                            index_name.clone(),
+                            Box::new(HirExpr::BinOp(
+                                BinOp::Add,
+                                Box::new(HirExpr::Var(index_name.clone())),
+                                Box::new(HirExpr::Lit(HirLit::F64(1.0))),
+                            )),
+                        );
+                        body = inject_for_update_before_continue(body, &update);
+                        body.push(HirStmt::Expr(update));
+                    }
+                    let condition = if generator_producer.is_some() {
+                        HirExpr::Lit(HirLit::Bool(true))
+                    } else {
+                        HirExpr::BinOp(
+                            BinOp::Lt,
+                            Box::new(HirExpr::Var(index_name.clone())),
+                            Box::new(if json_array {
+                                HirExpr::JsonAsNumber(Box::new(HirExpr::JsonGet(
+                                    Box::new(HirExpr::Var(values_name.clone())),
+                                    "length".into(),
+                                )))
+                            } else {
+                                self.lower_array_length_read(
+                                    HirExpr::Var(values_name.clone()),
+                                    &values_type,
+                                )?
+                            }),
+                        )
+                    };
+                    let loop_stmt = HirStmt::While(condition, body);
+                    let mut exception_prelude = None;
+                    let loop_stmt = if generator_producer.is_some() {
+                        let close = HirStmt::Expr(resume_generator(1)?);
+                        let exception = self.bind_local(
+                            "__thaw_for_of_exception",
+                            crate::caught_exception_carrier_type(),
+                        );
+                        exception_prelude = Some(crate::caught_exception_carrier_prelude(
+                            exception.clone(),
+                        ));
+                        let mut failure_body = vec![close.clone()];
+                        failure_body.extend(self.lower_throw_value_statements(
+                            HirExpr::Var(exception.clone()), crate::caught_exception_carrier_type(),
+                        )?);
+                        HirStmt::Try(
+                            self.inject_finally_before_exits(vec![loop_stmt], std::slice::from_ref(&close), false, 1)?,
+                            exception.clone(),
+                            failure_body,
+                            None,
+                        )
+                    } else {
+                        loop_stmt
+                    };
+                    let mut statements = vec![
+                        HirStmt::Let(values_name, values_type.clone(), values),
+                        HirStmt::Let(
+                            index_name,
+                            HirType::F64,
+                            HirExpr::Lit(HirLit::F64(0.0)),
+                        ),
+                    ];
+                    if let Some(prelude) = exception_prelude { statements.push(prelude); }
+                    statements.push(loop_stmt);
+                    if generator_producer.is_some() {
+                        statements.push(HirStmt::Expr(resume_generator(1)?));
+                    }
+                    let Some((producer, producer_type, init, _)) = generator_producer else {
+                        return Ok(statements);
+                    };
+                    statements.push(HirStmt::Return(None));
+                    let lambda_body = HirExpr::Block(statements);
+                    let mut referenced = BTreeSet::new();
+                    collect_referenced_bindings(&lambda_body, &mut referenced);
+                    let captures = referenced
+                        .into_iter()
+                        .filter_map(|name| {
+                            saved_scope
+                                .get(&name)
+                                .cloned()
+                                .map(|ty| HirParam { name, ty })
+                        })
+                        .collect();
+                    Ok(vec![HirStmt::Expr(HirExpr::Call(
+                        Box::new(HirExpr::Lambda(
+                            captures,
+                            vec![HirParam {
+                                name: producer,
+                                ty: producer_type,
+                            }],
+                            HirType::Void,
+                            Box::new(lambda_body),
+                        )),
+                        vec![init],
+                    ))])
+                })();
+                self.bindings = saved;
+                self.scope = saved_scope;
+                self.destructured_union_correlations = saved_correlations;
+                lowered
+            }
+
+            Stmt::ForIn(for_in) => {
+                let saved = self.bindings.clone();
+                let saved_scope = self.scope.clone();
+                let lowered = (|| -> Result<Vec<HirStmt>, String> {
+                    let object = self.lower_expr(&for_in.right)?;
+                    let object_type = self.infer_expr_type(&object)?;
+                    let keys = match &object_type {
+                        HirType::Object(fields) => fields
+                            .iter()
+                            .map(|(name, _)| HirExpr::Lit(HirLit::Str(name.clone())))
+                            .collect::<Vec<_>>(),
+                        HirType::Json | HirType::Dictionary(_) => Vec::new(),
+                        _ => {
+                            return Err(
+                                "`for...in` requires an object, dictionary, or JSON value".into(),
+                            )
+                        }
+                    };
+                    let object_name = format!("__thaw_for_in_object_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope
+                        .insert(object_name.clone(), object_type.clone());
+                    let keys_name = format!("__thaw_for_in_keys_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope.insert(
+                        keys_name.clone(),
+                        HirType::Array(Box::new(HirType::Str)),
+                    );
+                    let keys = if matches!(object_type, HirType::Json | HirType::Dictionary(_)) {
+                        HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_json_keys".into())),
+                            vec![HirExpr::Var(object_name.clone())],
+                        )
+                    } else {
+                        HirExpr::ArrayLit(keys)
+                    };
+                    let index_name = format!("__thaw_for_in_index_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope.insert(index_name.clone(), HirType::F64);
+                    let key_value = || {
+                        HirExpr::TypedIndex(
+                            Box::new(HirExpr::Var(keys_name.clone())),
+                            Box::new(HirExpr::Var(index_name.clone())),
+                            HirType::Str,
+                        )
+                    };
+                    let binding_stmt = match &for_in.left {
+                        ForHead::VarDecl(decl) => {
+                            let [declarator] = decl.decls.as_slice() else {
+                                return Err("`for...in` requires exactly one loop binding".into());
+                            };
+                            if declarator.init.is_some() {
+                                return Err(
+                                    "`for...in` loop bindings cannot have an initializer".into(),
+                                );
+                            }
+                            let Pat::Ident(binding) = &declarator.name else {
+                                return Err(
+                                    "`for...in` requires an identifier loop binding".into(),
+                                );
+                            };
+                            if let Some(annotation) = &binding.type_ann {
+                                let declared = lower_ts_type(
+                                    &annotation.type_ann,
+                                    self.interfaces,
+                                    self.generic_interfaces,
+                                )?;
+                                if declared != HirType::Str {
+                                    return Err(format!(
+                                        "`for...in` binding must be Str, got {declared:?}"
+                                    ));
+                                }
+                            }
+                            let source_name = binding.id.sym.to_string();
+                            let binding_name =
+                                format!("{source_name}__thaw_{}", self.next_binding);
+                            self.next_binding += 1;
+                            self.scope.insert(binding_name.clone(), HirType::Str);
+                            self.bindings
+                                .entry(source_name)
+                                .or_default()
+                                .push(binding_name.clone());
+                            HirStmt::Let(binding_name, HirType::Str, key_value())
+                        }
+                        ForHead::Pat(pattern) => {
+                            let Pat::Ident(binding) = pattern.as_ref() else {
+                                return Err(
+                                    "`for...in` assignment requires an identifier target".into(),
+                                );
+                            };
+                            let binding_name = self.resolve_binding(binding.id.sym.as_ref());
+                            let binding_type = self.scope.get(&binding_name).ok_or_else(|| {
+                                format!("unknown `for...in` assignment target `{binding_name}`")
+                            })?;
+                            if binding_type != &HirType::Str {
+                                return Err(format!(
+                                    "`for...in` assignment target must be Str, got {binding_type:?}"
+                                ));
+                            }
+                            self.record_binding_write(&binding_name);
+                            HirStmt::Expr(HirExpr::Assign(
+                                binding_name,
+                                Box::new(key_value()),
+                            ))
+                        }
+                        ForHead::UsingDecl(_) => {
+                            return Err("`using` bindings in `for...in` are not supported".into())
+                        }
+                    };
+                    let update = HirExpr::Assign(
+                        index_name.clone(),
+                        Box::new(HirExpr::BinOp(
+                            BinOp::Add,
+                            Box::new(HirExpr::Var(index_name.clone())),
+                            Box::new(HirExpr::Lit(HirLit::F64(1.0))),
+                        )),
+                    );
+                    let mut body = vec![binding_stmt];
+                    body.extend(self.lower_loop_body(&for_in.body)?);
+                    body = inject_for_update_before_continue(body, &update);
+                    body.push(HirStmt::Expr(update));
+                    Ok(vec![
+                        HirStmt::Let(object_name, object_type, object),
+                        HirStmt::Let(
+                            keys_name.clone(),
+                            HirType::Array(Box::new(HirType::Str)),
+                            keys,
+                        ),
+                        HirStmt::Let(
+                            index_name.clone(),
+                            HirType::F64,
+                            HirExpr::Lit(HirLit::F64(0.0)),
+                        ),
+                        HirStmt::While(
+                            HirExpr::BinOp(
+                                BinOp::Lt,
+                                Box::new(HirExpr::Var(index_name)),
+                                Box::new(HirExpr::ArrayLen(Box::new(HirExpr::Var(keys_name)))),
+                            ),
+                            body,
+                        ),
+                    ])
+                })();
+                self.bindings = saved;
+                self.scope = saved_scope;
+                lowered
+            }
+
+            Stmt::Switch(switch_stmt) => {
+                let saved = self.bindings.clone();
+                let saved_scope = self.scope.clone();
+                let lowered = (|| -> Result<Vec<HirStmt>, String> {
+                    let discriminant = self.lower_expr(&switch_stmt.discriminant)?;
+                    let discriminant_type = self.infer_expr_type(&discriminant)?;
+                    let value_name = format!("__thaw_switch_value_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope
+                        .insert(value_name.clone(), discriminant_type.clone());
+                    let selected_name = format!("__thaw_switch_selected_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope.insert(selected_name.clone(), HirType::F64);
+                    let none = HirExpr::Lit(HirLit::F64(-1.0));
+                    let case_count = switch_stmt.cases.len();
+                    let default_index = switch_stmt
+                        .cases
+                        .iter()
+                        .position(|case| case.test.is_none())
+                        .unwrap_or(case_count);
+                    let mut out = vec![
+                        HirStmt::Let(value_name.clone(), discriminant_type.clone(), discriminant),
+                        HirStmt::Let(selected_name.clone(), HirType::F64, none.clone()),
+                    ];
+
+                    for (index, case) in switch_stmt.cases.iter().enumerate() {
+                        let Some(test) = &case.test else {
+                            continue;
+                        };
+                        let test = self.lower_expr(test)?;
+                        let equality = self.lower_strict_equality(
+                            HirExpr::Var(value_name.clone()), test,
+                        ).map_err(|error| format!("switch case: {error}"))?;
+                        out.push(HirStmt::If(
+                            HirExpr::BinOp(
+                                BinOp::EqEqEq,
+                                Box::new(HirExpr::Var(selected_name.clone())),
+                                Box::new(none.clone()),
+                            ),
+                            vec![HirStmt::If(
+                                equality,
+                                vec![HirStmt::Expr(HirExpr::Assign(
+                                    selected_name.clone(),
+                                    Box::new(HirExpr::Lit(HirLit::F64(index as f64))),
+                                ))],
+                                Vec::new(),
+                            )],
+                            Vec::new(),
+                        ));
+                    }
+                    out.push(HirStmt::If(
+                        HirExpr::BinOp(
+                            BinOp::EqEqEq,
+                            Box::new(HirExpr::Var(selected_name.clone())),
+                            Box::new(none),
+                        ),
+                        vec![HirStmt::Expr(HirExpr::Assign(
+                            selected_name.clone(),
+                            Box::new(HirExpr::Lit(HirLit::F64(default_index as f64))),
+                        ))],
+                        Vec::new(),
+                    ));
+
+                    let exit = HirStmt::Expr(HirExpr::Assign(
+                        selected_name.clone(),
+                        Box::new(HirExpr::Lit(HirLit::F64(case_count as f64))),
+                    ));
+                    for (index, case) in switch_stmt.cases.iter().enumerate() {
+                        let isolated_entry = index == 0
+                            || Self::switch_case_prevents_fallthrough(
+                                &switch_stmt.cases[index - 1].cons,
+                            );
+                        let case_union = if isolated_entry {
+                            if let Some(test) = &case.test {
+                                self.union_narrowing(&Expr::Bin(swc_ecma_ast::BinExpr {
+                                    span: switch_stmt.span,
+                                    op: BinaryOp::EqEqEq,
+                                    left: switch_stmt.discriminant.clone(),
+                                    right: test.clone(),
+                                }))
+                                .map(|(targets, equal, complement)| {
+                                    targets
+                                        .into_iter()
+                                        .map(|target| UnionNarrowingTarget {
+                                            matching: if equal {
+                                                target.matching.clone()
+                                            } else if complement {
+                                                target
+                                                    .allowed
+                                                    .iter()
+                                                    .filter(|member| {
+                                                        !target.matching.contains(member)
+                                                    })
+                                                    .copied()
+                                                    .collect()
+                                            } else {
+                                                target.allowed.clone()
+                                            },
+                                            ..target
+                                        })
+                                        .collect::<Vec<_>>()
+                                })
+                            } else {
+                                let mut excluded = HashMap::<
+                                    Symbol,
+                                    (Vec<usize>, Vec<usize>, Vec<HirType>),
+                                >::new();
+                                for tested_case in &switch_stmt.cases {
+                                    let Some(test) = &tested_case.test else {
+                                        continue;
+                                    };
+                                    let Some((targets, equal, _)) = self.union_narrowing(
+                                        &Expr::Bin(swc_ecma_ast::BinExpr {
+                                            span: switch_stmt.span,
+                                            op: BinaryOp::EqEqEq,
+                                            left: switch_stmt.discriminant.clone(),
+                                            right: test.clone(),
+                                        }),
+                                    ) else {
+                                        continue;
+                                    };
+                                    if !equal {
+                                        continue;
+                                    }
+                                    for target in targets {
+                                        let entry = excluded.entry(target.name).or_insert_with(|| {
+                                            (Vec::new(), target.allowed, target.elements)
+                                        });
+                                        for member in target.matching {
+                                            if !entry.0.contains(&member) {
+                                                entry.0.push(member);
+                                            }
+                                        }
+                                    }
+                                }
+                                let targets = excluded
+                                    .into_iter()
+                                    .filter_map(|(name, (excluded, allowed, elements))| {
+                                        let matching = allowed
+                                            .iter()
+                                            .filter(|member| !excluded.contains(member))
+                                            .copied()
+                                            .collect::<Vec<_>>();
+                                        (!matching.is_empty()).then_some(UnionNarrowingTarget {
+                                            name,
+                                            matching,
+                                            allowed,
+                                            elements,
+                                        })
+                                    })
+                                    .collect::<Vec<_>>();
+                                (!targets.is_empty()).then_some(targets)
+                            }
+                        } else {
+                            None
+                        };
+                        let saved_union_narrowings = self.union_narrowings.clone();
+                        if let Some(targets) = &case_union {
+                            for target in targets {
+                                self.union_narrowings.insert(
+                                    target.name.clone(),
+                                    (target.matching.clone(), target.elements.clone()),
+                                );
+                            }
+                        }
+                        let lowered_case = self.lower_stmts(&case.cons);
+                        self.union_narrowings = saved_union_narrowings;
+                        let mut body = lowered_case?;
+                        body = rewrite_switch_case_stmts(
+                            body,
+                            &selected_name,
+                            index,
+                            &exit,
+                        );
+                        body.push(HirStmt::If(
+                            HirExpr::BinOp(
+                                BinOp::EqEqEq,
+                                Box::new(HirExpr::Var(selected_name.clone())),
+                                Box::new(HirExpr::Lit(HirLit::F64(index as f64))),
+                            ),
+                            vec![HirStmt::Expr(HirExpr::Assign(
+                                selected_name.clone(),
+                                Box::new(HirExpr::Lit(HirLit::F64((index + 1) as f64))),
+                            ))],
+                            Vec::new(),
+                        ));
+                        out.push(HirStmt::If(
+                            HirExpr::BinOp(
+                                BinOp::EqEqEq,
+                                Box::new(HirExpr::Var(selected_name.clone())),
+                                Box::new(HirExpr::Lit(HirLit::F64(index as f64))),
+                            ),
+                            body,
+                            Vec::new(),
+                        ));
+                    }
+                    if default_index < case_count
+                        && switch_stmt.cases.iter().all(|case| {
+                            case.cons.last().is_some_and(Self::stmt_definitely_exits)
+                        })
+                    {
+                        out.push(HirStmt::Throw(HirExpr::Lit(HirLit::Str(
+                            "unreachable exhaustive switch".into(),
+                        ))));
+                    }
+                    Ok(out)
+                })();
+                self.bindings = saved;
+                self.scope = saved_scope;
+                lowered
+            }
+
+            Stmt::Throw(throw_stmt) => {
+                let promise_rethrow = throw_stmt.arg.as_ident().is_some_and(|ident| {
+                    let name = self.resolve_binding(ident.sym.as_ref());
+                    self.promise_catch_bindings.contains(&name)
+                        || self
+                            .promise_catch_parameter
+                            .as_deref()
+                            .is_some_and(|parameter| self.resolve_binding(parameter) == name)
+                });
+                // The exception channel is a single tagged string end to
+                // end (see `new Error(...)`'s lowering and
+                // `thaw_runtime::split_error_tag`); a thrown non-string
+                // value used to be stored into that `i8*` slot as whatever
+                // raw bit pattern it happened to have (an f64's bits
+                // reinterpreted as a pointer for `throw 42`, say), which
+                // every reader then dereferenced as a C string --
+                // undefined behavior, not merely a wrong answer. Coercing
+                // every thrown value to its string form here keeps that
+                // one representation honest; unsupported types (a thrown
+                // `Promise`, function, `Map`/`Set`, etc.) are a compile
+                // error instead of memory corruption.
+                let value = self.lower_expr(&throw_stmt.arg)?;
+                let value_type = self.infer_expr_type(&value)?;
+                if promise_rethrow {
+                    let binding = throw_stmt.arg.as_ident()
+                        .map(|ident| self.resolve_binding(ident.sym.as_ref()))
+                        .ok_or("Promise rejection rethrow needs a binding")?;
+                    let mut args = vec![value];
+                    for field in ["original", "native_text", "aggregate", "tag", "f64", "i64", "bool", "object", "native"] {
+                        args.push(HirExpr::Var(Self::promise_rejection_snapshot_name(&binding, field)));
+                    }
+                    return Ok(vec![HirStmt::Throw(HirExpr::Call(
+                        Box::new(HirExpr::Var("@@thaw_rethrow_pending_exception".to_string())),
+                        args,
+                    ))]);
+                }
+                if let Some(object_name) = rethrow_object {
+                    let tag_name = object_name.replace("_object", "_tag");
+                    self.scope
+                        .insert(object_name.clone(), HirType::Object(Vec::new()));
+                    self.scope.insert(tag_name.clone(), HirType::I64);
+                    return Ok(vec![
+                        HirStmt::Expr(HirExpr::Call(
+                            Box::new(HirExpr::Var(
+                                "__thaw_set_pending_exception_object".to_string(),
+                            )),
+                            vec![HirExpr::Var(object_name)],
+                        )),
+                        HirStmt::Expr(HirExpr::Call(
+                            Box::new(HirExpr::Var(
+                                "__thaw_set_pending_exception_tag".to_string(),
+                            )),
+                            vec![HirExpr::Var(tag_name)],
+                        )),
+                        HirStmt::Throw(value),
+                    ]);
+                }
+                // One ordinary carrier path handles direct throws and throws
+                // of caught aliases.  The pending tuple remains the ABI to
+                // the nearest catch, while the visible catch binding itself
+                // will hold the original tagged value.
+                self.lower_throw_value_statements(value, value_type)
+            }
+
+            Stmt::Try(try_stmt) => {
+                if try_stmt.handler.is_none() && try_stmt.finalizer.is_none() {
+                    return Err("`try` needs a `catch` or `finally` block".into());
+                }
+
+                let mut body = self.lower_scoped_stmts(&try_stmt.block.stmts)?;
+                let (catch_name, mut catch_body) = match &try_stmt.handler {
+                    Some(handler) => {
+                        let source_name = match &handler.param {
+                            Some(Pat::Ident(binding)) => binding.id.sym.to_string(),
+                            Some(_) => {
+                                return Err(
+                                    "only a simple identifier catch binding is supported".into(),
+                                )
+                            }
+                            None => "_".to_string(),
+                        };
+                        let saved = self.bindings.clone();
+                        let catch_name = self.bind_local(
+                            &source_name, crate::caught_exception_carrier_type(),
+                        );
+                        self.catch_bindings.insert(catch_name.clone());
+                        let catch_body = self.lower_stmts(&handler.body.stmts)?;
+                        self.bindings = saved;
+                        (catch_name, catch_body)
+                    }
+                    None => {
+                        let mut name = "__thaw_finally_exception".to_string();
+                        while self.scope.contains_key(&name) {
+                            name.push('_');
+                        }
+                        let name = self.bind_local(
+                            &name, crate::caught_exception_carrier_type(),
+                        );
+                        let rethrow = self.lower_throw_value_statements(
+                            HirExpr::Var(name.clone()), crate::caught_exception_carrier_type(),
+                        )?;
+                        (name, rethrow)
+                    }
+                };
+
+                let mut after_try = Vec::new();
+                if let Some(finalizer) = &try_stmt.finalizer {
+                    let finalizer = self.lower_scoped_stmts(&finalizer.stmts)?;
+                    self.generator_finalizers
+                        .insert(catch_name.clone(), finalizer.clone());
+                    body = self.inject_finally_before_exits(body, &finalizer, false, 1)?;
+                    let source_catch = try_stmt.handler.is_some();
+                    catch_body = self.inject_finally_before_exits(
+                        catch_body, &finalizer, true, usize::from(source_catch),
+                    )?;
+                    if source_catch {
+                        // Calls, initializers, conditions, and awaits in a
+                        // source catch can fail without an explicit Throw.
+                        // Protect that entire body. Exit finalizers and their
+                        // terminal rethrows skip this guard after running once.
+                        let failure = self.bind_local("__thaw_finally_catch_failure", HirType::Str);
+                        let (captures, rethrow) =
+                            self.capture_finally_throw(HirExpr::Var(failure.clone()))?;
+                        let mut exceptional = captures;
+                        exceptional.push(HirStmt::Finally(finalizer.clone(), 0));
+                        exceptional.push(HirStmt::Throw(rethrow));
+                        catch_body = vec![HirStmt::Try(
+                            catch_body, failure.clone(), exceptional, Some(failure),
+                        )];
+                    }
+                    after_try = finalizer;
+                }
+                let mut lowered = vec![crate::caught_exception_carrier_prelude(
+                    catch_name.clone(),
+                ), HirStmt::Try(
+                    body,
+                    catch_name.clone(),
+                    catch_body,
+                    None,
+                )];
+                lowered.extend(after_try);
+                Ok(lowered)
+            }
+
+            other => Err(format!(
+                "unsupported statement {other:?} (Phase 0/1/2 support return/expr/let/if/while/for/throw/try)"
+            )),
+        }
+    }
+
+}
