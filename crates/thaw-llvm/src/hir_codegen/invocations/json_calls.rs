@@ -80,6 +80,50 @@ impl<'ctx> HirCompiler<'ctx> {
                 return self.compile_single_arg_call(
                     "thaw_json_receiver_bigint", args, "JSON bigint");
             }
+            "__thaw_json_receiver_number" => {
+                return self.compile_single_arg_call(
+                    "thaw_json_receiver_number", args, "JSON number");
+            }
+            "__thaw_json_receiver_string" => {
+                return self.compile_single_arg_call(
+                    "thaw_json_receiver_string", args, "JSON string");
+            }
+            "__thaw_json_receiver_bool" => {
+                let [value] = args else {
+                    return Err("JSON bool expects one argument".into());
+                };
+                let value = self.compile_expr(value)?.into_int_value();
+                let value = self.builder.build_int_z_extend(
+                    value, self.context.i8_type(), "json_receiver_bool_u8",
+                ).map_err(|error| error.to_string())?;
+                let result = self.builder.build_call(
+                    self.module.get_function("thaw_json_receiver_bool").unwrap(),
+                    &[value.into()], "json_receiver_bool",
+                ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                    .ok_or("JSON bool constructor returned no value")?;
+                return self.compile_check_json_host_error(result, Some("thaw_json_destroy"));
+            }
+            "__thaw_json_undefined" | "__thaw_json_null" => {
+                if !args.is_empty() {
+                    return Err(format!("{name} expects no arguments"));
+                }
+                let symbol = if name == "__thaw_json_undefined" {
+                    "thaw_json_undefined"
+                } else {
+                    "thaw_json_null"
+                };
+                let result = self.builder.build_call(
+                    self.module.get_function(symbol).unwrap(), &[], "json_receiver_constant",
+                ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                    .ok_or("JSON constant constructor returned no value")?;
+                return self.compile_check_json_host_error(result, Some("thaw_json_destroy"));
+            }
+            "__thaw_json_track_owned" => {
+                let result = self.compile_single_arg_call(
+                    "thaw_json_track_arena_owned_root", args, "owned catch JSON root",
+                )?;
+                return self.compile_check_json_host_error(result, None);
+            }
             "__thaw_json_is_date_shape" => {
                 let [value] = args else {
                     return Err("__thaw_json_is_date_shape expects one argument".into());

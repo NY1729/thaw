@@ -526,6 +526,28 @@ fn release_unconsumed_graph_leases(ctx: &Ctx<'_>, text: &str) {
     }
 }
 
+// The JS graph encoder has already retained the leases named by this wire.
+// If arena ownership cannot be established, return every producer-owned lease
+// before dropping the only bytes that identify them.
+fn owned_graph_wire_with_registration(
+    text: &str,
+    register: impl FnOnce(*const c_char) -> bool,
+) -> *mut c_char {
+    let wire = thaw_arena::owned_string(text);
+    if wire.is_null() || !register(wire) {
+        if !wire.is_null() { unsafe { thaw_arena::destroy_string(wire) }; }
+        with_active_or_context(|ctx| release_unconsumed_graph_leases(&ctx, text));
+        return std::ptr::null_mut();
+    }
+    wire
+}
+
+fn owned_graph_wire(text: &str) -> *mut c_char {
+    owned_graph_wire_with_registration(text, |wire| unsafe {
+        thaw_arena::register_owned_graph_wire(wire)
+    })
+}
+
 fn before_graph_decode<'js, T>(
     ctx: &Ctx<'js>, text: &str, graph: bool, lookup: impl FnOnce() -> Result<T, String>,
 ) -> Result<T, String> {
@@ -533,6 +555,19 @@ fn before_graph_decode<'js, T>(
         if graph {
             release_unconsumed_graph_leases(ctx, text);
         }
+        error
+    })
+}
+
+fn before_registered_graph_decode<T>(
+    wire: *const c_char,
+    lookup: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    lookup().map_err(|error| {
+        // Exact mixed graph wires are already registered by their native
+        // producer. Consume that grant on lookup failures before dispatch.
+        unsafe extern "C" { fn thaw_json_discard_graph_wire(source: *const c_char); }
+        unsafe { thaw_json_discard_graph_wire(wire) };
         error
     })
 }
@@ -4282,6 +4317,176 @@ pub unsafe extern "C" fn thaw_js_call_handle_mixed_graph_result(handle: u64, arg
     unsafe { thaw_js_call_handle_mixed_result_impl(handle, args_json, handles, true) }
 }
 
+/// A compiler-private mixed graph call with exact thrown-value transport.
+/// The callable and every staged direct handle are independent temporary
+/// references owned by this call, including when decoding or invocation
+/// fails. A successful return or thrown value gets its own retained handle.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_js_call_handle_mixed_exact_consuming_result(
+    handle: u64, args_json: *const c_char, handles: *const u8,
+) -> ThawCallWithExceptionResult {
+    enum Outcome { Value(u64), Exception(u64, bool) }
+    // Snapshot before user code can re-enter and mutate the native array.
+    let acquired = unsafe { native_handle_slice(handles) }.map(|values| values.to_vec());
+    if acquired.is_err() {
+        unsafe extern "C" { fn thaw_json_discard_graph_wire(source: *const c_char); }
+        // The exact ABI may fail before it reaches the graph decoder. The
+        // registered one-shot grant owns any transferred graph leases here.
+        unsafe { thaw_json_discard_graph_wire(args_json) };
+    }
+    let result: Result<Outcome, String> = match &acquired {
+        Err(error) => Err(error.clone()),
+        Ok(values) => {
+            let args_json_ptr = args_json;
+            let args_json = to_str(args_json);
+            with_active_or_context(|ctx| {
+                let target = before_registered_graph_decode(args_json_ptr, || {
+                    Function::from_value(value_for_handle(&ctx, handle)?)
+                        .map_err(|_| format!("JavaScript value handle {handle} is not callable"))
+                })?;
+                // The shared graph decoder owns the transferred leases once
+                // invoked. Preserve an original JS throw from that decoder
+                // through the same exact-result lane as a target-call throw.
+                let decode: Function = before_registered_graph_decode(args_json_ptr, || {
+                    private_graph_decode(&ctx).map_err(|error| error.to_string())
+                })?;
+                let arguments: Array = match decode.call((args_json.as_str(),)) {
+                    Ok(arguments) => arguments,
+                    Err(rquickjs::Error::Exception) => {
+                        let thrown = ctx.catch();
+                        let object_like = thrown.is_object() || thrown.is_function();
+                        return retain_value(&ctx, thrown)
+                            .map(|value| Outcome::Exception(value, object_like));
+                    }
+                    Err(error) => return Err(error.to_string()),
+                };
+                let mut call_args = Args::new_unsized(ctx.clone());
+                for index in 0..arguments.len() {
+                    let argument = match arguments.get::<Value>(index) {
+                        Ok(argument) => argument,
+                        Err(rquickjs::Error::Exception) => {
+                            let thrown = ctx.catch();
+                            let object_like = thrown.is_object() || thrown.is_function();
+                            return retain_value(&ctx, thrown)
+                                .map(|value| Outcome::Exception(value, object_like));
+                        }
+                        Err(error) => return Err(error.to_string()),
+                    };
+                    call_args.push_arg(argument)
+                        .map_err(|error| error.to_string())?;
+                }
+                for direct in values {
+                    call_args.push_arg(value_for_handle(&ctx, *direct)?)
+                        .map_err(|error| error.to_string())?;
+                }
+                match target.call_arg(call_args) {
+                    Ok(value) => retain_value(&ctx, value).map(Outcome::Value),
+                    Err(rquickjs::Error::Exception) => {
+                        let thrown = ctx.catch();
+                        let object_like = thrown.is_object() || thrown.is_function();
+                        retain_value(&ctx, thrown)
+                            .map(|value| Outcome::Exception(value, object_like))
+                    }
+                    Err(error) => Err(error.to_string()),
+                }
+            })
+        }
+    };
+    if let Ok(values) = acquired {
+        for direct in values { let _ = thaw_js_release_handle(direct); }
+    }
+    let _ = thaw_js_release_handle(handle);
+    match result {
+        Ok(Outcome::Value(value)) => ThawCallWithExceptionResult {
+            value, exception_handle: 0, exception_object_like: 0,
+            error: std::ptr::null(),
+        },
+        Ok(Outcome::Exception(exception_handle, object_like)) => ThawCallWithExceptionResult {
+            value: 0, exception_handle, exception_object_like: u8::from(object_like),
+            error: std::ptr::null(),
+        },
+        Err(error) => ThawCallWithExceptionResult {
+            value: 0, exception_handle: 0, exception_object_like: 0,
+            error: thaw_arena::owned_string(error),
+        },
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static EXACT_MIXED_NAPI_RELEASES: std::cell::Cell<u8> = const {
+        std::cell::Cell::new(0)
+    };
+}
+
+#[cfg(test)]
+extern "C" fn exact_mixed_napi_retain(reference: u64) -> u64 { reference }
+
+#[cfg(test)]
+extern "C" fn exact_mixed_napi_release(reference: u64) -> u8 {
+    if reference == 73 {
+        EXACT_MIXED_NAPI_RELEASES.with(|releases| releases.set(releases.get() + 1));
+        1
+    } else { 0 }
+}
+
+#[cfg(test)]
+#[test]
+fn exact_mixed_pre_dispatch_consumes_registered_graph_grant_once() {
+    std::thread::spawn(|| {
+        unsafe extern "C" {
+            fn thaw_json_register_napi_handle_operations(
+                retain: extern "C" fn(u64) -> u64,
+                release: extern "C" fn(u64) -> u8,
+            );
+            fn thaw_json_discard_graph_wire(source: *const c_char);
+        }
+        unsafe {
+            thaw_json_register_napi_handle_operations(
+                exact_mixed_napi_retain, exact_mixed_napi_release,
+            );
+        }
+        let wire = std::ffi::CString::new(
+            r#"{"root":{"v":null},"nodes":[],"leases":[],"napiLeases":["73"]}"#,
+        ).unwrap();
+        assert!(unsafe { thaw_arena::register_owned_graph_wire(wire.as_ptr()) });
+
+        let result = unsafe {
+            thaw_js_call_handle_mixed_exact_consuming_result(
+                0, wire.as_ptr(), std::ptr::null(),
+            )
+        };
+        assert!(!result.error.is_null());
+        unsafe { thaw_arena::destroy_string(result.error.cast_mut()) };
+        EXACT_MIXED_NAPI_RELEASES.with(|releases| assert_eq!(releases.get(), 1));
+        unsafe { thaw_json_discard_graph_wire(wire.as_ptr()) };
+        EXACT_MIXED_NAPI_RELEASES.with(|releases| assert_eq!(releases.get(), 1));
+
+        // The consumed pointer can be granted again; discard remains a
+        // one-shot operation even when called repeatedly or re-entrantly.
+        assert!(unsafe { thaw_arena::register_owned_graph_wire(wire.as_ptr()) });
+        unsafe { thaw_json_discard_graph_wire(wire.as_ptr()) };
+        unsafe { thaw_json_discard_graph_wire(wire.as_ptr()) };
+        EXACT_MIXED_NAPI_RELEASES.with(|releases| assert_eq!(releases.get(), 2));
+
+        // A valid empty direct-handle array reaches callable lookup. Its
+        // early return must consume the same registered argument grant.
+        let handles = [0u64];
+        assert!(unsafe { thaw_arena::register_owned_graph_wire(wire.as_ptr()) });
+        let result = unsafe {
+            thaw_js_call_handle_mixed_exact_consuming_result(
+                0, wire.as_ptr(), handles.as_ptr().cast(),
+            )
+        };
+        assert!(!result.error.is_null());
+        unsafe { thaw_arena::destroy_string(result.error.cast_mut()) };
+        EXACT_MIXED_NAPI_RELEASES.with(|releases| assert_eq!(releases.get(), 3));
+        assert!(unsafe { thaw_arena::register_owned_graph_wire(wire.as_ptr()) });
+        unsafe { thaw_json_discard_graph_wire(wire.as_ptr()) };
+        EXACT_MIXED_NAPI_RELEASES.with(|releases| assert_eq!(releases.get(), 4));
+    }).join().unwrap();
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn thaw_js_call_handle_mixed_native_json_result(handle: u64, graph_json: *const c_char, space_json: *const c_char, handles: *const u8) -> ThawResult {
     unsafe { thaw_js_call_handle_mixed_native_json_result_impl(handle, graph_json, space_json, handles, false) }
@@ -4320,4 +4525,135 @@ pub extern "C" fn thaw_js_resolve_handle_result(handle: u64) -> ThawResult {
 #[no_mangle]
 pub extern "C" fn thaw_js_resolve_handle_graph_result(handle: u64) -> ThawResult {
     thaw_js_resolve_handle_result_impl(handle, true)
+}
+
+#[no_mangle]
+pub extern "C" fn thaw_js_to_iterator_exact_result(
+    source_handle: u64,
+) -> ThawCallWithExceptionResult {
+    enum Outcome { Value(u64), Exception(u64, bool) }
+    let result: Result<Outcome, String> = with_active_or_context(|ctx| {
+        let source = value_for_handle(&ctx, source_handle)?;
+        let to_iterator: Function = ctx.globals().get("__thaw_to_iterator")
+            .map_err(|error| error.to_string())?;
+        match to_iterator.call::<_, Value>((source,)) {
+            Ok(iterator) => retain_value(&ctx, iterator).map(Outcome::Value),
+            Err(rquickjs::Error::Exception) => {
+                let thrown = ctx.catch();
+                let object_like = thrown.is_object() || thrown.is_function();
+                retain_value(&ctx, thrown)
+                    .map(|handle| Outcome::Exception(handle, object_like))
+            }
+            Err(error) => Err(error.to_string()),
+        }
+    });
+    match result {
+        Ok(Outcome::Value(value)) => ThawCallWithExceptionResult {
+            value, exception_handle: 0, exception_object_like: 0,
+            error: std::ptr::null(),
+        },
+        Ok(Outcome::Exception(exception_handle, object_like)) => ThawCallWithExceptionResult {
+            value: 0, exception_handle, exception_object_like: u8::from(object_like),
+            error: std::ptr::null(),
+        },
+        Err(error) => ThawCallWithExceptionResult {
+            value: 0, exception_handle: 0, exception_object_like: 0,
+            error: thaw_arena::owned_string(error),
+        },
+    }
+}
+
+/// One iterator step, with the exact JS result kept alive for a subsequent
+/// non-assimilating graph capture. The bootstrap helper performs ToBoolean
+/// on done before reading value and never awaits the method result.
+#[no_mangle]
+pub extern "C" fn thaw_js_iterator_step_exact_result(
+    iterator_handle: u64, mode: u8, error_text: *const c_char,
+) -> ThawCallWithExceptionResult {
+    enum Outcome { Value(u64), Exception(u64, bool) }
+    let result: Result<Outcome, String> = with_active_or_context(|ctx| {
+        if mode > 2 { return Err("Invalid iterator step mode".into()); }
+        let iterator = value_for_handle(&ctx, iterator_handle)?;
+        let step: Function = ctx.globals().get("__thaw_iterator_step_exact")
+            .map_err(|error| error.to_string())?;
+        let error = if error_text.is_null() { String::new() } else { to_str(error_text) };
+        match step.call::<_, Value>((iterator, mode, error)) {
+            Ok(record) => retain_value(&ctx, record).map(Outcome::Value),
+            Err(rquickjs::Error::Exception) => {
+                let thrown = ctx.catch();
+                let object_like = thrown.is_object() || thrown.is_function();
+                retain_value(&ctx, thrown)
+                    .map(|handle| Outcome::Exception(handle, object_like))
+            }
+            Err(error) => Err(error.to_string()),
+        }
+    });
+    match result {
+        Ok(Outcome::Value(value)) => ThawCallWithExceptionResult {
+            value, exception_handle: 0, exception_object_like: 0,
+            error: std::ptr::null(),
+        },
+        Ok(Outcome::Exception(exception_handle, object_like)) => ThawCallWithExceptionResult {
+            value: 0, exception_handle, exception_object_like: u8::from(object_like),
+            error: std::ptr::null(),
+        },
+        Err(error) => ThawCallWithExceptionResult {
+            value: 0, exception_handle: 0, exception_object_like: 0,
+            error: thaw_arena::owned_string(error),
+        },
+    }
+}
+
+
+/// Capture the exact value behind a retained QuickJS handle as an owned graph
+/// packet. Unlike resolve/await paths this does not assimilate Promise-like
+/// values, so a thrown Promise remains the original rejection value.
+#[no_mangle]
+pub extern "C" fn thaw_js_capture_handle_graph_result(handle: u64) -> ThawResult {
+    let result = with_active_or_context(|ctx| {
+        let value = value_for_handle(&ctx, handle)?;
+        let encode: Function = ctx.globals().get("__thaw_json_graph_encode_js")
+            .map_err(|error| error.to_string())?;
+        if value.is_object() || value.is_function() || value.is_symbol() {
+            encode.call((value.clone(), 0, true, false, value))
+        } else {
+            encode.call((value, 0, true, false))
+        }.map_err(|error| match error {
+            rquickjs::Error::Exception => describe_tagged_exception(&ctx),
+            error => error.to_string(),
+        })
+    });
+    match result {
+        Ok(wire) => {
+            let value = owned_graph_wire(&wire);
+            if value.is_null() {
+                ThawResult {
+                    value: std::ptr::null(),
+                    error: thaw_arena::owned_string("Unable to register JavaScript exception graph"),
+                }
+            } else {
+                ThawResult { value, error: std::ptr::null() }
+            }
+        }
+        Err(error) => ThawResult { value: std::ptr::null(), error: thaw_arena::owned_string(error) },
+    }
+}
+
+// Unrun control: failed grant registration retires only the producer's
+// retained lease before discarding the owned wire. Each test gets its own
+// thread-local QuickJS context and handle registry.
+#[cfg(test)]
+#[test]
+fn failed_exception_graph_grant_retires_producer_handle_lease() {
+    std::thread::spawn(|| {
+        let handle = with_context(|ctx| {
+            let value = ctx.eval::<Value<'_>, _>("(() => 1)").unwrap();
+            retain_value(&ctx, value).unwrap()
+        });
+        let wire = format!(
+            r#"{{"root":{{"v":null}},"nodes":[],"leases":[{handle}],"napiLeases":[]}}"#
+        );
+        assert!(owned_graph_wire_with_registration(&wire, |_| false).is_null());
+        assert_eq!(thaw_js_release_handle(handle), 0);
+    }).join().unwrap();
 }

@@ -259,6 +259,9 @@ impl<'ctx> HirCompiler<'ctx> {
                     Some(cell) => cell,
                     None => self.allocate_variable_cell(llvm_ty, name)?,
                 };
+                if existing_frame_cell.is_some() {
+                    self.retain_native_promise_cell_value(slot, ty, val)?;
+                }
                 self.builder
                     .build_store(slot, val)
                     .map_err(|e| e.to_string())?;
@@ -428,8 +431,6 @@ impl<'ctx> HirCompiler<'ctx> {
         let body_bb = self.context.append_basic_block(function, "whilebody");
         let after_bb = self.context.append_basic_block(function, "whileend");
 
-        let preheader_bb = self.builder.get_insert_block().unwrap();
-
         // Eagerly promote every pre-loop variable EITHER side's own
         // closure would otherwise reactively promote on first capture --
         // done here, before either side is compiled and before this
@@ -457,6 +458,12 @@ impl<'ctx> HirCompiler<'ctx> {
             };
             self.prepromote_variable_to_arena_cell(&name, &hir_ty)?;
         }
+
+        // A checked native Promise capture can split the incoming block
+        // into retain-failed and retain-ready successors. Later loop
+        // promotions must use the actual successor that branches to the
+        // header, not the predecessor of that ownership check.
+        let preheader_bb = self.builder.get_insert_block().unwrap();
 
         self.builder
             .build_unconditional_branch(header_bb)
@@ -515,6 +522,105 @@ impl<'ctx> HirCompiler<'ctx> {
         // `after_bb` is always reachable (the condition can be false on the
         // first check), so a `while` never terminates its enclosing block.
         Ok(false)
+    }
+
+    /// Pack the original exception tuple into the ordinary catch value.
+    /// Used both by lexical try/catch and by split async catch frames.
+    fn build_caught_exception_carrier(
+        &mut self,
+        text: PointerValue<'ctx>,
+        owner: PointerValue<'ctx>,
+        exception_tag: IntValue<'ctx>,
+        number: FloatValue<'ctx>,
+        bigint: IntValue<'ctx>,
+        boolean: IntValue<'ctx>,
+        share_json: bool,
+    ) -> Result<StructValue<'ctx>, String> {
+        let i64_ty = self.context.i64_type();
+        let i8_ty = self.context.i8_type();
+        let number_bits = self.builder.build_bit_cast(number, i64_ty, "caught_number_bits")
+            .map_err(|e| e.to_string())?.into_int_value();
+        let bool_bits = self.builder.build_int_z_extend(boolean, i64_ty, "caught_bool_bits")
+            .map_err(|e| e.to_string())?;
+        let text_bits = self.builder.build_ptr_to_int(text, i64_ty, "caught_text_bits")
+            .map_err(|e| e.to_string())?;
+        let owner_bits = self.builder.build_ptr_to_int(owner, i64_ty, "caught_owner_bits")
+            .map_err(|e| e.to_string())?;
+        // Lexical catches may receive a borrowed JSON Box and must share it.
+        // A split async catch uses the runtime pending-transfer API before its
+        // source Promise dies; that Box is already independently arena-rooted.
+        let selected_owner = if share_json {
+            let is_json = self.builder.build_int_compare(inkwell::IntPredicate::EQ,
+                exception_tag, i64_ty.const_int(7, false), "caught_is_json")
+                .map_err(|e| e.to_string())?;
+            let function = self.current_function();
+            let share_block = self.context.append_basic_block(function, "caught_share_json");
+            let passthrough_block = self.context.append_basic_block(function, "caught_keep_native_owner");
+            let join_block = self.context.append_basic_block(function, "caught_owner_ready");
+            self.builder.build_conditional_branch(is_json, share_block, passthrough_block)
+                .map_err(|e| e.to_string())?;
+            self.builder.position_at_end(share_block);
+            let shared = self.builder.build_call(
+                self.module.get_function("thaw_json_share").unwrap(),
+                &[owner.into()], "caught_json_share",
+            ).map_err(|e| e.to_string())?.try_as_basic_value().basic()
+                .ok_or("JSON exception share returned no value")?;
+            let rooted = self.builder.build_call(
+                self.module.get_function("thaw_json_track_arena_owned_root").unwrap(),
+                &[shared.into()], "caught_json_arena_root",
+            ).map_err(|e| e.to_string())?.try_as_basic_value().basic()
+                .ok_or("JSON exception root returned no value")?;
+            // track_arena_owned_root destroys its input on failure itself.
+            let rooted = self.compile_check_json_host_error(rooted, None)?.into_pointer_value();
+            let share_end = self.builder.get_insert_block().ok_or("missing JSON share block")?;
+            self.builder.build_unconditional_branch(join_block).map_err(|e| e.to_string())?;
+            self.builder.position_at_end(passthrough_block);
+            self.builder.build_unconditional_branch(join_block).map_err(|e| e.to_string())?;
+            self.builder.position_at_end(join_block);
+            let selected = self.builder.build_phi(self.context.ptr_type(AddressSpace::default()),
+                "caught_owned_json_or_native").map_err(|e| e.to_string())?;
+            selected.add_incoming(&[(&rooted, share_end), (&owner, passthrough_block)]);
+            selected.as_basic_value().into_pointer_value()
+        } else {
+            owner
+        };
+        let json_bits = self.builder.build_ptr_to_int(selected_owner,
+            i64_ty, "caught_json_bits").map_err(|e| e.to_string())?;
+        // Exception tags 1..8 map to union members 0..5,7,8.
+        // Tag 0 with an owner pointer is the native Object member (6);
+        // legacy text-only tag 0 remains a String member (3).
+        let owner_present = self.builder.build_is_not_null(owner, "caught_owner_present")
+            .map_err(|e| e.to_string())?;
+        let mut union_tag = self.builder.build_select(owner_present,
+            i8_ty.const_int(6, false), i8_ty.const_int(3, false), "caught_default_tag")
+            .map_err(|e| e.to_string())?.into_int_value();
+        let mut payload = self.builder.build_select(owner_present, owner_bits,
+            text_bits, "caught_default_payload")
+            .map_err(|e| e.to_string())?.into_int_value();
+        for (exception_kind, union_kind, bits) in [
+            (1u64, 0u64, number_bits),
+            (2, 1, bigint),
+            (3, 2, bool_bits),
+            (4, 3, text_bits),
+            (5, 4, i64_ty.const_zero()),
+            (6, 5, i64_ty.const_zero()),
+            (7, 7, json_bits),
+            (8, 8, bigint),
+        ] {
+            let active = self.builder.build_int_compare(inkwell::IntPredicate::EQ,
+                exception_tag, i64_ty.const_int(exception_kind, false), "caught_kind")
+                .map_err(|e| e.to_string())?;
+            union_tag = self.builder.build_select(active, i8_ty.const_int(union_kind, false),
+                union_tag, "select_caught_tag").map_err(|e| e.to_string())?.into_int_value();
+            payload = self.builder.build_select(active, bits, payload, "select_caught_payload")
+                .map_err(|e| e.to_string())?.into_int_value();
+        }
+        let union_ty = self.basic_type(&thaw_hir::caught_exception_carrier_type())?.into_struct_type();
+        let tagged = self.builder.build_insert_value(union_ty.get_undef(), union_tag,
+            0, "caught_union_tag").map_err(|e| e.to_string())?.into_struct_value();
+        self.builder.build_insert_value(tagged, payload,
+            1, "caught_union_payload").map(|value| value.into_struct_value())
+            .map_err(|e| e.to_string())
     }
 
     fn compile_try(
@@ -622,8 +728,14 @@ impl<'ctx> HirCompiler<'ctx> {
                 ptr_ty.const_null(),
             )
             .map_err(|e| e.to_string())?;
-        self.variables
-            .insert(catch_name.to_string(), (catch_slot, str_ty));
+        let carrier_type = thaw_hir::caught_exception_carrier_type();
+        let carrier_slot = if self.variable_hir_types.get(catch_name) == Some(&carrier_type) {
+            self.variables.get(catch_name).copied().map(|(slot, _)| slot)
+                .ok_or("caught value has no predeclared carrier slot")?
+        } else {
+            self.variables.insert(catch_name.to_string(), (catch_slot, str_ty));
+            catch_slot
+        };
         self.variables.insert(
             format!("{catch_name}__thaw_exception_object"),
             (object_slot, str_ty),
@@ -669,6 +781,29 @@ impl<'ctx> HirCompiler<'ctx> {
                     _ => HirType::I64,
                 },
             );
+        }
+        if self.variable_hir_types.get(catch_name) == Some(&carrier_type) {
+            let i64_ty = self.context.i64_type();
+            let stored_tag = self.variables.get(&format!("{catch_name}__thaw_exception_tag"))
+                .ok_or("catch tag snapshot missing")?.0;
+            let stored_f64 = self.variables.get(&format!("{catch_name}__thaw_exception_f64"))
+                .ok_or("catch f64 snapshot missing")?.0;
+            let stored_i64 = self.variables.get(&format!("{catch_name}__thaw_exception_i64"))
+                .ok_or("catch i64 snapshot missing")?.0;
+            let stored_bool = self.variables.get(&format!("{catch_name}__thaw_exception_bool"))
+                .ok_or("catch boolean snapshot missing")?.0;
+            let exception_tag = self.builder.build_load(i64_ty, stored_tag, "caught_value_tag")
+                .map_err(|e| e.to_string())?.into_int_value();
+            let number = self.builder.build_load(self.context.f64_type(), stored_f64, "caught_value_f64")
+                .map_err(|e| e.to_string())?.into_float_value();
+            let bigint = self.builder.build_load(i64_ty, stored_i64, "caught_value_i64")
+                .map_err(|e| e.to_string())?.into_int_value();
+            let boolean = self.builder.build_load(self.context.bool_type(), stored_bool, "caught_value_bool")
+                .map_err(|e| e.to_string())?.into_int_value();
+            let tagged = self.build_caught_exception_carrier(
+                thrown, thrown_object, exception_tag, number, bigint, boolean, true,
+            )?;
+            self.builder.build_store(carrier_slot, tagged).map_err(|e| e.to_string())?;
         }
         self.builder
             .build_store(

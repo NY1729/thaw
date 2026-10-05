@@ -1,4 +1,72 @@
 impl<'ctx> HirCompiler<'ctx> {
+    fn compile_dynamic_iterator_step_exact(
+        &mut self, args: &[HirExpr],
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let [iterator, mode, error_text] = args else {
+            return Err("exact iterator step expects iterator, mode, and error text".into());
+        };
+        self.uses_quickjs = true;
+        self.uses_quickjs_handles = true;
+        let iterator = self.compile_expr(iterator)?.into_int_value();
+        let mode = self.compile_expr(mode)?.into_int_value();
+        let mode = self.builder.build_int_truncate(mode, self.context.i8_type(),
+            "iterator_step_mode").map_err(|error| error.to_string())?;
+        let error_text = self.compile_expr(error_text)?.into_pointer_value();
+        let result = self.builder.build_call(
+            self.module.get_function("thaw_js_iterator_step_exact_result").unwrap(),
+            &[iterator.into(), mode.into(), error_text.into()], "iterator_step_exact",
+        ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+            .ok_or("exact iterator step returned no result")?.into_struct_value();
+        let value = self.compile_exact_iterator_handle_result(result, "iterator_step")?;
+        self.compile_original_quickjs_exception_handle(value, true)
+    }
+
+    fn compile_to_iterator_exact(
+        &mut self, args: &[HirExpr],
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let [source] = args else {
+            return Err("exact iterator acquisition expects one source".into());
+        };
+        self.uses_quickjs = true;
+        self.uses_quickjs_handles = true;
+        let source = self.compile_expr(source)?.into_int_value();
+        let result = self.builder.build_call(
+            self.module.get_function("thaw_js_to_iterator_exact_result").unwrap(),
+            &[source.into()], "to_iterator_exact",
+        ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+            .ok_or("exact iterator acquisition returned no result")?.into_struct_value();
+        self.compile_exact_iterator_handle_result(result, "iterator_acquire")
+    }
+
+    fn compile_exact_iterator_handle_result(
+        &mut self, result: inkwell::values::StructValue<'ctx>, _label: &str,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let value = self.builder.build_extract_value(result, 0, "iterator_step_record")
+            .map_err(|error| error.to_string())?;
+        let thrown = self.builder.build_extract_value(result, 1, "iterator_step_thrown")
+            .map_err(|error| error.to_string())?.into_int_value();
+        let native_error = self.builder.build_extract_value(result, 3, "iterator_step_native_error")
+            .map_err(|error| error.to_string())?;
+        let has_thrown = self.builder.build_int_compare(IntPredicate::NE, thrown,
+            self.context.i64_type().const_zero(), "iterator_step_has_thrown")
+            .map_err(|error| error.to_string())?;
+        let function = self.current_function();
+        let exact_throw = self.context.append_basic_block(function, "iterator_step_exact_throw");
+        let native_check = self.context.append_basic_block(function, "iterator_step_native_check");
+        self.builder.build_conditional_branch(has_thrown, exact_throw, native_check)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(exact_throw);
+        self.compile_throw_original_quickjs_exception_handle(thrown.into(), true)?;
+        self.builder.build_unconditional_branch(native_check)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(native_check);
+        self.builder.build_store(self.pending_exception().as_pointer_value(), native_error)
+            .map_err(|error| error.to_string())?;
+        self.clear_pending_native_text()?;
+        self.mark_pending_native_text(native_error)?;
+        self.branch_on_pending_exception()?;
+        Ok(value)
+    }
     fn compile_dynamic_named_call(
         &mut self,
         name: &str,
@@ -6,6 +74,8 @@ impl<'ctx> HirCompiler<'ctx> {
     ) -> Option<Result<BasicValueEnum<'ctx>, String>> {
         Some(match name {
             "loadScript" => self.compile_load_script(args),
+            "__thaw_to_iterator_exact" => self.compile_to_iterator_exact(args),
+            "__thaw_dynamic_iterator_step_exact" => self.compile_dynamic_iterator_step_exact(args),
             "callDynamic" => self.compile_call_dynamic(args),
             "getDynamicValue" => self.compile_get_dynamic_value(args),
             "newDynamicFunction" => self.compile_new_dynamic_function(args),
@@ -34,7 +104,11 @@ impl<'ctx> HirCompiler<'ctx> {
             "callDynamicMethodHandleRaw" => self.compile_call_dynamic_method_handle(args, true),
             "readDynamicValue" => self.compile_read_dynamic_value(args),
             "retainDynamicJson" => self.compile_retain_dynamic_json(args),
+            "@@thaw_retain_borrowed_dynamic_handle" =>
+                self.compile_retain_borrowed_dynamic_handle(args),
             "__thaw_json_host_from_dynamic" => self.compile_host_json_from_dynamic(args),
+            "__thaw_json_host_from_borrowed_dynamic" =>
+                self.compile_host_json_from_borrowed_dynamic(args),
             "__thaw_lookup_native_object" => self.compile_lookup_native_object(args),
             "__thaw_lookup_native_projector" => self.compile_lookup_native_projector(args),
             "__thaw_register_native_object_projector" =>
@@ -50,6 +124,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 args,
             ),
             "callDynamicValueMixed" => self.compile_call_dynamic_value_mixed(args),
+            "callDynamicValueMixedExact" => self.compile_call_dynamic_value_mixed_exact(args),
             "callDynamicValueMixedNativeJson" => self.compile_call_dynamic_value_mixed_native_json(args),
             "callDynamicValueMixedHandle" => {
                 self.compile_call_dynamic_value_mixed_handle(args)
@@ -137,6 +212,59 @@ impl<'ctx> HirCompiler<'ctx> {
         self.compile_check_json_host_error(json, Some("thaw_json_destroy"))
     }
 
+    fn compile_host_json_from_borrowed_dynamic(
+        &mut self,
+        args: &[HirExpr],
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let [source] = args else {
+            return Err("borrowed live JSON host conversion expects one handle".into());
+        };
+        self.uses_quickjs = true;
+        self.uses_quickjs_handles = true;
+        self.tracks_owned_json_roots = true;
+        let handle = self.compile_expr(source)?.into_int_value();
+        let json = self.builder.build_call(
+            self.module.get_function("thaw_json_host_from_borrowed_handle").unwrap(),
+            &[handle.into()], "borrowed_live_json_host",
+        ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+            .ok_or("borrowed live JSON host conversion returned no value")?;
+        // The source JsValue is borrowed. The std helper retained an
+        // independent host lease; the lexical catch carrier keeps its own.
+        self.compile_check_json_host_error(json, Some("thaw_json_destroy"))
+    }
+
+    /// The exact mixed call consumes each direct handle. A source JsValue is
+    /// borrowed, so give the call its own registry reference before staging.
+    fn compile_retain_borrowed_dynamic_handle(
+        &mut self,
+        args: &[HirExpr],
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let [value] = args else {
+            return Err("@@thaw_retain_borrowed_dynamic_handle expects one JsValue".into());
+        };
+        self.uses_quickjs = true;
+        self.uses_quickjs_handles = true;
+        let handle = self.compile_expr(value)?.into_int_value();
+        let retained = self.builder.build_call(
+            self.module.get_function("thaw_js_retain_handle").unwrap(),
+            &[handle.into()], "retain_exact_mixed_borrowed_handle",
+        ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+            .ok_or("thaw_js_retain_handle returned no status")?.into_int_value();
+        let valid = self.builder.build_int_compare(
+            inkwell::IntPredicate::NE, retained,
+            self.context.i8_type().const_zero(), "exact_mixed_borrowed_retained",
+        ).map_err(|error| error.to_string())?;
+        let ready = self.context.append_basic_block(
+            self.current_function(), "exact_mixed_borrowed_ready");
+        let invalid = self.context.append_basic_block(
+            self.current_function(), "exact_mixed_borrowed_invalid");
+        self.builder.build_conditional_branch(valid, ready, invalid)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(invalid);
+        self.compile_throw_type_error("Invalid borrowed JavaScript value handle")?;
+        self.builder.position_at_end(ready);
+        Ok(handle.into())
+    }
     fn compile_retain_dynamic_json(
         &mut self,
         args: &[HirExpr],

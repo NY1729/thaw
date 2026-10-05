@@ -60,20 +60,9 @@ impl<'a> FnLowerer<'a> {
         hir_name
     }
 
-    // Source declarations record immutability on the resolved storage name.
-    // Compiler-created Let temporaries continue to use bind_local directly.
-    fn bind_decl_local(&mut self, source_name: &str, ty: HirType, immutable: bool) -> Symbol {
-        let hir_name = self.bind_local(source_name, ty);
-        if immutable {
-            self.immutable_bindings.insert(hir_name.clone());
-        }
-        hir_name
-    }
-
     // The name marks a binding whose cell must be replaced on every for-loop
     // iteration, including when an async function resumes in a new frame call.
     fn bind_for_iteration_local(&mut self, source_name: &str, ty: HirType) -> Symbol {
-        let immutable = self.immutable_bindings.contains(&self.resolve_binding(source_name));
         let hir_name = format!("@@thaw_for_iteration_{}", self.next_binding);
         self.next_binding += 1;
         self.scope.insert(hir_name.clone(), ty);
@@ -82,9 +71,6 @@ impl<'a> FnLowerer<'a> {
             .entry(source_name.to_string())
             .or_default()
             .push(hir_name.clone());
-        if immutable {
-            self.immutable_bindings.insert(hir_name.clone());
-        }
         hir_name
     }
 
@@ -245,21 +231,22 @@ impl<'a> FnLowerer<'a> {
         while self.scope.contains_key(&name) {
             name.push('_');
         }
-        let catch_name = self.bind_local(&name, HirType::Str);
-        let normal_disposal = self.lower_using_disposal_sequence(&using_disposals, None);
+        let catch_name = self.bind_local(&name, crate::caught_exception_carrier_type());
+        let normal_disposal = self.lower_using_disposal_sequence(&using_disposals, None)?;
         let exceptional_disposal = self.lower_using_disposal_sequence(
             &using_disposals,
             Some(HirExpr::Var(catch_name.clone())),
-        );
+        )?;
         self.generator_finalizers
             .insert(catch_name.clone(), normal_disposal.clone());
         let body = self.inject_finally_before_exits(out, &normal_disposal, false, 1)?;
         // Every flag is initialized before any fallible acquisition in the Try.
+        using_flags.push(crate::caught_exception_carrier_prelude(catch_name.clone()));
         using_flags.push(HirStmt::Try(
             body,
             catch_name.clone(),
             exceptional_disposal,
-            Some(catch_name),
+            None,
         ));
         using_flags.extend(normal_disposal);
         Ok(using_flags)
@@ -277,15 +264,22 @@ impl<'a> FnLowerer<'a> {
 
     /// A nesting-safe `SuppressedError` combining a new `error` with the
     /// pending error, matching `new SuppressedError(error, suppressed)`.
-    fn suppressed_error_expr(&self, error: HirExpr, suppressed: HirExpr) -> HirExpr {
-        let message = HirExpr::Call(
-            Box::new(HirExpr::Var("__thaw_error_message".to_string())),
-            vec![error.clone()],
-        );
-        HirExpr::Call(
-            Box::new(HirExpr::Var("__thaw_error_suppress".to_string())),
-            vec![error, suppressed, message],
-        )
+    fn suppressed_error_expr(
+        &mut self, error: HirExpr, suppressed: HirExpr,
+    ) -> Result<HirExpr, String> {
+        let carrier = crate::caught_exception_carrier_type();
+        let HirType::Union(members) = carrier else { unreachable!() };
+        let record = self.lower_trusted_error_fields(vec![
+            ("__thaw_class_identity_\u{1e}SuppressedError\u{1f}Error".into(),
+                HirExpr::Lit(HirLit::Bool(true))),
+            ("message".into(), HirExpr::Lit(HirLit::Str(String::new()))),
+            ("name".into(), HirExpr::Lit(HirLit::Str("SuppressedError".into()))),
+            ("error".into(), error),
+            ("suppressed".into(), suppressed),
+        ], HirExpr::Lit(HirLit::Bool(false)), None)?;
+        Ok(HirExpr::UnionInject(Box::new(HirExpr::TypedClosure(
+            HirType::Object(Vec::new()), Box::new(record),
+        )), 6, members))
     }
 
     /// Dispose every resource even if an earlier disposer throws. When an
@@ -296,15 +290,19 @@ impl<'a> FnLowerer<'a> {
         &mut self,
         disposals: &[HirStmt],
         pending: Option<HirExpr>,
-    ) -> Vec<HirStmt> {
+    ) -> Result<Vec<HirStmt>, String> {
         let has_pending = pending.is_some();
-        let pending_name = self.bind_local("__thaw_using_pending", HirType::Str);
+        let carrier = crate::caught_exception_carrier_type();
+        let HirType::Union(members) = &carrier else { unreachable!() };
+        let pending_name = self.bind_local("__thaw_using_pending", carrier.clone());
         let has_pending_name = self.bind_local("__thaw_using_has_pending", HirType::Bool);
         let mut statements = vec![
             HirStmt::Let(
                 pending_name.clone(),
-                HirType::Str,
-                pending.unwrap_or_else(|| HirExpr::Lit(HirLit::Str(String::new()))),
+                carrier.clone(),
+                pending.unwrap_or_else(|| HirExpr::UnionInject(
+                    Box::new(HirExpr::Lit(HirLit::Undefined)), 4, members.clone(),
+                )),
             ),
             HirStmt::Let(
                 has_pending_name.clone(),
@@ -313,7 +311,11 @@ impl<'a> FnLowerer<'a> {
             ),
         ];
         for disposal in disposals {
-            let error_name = self.bind_local("__thaw_using_dispose_error", HirType::Str);
+            let error_name = self.bind_local("__thaw_using_dispose_error", carrier.clone());
+            let combined = self.suppressed_error_expr(
+                HirExpr::Var(error_name.clone()), HirExpr::Var(pending_name.clone()),
+            )?;
+            statements.push(crate::caught_exception_carrier_prelude(error_name.clone()));
             statements.push(HirStmt::Try(
                 vec![disposal.clone()],
                 error_name.clone(),
@@ -322,10 +324,7 @@ impl<'a> FnLowerer<'a> {
                         HirExpr::Var(has_pending_name.clone()),
                         vec![HirStmt::Expr(HirExpr::Assign(
                             pending_name.clone(),
-                            Box::new(self.suppressed_error_expr(
-                                HirExpr::Var(error_name.clone()),
-                                HirExpr::Var(pending_name.clone()),
-                            )),
+                            Box::new(combined),
                         ))],
                         vec![HirStmt::Expr(HirExpr::Assign(
                             pending_name.clone(),
@@ -337,19 +336,24 @@ impl<'a> FnLowerer<'a> {
                         Box::new(HirExpr::Lit(HirLit::Bool(true))),
                     )),
                 ],
-                Some(error_name),
+                None,
             ));
         }
         if has_pending {
-            statements.push(HirStmt::Throw(HirExpr::Var(pending_name)));
+            statements.extend(self.lower_throw_value_statements(
+                HirExpr::Var(pending_name), carrier,
+            )?);
         } else {
+            let rethrow = self.lower_throw_value_statements(
+                HirExpr::Var(pending_name), carrier,
+            )?;
             statements.push(HirStmt::If(
                 HirExpr::Var(has_pending_name),
-                vec![HirStmt::Throw(HirExpr::Var(pending_name))],
+                rethrow,
                 Vec::new(),
             ));
         }
-        statements
+        Ok(statements)
     }
 
     fn stmt_definitely_exits(stmt: &Stmt) -> bool {
