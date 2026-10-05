@@ -2163,45 +2163,151 @@
   };
   globalThis.__thaw_is_buffer_dynamic_value = value => Buffer.isBuffer(value);
   const timers = new Map();
+  const nativeDateNow = Date.now.bind(Date);
+  const nativeDate = Date;
+  const nativeReflectConstruct = Reflect.construct;
+  const nativeReflectApply = Reflect.apply;
+  const nativeDateToString = Date.prototype.toString;
+  const mockClocks = [];
+  const activeMockClock = api => {
+    for (let index = mockClocks.length - 1; index >= 0; index--) {
+      const clock = mockClocks[index];
+      if (clock.enabled && clock.apis.has(api)) return clock;
+    }
+    return null;
+  };
+  const refreshMockDate = () => {
+    const clock = activeMockClock('Date');
+    globalThis.Date = clock ? clock.date : nativeDate;
+  };
+  const mockDateFor = clock => {
+    function MockDate(...args) {
+      if (!new.target) return nativeReflectApply(nativeDateToString, new nativeDate(clock.now), []);
+      return nativeReflectConstruct(nativeDate, args.length ? args : [clock.now], new.target);
+    }
+    Object.setPrototypeOf(MockDate, nativeDate);
+    MockDate.prototype = nativeDate.prototype;
+    MockDate.now = () => clock.now;
+    return MockDate;
+  };
   const normalizeDelay = value => {
     const number = Number(value);
     if (!Number.isFinite(number) || number < 0) return 0;
     return Math.min(Math.trunc(number), 2147483647);
   };
   const timerHandle = id => ({
-    ref() { const timer = timers.get(id); if (timer) timer.refed = true; return this; },
-    unref() { const timer = timers.get(id); if (timer) timer.refed = false; return this; },
-    hasRef() { const timer = timers.get(id); return Boolean(timer && timer.refed); },
-    refresh() { const timer = timers.get(id); if (timer) timer.due = Date.now() + timer.milliseconds; return this; },
+    ref() { const timer = timers.get(id); if (timer && !timer.clock) timer.refed = true; return this; },
+    unref() { const timer = timers.get(id); if (timer && !timer.clock) timer.refed = false; return this; },
+    hasRef() { const timer = timers.get(id); return Boolean(timer && (timer.clock || timer.refed)); },
+    refresh() { const timer = timers.get(id); if (timer && !timer.clock) timer.due = nativeDateNow() + timer.milliseconds; return this; },
     close() { timers.delete(id); },
     [Symbol.toPrimitive]() { return id; }
   });
-  const schedule = (callback, delay, repeat, args, refed = true) => {
+  const schedule = (callback, delay, repeat, args, refed = true, api = 'setTimeout', forceReal = false) => {
     if (typeof callback !== 'function') {
       throw new TypeError('timer callback must be a function');
     }
     const id = nextTimerId++;
     const milliseconds = normalizeDelay(delay);
+    const clock = forceReal ? null : activeMockClock(api);
     timers.set(id, { callback, args, repeat, milliseconds, refed,
                      asyncContext: thawAsyncContext.get(),
-                     due: Date.now() + milliseconds });
+                     clock, due: (clock ? clock.now : nativeDateNow()) + (clock && api === 'setImmediate' ? -1 : milliseconds) });
     return timerHandle(id);
   };
   globalThis.setTimeout = (callback, delay = 0, ...args) =>
-    schedule(callback, delay, false, args);
+    schedule(callback, delay, false, args, true, 'setTimeout');
   globalThis.clearTimeout = id => { timers.delete(Number(id)); };
   globalThis.setInterval = (callback, delay = 0, ...args) =>
-    schedule(callback, delay, true, args);
+    schedule(callback, delay, true, args, true, 'setInterval');
   globalThis.clearInterval = globalThis.clearTimeout;
   globalThis.setImmediate = (callback, ...args) =>
-    schedule(callback, 0, false, args);
+    schedule(callback, 0, false, args, true, 'setImmediate');
   globalThis.clearImmediate = globalThis.clearTimeout;
   globalThis.__thaw_set_timeout_ref = (callback, delay, refed) =>
-    schedule(callback, delay, false, [], Boolean(refed));
+    schedule(callback, delay, false, [], Boolean(refed), 'setTimeout', true);
   globalThis.__thaw_set_timer_ref = (id, refed) => {
     const timer = timers.get(Number(id));
     if (timer) timer.refed = Boolean(refed);
   };
+  const invokeTimer = (timer, propagate = false) => {
+    const previousAsyncContext = thawAsyncContext.swap(timer.asyncContext);
+    try {
+      if (propagate) return timer.callback(...timer.args);
+      try { timer.callback(...timer.args); }
+      catch (error) {
+        if (typeof process === 'undefined' || !process.emit) throw error;
+        process.emit('uncaughtExceptionMonitor', error, 'uncaughtException');
+        if (!process.emit('uncaughtException', error, 'uncaughtException')) throw error;
+      }
+    } finally { thawAsyncContext.swap(previousAsyncContext); }
+  };
+  const nextMockTimer = (clock, through) => {
+    let selected = null;
+    for (const entry of timers) {
+      const [id, timer] = entry;
+      if (timer.clock !== clock || timer.due > through) continue;
+      if (!selected || timer.due < selected[1].due ||
+          (timer.due === selected[1].due && id < selected[0])) selected = entry;
+    }
+    return selected;
+  };
+  const fireMockTimer = (clock, id, timer) => {
+    if (timers.get(id) !== timer) return;
+    invokeTimer(timer, true);
+    if (timers.get(id) !== timer) return;
+    if (timer.repeat) timer.due += timer.milliseconds;
+    else timers.delete(id);
+  };
+  const requireMockClock = clock => {
+    if (!clock || !clock.enabled || !mockClocks.includes(clock)) throw new Error('mock timers are not enabled');
+  };
+  globalThis.__thaw_test_mock_timers_enable = options => {
+    options = options === undefined ? {} : options;
+    if (!options || typeof options !== 'object') throw new TypeError('mock timer options must be an object');
+    const supported = ['setTimeout', 'setInterval', 'setImmediate', 'Date'];
+    const requestedApis = options.apis;
+    const apis = requestedApis === undefined ? supported : requestedApis;
+    if (!Array.isArray(apis) || apis.some(api => !supported.includes(api))) throw new TypeError('invalid mock timer API');
+    const requestedNow = options.now;
+    const now = requestedNow === undefined ? 0 : Number(requestedNow);
+    if (!Number.isFinite(now) || now < 0) throw new RangeError('invalid mock timer time');
+    const clock = { enabled: true, now, apis: new Set(apis) };
+    clock.date = mockDateFor(clock);
+    mockClocks.push(clock);
+    refreshMockDate();
+    return clock;
+  };
+  globalThis.__thaw_test_mock_timers_tick = (clock, milliseconds) => {
+    requireMockClock(clock);
+    const amount = Number(milliseconds === undefined ? 1 : milliseconds);
+    if (!Number.isFinite(amount) || amount < 0) throw new RangeError('invalid mock timer advance');
+    const through = clock.now + amount;
+    if (!Number.isFinite(through)) throw new RangeError('invalid mock timer advance');
+    clock.now = through;
+    let entry;
+    while ((entry = nextMockTimer(clock, through))) fireMockTimer(clock, entry[0], entry[1]);
+  };
+  globalThis.__thaw_test_mock_timers_run_all = clock => {
+    requireMockClock(clock);
+    let lastDue = -Infinity;
+    for (const timer of timers.values()) if (timer.clock === clock) lastDue = Math.max(lastDue, timer.due);
+    if (lastDue !== -Infinity) globalThis.__thaw_test_mock_timers_tick(clock, lastDue - clock.now);
+  };
+  globalThis.__thaw_test_mock_timers_set_time = (clock, milliseconds) => {
+    requireMockClock(clock);
+    const now = Number(milliseconds === undefined ? 0 : milliseconds);
+    if (!Number.isFinite(now) || now < 0) throw new RangeError('invalid mock timer time');
+    clock.now = now;
+  };
+  globalThis.__thaw_test_mock_timers_reset = clock => {
+    requireMockClock(clock);
+    clock.enabled = false;
+    for (const [id, timer] of timers) if (timer.clock === clock) timers.delete(id);
+    mockClocks.splice(mockClocks.indexOf(clock), 1);
+    refreshMockDate();
+  };
+  globalThis.__thaw_test_real_now = nativeDateNow;
   globalThis.queueMicrotask = callback => {
     if (typeof callback !== 'function') {
       throw new TypeError('microtask callback must be a function');

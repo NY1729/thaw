@@ -69,32 +69,21 @@
     globalThis.AbortController = AbortController;
   }
   globalThis.__thaw_next_timer_delay = () => {
-    if (![...timers.values()].some(timer => timer.refed)) return -1;
+    if (![...timers.values()].some(timer => timer.refed && !timer.clock)) return -1;
     let due = Infinity;
-    for (const timer of timers.values()) due = Math.min(due, timer.due);
-    return due === Infinity ? -1 : Math.max(0, due - Date.now());
+    for (const timer of timers.values()) if (!timer.clock) due = Math.min(due, timer.due);
+    return due === Infinity ? -1 : Math.max(0, due - nativeDateNow());
   };
   globalThis.__thaw_run_due_timers = () => {
-    const now = Date.now();
+    const now = nativeDateNow();
     const due = [...timers.entries()]
-      .filter(([, timer]) => timer.due <= now)
+      .filter(([, timer]) => !timer.clock && timer.due <= now)
       .sort((a, b) => a[1].due - b[1].due || a[0] - b[0]);
     for (const [id, timer] of due) {
       if (!timers.has(id)) continue;
-      if (timer.repeat) timer.due = Date.now() + timer.milliseconds;
+      if (timer.repeat) timer.due = nativeDateNow() + timer.milliseconds;
       else timers.delete(id);
-      const previousAsyncContext = thawAsyncContext.swap(timer.asyncContext);
-      try {
-        try {
-          timer.callback(...timer.args);
-        } catch (error) {
-          if (typeof process === 'undefined' || !process.emit) throw error;
-          process.emit('uncaughtExceptionMonitor', error, 'uncaughtException');
-          if (!process.emit('uncaughtException', error, 'uncaughtException')) throw error;
-        }
-      } finally {
-        thawAsyncContext.swap(previousAsyncContext);
-      }
+      invokeTimer(timer);
     }
     return due.length;
   };
