@@ -436,6 +436,7 @@ struct HostWorker {
     commands: Sender<HostWorkerCommand>,
     events: Receiver<HostWorkerEvent>,
     thread: Option<JoinHandle<()>>,
+    refed: bool,
 }
 
 struct HostWorkerStart {

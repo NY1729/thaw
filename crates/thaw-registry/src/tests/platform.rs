@@ -776,6 +776,30 @@ fn worker_threads_native_runtime_round_trips_parent_messages() {
 }
 
 #[test]
+fn worker_threads_native_ref_unreffed_workers_follow_host_liveness() {
+    use std::ffi::{CStr, CString};
+    let dir = temp_registry("builtin_worker_native_ref");
+    fs::write(
+        dir.join("index.js"),
+        "var Worker = require('node:worker_threads').Worker; module.exports = async function () { var source = \"var wt = require('node:worker_threads'); wt.parentPort.on('message', function(value) { wt.parentPort.postMessage(value); wt.parentPort.close(); });\"; var missingHandleNoOp = __thaw_worker_ref(4294967295, true) === false; var worker = new Worker(source, { eval: true }); var initiallyActive = __thaw_worker_active(); var unrefReturnsSelf = worker.unref() === worker, inactiveAfterUnref = !__thaw_worker_active(); var sibling = new Worker(source, { eval: true }); var siblingKeepsActivity = __thaw_worker_active(); var refReturnsSelf = worker.ref() === worker, activeAfterRef = __thaw_worker_active(); worker.unref(); var siblingStillKeepsActivity = __thaw_worker_active(); var exits = [new Promise(function(resolve) { worker.on('exit', resolve); }), new Promise(function(resolve) { sibling.on('exit', resolve); })]; var messages = Promise.all([new Promise(function(resolve, reject) { worker.on('message', resolve); worker.on('error', reject); }), new Promise(function(resolve, reject) { sibling.on('message', resolve); sibling.on('error', reject); })]); worker.postMessage('unref'); sibling.postMessage('refed'); messages = await messages; var codes = await Promise.all(exits); var endedNoOp = worker.ref() === worker && worker.unref() === worker && __thaw_worker_ref(worker._nativeHandle, true) === false; return [missingHandleNoOp, initiallyActive, unrefReturnsSelf, inactiveAfterUnref, siblingKeepsActivity, refReturnsSelf, activeAfterRef, siblingStillKeepsActivity, messages, codes, !__thaw_worker_active(), endedNoOp]; };",
+    )
+    .unwrap();
+    let node_modules = temp_registry("builtin_worker_native_ref_node_modules");
+    let (bundle, _, file_count, _) =
+        bundle_commonjs_package(&node_modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(file_count, 3);
+    let script = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseNativeWorkerRef = module.exports;")).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(script.as_ptr()), 1);
+    let function = CString::new("exerciseNativeWorkerRef").unwrap();
+    let arguments = CString::new("[]").unwrap();
+    let result = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+    let result = unsafe { CStr::from_ptr(result) }.to_string_lossy();
+    assert_eq!(result, r#"[true,true,true,true,true,true,true,true,["unref","refed"],[0,0],true,true]"#);
+    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(node_modules);
+}
+
+#[test]
 fn worker_threads_native_runtime_transfers_structured_array_buffers() {
     use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_worker_native_structured_transfer");
