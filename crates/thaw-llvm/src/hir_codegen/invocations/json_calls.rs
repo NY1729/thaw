@@ -72,6 +72,14 @@ impl<'ctx> HirCompiler<'ctx> {
                 let value = self.compile_single_arg_call("thaw_json_typeof", args, "JSON typeof")?;
                 return self.compile_check_json_host_error(value, None);
             }
+            "__thaw_json_as_bigint_i64" => {
+                let value = self.compile_single_arg_call(
+                    "thaw_json_as_bigint_i64", args, "checked Json BigInt assertion",
+                )?;
+                // Host-backed Json may need a reentrant query for the exact
+                // decimal. Consume its error before another host operation.
+                return self.compile_check_json_host_error(value, None);
+            }
             "__thaw_json_borrowed_handle_id" => {
                 return self.compile_single_arg_call(
                     "thaw_json_borrowed_handle_id", args, "borrowed JSON handle");

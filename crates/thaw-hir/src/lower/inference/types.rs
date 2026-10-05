@@ -2298,6 +2298,13 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&HirType::I64, value, "JSON bigint")?;
                         return Ok(HirType::Json);
                     }
+                    "__thaw_json_as_bigint_i64" => {
+                        let [value] = args.as_slice() else {
+                            return Err("checked Json BigInt assertion expects one operand".into());
+                        };
+                        self.expect_type(&HirType::Json, value, "checked Json BigInt assertion")?;
+                        return Ok(HirType::I64);
+                    }
                     "__thaw_json_is_date_shape" => return Ok(HirType::Bool),
                     "__thaw_json_is_buffer_shape" => return Ok(HirType::Bool),
                     "__thaw_json_date_timestamp" => return Ok(HirType::F64),
