@@ -1134,3 +1134,54 @@ fn file_worker_and_main_keep_root_dirname_for_entry_and_dependencies() {
     let _ = fs::remove_dir_all(dir);
     let _ = fs::remove_dir_all(modules);
 }
+
+#[test]
+fn file_worker_preserves_unresolved_parent_path_components() {
+    use std::ffi::{CStr, CString};
+    let dir = temp_registry("worker_parent_components");
+    let modules = temp_registry("worker_parent_components_modules");
+    fs::write(dir.join("index.js"), r#"
+        var Worker = require('node:worker_threads').Worker;
+        module.exports = function () {
+            var originalRead = globalThis.__thaw_worker_read_source;
+            var originalSpawn = globalThis.__thaw_worker_spawn;
+            var captured, stop = {};
+            globalThis.__thaw_worker_read_source = function(path) {
+                if (path.endsWith('entry.js')) return "module.exports = require('../child.js');";
+                if (path.endsWith('child.js')) return 'module.exports = __filename;';
+                throw new Error('Unexpected read: ' + path);
+            };
+            globalThis.__thaw_worker_spawn = function(bundle, source) { captured = source; throw stop; };
+            try {
+                var values = ['entry.js', '../entry.js', '../../entry.js', 'nested/entry.js',
+                              '/entry.js', '/nested/entry.js'].map(function(path) {
+                    captured = undefined;
+                    try { new Worker(path); } catch (error) { if (error !== stop) throw error; }
+                    if (captured === undefined) throw new Error('Missing generated Worker source');
+                    var childModule = { exports: {} };
+                    Function('require', 'module', 'exports', captured)(
+                        function(name) { throw new Error(name); }, childModule, childModule.exports);
+                    return childModule.exports;
+                });
+                values.push(globalThis.__thaw_run_main_file('/entry.js'));
+                values.push(globalThis.__thaw_run_main_file('/nested/entry.js'));
+                return values;
+            } finally {
+                globalThis.__thaw_worker_read_source = originalRead;
+                globalThis.__thaw_worker_spawn = originalSpawn;
+            }
+        };
+    "#).unwrap();
+    let (bundle, _, _, _) = bundle_commonjs_package(&modules, "pkg", &dir, "index.js").unwrap();
+    let script = format!(
+        "globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; \
+         globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} \
+         globalThis.exerciseWorkerParentComponents = module.exports;"
+    );
+    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
+    let result = thaw_quickjs::thaw_js_call(c"exerciseWorkerParentComponents".as_ptr(), c"[]".as_ptr());
+    assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(),
+        "[\"../child.js\",\"../../child.js\",\"../../../child.js\",\"child.js\",\"/child.js\",\"/child.js\",\"/child.js\",\"/child.js\"]");
+    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(modules);
+}
