@@ -1358,3 +1358,64 @@ fn file_worker_package_main_rethrows_initialization_and_syntax_errors() {
     let _ = fs::remove_dir_all(dir);
     let _ = fs::remove_dir_all(modules);
 }
+
+#[test]
+fn file_loaders_resolve_dotted_files_and_directories_in_file_first_order() {
+    use std::ffi::{CStr, CString};
+    let dir = temp_registry("worker_dotted_resolution");
+    let modules = temp_registry("worker_dotted_resolution_modules");
+    fs::write(dir.join("index.js"), r#"
+        var Worker = require('node:worker_threads').Worker;
+        module.exports = function () {
+            var originalRead = globalThis.__thaw_worker_read_source;
+            var originalSpawn = globalThis.__thaw_worker_spawn;
+            var captured, metadataReads = 0, stop = {};
+            var common = ["require('./helper.test')", "require('./data.v1')", "require('./dir.v1')",
+                          "require('./cjs.v1')", "require('./json.v1')"];
+            globalThis.__thaw_worker_read_source = function(path) {
+                if (path === '/resolve/entry.js') return 'module.exports = [' +
+                    common.concat(["require('./pkg.v1')", "require('./collision')", "require('./exact.v1')"]).join(',') + '];';
+                if (path === '/resolve/main-entry.js') return 'module.exports = [' +
+                    common.concat(["require('./collision')", "require('./exact.v1')"]).join(',') + '];';
+                switch (path) {
+                    case '/resolve/helper.test.js': return 'module.exports = 11;';
+                    case '/resolve/data.v1.json': return '12';
+                    case '/resolve/dir.v1/index.js': return 'module.exports = 13;';
+                    case '/resolve/cjs.v1/index.cjs': return 'module.exports = 14;';
+                    case '/resolve/json.v1/index.json': return '15';
+                    case '/resolve/pkg.v1/package.json': return '{"main":"main"}';
+                    case '/resolve/pkg.v1/main.js': return 'module.exports = 16;';
+                    case '/resolve/collision.js': return 'module.exports = 17;';
+                    case '/resolve/collision/package.json': metadataReads++; return '{"main":"wrong.js"}';
+                    case '/resolve/collision/wrong.js': return 'module.exports = 99;';
+                    case '/resolve/exact.v1': return 'module.exports = 18;';
+                    default: throw new Error('Unexpected read: ' + path);
+                }
+            };
+            globalThis.__thaw_worker_spawn = function(bundle, source) { captured = source; throw stop; };
+            try {
+                try { new Worker('/resolve/entry.js'); } catch (error) { if (error !== stop) throw error; }
+                if (captured === undefined) throw new Error('Missing generated Worker source');
+                var childModule = { exports: {} };
+                Function('require', 'module', 'exports', captured)(
+                    function(name) { throw new Error(name); }, childModule, childModule.exports);
+                return [childModule.exports, globalThis.__thaw_run_main_file('/resolve/main-entry.js'), metadataReads];
+            } finally {
+                globalThis.__thaw_worker_read_source = originalRead;
+                globalThis.__thaw_worker_spawn = originalSpawn;
+            }
+        };
+    "#).unwrap();
+    let (bundle, _, _, _) = bundle_commonjs_package(&modules, "pkg", &dir, "index.js").unwrap();
+    let script = format!(
+        "globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; \
+         globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} \
+         globalThis.exerciseWorkerDottedResolution = module.exports;"
+    );
+    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
+    let result = thaw_quickjs::thaw_js_call(c"exerciseWorkerDottedResolution".as_ptr(), c"[]".as_ptr());
+    assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(),
+        "[[11,12,13,14,15,16,17,18],[11,12,13,14,15,17,18],0]");
+    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(modules);
+}

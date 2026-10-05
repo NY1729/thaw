@@ -2610,7 +2610,7 @@
       request = String(request);
       if (!request.startsWith('./') && !request.startsWith('../') && !request.startsWith('/')) return builtinRequire(request);
       const target = normalize(request.startsWith('/') ? request : base + '/' + request);
-      const candidates = /\.[^/]+$/.test(target) ? [target] : [target, target + '.js', target + '.cjs', target + '.json', target + '/index.js', target + '/index.cjs', target + '/index.json'];
+      const candidates = [target, target + '.js', target + '.cjs', target + '.json', target + '/index.js', target + '/index.cjs', target + '/index.json'];
       let source, resolved;
       for (const candidate of candidates) {
         try { source = globalThis.__thaw_worker_read_source(candidate); resolved = candidate; break; } catch (_) {}
