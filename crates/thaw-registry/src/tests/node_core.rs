@@ -2775,3 +2775,103 @@ module.exports = async function () {
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
 }
+
+#[test]
+fn node_test_mock_timers_advance_scheduler_and_restore_after_case() {
+    use std::ffi::{CStr, CString};
+
+    let dir = temp_registry("builtin_test_mock_timers");
+    fs::write(
+        dir.join("index.js"),
+        r#"var test = require('node:test');
+var timers = require('node:timers');
+var timerPromises = require('node:timers/promises');
+module.exports = async function () {
+  var seen = [], nativeDate = Date, saved;
+  var result = await test('virtual clock', { timeout: 10000 }, async function(t) {
+    saved = t.mock.timers;
+    t.mock.timers.enable({ now: 1000 });
+    class ClockDate extends Date {}
+    var subclassDate = new ClockDate();
+    seen.push(subclassDate instanceof ClockDate, subclassDate.getTime());
+    timers.setImmediate(function() { seen.push('immediate@' + Date.now()); });
+    var interval = timers.setInterval(function() { seen.push('interval@' + Date.now()); }, 4);
+    var cancelled = timers.setTimeout(function() { seen.push('cancelled'); }, 3);
+    timers.clearTimeout(cancelled);
+    timers.setTimeout(function() { seen.push('early'); }, 5);
+    timers.setTimeout(function() { seen.push('equal'); }, 5);
+    timers.setTimeout(function() { seen.push('late'); }, 10);
+    var promised = timerPromises.setTimeout(7, 'promise').then(function(value) { seen.push(value); });
+    t.mock.timers.tick(0);
+    t.mock.timers.tick(10);
+    await promised;
+    seen.push(Date.now(), t.mock.timers.enabled);
+    timers.setTimeout(function() { seen.push('last'); }, 20);
+    t.mock.timers.runAll();
+    seen.push(interval.unref().hasRef());
+    timers.clearInterval(interval);
+    seen.push(Date.now());
+    var negatives = 0;
+    try { t.mock.timers.tick(-1); } catch (error) { negatives++; }
+    try { t.mock.timers.setTime(-1); } catch (error) { negatives++; }
+    var thrown = new Error('timer callback'), caught = false, uncaught = 0;
+    function listener() { uncaught++; }
+    process.on('uncaughtException', listener);
+    timers.setTimeout(function() { throw thrown; }, 1);
+    try { t.mock.timers.tick(1); } catch (error) { caught = error === thrown; }
+    process.off('uncaughtException', listener);
+    seen.push(negatives, caught, uncaught);
+  });
+  var closed = false;
+  try { saved.tick(1); } catch (error) { closed = true; }
+  test.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 1000 });
+  var setTimeEffect = [];
+  timers.setTimeout(function() { setTimeEffect.push('fired'); }, 5);
+  test.mock.timers.setTime(1006);
+  setTimeEffect.push(Date.now(), setTimeEffect.length);
+  test.mock.timers.tick(0);
+  test.mock.timers.reset();
+  test.mock.timers.enable({ apis: ['Date'] });
+  var dateOnly = [Date.now()];
+  test.mock.timers.setTime(42);
+  dateOnly.push(Date.now());
+  test.mock.timers.tick();
+  dateOnly.push(Date.now());
+  test.mock.timers.setTime();
+  dateOnly.push(Date.now());
+  test.mock.timers.reset();
+  dateOnly.push(Date === nativeDate);
+  var disposeOk = true;
+  if (typeof Symbol.dispose === 'symbol') {
+    test.mock.timers.enable({ apis: ['Date'] });
+    test.mock.timers[Symbol.dispose]();
+    disposeOk = Date === nativeDate;
+  }
+  return [seen, result.status, saved.enabled, closed, Date === nativeDate, setTimeEffect, dateOnly, disposeOk];
+};"#,
+    )
+    .unwrap();
+    let empty_node_modules = temp_registry("builtin_test_mock_timers_node_modules");
+    let (bundle, _, file_count, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    assert!(file_count >= 3);
+    let script = format!(
+        "globalThis.module = {{ exports: {{}} }};\n\
+         globalThis.exports = globalThis.module.exports;\n\
+         globalThis.require = function(name) {{ throw new Error(\"require('\" + name + \"') is not supported\"); }};\n\
+         {bundle}\n\
+         globalThis.exerciseTestMockTimers = module.exports;\n"
+    );
+    let source = CString::new(script).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let func = CString::new("exerciseTestMockTimers").unwrap();
+    let args = CString::new("[]").unwrap();
+    let result_ptr = thaw_quickjs::thaw_js_call(func.as_ptr(), args.as_ptr());
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(
+        result,
+        r#"[[true,1000,"immediate@1000","interval@1010","early","equal","interval@1010","late","promise",1010,true,"interval@1030","interval@1030","interval@1030","interval@1030","interval@1030","last",true,1030,2,true,0],"passed",false,true,true,[1006,0,"fired"],[0,42,43,0,true],true]"#
+    );
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+}
