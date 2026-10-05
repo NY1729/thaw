@@ -752,6 +752,30 @@ fn worker_threads_load_runtime_computed_absolute_paths() {
 }
 
 #[test]
+fn worker_threads_native_stdio_defaults_to_parent_and_capture_stays_separate() {
+    use std::ffi::{CStr, CString};
+    let dir = temp_registry("builtin_worker_default_stdio");
+    fs::write(
+        dir.join("index.js"),
+        r#"var Worker = require('node:worker_threads').Worker; module.exports = async function () { var output = '', errors = '', capturedOutput = '', capturedErrors = '', originalOut = process.stdout, originalErr = process.stderr, originalSpawn = globalThis.__thaw_worker_spawn; process.stdout = { write: function(value, encoding, callback) { if (typeof encoding === 'function') callback = encoding; output += String(value); if (callback) queueMicrotask(callback); return true; } }; process.stderr = { write: function(value, encoding, callback) { if (typeof encoding === 'function') callback = encoding; errors += String(value); if (callback) queueMicrotask(callback); return true; } }; var source = "var wt = require('node:worker_threads'); process.stdout.write('default-out'); process.stderr.write('default-err'); wt.parentPort.close();"; try { var worker = new Worker(source, { eval: true }); var defaultExit = new Promise(function(resolve) { worker.on('exit', resolve); }); await defaultExit; var captured = new Worker("var wt = require('node:worker_threads'); console.log('captured-out'); console.error('captured-err'); wt.parentPort.close();", { eval: true, stdout: true, stderr: true }); captured.stdout.on('data', function(value) { capturedOutput += value; }); captured.stderr.on('data', function(value) { capturedErrors += value; }); var captureExit = new Promise(function(resolve) { captured.on('exit', resolve); }); await captureExit; globalThis.__thaw_worker_spawn = undefined; var fallbackSource = "var wt = require('node:worker_threads'); process.stdout.write('fallback-out'); process.stderr.write('fallback-err'); wt.parentPort.close();"; var fallback = new Worker(fallbackSource, { eval: true }); var fallbackExit = new Promise(function(resolve) { fallback.on('exit', resolve); }); await fallbackExit; return [worker.stdout === null, worker.stderr === null, output, errors, capturedOutput, capturedErrors, captured.stdout.readableEnded, captured.stderr.readableEnded, fallback.stdout === null, fallback.stderr === null]; } finally { globalThis.__thaw_worker_spawn = originalSpawn; process.stdout = originalOut; process.stderr = originalErr; } };"#,
+    )
+    .unwrap();
+    let node_modules = temp_registry("builtin_worker_default_stdio_node_modules");
+    let (bundle, _, file_count, _) =
+        bundle_commonjs_package(&node_modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(file_count, 3);
+    let script = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseDefaultWorkerStdio = module.exports;")).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(script.as_ptr()), 1);
+    let function = CString::new("exerciseDefaultWorkerStdio").unwrap();
+    let arguments = CString::new("[]").unwrap();
+    let result = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+    let result = unsafe { CStr::from_ptr(result) }.to_string_lossy();
+    assert_eq!(result, r#"[true,true,"default-outfallback-out","default-errfallback-err","captured-out\n","captured-err\n",true,true,true,true]"#);
+    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(node_modules);
+}
+
+#[test]
 fn worker_threads_native_runtime_round_trips_parent_messages() {
     use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_worker_native_round_trip");
