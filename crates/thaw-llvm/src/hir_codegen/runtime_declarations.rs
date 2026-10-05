@@ -2714,6 +2714,28 @@ impl<'ctx> HirCompiler<'ctx> {
             ),
             Some(Linkage::External),
         );
+        let exact_mixed_result_type = self.context.struct_type(&[
+            self.context.i64_type().into(), self.context.i64_type().into(),
+            self.context.i8_type().into(), i8_ptr.into(),
+        ], false);
+        self.module.add_function(
+            "thaw_js_iterator_step_exact_result",
+            exact_mixed_result_type.fn_type(&[
+                self.context.i64_type().into(), self.context.i8_type().into(), i8_ptr.into(),
+            ], false), Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_js_to_iterator_exact_result",
+            exact_mixed_result_type.fn_type(&[self.context.i64_type().into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_js_call_handle_mixed_exact_consuming_result",
+            exact_mixed_result_type.fn_type(&[
+                self.context.i64_type().into(), i8_ptr.into(), i8_ptr.into(),
+            ], false),
+            Some(Linkage::External),
+        );
         self.module.add_function(
             "thaw_js_call_handle_mixed_native_json_result",
             result_type.fn_type(
@@ -2753,6 +2775,7 @@ impl<'ctx> HirCompiler<'ctx> {
             ("thaw_js_call_handle_value_graph_result", "thaw_js_call_handle_value_result"),
             ("thaw_js_call_method_graph_result", "thaw_js_call_method_result"),
             ("thaw_js_resolve_handle_graph_result", "thaw_js_resolve_handle_result"),
+            ("thaw_js_capture_handle_graph_result", "thaw_js_resolve_handle_result"),
             ("thaw_js_call_handle_mixed_graph_result", "thaw_js_call_handle_mixed_result"),
             ("thaw_js_call_handle_mixed_native_json_graph_result", "thaw_js_call_handle_mixed_native_json_result"),
         ] {

@@ -704,6 +704,18 @@ impl<'a> FnLowerer<'a> {
             ])),
             Expr::Ident(ident) => {
                 let name = self.resolve_binding(ident.sym.as_ref());
+                if let Some((reserved, read)) = self.parameter_tdz_fallbacks.get(ident.sym.as_ref()) {
+                    // A nested arrow/function may bind the same spelling.
+                    // Its own parameter is initialized independently of the
+                    // enclosing method's still-uninitialized parameter.
+                    if reserved == &name { return Ok(read.clone()); }
+                }
+                if let Some((reserved, cell, payload)) = self.parameter_shared_cells.get(ident.sym.as_ref()) {
+                    if reserved == &name {
+                        return Ok(target_to_read_expr(&Target::ParameterCell(
+                            cell.clone(), payload.clone()))?);
+                    }
+                }
                 // A read of a `new Proxy(target, handler)`'s own `target`
                 // identifier, redirected to re-read the live QuickJS
                 // handle a `set` trap's mutation actually reaches (see
@@ -733,11 +745,7 @@ impl<'a> FnLowerer<'a> {
                         } else {
                             signature.ret.clone()
                         };
-                        return Ok(HirExpr::FunctionRef(
-                            name,
-                            signature.params.clone(),
-                            ret,
-                        ));
+                        return self.function_ref_from_signature(name, signature, ret);
                     }
                     // A bare class-name reference (not immediately
                     // `new`'d) -- real trigger: `class-transformer`'s
@@ -984,10 +992,17 @@ impl<'a> FnLowerer<'a> {
                     return Ok(HirExpr::Lit(HirLit::Undefined));
                 }
                 if self.class_static_context {
+                    let bound = self.resolve_binding("this");
+                    if self.scope.contains_key(&bound) {
+                        return Ok(HirExpr::Var(bound));
+                    }
                     let class = self
                         .class_context
                         .as_deref()
                         .ok_or("static `this` is missing its class context")?;
+                    if let Some(token) = self.class_value_token(class) {
+                        return Ok(HirExpr::Var(token));
+                    }
                     let constructor = class_constructor_symbol(class);
                     let signature = self.signatures.get(&constructor).ok_or_else(|| {
                         format!("static `this` constructor `{constructor}` is not declared")
@@ -1032,7 +1047,40 @@ impl<'a> FnLowerer<'a> {
                 {
                     if let swc_ecma_ast::TsEntityName::Ident(class) = &reference.type_name {
                         let resolved = self.resolve_binding(ident.sym.as_ref());
-                        let target = self.interfaces.get(class.sym.as_ref()).cloned();
+                        let target = self.interfaces.get(class.sym.as_ref()).cloned()
+                            .or_else(|| lower_ts_type(&assertion.type_ann,
+                                self.interfaces, self.generic_interfaces).ok());
+                        if self.scope.get(&resolved) == Some(&crate::caught_exception_carrier_type()) {
+                            if let Some(target @ HirType::Object(_)) = target.clone() {
+                                let HirType::Object(target_fields) = &target else { unreachable!() };
+                                let HirType::Union(members) = crate::caught_exception_carrier_type()
+                                    else { unreachable!() };
+                                let carrier = HirExpr::Var(resolved);
+                                let native = HirExpr::TypedClosure(target.clone(), Box::new(
+                                    HirExpr::UnionValue(Box::new(carrier.clone()), 6, members.clone()),
+                                ));
+                                let checked = HirExpr::Call(
+                                    Box::new(HirExpr::Var("__thaw_assert_class_identity".into())),
+                                    vec![native, HirExpr::Lit(HirLit::Str(class.sym.to_string())),
+                                        HirExpr::Lit(HirLit::Str(
+                                            crate::native_object_layout_token(target_fields))),
+                                    ],
+                                );
+                                return Ok(HirExpr::Conditional(
+                                    Box::new(HirExpr::BinOp(BinOp::EqEqEq,
+                                        Box::new(HirExpr::UnionTag(Box::new(carrier), members)),
+                                        Box::new(HirExpr::Lit(HirLit::F64(6.0))))),
+                                    Box::new(checked),
+                                    Box::new(HirExpr::ThrowValue(
+                                        Box::new(HirExpr::Lit(HirLit::Str(
+                                            "caught value is not a native object".into(),
+                                        ))),
+                                        Box::new(Self::unreachable_value(&target)?),
+                                    )),
+                                    target,
+                                ));
+                            }
+                        }
                         if self.scope.get(&resolved) == Some(&HirType::Str) {
                             if let Some(target @ HirType::Object(_)) = target {
                                 let value = if self.catch_bindings.contains(&resolved) {
@@ -1283,7 +1331,8 @@ impl<'a> FnLowerer<'a> {
                 // named function whose signature declares a rest
                 // parameter.
                 let tag_name = match &tag {
-                    HirExpr::Var(name) | HirExpr::FunctionRef(name, _, _) => Some(name.as_str()),
+                    HirExpr::Var(name) | HirExpr::FunctionRef(name, _, _)
+                    | HirExpr::FunctionRefThis(name, _, _, _) => Some(name.as_str()),
                     _ => None,
                 };
                 let args = if let Some(name) = tag_name {
@@ -1684,30 +1733,28 @@ impl<'a> FnLowerer<'a> {
                             &[(name, value_type, value)],
                         );
                     }
-                    // A caught exception has no real `Error` object or class
-                    // hierarchy behind it once thrown -- just a string,
-                    // optionally tagged with a class identity chain ahead
-                    // of the message (see `new Error(...)`/
-                    // `coerce_primitive_to_string` above) -- so testing one
-                    // against an Error-family class checks the tagged (or
-                    // defaulted) chain at runtime. A *not-yet-thrown* value
-                    // of a real Error-derived class (still `HirType::Object`,
-                    // e.g. right after `new MyError(...)`) instead falls
-                    // through to the same compile-time class-identity check
-                    // used for every other native class below.
-                    if extends_error_family && value_type == HirType::Str {
-                        let name = format!("__thaw_instanceof_value_{}", self.next_binding);
+                    // Built-in Error objects and subclasses share a physical
+                    // prefix, but subtype ancestry lives in the allocation
+                    // identity table. A tagged-looking string is not proof.
+                    if extends_error_family && matches!(value_type, HirType::Object(_)) {
+                        let name = format!("__thaw_instanceof_error_{}", self.next_binding);
                         self.next_binding += 1;
                         self.scope.insert(name.clone(), value_type.clone());
-                        let call = HirExpr::Call(
-                            Box::new(HirExpr::Var("__thaw_error_is_instance".to_string())),
-                            vec![
-                                HirExpr::Var(name.clone()),
-                                HirExpr::Lit(HirLit::Str(class.sym.to_string())),
-                            ],
+                        let query = HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_object_has_class_identity".into())),
+                            vec![HirExpr::Var(name.clone()),
+                                HirExpr::Lit(HirLit::Str(class.sym.to_string()))],
                         );
                         return self.wrap_call_argument_bindings(
-                            call,
+                            query, &[(name, value_type, value)],
+                        );
+                    }
+                    if extends_error_family && value_type == HirType::Str {
+                        let name = format!("__thaw_instanceof_text_{}", self.next_binding);
+                        self.next_binding += 1;
+                        self.scope.insert(name.clone(), value_type.clone());
+                        return self.wrap_call_argument_bindings(
+                            HirExpr::Lit(HirLit::Bool(false)),
                             &[(name, value_type, value)],
                         );
                     }
@@ -2392,7 +2439,8 @@ impl<'a> FnLowerer<'a> {
                                     .is_some_and(|parameter| {
                                         self.resolve_binding(parameter) == *name
                                     });
-                            if self.catch_bindings.contains(name)
+                            if (self.catch_bindings.contains(name)
+                                && self.scope.get(name) != Some(&crate::caught_exception_carrier_type()))
                                 || promise_catch
                             {
                                 let tag = if promise_catch {
@@ -2499,31 +2547,48 @@ impl<'a> FnLowerer<'a> {
                             self.next_binding += 1;
                             self.scope.insert(parameter.clone(), operand_type.clone());
                             let bound = HirExpr::Var(parameter.clone());
-                            let mut branches = vec![HirStmt::Return(Some(HirExpr::Lit(
-                                HirLit::Str(
-                                    native_typeof_name(elements.last().ok_or(
-                                        "`typeof` cannot inspect an empty union",
-                                    )?)
-                                    .ok_or_else(|| {
-                                        format!(
-                                            "`typeof` union member has no runtime category: {:?}",
-                                            elements.last().unwrap()
-                                        )
-                                    })?
-                                    .into(),
-                                ),
-                            )))];
+                            let member_typeof = |index: usize, member: &HirType| {
+                                let projected = HirExpr::UnionValue(
+                                    Box::new(bound.clone()), index, elements.clone(),
+                                );
+                                match member {
+                                    HirType::Json => Ok(HirExpr::Call(
+                                        Box::new(HirExpr::Var("__thaw_json_typeof".into())),
+                                        vec![projected],
+                                    )),
+                                    HirType::JsValue => Ok(HirExpr::JsonAsString(Box::new(
+                                        HirExpr::Call(
+                                            Box::new(HirExpr::Var("callDynamicValueWithValue".into())),
+                                            vec![
+                                                HirExpr::Call(
+                                                    Box::new(HirExpr::Var("getDynamicValue".into())),
+                                                    vec![HirExpr::Lit(HirLit::Str(
+                                                        "__thaw_typeof_dynamic_value".into(),
+                                                    ))],
+                                                ),
+                                                projected,
+                                            ],
+                                        ),
+                                    ))),
+                                    _ => native_typeof_name(member)
+                                        .map(|name| HirExpr::Lit(HirLit::Str(name.into())))
+                                        .ok_or_else(|| format!(
+                                            "`typeof` union member has no runtime category: {member:?}"
+                                        )),
+                                }
+                            };
+                            let last_index = elements.len().checked_sub(1).ok_or(
+                                "`typeof` cannot inspect an empty union",
+                            )?;
+                            let mut branches = vec![HirStmt::Return(Some(member_typeof(
+                                last_index, &elements[last_index],
+                            )?))];
                             for (index, member) in elements
                                 .iter()
                                 .enumerate()
                                 .rev()
                                 .skip(1)
                             {
-                                let type_name = native_typeof_name(member).ok_or_else(|| {
-                                    format!(
-                                        "`typeof` union member has no runtime category: {member:?}"
-                                    )
-                                })?;
                                 branches = vec![HirStmt::If(
                                     HirExpr::BinOp(
                                         BinOp::EqEqEq,
@@ -2533,9 +2598,7 @@ impl<'a> FnLowerer<'a> {
                                         )),
                                         Box::new(HirExpr::Lit(HirLit::F64(index as f64))),
                                     ),
-                                    vec![HirStmt::Return(Some(HirExpr::Lit(HirLit::Str(
-                                        type_name.into(),
-                                    ))))],
+                                    vec![HirStmt::Return(Some(member_typeof(index, member)?))],
                                     branches,
                                 )];
                             }
@@ -2605,7 +2668,7 @@ impl<'a> FnLowerer<'a> {
                             } else {
                                 HirExpr::OptionalIsNone(Box::new(bound), payload.clone())
                             };
-                            let present_typeof = if matches!(payload, HirType::Function(_, _) | HirType::CallableFunction(..)) {
+                            let present_typeof = if matches!(payload, HirType::Function(_, _) | HirType::CallableFunction(..) | HirType::FunctionWithThis(_, _)) {
                                 let present = if nullable {
                                     HirExpr::NullableValue(Box::new(HirExpr::Var(parameter.clone())), payload.clone())
                                 } else {
@@ -2637,7 +2700,7 @@ impl<'a> FnLowerer<'a> {
                                 "`typeof` requires one statically known runtime category, got {operand_type:?}"
                             ));
                         };
-                        if matches!(&operand_type, HirType::Function(_, _) | HirType::CallableFunction(..)) {
+                        if matches!(&operand_type, HirType::Function(_, _) | HirType::CallableFunction(..) | HirType::FunctionWithThis(_, _)) {
                             HirExpr::Conditional(
                                 Box::new(Self::function_pointer_is_undefined(value, &operand_type)),
                                 Box::new(HirExpr::Lit(HirLit::Str("undefined".into()))),
@@ -2842,6 +2905,12 @@ impl<'a> FnLowerer<'a> {
                             .into_iter()
                             .enumerate()
                             .map(|(position, value)| {
+                                // A hole has no expression to evaluate. Keep
+                                // its marker in the literal so the physical
+                                // presence mask still records an absent slot.
+                                if matches!(value, HirExpr::Lit(HirLit::ArrayHole)) {
+                                    return Ok(value);
+                                }
                                 let ty = self.infer_expr_type(&value)?;
                                 let name = format!(
                                     "__thaw_array_element_{}_{}",
@@ -2898,6 +2967,11 @@ impl<'a> FnLowerer<'a> {
                             .collect_generator_for_array_spread(value.clone(), &spread_source_type)?
                         {
                             value = collected;
+                        } else if let HirType::Tuple(elements) = &spread_source_type {
+                            // A typed tuple can be a contextual prefix of a longer
+                            // JavaScript array. Iterate its actual length through
+                            // the same canonical reads as Array.from(tuple).
+                            value = self.lower_tuple_as_json_array(value, elements.clone())?;
                         } else if spread_source_type == HirType::Str {
                             value = HirExpr::Call(
                                 Box::new(HirExpr::Var("__thaw_string_to_array".to_string())),
@@ -3130,6 +3204,31 @@ impl<'a> FnLowerer<'a> {
                     .ok_or("`super` property access is only valid in a derived class")?;
                 let property = super_property_name(&member.prop)?;
                 if self.class_static_context {
+                    if let Some(base_token) = self.static_super_base_handle() {
+                        if let Some(receiver) = self.static_this_token_expr() {
+                            let field = class_static_field_symbol(&base_name, &property);
+                            let ty = self.scope.get(&field).cloned().or_else(|| {
+                                self.signatures.get(&class_getter_symbol(&base_name, &property, true))
+                                    .map(|signature| signature.ret.clone())
+                            });
+                            let has_method = self.signatures.contains_key(
+                                &class_static_method_symbol(&base_name, &property));
+                            if ty.is_some() || has_method {
+                                let capture = format!("__thaw_super_read_base_{}", self.next_binding);
+                                self.next_binding += 1;
+                                let live = HirExpr::Call(
+                                    Box::new(HirExpr::Var("__thaw_get_super_static_property_json".into())),
+                                    vec![HirExpr::Var(capture.clone()), receiver,
+                                        HirExpr::Lit(HirLit::Str(property))],
+                                );
+                                let live = self.wrap_static_super_base_use(capture, base_token, live)?;
+                                return Ok(match ty {
+                                    Some(HirType::Function(..) | HirType::CallableFunction(..) | HirType::FunctionWithThis(..)) | None => live,
+                                    Some(ty) => HirExpr::JsonAsNative(Box::new(live), ty),
+                                });
+                            }
+                        }
+                    }
                     let storage = class_static_field_symbol(&base_name, &property);
                     if self.scope.contains_key(&storage) {
                         return Ok(HirExpr::Var(storage));
@@ -3209,6 +3308,7 @@ impl<'a> FnLowerer<'a> {
                                         | "callDynamicValue"
                                         | "callDynamicValueHandle"
                                         | "callDynamicValueMixed"
+                                        | "callDynamicValueMixedExact"
                                         | "callDynamicValueWithValue"))
                     ) || matches!(
                         &value,
@@ -3649,43 +3749,47 @@ impl<'a> FnLowerer<'a> {
                         // The runtime owns the length-prefixed representation
                         // so nested SuppressedErrors remain unambiguous.
                         let args = new_expr.args.clone().unwrap_or_default();
-                        if args.iter().any(|argument| argument.spread.is_some()) {
-                            return Err(
-                                "`new SuppressedError()` does not support spread arguments".into()
-                            );
-                        }
-                        if args.len() < 2 || args.len() > 3 {
-                            return Err(
-                                "`new SuppressedError()` expects an error, a suppressed error, and an optional message"
-                                    .into(),
-                            );
-                        }
-                        let (arguments, bindings) =
-                            self.lower_native_spread_values(&args, "SuppressedError")?;
-                        let error = arguments[0].clone();
-                        let suppressed = arguments[1].clone();
-                        let message = match arguments.get(2) {
-                            Some(message) => self.coerce_primitive_to_string(message.clone())?,
-                            None => HirExpr::Lit(HirLit::Str(String::new())),
+                        let (arguments, mut bindings) =
+                            self.lower_error_constructor_arguments(&args, "SuppressedError")?;
+                        let error = arguments.first().cloned()
+                            .unwrap_or(HirExpr::Lit(HirLit::Undefined));
+                        let suppressed = arguments.get(1).cloned()
+                            .unwrap_or(HirExpr::Lit(HirLit::Undefined));
+                        let (message_present, message) = match arguments.get(2) {
+                            Some(message) => {
+                                let missing = self.lower_strict_equality(message.clone(),
+                                    HirExpr::Lit(HirLit::Undefined))?;
+                                let text = self.coerce_primitive_to_string(message.clone())?;
+                                (HirExpr::Conditional(Box::new(missing.clone()),
+                                    Box::new(HirExpr::Lit(HirLit::Bool(false))),
+                                    Box::new(HirExpr::Lit(HirLit::Bool(true))), HirType::Bool),
+                                 HirExpr::Conditional(Box::new(missing),
+                                    Box::new(HirExpr::Lit(HirLit::Str(String::new()))),
+                                    Box::new(text), HirType::Str))
+                            }
+                            None => (HirExpr::Lit(HirLit::Bool(false)),
+                                HirExpr::Lit(HirLit::Str(String::new()))),
                         };
+                        let message_name = format!("__thaw_suppressed_message_{}", self.next_binding);
+                        self.next_binding += 1;
+                        self.scope.insert(message_name.clone(), HirType::Str);
+                        bindings.push((message_name.clone(), HirType::Str, message));
                         let marker = "__thaw_class_identity_\u{1e}SuppressedError\u{1f}Error";
-                        let result = HirExpr::ObjectLit(vec![
+                        let fields = vec![
                             (
                                 marker.to_string(),
                                 HirExpr::Lit(HirLit::Bool(true)),
                             ),
-                            ("message".to_string(), message),
+                            ("message".to_string(), HirExpr::Var(message_name)),
                             (
                                 "name".to_string(),
                                 HirExpr::Lit(HirLit::Str("SuppressedError".to_string())),
                             ),
                             ("error".to_string(), error),
                             ("suppressed".to_string(), suppressed),
-                        ]);
-                        let result = HirExpr::Call(
-                            Box::new(HirExpr::Var("__thaw_object_hide_marker".to_string())),
-                            vec![result, HirExpr::Lit(HirLit::Str(marker.to_string()))],
-                        );
+                        ];
+                        let result = self.lower_trusted_error_fields(fields, message_present,
+                            None)?;
                         return self.wrap_call_argument_bindings(result, &bindings);
                     }
                     if class.sym == *"AggregateError" {
@@ -3696,24 +3800,18 @@ impl<'a> FnLowerer<'a> {
                                 "`new AggregateError()` does not support spread arguments".into()
                             );
                         }
-                        if args.is_empty() || args.len() > 3 {
+                        if args.is_empty() {
                             return Err(
-                                "`new AggregateError()` expects an errors argument and at most a message and options".into()
+                                "`new AggregateError()` expects an errors iterable".into()
                             );
                         }
                         let errors = self.lower_expr(&args[0].expr)?;
                         let errors_type = self.infer_expr_type(&errors)?;
-                        if !matches!(errors_type, HirType::Array(_) | HirType::Tuple(_)) {
-                            return Err(
-                                "`AggregateError` errors must be a statically typed array or tuple"
-                                    .into(),
-                            );
-                        }
                         let errors_name = format!("__thaw_aggregate_errors_{}", self.next_binding);
                         self.next_binding += 1;
                         self.scope
                             .insert(errors_name.clone(), errors_type.clone());
-                        let mut bindings = vec![(errors_name.clone(), errors_type, errors)];
+                        let mut bindings = vec![(errors_name.clone(), errors_type.clone(), errors)];
 
                         let message = if let Some(argument) = args.get(1) {
                             let message = self.lower_expr(&argument.expr)?;
@@ -3731,9 +3829,6 @@ impl<'a> FnLowerer<'a> {
                         let options = if let Some(argument) = args.get(2) {
                             let options = self.lower_expr(&argument.expr)?;
                             let options_type = self.infer_expr_type(&options)?;
-                            if !matches!(options_type, HirType::Object(_)) {
-                                return Err("`AggregateError` options must be an object".into());
-                            }
                             let options_name =
                                 format!("__thaw_aggregate_options_{}", self.next_binding);
                             self.next_binding += 1;
@@ -3744,48 +3839,140 @@ impl<'a> FnLowerer<'a> {
                         } else {
                             None
                         };
-                        let message = match message {
+                        for argument in args.iter().skip(3) {
+                            let value = self.lower_expr(&argument.expr)?;
+                            let ty = self.infer_expr_type(&value)?;
+                            let name = format!("__thaw_aggregate_extra_{}", self.next_binding);
+                            self.next_binding += 1;
+                            self.scope.insert(name.clone(), ty.clone());
+                            bindings.push((name, ty, value));
+                        }
+                        let (message_present, message) = match message {
                             Some(name) => {
-                                self.coerce_primitive_to_string(HirExpr::Var(name))?
+                                let raw = HirExpr::Var(name);
+                                let missing = self.lower_strict_equality(raw.clone(),
+                                    HirExpr::Lit(HirLit::Undefined))?;
+                                let text = self.coerce_primitive_to_string(raw)?;
+                                (HirExpr::Conditional(Box::new(missing.clone()),
+                                    Box::new(HirExpr::Lit(HirLit::Bool(false))),
+                                    Box::new(HirExpr::Lit(HirLit::Bool(true))), HirType::Bool),
+                                 HirExpr::Conditional(Box::new(missing),
+                                    Box::new(HirExpr::Lit(HirLit::Str(String::new()))),
+                                    Box::new(text), HirType::Str))
                             }
-                            None => HirExpr::Lit(HirLit::Str(String::new())),
+                            None => (HirExpr::Lit(HirLit::Bool(false)),
+                                HirExpr::Lit(HirLit::Str(String::new()))),
                         };
+                        let message_name = format!("__thaw_aggregate_message_text_{}", self.next_binding);
+                        self.next_binding += 1;
+                        self.scope.insert(message_name.clone(), HirType::Str);
+                        bindings.push((message_name.clone(), HirType::Str, message));
                         let marker = "__thaw_class_identity_\u{1e}AggregateError\u{1f}Error";
                         let mut fields = vec![
                             (
                                 marker.to_string(),
                                 HirExpr::Lit(HirLit::Bool(true)),
                             ),
-                            ("message".to_string(), message),
+                            ("message".to_string(), HirExpr::Var(message_name)),
                             (
                                 "name".to_string(),
                                 HirExpr::Lit(HirLit::Str("AggregateError".to_string())),
                             ),
-                            ("errors".to_string(), HirExpr::Var(errors_name)),
+                            ("errors".to_string(), self.native_aggregate_errors_as_json(
+                                HirExpr::Var(errors_name), &errors_type,
+                            )?),
                         ];
-                        if let Some((name, HirType::Object(option_fields))) = options {
-                            if option_fields.iter().any(|(field, _)| field == "cause") {
-                                let options_type = HirType::Object(option_fields);
-                                fields.push((
-                                    "cause".to_string(),
-                                    HirExpr::PropAccess(
-                                        Box::new(HirExpr::Var(name)),
-                                        options_type,
-                                        "cause".to_string(),
-                                    ),
-                                ));
+                        let mut cause_present = None;
+                        if let Some((name, options_type)) = options {
+                            let source = HirExpr::Var(name);
+                            let (source, options_type) = if let Some(live) =
+                                self.native_error_options_live_json(source.clone(), &options_type)? {
+                                // Bind the live Host after message conversion;
+                                // HasProperty and Get(cause) share this value.
+                                let live_name = format!("__thaw_aggregate_live_options_{}",
+                                    self.next_binding);
+                                self.next_binding += 1;
+                                self.scope.insert(live_name.clone(), HirType::Json);
+                                bindings.push((live_name.clone(), HirType::Json, live));
+                                (HirExpr::Var(live_name), HirType::Json)
+                            } else { (source, options_type) };
+                            let key = HirExpr::Lit(HirLit::Str("cause".into()));
+                            let (present, cause) = match &options_type {
+                                HirType::Object(option_fields) => {
+                                    if option_fields.iter().any(|(field, _)| field == "cause") {
+                                        (self.lower_has_own_value(source.clone(), key.clone())?,
+                                         Some(HirExpr::PropAccess(Box::new(source.clone()),
+                                             options_type.clone(), "cause".into())))
+                                    } else if let Some(owner) =
+                                        self.class_instance_accessor_owner(&options_type, "cause") {
+                                        let symbol = class_getter_symbol(&owner, "cause", false);
+                                        let getter = if self.signatures.get(&symbol).is_some_and(|signature|
+                                            signature.accessor_owner.as_deref() == Some(owner.as_str())) {
+                                            HirExpr::Call(Box::new(HirExpr::Var(symbol)), vec![
+                                                self.assert_class_accessor_receiver(source.clone(), &owner),
+                                            ])
+                                        } else { HirExpr::Lit(HirLit::Undefined) };
+                                        (HirExpr::Lit(HirLit::Bool(true)), Some(getter))
+                                    } else {
+                                        let (present, value) = self.native_error_options_cause(
+                                            source.clone(), &options_type,
+                                        )?.ok_or("AggregateError options object lacks cause lookup")?;
+                                        (present, Some(value))
+                                    }
+                                }
+                                HirType::Json | HirType::Dictionary(_) => {
+                                    let object_like = HirExpr::Call(Box::new(HirExpr::Var(
+                                        "__thaw_json_is_object_like".into())), vec![source.clone()]);
+                                    let has = HirExpr::Call(Box::new(HirExpr::Var(
+                                        "__thaw_json_has".into())), vec![source.clone(), key.clone()]);
+                                    (HirExpr::Conditional(Box::new(object_like), Box::new(has),
+                                        Box::new(HirExpr::Lit(HirLit::Bool(false))), HirType::Bool),
+                                     Some(HirExpr::JsonKey(Box::new(source.clone()), Box::new(key.clone()))))
+                                }
+                                HirType::JsValue | HirType::Dynamic => {
+                                    let json_name = format!("__thaw_aggregate_options_json_{}", self.next_binding);
+                                    self.next_binding += 1;
+                                    self.scope.insert(json_name.clone(), HirType::Json);
+                                    let json_source = if matches!(options_type, HirType::JsValue) {
+                                        // Keep the original JS options object and its
+                                        // prototype/getter authority; ordinary conversion can
+                                        // assimilate a Promise or snapshot the object.
+                                        HirExpr::Call(Box::new(HirExpr::Var(
+                                            "__thaw_exception_json_from_handle".into())),
+                                            vec![source.clone()])
+                                    } else {
+                                        self.coerce_to_declared(&HirType::Json, source.clone())?
+                                    };
+                                    bindings.push((json_name.clone(), HirType::Json, json_source));
+                                    let json_source = HirExpr::Var(json_name);
+                                    let object_like = HirExpr::Call(Box::new(HirExpr::Var(
+                                        "__thaw_json_is_object_like".into())), vec![json_source.clone()]);
+                                    let has = HirExpr::Call(Box::new(HirExpr::Var(
+                                        "__thaw_json_has".into())), vec![json_source.clone(), key.clone()]);
+                                    (HirExpr::Conditional(Box::new(object_like), Box::new(has),
+                                        Box::new(HirExpr::Lit(HirLit::Bool(false))), HirType::Bool),
+                                     Some(HirExpr::JsonKey(Box::new(json_source), Box::new(key.clone()))))
+                                }
+                                _ => (HirExpr::Lit(HirLit::Bool(false)), None),
+                            };
+                            if let Some(cause) = cause {
+                                let present_name = format!("__thaw_aggregate_cause_present_{}", self.next_binding);
+                                self.next_binding += 1;
+                                self.scope.insert(present_name.clone(), HirType::Bool);
+                                bindings.push((present_name.clone(), HirType::Bool, present));
+                                let visible = self.coerce_to_declared(&HirType::Json, cause)?;
+                                fields.insert(3, ("cause".into(), HirExpr::Conditional(
+                                    Box::new(HirExpr::Var(present_name.clone())),
+                                    Box::new(visible),
+                                    Box::new(HirExpr::Call(Box::new(HirExpr::Var(
+                                        "__thaw_json_undefined".into())), Vec::new())),
+                                    HirType::Json,
+                                )));
+                                cause_present = Some(HirExpr::Var(present_name));
                             }
                         }
-                        return self.wrap_call_argument_bindings(
-                            HirExpr::Call(
-                                Box::new(HirExpr::Var("__thaw_object_hide_marker".to_string())),
-                                vec![
-                                    HirExpr::ObjectLit(fields),
-                                    HirExpr::Lit(HirLit::Str(marker.to_string())),
-                                ],
-                            ),
-                            &bindings,
-                        );
+                        let result = self.lower_trusted_error_fields(fields, message_present, cause_present)?;
+                        return self.wrap_call_argument_bindings(result, &bindings);
                     }
                     if matches!(
                         class.sym.as_ref(),
@@ -3797,74 +3984,8 @@ impl<'a> FnLowerer<'a> {
                             | "EvalError"
                             | "URIError"
                     ) {
-                        // `throw` unwinds a single tagged string (`catch`
-                        // binds it as `HirType::Str`, see
-                        // `lower/statements/lowering.rs`) -- there is no
-                        // `Error` object, stack trace, or support for a class
-                        // extending one of these, but `new Error(message)`/
-                        // `new TypeError(...)`/etc. tag that string with
-                        // their class name ahead of a `\u{1}` marker and the
-                        // message (see `thaw_runtime`'s `split_error_tag`),
-                        // so `.message`/`.name`/`instanceof` can recover it
-                        // at a catch site. A bare `throw "x"` (no `new`)
-                        // still throws exactly that string, untagged, and
-                        // every reader treats an untagged string as a
-                        // default-named `Error` whose message is the whole
-                        // string.
-                        let args = new_expr.args.clone().unwrap_or_default();
-                        if args.iter().any(|argument| argument.spread.is_some()) {
-                            return Err(format!(
-                                "`new {}()` does not support spread arguments",
-                                class.sym
-                            ));
-                        }
-                        if args.len() > 2 {
-                            return Err(format!(
-                                "`new {}()` expects at most a message and options argument",
-                                class.sym
-                            ));
-                        }
-                        let message = match args.first() {
-                            Some(argument) => {
-                                let message = self.lower_expr(&argument.expr)?;
-                                self.coerce_primitive_to_string(message)?
-                            }
-                            None => HirExpr::Lit(HirLit::Str(String::new())),
-                        };
-                        let tagged = HirExpr::Call(
-                            Box::new(HirExpr::Var("__thaw_error_frame".to_string())),
-                            vec![HirExpr::Lit(HirLit::Str(class.sym.to_string())), message],
-                        );
-                        let Some(options) = args.get(1) else {
-                            return Ok(tagged);
-                        };
-                        let options = self.lower_expr(&options.expr)?;
-                        let options_type = self.infer_expr_type(&options)?;
-                        let HirType::Object(fields) = &options_type else {
-                            return Err("Error options must be an object with a `cause` field".into());
-                        };
-                        let cause_type = fields
-                            .iter()
-                            .find(|(name, _)| name == "cause")
-                            .map(|(_, ty)| ty)
-                            .ok_or("Error options must have a `cause` field")?;
-                        let cause = HirExpr::PropAccess(
-                            Box::new(options),
-                            options_type.clone(),
-                            "cause".to_string(),
-                        );
-                        let cause = match cause_type {
-                            HirType::Str => cause,
-                            _ => self.coerce_primitive_to_string(cause)?,
-                        };
-                        let with_marker = HirExpr::Call(
-                            Box::new(HirExpr::Var("__thaw_string_concat".to_string())),
-                            vec![tagged, HirExpr::Lit(HirLit::Str("\u{2}".to_string()))],
-                        );
-                        return Ok(HirExpr::Call(
-                            Box::new(HirExpr::Var("__thaw_string_concat".to_string())),
-                            vec![with_marker, cause],
-                        ));
+                        let args = new_expr.args.as_deref().unwrap_or_default();
+                        return self.lower_builtin_error_object(class.sym.as_ref(), args);
                     }
                     let constructor = class_constructor_symbol(class.sym.as_ref());
                     if let Some(signature) = self.signatures.get(&constructor) {
@@ -4298,7 +4419,7 @@ impl<'a> FnLowerer<'a> {
                         .scope
                         .get(&name)
                         .is_some_and(|ty| {
-                            matches!(ty, HirType::Function(_, _) | HirType::CallableFunction(..))
+                            matches!(ty, HirType::Function(_, _) | HirType::CallableFunction(..) | HirType::FunctionWithThis(_, _))
                         })
                         || self.generic_arrows.contains_key(&name)
                         || self.generic_named_templates.contains_key(&name)

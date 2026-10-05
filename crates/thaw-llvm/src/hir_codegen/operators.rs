@@ -320,6 +320,7 @@ impl<'ctx> HirCompiler<'ctx> {
                         | "callDynamicMethod"
                         | "__thaw_call_selected_dynamic_method"
                         | "callDynamicValueMixed"
+                        | "callDynamicValueMixedExact"
                         | "callDynamicValueMixedNativeJson"
                         | "callDynamic"
                         | "callDynamicValue"

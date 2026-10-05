@@ -6,6 +6,121 @@ impl<'ctx> HirCompiler<'ctx> {
         self.compile_decode_graph(text, true)
     }
 
+    /// Capture one already-retained QuickJS exception as an owned JSON value.
+    /// The graph encoder preserves the original JS identity and never assimilates
+    /// thrown promises or thenables.
+    fn compile_original_quickjs_exception_handle(
+        &mut self,
+        handle: BasicValueEnum<'ctx>,
+        consume_handle: bool,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        self.uses_quickjs = true;
+        self.uses_quickjs_handles = true;
+        self.tracks_owned_json_roots = true;
+        // This API captures the exact JS value into an owned graph;
+        // resolve_handle_graph_result would assimilate a thrown
+        // Promise/thenable and change the exception itself.
+        let captured = self.builder.build_call(
+            self.module.get_function("thaw_js_capture_handle_graph_result").unwrap(),
+            &[handle.into()], "capture_original_exception",
+        ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+            .ok_or("exception capture returned no result")?.into_struct_value();
+        // A caller can transfer one owned input handle here. The captured
+        // graph already owns its independent transfer leases, so release the
+        // input before either the success or error branch can unwind.
+        if consume_handle {
+            self.builder.build_call(
+                self.module.get_function("thaw_js_release_handle").unwrap(),
+                &[handle.into()], "release_captured_exception_handle",
+            ).map_err(|error| error.to_string())?;
+        }
+        let wire = self.builder.build_extract_value(captured, 0, "exception_graph_wire")
+            .map_err(|error| error.to_string())?;
+        let error = self.builder.build_extract_value(captured, 1, "exception_capture_error")
+            .map_err(|error| error.to_string())?.into_pointer_value();
+        let failed = self.builder.build_is_not_null(error, "exception_capture_failed")
+            .map_err(|error| error.to_string())?;
+        let function = self.current_function();
+        let capture_failed = self.context.append_basic_block(function, "exception_capture_failed");
+        let capture_ok = self.context.append_basic_block(function, "exception_capture_ok");
+        self.builder.build_conditional_branch(failed, capture_failed, capture_ok)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(capture_failed);
+        self.builder.build_store(self.pending_exception().as_pointer_value(), error)
+            .map_err(|error| error.to_string())?;
+        self.clear_pending_native_text()?;
+        self.builder.build_store(
+            self.pending_exception_value(PENDING_EXCEPTION_VALUE_TAG_SYMBOL).as_pointer_value(),
+            self.context.i64_type().const_zero(),
+        ).map_err(|error| error.to_string())?;
+        self.builder.build_store(
+            self.pending_exception_object().as_pointer_value(),
+            self.context.ptr_type(AddressSpace::default()).const_null(),
+        ).map_err(|error| error.to_string())?;
+        self.mark_pending_native_text(error)?;
+        self.branch_on_pending_exception()?;
+        self.builder.build_unconditional_branch(capture_ok)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(capture_ok);
+        // The capture ABI can fail to allocate its owned wire without also
+        // allocating an error string. Do not pass a null NativeStr to the
+        // graph decoder.
+        let absent_wire = self.builder.build_is_null(
+            wire.into_pointer_value(), "exception_capture_absent_wire",
+        ).map_err(|error| error.to_string())?;
+        let wire_missing = self.context.append_basic_block(function, "exception_capture_wire_missing");
+        let wire_ready = self.context.append_basic_block(function, "exception_capture_wire_ready");
+        self.builder.build_conditional_branch(absent_wire, wire_missing, wire_ready)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(wire_missing);
+        self.compile_throw_type_error("Unable to capture original JavaScript exception")?;
+        self.builder.position_at_end(wire_ready);
+        // Decoding consumes all graph leases and destroys the owned
+        // wire. The fresh Box then follows the same arena-owned
+        // lifetime as caught aliases and Promise pending transfers.
+        let decoded = self.compile_decode_quickjs_graph(wire.into())?;
+        let rooted = self.builder.build_call(
+            self.module.get_function("thaw_json_track_arena_owned_root").unwrap(),
+            &[decoded.into()], "root_original_exception",
+        ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+            .ok_or("exception root returned no value")?;
+        self.compile_check_json_host_error(rooted, None)
+    }
+
+    /// Publish an owned original JS throw through the ordinary tagged
+    /// pending channel. The capture helper owns the input when requested;
+    /// this fresh JSON Box is then independently arena-rooted for catch,
+    /// async-frame, and Promise handoff.
+    fn compile_throw_original_quickjs_exception_handle(
+        &mut self,
+        handle: BasicValueEnum<'ctx>,
+        consume_handle: bool,
+    ) -> Result<(), String> {
+        let original = self.compile_original_quickjs_exception_handle(handle, consume_handle)?;
+        self.builder.build_store(self.pending_exception().as_pointer_value(), original)
+            .map_err(|error| error.to_string())?;
+        self.builder.build_store(self.pending_exception_object().as_pointer_value(), original)
+            .map_err(|error| error.to_string())?;
+        self.clear_pending_native_text()?;
+        self.builder.build_store(
+            self.pending_exception_value(PENDING_EXCEPTION_VALUE_TAG_SYMBOL).as_pointer_value(),
+            self.context.i64_type().const_int(7, false),
+        ).map_err(|error| error.to_string())?;
+        for (symbol, zero) in [
+            (PENDING_EXCEPTION_F64_SYMBOL, self.context.f64_type().const_zero().into()),
+            (PENDING_EXCEPTION_I64_SYMBOL, self.context.i64_type().const_zero().into()),
+            (PENDING_EXCEPTION_BOOL_SYMBOL, self.context.bool_type().const_zero().into()),
+        ] {
+            self.builder.build_store(self.pending_exception_value(symbol).as_pointer_value(), zero)
+                .map_err(|error| error.to_string())?;
+        }
+        self.builder.build_store(
+            self.pending_exception_aggregate_errors().as_pointer_value(),
+            self.context.ptr_type(AddressSpace::default()).const_null(),
+        ).map_err(|error| error.to_string())?;
+        self.branch_on_pending_exception()
+    }
+
     fn compile_decode_graph(
         &mut self,
         text: BasicValueEnum<'ctx>,

@@ -2023,6 +2023,118 @@ impl<'a> FnLowerer<'a> {
                         }
                         let value = arguments[0].clone();
                         let value_type = self.infer_expr_type(&value)?;
+                        if value_type == HirType::JsValue && arguments.len() == 1 {
+                            // The source handle belongs to its caller. The exact mixed
+                            // call consumes only the independent reference acquired
+                            // here, and returns an exact graph result or original
+                            // thrown value from a getter/toJSON callback.
+                            let borrowed = HirExpr::Call(
+                                Box::new(HirExpr::Var(
+                                    "@@thaw_retain_borrowed_dynamic_handle".into(),
+                                )),
+                                vec![value],
+                            );
+                            let empty = self.coerce_to_declared(
+                                &HirType::Json, HirExpr::ArrayLit(Vec::new()),
+                            )?;
+                            let result = HirExpr::JsonAsString(Box::new(HirExpr::Call(
+                                Box::new(HirExpr::Var("callDynamicValueMixedExact".into())),
+                                vec![
+                                    HirExpr::Call(
+                                        Box::new(HirExpr::Var("getDynamicValue".into())),
+                                        vec![HirExpr::Lit(HirLit::Str(
+                                            "__thaw_json_stringify_direct".into(),
+                                        ))],
+                                    ),
+                                    empty,
+                                    HirExpr::ArrayLit(vec![borrowed]),
+                                ],
+                            )));
+                            return self.wrap_call_argument_bindings(result, &bindings);
+                        }
+                        if value_type == HirType::JsValue {
+                            let replacer = arguments.get(1).cloned();
+                            let replacer_type = replacer.as_ref()
+                                .map(|value| self.infer_expr_type(value))
+                                .transpose()?;
+                            let space = arguments.get(2).cloned();
+                            let space_type = space.as_ref()
+                                .map(|value| self.infer_expr_type(value))
+                                .transpose()?;
+                            let supported_replacer = match replacer_type.as_ref() {
+                                Some(HirType::Function(..) | HirType::CallableFunction(..)
+                                    | HirType::FunctionWithThis(..) | HirType::Null
+                                    | HirType::Undefined | HirType::Bool | HirType::F64
+                                    | HirType::Str | HirType::JsValue) => true,
+                                Some(HirType::Array(element)) =>
+                                    element.as_ref() == &HirType::Str,
+                                _ => false,
+                            };
+                            let supported_space = space_type.as_ref().is_none_or(|ty| matches!(ty,
+                                HirType::F64 | HirType::Str | HirType::Bool
+                                    | HirType::Null | HirType::Undefined));
+                            if supported_replacer && supported_space {
+                                let borrowed = HirExpr::Call(
+                                    Box::new(HirExpr::Var(
+                                        "@@thaw_retain_borrowed_dynamic_handle".into(),
+                                    )),
+                                    vec![value],
+                                );
+                                let space_json = self.coerce_to_declared(&HirType::Json,
+                                    space.unwrap_or(HirExpr::Lit(HirLit::Undefined)))?;
+                                let (helper, json_arguments, direct_arguments) =
+                                    if matches!(replacer_type.as_ref(),
+                                        Some(HirType::Function(..)
+                                            | HirType::CallableFunction(..)
+                                            | HirType::FunctionWithThis(..))) {
+                                        (
+                                            "__thaw_json_stringify_live_replacer",
+                                            self.coerce_to_declared(&HirType::Json,
+                                                HirExpr::ArrayLit(vec![space_json]))?,
+                                            HirExpr::ArrayLit(vec![borrowed, HirExpr::Call(
+                                                Box::new(HirExpr::Var(
+                                                    "registerNativeCallbackGraph".into(),
+                                                )),
+                                                vec![replacer.unwrap()],
+                                            )]),
+                                        )
+                                    } else if replacer_type == Some(HirType::JsValue) {
+                                        (
+                                            "__thaw_json_stringify_live_dynamic_replacer",
+                                            self.coerce_to_declared(&HirType::Json,
+                                                HirExpr::ArrayLit(vec![space_json]))?,
+                                            HirExpr::ArrayLit(vec![borrowed, HirExpr::Call(
+                                                Box::new(HirExpr::Var(
+                                                    "@@thaw_retain_borrowed_dynamic_handle".into(),
+                                                )),
+                                                vec![replacer.unwrap()],
+                                            )]),
+                                        )
+                                    } else {
+                                        let replacer_json = self.coerce_to_declared(
+                                            &HirType::Json, replacer.unwrap())?;
+                                        (
+                                            "__thaw_json_stringify_native_accessors",
+                                            self.coerce_to_declared(&HirType::Json,
+                                                HirExpr::ArrayLit(vec![replacer_json,
+                                                    space_json]))?,
+                                            HirExpr::ArrayLit(vec![borrowed]),
+                                        )
+                                    };
+                                let result = HirExpr::JsonAsString(Box::new(HirExpr::Call(
+                                    Box::new(HirExpr::Var("callDynamicValueMixedExact".into())),
+                                    vec![
+                                        HirExpr::Call(
+                                            Box::new(HirExpr::Var("getDynamicValue".into())),
+                                            vec![HirExpr::Lit(HirLit::Str(helper.into()))],
+                                        ),
+                                        json_arguments,
+                                        direct_arguments,
+                                    ],
+                                )));
+                                return self.wrap_call_argument_bindings(result, &bindings);
+                            }
+                        }
                         if contains_js_value(&value_type) {
                             let mut json_arguments = Vec::with_capacity(arguments.len());
                             for (index, argument) in arguments.iter().enumerate() {
@@ -2030,7 +2142,8 @@ impl<'a> FnLowerer<'a> {
                                 let argument = if ty == HirType::JsValue
                                     || (index == 1
                                         && matches!(ty, HirType::Function(_, _)
-                                            | HirType::CallableFunction(..)))
+                                            | HirType::CallableFunction(..)
+                                            | HirType::FunctionWithThis(..)))
                                 {
                                     self.coerce_to_declared(&HirType::JsValue, argument.clone())?
                                 } else {
@@ -2064,7 +2177,9 @@ impl<'a> FnLowerer<'a> {
                                 HirType::Array(element) if element.as_ref() == &HirType::Str => {
                                     replacer_array = Some(replacer.clone());
                                 }
-                                HirType::Function(_, _) | HirType::CallableFunction(_, _, _, _) => {
+                                HirType::Function(_, _)
+                                | HirType::CallableFunction(_, _, _, _)
+                                | HirType::FunctionWithThis(_, _) => {
                                     replacer_function = Some(replacer.clone());
                                 }
                                 HirType::Null | HirType::Undefined => {
@@ -2092,7 +2207,30 @@ impl<'a> FnLowerer<'a> {
                             }
                             _ => None,
                         };
-                        let value = if native_accessor_fields.is_none() {
+                        if native_accessor_fields.is_some()
+                            && !Self::fixed_object_supports_live_projection(&value_type) {
+                            return Err("`JSON.stringify` needs a live native accessor projector for this object layout".into());
+                        }
+                        // Preserve the original owner for function fields:
+                        // snapshotting it would resurrect deleted keys and
+                        // change the receiver observed by toJSON.
+                        let live_function_fields = match &value_type {
+                            HirType::Object(fields)
+                                if native_accessor_fields.is_none()
+                                    && fields.iter().any(|(name, ty)| {
+                                        !is_hidden_accessor_field(name)
+                                            && matches!(ty, HirType::Function(_, _)
+                                                | HirType::CallableFunction(..)
+                                                | HirType::FunctionWithThis(..))
+                                    })
+                                    && Self::fixed_object_supports_live_projection(&value_type) =>
+                            {
+                                Some(fields.clone())
+                            }
+                            _ => None,
+                        };
+                        let value = if native_accessor_fields.is_none()
+                            && live_function_fields.is_none() {
                             if let (
                                 HirType::Object(fields),
                                 Some(HirExpr::ArrayLit(keys)),
@@ -2128,6 +2266,7 @@ impl<'a> FnLowerer<'a> {
                         let (value, value_type) = match &value_type {
                             HirType::Object(fields)
                                 if native_accessor_fields.is_none()
+                                    && live_function_fields.is_none()
                                     && fields.iter().any(|(name, ty)| {
                                         !is_hidden_accessor_field(name)
                                             && matches!(
@@ -2194,9 +2333,8 @@ impl<'a> FnLowerer<'a> {
                             }
                             _ => (value, value_type.clone()),
                         };
-                        let live_accessor_replacer = native_accessor_fields.is_some()
-                            && replacer_array.is_some();
-                        let value = if live_accessor_replacer {
+                        let value = if native_accessor_fields.is_some()
+                            || live_function_fields.is_some() {
                             value
                         } else if value_type == HirType::JsValue {
                             HirExpr::Call(
@@ -2237,32 +2375,55 @@ impl<'a> FnLowerer<'a> {
                                 }
                             },
                         };
-                        if let (Some(fields), Some(replacer)) =
-                            (native_accessor_fields, replacer_array.clone())
-                        {
-                            let value = self
-                                .lower_fixed_object_as_dynamic_accessor_object(value, &fields)?;
-                            let replacer_json =
-                                self.coerce_to_declared(&HirType::Json, replacer)?;
+                        if let Some(fields) = live_function_fields.or(native_accessor_fields) {
+                            let live = self.lower_fixed_object_as_dynamic_accessor_object(
+                                value, &fields, false,
+                            )?;
                             let space = space
                                 .map(|(value, _)| value)
                                 .unwrap_or(HirExpr::Lit(HirLit::Null));
                             let space_json = self.coerce_to_declared(&HirType::Json, space)?;
-                            let json_arguments = self.coerce_to_declared(
-                                &HirType::Json,
-                                HirExpr::ArrayLit(vec![replacer_json, space_json]),
-                            )?;
+                            let (helper, json_arguments, direct_arguments) =
+                                if let Some(replacer) = replacer_function {
+                                    (
+                                        "__thaw_json_stringify_live_replacer",
+                                        self.coerce_to_declared(
+                                            &HirType::Json,
+                                            HirExpr::ArrayLit(vec![space_json]),
+                                        )?,
+                                        HirExpr::ArrayLit(vec![
+                                            live,
+                                            HirExpr::Call(
+                                                Box::new(HirExpr::Var(
+                                                    "registerNativeCallbackGraph".into(),
+                                                )),
+                                                vec![replacer],
+                                            ),
+                                        ]),
+                                    )
+                                } else {
+                                    let replacer = replacer_array
+                                        .unwrap_or(HirExpr::Lit(HirLit::Null));
+                                    let replacer_json =
+                                        self.coerce_to_declared(&HirType::Json, replacer)?;
+                                    (
+                                        "__thaw_json_stringify_native_accessors",
+                                        self.coerce_to_declared(
+                                            &HirType::Json,
+                                            HirExpr::ArrayLit(vec![replacer_json, space_json]),
+                                        )?,
+                                        HirExpr::ArrayLit(vec![live]),
+                                    )
+                                };
                             let result = HirExpr::JsonAsString(Box::new(HirExpr::Call(
-                                Box::new(HirExpr::Var("callDynamicValueMixed".into())),
+                                Box::new(HirExpr::Var("callDynamicValueMixedExact".into())),
                                 vec![
                                     HirExpr::Call(
                                         Box::new(HirExpr::Var("getDynamicValue".into())),
-                                        vec![HirExpr::Lit(HirLit::Str(
-                                            "__thaw_json_stringify_native_accessors".into(),
-                                        ))],
+                                        vec![HirExpr::Lit(HirLit::Str(helper.into()))],
                                     ),
                                     json_arguments,
-                                    HirExpr::ArrayLit(vec![value]),
+                                    direct_arguments,
                                 ],
                             )));
                             return self.wrap_call_argument_bindings(result, &bindings);
@@ -2271,20 +2432,24 @@ impl<'a> FnLowerer<'a> {
                             let space = space
                                 .map(|(value, _)| value)
                                 .unwrap_or(HirExpr::Lit(HirLit::Null));
-                            // Keep the live native Json graph intact until the JS
-                            // replacer has had a chance to remove a back edge.
+                            // A Json ArrayLit holds a shallow share of each
+                            // element. The native graph (including back
+                            // edges) stays live until the replacer runs.
                             let space = self.coerce_to_declared(&HirType::Json, space)?;
+                            let json_arguments = self.coerce_to_declared(
+                                &HirType::Json,
+                                HirExpr::ArrayLit(vec![space, value]),
+                            )?;
                             let result = HirExpr::JsonAsString(Box::new(HirExpr::Call(
-                                Box::new(HirExpr::Var("callDynamicValueMixedNativeJson".into())),
+                                Box::new(HirExpr::Var("callDynamicValueMixedExact".into())),
                                 vec![
                                     HirExpr::Call(
                                         Box::new(HirExpr::Var("getDynamicValue".into())),
                                         vec![HirExpr::Lit(HirLit::Str(
-                                            "__thaw_json_stringify_replacer".into(),
+                                            "__thaw_json_stringify_live_replacer".into(),
                                         ))],
                                     ),
-                                    value,
-                                    space,
+                                    json_arguments,
                                     HirExpr::ArrayLit(vec![HirExpr::Call(
                                         Box::new(HirExpr::Var("registerNativeCallbackGraph".into())),
                                         vec![replacer],
