@@ -31,7 +31,7 @@ TIMEOUTS = {
 }
 TEST_FILTERS = tuple(item["filter"] for item in verify.EXPECTED["test_filters"])
 FILTER_PACKAGES = {item["filter"]: item["package"] for item in verify.EXPECTED["test_filters"]}
-STAGE_NAMES = ("identity", "baseline_check", "candidate_check", "llvm_no_run", "hir_no_run", "std_no_run")
+STAGE_NAMES = ("identity", "baseline_check", "candidate_check", "quickjs_no_run", "std_no_run", "llvm_no_run", "hir_no_run")
 ALLOWED_STATES = {"not-run", "passed", "failed", "timed-out", "blocked"}
 
 
@@ -179,6 +179,7 @@ def _persist(evidence: Path, state: dict[str, Any]) -> None:
         "run_id": state.get("run_id"),
         "baseline_check": state.get("stages", {}).get("baseline_check"),
         "candidate_check": state.get("stages", {}).get("candidate_check"),
+        "quickjs_no_run": state.get("stages", {}).get("quickjs_no_run"),
         "llvm_no_run": state.get("stages", {}).get("llvm_no_run"),
         "hir_no_run": state.get("stages", {}).get("hir_no_run"),
         "std_no_run": state.get("stages", {}).get("std_no_run"),
@@ -361,6 +362,24 @@ def _block_filters(state: dict[str, Any], start_index: int, reason: str) -> None
                 item[step].update({"status": "blocked", "reason": reason})
 
 
+def _block_old_filters(state: dict[str, Any], start_index: int, reason: str) -> None:
+    """Keep predecessor-lane fail-fast dispositions inside its original 30 groups."""
+    for item in state["filters"][start_index:30]:
+        if item["status"] == "not-run":
+            item.update({"status": "blocked", "reason": reason})
+        for step in ("list", "run"):
+            if item[step]["status"] == "not-run":
+                item[step].update({"status": "blocked", "reason": reason})
+
+
+def _block_filter(item: dict[str, Any], reason: str) -> None:
+    if item["status"] == "not-run":
+        item.update({"status": "blocked", "reason": reason})
+    for step in ("list", "run"):
+        if item[step]["status"] == "not-run":
+            item[step].update({"status": "blocked", "reason": reason})
+
+
 def _run_stage(
     state: dict[str, Any],
     evidence: Path,
@@ -458,6 +477,7 @@ def _run_filter(
         listed = _command(execute, {}, evidence, "candidate", candidate, list_argv, target, prefix + "_list", TIMEOUTS["list"], started_wall)
     except TimeoutError as exc:
         item["list"].update({"status": "blocked", "reason": str(exc)})
+        item["run"].update({"status": "blocked", "reason": "control execution requires a completed test listing"})
         item.update({"status": "blocked", "reason": str(exc)})
         _persist(evidence, state)
         return False
@@ -467,6 +487,7 @@ def _run_filter(
         with log.open("ab") as stream:
             stream.write(f"executor exception: {type(exc).__name__}: {exc}\n".encode("utf-8", errors="replace"))
         item["list"].update({"status": "failed", "reason": f"executor exception: {type(exc).__name__}: {exc}", "log": str(log), "log_sha256": _sha(log)})
+        item["run"].update({"status": "blocked", "reason": "control execution requires a completed test listing"})
         item.update({"status": "failed", "reason": item["list"]["reason"]})
         _persist(evidence, state)
         return False
@@ -481,20 +502,35 @@ def _run_filter(
     selected = _filter_list(listed.get("stdout", ""))
     item["selected_names"] = selected
     item["selected_count"] = len(selected)
-    expected = verify.EXPECTED.get("expected_test_names", {}).get(filter_name)
-    if expected is not None:
-        observed_leaves = [name.rsplit("::", 1)[-1] for name in selected]
+    expected_full = verify.EXPECTED.get("expected_full_test_names", {}).get(filter_name)
+    if expected_full is not None:
         exact = (
-            len(selected) == len(expected)
-            and len(set(expected)) == len(expected)
-            and all("::" in name and name.split("::", 1)[0] for name in selected)
-            and sorted(observed_leaves) == sorted(expected)
+            isinstance(expected_full, list)
+            and len(selected) == len(expected_full)
+            and len(set(selected)) == len(selected)
+            and len(set(expected_full)) == len(expected_full)
+            and set(selected) == set(expected_full)
         )
         if not exact:
-            item.update({"status": "failed", "reason": f"cargo --list names/count differ from exact expected identifiers: expected {len(expected)} unique names, got {len(selected)}"})
+            item.update({"status": "failed", "reason": f"cargo --list full names/count differ from exact expected identifiers: expected {len(expected_full)} unique names, got {len(selected)}"})
             item["run"].update({"status": "blocked", "reason": "exact expected test listing was not established"})
             _persist(evidence, state)
             return False
+    else:
+        expected = verify.EXPECTED.get("expected_test_names", {}).get(filter_name)
+        if expected is not None:
+            observed_leaves = [name.rsplit("::", 1)[-1] for name in selected]
+            exact = (
+                len(selected) == len(expected)
+                and len(set(expected)) == len(expected)
+                and all("::" in name and name.split("::", 1)[0] for name in selected)
+                and sorted(observed_leaves) == sorted(expected)
+            )
+            if not exact:
+                item.update({"status": "failed", "reason": f"cargo --list names/count differ from exact expected identifiers: expected {len(expected)} unique names, got {len(selected)}"})
+                item["run"].update({"status": "blocked", "reason": "exact expected test listing was not established"})
+                _persist(evidence, state)
+                return False
     if not selected:
         item.update({"status": "failed", "reason": "cargo --list selected zero tests"})
         item["run"].update({"status": "blocked", "reason": "cargo --list selected zero tests"})
@@ -535,15 +571,15 @@ def _run_filter(
 
 
 def _overall(state: dict[str, Any]) -> tuple[str, int, str]:
-    baseline = state["stages"]["baseline_check"]["status"]
-    required = [state["stages"][name]["status"] for name in ("candidate_check", "llvm_no_run", "hir_no_run", "std_no_run")]
+    required = [
+        state["stages"][name]["status"]
+        for name in ("baseline_check", "candidate_check", "quickjs_no_run", "llvm_no_run", "hir_no_run", "std_no_run")
+    ]
     filters = [item["status"] for item in state["filters"]]
-    if baseline != "passed":
-        return "failed", 1, "baseline compilation diagnostic failed or did not complete"
     if all(value == "passed" for value in required + filters):
         return "passed", 0, "baseline and candidate diagnostics plus all focused controls passed"
     if any(value == "failed" or value == "timed-out" for value in required + filters):
-        return "failed", 1, "one or more candidate compilation or focused control stages failed"
+        return "failed", 1, "one or more required compilation or focused control stages failed"
     return "blocked", 1, "one or more required candidate stages did not complete"
 
 
@@ -564,7 +600,7 @@ def _run_validation_impl(
     except Exception as exc:
         reason = f"identity verification failed: {type(exc).__name__}: {exc}"
         state["stages"]["identity"].update({"status": "failed", "reason": reason})
-        for stage in ("baseline_check", "candidate_check", "llvm_no_run", "hir_no_run", "std_no_run"):
+        for stage in ("baseline_check", "candidate_check", "quickjs_no_run", "std_no_run", "llvm_no_run", "hir_no_run"):
             _block_stage(state, stage, reason)
         _block_filters(state, 0, reason)
         state["overall"] = {"status": "failed", "reason": reason}
@@ -579,18 +615,60 @@ def _run_validation_impl(
     candidate_target = target_root / "candidate"
     baseline_cmd = ["cargo", "check", "--locked", "-p", "thaw-llvm", "--lib"]
     candidate_cmd = ["cargo", "check", "--locked", "-p", "thaw-llvm", "--lib"]
-    baseline_result = _run_stage(state, evidence, execute, "baseline", baseline, baseline_cmd, baseline_target, "baseline_check", TIMEOUTS["check"], started_wall)
+
+    quickjs_result = _run_stage(
+        state,
+        evidence,
+        execute,
+        "candidate",
+        candidate,
+        ["cargo", "test", "--locked", "-p", "thaw-quickjs", "--lib", "--no-run"],
+        candidate_target,
+        "quickjs_no_run",
+        TIMEOUTS["no_run"],
+        started_wall,
+    )
+    _persist(evidence, state)
+    std_result = _run_stage(
+        state,
+        evidence,
+        execute,
+        "candidate",
+        candidate,
+        ["cargo", "test", "--locked", "-p", "thaw-std", "--lib", "--no-run"],
+        candidate_target,
+        "std_no_run",
+        TIMEOUTS["no_run"],
+        started_wall,
+    )
     _persist(evidence, state)
 
+    # New QuickJS/std groups are independent: a failed focused command cannot
+    # suppress another eligible group, and each package uses only its own gate.
+    for index in range(30, len(state["filters"])):
+        item = state["filters"][index]
+        package = item["package"]
+        preflight = quickjs_result if package == "thaw-quickjs" else std_result if package == "thaw-std" else None
+        if preflight is None:
+            _block_filter(item, f"no independent preflight is defined for package {package}")
+        elif preflight["status"] != "passed":
+            _block_filter(item, f"{package} test no-run {preflight['status']}: {preflight.get('reason') or preflight.get('exit_code')}")
+        else:
+            _run_filter(state, item, index + 1, execute, evidence, candidate_target, candidate, started_wall)
+        _persist(evidence, state)
+
+    baseline_result = _run_stage(state, evidence, execute, "baseline", baseline, baseline_cmd, baseline_target, "baseline_check", TIMEOUTS["check"], started_wall)
+    _persist(evidence, state)
     candidate_result = _run_stage(state, evidence, execute, "candidate", candidate, candidate_cmd, candidate_target, "candidate_check", TIMEOUTS["check"], started_wall)
     _persist(evidence, state)
 
+    # The predecessor lane retains its candidate LLVM-check, LLVM no-run, HIR
+    # no-run and std-gate fail-fast behavior across exactly its original 30 groups.
     if candidate_result["status"] != "passed":
         reason = f"candidate check {candidate_result['status']}: {candidate_result.get('reason') or candidate_result.get('exit_code')}"
         _block_stage(state, "llvm_no_run", reason)
         _block_stage(state, "hir_no_run", reason)
-        _block_stage(state, "std_no_run", reason)
-        _block_filters(state, 0, reason)
+        _block_old_filters(state, 0, reason)
     else:
         llvm_result = _run_stage(
             state,
@@ -608,8 +686,7 @@ def _run_validation_impl(
         if llvm_result["status"] != "passed":
             reason = f"LLVM no-run {llvm_result['status']}: {llvm_result.get('reason') or llvm_result.get('exit_code')}"
             _block_stage(state, "hir_no_run", reason)
-            _block_stage(state, "std_no_run", reason)
-            _block_filters(state, 0, reason)
+            _block_old_filters(state, 0, reason)
         else:
             hir_result = _run_stage(
                 state,
@@ -626,34 +703,19 @@ def _run_validation_impl(
             _persist(evidence, state)
             if hir_result["status"] != "passed":
                 reason = f"HIR no-run {hir_result['status']}: {hir_result.get('reason') or hir_result.get('exit_code')}"
-                _block_stage(state, "std_no_run", reason)
-                _block_filters(state, 0, reason)
+                _block_old_filters(state, 0, reason)
+            elif std_result["status"] != "passed":
+                reason = f"std no-run {std_result['status']}: {std_result.get('reason') or std_result.get('exit_code')}"
+                _block_old_filters(state, 0, reason)
             else:
-                std_result = _run_stage(
-                    state,
-                    evidence,
-                    execute,
-                    "candidate",
-                    candidate,
-                    ["cargo", "test", "--locked", "-p", "thaw-std", "--lib", "--no-run"],
-                    candidate_target,
-                    "std_no_run",
-                    TIMEOUTS["no_run"],
-                    started_wall,
-                )
-                _persist(evidence, state)
-                if std_result["status"] != "passed":
-                    reason = f"std no-run {std_result['status']}: {std_result.get('reason') or std_result.get('exit_code')}"
-                    _block_filters(state, 0, reason)
-                else:
-                    for index, item in enumerate(state["filters"]):
-                        passed = _run_filter(state, item, index + 1, execute, evidence, candidate_target, candidate, started_wall)
+                for index, item in enumerate(state["filters"][:30]):
+                    passed = _run_filter(state, item, index + 1, execute, evidence, candidate_target, candidate, started_wall)
+                    _persist(evidence, state)
+                    if not passed:
+                        reason = item.get("reason", "focused control did not pass")
+                        _block_old_filters(state, index + 1, f"prior focused control blocked sequence: {reason}")
                         _persist(evidence, state)
-                        if not passed:
-                            reason = item.get("reason", "focused control did not pass")
-                            _block_filters(state, index + 1, f"prior focused control blocked sequence: {reason}")
-                            _persist(evidence, state)
-                            break
+                        break
 
     # Recheck both source trees after all Cargo commands before recording a final verdict.
     try:

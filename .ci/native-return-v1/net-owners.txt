@@ -48,6 +48,8 @@ added  crates/thaw-llvm/src/hir_codegen/tests/async/union_discard_jit.rs
 modified  crates/thaw-llvm/src/hir_codegen/values/closures.rs
 modified  crates/thaw-llvm/src/hir_codegen/values/expressions.rs
 modified  crates/thaw-llvm/src/hir_codegen/values/unions.rs
+modified  crates/thaw-quickjs/src/quickjs/api.rs
+modified  crates/thaw-quickjs/src/quickjs/platform_globals/runtime.js
 modified  crates/thaw-runtime/src/lib.rs
 modified  crates/thaw-runtime/src/runtime/promises.rs
 modified  crates/thaw-runtime/src/tests.rs

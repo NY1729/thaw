@@ -94,7 +94,7 @@ def create_git_repo(root: Path) -> tuple[str, str]:
 
 
 class Fixture:
-    """Tiny seven-stage baseline whose patch bytes and pins are self-consistent."""
+    """Tiny eight-stage baseline whose patch bytes and pins are self-consistent."""
 
     def __init__(self, root: Path):
         self.root = root
@@ -115,11 +115,15 @@ class Fixture:
             "crates/thaw-llvm/Cargo.toml": "[package]\nname='thaw-llvm'\n",
             "crates/thaw-llvm/src/hir_codegen/tests/async.rs": "// baseline async test owner\n",
             "crates/thaw-runtime/Cargo.toml": "[package]\nname='thaw-runtime'\n",
+            "crates/thaw-quickjs/src/quickjs/api.rs": "api baseline\n",
+            "crates/thaw-quickjs/src/quickjs/platform_globals/runtime.js": "runtime baseline\n",
             "outside.txt": "unmodified product file\n",
         }
         for rel, text in initial.items():
             write(self.baseline / rel, text)
         repair_extra = "crates/thaw-std/src/json.rs"
+        api_owner = "crates/thaw-quickjs/src/quickjs/api.rs"
+        runtime_owner = "crates/thaw-quickjs/src/quickjs/platform_globals/runtime.js"
         repair_extra_bytes = b"fixture json base\n"
         write(self.baseline / repair_extra, repair_extra_bytes)
 
@@ -153,7 +157,7 @@ class Fixture:
             json.dumps(handoff_manifest, sort_keys=True) + "\n",
         )
 
-        stage1 = {key: value for key, value in initial.items() if key != "outside.txt"}
+        stage1 = {key: value for key, value in initial.items() if key not in ("outside.txt", api_owner, runtime_owner)}
         stage1[lib] = "pub fn fixture() -> &'static str { \"native\" }\n"
 
         # Patch 2: add one v5 control and wire it immediately.
@@ -204,6 +208,12 @@ class Fixture:
         stage7 = dict(stage6)
         stage7[lib] = "pub fn fixture() -> &'static str { \"next-hir-v1\" }\n"
         write(self.payload / "next-hir-v1.patch", patch_for(lib, stage6[lib], stage7[lib]))
+        stage8 = dict(stage7)
+        stage8[api_owner] = "api forced root final\n"
+        stage8[runtime_owner] = "runtime forced root final\n"
+        forced_root_patch = patch_for(api_owner, initial[api_owner], stage8[api_owner])
+        forced_root_patch += patch_for(runtime_owner, initial[runtime_owner], stage8[runtime_owner])
+        write(self.payload / "forced-root-wire-v1.patch", forced_root_patch)
         paired_base = dict(stage4)
         paired_base[repair_extra] = repair_extra_bytes.decode()
         repair_final = dict(stage5)
@@ -214,6 +224,11 @@ class Fixture:
         next_hir_base = dict(final_stage)
         next_hir_final = dict(stage7)
         next_hir_final[repair_extra] = repair_json_bytes.decode()
+        forced_root_base = dict(next_hir_final)
+        forced_root_base[api_owner] = initial[api_owner]
+        forced_root_base[runtime_owner] = initial[runtime_owner]
+        forced_root_final = dict(stage8)
+        forced_root_final[repair_extra] = repair_json_bytes.decode()
         for name, files in (
             ("compile-repairs-v1-base", paired_base),
             ("compile-repairs-v1", repair_final),
@@ -221,13 +236,14 @@ class Fixture:
             ("cumulative-hir-v1", final_stage),
             ("next-hir-v1-base", next_hir_base),
             ("next-hir-v1", next_hir_final),
+            ("forced-root-wire-v1-base", forced_root_base),
+            ("forced-root-wire-v1", forced_root_final),
         ):
             stage_dir = root / ("manifest-tree-" + name)
             for rel, text in files.items():
                 write(stage_dir / rel, text)
-            (self.payload / f"{name}.sha256").write_bytes(
-                manifest_for(stage_dir, "lexical" if name in ("compile-repairs-v1", "cumulative-hir-v1-base", "cumulative-hir-v1", "next-hir-v1-base", "next-hir-v1") else "components")
-            )
+            path_order = "lexical" if name in ("compile-repairs-v1", "cumulative-hir-v1-base", "cumulative-hir-v1", "next-hir-v1-base", "next-hir-v1", "forced-root-wire-v1-base", "forced-root-wire-v1") else "components"
+            (self.payload / f"{name}.sha256").write_bytes(manifest_for(stage_dir, path_order))
 
         for name, files in zip(("original-native", "scope-v5", "discard-v2", "return-v1"), (stage1, stage2, stage3, stage4)):
             stage_dir = root / ("manifest-tree-" + name)
@@ -261,6 +277,14 @@ class Fixture:
             "extra_paths": [repair_extra],
             "path_order": "lexical",
         })
+        stages.append({
+            "name": "forced-root-wire-v1",
+            "file": "forced-root-wire-v1.sha256",
+            "sha256": sha((self.payload / "forced-root-wire-v1.sha256").read_bytes()),
+            "count": len(forced_root_final),
+            "extra_paths": [repair_extra, api_owner, runtime_owner],
+            "path_order": "lexical",
+        })
 
         # Stage fixture trees are written above from text maps; preserve the
         # expected subset inventory separately for fast mutation tests.
@@ -270,6 +294,8 @@ class Fixture:
             f"modified  {lib}\n",
             f"modified  {async_owner}\n",
             f"modified  {repair_extra}\n",
+            f"modified  {api_owner}\n",
+            f"modified  {runtime_owner}\n",
             f"new  {v5_control}\n",
             f"new  {discard_control}\n",
             f"new  {return_control}\n",
@@ -298,7 +324,7 @@ class Fixture:
         }
         payload_files = {
             name: sha((self.payload / name).read_bytes())
-            for name in ("discard-v2.patch", "return-v1.patch", "compile-repairs-v1.patch", "cumulative-hir-v1.patch", "next-hir-v1.patch")
+            for name in ("discard-v2.patch", "return-v1.patch", "compile-repairs-v1.patch", "cumulative-hir-v1.patch", "next-hir-v1.patch", "forced-root-wire-v1.patch")
         }
         artifact_hashes = {}
         for name, desc in self._artifact_paths().items():
@@ -315,8 +341,8 @@ class Fixture:
             "net_owners": {
                 "file": "net-owners.txt",
                 "sha256": sha((self.payload / "net-owners.txt").read_bytes()),
-                "count": 6,
-                "modified": 3,
+                "count": 8,
+                "modified": 5,
                 "new": 3,
             },
             "repair_base": {
@@ -345,7 +371,28 @@ class Fixture:
                 "path_order": "lexical",
                 "paired_after": "cumulative-hir-v1",
             },
-            "patch_order": ["original-native", "scope-v5", "discard-v2", "return-v1", "compile-repairs-v1", "cumulative-hir-v1", "next-hir-v1"],
+            "forced_root_wire_base": {
+                "file": "forced-root-wire-v1-base.sha256",
+                "sha256": sha((self.payload / "forced-root-wire-v1-base.sha256").read_bytes()),
+                "count": len(forced_root_base),
+                "path_order": "lexical",
+                "paired_after": "next-hir-v1",
+                "extra_owners": [
+                    {
+                        "path": api_owner,
+                        "sha256": sha(initial[api_owner].encode()),
+                        "git_blob_sha1": verify._git_blob_sha1(initial[api_owner].encode()) if verify is not None else "",
+                        "final_sha256": sha(stage8[api_owner].encode()),
+                    },
+                    {
+                        "path": runtime_owner,
+                        "sha256": sha(initial[runtime_owner].encode()),
+                        "git_blob_sha1": verify._git_blob_sha1(initial[runtime_owner].encode()) if verify is not None else "",
+                        "final_sha256": sha(stage8[runtime_owner].encode()),
+                    },
+                ],
+            },
+            "patch_order": ["original-native", "scope-v5", "discard-v2", "return-v1", "compile-repairs-v1", "cumulative-hir-v1", "next-hir-v1", "forced-root-wire-v1"],
             "subset_roots": [
                 ".gitignore",
                 "Cargo.lock",
@@ -366,6 +413,7 @@ class Fixture:
             "runner_dependencies": copy.deepcopy(verify.EXPECTED["runner_dependencies"]) if verify is not None else {},
             "test_filters": copy.deepcopy(verify.EXPECTED["test_filters"]) if verify is not None else [],
             "expected_test_names": copy.deepcopy(verify.EXPECTED.get("expected_test_names", {})) if verify is not None else {},
+            "expected_full_test_names": copy.deepcopy(verify.EXPECTED.get("expected_full_test_names", {})) if verify is not None else {},
             "provenance_only_review_fingerprints": copy.deepcopy(verify.EXPECTED["provenance_only_review_fingerprints"]) if verify is not None else {},
         }
         write(self.payload / "pins.json", json.dumps(self.expected, sort_keys=True, indent=2) + "\n")
@@ -386,6 +434,8 @@ class Fixture:
             "cumulative_hir_final": "cumulative-hir-v1.sha256",
             "next_hir_base": "next-hir-v1-base.sha256",
             "next_hir_final": "next-hir-v1.sha256",
+            "forced_root_wire_base": "forced-root-wire-v1-base.sha256",
+            "forced_root_wire_final": "forced-root-wire-v1.sha256",
             "native_base": "native-base.sha256",
             "net_owners": "net-owners.txt",
             "scope_test_plan": "scope-v5-test-plan.md",
@@ -420,7 +470,7 @@ class VerificationRedGreenTests(unittest.TestCase):
         with self.assertRaisesRegex(mod.VerificationError, pattern):
             call(*args, **kwargs)
 
-    def test_positive_reconstruction_replays_seven_stages_and_preserves_unrelated_file(self):
+    def test_positive_reconstruction_replays_eight_stages_and_preserves_unrelated_file(self):
         mod = self.require_implementation()
         result = mod.reconstruct(
             self.fixture.baseline,
@@ -429,7 +479,7 @@ class VerificationRedGreenTests(unittest.TestCase):
             self.fixture.evidence,
         )
         self.assertEqual([x["count"] for x in mod.EXPECTED["stage_manifests"]], result["stage_counts"])
-        self.assertEqual(7, len(result["stages"]))
+        self.assertEqual(8, len(result["stages"]))
         self.assertEqual("unmodified product file\n", (self.fixture.candidate / "outside.txt").read_text())
         self.assertTrue((self.fixture.evidence / "reconstruction.json").is_file())
 
@@ -472,7 +522,7 @@ class VerificationRedGreenTests(unittest.TestCase):
             digest for digest, rel in mod._parse_sha_manifest(self.fixture.payload / "compile-repairs-v1.sha256", "repair final", path_order="lexical")
             if rel == lib
         )
-        self.assertEqual("next-hir-v1", result["stages"][-1]["stage"])
+        self.assertEqual("next-hir-v1", result["stages"][6]["stage"])
         self.assertEqual(sha(repair_bytes), expected_repair_hash)
         self.assertEqual(b'pub fn fixture() -> &\'static str { "next-hir-v1" }\n', (self.fixture.candidate / lib).read_bytes())
 
@@ -497,12 +547,109 @@ class VerificationRedGreenTests(unittest.TestCase):
         self.assertEqual("cumulative-hir-v1.patch", applied[-1])
         self.assertNotIn("next-hir-v1.patch", applied)
 
-    def test_actual_next_hir_inputs_and_name_pins_match_the_immutable_source(self):
+    def test_forced_root_pair_is_exactly_next_hir_final_plus_two_pinned_providers(self):
+        mod = self.require_implementation()
+        pair = mod.EXPECTED["forced_root_wire_base"]
+        self.assertEqual("next-hir-v1", pair["paired_after"])
+        self.assertEqual("lexical", pair["path_order"])
+        result = mod.verify_inputs(self.fixture.baseline, self.fixture.payload)
+        self.assertEqual(8, result["net_owner_count"])
+        self.assertEqual(2, len(pair["extra_owners"]))
+        before = {rel: digest for digest, rel in mod._parse_sha_manifest(self.fixture.payload / pair["file"], "wire base", path_order="lexical")}
+        previous = {rel: digest for digest, rel in mod._parse_sha_manifest(self.fixture.payload / "next-hir-v1.sha256", "next final", path_order="lexical")}
+        self.assertEqual(len(previous) + 2, pair["count"])
+        for owner in pair["extra_owners"]:
+            self.assertNotIn(owner["path"], previous)
+            previous[owner["path"]] = owner["sha256"]
+        self.assertEqual(previous, before)
+
+    def test_forced_root_provider_sha256_and_git_blob_are_pinned(self):
+        mod = self.require_implementation()
+        owner = mod.EXPECTED["forced_root_wire_base"]["extra_owners"][0]
+        path = self.fixture.baseline / owner["path"]
+        original = path.read_bytes()
+        original_commit = self.fixture.commit
+        original_expected = copy.deepcopy(mod.EXPECTED)
+        try:
+            path.write_bytes(original + b"baseline drift\n")
+            subprocess.run(["git", "-C", str(self.fixture.baseline), "add", owner["path"]], check=True)
+            subprocess.run(["git", "-C", str(self.fixture.baseline), "commit", "-qm", "fixture provider drift"], check=True)
+            altered = copy.deepcopy(mod.EXPECTED)
+            altered["baseline"]["commit"] = subprocess.check_output(["git", "-C", str(self.fixture.baseline), "rev-parse", "HEAD"], text=True).strip()
+            altered["baseline"]["tree"] = subprocess.check_output(["git", "-C", str(self.fixture.baseline), "rev-parse", "HEAD^{tree}"], text=True).strip()
+            mod.EXPECTED = altered
+            write(self.fixture.payload / "pins.json", json.dumps(altered, sort_keys=True, indent=2) + "\n")
+            self.assertVerifyError("forced-root.*provider|SHA-256|Git blob", mod.verify_inputs, self.fixture.baseline, self.fixture.payload)
+        finally:
+            subprocess.run(["git", "-C", str(self.fixture.baseline), "reset", "--hard", original_commit], check=True)
+            mod.EXPECTED = original_expected
+            write(self.fixture.payload / "pins.json", json.dumps(self.fixture.expected, sort_keys=True, indent=2) + "\n")
+
+    def test_forced_root_extra_paths_are_limited_to_the_eighth_stage(self):
+        mod = self.require_implementation()
+        expected_paths = [
+            "crates/thaw-std/src/json.rs",
+            "crates/thaw-quickjs/src/quickjs/api.rs",
+            "crates/thaw-quickjs/src/quickjs/platform_globals/runtime.js",
+        ]
+        self.assertEqual(["crates/thaw-std/src/json.rs"], mod.EXPECTED["stage_manifests"][6]["extra_paths"])
+        self.assertEqual(expected_paths, mod.EXPECTED["stage_manifests"][7]["extra_paths"])
+        altered = copy.deepcopy(mod.EXPECTED)
+        altered["stage_manifests"][6]["extra_paths"] = expected_paths
+        mod.EXPECTED = altered
+        write(self.fixture.payload / "pins.json", json.dumps(altered, sort_keys=True, indent=2) + "\n")
+        self.assertVerifyError("unexpected stage-scoped extra path", mod.verify_inputs, self.fixture.baseline, self.fixture.payload)
+
+    def test_forced_root_pair_cannot_be_retargeted_to_an_older_stage(self):
+        mod = self.require_implementation()
+        altered = copy.deepcopy(mod.EXPECTED)
+        altered["forced_root_wire_base"]["paired_after"] = "cumulative-hir-v1"
+        mod.EXPECTED = altered
+        write(self.fixture.payload / "pins.json", json.dumps(altered, sort_keys=True, indent=2) + "\n")
+        self.assertVerifyError("forced-root wire paired base|immediately follow", mod.verify_inputs, self.fixture.baseline, self.fixture.payload)
+
+    def test_unexpected_forced_root_stage_input_is_rejected(self):
+        mod = self.require_implementation()
+        write(self.fixture.payload / "forced-root-wire-v2.patch", "unexpected stage\n")
+        self.assertVerifyError("unexpected forced-root wire input", mod.verify_inputs, self.fixture.baseline, self.fixture.payload)
+
+    def test_forced_root_pair_is_checked_immediately_before_eighth_patch(self):
+        mod = self.require_implementation()
+        original_verify_stage = mod.verify_stage
+        original_apply = mod._apply_patch
+        applied = []
+
+        def apply_and_record(tree, patch):
+            applied.append(patch.name)
+            return original_apply(tree, patch)
+
+        def verify_then_drift(tree, manifest, *args, **kwargs):
+            result = original_verify_stage(tree, manifest, *args, **kwargs)
+            if Path(manifest).name == "next-hir-v1.sha256":
+                write(tree / mod.EXPECTED["forced_root_wire_base"]["extra_owners"][0]["path"], "drift after seventh final\n")
+            return result
+
+        with mock.patch.object(mod, "verify_stage", side_effect=verify_then_drift), mock.patch.object(mod, "_apply_patch", side_effect=apply_and_record):
+            self.assertVerifyError("paired.*base|manifest hash mismatch|stage hash mismatch", mod.reconstruct, self.fixture.baseline, self.fixture.candidate, self.fixture.payload, self.fixture.evidence)
+        self.assertEqual("next-hir-v1.patch", applied[-1])
+        self.assertNotIn("forced-root-wire-v1.patch", applied)
+
+    def test_forced_root_final_drift_is_rejected_after_reconstruction(self):
+        mod = self.require_implementation()
+        mod.reconstruct(self.fixture.baseline, self.fixture.candidate, self.fixture.payload, self.fixture.evidence)
+        path = self.fixture.candidate / mod.EXPECTED["forced_root_wire_base"]["extra_owners"][0]["path"]
+        path.write_bytes(path.read_bytes() + b"drift\n")
+        self.assertVerifyError("stage hash mismatch", mod.verify_prepared, self.fixture.baseline, self.fixture.candidate, self.fixture.payload)
+
+    def test_actual_hir_and_forced_root_inputs_and_name_pins_match_the_immutable_source(self):
         mod = self.require_implementation()
         production_expected = self.fixture.expected_before
         pins_path = MODULE_DIR / "pins.json"
         pins = json.loads(pins_path.read_text(encoding="utf-8"))
         self.assertEqual(production_expected, pins)
+        self.assertEqual(39, len(production_expected["test_filters"]))
+        self.assertEqual("d94499d8d78d64e6dbb72fbac6abaa548398718f89b5685d1d5a759f944954f9", sha(json.dumps(production_expected["test_filters"][:30], sort_keys=True, separators=(",", ":")).encode()))
+        self.assertEqual("76007d26d76fa871bbc129d1ff94718df82a53a5bf363cf707e039a0561e669b", sha(json.dumps(production_expected["expected_test_names"], sort_keys=True, separators=(",", ":")).encode()))
 
         self.assertIn("cumulative-hir-v1", [stage["name"] for stage in production_expected["stage_manifests"]])
         cumulative_stage = next(stage for stage in production_expected["stage_manifests"] if stage["name"] == "cumulative-hir-v1")
@@ -560,28 +707,34 @@ class VerificationRedGreenTests(unittest.TestCase):
         roster_path = MODULE_DIR / net["file"]
         roster_lines = roster_path.read_text(encoding="utf-8").splitlines()
         self.assertEqual(net["sha256"], sha(roster_path.read_bytes()))
-        self.assertEqual("673d4f32930cd141ac8e3562179a9c61b0d3a8a1da55ac7c342d2914f1ed40ab", sha(roster_path.read_bytes()))
-        self.assertEqual((54, 49, 5), (len(roster_lines), sum(line.startswith("modified  ") for line in roster_lines), sum(line.startswith("added  ") for line in roster_lines)))
-        self.assertEqual((54, 49, 5), (net["count"], net["modified"], net["new"]))
+        self.assertEqual("10fbe496127766ee0cdc18e35ba019968d2d4b7c2688f37c973cd2825551d654", sha(roster_path.read_bytes()))
+        self.assertEqual((56, 51, 5), (len(roster_lines), sum(line.startswith("modified  ") for line in roster_lines), sum(line.startswith("added  ") for line in roster_lines)))
+        self.assertEqual((56, 51, 5), (net["count"], net["modified"], net["new"]))
         fixture_expected = mod.EXPECTED
         mod.EXPECTED = production_expected
         try:
             parsed_roster = mod._read_net_roster(MODULE_DIR)
         finally:
             mod.EXPECTED = fixture_expected
-        self.assertEqual(54, len(parsed_roster))
-        self.assertEqual(49, sum(status == "modified" for status in parsed_roster.values()))
+        self.assertEqual(56, len(parsed_roster))
+        self.assertEqual(51, sum(status == "modified" for status in parsed_roster.values()))
         self.assertEqual(5, sum(status == "new" for status in parsed_roster.values()))
         self.assertEqual("modified", parsed_roster["crates/thaw-hir/src/lower/invocations/arguments.rs"])
 
-        added_filters = production_expected["test_filters"][-3:]
-        self.assertEqual(30, len(production_expected["test_filters"]))
-        self.assertEqual((20, 9, 1), tuple(sum(item["package"] == package for item in production_expected["test_filters"]) for package in ("thaw-llvm", "thaw-hir", "thaw-std")))
+        added_filters = production_expected["test_filters"][-9:]
+        self.assertEqual(39, len(production_expected["test_filters"]))
+        self.assertEqual((20, 9, 3, 7), tuple(sum(item["package"] == package for item in production_expected["test_filters"]) for package in ("thaw-llvm", "thaw-hir", "thaw-std", "thaw-quickjs")))
         self.assertEqual(
             [
-                {"package": "thaw-hir", "filter": "thaw_rethrow_cleanup_"},
-                {"package": "thaw-hir", "filter": "error_argument_staging_"},
-                {"package": "thaw-hir", "filter": "existing_native_spread_staging_mode_false_is_unchanged"},
+                {"package": "thaw-quickjs", "filter": "forced_root_"},
+                {"package": "thaw-quickjs", "filter": "graph_codec_roundtrip_preserves_negative_zero"},
+                {"package": "thaw-quickjs", "filter": "graph_codec_roundtrip_retains_identity_and_releases_live_lease"},
+                {"package": "thaw-quickjs", "filter": "graph_codec_uses_bootstrap_intrinsics_after_global_replacement"},
+                {"package": "thaw-quickjs", "filter": "handle_registry_identity_ignores_later_object_is_override"},
+                {"package": "thaw-quickjs", "filter": "failed_exception_graph_grant_retires_producer_handle_lease"},
+                {"package": "thaw-quickjs", "filter": "exact_mixed_pre_dispatch_consumes_registered_graph_grant_once"},
+                {"package": "thaw-std", "filter": "unregistered_graph_wire_cannot_transfer_napi_lease_tokens"},
+                {"package": "thaw-std", "filter": "mutated_graph_wire_retires_only_registered_snapshot_leases"},
             ],
             added_filters,
         )
@@ -627,11 +780,78 @@ class VerificationRedGreenTests(unittest.TestCase):
         for filter_name, expected_names in exact_names.items():
             self.assertEqual(expected_names, production_expected["expected_test_names"][filter_name])
 
+        wire_stage = production_expected["stage_manifests"][-1]
+        wire_pair = production_expected["forced_root_wire_base"]
+        self.assertEqual(
+            ["original-native", "scope-v5", "discard-v2", "return-v1", "compile-repairs-v1", "cumulative-hir-v1", "next-hir-v1"],
+            [stage["name"] for stage in production_expected["stage_manifests"][:7]],
+        )
+        self.assertEqual([175, 176, 179, 180, 181, 181, 181], [stage["count"] for stage in production_expected["stage_manifests"][:7]])
+        self.assertEqual("forced-root-wire-v1", wire_stage["name"])
+        self.assertEqual(183, wire_stage["count"])
+        self.assertEqual(["crates/thaw-std/src/json.rs", *[owner["path"] for owner in wire_pair["extra_owners"]]], wire_stage["extra_paths"])
+        self.assertEqual("next-hir-v1", wire_pair["paired_after"])
+        self.assertEqual("lexical", wire_pair["path_order"])
+        self.assertEqual(183, wire_pair["count"])
+        self.assertEqual("a7f04af1afa5b9d41d7a8dca984ccefba020cdd36f19175ef14a8f809a6e8683", production_expected["payload_patches"]["forced-root-wire-v1.patch"])
+        self.assertEqual(production_expected["payload_patches"]["forced-root-wire-v1.patch"], sha((MODULE_DIR / "forced-root-wire-v1.patch").read_bytes()))
+        self.assertEqual(wire_pair["sha256"], sha((MODULE_DIR / wire_pair["file"]).read_bytes()))
+        self.assertEqual(wire_stage["sha256"], sha((MODULE_DIR / wire_stage["file"]).read_bytes()))
+        self.assertEqual(
+            [
+                ("crates/thaw-quickjs/src/quickjs/api.rs", "02907f79127e23ede4faea4fd89e4ac466cde76d5f4febc8831fa8b5df2d6d36", "4ade648dbe5203bff00014bd7903821d595680b0", "be84b1a2c295c8bcc62ec41427999d75f485b90b4711e8b384424782f9e1bbf9"),
+                ("crates/thaw-quickjs/src/quickjs/platform_globals/runtime.js", "0a223f6a0934dfddba0217e342f7ed1f09242b806d313f4da26eca012cd7ee3a", "73eeee5f1df8a84b65fd5b088c374aa0a6e1521e", "bdca00a406d512f19349d41b5ac70d145a28eb0d029c5521dd9c375a68e50a81"),
+            ],
+            [(owner["path"], owner["sha256"], owner["git_blob_sha1"], owner["final_sha256"]) for owner in wire_pair["extra_owners"]],
+        )
+        full_names = production_expected["expected_full_test_names"]
+        self.assertEqual(9, len(full_names))
+        self.assertEqual(16, sum(map(len, full_names.values())))
+        self.assertEqual(
+            {
+                "forced_root_": [
+                    "forced_root_graph_wire_controls::forced_root_transfer_failure_rolls_back_once",
+                    "forced_root_graph_wire_controls::forced_root_decoded_lease_outlives_consumed_input_and_root",
+                    "forced_root_graph_wire_controls::forced_root_guard_preserves_other_graph_modes",
+                    "forced_root_graph_wire_controls::forced_root_default_query_boundary_is_explicit",
+                    "forced_root_graph_wire_controls::forced_root_capture_packet_uses_existing_node_grammar",
+                    "forced_root_graph_wire_controls::forced_root_capture_preserves_identity_aliases_and_liveness",
+                    "forced_root_graph_wire_controls::forced_root_capture_performs_no_original_value_hooks",
+                    "forced_root_graph_wire_controls::forced_root_packet_ignores_replaced_intrinsics_and_metadata_hooks",
+                ],
+                "graph_codec_roundtrip_preserves_negative_zero": ["graph_codec_roundtrip_preserves_negative_zero"],
+                "graph_codec_roundtrip_retains_identity_and_releases_live_lease": ["graph_codec_roundtrip_retains_identity_and_releases_live_lease"],
+                "graph_codec_uses_bootstrap_intrinsics_after_global_replacement": ["graph_codec_uses_bootstrap_intrinsics_after_global_replacement"],
+                "handle_registry_identity_ignores_later_object_is_override": ["handle_registry_identity_ignores_later_object_is_override"],
+                "failed_exception_graph_grant_retires_producer_handle_lease": ["failed_exception_graph_grant_retires_producer_handle_lease"],
+                "exact_mixed_pre_dispatch_consumes_registered_graph_grant_once": ["exact_mixed_pre_dispatch_consumes_registered_graph_grant_once"],
+                "unregistered_graph_wire_cannot_transfer_napi_lease_tokens": ["json::unregistered_graph_wire_cannot_transfer_napi_lease_tokens"],
+                "mutated_graph_wire_retires_only_registered_snapshot_leases": ["json::mutated_graph_wire_retires_only_registered_snapshot_leases"],
+            },
+            full_names,
+        )
+
+        wire_base_rows = mod._parse_sha_manifest(MODULE_DIR / wire_pair["file"], "actual forced-root base", path_order="lexical")
+        wire_final_rows = mod._parse_sha_manifest(MODULE_DIR / wire_stage["file"], "actual forced-root final", path_order="lexical")
+        next_final_map = {rel: digest for digest, rel in next_final_rows}
+        wire_base_map = {rel: digest for digest, rel in wire_base_rows}
+        wire_final_map = {rel: digest for digest, rel in wire_final_rows}
+        expected_base_map = dict(next_final_map)
+        expected_final_map = dict(next_final_map)
+        for owner in wire_pair["extra_owners"]:
+            expected_base_map[owner["path"]] = owner["sha256"]
+            expected_final_map[owner["path"]] = owner["final_sha256"]
+        self.assertEqual(expected_base_map, wire_base_map)
+        self.assertEqual(expected_final_map, wire_final_map)
+        self.assertEqual(183, len(wire_base_rows))
+        self.assertEqual(183, len(wire_final_rows))
+        self.assertTrue(all(wire_final_map[rel] == digest for rel, digest in next_final_map.items()))
+
     def test_shipped_roster_artifact_descriptor_and_bytes_share_the_expected_pin(self):
         production_expected = self.fixture.expected_before
         roster_path = MODULE_DIR / "net-owners.txt"
         roster_digest = sha(roster_path.read_bytes())
-        self.assertEqual("673d4f32930cd141ac8e3562179a9c61b0d3a8a1da55ac7c342d2914f1ed40ab", roster_digest)
+        self.assertEqual("10fbe496127766ee0cdc18e35ba019968d2d4b7c2688f37c973cd2825551d654", roster_digest)
         self.assertEqual(roster_digest, production_expected["net_owners"]["sha256"])
         self.assertEqual(roster_digest, production_expected["artifacts"]["net-owners.txt"])
         shipped_pins = json.loads((MODULE_DIR / "pins.json").read_text(encoding="utf-8"))

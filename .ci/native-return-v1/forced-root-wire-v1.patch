@@ -1,0 +1,1087 @@
+diff --git a/crates/thaw-quickjs/src/quickjs/api.rs b/crates/thaw-quickjs/src/quickjs/api.rs
+index 4ade648dbe5203bff00014bd7903821d595680b0..5f92994c30936d25037fd9d4df051eee932be428 100644
+--- a/crates/thaw-quickjs/src/quickjs/api.rs
++++ b/crates/thaw-quickjs/src/quickjs/api.rs
+@@ -4656,4 +4656,1037 @@
+         assert!(owned_graph_wire_with_registration(&wire, |_| false).is_null());
+         assert_eq!(thaw_js_release_handle(handle), 0);
+     }).join().unwrap();
+ }
++
++// Source-authored controls for the forced-root graph wire prerequisite.
++// These controls intentionally use the real QuickJS capture API, the real
++// std graph decoder, and the production HostOperations callback tuple. They
++// are not evidence of execution until the complete checkout is authorized.
++#[cfg(test)]
++mod forced_root_graph_wire_controls {
++    use super::*;
++    use std::ffi::{CStr, CString, c_char, c_void};
++
++    thread_local! {
++        static INPUT_HANDLES: std::cell::RefCell<Vec<u64>> = const {
++            std::cell::RefCell::new(Vec::new())
++        };
++        static ALL_INPUT_HANDLES: std::cell::RefCell<Vec<u64>> = const {
++            std::cell::RefCell::new(Vec::new())
++        };
++        static TEST_FIXTURE_FAILURES: std::cell::RefCell<Vec<&'static str>> = const {
++            std::cell::RefCell::new(Vec::new())
++        };
++        static HANDLES_SLOT_FAULT_UNRESTORED: std::cell::Cell<bool> = const {
++            std::cell::Cell::new(false)
++        };
++        static FIXTURE_STATE_UNRESTORED: std::cell::Cell<bool> = const {
++            std::cell::Cell::new(false)
++        };
++    }
++
++    fn record_input(handle: u64) {
++        INPUT_HANDLES.with(|handles| handles.borrow_mut().push(handle));
++        ALL_INPUT_HANDLES.with(|handles| {
++            let mut handles = handles.borrow_mut();
++            if !handles.contains(&handle) { handles.push(handle); }
++        });
++    }
++
++    fn forget_input(handle: u64) -> bool {
++        INPUT_HANDLES.with(|handles| {
++            let mut handles = handles.borrow_mut();
++            let Some(index) = handles.iter().rposition(|candidate| *candidate == handle) else {
++                return false;
++            };
++            handles.swap_remove(index);
++            true
++        })
++    }
++
++    struct TestInputScope;
++
++    impl TestInputScope {
++        fn new() -> Self {
++            INPUT_HANDLES.with(|handles| assert!(handles.borrow().is_empty()));
++            ALL_INPUT_HANDLES.with(|handles| handles.borrow_mut().clear());
++            TEST_FIXTURE_FAILURES.with(|failures| failures.borrow_mut().clear());
++            HANDLES_SLOT_FAULT_UNRESTORED.with(|active| active.set(false));
++            FIXTURE_STATE_UNRESTORED.with(|active| active.set(false));
++            Self
++        }
++    }
++
++    impl Drop for TestInputScope {
++        fn drop(&mut self) {
++            if HANDLES_SLOT_FAULT_UNRESTORED.with(std::cell::Cell::get)
++                || FIXTURE_STATE_UNRESTORED.with(std::cell::Cell::get)
++            {
++                eprintln!("forced-root FAIL/HOLD: fixture restoration is unverified; O lookup/release was withheld");
++                if !std::thread::panicking() {
++                    panic!("forced-root teardown withheld O because registry/global restoration is unverified");
++                }
++                return;
++            }
++            let mut teardown_failed = false;
++            let had_leftovers = INPUT_HANDLES.with(|handles| !handles.borrow().is_empty());
++            let all_handles = ALL_INPUT_HANDLES.with(|handles| handles.borrow().clone());
++            for handle in all_handles {
++                let expected = INPUT_HANDLES.with(|handles| {
++                    handles.borrow().iter().filter(|candidate| **candidate == handle).count() as u64
++                });
++                let actual = registry_state(handle);
++                if actual != (expected, expected > 0) {
++                    teardown_failed = true;
++                    eprintln!("forced-root FAIL/HOLD: handle {handle} has registry state {actual:?}, remaining O ledger expects {expected}");
++                    // If the registry has extra references after every Box
++                    // and wire guard dropped, retire them only as explicit
++                    // failing teardown repair. The mismatch remains a test
++                    // failure and cannot satisfy a producer cleanup control.
++                    if actual.0 > expected {
++                        for _ in expected..actual.0 {
++                            if thaw_js_release_handle(handle) != 1 { break; }
++                        }
++                    }
++                }
++            }
++            let leftovers = INPUT_HANDLES.with(|handles| std::mem::take(&mut *handles.borrow_mut()));
++            for handle in leftovers.into_iter().rev() {
++                if thaw_js_release_handle(handle) != 1 { teardown_failed = true; }
++            }
++            let restoration_failed = TEST_FIXTURE_FAILURES.with(|failures| !failures.borrow().is_empty());
++            if had_leftovers || teardown_failed || restoration_failed {
++                eprintln!("forced-root FAIL/HOLD during test teardown: leftover O claims, P/D mismatch, failed release, or unverified restoration");
++                if !std::thread::panicking() {
++                    panic!("forced-root test teardown did not reach its explicit ownership/restoration assertions");
++                }
++            }
++        }
++    }
++
++    struct OwnedJson {
++        pointer: *mut c_void,
++    }
++
++    impl OwnedJson {
++        fn new(pointer: *mut c_void) -> Self { Self { pointer } }
++        fn as_ptr(&self) -> *mut c_void { self.pointer }
++        fn is_null(&self) -> bool { self.pointer.is_null() }
++
++        fn track_arena_root(mut self) -> Result<Self, &'static str> {
++            if self.pointer.is_null() { return Err("decoder returned a null owned Json pointer"); }
++            let input = std::mem::replace(&mut self.pointer, std::ptr::null_mut());
++            // The real tracker destroys input on a null result. The guard is
++            // disarmed before the call, so neither branch can double free.
++            let rooted = unsafe { thaw_json_track_arena_owned_root(input) };
++            drop(self);
++            if rooted.is_null() { Err("root tracker consumed the Box on failure") }
++            else { Ok(Self::new(rooted)) }
++        }
++    }
++
++    impl Drop for OwnedJson {
++        fn drop(&mut self) {
++            if !self.pointer.is_null() {
++                unsafe { thaw_json_destroy(self.pointer) };
++                self.pointer = std::ptr::null_mut();
++            }
++        }
++    }
++
++    unsafe extern "C" {
++        fn thaw_json_register_host_operations(
++            retain: extern "C" fn(u64) -> u8,
++            release: extern "C" fn(u64) -> u8,
++            get: extern "C" fn(u64, *const c_char) -> ThawHandleResult,
++            query: extern "C" fn(u64, u8) -> ThawResult,
++            date_set: extern "C" fn(u64, f64) -> ThawResult,
++            set: extern "C" fn(u64, *const c_char, *const c_char) -> ThawHandleResult,
++            predicate: extern "C" fn(u64, *const c_char, u8) -> ThawHandleResult,
++            enumerate: extern "C" fn(u64, u8) -> ThawResult,
++        );
++        fn thaw_json_graph_decode(source: *const c_char) -> *mut c_void;
++        fn thaw_json_discard_graph_wire(source: *const c_char);
++        fn thaw_json_take_graph_error() -> u8;
++        fn thaw_json_take_host_error() -> *const c_char;
++        fn thaw_json_typeof(value: *const c_void) -> *const c_char;
++        fn thaw_json_strict_equal(left: *const c_void, right: *const c_void) -> u8;
++        fn thaw_json_borrowed_handle_id(value: *const c_void) -> u64;
++        fn thaw_json_clone(value: *const c_void) -> *mut c_void;
++        fn thaw_json_destroy(value: *mut c_void);
++        fn thaw_json_track_arena_owned_root(value: *mut c_void) -> *mut c_void;
++        fn thaw_json_get(value: *mut c_void, key: *const c_char) -> *mut c_void;
++        fn thaw_json_object_set_number(value: *mut c_void, key: *const c_char, number: f64);
++        fn thaw_json_as_number(value: *mut c_void) -> f64;
++        fn thaw_cstring_destroy(value: *mut c_char);
++    }
++
++    fn install_real_host_callbacks() {
++        // The result layouts are the api.rs #[repr(C)] ThawHandleResult
++        // (u64 plus error pointer) and ThawResult (text plus error pointer),
++        // matching thaw-std's HostHandleResult and HostTextResult exactly.
++        unsafe {
++            thaw_json_register_host_operations(
++                thaw_js_retain_handle,
++                thaw_js_release_handle,
++                thaw_js_get_property_json_key_result,
++                thaw_js_host_query_result,
++                thaw_js_host_date_set_result,
++                thaw_js_set_property_graph_result,
++                thaw_js_property_predicate_json_key_result,
++                thaw_js_host_enumerate_result,
++            );
++        }
++    }
++
++    fn retain_source(source: &str) -> u64 {
++        let handle = with_context(|ctx| {
++            let value = ctx.eval::<Value<'_>, _>(source)
++                .expect("create real JavaScript fixture value");
++            retain_value(&ctx, value).expect("retain real JavaScript fixture value")
++        });
++        record_input(handle);
++        handle
++    }
++
++    fn registry_state(handle: u64) -> (u64, bool) {
++        with_context(|ctx| {
++            let refs: Array = ctx.globals().get("__thaw_value_handle_refs")
++                .expect("real refs registry");
++            let live: Array = ctx.globals().get("__thaw_value_handle_live")
++                .expect("real live registry");
++            let index = (handle - 1) as usize;
++            (refs.get::<u64>(index).expect("read primitive registry count"),
++             live.get::<bool>(index).expect("read primitive registry liveness"))
++        })
++    }
++
++    fn eval_bool(source: &str) -> bool {
++        with_context(|ctx| ctx.eval::<bool, _>(source).expect("evaluate fixture assertion"))
++    }
++
++    fn free_c_string(value: *const c_char) {
++        if !value.is_null() { unsafe { thaw_cstring_destroy(value.cast_mut()) }; }
++    }
++
++    struct OwnedText { pointer: *const c_char }
++
++    impl OwnedText {
++        fn new(pointer: *const c_char) -> Self { Self { pointer } }
++        fn is_null(&self) -> bool { self.pointer.is_null() }
++        fn to_string_lossy(&self) -> String {
++            if self.pointer.is_null() { String::new() }
++            else { unsafe { CStr::from_ptr(self.pointer) }.to_string_lossy().into_owned() }
++        }
++    }
++
++    impl Drop for OwnedText {
++        fn drop(&mut self) { free_c_string(self.pointer); }
++    }
++
++    struct CaptureResultOwner {
++        value: *const c_char,
++        error: OwnedText,
++        grant_pending: bool,
++    }
++
++    impl CaptureResultOwner {
++        fn new(result: ThawResult) -> Self {
++            Self { value: result.value, error: OwnedText::new(result.error), grant_pending: true }
++        }
++        fn take_value(&mut self) -> *const c_char {
++            self.grant_pending = false;
++            std::mem::replace(&mut self.value, std::ptr::null())
++        }
++    }
++
++    impl Drop for CaptureResultOwner {
++        fn drop(&mut self) {
++            if !self.value.is_null() {
++                if self.grant_pending { unsafe { thaw_json_discard_graph_wire(self.value) }; }
++                free_c_string(self.value);
++                self.value = std::ptr::null();
++            }
++        }
++    }
++
++    struct RegisteredGraphWire {
++        pointer: *const c_char,
++        text: String,
++        grant_pending: bool,
++    }
++
++    impl RegisteredGraphWire {
++        fn capture(handle: u64) -> Self {
++            let mut result = CaptureResultOwner::new(thaw_js_capture_handle_graph_result(handle));
++            assert!(result.error.is_null(), "real capture failed: {}", result.error.to_string_lossy());
++            assert!(!result.value.is_null(), "capture returned no registered wire");
++            let mut wire = Self { pointer: result.take_value(), text: String::new(), grant_pending: true };
++            wire.text = unsafe { CStr::from_ptr(wire.pointer) }.to_str()
++                .expect("wire is ASCII/UTF-8").to_owned();
++            wire
++        }
++
++        fn decode(&mut self) -> OwnedJson {
++            // The real decoder consumes the registered one-shot grant even
++            // when it returns its documented failure Null.
++            let decoded = OwnedJson::new(unsafe { thaw_json_graph_decode(self.pointer) });
++            self.grant_pending = false;
++            decoded
++        }
++
++        fn discard(&mut self) {
++            if self.grant_pending {
++                unsafe { thaw_json_discard_graph_wire(self.pointer) };
++                self.grant_pending = false;
++            }
++        }
++    }
++
++    impl Drop for RegisteredGraphWire {
++        fn drop(&mut self) {
++            if self.grant_pending { self.discard(); }
++            free_c_string(self.pointer);
++        }
++    }
++
++    fn assert_forced_packet(text: &str, handle: u64) {
++        let expected = format!(
++            r#"{{"root":{{"r":0}},"nodes":[{{"hdl":{handle}}}],"leases":[{handle}],"napiLeases":[]}}"#
++        );
++        assert_eq!(text, expected.as_str(), "forced-root producer uses the exact fixed packet bytes");
++        let graph: serde_json::Value = serde_json::from_str(text)
++            .expect("actual capture wire parses");
++        assert_eq!(graph.as_object().map(serde_json::Map::len), Some(4));
++        assert_eq!(graph.get("root"), Some(&serde_json::json!({"r": 0})));
++        let nodes = graph.get("nodes").and_then(serde_json::Value::as_array)
++            .expect("nodes array");
++        assert_eq!(nodes.len(), 1);
++        let node = nodes[0].as_object().expect("one handle node");
++        assert_eq!(node.len(), 1, "forced node has only hdl");
++        assert_eq!(node.get("hdl").and_then(serde_json::Value::as_u64), Some(handle));
++        assert!(handle > 0 && handle <= 9_007_199_254_740_991);
++        assert_eq!(graph.get("leases").and_then(serde_json::Value::as_array)
++            .map(|leases| leases.iter().filter_map(serde_json::Value::as_u64).collect::<Vec<_>>()),
++            Some(vec![handle]));
++        assert_eq!(graph.get("napiLeases").and_then(serde_json::Value::as_array)
++            .map(Vec::len), Some(0));
++    }
++
++    fn decode_and_assert_type(handle: u64, expected_type: &str) -> OwnedJson {
++        let (before_count, before_live) = registry_state(handle);
++        assert!(before_live && before_count > 0, "input O is live before capture");
++        let mut wire = RegisteredGraphWire::capture(handle);
++        assert_forced_packet(&wire.text, handle);
++        assert_eq!(registry_state(handle), (before_count + 1, true), "capture adds exactly P to O");
++        let decoded = wire.decode();
++        assert!(!decoded.is_null(), "real std decoder returned a Box");
++        assert_eq!(unsafe { thaw_json_take_graph_error() }, 0);
++        let actual = unsafe { CStr::from_ptr(thaw_json_typeof(decoded.as_ptr())) }
++            .to_str().expect("static typeof text");
++        assert_eq!(actual, expected_type);
++        assert_eq!(registry_state(handle), (before_count + 1, true), "D replaces P after decode");
++        decoded
++    }
++
++    fn destroy_value(value: OwnedJson) { drop(value); }
++
++    fn take_host_error_text() -> Option<String> {
++        let value = OwnedText::new(unsafe { thaw_json_take_host_error() });
++        if value.is_null() { None } else { Some(value.to_string_lossy()) }
++    }
++
++    fn release_input(handle: u64) {
++        let (before_count, before_live) = registry_state(handle);
++        assert!(before_live && before_count > 0, "input reference is live before retirement");
++        let released = thaw_js_release_handle(handle);
++        if released == 1 { assert!(forget_input(handle), "retire tracked original O once"); }
++        assert_eq!(released, 1, "retire original O");
++        assert_eq!(registry_state(handle), (before_count - 1, before_count > 1));
++    }
++
++    fn retire_input_in_context(ctx: &Ctx<'_>, handle: u64) -> u8 {
++        let released = release_handle_in_context(ctx, handle);
++        if released == 1 { assert!(forget_input(handle), "retire tracked original O once"); }
++        released
++    }
++
++    fn encoder_text_for_handle(handle: u64) -> String {
++        with_context(|ctx| {
++            let value = value_for_handle(&ctx, handle).expect("live original handle");
++            let encode: Function = ctx.globals().get("__thaw_json_graph_encode_js")
++                .expect("bootstrap graph encoder");
++            encode.call((value.clone(), 0, true, false, value))
++                .expect("real forced-root encoder bytes")
++        })
++    }
++
++    fn release_encoder_leases(text: &str) -> Result<(), String> {
++        let graph: serde_json::Value = serde_json::from_str(text)
++            .map_err(|error| format!("cannot parse unregistered encoder packet during teardown: {error}"))?;
++        for handle in graph.get("leases").and_then(serde_json::Value::as_array)
++            .into_iter().flatten().filter_map(serde_json::Value::as_u64)
++        {
++            if handle != 0 && thaw_js_release_handle(handle) != 1 {
++                return Err(format!("producer lease {handle} did not retire once"));
++            }
++        }
++        Ok(())
++    }
++
++    struct UnregisteredEncodedPacket {
++        text: String,
++        transferred: bool,
++    }
++
++    impl UnregisteredEncodedPacket {
++        fn new(text: String) -> Self { Self { text, transferred: false } }
++        fn as_str(&self) -> &str { &self.text }
++        fn transfer_to_registration_helper(&mut self) { self.transferred = true; }
++    }
++
++    impl Drop for UnregisteredEncodedPacket {
++        fn drop(&mut self) {
++            if !self.transferred {
++                if let Err(error) = release_encoder_leases(&self.text) {
++                    eprintln!("forced-root FAIL/HOLD: {error}");
++                    TEST_FIXTURE_FAILURES.with(|failures| failures.borrow_mut().push("unregistered producer lease teardown failed"));
++                }
++                self.transferred = true;
++            }
++        }
++    }
++
++    struct EvalRestore {
++        source: &'static str,
++        armed: bool,
++        faulted_handles_slot: bool,
++    }
++
++    impl EvalRestore {
++        fn restore(&mut self) -> bool {
++            if !self.armed { return true; }
++            match with_context(|ctx| ctx.eval::<(), _>(self.source)) {
++                Ok(()) => {
++                    self.armed = false;
++                    FIXTURE_STATE_UNRESTORED.with(|active| active.set(false));
++                    if self.faulted_handles_slot {
++                        HANDLES_SLOT_FAULT_UNRESTORED.with(|active| active.set(false));
++                    }
++                    true
++                }
++                Err(_) => {
++                    TEST_FIXTURE_FAILURES.with(|failures| failures.borrow_mut().push(self.source));
++                    false
++                }
++            }
++        }
++    }
++
++    impl Drop for EvalRestore {
++        fn drop(&mut self) {
++            if self.armed {
++                let restored = with_context(|ctx| {
++                    // Clear any test-only pending exception first so the
++                    // pre-created descriptor-restoration function can run.
++                    drop(ctx.catch());
++                    ctx.eval::<(), _>(self.source)
++                });
++                match restored {
++                    Ok(()) => {
++                        self.armed = false;
++                        FIXTURE_STATE_UNRESTORED.with(|active| active.set(false));
++                        if self.faulted_handles_slot {
++                            HANDLES_SLOT_FAULT_UNRESTORED.with(|active| active.set(false));
++                        }
++                    }
++                    Err(error) => {
++                        TEST_FIXTURE_FAILURES.with(|failures| failures.borrow_mut().push(self.source));
++                        FIXTURE_STATE_UNRESTORED.with(|active| active.set(true));
++                        if self.faulted_handles_slot {
++                            HANDLES_SLOT_FAULT_UNRESTORED.with(|active| active.set(true));
++                        }
++                        eprintln!("forced-root FAIL/HOLD: could not restore fixture state: {error}");
++                    }
++                }
++            }
++        }
++    }
++
++    #[test]
++    fn forced_root_transfer_failure_rolls_back_once() {
++        std::thread::spawn(|| {
++            let _inputs = TestInputScope::new();
++            install_real_host_callbacks();
++
++            // F4(a): a released input is rejected before any producer P can
++            // be acquired or registered.
++            let released = retain_source("({released: true})");
++            release_input(released);
++            let failed = CaptureResultOwner::new(thaw_js_capture_handle_graph_result(released));
++            assert!(failed.value.is_null());
++            assert!(!failed.error.is_null());
++            drop(failed);
++            assert_eq!(registry_state(released), (0, false));
++
++            // F4(b): fail only the actual refs-array increment, then restore
++            // its exact own data descriptor before reading the count again.
++            let restricted = retain_source("({restricted: true})");
++            let saved = eval_bool(&format!("(() => {{ const a=globalThis.__thaw_value_handle_refs; const i={}; const d=Object.getOwnPropertyDescriptor(a,i); if(!d || !('value' in d) || !d.writable) return false; globalThis.__fr_saved_refs_descriptor=d; globalThis.__fr_restore_refs_slot=()=>{{Object.defineProperty(a,i,globalThis.__fr_saved_refs_descriptor); delete globalThis.__fr_restore_refs_slot; delete globalThis.__fr_saved_refs_descriptor;}}; Object.defineProperty(a,i,{{...d,writable:false}}); return true; }})()", restricted - 1));
++            assert!(saved, "refs slot must be a writable own data property before the fault");
++            let mut restore_refs = EvalRestore {
++                source: "globalThis.__fr_restore_refs_slot()",
++                armed: true,
++                faulted_handles_slot: false,
++            };
++            let failed = CaptureResultOwner::new(thaw_js_capture_handle_graph_result(restricted));
++            assert!(failed.value.is_null(), "failed P retain cannot escape as a packet");
++            assert!(!failed.error.is_null());
++            drop(failed);
++            if !restore_refs.restore() { return; }
++            assert_eq!(registry_state(restricted), (1, true), "O is unchanged after failed retain");
++            release_input(restricted);
++
++            // F4(c): get bytes from the real encoder and let the real
++            // registration helper inject its documented false-registration
++            // outcome. The helper owns the actual P rollback.
++            let registration = retain_source("({registration: true})");
++            let mut actual_wire = UnregisteredEncodedPacket::new(encoder_text_for_handle(registration));
++            assert_forced_packet(actual_wire.as_str(), registration);
++            assert_eq!(registry_state(registration), (2, true));
++            actual_wire.transfer_to_registration_helper();
++            assert!(owned_graph_wire_with_registration(actual_wire.as_str(), |_| false).is_null());
++            assert_eq!(registry_state(registration), (1, true), "only P was retired");
++            release_input(registration);
++
++            // F4(d): the registered decoder grant is one-shot even when a
++            // discard is repeated; this exercises its actual lease list.
++            let discarded = retain_source("({discarded: true})");
++            let mut wire = RegisteredGraphWire::capture(discarded);
++            assert_forced_packet(&wire.text, discarded);
++            assert_eq!(registry_state(discarded), (2, true));
++            unsafe { thaw_json_discard_graph_wire(wire.pointer); }
++            wire.grant_pending = false;
++            assert_eq!(registry_state(discarded), (1, true));
++            unsafe { thaw_json_discard_graph_wire(wire.pointer); }
++            assert_eq!(registry_state(discarded), (1, true), "second discard is inert");
++            drop(wire);
++            release_input(discarded);
++
++            // F4(e): mutate only the live bytes. The decoder must reject the
++            // snapshot mismatch but clean P from the registered snapshot.
++            let mutated = retain_source("({snapshot: true})");
++            let mut wire = RegisteredGraphWire::capture(mutated);
++            assert_forced_packet(&wire.text, mutated);
++            unsafe { *(wire.pointer as *mut c_char) = b'[' as c_char; }
++            let failed_box = wire.decode();
++            assert!(!failed_box.is_null());
++            assert_eq!(unsafe { thaw_json_take_graph_error() }, 1);
++            assert_eq!(registry_state(mutated), (1, true), "snapshot cleanup retires P once");
++            destroy_value(failed_box);
++            assert_eq!(registry_state(mutated), (1, true), "failure Null owns no D");
++            drop(wire);
++            release_input(mutated);
++
++            // F4(f): the accepted asymmetric negative. Set up the exact
++            // restoration function and sentinel before faulting one handles
++            // slot. O and P are both live; refs/live remain writable data.
++            let asymmetric = retain_source("({asymmetric: true})");
++            let mut wire = RegisteredGraphWire::capture(asymmetric);
++            assert_forced_packet(&wire.text, asymmetric);
++            assert_eq!(registry_state(asymmetric), (2, true));
++            assert!(eval_bool(&format!("(() => {{ const i={}; const h=globalThis.__thaw_value_handles; const r=globalThis.__thaw_value_handle_refs; const l=globalThis.__thaw_value_handle_live; const d=Object.getOwnPropertyDescriptor(h,i); const rd=Object.getOwnPropertyDescriptor(r,i); const ld=Object.getOwnPropertyDescriptor(l,i); if(!d || !('value' in d) || !d.configurable || !rd || !('value' in rd) || !rd.writable || !ld || !('value' in ld) || !ld.writable || r[i]!==2 || l[i]!==true) return false; globalThis.__fr_saved_handles_descriptor=d; globalThis.__fr_fault_reads=0; globalThis.__fr_fault_sentinel={{tag:'forced-root-handles-slot-fault'}}; globalThis.__fr_restore_handles_slot=()=>{{Object.defineProperty(h,i,globalThis.__fr_saved_handles_descriptor); delete globalThis.__fr_restore_handles_slot; delete globalThis.__fr_saved_handles_descriptor; delete globalThis.__fr_fault_sentinel; delete globalThis.__fr_fault_reads;}}; Object.defineProperty(h,i,{{configurable:true,enumerable:d.enumerable,get(){{globalThis.__fr_fault_reads++; throw globalThis.__fr_fault_sentinel;}}}}); return true; }})()", asymmetric - 1)), "only a configurable handles data slot may be faulted");
++            let mut restore_handles = EvalRestore {
++                source: "globalThis.__fr_restore_handles_slot()",
++                armed: true,
++                faulted_handles_slot: true,
++            };
++            HANDLES_SLOT_FAULT_UNRESTORED.with(|active| active.set(true));
++            let failure_box = wire.decode();
++            assert!(!failure_box.is_null());
++            let during_fault = registry_state(asymmetric);
++            let fault_reads: u64 = with_context(|ctx| ctx.globals().get("__fr_fault_reads")
++                .expect("read isolated getter counter without running another JS operation"));
++            let graph_error = unsafe { thaw_json_take_graph_error() };
++            assert_eq!(during_fault, (1, true), "real decoder cleanup takes refs 2 to 1");
++            assert_eq!(fault_reads, 1, "real retain callback hits only the throwing slot");
++            assert_eq!(graph_error, 1);
++            let sentinel_seen = with_context(|ctx| {
++                let caught = ctx.catch();
++                let sentinel: Value = ctx.globals().get("__fr_fault_sentinel")
++                    .expect("pre-created sentinel");
++                let object: Object = ctx.globals().get("Object").expect("Object intrinsic");
++                let object_is: Function = object.get("is").expect("Object.is");
++                object_is.call::<_, bool>((caught, sentinel)).expect("compare caught identity")
++            });
++            assert!(sentinel_seen, "the real callback's pending getter exception is drained by identity");
++            if !restore_handles.restore() { return; }
++            assert_eq!(registry_state(asymmetric), (1, true), "descriptor is restored before O lookup");
++            with_context(|ctx| {
++                let original = value_for_handle(&ctx, asymmetric)
++                    .expect("restored descriptor recovers original O");
++                let duplicate = retain_value(&ctx, original).expect("same original identity");
++                record_input(duplicate);
++                assert_eq!(duplicate, asymmetric);
++                assert_eq!(retire_input_in_context(&ctx, duplicate), 1);
++            });
++            destroy_value(failure_box);
++            drop(wire); // its grant was consumed by the decoder
++            release_input(asymmetric);
++
++            // F4(g): expose the real writable Host-query boundary. There is
++            // deliberately no substitute/default-safe callback in this test.
++            let query_override = retain_source("({queryOverride: true})");
++            let mut wire = RegisteredGraphWire::capture(query_override);
++            assert_forced_packet(&wire.text, query_override);
++            assert!(eval_bool("(() => { globalThis.__fr_saved_query_descriptor=Object.getOwnPropertyDescriptor(globalThis,'__thaw_json_host_query'); if(!globalThis.__fr_saved_query_descriptor) return false; globalThis.__fr_restore_query=()=>{Object.defineProperty(globalThis,'__thaw_json_host_query',globalThis.__fr_saved_query_descriptor); delete globalThis.__fr_saved_query_descriptor; delete globalThis.__fr_restore_query;}; Object.defineProperty(globalThis,'__thaw_json_host_query',{...globalThis.__fr_saved_query_descriptor,value(){throw new Error('forced-root query override');}}); return true; })()"));
++            let mut restore_query = EvalRestore {
++                source: "globalThis.__fr_restore_query()",
++                armed: true,
++                faulted_handles_slot: false,
++            };
++            let failed = wire.decode();
++            assert!(!failed.is_null());
++            assert_eq!(unsafe { thaw_json_take_graph_error() }, 1);
++            assert!(take_host_error_text().is_some(), "actual query error is visible");
++            assert_eq!(registry_state(query_override), (1, true), "failed D and P are each retired");
++            if !restore_query.restore() { return; }
++            destroy_value(failed);
++            drop(wire);
++            release_input(query_override);
++        }).join().unwrap();
++    }
++
++    #[test]
++    fn forced_root_decoded_lease_outlives_consumed_input_and_root() {
++        std::thread::spawn(|| {
++            let _inputs = TestInputScope::new();
++            install_real_host_callbacks();
++            // R6 HOLD: this exercises the actual std-to-QuickJS release
++            // callback outside with_context, but it does not prove recursive
++            // same-grant cleanup/reentry. The pinned production route has no
++            // safe source-backed fixture here, so no fake callback is used.
++            for consume_original in [false, true] {
++                let handle = retain_source("({value: 41})");
++                let mut first_wire = RegisteredGraphWire::capture(handle);
++                let mut second_wire = RegisteredGraphWire::capture(handle);
++                assert_forced_packet(&first_wire.text, handle);
++                assert_forced_packet(&second_wire.text, handle);
++                assert_eq!(registry_state(handle), (3, true), "O plus independent P1/P2");
++
++                if consume_original {
++                    release_input(handle);
++                    assert_eq!(registry_state(handle), (2, true), "caller consumes O after capture, before decode");
++                }
++
++                let first = first_wire.decode();
++                assert!(!first.is_null());
++                assert_eq!(unsafe { thaw_json_take_graph_error() }, 0);
++                assert_eq!(registry_state(handle), if consume_original { (2, true) } else { (3, true) }, "D1 replaces P1");
++                let first = first.track_arena_root().expect("root tracker preserves D1 Box");
++                assert!(!first.is_null());
++                assert_eq!(registry_state(handle), if consume_original { (2, true) } else { (3, true) },
++                    "successful root tracking adds no registry claim");
++                let second = second_wire.decode();
++                assert!(!second.is_null());
++                assert_eq!(unsafe { thaw_json_take_graph_error() }, 0);
++                assert_eq!(registry_state(handle), if consume_original { (2, true) } else { (3, true) }, "D2 replaces P2");
++                let second = second.track_arena_root().expect("root tracker preserves D2 Box");
++                assert!(!second.is_null());
++                assert_eq!(registry_state(handle), if consume_original { (2, true) } else { (3, true) },
++                    "successful second root tracking adds no registry claim");
++                assert_eq!(unsafe { thaw_json_borrowed_handle_id(first.as_ptr()) }, handle);
++                assert_eq!(unsafe { thaw_json_borrowed_handle_id(second.as_ptr()) }, handle);
++
++                let first_clone = OwnedJson::new(unsafe { thaw_json_clone(first.as_ptr()) });
++                let first_clone = first_clone.track_arena_root().expect("root tracker preserves cloned Box");
++                assert!(!first_clone.is_null());
++                assert_eq!(registry_state(handle), if consume_original { (2, true) } else { (3, true) },
++                    "cloning this Host lease shares its Rc without another registry retain");
++                assert_eq!(unsafe { thaw_json_strict_equal(first.as_ptr(), first_clone.as_ptr()) }, 1);
++                destroy_value(first);
++                let key = CString::new("value").unwrap();
++                let still_live = OwnedJson::new(unsafe { thaw_json_get(first_clone.as_ptr(), key.as_ptr()) });
++                assert_eq!(unsafe { thaw_json_as_number(still_live.as_ptr()) }, 41.0,
++                    "the last surviving alias still reaches the real JS object");
++                destroy_value(still_live);
++                assert_eq!(registry_state(handle), if consume_original { (2, true) } else { (3, true) },
++                    "first Box retirement leaves its cloned Host lease alive");
++                destroy_value(first_clone);
++                assert_eq!(registry_state(handle), if consume_original { (1, true) } else { (2, true) },
++                    "last owner of D1 retires one shared lease");
++
++                let second_value = OwnedJson::new(unsafe { thaw_json_get(second.as_ptr(), key.as_ptr()) });
++                assert_eq!(unsafe { thaw_json_as_number(second_value.as_ptr()) }, 41.0,
++                    "independent D2 remains live after D1 teardown");
++                destroy_value(second_value);
++                destroy_value(second);
++                assert_eq!(registry_state(handle), if consume_original { (0, false) } else { (1, true) },
++                    "final D2 destruction retires its one lease");
++                drop(first_wire);
++                drop(second_wire);
++                if !consume_original { release_input(handle); }
++            }
++        }).join().unwrap();
++    }
++
++    #[test]
++    fn forced_root_guard_preserves_other_graph_modes() {
++        std::thread::spawn(|| {
++            let _inputs = TestInputScope::new();
++            install_real_host_callbacks();
++            // Packet owners live outside the active QuickJS context borrow.
++            // A later encode failure unwinds the context closure first, then
++            // retires earlier P claims through the real callback route.
++            let mut packets: Vec<UnregisteredEncodedPacket> = Vec::with_capacity(11);
++            with_context(|ctx| {
++                let encode: Function = ctx.globals().get("__thaw_json_graph_encode_js")
++                    .expect("bootstrap graph encoder");
++                let root: Value = ctx.eval("({x:1})").expect("object source");
++                let other: Value = ctx.eval("({})").expect("nonmatching force value");
++                let nested_pair: Array = ctx.eval("(() => { const value={}; return [[value],value]; })()")
++                    .expect("nested receiver and separate forced value");
++                let nested: Value = nested_pair.get(0).expect("nested receiver array");
++                let nested_force: Value = nested_pair.get(1).expect("nested forced value");
++                let masked: Value = ctx.eval("[{}]").expect("masked source");
++                let scalar: Value = ctx.eval("'scalar'").expect("scalar source");
++                let mask_match: Value = ctx.eval("[{}]").expect("matching mask root");
++                let nonlive_match: Value = ctx.eval("({nonlive: true})").expect("matching non-live root");
++                let plain_match: Value = ctx.eval("({plain: true})").expect("matching plain root");
++                packets.push(UnregisteredEncodedPacket::new(encode.call((root.clone(), 0, true, false))
++                    .expect("omitted force mode")));
++                packets.push(UnregisteredEncodedPacket::new(encode.call((root.clone(), 0, true, false, other))
++                    .expect("nonmatching root/force mode")));
++                packets.push(UnregisteredEncodedPacket::new(encode.call((nested, 0, true, false, nested_force))
++                    .expect("nested force mode")));
++                packets.push(UnregisteredEncodedPacket::new(encode.call((masked, 1, false, false))
++                    .expect("nonzero mask mode")));
++                packets.push(UnregisteredEncodedPacket::new(encode.call((root.clone(), 0, false, false))
++                    .expect("non-live mode")));
++                packets.push(UnregisteredEncodedPacket::new(encode.call((root, 0, true, true))
++                    .expect("plain-result mode")));
++                packets.push(UnregisteredEncodedPacket::new(encode.call((scalar.clone(), 0, true, false))
++                    .expect("ordinary scalar mode")));
++                // Each exact root===force case holds the other guard fields
++                // constant so mask, live, plain-result and type exclusions
++                // are independently exercised against baseline token output.
++                packets.push(UnregisteredEncodedPacket::new(encode.call((
++                    mask_match.clone(), 1, true, false, mask_match,
++                )).expect("matching root with only nonzero-mask exclusion")));
++                packets.push(UnregisteredEncodedPacket::new(encode.call((
++                    nonlive_match.clone(), 0, false, false, nonlive_match,
++                )).expect("matching root with only non-live exclusion")));
++                packets.push(UnregisteredEncodedPacket::new(encode.call((
++                    plain_match.clone(), 0, true, true, plain_match,
++                )).expect("matching root with only plain-result exclusion")));
++                packets.push(UnregisteredEncodedPacket::new(encode.call((
++                    scalar.clone(), 0, true, false, scalar,
++                )).expect("matching scalar force excluded by root type")));
++            });
++
++            let ordinary = r#"{"root":{"r":0},"nodes":[{"o":[["x",{"v":1},7]]}],"leases":[],"napiLeases":[]}"#;
++            assert_eq!(packets[0].as_str(), ordinary, "omitted force keeps ordinary bytes");
++            assert_eq!(packets[1].as_str(), ordinary, "nonmatching force keeps ordinary bytes");
++            assert_eq!(packets[4].as_str(), ordinary, "non-live ordinary object stays unchanged");
++            assert_eq!(packets[5].as_str(), ordinary, "plain object mode retains its existing bytes");
++            assert_eq!(packets[6].as_str(), r#"{"root":{"v":"scalar"},"nodes":[],"leases":[],"napiLeases":[]}"#);
++
++            let nested: serde_json::Value = serde_json::from_str(packets[2].as_str()).unwrap();
++            assert_eq!(nested.get("root"), Some(&serde_json::json!({"r": 0})));
++            let nested_leases = nested.get("leases").and_then(serde_json::Value::as_array).unwrap();
++            assert_eq!(nested_leases.len(), 2, "entry and own property each transfer a lease");
++            let nested_handle = nested_leases[0].as_u64().expect("numeric handle lease");
++            assert_eq!(nested_leases[1].as_u64(), Some(nested_handle), "both nested tokens reuse canonical H");
++            assert_eq!(packets[2].as_str(), format!(
++                r#"{{"root":{{"r":0}},"nodes":[{{"a":[{{"hdl":{nested_handle}}}],"p":[["0",{{"hdl":{nested_handle}}},7],["length",{{"v":1}},1]]}}],"leases":[{nested_handle},{nested_handle}],"napiLeases":[]}}"#
++            ));
++
++            let masked: serde_json::Value = serde_json::from_str(packets[3].as_str()).unwrap();
++            let masked_leases = masked.get("leases").and_then(serde_json::Value::as_array).unwrap();
++            assert_eq!(masked_leases.len(), 1);
++            let masked_handle = masked_leases[0].as_u64().expect("masked handle lease");
++            assert_eq!(packets[3].as_str(), format!(
++                r#"{{"root":{{"r":0}},"nodes":[{{"a":[{{"r":1}}],"p":[["0",{{"r":1}},7],["length",{{"v":1}},1]}},{{"hdl":{masked_handle}}}],"leases":[{masked_handle}],"napiLeases":[]}}"#
++            ));
++
++            for index in 7..=10 {
++                let graph: serde_json::Value = serde_json::from_str(packets[index].as_str()).unwrap();
++                let root_handle = graph.get("root").and_then(|root| root.get("hdl"))
++                    .and_then(serde_json::Value::as_u64).expect("matching root remains the baseline direct hdl token");
++                assert_eq!(graph.get("nodes").and_then(serde_json::Value::as_array).map(Vec::len), Some(0));
++                assert_eq!(graph.get("leases").and_then(serde_json::Value::as_array)
++                    .map(|leases| leases.iter().filter_map(serde_json::Value::as_u64).collect::<Vec<_>>()),
++                    Some(vec![root_handle]));
++                assert_eq!(packets[index].as_str(), format!(
++                    r#"{{"root":{{"hdl":{root_handle}}},"nodes":[],"leases":[{root_handle}],"napiLeases":[]}}"#
++                ));
++            }
++
++            // Each packet guard releases every real producer claim exactly
++            // once, including nested same-H multiplicity, before O cleanup.
++            drop(packets);
++
++            // The scalar input route is the real capture API's four-argument
++            // ordinary encoder call, not the forced-root fast path.
++            let scalar_handle = retain_source("'scalar'");
++            let mut scalar_wire = RegisteredGraphWire::capture(scalar_handle);
++            assert_eq!(scalar_wire.text,
++                r#"{"root":{"v":"scalar"},"nodes":[],"leases":[],"napiLeases":[]}"#);
++            let scalar_value = scalar_wire.decode();
++            assert!(!scalar_value.is_null());
++            assert_eq!(unsafe { thaw_json_take_graph_error() }, 0);
++            assert_eq!(unsafe { CStr::from_ptr(thaw_json_typeof(scalar_value.as_ptr())) }.to_bytes(), b"string");
++            assert_eq!(registry_state(scalar_handle), (1, true), "scalar path adds no Host lease");
++            destroy_value(scalar_value);
++            drop(scalar_wire);
++            release_input(scalar_handle);
++        }).join().unwrap();
++    }
++
++    #[test]
++    fn forced_root_default_query_boundary_is_explicit() {
++        std::thread::spawn(|| {
++            let _inputs = TestInputScope::new();
++            // Missing HostOperations yields the documented marker-object
++            // decoder branch. It is not original-value projection; P needs
++            // explicit fixture cleanup because no real release callback is
++            // registered in this isolated child thread.
++            std::thread::spawn(|| {
++                let _inputs = TestInputScope::new();
++                let marker_handle = retain_source("({markerOnly: true})");
++                let mut marker_wire = RegisteredGraphWire::capture(marker_handle);
++                assert_forced_packet(&marker_wire.text, marker_handle);
++                let marker = marker_wire.decode();
++                assert!(!marker.is_null());
++                assert_eq!(unsafe { thaw_json_take_graph_error() }, 0);
++                assert_eq!(unsafe { thaw_json_borrowed_handle_id(marker.as_ptr()) }, 0,
++                    "marker object is not a successful projection of the original handle");
++                assert_eq!(registry_state(marker_handle), (2, true),
++                    "without HostOperations the decoder cannot retire P");
++                assert_eq!(thaw_js_release_handle(marker_handle), 1,
++                    "fixture explicitly retires unconsumed P after demonstrating the boundary");
++                destroy_value(marker);
++                drop(marker_wire);
++                release_input(marker_handle);
++            }).join().unwrap();
++
++            install_real_host_callbacks();
++            let default_query = retain_source("(() => { globalThis.__fr_default_query_gets=0; const target={}; return new Proxy(target,{get(t,k,r){__fr_default_query_gets++; return Reflect.get(t,k,r);},ownKeys(){__fr_default_query_gets++; return [];},getOwnPropertyDescriptor(){__fr_default_query_gets++; return undefined;},getPrototypeOf(){__fr_default_query_gets++; return null;}}); })()");
++            let decoded = decode_and_assert_type(default_query, "object");
++            assert!(eval_bool("__fr_default_query_gets === 0"),
++                "the actual default operation-0 query is typeof and does not inspect the root");
++            destroy_value(decoded);
++            release_input(default_query);
++
++            let overridden_query = retain_source("({override: true})");
++            let mut wire = RegisteredGraphWire::capture(overridden_query);
++            assert_forced_packet(&wire.text, overridden_query);
++            assert!(eval_bool("(() => { globalThis.__fr_saved_query_descriptor=Object.getOwnPropertyDescriptor(globalThis,'__thaw_json_host_query'); if(!globalThis.__fr_saved_query_descriptor) return false; globalThis.__fr_restore_query=()=>{Object.defineProperty(globalThis,'__thaw_json_host_query',globalThis.__fr_saved_query_descriptor); delete globalThis.__fr_saved_query_descriptor; delete globalThis.__fr_restore_query;}; Object.defineProperty(globalThis,'__thaw_json_host_query',{...globalThis.__fr_saved_query_descriptor,value(){throw new Error('documented mutable query boundary');}}); return true; })()"));
++            let mut restore = EvalRestore {
++                source: "globalThis.__fr_restore_query()",
++                armed: true,
++                faulted_handles_slot: false,
++            };
++            let failed = wire.decode();
++            assert!(!failed.is_null());
++            assert_eq!(unsafe { thaw_json_take_graph_error() }, 1);
++            assert!(take_host_error_text().is_some());
++            assert_eq!(registry_state(overridden_query), (1, true),
++                "query failure retires the acquired D and producer P, leaving O");
++            if !restore.restore() { return; }
++            destroy_value(failed);
++            drop(wire);
++            release_input(overridden_query);
++        }).join().unwrap();
++    }
++    #[test]
++    fn forced_root_capture_packet_uses_existing_node_grammar() {
++        std::thread::spawn(|| {
++            let _inputs = TestInputScope::new();
++            install_real_host_callbacks();
++            for (source, expected) in [
++                ("({answer: 42})", "object"),
++                ("[1, 2]", "object"),
++                ("(() => 7)", "function"),
++                ("Symbol('forced-root-unique')", "symbol"),
++                ("Symbol.for('forced-root-registered')", "symbol"),
++                ("new Promise(() => {})", "object"),
++            ] {
++                let handle = retain_source(source);
++                let decoded = decode_and_assert_type(handle, expected);
++                destroy_value(decoded);
++                assert_eq!(registry_state(handle), (1, true), "destroy D preserves O");
++                release_input(handle);
++            }
++        }).join().unwrap();
++    }
++
++    #[test]
++    fn forced_root_capture_preserves_identity_aliases_and_liveness() {
++        std::thread::spawn(|| {
++            let _inputs = TestInputScope::new();
++            install_real_host_callbacks();
++            let self_handle = retain_source("(() => { const v = {value: 1}; v.self = v; return v; })()");
++            let first = decode_and_assert_type(self_handle, "object");
++            let second = decode_and_assert_type(self_handle, "object");
++            assert_eq!(unsafe { thaw_json_strict_equal(first.as_ptr(), second.as_ptr()) }, 1);
++            assert_eq!(unsafe { thaw_json_borrowed_handle_id(first.as_ptr()) }, self_handle);
++            assert_eq!(unsafe { thaw_json_borrowed_handle_id(second.as_ptr()) }, self_handle);
++            assert_eq!(registry_state(self_handle), (3, true), "O plus independent D1/D2");
++
++            let key_from_json = CString::new("fromJson").unwrap();
++            unsafe { thaw_json_object_set_number(first.as_ptr(), key_from_json.as_ptr(), 7.0) };
++            let observed_from_original = eval_bool(&format!(
++                "globalThis.__thaw_value_handles[{}].fromJson === 7",
++                self_handle - 1));
++            assert!(observed_from_original, "Json mutation reaches the exact live JS root");
++            assert!(eval_bool(&format!(
++                "(globalThis.__thaw_value_handles[{}].self === globalThis.__thaw_value_handles[{}])",
++                self_handle - 1, self_handle - 1)), "original self alias remains intact");
++            assert!(eval_bool(&format!(
++                "(globalThis.__thaw_value_handles[{}].fromJs = 9, true)", self_handle - 1)));
++            let key_from_js = CString::new("fromJs").unwrap();
++            let js_value = OwnedJson::new(unsafe { thaw_json_get(second.as_ptr(), key_from_js.as_ptr()) });
++            let first_value = OwnedJson::new(unsafe { thaw_json_get(first.as_ptr(), key_from_js.as_ptr()) });
++            assert_eq!(unsafe { thaw_json_strict_equal(js_value.as_ptr(), first_value.as_ptr()) }, 1,
++                "original JS mutation is visible through both Json Host aliases");
++            destroy_value(js_value);
++            destroy_value(first_value);
++
++            let object_a = retain_source("({same: 1})");
++            let object_b = retain_source("({same: 1})");
++            let function_a = retain_source("(() => 1)");
++            let function_b = retain_source("(() => 1)");
++            let symbol_a = retain_source("Symbol('same description')");
++            let symbol_b = retain_source("Symbol('same description')");
++            let registered_a = retain_source("Symbol.for('forced-root-key')");
++            let registered_b = retain_source("Symbol.for('forced-root-key')");
++            let promise_a = retain_source("new Promise(() => {})");
++            let promise_b = retain_source("new Promise(() => {})");
++            let decoded = [object_a, object_b, function_a, function_b, symbol_a, symbol_b,
++                registered_a, registered_b, promise_a, promise_b]
++                .into_iter().map(|handle| decode_and_assert_type(handle,
++                    if handle == function_a || handle == function_b { "function" }
++                    else if handle == symbol_a || handle == symbol_b
++                        || handle == registered_a || handle == registered_b { "symbol" }
++                    else { "object" }))
++                .collect::<Vec<_>>();
++            for pair in [(0, 1), (2, 3), (4, 5), (8, 9)] {
++                assert_eq!(unsafe { thaw_json_strict_equal(decoded[pair.0].as_ptr(), decoded[pair.1].as_ptr()) }, 0,
++                    "distinct objects/functions/symbols/promises stay distinct");
++            }
++            assert_eq!(unsafe { thaw_json_strict_equal(decoded[6].as_ptr(), decoded[7].as_ptr()) }, 1,
++                "repeated Symbol.for values preserve registered identity");
++
++            let repeated_promise = retain_source("new Promise(() => {})");
++            let promise_alias_1 = decode_and_assert_type(repeated_promise, "object");
++            let promise_alias_2 = decode_and_assert_type(repeated_promise, "object");
++            assert_eq!(unsafe { thaw_json_strict_equal(promise_alias_1.as_ptr(), promise_alias_2.as_ptr()) }, 1,
++                "same pending Promise remains the same object without assimilation");
++            destroy_value(promise_alias_1);
++            assert_eq!(registry_state(repeated_promise), (2, true));
++            assert_eq!(unsafe { thaw_json_strict_equal(promise_alias_2.as_ptr(), promise_alias_2.as_ptr()) }, 1);
++            destroy_value(promise_alias_2);
++
++            for value in decoded { destroy_value(value); }
++            destroy_value(first);
++            assert_eq!(registry_state(self_handle), (2, true), "D2 survives D1 retirement");
++            assert_eq!(unsafe { thaw_json_borrowed_handle_id(second.as_ptr()) }, self_handle);
++            destroy_value(second);
++            release_input(self_handle);
++            for handle in [object_a, object_b, function_a, function_b, symbol_a, symbol_b,
++                registered_a, registered_b, promise_a, promise_b, repeated_promise] {
++                release_input(handle);
++            }
++        }).join().unwrap();
++    }
++
++    #[test]
++    fn forced_root_capture_performs_no_original_value_hooks() {
++        std::thread::spawn(|| {
++            let _inputs = TestInputScope::new();
++            install_real_host_callbacks();
++            let object = retain_source("(() => { globalThis.__fr_hooks = {get:0,own:0,desc:0,proto:0,apply:0,ownGet:0,coerce:0,toJSON:0,then:0}; const target = {}; Object.defineProperty(target, 'x', {get(){__fr_hooks.ownGet++; return 1;}, configurable:true}); target.valueOf = target.toString = () => {__fr_hooks.coerce++; return 1;}; target.toJSON = () => {__fr_hooks.toJSON++; return {};}; target[Symbol.toPrimitive] = () => {__fr_hooks.coerce++; return 1;}; return new Proxy(target, {get(t,k,r){__fr_hooks.get++; return Reflect.get(t,k,r);}, ownKeys(t){__fr_hooks.own++; return Reflect.ownKeys(t);}, getOwnPropertyDescriptor(t,k){__fr_hooks.desc++; return Reflect.getOwnPropertyDescriptor(t,k);}, getPrototypeOf(t){__fr_hooks.proto++; return Reflect.getPrototypeOf(t);}}); })()");
++            let decoded_object = decode_and_assert_type(object, "object");
++            assert!(eval_bool("Object.values(__fr_hooks).every(n => n === 0)"),
++                "capture and default typeof query do not inspect the original Proxy");
++            assert!(eval_bool(&format!("globalThis.__thaw_value_handles[{}].x === 1", object - 1)));
++            assert!(eval_bool("__fr_hooks.get === 1 && __fr_hooks.ownGet === 1"),
++                "only the later explicit property read invokes its expected hooks");
++            destroy_value(decoded_object);
++            release_input(object);
++
++            let callable = retain_source("(() => { globalThis.__fr_apply_count = 0; const f = function(){}; return new Proxy(f, {get(){__fr_apply_count++; return undefined;}, ownKeys(){__fr_apply_count++; return [];}, getOwnPropertyDescriptor(){__fr_apply_count++; return undefined;}, getPrototypeOf(){__fr_apply_count++; return null;}, apply(){__fr_apply_count++; return undefined;}}); })()");
++            let decoded_callable = decode_and_assert_type(callable, "function");
++            assert!(eval_bool("__fr_apply_count === 0"), "function Proxy is neither inspected nor called");
++            destroy_value(decoded_callable);
++            release_input(callable);
++
++            let pending = retain_source("(() => { globalThis.__fr_then_count = 0; const p = new Promise(() => {}); Object.defineProperty(p, 'then', {configurable:true, get(){__fr_then_count++; return function(){__fr_then_count++;};}}); return p; })()");
++            let decoded_pending = decode_and_assert_type(pending, "object");
++            assert!(eval_bool("__fr_then_count === 0"), "pending Promise is not subscribed or assimilated");
++            destroy_value(decoded_pending);
++            release_input(pending);
++
++            let revoked = retain_source("(() => { const pair = Proxy.revocable({}, {}); pair.revoke(); return pair.proxy; })()");
++            let decoded_revoked = decode_and_assert_type(revoked, "object");
++            assert_eq!(unsafe { thaw_json_borrowed_handle_id(decoded_revoked.as_ptr()) }, revoked);
++            destroy_value(decoded_revoked);
++            release_input(revoked);
++        }).join().unwrap();
++    }
++
++    #[test]
++    fn forced_root_packet_ignores_replaced_intrinsics_and_metadata_hooks() {
++        std::thread::spawn(|| {
++            let _inputs = TestInputScope::new();
++            install_real_host_callbacks();
++            let handle = retain_source("({x: 3})");
++            let installed = eval_bool("(() => { globalThis.__fr_saved = {String:globalThis.String, stringify:JSON.stringify, push:Array.prototype.push, retain:globalThis.__thaw_retain_dynamic_value, release:globalThis.__thaw_release_dynamic_value, objectToJSON:Object.getOwnPropertyDescriptor(Object.prototype,'toJSON'), arrayToJSON:Object.getOwnPropertyDescriptor(Array.prototype,'toJSON')}; globalThis.__fr_hook_count=0; const fail=()=>{throw new Error('replaced intrinsic used');}; globalThis.String=fail; JSON.stringify=fail; Array.prototype.push=fail; globalThis.__thaw_retain_dynamic_value=fail; globalThis.__thaw_release_dynamic_value=fail; Object.defineProperty(Object.prototype,'toJSON',{configurable:true,get(){__fr_hook_count++; return fail;}}); Object.defineProperty(Array.prototype,'toJSON',{configurable:true,get(){__fr_hook_count++; return fail;}}); return true; })()");
++            assert!(installed);
++            let mut restore_intrinsics = EvalRestore {
++                source: "(() => { const s=globalThis.__fr_saved; globalThis.String=s.String; JSON.stringify=s.stringify; Array.prototype.push=s.push; globalThis.__thaw_retain_dynamic_value=s.retain; globalThis.__thaw_release_dynamic_value=s.release; if (s.objectToJSON) Object.defineProperty(Object.prototype,'toJSON',s.objectToJSON); else delete Object.prototype.toJSON; if (s.arrayToJSON) Object.defineProperty(Array.prototype,'toJSON',s.arrayToJSON); else delete Array.prototype.toJSON; delete globalThis.__fr_saved; })()",
++                armed: true,
++                faulted_handles_slot: false,
++            };
++            let mut wire = RegisteredGraphWire::capture(handle);
++            assert_forced_packet(&wire.text, handle);
++            assert_eq!(registry_state(handle), (2, true), "O+P before default decode");
++            let decoded = wire.decode();
++            assert_eq!(unsafe { thaw_json_take_graph_error() }, 0);
++            assert!(eval_bool("__fr_hook_count === 0"), "prototype JSON hooks stay untouched");
++            assert_eq!(registry_state(handle), (2, true), "O+D after default decode");
++            destroy_value(decoded);
++            assert_eq!(registry_state(handle), (1, true));
++            drop(wire);
++            if !restore_intrinsics.restore() { return; }
++            assert_eq!(registry_state(handle), (1, true), "restoration leaves only O");
++
++            // The registry's canonical index is an existing own data slot.
++            // A fresh empty encoder array would hit this inherited index-0
++            // setter if the new producer assembled leases through Array.push.
++            assert!(eval_bool(&format!("(() => {{ const a=globalThis.__thaw_value_handles; const d=Object.getOwnPropertyDescriptor(a,{}); return !!d && Object.prototype.hasOwnProperty.call(d,'value'); }})()", handle - 1)),
++                "canonical registry index must already be an own data property");
++            assert!(eval_bool("(() => { globalThis.__fr_index_setter_hits=0; globalThis.__fr_saved_index0_descriptor=Object.getOwnPropertyDescriptor(Array.prototype,'0'); Object.defineProperty(Array.prototype,'0',{configurable:true, set(){__fr_index_setter_hits++;}}); return true; })()"));
++            let mut restore_index_setter = EvalRestore {
++                source: "(() => { const d=globalThis.__fr_saved_index0_descriptor; if(d) Object.defineProperty(Array.prototype,'0',d); else delete Array.prototype[0]; delete globalThis.__fr_saved_index0_descriptor; delete globalThis.__fr_index_setter_hits; })()",
++                armed: true,
++                faulted_handles_slot: false,
++            };
++            assert_eq!(registry_state(handle), (1, true), "O before inherited-setter capture");
++            let mut second = RegisteredGraphWire::capture(handle);
++            assert_forced_packet(&second.text, handle);
++            assert_eq!(registry_state(handle), (2, true), "O+P after setter capture");
++            let second_value = second.decode();
++            assert_eq!(unsafe { thaw_json_take_graph_error() }, 0);
++            assert_eq!(registry_state(handle), (2, true), "O+D after setter decode");
++            assert!(eval_bool("__fr_index_setter_hits === 0"), "packet assembly never writes inherited index 0");
++            destroy_value(second_value);
++            drop(second);
++            assert_eq!(registry_state(handle), (1, true), "O remains after decoded D retirement");
++            if !restore_index_setter.restore() { return; }
++            release_input(handle);
++            assert_eq!(registry_state(handle), (0, false), "final O retirement reaches zero");
++        }).join().unwrap();
++    }
++}
+diff --git a/crates/thaw-quickjs/src/quickjs/platform_globals/runtime.js b/crates/thaw-quickjs/src/quickjs/platform_globals/runtime.js
+index 73eeee5f1df8a84b65fd5b088c374aa0a6e1521e..d0985050533b44a564aa9c87221a31e9e4f1e273 100644
+--- a/crates/thaw-quickjs/src/quickjs/platform_globals/runtime.js
++++ b/crates/thaw-quickjs/src/quickjs/platform_globals/runtime.js
+@@ -1018,8 +1018,9 @@
+     const handleCarriers = new thawGraphWeakMapConstructor();
+     const symbolHandles = new thawGraphMapConstructor();
+     const retained = [];
+     const retainedNapi = [];
++    let forcedRootLease = 0;
+     const retain = value => {
+       const handle = thawGraphRetain(value);
+       thawGraphApply(thawGraphArrayPush, retained, [handle]);
+       return handle;
+@@ -1037,8 +1038,20 @@
+       thawGraphApply(thawGraphArrayPush, retainedNapi, [token]);
+       return thawGraphString(handle);
+     };
+     try {
++    if (handleMask === 0 && live === true && plainResult === false
++      && forceHandle !== undefined && root === forceHandle
++      && root !== null && (typeof root === 'object' || typeof root === 'function'
++        || typeof root === 'symbol')) {
++      forcedRootLease = thawGraphRetain(root);
++      if (!thawGraphNumberIsFinite(forcedRootLease)
++        || !thawGraphNumberIsSafeInteger(forcedRootLease) || forcedRootLease <= 0)
++        throw new thawGraphTypeError('Cannot retain graph handle');
++      const handleText = thawGraphString(forcedRootLease);
++      return '{"root":{"r":0},"nodes":[{"hdl":' + handleText
++        + '}],"leases":[' + handleText + '],"napiLeases":[]}';
++    }
+     if (thawGraphArrayIsArray(root) && handleMask && !live) {
+       thawGraphApply(thawGraphArrayForEach, root, [(item, index) => {
+         if ((handleMask & (1 << index)) !== 0) {
+           const carrier = thawGraphObjectCreate(null);
+@@ -1206,8 +1219,9 @@
+     }
+     return thawGraphStringify({ root: rootToken, nodes, leases: retained,
+       napiLeases: retainedNapi });
+     } catch (error) {
++      if (forcedRootLease !== 0) thawGraphRelease(forcedRootLease);
+       for (let index = 0; index < retained.length; index++)
+         thawGraphRelease(retained[index]);
+       for (let index = 0; index < retainedNapi.length; index++)
+         thawGraphNapiRelease(retainedNapi[index]);

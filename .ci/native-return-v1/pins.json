@@ -5,8 +5,10 @@
     "cumulative-hir-v1-base.sha256": "d3b7c0e06ca053f4b342dcbc8ac1247a3460c946a35a2b22d2645c76251a2aa9",
     "cumulative-hir-v1.sha256": "0be3783d6241706ba2dd492704162aa9e0076dcc4a1de96e309eca9b512ba81c",
     "discard-v2.sha256": "c47d4ab7e4a805190e719b13b99bd7d233e24a5007afcbff6becebab9493e328",
+    "forced-root-wire-v1-base.sha256": "23da8386704a188e890bd7e591bb395ce611d45e8fbf0ad264716b5d61e3c9bf",
+    "forced-root-wire-v1.sha256": "83a99e4934c4108992f874ca75ff2ea366283fbc3c543afaf9fee6489cb95941",
     "native-base.sha256": "da86c2c16619de2e236cdd50b9d2572465fbdd4dc3b75b680cf91c6b0f6bdb72",
-    "net-owners.txt": "673d4f32930cd141ac8e3562179a9c61b0d3a8a1da55ac7c342d2914f1ed40ab",
+    "net-owners.txt": "10fbe496127766ee0cdc18e35ba019968d2d4b7c2688f37c973cd2825551d654",
     "next-hir-v1-base.sha256": "0be3783d6241706ba2dd492704162aa9e0076dcc4a1de96e309eca9b512ba81c",
     "next-hir-v1.sha256": "f8915460efcaafc82a4392d9ca6b656dc150045d5cad4458b66755ef5705635b",
     "original-native.sha256": "4e219dde2129cf5876497edd6f9032cebdbee89eded9cce20e50ecda041053ce",
@@ -31,6 +33,42 @@
     "paired_after": "compile-repairs-v1",
     "path_order": "lexical",
     "sha256": "d3b7c0e06ca053f4b342dcbc8ac1247a3460c946a35a2b22d2645c76251a2aa9"
+  },
+  "expected_full_test_names": {
+    "exact_mixed_pre_dispatch_consumes_registered_graph_grant_once": [
+      "exact_mixed_pre_dispatch_consumes_registered_graph_grant_once"
+    ],
+    "failed_exception_graph_grant_retires_producer_handle_lease": [
+      "failed_exception_graph_grant_retires_producer_handle_lease"
+    ],
+    "forced_root_": [
+      "forced_root_graph_wire_controls::forced_root_transfer_failure_rolls_back_once",
+      "forced_root_graph_wire_controls::forced_root_decoded_lease_outlives_consumed_input_and_root",
+      "forced_root_graph_wire_controls::forced_root_guard_preserves_other_graph_modes",
+      "forced_root_graph_wire_controls::forced_root_default_query_boundary_is_explicit",
+      "forced_root_graph_wire_controls::forced_root_capture_packet_uses_existing_node_grammar",
+      "forced_root_graph_wire_controls::forced_root_capture_preserves_identity_aliases_and_liveness",
+      "forced_root_graph_wire_controls::forced_root_capture_performs_no_original_value_hooks",
+      "forced_root_graph_wire_controls::forced_root_packet_ignores_replaced_intrinsics_and_metadata_hooks"
+    ],
+    "graph_codec_roundtrip_preserves_negative_zero": [
+      "graph_codec_roundtrip_preserves_negative_zero"
+    ],
+    "graph_codec_roundtrip_retains_identity_and_releases_live_lease": [
+      "graph_codec_roundtrip_retains_identity_and_releases_live_lease"
+    ],
+    "graph_codec_uses_bootstrap_intrinsics_after_global_replacement": [
+      "graph_codec_uses_bootstrap_intrinsics_after_global_replacement"
+    ],
+    "handle_registry_identity_ignores_later_object_is_override": [
+      "handle_registry_identity_ignores_later_object_is_override"
+    ],
+    "mutated_graph_wire_retires_only_registered_snapshot_leases": [
+      "json::mutated_graph_wire_retires_only_registered_snapshot_leases"
+    ],
+    "unregistered_graph_wire_cannot_transfer_napi_lease_tokens": [
+      "json::unregistered_graph_wire_cannot_transfer_napi_lease_tokens"
+    ]
   },
   "expected_test_names": {
     "error_argument_staging_": [
@@ -84,17 +122,38 @@
       "typed_decode_scope_tracks_dynamic_retains_merges_and_excludes_reentry"
     ]
   },
+  "forced_root_wire_base": {
+    "count": 183,
+    "extra_owners": [
+      {
+        "final_sha256": "be84b1a2c295c8bcc62ec41427999d75f485b90b4711e8b384424782f9e1bbf9",
+        "git_blob_sha1": "4ade648dbe5203bff00014bd7903821d595680b0",
+        "path": "crates/thaw-quickjs/src/quickjs/api.rs",
+        "sha256": "02907f79127e23ede4faea4fd89e4ac466cde76d5f4febc8831fa8b5df2d6d36"
+      },
+      {
+        "final_sha256": "bdca00a406d512f19349d41b5ac70d145a28eb0d029c5521dd9c375a68e50a81",
+        "git_blob_sha1": "73eeee5f1df8a84b65fd5b088c374aa0a6e1521e",
+        "path": "crates/thaw-quickjs/src/quickjs/platform_globals/runtime.js",
+        "sha256": "0a223f6a0934dfddba0217e342f7ed1f09242b806d313f4da26eca012cd7ee3a"
+      }
+    ],
+    "file": "forced-root-wire-v1-base.sha256",
+    "paired_after": "next-hir-v1",
+    "path_order": "lexical",
+    "sha256": "23da8386704a188e890bd7e591bb395ce611d45e8fbf0ad264716b5d61e3c9bf"
+  },
   "native_base": {
     "count": 24,
     "file": "native-base.sha256",
     "sha256": "da86c2c16619de2e236cdd50b9d2572465fbdd4dc3b75b680cf91c6b0f6bdb72"
   },
   "net_owners": {
-    "count": 54,
+    "count": 56,
     "file": "net-owners.txt",
-    "modified": 49,
+    "modified": 51,
     "new": 5,
-    "sha256": "673d4f32930cd141ac8e3562179a9c61b0d3a8a1da55ac7c342d2914f1ed40ab"
+    "sha256": "10fbe496127766ee0cdc18e35ba019968d2d4b7c2688f37c973cd2825551d654"
   },
   "next_hir_base": {
     "count": 181,
@@ -110,12 +169,14 @@
     "return-v1",
     "compile-repairs-v1",
     "cumulative-hir-v1",
-    "next-hir-v1"
+    "next-hir-v1",
+    "forced-root-wire-v1"
   ],
   "payload_patches": {
     "compile-repairs-v1.patch": "2994f62e98a4fb9cbd0b792b20da09bf505874d749447bf8f0e43776d25e0f05",
     "cumulative-hir-v1.patch": "63744b75a96ce30ff503d90379b08ec20ffbebb5f5f68716972d6c7d6f17f368",
     "discard-v2.patch": "0ffe9fcec530feb12a2ca084399643861c240cc81906c9aab4677cc529aceb39",
+    "forced-root-wire-v1.patch": "a7f04af1afa5b9d41d7a8dca984ccefba020cdd36f19175ef14a8f809a6e8683",
     "next-hir-v1.patch": "c0d4addaf22a7c7c26a133153b8298cc39013794f0263228468dddb8e0f3936b",
     "return-v1.patch": "2e2e2057925542c0790d5ec879ce94d55e3ba5798b470aa5cd85327821fd1ec8"
   },
@@ -239,6 +300,18 @@
       "name": "next-hir-v1",
       "path_order": "lexical",
       "sha256": "f8915460efcaafc82a4392d9ca6b656dc150045d5cad4458b66755ef5705635b"
+    },
+    {
+      "count": 183,
+      "extra_paths": [
+        "crates/thaw-std/src/json.rs",
+        "crates/thaw-quickjs/src/quickjs/api.rs",
+        "crates/thaw-quickjs/src/quickjs/platform_globals/runtime.js"
+      ],
+      "file": "forced-root-wire-v1.sha256",
+      "name": "forced-root-wire-v1",
+      "path_order": "lexical",
+      "sha256": "83a99e4934c4108992f874ca75ff2ea366283fbc3c543afaf9fee6489cb95941"
     }
   ],
   "subset_roots": [
@@ -370,6 +443,42 @@
     {
       "filter": "existing_native_spread_staging_mode_false_is_unchanged",
       "package": "thaw-hir"
+    },
+    {
+      "filter": "forced_root_",
+      "package": "thaw-quickjs"
+    },
+    {
+      "filter": "graph_codec_roundtrip_preserves_negative_zero",
+      "package": "thaw-quickjs"
+    },
+    {
+      "filter": "graph_codec_roundtrip_retains_identity_and_releases_live_lease",
+      "package": "thaw-quickjs"
+    },
+    {
+      "filter": "graph_codec_uses_bootstrap_intrinsics_after_global_replacement",
+      "package": "thaw-quickjs"
+    },
+    {
+      "filter": "handle_registry_identity_ignores_later_object_is_override",
+      "package": "thaw-quickjs"
+    },
+    {
+      "filter": "failed_exception_graph_grant_retires_producer_handle_lease",
+      "package": "thaw-quickjs"
+    },
+    {
+      "filter": "exact_mixed_pre_dispatch_consumes_registered_graph_grant_once",
+      "package": "thaw-quickjs"
+    },
+    {
+      "filter": "unregistered_graph_wire_cannot_transfer_napi_lease_tokens",
+      "package": "thaw-std"
+    },
+    {
+      "filter": "mutated_graph_wire_retires_only_registered_snapshot_leases",
+      "package": "thaw-std"
     }
   ],
   "validation_branch": "validation/native-return"

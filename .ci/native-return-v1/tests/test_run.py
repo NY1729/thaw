@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 
@@ -19,38 +20,160 @@ sys.path.insert(0, str(MODULE_DIR))
 try:
     run = importlib.import_module("run")
     verify = importlib.import_module("verify")
-    from test_verify import Fixture, sha, write
 except ModuleNotFoundError:
     run = None
     verify = None
-    Fixture = None
+
+
+class FullNameFilterTests(unittest.TestCase):
+    def setUp(self):
+        self.original_expected = verify.EXPECTED
+        self.temp = tempfile.TemporaryDirectory(prefix="thaw-full-name-filter-")
+        self.root = Path(self.temp.name)
+        self.evidence = self.root / "evidence"
+        self.evidence.mkdir()
+        self.candidate = self.root / "candidate"
+        self.candidate.mkdir()
+        self.target = self.root / "target"
+        self.filter_name = "forced_root_"
+        self.expected_names = [
+            "forced_root_graph_wire_controls::forced_root_transfer_failure_rolls_back_once",
+            "forced_root_graph_wire_controls::forced_root_decoded_lease_outlives_consumed_input_and_root",
+        ]
+
+    def tearDown(self):
+        verify.EXPECTED = self.original_expected
+        self.temp.cleanup()
+
+    def execute(self, listed_names):
+        def run_command(argv, cwd, env, log, timeout):
+            if "--list" in argv:
+                stdout = "".join(f"{name}: test\n" for name in listed_names) + f"{len(listed_names)} tests, 0 benchmarks\n"
+            else:
+                stdout = (
+                    f"running {len(self.expected_names)} test(s)\n"
+                    + "".join(f"test {name} ... ok\n" for name in self.expected_names)
+                    + f"test result: ok. {len(self.expected_names)} passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n"
+                )
+            return {"exit_code": 0, "stdout": stdout, "timed_out": False}
+
+        return run_command
+
+    def run_filter(self, listed_names):
+        verify.EXPECTED = dict(self.original_expected)
+        verify.EXPECTED["expected_full_test_names"] = {self.filter_name: list(self.expected_names)}
+        item = {
+            "package": "thaw-quickjs",
+            "filter": self.filter_name,
+            "status": "not-run",
+            "reason": "not started",
+            "list": run._new_stage("filter_31_list"),
+            "run": run._new_stage("filter_31_run"),
+        }
+        state = {"filters": [item]}
+        passed = run._run_filter(
+            state,
+            item,
+            31,
+            self.execute(listed_names),
+            self.evidence,
+            self.target,
+            self.candidate,
+            time.monotonic(),
+        )
+        return passed, item
+
+    def test_new_full_names_require_exact_unique_fully_qualified_list(self):
+        passed, item = self.run_filter(list(self.expected_names))
+        self.assertTrue(passed)
+        self.assertEqual(self.expected_names, item["selected_names"])
+
+        substituted = ["wrong_namespace::" + self.expected_names[0].rsplit("::", 1)[-1], self.expected_names[1]]
+        passed, item = self.run_filter(substituted)
+        self.assertFalse(passed)
+        self.assertEqual("failed", item["status"])
+        self.assertEqual("blocked", item["run"]["status"])
+
+    def test_full_name_contract_accepts_bare_crate_root_test_names(self):
+        self.filter_name = "graph_codec_roundtrip_preserves_negative_zero"
+        self.expected_names = ["graph_codec_roundtrip_preserves_negative_zero"]
+        passed, item = self.run_filter(list(self.expected_names))
+        self.assertTrue(passed)
+        self.assertEqual(self.expected_names, item["selected_names"])
 
 
 class DiagnosticRunnerTests(unittest.TestCase):
+    OLD_FILTER_COUNT = 30
+
     def require_implementation(self):
-        if run is None or verify is None or Fixture is None:
+        if run is None or verify is None:
             self.fail("run.py must expose the diagnostic gate runner and verification APIs")
         return run
 
     def setUp(self):
         self.require_implementation()
         self.temp = tempfile.TemporaryDirectory(prefix="thaw-run-test-")
-        self.fixture = Fixture(Path(self.temp.name))
-        self.fixture.activate()
-        verify.reconstruct(self.fixture.baseline, self.fixture.candidate, self.fixture.payload, self.fixture.evidence)
+        root = Path(self.temp.name)
+        self.fixture = SimpleNamespace(
+            baseline=root / "baseline",
+            candidate=root / "candidate",
+            payload=root / "payload",
+        )
+        for path in (self.fixture.baseline, self.fixture.candidate, self.fixture.payload):
+            path.mkdir(parents=True)
+        self.original_expected = verify.EXPECTED
+        self.identity_validation_patch = mock.patch.object(verify, "_validate_independent_paths", return_value=None)
+        self.prepared_identity_patch = mock.patch.object(verify, "verify_prepared", return_value={"synthetic": "identity verified"})
+        self.identity_validation_patch.start()
+        self.prepared_identity = self.prepared_identity_patch.start()
         self.old_payload_dir = run.PAYLOAD_DIR
         run.PAYLOAD_DIR = self.fixture.payload
-        self.evidence = Path(self.temp.name) / "run-evidence"
+        self.evidence = root / "run-evidence"
 
     def tearDown(self):
-        if verify is not None and hasattr(self, "fixture") and hasattr(self.fixture, "expected_before"):
-            verify.EXPECTED = self.fixture.expected_before
+        if verify is not None and hasattr(self, "original_expected"):
+            verify.EXPECTED = self.original_expected
+        if hasattr(self, "identity_validation_patch"):
+            self.identity_validation_patch.stop()
+        if hasattr(self, "prepared_identity_patch"):
+            self.prepared_identity_patch.stop()
         if run is not None and hasattr(self, "old_payload_dir"):
             run.PAYLOAD_DIR = self.old_payload_dir
         self.temp.cleanup()
 
-    def successful_executor(self, *, fail=None, list_zero=None, ignored=None, raise_on=None, list_variant=None, list_variant_filter=None, run_variant=None, run_variant_filter=None, failed_run_filter=None):
+    def successful_executor(
+        self,
+        *,
+        fail=None,
+        timeout_no_run=None,
+        list_zero=None,
+        ignored=None,
+        raise_on=None,
+        raise_filter=None,
+        raise_filter_when="list",
+        timeout_filter=None,
+        timeout_filter_when="list",
+        list_variant=None,
+        list_variant_filter=None,
+        run_variant=None,
+        run_variant_filter=None,
+        failed_list_filter=None,
+        failed_run_filter=None,
+    ):
         calls = []
+
+        def filter_name_for(argv):
+            return next((name for name in run.TEST_FILTERS if name in argv), "control")
+
+        def test_names_for(filter_name):
+            full_names = verify.EXPECTED.get("expected_full_test_names", {}).get(filter_name)
+            if full_names is not None:
+                return list(full_names)
+            leaves = verify.EXPECTED.get("expected_test_names", {}).get(filter_name)
+            if leaves:
+                package = verify.EXPECTED["test_filters"][run.TEST_FILTERS.index(filter_name)]["package"].replace("-", "_")
+                return [f"{package}::tests::{leaf}" for leaf in leaves]
+            return [filter_name + "::selected"]
 
         def execute(argv, cwd, env, log, timeout_seconds):
             argv = list(argv)
@@ -59,25 +182,32 @@ class DiagnosticRunnerTests(unittest.TestCase):
             lane = "baseline" if Path(cwd) == self.fixture.baseline else "candidate"
             if raise_on == f"{lane}-check" and argv[1:2] == ["check"]:
                 raise RuntimeError("injected executor failure")
+            if raise_on == "quickjs-no-run" and "--no-run" in argv and "thaw-quickjs" in argv:
+                raise RuntimeError("injected QuickJS no-run exception")
             if fail == f"{lane}-check" and argv[1:2] == ["check"]:
                 return {"exit_code": 101, "stdout": "error: injected check failure\n", "timed_out": False}
             if fail == "llvm-no-run" and "--no-run" in argv and "thaw-llvm" in argv:
                 return {"exit_code": 101, "stdout": "error: injected LLVM no-run failure\n", "timed_out": False}
             if fail == "hir-no-run" and "--no-run" in argv and "thaw-hir" in argv:
                 return {"exit_code": 101, "stdout": "error: injected HIR no-run failure\n", "timed_out": False}
+            if fail == "quickjs-no-run" and "--no-run" in argv and "thaw-quickjs" in argv:
+                return {"exit_code": 101, "stdout": "error: injected QuickJS no-run failure\n", "timed_out": False}
+            if timeout_no_run is not None and "--no-run" in argv and timeout_no_run in argv:
+                return {"exit_code": -signal.SIGTERM, "stdout": "no-run timed out\n", "timed_out": True}
             if fail == "std-no-run" and "--no-run" in argv and "thaw-std" in argv:
                 return {"exit_code": 101, "stdout": "error: injected std no-run failure\n", "timed_out": False}
-            if fail == "failed-list" and "--list" in argv:
+            filter_name = filter_name_for(argv)
+            is_list = "--list" in argv
+            is_filter_run = argv[1:2] == ["test"] and "--no-run" not in argv and not is_list
+            if raise_filter == filter_name and ((raise_filter_when == "list" and is_list) or (raise_filter_when == "run" and is_filter_run)):
+                raise RuntimeError("injected focused-control executor failure")
+            if timeout_filter == filter_name and ((timeout_filter_when == "list" and is_list) or (timeout_filter_when == "run" and is_filter_run)):
+                return {"exit_code": -signal.SIGTERM, "stdout": "timed out\n", "timed_out": True}
+            if fail == "failed-list" and "--list" in argv and (failed_list_filter is None or failed_list_filter == filter_name):
                 return {"exit_code": 1, "stdout": "list failed\n", "timed_out": False}
             if fail == "failed-run" and "--list" not in argv and "--no-run" not in argv and argv[1:2] == ["test"]:
-                filter_name = next((x for x in argv if x in run.TEST_FILTERS), "control")
                 if failed_run_filter is None or failed_run_filter == filter_name:
-                    expected = verify.EXPECTED.get("expected_test_names", {}).get(filter_name)
-                    if expected:
-                        package = verify.EXPECTED["test_filters"][run.TEST_FILTERS.index(filter_name)]["package"].replace("-", "_")
-                        names = [f"{package}::tests::{leaf}" for leaf in expected]
-                    else:
-                        names = [filter_name + "::selected"]
+                    names = test_names_for(filter_name)
                     return {
                         "exit_code": 101,
                         "stdout": "".join(f"test {name} ... FAILED\n" for name in names) + f"test result: FAILED. 0 passed; {len(names)} failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n",
@@ -88,31 +218,41 @@ class DiagnosticRunnerTests(unittest.TestCase):
             if "--no-run" in argv:
                 return {"exit_code": 0, "stdout": "Finished test profile\n", "timed_out": False}
             if "--list" in argv:
-                filter_name = next((x for x in argv if x in run.TEST_FILTERS), "control")
                 if list_zero == filter_name:
                     return {"exit_code": 0, "stdout": "0 tests, 0 benchmarks\n", "timed_out": False}
-                expected = verify.EXPECTED.get("expected_test_names", {}).get(filter_name)
-                if expected:
-                    package = verify.EXPECTED["test_filters"][run.TEST_FILTERS.index(filter_name)]["package"].replace("-", "_")
-                    leaves = list(expected)
+                expected = test_names_for(filter_name)
+                if verify.EXPECTED.get("expected_full_test_names", {}).get(filter_name) is not None:
+                    names = list(expected)
                     variant = list_variant if list_variant_filter is None or list_variant_filter == filter_name else None
                     if variant == "substitute":
+                        names[0] = names[0] + "_substituted_name"
+                    if variant == "wrong_namespace":
+                        names[0] = "wrong_namespace::" + names[0].rsplit("::", 1)[-1]
+                    if variant == "wrong_leaf":
+                        names[0] = names[0].rsplit("::", 1)[0] + "::wrong_leaf"
+                    if variant == "short":
+                        names = names[:-1]
+                    if variant == "duplicate":
+                        names.append(names[0])
+                    return {"exit_code": 0, "stdout": "".join(f"{name}: test\n" for name in names) + f"{len(names)} tests, 0 benchmarks\n", "timed_out": False}
+                legacy = verify.EXPECTED.get("expected_test_names", {}).get(filter_name)
+                if legacy is not None:
+                    package = verify.EXPECTED["test_filters"][run.TEST_FILTERS.index(filter_name)]["package"].replace("-", "_")
+                    leaves = list(legacy)
+                    variant = list_variant if list_variant_filter is None or list_variant_filter == filter_name else None
+                    if variant in ("substitute", "wrong_leaf"):
                         leaves[0] = filter_name + "substituted_name"
                     if variant == "short":
                         leaves = leaves[:-1]
                     names = [f"{package}::tests::{leaf}" for leaf in leaves]
+                    if variant == "wrong_namespace":
+                        names[0] = "wrong_namespace::tests::" + names[0].rsplit("::", 1)[-1]
                     if variant == "duplicate":
                         names.append(names[0])
                     return {"exit_code": 0, "stdout": "".join(f"{name}: test\n" for name in names) + f"{len(names)} tests, 0 benchmarks\n", "timed_out": False}
-                name = filter_name + "::selected"
-                return {"exit_code": 0, "stdout": f"{name}: test\n1 test, 0 benchmarks\n", "timed_out": False}
-            filter_name = next((x for x in argv if x in run.TEST_FILTERS), "control")
-            expected = verify.EXPECTED.get("expected_test_names", {}).get(filter_name)
-            if expected:
-                package = verify.EXPECTED["test_filters"][run.TEST_FILTERS.index(filter_name)]["package"].replace("-", "_")
-                names = [f"{package}::tests::{leaf}" for leaf in expected]
-            else:
-                names = [filter_name + "::selected"]
+                names = test_names_for(filter_name)
+                return {"exit_code": 0, "stdout": "".join(f"{name}: test\n" for name in names) + f"{len(names)} tests, 0 benchmarks\n", "timed_out": False}
+            names = test_names_for(filter_name)
             if ignored == filter_name:
                 return {
                     "exit_code": 0,
@@ -120,9 +260,16 @@ class DiagnosticRunnerTests(unittest.TestCase):
                     "timed_out": False,
                 }
             variant = run_variant if run_variant_filter is None or run_variant_filter == filter_name else None
-            if expected and variant == "malformed":
+            if verify.EXPECTED.get("expected_full_test_names", {}).get(filter_name) is not None and variant == "wrong_name":
+                names[0] = "wrong_namespace::" + names[0].rsplit("::", 1)[-1]
+            if verify.EXPECTED.get("expected_full_test_names", {}).get(filter_name) is not None and variant == "duplicate":
+                names.append(names[0])
+            full_expected = verify.EXPECTED.get("expected_full_test_names", {}).get(filter_name)
+            legacy_expected = verify.EXPECTED.get("expected_test_names", {}).get(filter_name)
+            has_expected = full_expected is not None or legacy_expected is not None
+            if has_expected and variant == "malformed":
                 return {"exit_code": 0, "stdout": "running tests\n" + "".join(f"test {name} ... ok\n" for name in names), "timed_out": False}
-            if expected and variant == "partial":
+            if has_expected and variant == "partial":
                 partial_names = names[:-1]
                 return {
                     "exit_code": 0,
@@ -152,58 +299,75 @@ class DiagnosticRunnerTests(unittest.TestCase):
         result = self.run_case(executor)
         self.assertEqual("failed", result["stages"]["baseline_check"]["status"])
         self.assertEqual("passed", result["stages"]["candidate_check"]["status"])
-        self.assertEqual(30, len(result["filters"]))
+        self.assertEqual(39, len(result["filters"]))
         self.assertTrue(all(item["status"] == "passed" for item in result["filters"]))
         self.assertEqual(1, result["exit_code"])
 
-    def test_candidate_check_failure_blocks_both_no_runs_and_controls(self):
+    def test_candidate_check_failure_blocks_predecessor_gates_and_controls(self):
         result = self.run_case(self.successful_executor(fail="candidate-check"))
         self.assertEqual("passed", result["stages"]["baseline_check"]["status"])
         self.assertEqual("failed", result["stages"]["candidate_check"]["status"])
-        for name in ("llvm_no_run", "hir_no_run", "std_no_run"):
+        for name in ("llvm_no_run", "hir_no_run"):
             self.assertEqual("blocked", result["stages"][name]["status"])
-        self.assertTrue(all(item["status"] == "blocked" for item in result["filters"]))
+        self.assertEqual("passed", result["stages"]["quickjs_no_run"]["status"])
+        self.assertEqual("passed", result["stages"]["std_no_run"]["status"])
+        self.assertTrue(all(item["status"] == "blocked" for item in result["filters"][: self.OLD_FILTER_COUNT]))
+        self.assertTrue(all(item["status"] == "passed" for item in result["filters"][self.OLD_FILTER_COUNT :]))
+        self.assertEqual("failed", result["overall"]["status"])
 
-    def test_llvm_no_run_failure_blocks_hir_and_all_controls(self):
+    def test_llvm_no_run_failure_blocks_hir_and_old_controls(self):
         result = self.run_case(self.successful_executor(fail="llvm-no-run"))
         self.assertEqual("failed", result["stages"]["llvm_no_run"]["status"])
         self.assertEqual("blocked", result["stages"]["hir_no_run"]["status"])
-        self.assertTrue(all(item["status"] == "blocked" for item in result["filters"]))
+        self.assertEqual("passed", result["stages"]["quickjs_no_run"]["status"])
+        self.assertEqual("passed", result["stages"]["std_no_run"]["status"])
+        self.assertTrue(all(item["status"] == "blocked" for item in result["filters"][: self.OLD_FILTER_COUNT]))
+        self.assertTrue(all(item["status"] == "passed" for item in result["filters"][self.OLD_FILTER_COUNT :]))
+        self.assertEqual("failed", result["overall"]["status"])
 
-    def test_hir_no_run_failure_blocks_all_controls(self):
+    def test_hir_no_run_failure_blocks_old_controls_but_leaves_new_lane_successful(self):
         result = self.run_case(self.successful_executor(fail="hir-no-run"))
         self.assertEqual("failed", result["stages"]["hir_no_run"]["status"])
-        self.assertEqual("blocked", result["stages"]["std_no_run"]["status"])
-        self.assertTrue(all(item["status"] == "blocked" for item in result["filters"]))
+        self.assertEqual("passed", result["stages"]["std_no_run"]["status"])
+        self.assertTrue(all(item["status"] == "blocked" for item in result["filters"][: self.OLD_FILTER_COUNT]))
+        self.assertTrue(all(item["status"] == "passed" for item in result["filters"][self.OLD_FILTER_COUNT :]))
+        self.assertEqual("failed", result["overall"]["status"])
 
-    def test_std_no_run_failure_blocks_all_controls(self):
+    def test_std_no_run_failure_blocks_old_and_std_controls_only(self):
         result = self.run_case(self.successful_executor(fail="std-no-run"))
         self.assertEqual("passed", result["stages"]["hir_no_run"]["status"])
         self.assertEqual("failed", result["stages"]["std_no_run"]["status"])
-        self.assertTrue(all(item["status"] == "blocked" for item in result["filters"]))
+        self.assertTrue(all(item["status"] == "passed" for item in result["filters"][self.OLD_FILTER_COUNT : self.OLD_FILTER_COUNT + 7]))
+        self.assertTrue(all(item["status"] == "blocked" for item in result["filters"][self.OLD_FILTER_COUNT + 7 :]))
+        self.assertTrue(all(item["status"] == "blocked" for item in result["filters"][: self.OLD_FILTER_COUNT]))
+        self.assertEqual("failed", result["overall"]["status"])
 
-    def test_zero_list_selection_fails_and_blocks_remaining_filters(self):
+    def test_zero_old_list_selection_fails_and_blocks_remaining_old_filters(self):
         first = run.TEST_FILTERS[0]
         result = self.run_case(self.successful_executor(list_zero=first))
         self.assertEqual("failed", result["filters"][0]["status"])
         self.assertIn("selected zero", result["filters"][0]["reason"])
-        self.assertTrue(all(item["status"] == "blocked" for item in result["filters"][1:]))
+        self.assertTrue(all(item["status"] == "blocked" for item in result["filters"][1 : self.OLD_FILTER_COUNT]))
+        self.assertTrue(all(item["status"] == "passed" for item in result["filters"][self.OLD_FILTER_COUNT :]))
 
     def test_ignored_only_actual_execution_is_not_a_pass(self):
         first = run.TEST_FILTERS[0]
         result = self.run_case(self.successful_executor(ignored=first))
         self.assertEqual("failed", result["filters"][0]["status"])
         self.assertIn("ignored", result["filters"][0]["reason"])
-        self.assertTrue(all(item["status"] == "blocked" for item in result["filters"][1:]))
+        self.assertTrue(all(item["status"] == "blocked" for item in result["filters"][1 : self.OLD_FILTER_COUNT]))
+        self.assertTrue(all(item["status"] == "passed" for item in result["filters"][self.OLD_FILTER_COUNT :]))
 
-    def test_failed_list_and_failed_control_stop_later_filters(self):
-        list_result = self.run_case(self.successful_executor(fail="failed-list"))
+    def test_failed_old_list_and_control_stop_later_old_filters(self):
+        list_result = self.run_case(self.successful_executor(fail="failed-list", failed_list_filter=run.TEST_FILTERS[0]))
         self.assertEqual("failed", list_result["filters"][0]["status"])
         self.assertEqual("blocked", list_result["filters"][1]["status"])
-        run_result = self.run_case(self.successful_executor(fail="failed-run"))
+        self.assertTrue(all(item["status"] == "passed" for item in list_result["filters"][self.OLD_FILTER_COUNT :]))
+        run_result = self.run_case(self.successful_executor(fail="failed-run", failed_run_filter=run.TEST_FILTERS[0]))
         self.assertEqual("failed", run_result["filters"][0]["status"])
         self.assertIn("failed", run_result["filters"][0]["reason"])
-        self.assertTrue(all(item["status"] == "blocked" for item in run_result["filters"][1:]))
+        self.assertTrue(all(item["status"] == "blocked" for item in run_result["filters"][1 : self.OLD_FILTER_COUNT]))
+        self.assertTrue(all(item["status"] == "passed" for item in run_result["filters"][self.OLD_FILTER_COUNT :]))
 
     def test_signal_and_timeout_are_failures_not_success(self):
         def signal_executor(argv, cwd, env, log, timeout):
@@ -232,6 +396,8 @@ class DiagnosticRunnerTests(unittest.TestCase):
         self.assertIn("wall budget", result["stages"]["baseline_check"]["reason"])
         self.assertEqual("blocked", result["stages"]["candidate_check"]["status"])
         self.assertIn("wall budget", result["stages"]["candidate_check"]["reason"])
+        self.assertEqual("blocked", result["overall"]["status"])
+        self.assertTrue(all(item["status"] == "blocked" for item in result["filters"]))
         self.assertTrue((self.evidence / "validation.json").is_file())
 
     def test_executor_exception_keeps_log_and_still_runs_independent_candidate_check(self):
@@ -243,20 +409,21 @@ class DiagnosticRunnerTests(unittest.TestCase):
         self.assertTrue((self.evidence / "validation.json").is_file())
 
     def test_identity_failure_runs_zero_cargo_commands_and_marks_all_stages(self):
-        self.fixture.candidate.joinpath("unexpected.txt").write_text("tamper\n")
+        self.prepared_identity.side_effect = verify.VerificationError("injected prepared identity mismatch")
         executor = self.successful_executor()
         result = self.run_case(executor)
         self.assertEqual([], executor.calls)
         self.assertEqual("failed", result["stages"]["identity"]["status"])
         self.assertTrue(all(stage["status"] == "blocked" for stage in result["stages"].values() if stage["name"] not in ("identity",)))
 
-    def test_success_uses_30_pinned_filters_locked_and_separate_target_dirs(self):
+    def test_success_uses_39_pinned_filters_locked_and_separate_target_dirs(self):
         executor = self.successful_executor()
         result = self.run_case(executor)
-        self.assertEqual(30, len(result["filters"]))
+        self.assertEqual(39, len(result["filters"]))
         self.assertEqual(20, sum(f["package"] == "thaw-llvm" for f in result["filters"]))
         self.assertEqual(9, sum(f["package"] == "thaw-hir" for f in result["filters"]))
-        self.assertEqual(1, sum(f["package"] == "thaw-std" for f in result["filters"]))
+        self.assertEqual(7, sum(f["package"] == "thaw-quickjs" for f in result["filters"]))
+        self.assertEqual(3, sum(f["package"] == "thaw-std" for f in result["filters"]))
         cargo_calls = executor.calls
         self.assertTrue(cargo_calls)
         self.assertTrue(all("--locked" in call["argv"] for call in cargo_calls))
@@ -264,14 +431,41 @@ class DiagnosticRunnerTests(unittest.TestCase):
         self.assertEqual(2, len(target_dirs))
         self.assertNotEqual(*sorted(target_dirs))
         run_calls = [call["argv"] for call in cargo_calls if call["argv"][1:2] == ["test"] and "--no-run" not in call["argv"] and "--list" not in call["argv"]]
-        self.assertEqual(30, len(run_calls))
+        self.assertEqual(39, len(run_calls))
         self.assertTrue(all("--test-threads=1" in argv for argv in run_calls))
         no_runs = [call["argv"] for call in cargo_calls if "--no-run" in call["argv"]]
-        self.assertEqual(["thaw-llvm", "thaw-hir", "thaw-std"], [argv[argv.index("-p") + 1] for argv in no_runs])
+        self.assertEqual(["thaw-quickjs", "thaw-std", "thaw-llvm", "thaw-hir"], [argv[argv.index("-p") + 1] for argv in no_runs])
+        self.assertEqual(1, sum(argv[argv.index("-p") + 1] == "thaw-std" for argv in no_runs))
+        listed_filters = [
+            argv[argv.index("--lib") + 1]
+            for call in cargo_calls
+            if (argv := call["argv"])[1:2] == ["test"] and "--list" in argv
+        ]
+        self.assertEqual(list(run.TEST_FILTERS[30:]) + list(run.TEST_FILTERS[:30]), listed_filters)
+        first_llvm_check = next(
+            index
+            for index, call in enumerate(cargo_calls)
+            if call["argv"][1:2] == ["check"] and "thaw-llvm" in call["argv"]
+        )
+        for package in ("thaw-quickjs", "thaw-std"):
+            preflight = next(
+                index
+                for index, call in enumerate(cargo_calls)
+                if "--no-run" in call["argv"] and call["argv"][call["argv"].index("-p") + 1] == package
+            )
+            self.assertLess(preflight, first_llvm_check, f"{package} preflight must precede LLVM checks")
+        new_control_indices = [
+            index
+            for filter_name in run.TEST_FILTERS[30:]
+            for index, call in enumerate(cargo_calls)
+            if call["argv"][1:2] == ["test"] and "--no-run" not in call["argv"] and filter_name in call["argv"]
+        ]
+        self.assertEqual(18, len(new_control_indices))
+        self.assertTrue(all(index < first_llvm_check for index in new_control_indices))
 
-    def test_new_filters_preserve_exact_full_names_counts_and_execution_evidence(self):
+    def test_previous_hir_filters_preserve_leaf_name_contracts_and_execution_evidence(self):
         result = self.run_case(self.successful_executor())
-        hir_filters = result["filters"][-5:]
+        hir_filters = result["filters"][25:30]
         self.assertEqual(
             [
                 "thaw_binding_helper_",
@@ -288,27 +482,174 @@ class DiagnosticRunnerTests(unittest.TestCase):
             self.assertEqual(expected, [name.rsplit("::", 1)[-1] for name in item["selected_names"]])
             self.assertEqual(item["selected_names"], item["execution_names"])
 
-    def test_new_filters_reject_substituted_or_duplicate_listed_names(self):
-        for filter_name in run.TEST_FILTERS[-5:]:
+    def test_appended_groups_match_exact_full_names_without_leaf_normalization(self):
+        result = self.run_case(self.successful_executor())
+        expected_full = verify.EXPECTED["expected_full_test_names"]
+        new_groups = result["filters"][self.OLD_FILTER_COUNT :]
+        self.assertEqual(9, len(new_groups))
+        self.assertEqual(set(expected_full), {item["filter"] for item in new_groups})
+        for item in new_groups:
+            expected = expected_full[item["filter"]]
+            self.assertEqual(len(expected), len(set(expected)))
+            self.assertEqual(sorted(expected), sorted(item["selected_names"]))
+            self.assertEqual(sorted(expected), sorted(item["execution_names"]))
+
+    def test_new_quickjs_and_std_preflights_run_before_old_llvm_hir_gates(self):
+        executor = self.successful_executor()
+        result = self.run_case(executor)
+        self.assertEqual("passed", result["stages"]["quickjs_no_run"]["status"])
+        self.assertEqual("passed", result["stages"]["std_no_run"]["status"])
+        self.assertEqual("passed", result["stages"]["llvm_no_run"]["status"])
+        self.assertEqual("passed", result["stages"]["hir_no_run"]["status"])
+        self.assertEqual("passed", result["overall"]["status"])
+        no_run_calls = [call["argv"] for call in executor.calls if "--no-run" in call["argv"]]
+        names = [argv[argv.index("-p") + 1] for argv in no_run_calls]
+        self.assertLess(names.index("thaw-quickjs"), names.index("thaw-llvm"))
+        self.assertLess(names.index("thaw-std"), names.index("thaw-llvm"))
+
+    def test_quickjs_and_std_preflight_failures_are_scoped_to_their_crate(self):
+        quickjs = self.run_case(self.successful_executor(fail="quickjs-no-run"))
+        self.assertEqual("failed", quickjs["stages"]["quickjs_no_run"]["status"])
+        self.assertEqual("passed", quickjs["stages"]["std_no_run"]["status"])
+        self.assertTrue(all(item["status"] == "blocked" for item in quickjs["filters"][30:37]))
+        self.assertTrue(all(item["status"] == "passed" for item in quickjs["filters"][37:39]))
+        self.assertTrue(all(item["status"] == "passed" for item in quickjs["filters"][:30]))
+        self.assertEqual("failed", quickjs["overall"]["status"])
+
+        self.evidence = Path(self.temp.name) / "run-evidence-std-no-run-failure"
+        std = self.run_case(self.successful_executor(fail="std-no-run"))
+        self.assertEqual("passed", std["stages"]["quickjs_no_run"]["status"])
+        self.assertEqual("failed", std["stages"]["std_no_run"]["status"])
+        self.assertTrue(all(item["status"] == "passed" for item in std["filters"][30:37]))
+        self.assertTrue(all(item["status"] == "blocked" for item in std["filters"][37:39]))
+        self.assertEqual("failed", std["overall"]["status"])
+
+    def test_quickjs_no_run_exception_still_allows_std_controls(self):
+        result = self.run_case(self.successful_executor(raise_on="quickjs-no-run"))
+        self.assertEqual("failed", result["stages"]["quickjs_no_run"]["status"])
+        self.assertEqual("passed", result["stages"]["std_no_run"]["status"])
+        self.assertTrue(all(item["status"] == "blocked" for item in result["filters"][30:37]))
+        self.assertTrue(all(item["status"] == "passed" for item in result["filters"][37:39]))
+        self.assertEqual("failed", result["overall"]["status"])
+
+    def test_quickjs_no_run_timeout_still_allows_std_controls(self):
+        result = self.run_case(self.successful_executor(timeout_no_run="thaw-quickjs"))
+        self.assertEqual("timed-out", result["stages"]["quickjs_no_run"]["status"])
+        self.assertEqual("passed", result["stages"]["std_no_run"]["status"])
+        self.assertTrue(all(item["status"] == "blocked" for item in result["filters"][30:37]))
+        self.assertTrue(all(item["status"] == "passed" for item in result["filters"][37:39]))
+        self.assertEqual("failed", result["overall"]["status"])
+
+    def test_first_new_group_run_failure_does_not_suppress_groups_32_through_39(self):
+        first_new = run.TEST_FILTERS[self.OLD_FILTER_COUNT]
+        result = self.run_case(self.successful_executor(fail="failed-run", failed_run_filter=first_new))
+        self.assertEqual("failed", result["filters"][30]["status"])
+        self.assertTrue(all(item["status"] == "passed" for item in result["filters"][31:39]))
+        self.assertEqual("failed", result["overall"]["status"])
+
+    def test_first_new_group_list_substitution_does_not_suppress_groups_32_through_39(self):
+        first_new = run.TEST_FILTERS[self.OLD_FILTER_COUNT]
+        result = self.run_case(
+            self.successful_executor(list_variant="wrong_namespace", list_variant_filter=first_new)
+        )
+        self.assertEqual("failed", result["filters"][30]["status"])
+        self.assertIn("expected", result["filters"][30]["reason"])
+        self.assertTrue(all(item["status"] == "passed" for item in result["filters"][31:39]))
+        self.assertEqual("failed", result["overall"]["status"])
+
+    def test_first_new_group_timeout_does_not_suppress_groups_32_through_39(self):
+        first_new = run.TEST_FILTERS[self.OLD_FILTER_COUNT]
+        result = self.run_case(self.successful_executor(timeout_filter=first_new))
+        self.assertEqual("timed-out", result["filters"][30]["status"])
+        self.assertEqual("blocked", result["filters"][30]["run"]["status"])
+        self.assertTrue(all(item["status"] == "passed" for item in result["filters"][31:39]))
+        self.assertEqual("failed", result["overall"]["status"])
+
+    def test_first_new_group_executor_exception_does_not_suppress_groups_32_through_39(self):
+        first_new = run.TEST_FILTERS[self.OLD_FILTER_COUNT]
+        result = self.run_case(self.successful_executor(raise_filter=first_new))
+        self.assertEqual("failed", result["filters"][30]["status"])
+        self.assertEqual("failed", result["filters"][30]["list"]["status"])
+        self.assertEqual("blocked", result["filters"][30]["run"]["status"])
+        self.assertTrue(all(item["status"] == "passed" for item in result["filters"][31:39]))
+        self.assertEqual("failed", result["overall"]["status"])
+
+    def test_timeout_between_list_and_run_blocks_substeps_and_later_groups_honestly(self):
+        first_new = run.TEST_FILTERS[self.OLD_FILTER_COUNT]
+        executor = self.successful_executor()
+
+        def expire_after_first_new_list(argv, cwd, env, log, timeout):
+            result = executor(argv, cwd, env, log, timeout)
+            if argv[1:2] == ["test"] and "--list" in argv and first_new in argv:
+                run.WALL_BUDGET_SECONDS = 0
+            return result
+
+        with mock.patch.object(run, "WALL_BUDGET_SECONDS", 70 * 60):
+            result = self.run_case(expire_after_first_new_list)
+        first = result["filters"][30]
+        self.assertEqual("passed", first["list"]["status"])
+        self.assertEqual("blocked", first["run"]["status"])
+        self.assertIn("wall budget", first["run"]["reason"])
+        self.assertTrue(all(item["status"] == "blocked" for item in result["filters"][31:39]))
+        self.assertEqual("blocked", result["overall"]["status"])
+
+    def test_new_full_name_list_rejects_namespace_leaf_substitution_duplicates_and_partials(self):
+        first_new = run.TEST_FILTERS[self.OLD_FILTER_COUNT]
+        for variant in ("wrong_namespace", "wrong_leaf", "duplicate", "short", "substitute"):
+            self.evidence = Path(self.temp.name) / f"run-evidence-full-list-{variant}"
+            result = self.run_case(
+                self.successful_executor(list_variant=variant, list_variant_filter=first_new)
+            )
+            self.assertEqual("failed", result["filters"][30]["status"], variant)
+            self.assertTrue(all(item["status"] == "passed" for item in result["filters"][31:39]))
+
+    def test_new_full_name_execution_rejects_wrong_namespace_and_partial_or_ignored_results(self):
+        first_new = run.TEST_FILTERS[self.OLD_FILTER_COUNT]
+        for variant in ("wrong_name", "partial", "malformed"):
+            self.evidence = Path(self.temp.name) / f"run-evidence-full-run-{variant}"
+            result = self.run_case(
+                self.successful_executor(run_variant=variant, run_variant_filter=first_new)
+            )
+            self.assertEqual("failed", result["filters"][30]["status"], variant)
+            self.assertTrue(all(item["status"] == "passed" for item in result["filters"][31:39]))
+
+        self.evidence = Path(self.temp.name) / "run-evidence-full-run-ignored"
+        ignored = self.run_case(self.successful_executor(ignored=first_new))
+        self.assertEqual("failed", ignored["filters"][30]["status"])
+        self.assertIn("ignored", ignored["filters"][30]["reason"])
+        self.assertTrue(all(item["status"] == "passed" for item in ignored["filters"][31:39]))
+
+    def test_post_run_identity_failure_overrides_passing_controls(self):
+        self.prepared_identity.side_effect = [
+            {"synthetic": "identity verified"},
+            verify.VerificationError("injected post-run identity mismatch"),
+        ]
+        result = self.run_case(self.successful_executor())
+        self.assertEqual("passed", result["filters"][30]["status"])
+        self.assertEqual("failed", result["post_run_identity"]["status"])
+        self.assertEqual("failed", result["overall"]["status"])
+
+    def test_previous_hir_filters_reject_substituted_or_duplicate_listed_names(self):
+        for filter_name in run.TEST_FILTERS[25:30]:
             for variant in ("substitute", "duplicate", "short"):
                 result = self.run_case(self.successful_executor(list_variant=variant, list_variant_filter=filter_name))
                 index = run.TEST_FILTERS.index(filter_name)
                 self.assertEqual("failed", result["filters"][index]["status"])
                 self.assertIn("expected", result["filters"][index]["reason"])
-                if index + 1 < len(result["filters"]):
+                if index + 1 < self.OLD_FILTER_COUNT:
                     self.assertEqual("blocked", result["filters"][index + 1]["status"])
                 self.evidence = Path(self.temp.name) / f"run-evidence-{filter_name}-{variant}"
 
-    def test_new_filter_rejects_ignored_only_execution(self):
-        for filter_name in run.TEST_FILTERS[-5:]:
+    def test_previous_hir_filter_rejects_ignored_only_execution(self):
+        for filter_name in run.TEST_FILTERS[25:30]:
             result = self.run_case(self.successful_executor(ignored=filter_name))
             index = run.TEST_FILTERS.index(filter_name)
             self.assertEqual("failed", result["filters"][index]["status"])
             self.assertIn("ignored", result["filters"][index]["reason"])
             self.evidence = Path(self.temp.name) / f"run-evidence-ignored-{filter_name}"
 
-    def test_new_filter_rejects_malformed_summary_and_partial_execution(self):
-        for filter_name in run.TEST_FILTERS[-5:]:
+    def test_previous_hir_filters_reject_malformed_summary_and_partial_execution(self):
+        for filter_name in run.TEST_FILTERS[25:30]:
             for variant in ("malformed", "partial"):
                 result = self.run_case(self.successful_executor(run_variant=variant, run_variant_filter=filter_name))
                 index = run.TEST_FILTERS.index(filter_name)
@@ -316,8 +657,8 @@ class DiagnosticRunnerTests(unittest.TestCase):
                 self.assertTrue(any(term in result["filters"][index]["reason"] for term in ("summary", "omitted", "execution count")))
                 self.evidence = Path(self.temp.name) / f"run-evidence-{filter_name}-{variant}"
 
-    def test_each_new_filter_rejects_zero_selected_and_failed_execution(self):
-        for filter_name in run.TEST_FILTERS[-5:]:
+    def test_previous_hir_filters_reject_zero_selected_and_failed_execution(self):
+        for filter_name in run.TEST_FILTERS[25:30]:
             index = run.TEST_FILTERS.index(filter_name)
             zero = self.run_case(self.successful_executor(list_zero=filter_name))
             self.assertEqual("failed", zero["filters"][index]["status"])
@@ -365,7 +706,9 @@ class DiagnosticRunnerTests(unittest.TestCase):
             self.assertEqual(0, initialized.returncode, initialized.stderr)
             initial_state = json.loads((evidence / "validation.json").read_text())
             self.assertEqual("running", initial_state["status"])
-            self.assertEqual(30, len(initial_state["filters"]))
+            self.assertEqual(39, len(initial_state["filters"]))
+            self.assertIn("quickjs_no_run", initial_state["stages"])
+            self.assertEqual("not-run", initial_state["stages"]["quickjs_no_run"]["status"])
             finalized = subprocess.run(
                 [sys.executable, str(helper), "--finalize-if-incomplete", "--evidence", str(evidence), "--reason", "setup failed"],
                 capture_output=True,
@@ -378,6 +721,8 @@ class DiagnosticRunnerTests(unittest.TestCase):
             self.assertEqual(1, blocked["exit_code"])
             self.assertTrue(all(stage["status"] == "blocked" for stage in blocked["stages"].values()))
             self.assertTrue(all(item["status"] == "blocked" for item in blocked["filters"]))
+            summary = json.loads((evidence / "summary.json").read_text())
+            self.assertEqual(blocked["stages"]["quickjs_no_run"], summary["quickjs_no_run"])
 
     def test_finalizer_preserves_terminal_pass_and_exit_code_zero(self):
         state = run.initialize_evidence(self.evidence)

@@ -21,6 +21,14 @@ MODULE_DIR = Path(__file__).resolve().parent
 VALIDATION_BRANCH = "validation/native-return"
 BASELINE_COMMIT = "8b353a99d4995c8217b9e73cd308ea85d2d6e5d8"
 BASELINE_TREE = "f3dd90940e1d36ce27e57774b62f87b9df4140af"
+FORCED_ROOT_PROVIDER_PATHS = [
+    "crates/thaw-quickjs/src/quickjs/api.rs",
+    "crates/thaw-quickjs/src/quickjs/platform_globals/runtime.js",
+]
+FORCED_ROOT_STAGE_EXTRA_PATHS = [
+    "crates/thaw-std/src/json.rs",
+    *FORCED_ROOT_PROVIDER_PATHS,
+]
 EXPECTED: dict[str, Any] = {
     "schema_version": 1,
     "validation_branch": VALIDATION_BRANCH,
@@ -49,6 +57,7 @@ EXPECTED: dict[str, Any] = {
         "compile-repairs-v1.patch": "2994f62e98a4fb9cbd0b792b20da09bf505874d749447bf8f0e43776d25e0f05",
         "cumulative-hir-v1.patch": "63744b75a96ce30ff503d90379b08ec20ffbebb5f5f68716972d6c7d6f17f368",
         "next-hir-v1.patch": "c0d4addaf22a7c7c26a133153b8298cc39013794f0263228468dddb8e0f3936b",
+        "forced-root-wire-v1.patch": "a7f04af1afa5b9d41d7a8dca984ccefba020cdd36f19175ef14a8f809a6e8683",
     },
     "artifacts": {
         "original-native.sha256": "4e219dde2129cf5876497edd6f9032cebdbee89eded9cce20e50ecda041053ce",
@@ -56,7 +65,7 @@ EXPECTED: dict[str, Any] = {
         "discard-v2.sha256": "c47d4ab7e4a805190e719b13b99bd7d233e24a5007afcbff6becebab9493e328",
         "return-v1.sha256": "51b1d9dd9a501538cc44fcaf8bfa72cc5a3f9ceb34c2942d4a0c676acc2e7031",
         "native-base.sha256": "da86c2c16619de2e236cdd50b9d2572465fbdd4dc3b75b680cf91c6b0f6bdb72",
-        "net-owners.txt": "673d4f32930cd141ac8e3562179a9c61b0d3a8a1da55ac7c342d2914f1ed40ab",
+        "net-owners.txt": "10fbe496127766ee0cdc18e35ba019968d2d4b7c2688f37c973cd2825551d654",
         "scope-v5-test-plan.md": "9eb740f8f418de5e7f8c7cd88607d5b269c7495a34600d937bf8653f7e55ae81",
         "compile-repairs-v1-base.sha256": "88bb3556306a13f8148d229b88057ed4324f9ac43861cbc5d2b3fd52df03e80e",
         "compile-repairs-v1.sha256": "d3b7c0e06ca053f4b342dcbc8ac1247a3460c946a35a2b22d2645c76251a2aa9",
@@ -64,6 +73,8 @@ EXPECTED: dict[str, Any] = {
         "cumulative-hir-v1.sha256": "0be3783d6241706ba2dd492704162aa9e0076dcc4a1de96e309eca9b512ba81c",
         "next-hir-v1-base.sha256": "0be3783d6241706ba2dd492704162aa9e0076dcc4a1de96e309eca9b512ba81c",
         "next-hir-v1.sha256": "f8915460efcaafc82a4392d9ca6b656dc150045d5cad4458b66755ef5705635b",
+        "forced-root-wire-v1-base.sha256": "23da8386704a188e890bd7e591bb395ce611d45e8fbf0ad264716b5d61e3c9bf",
+        "forced-root-wire-v1.sha256": "83a99e4934c4108992f874ca75ff2ea366283fbc3c543afaf9fee6489cb95941",
     },
     "stage_manifests": [
         {"name": "original-native", "file": "original-native.sha256", "sha256": "4e219dde2129cf5876497edd6f9032cebdbee89eded9cce20e50ecda041053ce", "count": 175},
@@ -73,6 +84,7 @@ EXPECTED: dict[str, Any] = {
         {"name": "compile-repairs-v1", "file": "compile-repairs-v1.sha256", "sha256": "d3b7c0e06ca053f4b342dcbc8ac1247a3460c946a35a2b22d2645c76251a2aa9", "count": 181, "extra_paths": ["crates/thaw-std/src/json.rs"], "path_order": "lexical"},
         {"name": "cumulative-hir-v1", "file": "cumulative-hir-v1.sha256", "sha256": "0be3783d6241706ba2dd492704162aa9e0076dcc4a1de96e309eca9b512ba81c", "count": 181, "extra_paths": ["crates/thaw-std/src/json.rs"], "path_order": "lexical"},
         {"name": "next-hir-v1", "file": "next-hir-v1.sha256", "sha256": "f8915460efcaafc82a4392d9ca6b656dc150045d5cad4458b66755ef5705635b", "count": 181, "extra_paths": ["crates/thaw-std/src/json.rs"], "path_order": "lexical"},
+        {"name": "forced-root-wire-v1", "file": "forced-root-wire-v1.sha256", "sha256": "83a99e4934c4108992f874ca75ff2ea366283fbc3c543afaf9fee6489cb95941", "count": 183, "extra_paths": ["crates/thaw-std/src/json.rs", "crates/thaw-quickjs/src/quickjs/api.rs", "crates/thaw-quickjs/src/quickjs/platform_globals/runtime.js"], "path_order": "lexical"},
     ],
     "repair_base": {
         "file": "compile-repairs-v1-base.sha256",
@@ -100,9 +112,30 @@ EXPECTED: dict[str, Any] = {
         "path_order": "lexical",
         "paired_after": "cumulative-hir-v1",
     },
+    "forced_root_wire_base": {
+        "file": "forced-root-wire-v1-base.sha256",
+        "sha256": "23da8386704a188e890bd7e591bb395ce611d45e8fbf0ad264716b5d61e3c9bf",
+        "count": 183,
+        "path_order": "lexical",
+        "paired_after": "next-hir-v1",
+        "extra_owners": [
+            {
+                "path": "crates/thaw-quickjs/src/quickjs/api.rs",
+                "sha256": "02907f79127e23ede4faea4fd89e4ac466cde76d5f4febc8831fa8b5df2d6d36",
+                "git_blob_sha1": "4ade648dbe5203bff00014bd7903821d595680b0",
+                "final_sha256": "be84b1a2c295c8bcc62ec41427999d75f485b90b4711e8b384424782f9e1bbf9",
+            },
+            {
+                "path": "crates/thaw-quickjs/src/quickjs/platform_globals/runtime.js",
+                "sha256": "0a223f6a0934dfddba0217e342f7ed1f09242b806d313f4da26eca012cd7ee3a",
+                "git_blob_sha1": "73eeee5f1df8a84b65fd5b088c374aa0a6e1521e",
+                "final_sha256": "bdca00a406d512f19349d41b5ac70d145a28eb0d029c5521dd9c375a68e50a81",
+            },
+        ],
+    },
     "native_base": {"file": "native-base.sha256", "sha256": "da86c2c16619de2e236cdd50b9d2572465fbdd4dc3b75b680cf91c6b0f6bdb72", "count": 24},
-    "net_owners": {"file": "net-owners.txt", "sha256": "673d4f32930cd141ac8e3562179a9c61b0d3a8a1da55ac7c342d2914f1ed40ab", "count": 54, "modified": 49, "new": 5},
-    "patch_order": ["original-native", "scope-v5", "discard-v2", "return-v1", "compile-repairs-v1", "cumulative-hir-v1", "next-hir-v1"],
+    "net_owners": {"file": "net-owners.txt", "sha256": "10fbe496127766ee0cdc18e35ba019968d2d4b7c2688f37c973cd2825551d654", "count": 56, "modified": 51, "new": 5},
+    "patch_order": ["original-native", "scope-v5", "discard-v2", "return-v1", "compile-repairs-v1", "cumulative-hir-v1", "next-hir-v1", "forced-root-wire-v1"],
     "subset_roots": [
         ".gitignore",
         "Cargo.lock",
@@ -178,6 +211,15 @@ EXPECTED: dict[str, Any] = {
         {"package": "thaw-hir", "filter": "thaw_rethrow_cleanup_"},
         {"package": "thaw-hir", "filter": "error_argument_staging_"},
         {"package": "thaw-hir", "filter": "existing_native_spread_staging_mode_false_is_unchanged"},
+        {"package": "thaw-quickjs", "filter": "forced_root_"},
+        {"package": "thaw-quickjs", "filter": "graph_codec_roundtrip_preserves_negative_zero"},
+        {"package": "thaw-quickjs", "filter": "graph_codec_roundtrip_retains_identity_and_releases_live_lease"},
+        {"package": "thaw-quickjs", "filter": "graph_codec_uses_bootstrap_intrinsics_after_global_replacement"},
+        {"package": "thaw-quickjs", "filter": "handle_registry_identity_ignores_later_object_is_override"},
+        {"package": "thaw-quickjs", "filter": "failed_exception_graph_grant_retires_producer_handle_lease"},
+        {"package": "thaw-quickjs", "filter": "exact_mixed_pre_dispatch_consumes_registered_graph_grant_once"},
+        {"package": "thaw-std", "filter": "unregistered_graph_wire_cannot_transfer_napi_lease_tokens"},
+        {"package": "thaw-std", "filter": "mutated_graph_wire_retires_only_registered_snapshot_leases"},
     ],
     "expected_test_names": {
         "thaw_remaining_": [
@@ -230,6 +272,26 @@ EXPECTED: dict[str, Any] = {
         "existing_native_spread_staging_mode_false_is_unchanged": [
             "existing_native_spread_staging_mode_false_is_unchanged",
         ],
+    },
+    "expected_full_test_names": {
+        "forced_root_": [
+            "forced_root_graph_wire_controls::forced_root_transfer_failure_rolls_back_once",
+            "forced_root_graph_wire_controls::forced_root_decoded_lease_outlives_consumed_input_and_root",
+            "forced_root_graph_wire_controls::forced_root_guard_preserves_other_graph_modes",
+            "forced_root_graph_wire_controls::forced_root_default_query_boundary_is_explicit",
+            "forced_root_graph_wire_controls::forced_root_capture_packet_uses_existing_node_grammar",
+            "forced_root_graph_wire_controls::forced_root_capture_preserves_identity_aliases_and_liveness",
+            "forced_root_graph_wire_controls::forced_root_capture_performs_no_original_value_hooks",
+            "forced_root_graph_wire_controls::forced_root_packet_ignores_replaced_intrinsics_and_metadata_hooks",
+        ],
+        "graph_codec_roundtrip_preserves_negative_zero": ["graph_codec_roundtrip_preserves_negative_zero"],
+        "graph_codec_roundtrip_retains_identity_and_releases_live_lease": ["graph_codec_roundtrip_retains_identity_and_releases_live_lease"],
+        "graph_codec_uses_bootstrap_intrinsics_after_global_replacement": ["graph_codec_uses_bootstrap_intrinsics_after_global_replacement"],
+        "handle_registry_identity_ignores_later_object_is_override": ["handle_registry_identity_ignores_later_object_is_override"],
+        "failed_exception_graph_grant_retires_producer_handle_lease": ["failed_exception_graph_grant_retires_producer_handle_lease"],
+        "exact_mixed_pre_dispatch_consumes_registered_graph_grant_once": ["exact_mixed_pre_dispatch_consumes_registered_graph_grant_once"],
+        "unregistered_graph_wire_cannot_transfer_napi_lease_tokens": ["json::unregistered_graph_wire_cannot_transfer_napi_lease_tokens"],
+        "mutated_graph_wire_retires_only_registered_snapshot_leases": ["json::mutated_graph_wire_retires_only_registered_snapshot_leases"],
     },
     # Informational fingerprints only; their underlying prose is not shipped or validated by CI.
     "provenance_only_review_fingerprints": {
@@ -500,8 +562,11 @@ def verify_stage(
 ) -> dict[str, Any]:
     """Validate one source subset against a canonical sorted sha256 manifest."""
     extra_paths = extra_paths or []
-    allowed_extra = EXPECTED.get("repair_base", {}).get("extra_owner", {}).get("path")
-    if extra_paths and extra_paths != [allowed_extra]:
+    allowed_extra_sets = [
+        [EXPECTED.get("repair_base", {}).get("extra_owner", {}).get("path")],
+        FORCED_ROOT_STAGE_EXTRA_PATHS,
+    ]
+    if extra_paths and extra_paths not in allowed_extra_sets:
         raise VerificationError(f"stage has an unapproved extra path scope: {extra_paths!r}")
     rows = _parse_sha_manifest(manifest, "stage manifest", path_order=path_order)
     if len(rows) != expected_count:
@@ -628,6 +693,11 @@ def verify_inputs(baseline: Path, payload: Path) -> dict[str, Any]:
     if actual_next_hir_inputs - expected_next_hir_inputs:
         unexpected = sorted(actual_next_hir_inputs - expected_next_hir_inputs)
         raise VerificationError(f"unexpected next HIR input: {unexpected[0]}")
+    expected_forced_root_inputs = {"forced-root-wire-v1.patch", "forced-root-wire-v1-base.sha256", "forced-root-wire-v1.sha256"}
+    actual_forced_root_inputs = {entry.name for entry in payload.iterdir() if entry.name.startswith("forced-root-wire-v")}
+    if actual_forced_root_inputs - expected_forced_root_inputs:
+        unexpected = sorted(actual_forced_root_inputs - expected_forced_root_inputs)
+        raise VerificationError(f"unexpected forced-root wire input: {unexpected[0]}")
 
     owner_map = _read_owner_map(payload)
     manifest = _json_no_duplicates(source_bytes["handoff_manifest"], "native handoff manifest")
@@ -664,9 +734,14 @@ def verify_inputs(baseline: Path, payload: Path) -> dict[str, Any]:
 
     # Each manifest file is parsed here, before any patch is applied, so malformed or
     # unsafe input cannot become a Cargo-time surprise.
-    lexical_stage_names = {"compile-repairs-v1", "cumulative-hir-v1", "next-hir-v1"}
+    lexical_stage_names = {"compile-repairs-v1", "cumulative-hir-v1", "next-hir-v1", "forced-root-wire-v1"}
     extra_path = EXPECTED["repair_base"]["extra_owner"]["path"]
-    extra_paths_by_stage = {"compile-repairs-v1": [extra_path], "cumulative-hir-v1": [extra_path], "next-hir-v1": [extra_path]}
+    extra_paths_by_stage = {
+        "compile-repairs-v1": [extra_path],
+        "cumulative-hir-v1": [extra_path],
+        "next-hir-v1": [extra_path],
+        "forced-root-wire-v1": FORCED_ROOT_STAGE_EXTRA_PATHS,
+    }
     for stage in EXPECTED["stage_manifests"]:
         extra_paths = stage.get("extra_paths", [])
         expected_extra = extra_paths_by_stage.get(stage["name"], [])
@@ -790,6 +865,62 @@ def verify_inputs(baseline: Path, payload: Path) -> dict[str, Any]:
     next_final_map = {rel: digest for digest, rel in next_final_rows}
     if len(next_final_rows) != next_stage["count"] or set(next_final_map) != set(next_base_map) or next_final_map.get(extra["path"]) != extra["final_sha256"]:
         raise VerificationError("next HIR final manifest changed the paired base path set or pinned JSON hash")
+
+    wire_base = EXPECTED.get("forced_root_wire_base")
+    wire_stage = stage_by_name.get("forced-root-wire-v1")
+    if not isinstance(wire_base, dict) or wire_stage is None:
+        raise VerificationError("forced-root wire paired base or final stage is missing")
+    if wire_base.get("path_order") != "lexical" or wire_base.get("paired_after") != "next-hir-v1":
+        raise VerificationError("forced-root wire paired base must be lexical and immediately follow next-hir-v1")
+    wire_index = EXPECTED["patch_order"].index("forced-root-wire-v1")
+    if wire_index == 0 or EXPECTED["patch_order"][wire_index - 1] != wire_base["paired_after"]:
+        raise VerificationError("forced-root wire paired base does not immediately precede its patch stage")
+    if wire_stage.get("path_order") != "lexical" or wire_stage.get("extra_paths") != FORCED_ROOT_STAGE_EXTRA_PATHS:
+        raise VerificationError("forced-root wire final manifest must use lexical order and its exact stage-scoped paths")
+    if wire_stage.get("count") != wire_base.get("count") or wire_base.get("count") != len(next_final_map) + len(FORCED_ROOT_PROVIDER_PATHS):
+        raise VerificationError("forced-root wire paired base count must add exactly two QuickJS providers")
+    if wire_base.get("file") != "forced-root-wire-v1-base.sha256" or wire_stage.get("file") != "forced-root-wire-v1.sha256":
+        raise VerificationError("forced-root wire paired input filenames differ from the pinned contract")
+    if wire_base.get("sha256") != EXPECTED["artifacts"].get(wire_base["file"]):
+        raise VerificationError("forced-root wire paired-base descriptor is stale relative to its artifact pin")
+    if wire_stage.get("sha256") != EXPECTED["artifacts"].get(wire_stage["file"]):
+        raise VerificationError("forced-root wire final descriptor is stale relative to its artifact pin")
+    wire_base_path = _path_without_symlinks(payload, wire_base["file"], "forced-root wire paired base")
+    wire_stage_path = _path_without_symlinks(payload, wire_stage["file"], "forced-root wire final")
+    if _sha(wire_base_path.read_bytes()) != wire_base["sha256"] or _sha(wire_stage_path.read_bytes()) != wire_stage["sha256"]:
+        raise VerificationError("forced-root wire paired base or final manifest hash differs from its descriptor")
+    wire_owners = wire_base.get("extra_owners")
+    if (
+        not isinstance(wire_owners, list)
+        or len(wire_owners) != len(FORCED_ROOT_PROVIDER_PATHS)
+        or any(not isinstance(owner, dict) for owner in wire_owners)
+        or [owner.get("path") for owner in wire_owners] != FORCED_ROOT_PROVIDER_PATHS
+    ):
+        raise VerificationError("forced-root wire paired base must pin exactly the two QuickJS provider owners")
+    wire_base_rows = _parse_sha_manifest(wire_base_path, "forced-root wire paired base", path_order="lexical")
+    wire_final_rows = _parse_sha_manifest(wire_stage_path, "forced-root wire final", path_order="lexical")
+    wire_base_map = {rel: digest for digest, rel in wire_base_rows}
+    wire_final_map = {rel: digest for digest, rel in wire_final_rows}
+    expected_wire_base = dict(next_final_map)
+    expected_wire_final = dict(next_final_map)
+    for owner in wire_owners:
+        rel = owner["path"]
+        if rel in expected_wire_base:
+            raise VerificationError(f"forced-root wire provider already exists in the next HIR final: {rel}")
+        base_path = _path_without_symlinks(baseline, rel, "forced-root wire provider")
+        if not base_path.is_file() or base_path.is_symlink():
+            raise VerificationError(f"forced-root wire provider is missing or not a regular baseline file: {rel}")
+        base_bytes = base_path.read_bytes()
+        if _sha(base_bytes) != owner["sha256"] or _git_blob_sha1(base_bytes) != owner["git_blob_sha1"]:
+            raise VerificationError(f"forced-root wire provider SHA-256 or Git blob pin mismatch for {rel}")
+        expected_wire_base[rel] = owner["sha256"]
+        expected_wire_final[rel] = owner["final_sha256"]
+        if net.get(rel) != "modified":
+            raise VerificationError(f"forced-root wire provider must be a modified net owner: {rel}")
+    if len(wire_base_rows) != wire_base["count"] or wire_base_map != expected_wire_base:
+        raise VerificationError("forced-root wire paired base differs from the exact next HIR final plus two pinned baseline providers")
+    if len(wire_final_rows) != wire_stage["count"] or wire_final_map != expected_wire_final:
+        raise VerificationError("forced-root wire final changed prior-stage owners or differs from the two pinned provider finals")
     return {
         "baseline": identity,
         "inputs": {**EXPECTED["payload_patches"], **EXPECTED["artifacts"]},
@@ -955,6 +1086,7 @@ def _patch_path(baseline: Path, payload: Path, name: str) -> Path:
         "compile-repairs-v1": "compile-repairs-v1.patch",
         "cumulative-hir-v1": "cumulative-hir-v1.patch",
         "next-hir-v1": "next-hir-v1.patch",
+        "forced-root-wire-v1": "forced-root-wire-v1.patch",
     }.get(name)
     if not payload_name:
         raise VerificationError(f"unknown patch stage: {name}")
@@ -1060,6 +1192,24 @@ def reconstruct(baseline: Path, candidate: Path, payload: Path, evidence: Path) 
                     "manifest_sha256": paired["manifest_sha256"],
                     "paired_after": paired_stage_name,
                     "extra_owner": EXPECTED["repair_base"]["extra_owner"]["path"],
+                }
+            elif stage["name"] == "forced-root-wire-v1":
+                wire_base = EXPECTED["forced_root_wire_base"]
+                paired_stage_name = wire_base["paired_after"]
+                if not state["stages"] or state["stages"][-1]["stage"] != paired_stage_name:
+                    raise VerificationError("forced-root wire paired base is not immediately after the named next HIR final")
+                paired = verify_stage(
+                    candidate,
+                    payload / wire_base["file"],
+                    wire_base["count"],
+                    FORCED_ROOT_STAGE_EXTRA_PATHS,
+                    wire_base.get("path_order", "components"),
+                )
+                state["paired_forced_root_wire_base"] = {
+                    "count": paired["count"],
+                    "manifest_sha256": paired["manifest_sha256"],
+                    "paired_after": paired_stage_name,
+                    "extra_owners": list(FORCED_ROOT_PROVIDER_PATHS),
                 }
             applied = _apply_patch(candidate, patch)
             manifest = payload / stage["file"]
