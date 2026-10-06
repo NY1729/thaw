@@ -1,0 +1,61 @@
+diff --git a/crates/thaw-quickjs/src/quickjs/api.rs b/crates/thaw-quickjs/src/quickjs/api.rs
+--- a/crates/thaw-quickjs/src/quickjs/api.rs
++++ b/crates/thaw-quickjs/src/quickjs/api.rs
+@@ -4348,7 +4348,8 @@
+                 // invoked. Preserve an original JS throw from that decoder
+                 // through the same exact-result lane as a target-call throw.
+                 let decode: Function = before_registered_graph_decode(args_json_ptr, || {
+-                    private_graph_decode(&ctx).map_err(|error| error.to_string())
++                    ctx.globals().get("__thaw_json_graph_decode_owned")
++                        .map_err(|error| error.to_string())
+                 })?;
+                 let arguments: Array = match decode.call((args_json.as_str(),)) {
+                     Ok(arguments) => arguments,
+diff --git a/crates/thaw-quickjs/src/quickjs/wasm.rs b/crates/thaw-quickjs/src/quickjs/wasm.rs
+--- a/crates/thaw-quickjs/src/quickjs/wasm.rs
++++ b/crates/thaw-quickjs/src/quickjs/wasm.rs
+@@ -19,7 +19,7 @@
+         f.write_str("JavaScript WebAssembly callback exception")
+     }
+ }
+-impl wasmi::core::HostError for WasmJsException {}
++impl wasmi::errors::HostError for WasmJsException {}
+ 
+ std::thread_local! {
+     static WASM_JS_EXCEPTIONS: std::cell::RefCell<(u32, HashMap<u32, WasmJsValue>)> =
+diff --git a/crates/thaw-runtime/src/runtime/native_values/numbers.rs b/crates/thaw-runtime/src/runtime/native_values/numbers.rs
+--- a/crates/thaw-runtime/src/runtime/native_values/numbers.rs
++++ b/crates/thaw-runtime/src/runtime/native_values/numbers.rs
+@@ -801,7 +801,7 @@
+                 // A coarser lattice has no point in this rounding cell.
+                 let coarser = exponent + 1;
+                 let power = base.pow(coarser.unsigned_abs());
+-                let binary_scale = BigUint::from(1u8) << 1074;
++                let binary_scale = BigUint::from(1u8) << 1074usize;
+                 let exact_value = {
+                     let bits = value.to_bits();
+                     let biased = ((bits >> 52) & 0x7ff) as usize;
+diff --git a/crates/thaw-runtime/src/runtime/native_values/template_strings.rs b/crates/thaw-runtime/src/runtime/native_values/template_strings.rs
+--- a/crates/thaw-runtime/src/runtime/native_values/template_strings.rs
++++ b/crates/thaw-runtime/src/runtime/native_values/template_strings.rs
+@@ -49,7 +49,7 @@
+ }
+ 
+ #[cfg(test)]
+-mod reset_tests {
++mod template_strings_reset_tests {
+     use super::*;
+ 
+     #[test]
+diff --git a/crates/thaw-runtime/src/tests.rs b/crates/thaw-runtime/src/tests.rs
+--- a/crates/thaw-runtime/src/tests.rs
++++ b/crates/thaw-runtime/src/tests.rs
+@@ -2668,7 +2668,7 @@
+     assert_eq!(PROMISE_FINALLY_ADOPT_STATES.with(|states| states.borrow().len()), states_before);
+     assert_eq!(READY_CONTINUATIONS.with(|ready| ready.borrow().len()), ready_before);
+     assert_eq!(thaw_promise_state(output), 1);
+-    assert_eq!(unsafe { (*output).result }, Some(original.cast()));
++    assert_eq!(unsafe { (*output).result }, Some(original.cast::<u8>().cast_const()));
+     assert!(!ACTIVE_PROMISES.with(|active| active.borrow().contains(&input)));
+     assert!(ACTIVE_PROMISES.with(|active| active.borrow().contains(&output)));
+     unsafe { thaw_promise_destroy(output) };

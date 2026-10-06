@@ -105,7 +105,7 @@ class FullNameFilterTests(unittest.TestCase):
 class DiagnosticRunnerTests(unittest.TestCase):
     OLD_FILTER_COUNT = 30
     PRE_EXTENSION_FILTER_COUNT = 39
-    FILTER_COUNT = 50
+    FILTER_COUNT = 56
     PRESERVED_FILTERS = (
         ("thaw-llvm", "native_eval_then_return_"),
         ("thaw-llvm", "discarded_native_promise_union_"),
@@ -469,16 +469,16 @@ class DiagnosticRunnerTests(unittest.TestCase):
         self.assertEqual("blocked", result["stages"]["runtime_no_run"]["status"])
         self.assertTrue(all(stage["status"] == "blocked" for stage in result["stages"].values() if stage["name"] not in ("identity",)))
 
-    def test_success_uses_50_pinned_filters_locked_and_separate_target_dirs(self):
+    def test_success_uses_56_pinned_filters_locked_and_separate_target_dirs(self):
         executor = self.successful_executor()
         result = self.run_case(executor)
         self.assertEqual(self.FILTER_COUNT, len(result["filters"]))
         self.assertEqual(self.PRESERVED_FILTERS, tuple((item["package"], item["filter"]) for item in result["filters"][:self.PRE_EXTENSION_FILTER_COUNT]))
         self.assertEqual(20, sum(f["package"] == "thaw-llvm" for f in result["filters"]))
         self.assertEqual(9, sum(f["package"] == "thaw-hir" for f in result["filters"]))
-        self.assertEqual(7, sum(f["package"] == "thaw-quickjs" for f in result["filters"]))
+        self.assertEqual(9, sum(f["package"] == "thaw-quickjs" for f in result["filters"]))
         self.assertEqual(8, sum(f["package"] == "thaw-std" for f in result["filters"]))
-        self.assertEqual(6, sum(f["package"] == "thaw-runtime" for f in result["filters"]))
+        self.assertEqual(10, sum(f["package"] == "thaw-runtime" for f in result["filters"]))
         cargo_calls = executor.calls
         self.assertTrue(cargo_calls)
         self.assertTrue(all("--locked" in call["argv"] for call in cargo_calls))
@@ -517,7 +517,7 @@ class DiagnosticRunnerTests(unittest.TestCase):
             for index, call in enumerate(cargo_calls)
             if call["argv"][1:2] == ["test"] and "--no-run" not in call["argv"] and filter_name in call["argv"]
         ]
-        self.assertEqual(40, len(new_control_indices))
+        self.assertEqual(2 * (self.FILTER_COUNT - self.OLD_FILTER_COUNT), len(new_control_indices))
         self.assertTrue(all(index < first_llvm_check for index in new_control_indices))
         runtime_preflight = next(
             index for index, call in enumerate(cargo_calls)
@@ -540,7 +540,8 @@ class DiagnosticRunnerTests(unittest.TestCase):
         self.assertLess(max(dependency_control_indices), first_llvm_check)
 
     def test_previous_hir_filters_preserve_leaf_name_contracts_and_execution_evidence(self):
-        result = self.run_case(self.successful_executor())
+        executor = self.successful_executor()
+        result = self.run_case(executor)
         hir_filters = result["filters"][25:30]
         self.assertEqual(
             [
@@ -558,11 +559,11 @@ class DiagnosticRunnerTests(unittest.TestCase):
             self.assertEqual(expected, [name.rsplit("::", 1)[-1] for name in item["selected_names"]])
             self.assertEqual(item["selected_names"], item["execution_names"])
 
-    def test_appended_twenty_groups_match_exact_full_names_without_leaf_normalization(self):
+    def test_appended_groups_match_exact_full_names_without_leaf_normalization(self):
         result = self.run_case(self.successful_executor())
         expected_full = verify.EXPECTED["expected_full_test_names"]
         new_groups = result["filters"][self.OLD_FILTER_COUNT :]
-        self.assertEqual(20, len(new_groups))
+        self.assertEqual(26, len(new_groups))
         self.assertEqual(set(expected_full), {item["filter"] for item in new_groups})
         for item in new_groups:
             expected = expected_full[item["filter"]]
@@ -590,6 +591,7 @@ class DiagnosticRunnerTests(unittest.TestCase):
         self.assertTrue(all(item["status"] == "blocked" for item in quickjs["filters"][30:37]))
         self.assertTrue(all(item["status"] == "passed" for item in quickjs["filters"][37:39]))
         self.assertTrue(all(item["status"] == "passed" for item in quickjs["filters"][39:50]))
+        self.assertTrue(all(item["status"] == "blocked" for item in quickjs["filters"][54:56]))
         self.assertTrue(all(item["status"] == "passed" for item in quickjs["filters"][:30]))
         self.assertEqual("failed", quickjs["overall"]["status"])
 
@@ -644,7 +646,7 @@ class DiagnosticRunnerTests(unittest.TestCase):
     def test_new_dependency_exact_controls_have_one_expected_name_and_one_nonignored_outcome(self):
         result = self.run_case(self.successful_executor())
         expected_full = verify.EXPECTED["expected_full_test_names"]
-        dependency_groups = result["filters"][self.PRE_EXTENSION_FILTER_COUNT :]
+        dependency_groups = result["filters"][self.PRE_EXTENSION_FILTER_COUNT :50]
         self.assertEqual(11, len(dependency_groups))
         for item in dependency_groups:
             with self.subTest(filter=item["filter"]):
@@ -654,6 +656,32 @@ class DiagnosticRunnerTests(unittest.TestCase):
                 self.assertEqual(1, item["selected_count"])
                 self.assertEqual(expected, item["execution_names"])
                 self.assertEqual({"passed": 1, "failed": 0, "ignored": 0}, item["execution"])
+
+    def test_six_quickjs_runtime_singletons_use_full_name_identity_and_package_gates(self):
+        executor = self.successful_executor()
+        result = self.run_case(executor)
+        groups = result["filters"][50:56]
+        self.assertEqual(6, len(groups))
+        for item in groups:
+            with self.subTest(filter=item["filter"]):
+                self.assertEqual([item["filter"]], verify.EXPECTED["expected_full_test_names"][item["filter"]])
+                self.assertEqual([item["filter"]], item["selected_names"])
+                self.assertEqual([item["filter"]], item["execution_names"])
+                self.assertEqual(1, item["selected_count"])
+                self.assertEqual({"passed": 1, "failed": 0, "ignored": 0}, item["execution"])
+        exact_commands = [
+            call["argv"] for call in executor.calls
+            if call["argv"][1:2] == ["test"]
+        ]
+        self.assertFalse(any("--exact" in argv for argv in exact_commands))
+        self.evidence = Path(self.temp.name) / "run-evidence-quickjs-runtime-gates"
+        runtime_failed = self.run_case(self.successful_executor(fail="runtime-no-run"))
+        self.assertTrue(all(item["status"] == "blocked" for item in runtime_failed["filters"][50:54]))
+        self.assertTrue(all(item["status"] == "passed" for item in runtime_failed["filters"][54:56]))
+        self.evidence = Path(self.temp.name) / "run-evidence-quickjs-gates"
+        quickjs_failed = self.run_case(self.successful_executor(fail="quickjs-no-run"))
+        self.assertTrue(all(item["status"] == "blocked" for item in quickjs_failed["filters"][54:56]))
+        self.assertTrue(all(item["status"] == "passed" for item in quickjs_failed["filters"][50:54]))
 
     def test_appended_http_control_is_exact_and_uses_the_existing_std_preflight(self):
         self.assertEqual(

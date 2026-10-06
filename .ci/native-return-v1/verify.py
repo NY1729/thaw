@@ -41,6 +41,18 @@ STD_HTTP_BASE_GIT_BLOB_SHA1 = "ff3ff9850cef56b5dd7be727c6bdbf74adb143d8"
 STD_HTTP_FINAL_SHA256 = "22f6c8809a304857a4fb800ef9949f70cbe573a8a2a4930b3df847640d1435ed"
 STD_COMPILE_EXTRA_PATHS = [*FORCED_ROOT_STAGE_EXTRA_PATHS, STD_HTTP_PATH]
 STD_COMPILE_SOURCE_PATHS = [STD_HTTP_PATH, "crates/thaw-std/src/json.rs"]
+QUICKJS_WASM_PATH = "crates/thaw-quickjs/src/quickjs/wasm.rs"
+QUICKJS_WASM_BASE_SHA256 = "6eabef4cc98d6d123f8c8772f3b534ad06682e5e0792f6d18e56a350558f2a56"
+QUICKJS_WASM_BASE_GIT_BLOB_SHA1 = "8735b64671f7b03806397986e9fbbe08d08ac747"
+QUICKJS_WASM_FINAL_SHA256 = "6982e1394e32a2ddd083d3f5c31c9e8cf1f5e8b41105722c7cd4826efb73c0db"
+QUICKJS_RUNTIME_EXTRA_PATHS = [*STD_COMPILE_EXTRA_PATHS, QUICKJS_WASM_PATH]
+QUICKJS_RUNTIME_SOURCE_PATHS = [
+    "crates/thaw-quickjs/src/quickjs/api.rs",
+    QUICKJS_WASM_PATH,
+    "crates/thaw-runtime/src/runtime/native_values/numbers.rs",
+    "crates/thaw-runtime/src/runtime/native_values/template_strings.rs",
+    "crates/thaw-runtime/src/tests.rs",
+]
 EXPECTED: dict[str, Any] = {
     "schema_version": 1,
     "validation_branch": VALIDATION_BRANCH,
@@ -363,6 +375,61 @@ EXPECTED: dict[str, Any] = {
     },
 }
 
+EXPECTED["payload_patches"]["quickjs-runtime-compile-v1.patch"] = "ab6405f01b6d8377b7d9282edf90a14003ad762b5dfc0cc5a8d7252db98f9a50"
+EXPECTED["artifacts"].update({
+    "quickjs-runtime-compile-v1-base.sha256": "2bd5d6ebe24b70d971ba1e9fbaee069562c333a075f48ff3097d11cf541127a2",
+    "quickjs-runtime-compile-v1.sha256": "15614690c79ade16025fded42bc9905fb9aef1add904c6280ef6538f67979538",
+    "net-owners.txt": "50d21ac22ff6888bd58eee813964c5a843e4a476620e480482cb7a88bddb0874",
+})
+EXPECTED["stage_manifests"].append({
+    "name": "quickjs-runtime-compile-v1",
+    "file": "quickjs-runtime-compile-v1.sha256",
+    "sha256": "15614690c79ade16025fded42bc9905fb9aef1add904c6280ef6538f67979538",
+    "count": 185,
+    "extra_paths": QUICKJS_RUNTIME_EXTRA_PATHS,
+    "path_order": "lexical",
+})
+EXPECTED["quickjs_runtime_compile_base"] = {
+    "file": "quickjs-runtime-compile-v1-base.sha256",
+    "sha256": "2bd5d6ebe24b70d971ba1e9fbaee069562c333a075f48ff3097d11cf541127a2",
+    "count": 185,
+    "path_order": "lexical",
+    "paired_after": "std-compile-v1",
+    "extra_owner": {
+        "path": QUICKJS_WASM_PATH,
+        "sha256": QUICKJS_WASM_BASE_SHA256,
+        "git_blob_sha1": QUICKJS_WASM_BASE_GIT_BLOB_SHA1,
+        "final_sha256": QUICKJS_WASM_FINAL_SHA256,
+    },
+}
+EXPECTED["quickjs_runtime_source_paths"] = QUICKJS_RUNTIME_SOURCE_PATHS
+EXPECTED["net_owners"] = {
+    "file": "net-owners.txt",
+    "sha256": "50d21ac22ff6888bd58eee813964c5a843e4a476620e480482cb7a88bddb0874",
+    "count": 61,
+    "modified": 56,
+    "new": 5,
+}
+EXPECTED["patch_order"].append("quickjs-runtime-compile-v1")
+EXPECTED["test_filters"].extend([
+    {"package": "thaw-runtime", "filter": "template_strings_reset_tests::raw_reads_reuse_the_registered_handle_and_exact_string_bytes"},
+    {"package": "thaw-runtime", "filter": "template_strings_reset_tests::cooked_root_retains_raw_until_the_cooked_handle_expires"},
+    {"package": "thaw-runtime", "filter": "radix_string_tests::shortest_radix_spelling_roundtrips_across_every_base"},
+    {"package": "thaw-runtime", "filter": "reset_tests::match_metadata_expires_with_its_arena_handle"},
+    {"package": "thaw-quickjs", "filter": "tests::webassembly_callback_exception_identity"},
+    {"package": "thaw-quickjs", "filter": "tests::webassembly_start_trap_error_kind"},
+])
+EXPECTED["expected_full_test_names"].update({
+    name: [name] for name in (
+        "template_strings_reset_tests::raw_reads_reuse_the_registered_handle_and_exact_string_bytes",
+        "template_strings_reset_tests::cooked_root_retains_raw_until_the_cooked_handle_expires",
+        "radix_string_tests::shortest_radix_spelling_roundtrips_across_every_base",
+        "reset_tests::match_metadata_expires_with_its_arena_handle",
+        "tests::webassembly_callback_exception_identity",
+        "tests::webassembly_start_trap_error_kind",
+    )
+})
+
 
 class VerificationError(RuntimeError):
     """A source identity, input pin, or reconstruction contract failed."""
@@ -628,6 +695,7 @@ def verify_stage(
         [EXPECTED.get("repair_base", {}).get("extra_owner", {}).get("path")],
         FORCED_ROOT_STAGE_EXTRA_PATHS,
         STD_COMPILE_EXTRA_PATHS,
+        QUICKJS_RUNTIME_EXTRA_PATHS,
     ]
     if extra_paths and extra_paths not in allowed_extra_sets:
         raise VerificationError(f"stage has an unapproved extra path scope: {extra_paths!r}")
@@ -860,6 +928,73 @@ def _verify_std_compile_inputs(
     }
 
 
+def _verify_quickjs_runtime_inputs(
+    payload: Path, baseline: Path, stage_by_name: dict[str, dict[str, Any]], net: dict[str, str]
+) -> dict[str, Any]:
+    """Pin stage eleven to stage ten plus original baseline wasm.rs."""
+    base = EXPECTED.get("quickjs_runtime_compile_base")
+    previous = stage_by_name.get("std-compile-v1")
+    stage = stage_by_name.get("quickjs-runtime-compile-v1")
+    if not isinstance(base, dict) or previous is None or stage is None:
+        raise VerificationError("QuickJS/runtime paired base or stage is missing")
+    if base.get("paired_after") != previous["name"] or EXPECTED["patch_order"][-2:] != ["std-compile-v1", "quickjs-runtime-compile-v1"]:
+        raise VerificationError("QuickJS/runtime paired base must immediately follow std-compile-v1")
+    if base.get("path_order") != "lexical" or previous.get("path_order") != "lexical":
+        raise VerificationError("QuickJS/runtime base and predecessor must retain lexical path ordering")
+    if previous.get("extra_paths") != STD_COMPILE_EXTRA_PATHS or stage.get("extra_paths") != QUICKJS_RUNTIME_EXTRA_PATHS:
+        raise VerificationError("QuickJS/runtime stage has an unexpected stage-scoped path set")
+    if stage.get("path_order") != "lexical" or base.get("count") != previous["count"] + 1 or stage.get("count") != base["count"]:
+        raise VerificationError("QuickJS/runtime paired base and final must contain exactly 185 files")
+    if base.get("file") != "quickjs-runtime-compile-v1-base.sha256" or stage.get("file") != "quickjs-runtime-compile-v1.sha256":
+        raise VerificationError("QuickJS/runtime paired input filenames differ from the pinned contract")
+    for descriptor in (base, stage):
+        if descriptor.get("sha256") != EXPECTED["artifacts"].get(descriptor["file"]):
+            raise VerificationError(f"QuickJS/runtime manifest pin is stale for {descriptor['file']}")
+    expected_owner = {
+        "path": QUICKJS_WASM_PATH,
+        "sha256": QUICKJS_WASM_BASE_SHA256,
+        "git_blob_sha1": QUICKJS_WASM_BASE_GIT_BLOB_SHA1,
+        "final_sha256": QUICKJS_WASM_FINAL_SHA256,
+    }
+    if base.get("extra_owner") != expected_owner:
+        raise VerificationError("QuickJS/runtime paired base wasm.rs identity differs from the pinned baseline")
+    wasm_path = _path_without_symlinks(baseline, QUICKJS_WASM_PATH, "QuickJS/runtime baseline wasm owner")
+    if not wasm_path.is_file() or wasm_path.is_symlink():
+        raise VerificationError(f"QuickJS/runtime baseline wasm owner is missing or not a regular file: {QUICKJS_WASM_PATH}")
+    wasm_bytes = wasm_path.read_bytes()
+    if _sha(wasm_bytes) != QUICKJS_WASM_BASE_SHA256 or _git_blob_sha1(wasm_bytes) != QUICKJS_WASM_BASE_GIT_BLOB_SHA1:
+        raise VerificationError("baseline QuickJS wasm owner SHA-256 or Git blob identity mismatch")
+    base_path = _path_without_symlinks(payload, base["file"], "QuickJS/runtime paired base")
+    previous_path = _path_without_symlinks(payload, previous["file"], "QuickJS/runtime predecessor final")
+    final_path = _path_without_symlinks(payload, stage["file"], "QuickJS/runtime final")
+    previous_rows = _parse_sha_manifest(previous_path, "QuickJS/runtime predecessor final", path_order="lexical")
+    base_rows = _parse_sha_manifest(base_path, "QuickJS/runtime paired base", path_order="lexical")
+    final_rows = _parse_sha_manifest(final_path, "QuickJS/runtime final", path_order="lexical")
+    previous_map = {rel: digest for digest, rel in previous_rows}
+    base_map = {rel: digest for digest, rel in base_rows}
+    final_map = {rel: digest for digest, rel in final_rows}
+    expected_base = dict(previous_map)
+    if QUICKJS_WASM_PATH in expected_base:
+        raise VerificationError("QuickJS/runtime paired base wasm.rs is already in the preceding source set")
+    expected_base[QUICKJS_WASM_PATH] = QUICKJS_WASM_BASE_SHA256
+    if base_map != expected_base or len(base_rows) != base["count"]:
+        raise VerificationError("QuickJS/runtime paired base differs from std final plus original baseline wasm.rs")
+    if set(final_map) != set(base_map) or len(final_rows) != stage["count"]:
+        raise VerificationError("QuickJS/runtime final changed the paired base path set")
+    changed = {rel for rel in base_map if base_map[rel] != final_map[rel]}
+    if changed != set(QUICKJS_RUNTIME_SOURCE_PATHS) or final_map.get(QUICKJS_WASM_PATH) != QUICKJS_WASM_FINAL_SHA256:
+        raise VerificationError("QuickJS/runtime final must change exactly the five pinned source owners")
+    if any(net.get(rel) != "modified" for rel in QUICKJS_RUNTIME_SOURCE_PATHS):
+        raise VerificationError("QuickJS/runtime source owners must all be modified net owners")
+    return {
+        "base_count": len(base_map),
+        "final_count": len(final_map),
+        "changed_source_owners": sorted(changed),
+        "unchanged_source_count": len(base_map) - len(changed),
+        "paired_after": previous["name"],
+    }
+
+
 def verify_inputs(baseline: Path, payload: Path) -> dict[str, Any]:
     """Validate descriptor, immutable bytes, clean baseline and roster preconditions."""
     if not payload.is_dir() or payload.is_symlink():
@@ -923,6 +1058,11 @@ def verify_inputs(baseline: Path, payload: Path) -> dict[str, Any]:
     if actual_std_compile_inputs - expected_std_compile_inputs:
         unexpected = sorted(actual_std_compile_inputs - expected_std_compile_inputs)
         raise VerificationError(f"unexpected std compile input: {unexpected[0]}")
+    expected_quickjs_runtime_inputs = {"quickjs-runtime-compile-v1.patch", "quickjs-runtime-compile-v1-base.sha256", "quickjs-runtime-compile-v1.sha256"}
+    actual_quickjs_runtime_inputs = {entry.name for entry in payload.iterdir() if entry.name.startswith("quickjs-runtime-compile-v")}
+    if actual_quickjs_runtime_inputs - expected_quickjs_runtime_inputs:
+        unexpected = sorted(actual_quickjs_runtime_inputs - expected_quickjs_runtime_inputs)
+        raise VerificationError(f"unexpected QuickJS/runtime compile input: {unexpected[0]}")
 
     owner_map = _read_owner_map(payload)
     manifest = _json_no_duplicates(source_bytes["handoff_manifest"], "native handoff manifest")
@@ -959,7 +1099,7 @@ def verify_inputs(baseline: Path, payload: Path) -> dict[str, Any]:
 
     # Each manifest file is parsed here, before any patch is applied, so malformed or
     # unsafe input cannot become a Cargo-time surprise.
-    lexical_stage_names = {"compile-repairs-v1", "cumulative-hir-v1", "next-hir-v1", "forced-root-wire-v1", "dependency-compile-v1", "std-compile-v1"}
+    lexical_stage_names = {"compile-repairs-v1", "cumulative-hir-v1", "next-hir-v1", "forced-root-wire-v1", "dependency-compile-v1", "std-compile-v1", "quickjs-runtime-compile-v1"}
     extra_path = EXPECTED["repair_base"]["extra_owner"]["path"]
     extra_paths_by_stage = {
         "compile-repairs-v1": [extra_path],
@@ -968,6 +1108,7 @@ def verify_inputs(baseline: Path, payload: Path) -> dict[str, Any]:
         "forced-root-wire-v1": FORCED_ROOT_STAGE_EXTRA_PATHS,
         "dependency-compile-v1": FORCED_ROOT_STAGE_EXTRA_PATHS,
         "std-compile-v1": STD_COMPILE_EXTRA_PATHS,
+        "quickjs-runtime-compile-v1": QUICKJS_RUNTIME_EXTRA_PATHS,
     }
     for stage in EXPECTED["stage_manifests"]:
         extra_paths = stage.get("extra_paths", [])
@@ -1150,6 +1291,7 @@ def verify_inputs(baseline: Path, payload: Path) -> dict[str, Any]:
         raise VerificationError("forced-root wire final changed prior-stage owners or differs from the two pinned provider finals")
     dependency_inputs = _verify_dependency_compile_inputs(payload, stage_by_name, net)
     std_compile_inputs = _verify_std_compile_inputs(payload, baseline, stage_by_name, net)
+    quickjs_runtime_inputs = _verify_quickjs_runtime_inputs(payload, baseline, stage_by_name, net)
     return {
         "baseline": identity,
         "inputs": {**EXPECTED["payload_patches"], **EXPECTED["artifacts"]},
@@ -1157,6 +1299,7 @@ def verify_inputs(baseline: Path, payload: Path) -> dict[str, Any]:
         "net_owner_count": len(net),
         "dependency_compile": dependency_inputs,
         "std_compile": std_compile_inputs,
+        "quickjs_runtime_compile": quickjs_runtime_inputs,
         "patch_order": list(EXPECTED["patch_order"]),
     }
 
@@ -1320,6 +1463,7 @@ def _patch_path(baseline: Path, payload: Path, name: str) -> Path:
         "forced-root-wire-v1": "forced-root-wire-v1.patch",
         "dependency-compile-v1": "dependency-compile-v1.patch",
         "std-compile-v1": "std-compile-v1.patch",
+        "quickjs-runtime-compile-v1": "quickjs-runtime-compile-v1.patch",
     }.get(name)
     if not payload_name:
         raise VerificationError(f"unknown patch stage: {name}")
@@ -1495,6 +1639,36 @@ def reconstruct(baseline: Path, candidate: Path, payload: Path, evidence: Path) 
                     "extra_paths": list(STD_COMPILE_EXTRA_PATHS),
                     "http_baseline_sha256": STD_HTTP_BASE_SHA256,
                     "http_baseline_git_blob_sha1": STD_HTTP_BASE_GIT_BLOB_SHA1,
+                }
+            elif stage["name"] == "quickjs-runtime-compile-v1":
+                quickjs_base = EXPECTED["quickjs_runtime_compile_base"]
+                paired_stage_name = quickjs_base["paired_after"]
+                if not state["stages"] or state["stages"][-1]["stage"] != paired_stage_name:
+                    raise VerificationError("QuickJS/runtime paired base is not immediately after the std final")
+                previous = stage_by_name[paired_stage_name]
+                previous_result = verify_stage(
+                    candidate,
+                    payload / previous["file"],
+                    previous["count"],
+                    previous.get("extra_paths", []),
+                    previous.get("path_order", "components"),
+                )
+                if previous_result["manifest_sha256"] != state["stages"][-1]["manifest_sha256"]:
+                    raise VerificationError("QuickJS/runtime predecessor no longer matches the reconstructed std final")
+                paired = verify_stage(
+                    candidate,
+                    payload / quickjs_base["file"],
+                    quickjs_base["count"],
+                    QUICKJS_RUNTIME_EXTRA_PATHS,
+                    quickjs_base["path_order"],
+                )
+                state["paired_quickjs_runtime_base"] = {
+                    "count": paired["count"],
+                    "manifest_sha256": paired["manifest_sha256"],
+                    "paired_after": paired_stage_name,
+                    "extra_owner": QUICKJS_WASM_PATH,
+                    "wasm_baseline_sha256": QUICKJS_WASM_BASE_SHA256,
+                    "wasm_baseline_git_blob_sha1": QUICKJS_WASM_BASE_GIT_BLOB_SHA1,
                 }
             applied = _apply_patch(candidate, patch)
             manifest = payload / stage["file"]
