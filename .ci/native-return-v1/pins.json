@@ -10,13 +10,15 @@
     "forced-root-wire-v1-base.sha256": "23da8386704a188e890bd7e591bb395ce611d45e8fbf0ad264716b5d61e3c9bf",
     "forced-root-wire-v1.sha256": "83a99e4934c4108992f874ca75ff2ea366283fbc3c543afaf9fee6489cb95941",
     "native-base.sha256": "da86c2c16619de2e236cdd50b9d2572465fbdd4dc3b75b680cf91c6b0f6bdb72",
-    "net-owners.txt": "b716db27fa12c0995101ee93b1875510353245f0c20d8cbe660d957280eb23bb",
+    "net-owners.txt": "e6e1b5beb336d919941e914ddc7569c3b5567ed30344f69adde12c4f1f891d0c",
     "next-hir-v1-base.sha256": "0be3783d6241706ba2dd492704162aa9e0076dcc4a1de96e309eca9b512ba81c",
     "next-hir-v1.sha256": "f8915460efcaafc82a4392d9ca6b656dc150045d5cad4458b66755ef5705635b",
     "original-native.sha256": "4e219dde2129cf5876497edd6f9032cebdbee89eded9cce20e50ecda041053ce",
     "return-v1.sha256": "51b1d9dd9a501538cc44fcaf8bfa72cc5a3f9ceb34c2942d4a0c676acc2e7031",
     "scope-v5-test-plan.md": "9eb740f8f418de5e7f8c7cd88607d5b269c7495a34600d937bf8653f7e55ae81",
-    "scope-v5.sha256": "227274cad19f045e158168cc2b341744fb62e2d0e78c633ece4703e462d7a8e3"
+    "scope-v5.sha256": "227274cad19f045e158168cc2b341744fb62e2d0e78c633ece4703e462d7a8e3",
+    "std-compile-v1-base.sha256": "cc7f08e15509afde400423c709a28703152a2e20df1d77518dc1fcd58ef4fc32",
+    "std-compile-v1.sha256": "2f0b3a27d30ba1e294d760e53ac226e59b3e375ee3ca0bb8668f0ef8b197fec3"
   },
   "baseline": {
     "commit": "8b353a99d4995c8217b9e73cd308ea85d2d6e5d8",
@@ -71,6 +73,9 @@
     ],
     "handle_registry_identity_ignores_later_object_is_override": [
       "handle_registry_identity_ignores_later_object_is_override"
+    ],
+    "http::tests::peer_send_eof_preserves_pending_streamed_response": [
+      "http::tests::peer_send_eof_preserves_pending_streamed_response"
     ],
     "json::tests::a_missing_key_or_index_is_distinguishable_from_an_explicit_null": [
       "json::tests::a_missing_key_or_index_is_distinguishable_from_an_explicit_null"
@@ -188,11 +193,11 @@
     "sha256": "da86c2c16619de2e236cdd50b9d2572465fbdd4dc3b75b680cf91c6b0f6bdb72"
   },
   "net_owners": {
-    "count": 57,
+    "count": 58,
     "file": "net-owners.txt",
-    "modified": 52,
+    "modified": 53,
     "new": 5,
-    "sha256": "b716db27fa12c0995101ee93b1875510353245f0c20d8cbe660d957280eb23bb"
+    "sha256": "e6e1b5beb336d919941e914ddc7569c3b5567ed30344f69adde12c4f1f891d0c"
   },
   "next_hir_base": {
     "count": 181,
@@ -210,7 +215,8 @@
     "cumulative-hir-v1",
     "next-hir-v1",
     "forced-root-wire-v1",
-    "dependency-compile-v1"
+    "dependency-compile-v1",
+    "std-compile-v1"
   ],
   "payload_patches": {
     "compile-repairs-v1.patch": "2994f62e98a4fb9cbd0b792b20da09bf505874d749447bf8f0e43776d25e0f05",
@@ -219,7 +225,8 @@
     "discard-v2.patch": "0ffe9fcec530feb12a2ca084399643861c240cc81906c9aab4677cc529aceb39",
     "forced-root-wire-v1.patch": "a7f04af1afa5b9d41d7a8dca984ccefba020cdd36f19175ef14a8f809a6e8683",
     "next-hir-v1.patch": "c0d4addaf22a7c7c26a133153b8298cc39013794f0263228468dddb8e0f3936b",
-    "return-v1.patch": "2e2e2057925542c0790d5ec879ce94d55e3ba5798b470aa5cd85327821fd1ec8"
+    "return-v1.patch": "2e2e2057925542c0790d5ec879ce94d55e3ba5798b470aa5cd85327821fd1ec8",
+    "std-compile-v1.patch": "25263410104929b361693cf228056514e27a41c262f8680c3e7bfb4a0c09cc18"
   },
   "provenance_only_review_fingerprints": {
     "discard_v2": "91f328cce86a8102e53045be4069b646487ea0acf48e141a11099197942571fd",
@@ -365,8 +372,34 @@
       "name": "dependency-compile-v1",
       "path_order": "lexical",
       "sha256": "605121c9db1c995897770fc223d6207d18e9a6075e11725c2c9c0e25f8e2288d"
+    },
+    {
+      "count": 184,
+      "extra_paths": [
+        "crates/thaw-std/src/json.rs",
+        "crates/thaw-quickjs/src/quickjs/api.rs",
+        "crates/thaw-quickjs/src/quickjs/platform_globals/runtime.js",
+        "crates/thaw-std/src/http.rs"
+      ],
+      "file": "std-compile-v1.sha256",
+      "name": "std-compile-v1",
+      "path_order": "lexical",
+      "sha256": "2f0b3a27d30ba1e294d760e53ac226e59b3e375ee3ca0bb8668f0ef8b197fec3"
     }
   ],
+  "std_compile_base": {
+    "count": 184,
+    "extra_owner": {
+      "final_sha256": "22f6c8809a304857a4fb800ef9949f70cbe573a8a2a4930b3df847640d1435ed",
+      "git_blob_sha1": "ff3ff9850cef56b5dd7be727c6bdbf74adb143d8",
+      "path": "crates/thaw-std/src/http.rs",
+      "sha256": "4ad52d51d87666b1a910477daa3c8b7a2c3b4b9825198a1b1495242aba1cbddf"
+    },
+    "file": "std-compile-v1-base.sha256",
+    "paired_after": "dependency-compile-v1",
+    "path_order": "lexical",
+    "sha256": "cc7f08e15509afde400423c709a28703152a2e20df1d77518dc1fcd58ef4fc32"
+  },
   "subset_roots": [
     ".gitignore",
     "Cargo.lock",
@@ -571,6 +604,10 @@
     },
     {
       "filter": "json::tests::a_missing_key_or_index_is_distinguishable_from_an_explicit_null",
+      "package": "thaw-std"
+    },
+    {
+      "filter": "http::tests::peer_send_eof_preserves_pending_streamed_response",
       "package": "thaw-std"
     }
   ],

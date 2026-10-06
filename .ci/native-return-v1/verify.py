@@ -35,6 +35,12 @@ DEPENDENCY_SOURCE_PATHS = [
     "crates/thaw-runtime/src/tests.rs",
     "crates/thaw-std/src/json.rs",
 ]
+STD_HTTP_PATH = "crates/thaw-std/src/http.rs"
+STD_HTTP_BASE_SHA256 = "4ad52d51d87666b1a910477daa3c8b7a2c3b4b9825198a1b1495242aba1cbddf"
+STD_HTTP_BASE_GIT_BLOB_SHA1 = "ff3ff9850cef56b5dd7be727c6bdbf74adb143d8"
+STD_HTTP_FINAL_SHA256 = "22f6c8809a304857a4fb800ef9949f70cbe573a8a2a4930b3df847640d1435ed"
+STD_COMPILE_EXTRA_PATHS = [*FORCED_ROOT_STAGE_EXTRA_PATHS, STD_HTTP_PATH]
+STD_COMPILE_SOURCE_PATHS = [STD_HTTP_PATH, "crates/thaw-std/src/json.rs"]
 EXPECTED: dict[str, Any] = {
     "schema_version": 1,
     "validation_branch": VALIDATION_BRANCH,
@@ -65,6 +71,7 @@ EXPECTED: dict[str, Any] = {
         "next-hir-v1.patch": "c0d4addaf22a7c7c26a133153b8298cc39013794f0263228468dddb8e0f3936b",
         "forced-root-wire-v1.patch": "a7f04af1afa5b9d41d7a8dca984ccefba020cdd36f19175ef14a8f809a6e8683",
         "dependency-compile-v1.patch": "68a5c8e397df3462aeb83879d854837a423ef297d523f455ecd62d05b7281aea",
+        "std-compile-v1.patch": "25263410104929b361693cf228056514e27a41c262f8680c3e7bfb4a0c09cc18",
     },
     "artifacts": {
         "original-native.sha256": "4e219dde2129cf5876497edd6f9032cebdbee89eded9cce20e50ecda041053ce",
@@ -72,7 +79,7 @@ EXPECTED: dict[str, Any] = {
         "discard-v2.sha256": "c47d4ab7e4a805190e719b13b99bd7d233e24a5007afcbff6becebab9493e328",
         "return-v1.sha256": "51b1d9dd9a501538cc44fcaf8bfa72cc5a3f9ceb34c2942d4a0c676acc2e7031",
         "native-base.sha256": "da86c2c16619de2e236cdd50b9d2572465fbdd4dc3b75b680cf91c6b0f6bdb72",
-        "net-owners.txt": "b716db27fa12c0995101ee93b1875510353245f0c20d8cbe660d957280eb23bb",
+        "net-owners.txt": "e6e1b5beb336d919941e914ddc7569c3b5567ed30344f69adde12c4f1f891d0c",
         "scope-v5-test-plan.md": "9eb740f8f418de5e7f8c7cd88607d5b269c7495a34600d937bf8653f7e55ae81",
         "compile-repairs-v1-base.sha256": "88bb3556306a13f8148d229b88057ed4324f9ac43861cbc5d2b3fd52df03e80e",
         "compile-repairs-v1.sha256": "d3b7c0e06ca053f4b342dcbc8ac1247a3460c946a35a2b22d2645c76251a2aa9",
@@ -84,6 +91,8 @@ EXPECTED: dict[str, Any] = {
         "forced-root-wire-v1.sha256": "83a99e4934c4108992f874ca75ff2ea366283fbc3c543afaf9fee6489cb95941",
         "dependency-compile-v1-base.sha256": "83a99e4934c4108992f874ca75ff2ea366283fbc3c543afaf9fee6489cb95941",
         "dependency-compile-v1.sha256": "605121c9db1c995897770fc223d6207d18e9a6075e11725c2c9c0e25f8e2288d",
+        "std-compile-v1-base.sha256": "cc7f08e15509afde400423c709a28703152a2e20df1d77518dc1fcd58ef4fc32",
+        "std-compile-v1.sha256": "2f0b3a27d30ba1e294d760e53ac226e59b3e375ee3ca0bb8668f0ef8b197fec3",
     },
     "stage_manifests": [
         {"name": "original-native", "file": "original-native.sha256", "sha256": "4e219dde2129cf5876497edd6f9032cebdbee89eded9cce20e50ecda041053ce", "count": 175},
@@ -95,6 +104,7 @@ EXPECTED: dict[str, Any] = {
         {"name": "next-hir-v1", "file": "next-hir-v1.sha256", "sha256": "f8915460efcaafc82a4392d9ca6b656dc150045d5cad4458b66755ef5705635b", "count": 181, "extra_paths": ["crates/thaw-std/src/json.rs"], "path_order": "lexical"},
         {"name": "forced-root-wire-v1", "file": "forced-root-wire-v1.sha256", "sha256": "83a99e4934c4108992f874ca75ff2ea366283fbc3c543afaf9fee6489cb95941", "count": 183, "extra_paths": ["crates/thaw-std/src/json.rs", "crates/thaw-quickjs/src/quickjs/api.rs", "crates/thaw-quickjs/src/quickjs/platform_globals/runtime.js"], "path_order": "lexical"},
         {"name": "dependency-compile-v1", "file": "dependency-compile-v1.sha256", "sha256": "605121c9db1c995897770fc223d6207d18e9a6075e11725c2c9c0e25f8e2288d", "count": 183, "extra_paths": ["crates/thaw-std/src/json.rs", "crates/thaw-quickjs/src/quickjs/api.rs", "crates/thaw-quickjs/src/quickjs/platform_globals/runtime.js"], "path_order": "lexical"},
+        {"name": "std-compile-v1", "file": "std-compile-v1.sha256", "sha256": "2f0b3a27d30ba1e294d760e53ac226e59b3e375ee3ca0bb8668f0ef8b197fec3", "count": 184, "extra_paths": STD_COMPILE_EXTRA_PATHS, "path_order": "lexical"},
     ],
     "repair_base": {
         "file": "compile-repairs-v1-base.sha256",
@@ -150,9 +160,22 @@ EXPECTED: dict[str, Any] = {
         "path_order": "lexical",
         "paired_after": "forced-root-wire-v1",
     },
+    "std_compile_base": {
+        "file": "std-compile-v1-base.sha256",
+        "sha256": "cc7f08e15509afde400423c709a28703152a2e20df1d77518dc1fcd58ef4fc32",
+        "count": 184,
+        "path_order": "lexical",
+        "paired_after": "dependency-compile-v1",
+        "extra_owner": {
+            "path": STD_HTTP_PATH,
+            "sha256": STD_HTTP_BASE_SHA256,
+            "git_blob_sha1": STD_HTTP_BASE_GIT_BLOB_SHA1,
+            "final_sha256": STD_HTTP_FINAL_SHA256,
+        },
+    },
     "native_base": {"file": "native-base.sha256", "sha256": "da86c2c16619de2e236cdd50b9d2572465fbdd4dc3b75b680cf91c6b0f6bdb72", "count": 24},
-    "net_owners": {"file": "net-owners.txt", "sha256": "b716db27fa12c0995101ee93b1875510353245f0c20d8cbe660d957280eb23bb", "count": 57, "modified": 52, "new": 5},
-    "patch_order": ["original-native", "scope-v5", "discard-v2", "return-v1", "compile-repairs-v1", "cumulative-hir-v1", "next-hir-v1", "forced-root-wire-v1", "dependency-compile-v1"],
+    "net_owners": {"file": "net-owners.txt", "sha256": "e6e1b5beb336d919941e914ddc7569c3b5567ed30344f69adde12c4f1f891d0c", "count": 58, "modified": 53, "new": 5},
+    "patch_order": ["original-native", "scope-v5", "discard-v2", "return-v1", "compile-repairs-v1", "cumulative-hir-v1", "next-hir-v1", "forced-root-wire-v1", "dependency-compile-v1", "std-compile-v1"],
     "subset_roots": [
         ".gitignore",
         "Cargo.lock",
@@ -247,6 +270,7 @@ EXPECTED: dict[str, Any] = {
         {"package": "thaw-runtime", "filter": "tests::purged_aggregate_callbacks_ignore_late_child_results_and_release_roots"},
         {"package": "thaw-std", "filter": "json::tests::jit_dictionary_callbacks_preserve_presence_and_typed_failures"},
         {"package": "thaw-std", "filter": "json::tests::a_missing_key_or_index_is_distinguishable_from_an_explicit_null"},
+        {"package": "thaw-std", "filter": "http::tests::peer_send_eof_preserves_pending_streamed_response"},
     ],
     "expected_test_names": {
         "thaw_remaining_": [
@@ -329,6 +353,7 @@ EXPECTED: dict[str, Any] = {
         "tests::purged_aggregate_callbacks_ignore_late_child_results_and_release_roots": ["tests::purged_aggregate_callbacks_ignore_late_child_results_and_release_roots"],
         "json::tests::jit_dictionary_callbacks_preserve_presence_and_typed_failures": ["json::tests::jit_dictionary_callbacks_preserve_presence_and_typed_failures"],
         "json::tests::a_missing_key_or_index_is_distinguishable_from_an_explicit_null": ["json::tests::a_missing_key_or_index_is_distinguishable_from_an_explicit_null"],
+        "http::tests::peer_send_eof_preserves_pending_streamed_response": ["http::tests::peer_send_eof_preserves_pending_streamed_response"],
     },
     # Informational fingerprints only; their underlying prose is not shipped or validated by CI.
     "provenance_only_review_fingerprints": {
@@ -602,6 +627,7 @@ def verify_stage(
     allowed_extra_sets = [
         [EXPECTED.get("repair_base", {}).get("extra_owner", {}).get("path")],
         FORCED_ROOT_STAGE_EXTRA_PATHS,
+        STD_COMPILE_EXTRA_PATHS,
     ]
     if extra_paths and extra_paths not in allowed_extra_sets:
         raise VerificationError(f"stage has an unapproved extra path scope: {extra_paths!r}")
@@ -746,6 +772,94 @@ def _verify_dependency_compile_inputs(
     }
 
 
+def _verify_std_compile_inputs(
+    payload: Path,
+    baseline: Path,
+    stage_by_name: dict[str, dict[str, Any]],
+    net: dict[str, str],
+) -> dict[str, Any]:
+    """Pin the tenth patch to the ninth final plus its exact baseline HTTP owner."""
+    base = EXPECTED.get("std_compile_base")
+    previous = stage_by_name.get("dependency-compile-v1")
+    stage = stage_by_name.get("std-compile-v1")
+    if not isinstance(base, dict) or previous is None or stage is None:
+        raise VerificationError("std compile paired base or stage is missing")
+    if base.get("paired_after") != previous["name"]:
+        raise VerificationError("std compile paired base must name the dependency compile predecessor")
+    patch_index = EXPECTED["patch_order"].index("std-compile-v1")
+    if patch_index == 0 or EXPECTED["patch_order"][patch_index - 1] != base["paired_after"]:
+        raise VerificationError("std compile paired base does not immediately precede its patch stage")
+    if base.get("path_order") != "lexical" or previous.get("path_order") != "lexical":
+        raise VerificationError("std compile base and predecessor must retain lexical path ordering")
+    if previous.get("extra_paths") != FORCED_ROOT_STAGE_EXTRA_PATHS:
+        raise VerificationError("std compile predecessor no longer carries the pinned three extra paths")
+    if stage.get("path_order") != "lexical" or stage.get("extra_paths") != STD_COMPILE_EXTRA_PATHS:
+        raise VerificationError("std compile final must retain the exact stage-scoped HTTP path")
+    if base.get("count") != previous["count"] + 1 or stage.get("count") != base.get("count"):
+        raise VerificationError("std compile paired base and final must contain the exact 184-file scope")
+    if base.get("file") != "std-compile-v1-base.sha256" or stage.get("file") != "std-compile-v1.sha256":
+        raise VerificationError("std compile paired input filenames differ from the pinned contract")
+    for descriptor in (base, stage):
+        if descriptor.get("sha256") != EXPECTED["artifacts"].get(descriptor["file"]):
+            raise VerificationError(f"std compile manifest pin is stale for {descriptor['file']}")
+
+    owner = base.get("extra_owner")
+    expected_owner = {
+        "path": STD_HTTP_PATH,
+        "sha256": STD_HTTP_BASE_SHA256,
+        "git_blob_sha1": STD_HTTP_BASE_GIT_BLOB_SHA1,
+        "final_sha256": STD_HTTP_FINAL_SHA256,
+    }
+    if owner != expected_owner:
+        raise VerificationError("std compile paired base HTTP source identity differs from the pinned baseline")
+    http_path = _path_without_symlinks(baseline, STD_HTTP_PATH, "std compile baseline HTTP owner")
+    if not http_path.is_file() or http_path.is_symlink():
+        raise VerificationError(f"std compile baseline HTTP owner is missing or not a regular file: {STD_HTTP_PATH}")
+    http_bytes = http_path.read_bytes()
+    if _sha(http_bytes) != STD_HTTP_BASE_SHA256 or _git_blob_sha1(http_bytes) != STD_HTTP_BASE_GIT_BLOB_SHA1:
+        raise VerificationError("std compile baseline HTTP owner SHA-256 or Git blob identity mismatch")
+
+    base_path = _path_without_symlinks(payload, base["file"], "std compile paired base")
+    previous_path = _path_without_symlinks(payload, previous["file"], "std compile predecessor final")
+    final_path = _path_without_symlinks(payload, stage["file"], "std compile final")
+    base_bytes, previous_bytes, final_bytes = base_path.read_bytes(), previous_path.read_bytes(), final_path.read_bytes()
+    if (
+        _sha(base_bytes) != base["sha256"]
+        or _sha(previous_bytes) != previous["sha256"]
+        or _sha(final_bytes) != stage["sha256"]
+        or previous["sha256"] != EXPECTED["artifacts"].get(previous["file"])
+    ):
+        raise VerificationError("std compile paired base or final manifest hash differs from its descriptor")
+    previous_rows = _parse_sha_manifest(previous_path, "std compile predecessor final", path_order="lexical")
+    base_rows = _parse_sha_manifest(base_path, "std compile paired base", path_order="lexical")
+    final_rows = _parse_sha_manifest(final_path, "std compile final", path_order="lexical")
+    previous_map = {rel: digest for digest, rel in previous_rows}
+    base_map = {rel: digest for digest, rel in base_rows}
+    final_map = {rel: digest for digest, rel in final_rows}
+    expected_base = dict(previous_map)
+    if STD_HTTP_PATH in expected_base:
+        raise VerificationError("std compile HTTP baseline owner already exists in its predecessor stage")
+    expected_base[STD_HTTP_PATH] = STD_HTTP_BASE_SHA256
+    if len(previous_rows) != previous["count"] or len(base_rows) != base["count"] or base_map != expected_base:
+        raise VerificationError("std compile paired base differs from the exact dependency final plus baseline HTTP owner")
+    if len(final_rows) != stage["count"] or set(final_map) != set(base_map):
+        raise VerificationError("std compile final changed the paired base's exact 184-path set")
+    changed = {rel for rel in base_map if base_map[rel] != final_map[rel]}
+    if changed != set(STD_COMPILE_SOURCE_PATHS) or final_map.get(STD_HTTP_PATH) != STD_HTTP_FINAL_SHA256:
+        raise VerificationError("std compile final must modify only the pinned HTTP and JSON owners")
+    if any(net.get(rel) != "modified" for rel in STD_COMPILE_SOURCE_PATHS):
+        raise VerificationError("std compile HTTP and JSON source owners must be modified net owners")
+    return {
+        "base_count": len(base_map),
+        "final_count": len(final_map),
+        "changed_source_owners": sorted(changed),
+        "unchanged_source_count": len(base_map) - len(changed),
+        "paired_after": previous["name"],
+        "http_baseline_sha256": STD_HTTP_BASE_SHA256,
+        "http_baseline_git_blob_sha1": STD_HTTP_BASE_GIT_BLOB_SHA1,
+    }
+
+
 def verify_inputs(baseline: Path, payload: Path) -> dict[str, Any]:
     """Validate descriptor, immutable bytes, clean baseline and roster preconditions."""
     if not payload.is_dir() or payload.is_symlink():
@@ -804,6 +918,11 @@ def verify_inputs(baseline: Path, payload: Path) -> dict[str, Any]:
     if actual_dependency_inputs - expected_dependency_inputs:
         unexpected = sorted(actual_dependency_inputs - expected_dependency_inputs)
         raise VerificationError(f"unexpected dependency compile input: {unexpected[0]}")
+    expected_std_compile_inputs = {"std-compile-v1.patch", "std-compile-v1-base.sha256", "std-compile-v1.sha256"}
+    actual_std_compile_inputs = {entry.name for entry in payload.iterdir() if entry.name.startswith("std-compile-v")}
+    if actual_std_compile_inputs - expected_std_compile_inputs:
+        unexpected = sorted(actual_std_compile_inputs - expected_std_compile_inputs)
+        raise VerificationError(f"unexpected std compile input: {unexpected[0]}")
 
     owner_map = _read_owner_map(payload)
     manifest = _json_no_duplicates(source_bytes["handoff_manifest"], "native handoff manifest")
@@ -840,7 +959,7 @@ def verify_inputs(baseline: Path, payload: Path) -> dict[str, Any]:
 
     # Each manifest file is parsed here, before any patch is applied, so malformed or
     # unsafe input cannot become a Cargo-time surprise.
-    lexical_stage_names = {"compile-repairs-v1", "cumulative-hir-v1", "next-hir-v1", "forced-root-wire-v1", "dependency-compile-v1"}
+    lexical_stage_names = {"compile-repairs-v1", "cumulative-hir-v1", "next-hir-v1", "forced-root-wire-v1", "dependency-compile-v1", "std-compile-v1"}
     extra_path = EXPECTED["repair_base"]["extra_owner"]["path"]
     extra_paths_by_stage = {
         "compile-repairs-v1": [extra_path],
@@ -848,6 +967,7 @@ def verify_inputs(baseline: Path, payload: Path) -> dict[str, Any]:
         "next-hir-v1": [extra_path],
         "forced-root-wire-v1": FORCED_ROOT_STAGE_EXTRA_PATHS,
         "dependency-compile-v1": FORCED_ROOT_STAGE_EXTRA_PATHS,
+        "std-compile-v1": STD_COMPILE_EXTRA_PATHS,
     }
     for stage in EXPECTED["stage_manifests"]:
         extra_paths = stage.get("extra_paths", [])
@@ -1029,12 +1149,14 @@ def verify_inputs(baseline: Path, payload: Path) -> dict[str, Any]:
     if len(wire_final_rows) != wire_stage["count"] or wire_final_map != expected_wire_final:
         raise VerificationError("forced-root wire final changed prior-stage owners or differs from the two pinned provider finals")
     dependency_inputs = _verify_dependency_compile_inputs(payload, stage_by_name, net)
+    std_compile_inputs = _verify_std_compile_inputs(payload, baseline, stage_by_name, net)
     return {
         "baseline": identity,
         "inputs": {**EXPECTED["payload_patches"], **EXPECTED["artifacts"]},
         "native_owner_count": len(owner_map),
         "net_owner_count": len(net),
         "dependency_compile": dependency_inputs,
+        "std_compile": std_compile_inputs,
         "patch_order": list(EXPECTED["patch_order"]),
     }
 
@@ -1197,6 +1319,7 @@ def _patch_path(baseline: Path, payload: Path, name: str) -> Path:
         "next-hir-v1": "next-hir-v1.patch",
         "forced-root-wire-v1": "forced-root-wire-v1.patch",
         "dependency-compile-v1": "dependency-compile-v1.patch",
+        "std-compile-v1": "std-compile-v1.patch",
     }.get(name)
     if not payload_name:
         raise VerificationError(f"unknown patch stage: {name}")
@@ -1245,6 +1368,7 @@ def reconstruct(baseline: Path, candidate: Path, payload: Path, evidence: Path) 
 
         if [stage["name"] for stage in EXPECTED["stage_manifests"]] != EXPECTED["patch_order"]:
             raise VerificationError("patch order differs from immutable stage order")
+        stage_by_name = {stage["name"]: stage for stage in EXPECTED["stage_manifests"]}
         for stage in EXPECTED["stage_manifests"]:
             patch = _patch_path(baseline, payload, stage["name"])
             if stage["name"] == "compile-repairs-v1":
@@ -1341,6 +1465,36 @@ def reconstruct(baseline: Path, candidate: Path, payload: Path, evidence: Path) 
                     "manifest_sha256": paired["manifest_sha256"],
                     "paired_after": paired_stage_name,
                     "extra_paths": list(FORCED_ROOT_STAGE_EXTRA_PATHS),
+                }
+            elif stage["name"] == "std-compile-v1":
+                std_base = EXPECTED["std_compile_base"]
+                paired_stage_name = std_base["paired_after"]
+                if not state["stages"] or state["stages"][-1]["stage"] != paired_stage_name:
+                    raise VerificationError("std compile paired base is not immediately after the dependency final")
+                previous = stage_by_name[paired_stage_name]
+                previous_result = verify_stage(
+                    candidate,
+                    payload / previous["file"],
+                    previous["count"],
+                    previous.get("extra_paths", []),
+                    previous.get("path_order", "components"),
+                )
+                if previous_result["manifest_sha256"] != state["stages"][-1]["manifest_sha256"]:
+                    raise VerificationError("std compile predecessor no longer matches the reconstructed dependency final")
+                paired = verify_stage(
+                    candidate,
+                    payload / std_base["file"],
+                    std_base["count"],
+                    STD_COMPILE_EXTRA_PATHS,
+                    std_base.get("path_order", "components"),
+                )
+                state["paired_std_compile_base"] = {
+                    "count": paired["count"],
+                    "manifest_sha256": paired["manifest_sha256"],
+                    "paired_after": paired_stage_name,
+                    "extra_paths": list(STD_COMPILE_EXTRA_PATHS),
+                    "http_baseline_sha256": STD_HTTP_BASE_SHA256,
+                    "http_baseline_git_blob_sha1": STD_HTTP_BASE_GIT_BLOB_SHA1,
                 }
             applied = _apply_patch(candidate, patch)
             manifest = payload / stage["file"]

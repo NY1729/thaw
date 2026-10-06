@@ -54,4 +54,5 @@ modified  crates/thaw-runtime/src/lib.rs
 modified  crates/thaw-runtime/src/runtime/native_values/strings.rs
 modified  crates/thaw-runtime/src/runtime/promises.rs
 modified  crates/thaw-runtime/src/tests.rs
+modified  crates/thaw-std/src/http.rs
 modified  crates/thaw-std/src/json.rs

@@ -1,0 +1,23 @@
+diff --git a/crates/thaw-std/src/http.rs b/crates/thaw-std/src/http.rs
+--- a/crates/thaw-std/src/http.rs
++++ b/crates/thaw-std/src/http.rs
+@@ -3121,7 +3121,7 @@
+         assert!(!connection.client_gone);
+         // EOF can follow the last body bytes already buffered by a prior read.
+         let mut context = RequestContext::new("POST", "/", &[], &[], std::ptr::null_mut());
+-        connection.response_ctx = &mut context;
++        connection.response_ctx = &mut *context;
+         connection.request.extend_from_slice(b"abc");
+         connection.body_plan = BodyPlan::Fixed(3);
+         connection.body_complete = false;
+diff --git a/crates/thaw-std/src/json.rs b/crates/thaw-std/src/json.rs
+--- a/crates/thaw-std/src/json.rs
++++ b/crates/thaw-std/src/json.rs
+@@ -4101,7 +4101,6 @@
+     brand_internal_value(Value::shared_object(fields))
+ }
+ 
+-#[no_mangle]
+ const JIT_DICTIONARY_TYPE_ERROR: &[u8] = b"\x01TypeError\x01Cannot convert undefined or null to object\0";
+ const JIT_DICTIONARY_DELETE_ERROR: &[u8] = b"\x01TypeError\x01Cannot delete property\0";
+ const JIT_DICTIONARY_ENTRIES_ERROR: &[u8] = b"\x01TypeError\x01Iterator value is not an entry object\0";

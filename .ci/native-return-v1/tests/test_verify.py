@@ -130,6 +130,7 @@ class Fixture:
         strings_owner = "crates/thaw-runtime/src/runtime/native_values/strings.rs"
         promises_owner = "crates/thaw-runtime/src/runtime/promises.rs"
         runtime_tests_owner = "crates/thaw-runtime/src/tests.rs"
+        http_owner = "crates/thaw-std/src/http.rs"
         repair_extra_bytes = b"fixture json base\n"
         write(self.baseline / repair_extra, repair_extra_bytes)
 
@@ -246,6 +247,18 @@ class Fixture:
         dependency_patch += patch_for(runtime_tests_owner, initial[runtime_tests_owner], dependency_final[runtime_tests_owner])
         dependency_patch += patch_for(repair_extra, repair_json_bytes.decode(), dependency_json_bytes.decode())
         write(self.payload / "dependency-compile-v1.patch", dependency_patch)
+        http_base_bytes = b"fixture std http base\n"
+        http_final_bytes = b"fixture std http compiled\n"
+        json_final_bytes = b"fixture json std compile final\n"
+        std_base = dict(dependency_final)
+        std_base[http_owner] = http_base_bytes.decode()
+        std_final = dict(std_base)
+        std_final[http_owner] = http_final_bytes.decode()
+        std_final[repair_extra] = json_final_bytes.decode()
+        std_patch = patch_for(http_owner, http_base_bytes.decode(), http_final_bytes.decode())
+        std_patch += patch_for(repair_extra, dependency_json_bytes.decode(), json_final_bytes.decode())
+        write(self.payload / "std-compile-v1.patch", std_patch)
+        write(self.baseline / http_owner, http_base_bytes)
         for name, files in (
             ("compile-repairs-v1-base", paired_base),
             ("compile-repairs-v1", repair_final),
@@ -256,11 +269,13 @@ class Fixture:
             ("forced-root-wire-v1-base", forced_root_base),
             ("forced-root-wire-v1", forced_root_final),
             ("dependency-compile-v1", dependency_final),
+            ("std-compile-v1-base", std_base),
+            ("std-compile-v1", std_final),
         ):
             stage_dir = root / ("manifest-tree-" + name)
             for rel, text in files.items():
                 write(stage_dir / rel, text)
-            path_order = "lexical" if name in ("compile-repairs-v1", "cumulative-hir-v1-base", "cumulative-hir-v1", "next-hir-v1-base", "next-hir-v1", "forced-root-wire-v1-base", "forced-root-wire-v1", "dependency-compile-v1") else "components"
+            path_order = "lexical" if name in ("compile-repairs-v1", "cumulative-hir-v1-base", "cumulative-hir-v1", "next-hir-v1-base", "next-hir-v1", "forced-root-wire-v1-base", "forced-root-wire-v1", "dependency-compile-v1", "std-compile-v1-base", "std-compile-v1") else "components"
             (self.payload / f"{name}.sha256").write_bytes(manifest_for(stage_dir, path_order))
         (self.payload / "dependency-compile-v1-base.sha256").write_bytes((self.payload / "forced-root-wire-v1.sha256").read_bytes())
 
@@ -312,6 +327,14 @@ class Fixture:
             "extra_paths": [repair_extra, api_owner, runtime_owner],
             "path_order": "lexical",
         })
+        stages.append({
+            "name": "std-compile-v1",
+            "file": "std-compile-v1.sha256",
+            "sha256": sha((self.payload / "std-compile-v1.sha256").read_bytes()),
+            "count": len(std_final),
+            "extra_paths": [repair_extra, api_owner, runtime_owner, http_owner],
+            "path_order": "lexical",
+        })
 
         # Stage fixture trees are written above from text maps; preserve the
         # expected subset inventory separately for fast mutation tests.
@@ -326,6 +349,7 @@ class Fixture:
             f"modified  {strings_owner}\n",
             f"modified  {promises_owner}\n",
             f"modified  {runtime_tests_owner}\n",
+            f"modified  {http_owner}\n",
             f"new  {v5_control}\n",
             f"new  {discard_control}\n",
             f"new  {return_control}\n",
@@ -354,7 +378,7 @@ class Fixture:
         }
         payload_files = {
             name: sha((self.payload / name).read_bytes())
-            for name in ("discard-v2.patch", "return-v1.patch", "compile-repairs-v1.patch", "cumulative-hir-v1.patch", "next-hir-v1.patch", "forced-root-wire-v1.patch", "dependency-compile-v1.patch")
+            for name in ("discard-v2.patch", "return-v1.patch", "compile-repairs-v1.patch", "cumulative-hir-v1.patch", "next-hir-v1.patch", "forced-root-wire-v1.patch", "dependency-compile-v1.patch", "std-compile-v1.patch")
         }
         artifact_hashes = {}
         for name, desc in self._artifact_paths().items():
@@ -429,7 +453,20 @@ class Fixture:
                 "path_order": "lexical",
                 "paired_after": "forced-root-wire-v1",
             },
-            "patch_order": ["original-native", "scope-v5", "discard-v2", "return-v1", "compile-repairs-v1", "cumulative-hir-v1", "next-hir-v1", "forced-root-wire-v1", "dependency-compile-v1"],
+            "std_compile_base": {
+                "file": "std-compile-v1-base.sha256",
+                "sha256": sha((self.payload / "std-compile-v1-base.sha256").read_bytes()),
+                "count": len(std_base),
+                "path_order": "lexical",
+                "paired_after": "dependency-compile-v1",
+                "extra_owner": {
+                    "path": http_owner,
+                    "sha256": sha(http_base_bytes),
+                    "git_blob_sha1": verify._git_blob_sha1(http_base_bytes) if verify is not None else "",
+                    "final_sha256": sha(http_final_bytes),
+                },
+            },
+            "patch_order": ["original-native", "scope-v5", "discard-v2", "return-v1", "compile-repairs-v1", "cumulative-hir-v1", "next-hir-v1", "forced-root-wire-v1", "dependency-compile-v1", "std-compile-v1"],
             "subset_roots": [
                 ".gitignore",
                 "Cargo.lock",
@@ -453,6 +490,16 @@ class Fixture:
             "expected_full_test_names": copy.deepcopy(verify.EXPECTED.get("expected_full_test_names", {})) if verify is not None else {},
             "provenance_only_review_fingerprints": copy.deepcopy(verify.EXPECTED["provenance_only_review_fingerprints"]) if verify is not None else {},
         }
+        self.expected["std_compile_base"]["extra_owner"]["final_sha256"] = sha(http_final_bytes)
+        self.expected["artifacts"]["std-compile-v1-base.sha256"] = sha((self.payload / "std-compile-v1-base.sha256").read_bytes())
+        self.expected["artifacts"]["std-compile-v1.sha256"] = sha((self.payload / "std-compile-v1.sha256").read_bytes())
+        self.expected["net_owners"] = {
+            "file": "net-owners.txt",
+            "sha256": sha((self.payload / "net-owners.txt").read_bytes()),
+            "count": 12,
+            "modified": 9,
+            "new": 3,
+        }
         write(self.payload / "pins.json", json.dumps(self.expected, sort_keys=True, indent=2) + "\n")
         self._commit = self.commit
         self._tree = self.tree
@@ -475,6 +522,8 @@ class Fixture:
             "forced_root_wire_final": "forced-root-wire-v1.sha256",
             "dependency_compile_base": "dependency-compile-v1-base.sha256",
             "dependency_compile_final": "dependency-compile-v1.sha256",
+            "std_compile_base": "std-compile-v1-base.sha256",
+            "std_compile_final": "std-compile-v1.sha256",
             "native_base": "native-base.sha256",
             "net_owners": "net-owners.txt",
             "scope_test_plan": "scope-v5-test-plan.md",
@@ -485,6 +534,15 @@ class Fixture:
         if verify is None:
             return
         self.expected_before = verify.EXPECTED
+        self.std_http_constants_before = (
+            verify.STD_HTTP_BASE_SHA256,
+            verify.STD_HTTP_BASE_GIT_BLOB_SHA1,
+            verify.STD_HTTP_FINAL_SHA256,
+        )
+        owner = self.expected["std_compile_base"]["extra_owner"]
+        verify.STD_HTTP_BASE_SHA256 = owner["sha256"]
+        verify.STD_HTTP_BASE_GIT_BLOB_SHA1 = owner["git_blob_sha1"]
+        verify.STD_HTTP_FINAL_SHA256 = owner["final_sha256"]
         verify.EXPECTED = copy.deepcopy(self.expected)
 
 
@@ -502,6 +560,11 @@ class VerificationRedGreenTests(unittest.TestCase):
     def tearDown(self):
         if verify is not None and hasattr(self, "fixture") and hasattr(self.fixture, "expected_before"):
             verify.EXPECTED = self.fixture.expected_before
+            (
+                verify.STD_HTTP_BASE_SHA256,
+                verify.STD_HTTP_BASE_GIT_BLOB_SHA1,
+                verify.STD_HTTP_FINAL_SHA256,
+            ) = self.fixture.std_http_constants_before
         self.temp.cleanup()
 
     def assertVerifyError(self, pattern: str, call, *args, **kwargs):
@@ -509,7 +572,7 @@ class VerificationRedGreenTests(unittest.TestCase):
         with self.assertRaisesRegex(mod.VerificationError, pattern):
             call(*args, **kwargs)
 
-    def test_positive_reconstruction_replays_nine_stages_and_preserves_unrelated_file(self):
+    def test_positive_reconstruction_replays_ten_stages_and_preserves_unrelated_file(self):
         mod = self.require_implementation()
         result = mod.reconstruct(
             self.fixture.baseline,
@@ -518,7 +581,9 @@ class VerificationRedGreenTests(unittest.TestCase):
             self.fixture.evidence,
         )
         self.assertEqual([x["count"] for x in mod.EXPECTED["stage_manifests"]], result["stage_counts"])
-        self.assertEqual(9, len(result["stages"]))
+        self.assertEqual(10, len(result["stages"]))
+        self.assertEqual("std-compile-v1", result["stages"][-1]["stage"])
+        self.assertEqual(mod.EXPECTED["stage_manifests"][-1]["count"], result["stage_counts"][-1])
         self.assertEqual("unmodified product file\n", (self.fixture.candidate / "outside.txt").read_text())
         self.assertTrue((self.fixture.evidence / "reconstruction.json").is_file())
 
@@ -531,7 +596,7 @@ class VerificationRedGreenTests(unittest.TestCase):
         self.assertEqual([extra], mod.EXPECTED["stage_manifests"][4]["extra_paths"])
         mod.reconstruct(self.fixture.baseline, self.fixture.candidate, self.fixture.payload, self.fixture.evidence)
         self.assertIn(extra, mod.verify_prepared(self.fixture.baseline, self.fixture.candidate, self.fixture.payload)["final_stage"]["files"])
-        self.assertEqual(b"fixture json dependency final\n", (self.fixture.candidate / extra).read_bytes())
+        self.assertEqual(b"fixture json std compile final\n", (self.fixture.candidate / extra).read_bytes())
 
     def test_actual_frozen_final_repair_manifest_uses_its_pinned_lexical_order(self):
         mod = self.require_implementation()
@@ -592,7 +657,7 @@ class VerificationRedGreenTests(unittest.TestCase):
         self.assertEqual("next-hir-v1", pair["paired_after"])
         self.assertEqual("lexical", pair["path_order"])
         result = mod.verify_inputs(self.fixture.baseline, self.fixture.payload)
-        self.assertEqual(11, result["net_owner_count"])
+        self.assertEqual(12, result["net_owner_count"])
         self.assertEqual(2, len(pair["extra_owners"]))
         before = {rel: digest for digest, rel in mod._parse_sha_manifest(self.fixture.payload / pair["file"], "wire base", path_order="lexical")}
         previous = {rel: digest for digest, rel in mod._parse_sha_manifest(self.fixture.payload / "next-hir-v1.sha256", "next final", path_order="lexical")}
@@ -676,10 +741,10 @@ class VerificationRedGreenTests(unittest.TestCase):
     def test_dependency_compile_pair_preserves_wire_roots_and_changes_only_four_sources(self):
         mod = self.require_implementation()
         base = mod.EXPECTED["dependency_compile_base"]
-        stage = mod.EXPECTED["stage_manifests"][-1]
+        stage = next(item for item in mod.EXPECTED["stage_manifests"] if item["name"] == "dependency-compile-v1")
         predecessor = next(item for item in mod.EXPECTED["stage_manifests"] if item["name"] == "forced-root-wire-v1")
         self.assertEqual("forced-root-wire-v1", base["paired_after"])
-        self.assertEqual(9, len(mod.EXPECTED["stage_manifests"]))
+        self.assertEqual(10, len(mod.EXPECTED["stage_manifests"]))
         self.assertEqual(predecessor["count"], base["count"])
         self.assertEqual(base["count"], stage["count"])
         self.assertEqual(predecessor["extra_paths"], stage["extra_paths"])
@@ -755,13 +820,14 @@ class VerificationRedGreenTests(unittest.TestCase):
         mod = self.require_implementation()
         expected = self.fixture.expected_before
         self.assertEqual(expected, json.loads((MODULE_DIR / "pins.json").read_text(encoding="utf-8")))
-        self.assertEqual(49, len(expected["test_filters"]))
+        self.assertEqual(50, len(expected["test_filters"]))
+        self.assertEqual("0c2490af44241dfc80bef8ca25c321323722ab899842a0a84b6fd57906a48113", sha(json.dumps(expected["test_filters"][:49], sort_keys=True, separators=(",", ":")).encode()))
         self.assertEqual("36f8d90adffb57aac119cd538c9525e9dd13a9213cb8260832cdc2bee609e621", sha(json.dumps(expected["test_filters"][:39], sort_keys=True, separators=(",", ":")).encode()))
         self.assertEqual("d94499d8d78d64e6dbb72fbac6abaa548398718f89b5685d1d5a759f944954f9", sha(json.dumps(expected["test_filters"][:30], sort_keys=True, separators=(",", ":")).encode()))
         self.assertEqual("76007d26d76fa871bbc129d1ff94718df82a53a5bf363cf707e039a0561e669b", sha(json.dumps(expected["expected_test_names"], sort_keys=True, separators=(",", ":")).encode()))
         old_full_names = {key: value for key, value in expected["expected_full_test_names"].items() if key not in {item["filter"] for item in expected["test_filters"][39:]}}
         self.assertEqual("5efbf022609d87fda1346b2ed8a55b76113385735228ed176a0a2f2a8d996a7e", sha(json.dumps(old_full_names, sort_keys=True, separators=(",", ":")).encode()))
-        self.assertEqual((20, 9, 7, 7, 6), tuple(sum(item["package"] == package for item in expected["test_filters"]) for package in ("thaw-llvm", "thaw-hir", "thaw-std", "thaw-quickjs", "thaw-runtime")))
+        self.assertEqual((20, 9, 8, 7, 6), tuple(sum(item["package"] == package for item in expected["test_filters"]) for package in ("thaw-llvm", "thaw-hir", "thaw-std", "thaw-quickjs", "thaw-runtime")))
         appended = expected["test_filters"][39:]
         expected_appended = [
             ("thaw-runtime", "tests::dependency_compile_uri_byte_iteration"),
@@ -774,26 +840,27 @@ class VerificationRedGreenTests(unittest.TestCase):
             ("thaw-runtime", "tests::purged_aggregate_callbacks_ignore_late_child_results_and_release_roots"),
             ("thaw-std", "json::tests::jit_dictionary_callbacks_preserve_presence_and_typed_failures"),
             ("thaw-std", "json::tests::a_missing_key_or_index_is_distinguishable_from_an_explicit_null"),
+            ("thaw-std", "http::tests::peer_send_eof_preserves_pending_streamed_response"),
         ]
         self.assertEqual(expected_appended, [(item["package"], item["filter"]) for item in appended])
         self.assertTrue(all(set(item) == {"package", "filter"} for item in appended))
         self.assertEqual({name: [name] for _, name in expected_appended}, {key: expected["expected_full_test_names"][key] for _, key in expected_appended})
-        self.assertEqual(57, expected["net_owners"]["count"])
-        self.assertEqual((52, 5), (expected["net_owners"]["modified"], expected["net_owners"]["new"]))
+        self.assertEqual(58, expected["net_owners"]["count"])
+        self.assertEqual((53, 5), (expected["net_owners"]["modified"], expected["net_owners"]["new"]))
         net_path = MODULE_DIR / expected["net_owners"]["file"]
-        self.assertEqual("b716db27fa12c0995101ee93b1875510353245f0c20d8cbe660d957280eb23bb", sha(net_path.read_bytes()))
+        self.assertEqual("e6e1b5beb336d919941e914ddc7569c3b5567ed30344f69adde12c4f1f891d0c", sha(net_path.read_bytes()))
         fixture_expected = mod.EXPECTED
         mod.EXPECTED = expected
         try:
             roster = mod._read_net_roster(MODULE_DIR)
         finally:
             mod.EXPECTED = fixture_expected
-        self.assertEqual(57, len(roster))
-        self.assertEqual((52, 5), (sum(value == "modified" for value in roster.values()), sum(value == "new" for value in roster.values())))
+        self.assertEqual(58, len(roster))
+        self.assertEqual((53, 5), (sum(value == "modified" for value in roster.values()), sum(value == "new" for value in roster.values())))
         self.assertEqual("modified", roster["crates/thaw-runtime/src/runtime/native_values/strings.rs"])
 
-        self.assertEqual(["original-native", "scope-v5", "discard-v2", "return-v1", "compile-repairs-v1", "cumulative-hir-v1", "next-hir-v1", "forced-root-wire-v1", "dependency-compile-v1"], expected["patch_order"])
-        self.assertEqual([175, 176, 179, 180, 181, 181, 181, 183, 183], [stage["count"] for stage in expected["stage_manifests"]])
+        self.assertEqual(["original-native", "scope-v5", "discard-v2", "return-v1", "compile-repairs-v1", "cumulative-hir-v1", "next-hir-v1", "forced-root-wire-v1", "dependency-compile-v1", "std-compile-v1"], expected["patch_order"])
+        self.assertEqual([175, 176, 179, 180, 181, 181, 181, 183, 183, 184], [stage["count"] for stage in expected["stage_manifests"]])
         self.assertEqual("83a99e4934c4108992f874ca75ff2ea366283fbc3c543afaf9fee6489cb95941", sha((MODULE_DIR / "forced-root-wire-v1.sha256").read_bytes()))
         self.assertEqual("d3b7c0e06ca053f4b342dcbc8ac1247a3460c946a35a2b22d2645c76251a2aa9", expected["artifacts"]["compile-repairs-v1.sha256"])
         self.assertEqual("0be3783d6241706ba2dd492704162aa9e0076dcc4a1de96e309eca9b512ba81c", expected["artifacts"]["cumulative-hir-v1.sha256"])
@@ -802,7 +869,7 @@ class VerificationRedGreenTests(unittest.TestCase):
         self.assertEqual("23da8386704a188e890bd7e591bb395ce611d45e8fbf0ad264716b5d61e3c9bf", expected["forced_root_wire_base"]["sha256"])
 
         wire_stage = next(stage for stage in expected["stage_manifests"] if stage["name"] == "forced-root-wire-v1")
-        dependency_stage = expected["stage_manifests"][-1]
+        dependency_stage = next(stage for stage in expected["stage_manifests"] if stage["name"] == "dependency-compile-v1")
         dependency_base = expected["dependency_compile_base"]
         self.assertEqual("dependency-compile-v1", dependency_stage["name"])
         self.assertEqual("forced-root-wire-v1", dependency_base["paired_after"])
@@ -826,15 +893,62 @@ class VerificationRedGreenTests(unittest.TestCase):
         self.assertEqual(set(mod.DEPENDENCY_SOURCE_PATHS), changed)
         self.assertEqual(179, len(base_map) - len(changed))
         self.assertEqual(dependency_stage["sha256"], sha(final_path.read_bytes()))
+        self.assertEqual("std-compile-v1", expected["stage_manifests"][-1]["name"])
+        self.assertEqual(184, expected["stage_manifests"][-1]["count"])
         for rel, expected_hash in {**expected["payload_patches"], **expected["artifacts"]}.items():
             with self.subTest(path=rel):
                 self.assertEqual(expected_hash, sha((MODULE_DIR / rel).read_bytes()), rel)
+
+    def test_tenth_std_compile_stage_preserves_the_exact_first_49_groups(self):
+        self.require_implementation()
+        expected = json.loads((MODULE_DIR / "pins.json").read_text(encoding="utf-8"))
+        self.assertEqual(
+            "0c2490af44241dfc80bef8ca25c321323722ab899842a0a84b6fd57906a48113",
+            sha(json.dumps(expected["test_filters"][:49], sort_keys=True, separators=(",", ":")).encode()),
+        )
+        self.assertEqual(50, len(expected["test_filters"]))
+        self.assertEqual(
+            {"package": "thaw-std", "filter": "http::tests::peer_send_eof_preserves_pending_streamed_response"},
+            expected["test_filters"][49],
+        )
+        self.assertEqual(
+            ["original-native", "scope-v5", "discard-v2", "return-v1", "compile-repairs-v1", "cumulative-hir-v1", "next-hir-v1", "forced-root-wire-v1", "dependency-compile-v1", "std-compile-v1"],
+            expected["patch_order"],
+        )
+        stage = expected["stage_manifests"][-1]
+        self.assertEqual(("std-compile-v1", 184, "lexical"), (stage["name"], stage["count"], stage["path_order"]))
+        self.assertEqual(
+            ["crates/thaw-std/src/json.rs", "crates/thaw-quickjs/src/quickjs/api.rs", "crates/thaw-quickjs/src/quickjs/platform_globals/runtime.js", "crates/thaw-std/src/http.rs"],
+            stage["extra_paths"],
+        )
+        self.assertEqual("4ad52d51d87666b1a910477daa3c8b7a2c3b4b9825198a1b1495242aba1cbddf", self.fixture.std_http_constants_before[0])
+        self.assertEqual("ff3ff9850cef56b5dd7be727c6bdbf74adb143d8", self.fixture.std_http_constants_before[1])
+        self.assertEqual(
+            ["http::tests::peer_send_eof_preserves_pending_streamed_response"],
+            expected["expected_full_test_names"][expected["test_filters"][49]["filter"]],
+        )
+
+    def test_std_compile_pair_rejects_wrong_baseline_http_identity(self):
+        mod = self.require_implementation()
+        helper = getattr(mod, "_verify_std_compile_inputs", None)
+        self.assertTrue(callable(helper), "std compile source identity verifier is missing")
+        stage_by_name = {stage["name"]: stage for stage in mod.EXPECTED["stage_manifests"]}
+        net = mod._read_net_roster(self.fixture.payload)
+        result = helper(self.fixture.payload, self.fixture.baseline, stage_by_name, net)
+        self.assertEqual(stage_by_name["std-compile-v1"]["count"], result["base_count"])
+        http = self.fixture.baseline / mod.STD_HTTP_PATH
+        original = http.read_bytes()
+        try:
+            http.write_bytes(original + b"changed identity\n")
+            self.assertVerifyError("baseline HTTP owner SHA-256 or Git blob identity mismatch", helper, self.fixture.payload, self.fixture.baseline, stage_by_name, net)
+        finally:
+            http.write_bytes(original)
 
     def test_shipped_roster_artifact_descriptor_and_bytes_share_the_expected_pin(self):
         production_expected = self.fixture.expected_before
         roster_path = MODULE_DIR / "net-owners.txt"
         roster_digest = sha(roster_path.read_bytes())
-        self.assertEqual("b716db27fa12c0995101ee93b1875510353245f0c20d8cbe660d957280eb23bb", roster_digest)
+        self.assertEqual("e6e1b5beb336d919941e914ddc7569c3b5567ed30344f69adde12c4f1f891d0c", roster_digest)
         self.assertEqual(roster_digest, production_expected["net_owners"]["sha256"])
         self.assertEqual(roster_digest, production_expected["artifacts"]["net-owners.txt"])
         shipped_pins = json.loads((MODULE_DIR / "pins.json").read_text(encoding="utf-8"))
