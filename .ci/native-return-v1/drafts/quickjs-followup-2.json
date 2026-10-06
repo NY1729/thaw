@@ -1,0 +1,45 @@
+{
+  "status": "DRAFT_NOT_WIRED_TO_CI",
+  "control_base": "61439b452ad57fbe5339581e041643cd347e02ab",
+  "product_baseline": "8b353a99d4995c8217b9e73cd308ea85d2d6e5d8",
+  "apply_after": "baseline plus all 12 pinned reconstruction stages",
+  "pristine_manifest": ".ci/native-return-v1/quickjs-api-followup-v1.sha256",
+  "pristine_manifest_sha256": "2fc7c97c06059974628930e661751c3a4cf7603bb1c2e795fe6a56d7f862d06b",
+  "pristine_owner_count": 186,
+  "patch_sha256": "3246a5d75a444b5098fe37b2288565a9d405da9187f3806d2068d8ef3bcf5853",
+  "hunk_count": 10,
+  "owners": [
+    {
+      "path": "crates/thaw-quickjs/src/quickjs/api.rs",
+      "base_sha256": "8ce1969860e2d9ff0266c3ee44501181e69f33a2a99e305f02f5978edbd14c8c",
+      "patched_sha256": "cbd0c8622ae553e99c652f896cf20c41fd996d60c5d8eae68df48b15466620b3"
+    },
+    {
+      "path": "crates/thaw-quickjs/src/quickjs/filesystem.rs",
+      "base_sha256": "877d2d08445bc94e6b2d1095cf8b40943e3a8d79840535961b3f951d65b944ed",
+      "patched_sha256": "4677a999ad895ee2d190bd72b4e4374248136b766e8c643c7b4a58606a9e8463"
+    },
+    {
+      "path": "crates/thaw-quickjs/src/quickjs/platform_globals/runtime.js",
+      "base_sha256": "bdca00a406d512f19349d41b5ac70d145a28eb0d029c5521dd9c375a68e50a81",
+      "patched_sha256": "931658ba347d0c1a10a5c00c0c749993cf99b657e825e5593882e4c61cf71bec"
+    },
+    {
+      "path": "crates/thaw-quickjs/src/quickjs/platform_globals/webassembly.js",
+      "base_sha256": "e81b910bbec01ac145abc06521b664997310c3d63f4b27036297b5ebe29327f1",
+      "patched_sha256": "0c4480cfe460d6747acffbecfb16c849ef3b5c12b878920b9e94b3ce1f8953da"
+    },
+    {
+      "path": "crates/thaw-quickjs/src/tests.rs",
+      "base_sha256": "c49ffdf065c4fd7d2d5765affed1daf773c07ef6b46eca137fa3c25ec1d5cab1",
+      "patched_sha256": "7a90333f99c527fc5f8c9a5e8c1132485e52a7460edcfcf376bb585b91e02e6a"
+    }
+  ],
+  "verification": {
+    "all_186_pristine_hashes_match": true,
+    "patch_dry_run_p1_fuzz0": true,
+    "paired_five_file_application": true,
+    "tests_run": false,
+    "build_run": false
+  }
+}

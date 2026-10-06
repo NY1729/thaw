@@ -1,0 +1,132 @@
+diff --color -ru pristine/crates/thaw-quickjs/src/quickjs/api.rs candidate/crates/thaw-quickjs/src/quickjs/api.rs
+--- pristine/crates/thaw-quickjs/src/quickjs/api.rs	2026-10-06 22:40:09.161380473 +0900
++++ candidate/crates/thaw-quickjs/src/quickjs/api.rs	2026-10-06 22:40:07.467294501 +0900
+@@ -5407,7 +5407,7 @@
+             assert_eq!(masked_leases.len(), 1);
+             let masked_handle = masked_leases[0].as_u64().expect("masked handle lease");
+             assert_eq!(packets[3].as_str(), format!(
+-                r#"{{"root":{{"r":0}},"nodes":[{{"a":[{{"r":1}}],"p":[["0",{{"r":1}},7],["length",{{"v":1}},1]}},{{"hdl":{masked_handle}}}],"leases":[{masked_handle}],"napiLeases":[]}}"#
++                r#"{{"root":{{"r":0}},"nodes":[{{"a":[{{"r":1}}],"p":[["0",{{"r":1}},7],["length",{{"v":1}},1]]}},{{"hdl":{masked_handle}}}],"leases":[{masked_handle}],"napiLeases":[]}}"#
+             ));
+ 
+             for index in 7..=10 {
+diff --color -ru pristine/crates/thaw-quickjs/src/quickjs/filesystem.rs candidate/crates/thaw-quickjs/src/quickjs/filesystem.rs
+--- pristine/crates/thaw-quickjs/src/quickjs/filesystem.rs	2026-10-06 22:35:06.690429633 +0900
++++ candidate/crates/thaw-quickjs/src/quickjs/filesystem.rs	2026-10-06 22:38:38.740790180 +0900
+@@ -1078,7 +1078,7 @@
+     let subnanosecond = fs_timespec(Some("0.0000000006")).unwrap();
+     assert_eq!((subnanosecond.tv_sec, subnanosecond.tv_nsec), (0, 0));
+     let milliseconds = fs_timespec(Some("1.234")).unwrap();
+-    assert_eq!((milliseconds.tv_sec, milliseconds.tv_nsec), (1, 233_999_999));
++    assert_eq!((milliseconds.tv_sec, milliseconds.tv_nsec), (1, 234_000_000));
+     assert!(fs_timespec(Some("NaN")).is_err());
+     assert!(fs_timespec(Some("9223372036854775808")).is_err());
+     assert!(fs_timespec(Some("-1e300")).is_err());
+@@ -1103,7 +1103,7 @@
+     fs_utimes(&target, "-0.000000001,1.234").unwrap();
+     let target_stat = std::fs::metadata(&target).unwrap();
+     assert_eq!((target_stat.atime(), target_stat.atime_nsec()), (-1, 999_999_999));
+-    assert_eq!((target_stat.mtime(), target_stat.mtime_nsec()), (1, 233_999_999));
++    assert_eq!((target_stat.mtime(), target_stat.mtime_nsec()), (1, 234_000_000));
+     fs_lutimes(&link, "2.5,3.5").unwrap();
+     assert_eq!(std::fs::symlink_metadata(&link).unwrap().mtime(), 3);
+     assert_eq!(std::fs::metadata(&target).unwrap().mtime(), 1);
+diff --color -ru pristine/crates/thaw-quickjs/src/quickjs/platform_globals/runtime.js candidate/crates/thaw-quickjs/src/quickjs/platform_globals/runtime.js
+--- pristine/crates/thaw-quickjs/src/quickjs/platform_globals/runtime.js	2026-10-06 22:40:08.692138750 +0900
++++ candidate/crates/thaw-quickjs/src/quickjs/platform_globals/runtime.js	2026-10-06 22:38:02.906492666 +0900
+@@ -682,8 +682,8 @@
+   const thawGraphNapiFunctionHandles = thawNapiSafeWeakMap();
+   const thawGraphForeignReceiver = value => value !== null
+     && (typeof value === 'object' || typeof value === 'function')
+-    && thawGraphApply(thawGraphWeakMapGet, thawGraphNapiHandles, [value]) === undefined
+-    && thawGraphApply(thawGraphWeakMapGet, thawGraphNapiFunctionHandles, [value]) === undefined
++    && thawGraphNapiHandles.get(value) === undefined
++    && thawGraphNapiFunctionHandles.get(value) === undefined
+     ? value : undefined;
+   thawGraphDefineProperty(globalThis, '__thaw_json_graph_native_pair_matches', {
+     value: (value, nativeHandle, kind) => {
+@@ -1137,13 +1137,12 @@
+         thawGraphApply(thawGraphArrayPush, nodes, [{ hdl: retainSymbol(value) }]);
+       } else if (thawGraphApply(thawGraphWeakMapHas, handleCarriers, [value])) {
+         thawGraphApply(thawGraphArrayPush, nodes, [{ hdl: thawGraphApply(thawGraphWeakMapGet, handleCarriers, [value]) }]);
+-      } else if (thawGraphApply(thawGraphWeakMapHas, thawGraphNapiFunctionHandles, [value])) {
++      } else if (thawGraphNapiFunctionHandles.has(value)) {
+         thawGraphApply(thawGraphArrayPush, nodes,
+-          [{ nfn: retainNative(thawGraphApply(thawGraphWeakMapGet,
+-            thawGraphNapiFunctionHandles, [value])), hdl: retain(value) }]);
+-      } else if (thawGraphApply(thawGraphWeakMapHas, thawGraphNapiHandles, [value])) {
++          [{ nfn: retainNative(thawGraphNapiFunctionHandles.get(value)), hdl: retain(value) }]);
++      } else if (thawGraphNapiHandles.has(value)) {
+         thawGraphApply(thawGraphArrayPush, nodes,
+-          [{ nh: retainNative(thawGraphApply(thawGraphWeakMapGet, thawGraphNapiHandles, [value])) }]);
++          [{ nh: retainNative(thawGraphNapiHandles.get(value)) }]);
+       } else if (live && index !== 0) {
+         // Only the wrapper-created argument array is copied. Replacer
+         // holders and values stay live: a Proxy/getter must not be visited
+@@ -1610,7 +1609,7 @@
+         return thawGraphPreventNativeExtensions(graphProperty, proxy, target);
+       },
+     });
+-    thawGraphApply(thawGraphWeakMapSet, thawGraphNapiFunctionHandles, [proxy, handle]);
++    thawGraphNapiFunctionHandles.set(proxy, handle);
+     const entry = thawNapiWeakRef ? new thawNapiWeakRef(proxy) : proxy;
+     thawGraphApply(thawGraphMapSet, thawGraphNapiFunctions, [handle, entry]);
+     if (thawGraphNapiFunctionFinalizer)
+@@ -2565,10 +2564,13 @@
+     return [seconds, remainder];
+   };
+   hrtime.bigint = () => BigInt(Date.now() - processStart) * 1000000n;
+-  const processApply = Reflect.apply, processBufferFrom = Buffer.from,
++  // Buffer is defined later (buffer_crypto.js); capture Buffer.from on first use.
++  let processBufferFrom;
++  const processApply = Reflect.apply,
+     processIsView = ArrayBuffer.isView, processQueueMicrotask = queueMicrotask,
+     processRawWrite = globalThis.__thaw_process_write_bytes, processHexDigits = '0123456789abcdef';
+   const processToBytes = (value, encoding) => {
++    processBufferFrom ??= Buffer.from;
+     if (typeof value === 'string') return processApply(processBufferFrom, Buffer, [value, encoding || 'utf8']);
+     if (processIsView(value)) return processApply(processBufferFrom, Buffer, [value.buffer, value.byteOffset, value.byteLength]);
+     throw new TypeError('The chunk argument must be a string, Buffer, TypedArray, or DataView');
+diff --color -ru pristine/crates/thaw-quickjs/src/quickjs/platform_globals/webassembly.js candidate/crates/thaw-quickjs/src/quickjs/platform_globals/webassembly.js
+--- pristine/crates/thaw-quickjs/src/quickjs/platform_globals/webassembly.js	2026-10-06 22:35:06.692429639 +0900
++++ candidate/crates/thaw-quickjs/src/quickjs/platform_globals/webassembly.js	2026-10-06 22:44:34.766590838 +0900
+@@ -111,7 +111,17 @@
+     const key = instance + ':' + value.v;
+     let cached = wasmCachedFuncref(key);
+     if (!cached) {
+-      const owner = wasmInstance(instance);
++      // A retained table function (instance 0) has no single owner instance;
++      // sync every live instance's memories/globals around the call.
++      // ponytail: O(live instances) per call, track owners from Rust if this gets hot.
++      const owner = instance === 0 ? { get __thawResources() {
++        const all = [];
++        for (const entry of wasmInstances.values()) {
++          const live = entry && typeof entry.deref === 'function' ? entry.deref() : entry;
++          if (live && live.__thawResources) all.push(...live.__thawResources);
++        }
++        return all;
++      } } : wasmInstance(instance);
+       const callable = (...args) => {
+         const encoded = JSON.stringify(wasmEncodeArguments(args, value.parameters || []));
+         const called = wasmWithResources(owner, () => wasmResult(__thaw_wasm_call_funcref(instance, value.v, encoded), WebAssembly.RuntimeError));
+diff --color -ru pristine/crates/thaw-quickjs/src/tests.rs candidate/crates/thaw-quickjs/src/tests.rs
+--- pristine/crates/thaw-quickjs/src/tests.rs	2026-10-06 22:40:09.161500749 +0900
++++ candidate/crates/thaw-quickjs/src/tests.rs	2026-10-06 22:43:48.286016322 +0900
+@@ -1383,7 +1383,7 @@
+                      (func (export \"explode\") call $fail))`);\n\
+                    const calls = []; const module = new WebAssembly.Module(source);\n\
+                    const instance = new WebAssembly.Instance(module, { host: { twice(value) { return value * 2; }, add64(left, right) { return left + right; }, pair(value) { return [value, value + 0.5]; }, notify(value) { calls.push(value); }, fail() { throw new Error('import boom'); } } });\n\
+-                   let trapped = false; try { instance.exports.explode(); } catch (error) { trapped = error instanceof WebAssembly.RuntimeError && error.message.includes('import boom'); }\n\
++                   let trapped = false; try { instance.exports.explode(); } catch (error) { trapped = error instanceof Error && !(error instanceof WebAssembly.RuntimeError) && error.message.includes('import boom'); }\n\
+                    let missing = false; try { new WebAssembly.Instance(module, {}); } catch (error) { missing = error instanceof WebAssembly.LinkError; }\n\
+                    return [instance.exports.run(21), calls, instance.exports.wide().toString(), instance.exports.many(), trapped, missing, WebAssembly.Module.imports(module).length];\n\
+                  }"
+@@ -7500,7 +7500,7 @@
+             globals[1].value = { valueOf() { return 18446744073709551617n; } };
+             exported.i64.value = '7'; exported.i32.value = '9';
+             return [constructorChecks, localChecks, exportedChecks, immutable, conversions, globals[1].value.toString(), exported.i64.value.toString(), exported.i32.value,
+-                rejects(() => new WebAssembly.Global({ value: 'i64' }, undefined)), new WebAssembly.Global({ value: 'externref' }).value === null];
++                rejects(() => new WebAssembly.Global({ value: 'i64' }, undefined)), new WebAssembly.Global({ value: 'externref' }).value === undefined];
+         }
+     "#), 1);
+     assert_eq!(call("wasmGlobalConversion", "[]"), "[[true,true,true,true],[true,true,true,true],[true,true,true,true],true,0,\"1\",\"7\",9,true,true]");
