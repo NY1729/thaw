@@ -1,180 +1,165 @@
-name: CI
+name: Native Return candidate diagnostics
 
 on:
   push:
-  pull_request:
+    branches:
+      - validation/native-return
+    paths:
+      - .github/workflows/ci.yml
+      - .ci/native-return-v1/**
 
 permissions:
   contents: read
 
 jobs:
-  test:
+  native-return-diagnostics:
+    name: Pinned native candidate diagnostics
     runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: postgres:16-alpine
-        env:
-          POSTGRES_PASSWORD: password
-          POSTGRES_DB: app
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U postgres -d app"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
+    timeout-minutes: 90
     env:
-      THAW_ACCEPTANCE_OUTPUT_DIR: ${{ github.workspace }}/target/acceptance
-      LLVM_SYS_221_PREFIX: /opt/llvm-22
-      CARGO_BUILD_JOBS: "1"
+      CARGO_BUILD_JOBS: "2"
       CARGO_INCREMENTAL: "0"
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_PROFILE_TEST_DEBUG: "0"
     steps:
-      - uses: actions/checkout@v4
-      - name: Free disk space
-        run: |
-          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
-          df -h /
-      - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y libuv1-dev
-      - name: Install LLVM 22
-        run: |
-          curl -L https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.8/LLVM-22.1.8-Linux-X64.tar.xz -o /tmp/llvm.tar.xz
-          echo "df0e1ecf16caf3489a272a5eea4eec9b0d82878f6477fa309504f918a0006384  /tmp/llvm.tar.xz" | sha256sum -c -
-          sudo mkdir -p /opt/llvm-22
-          sudo tar -xJf /tmp/llvm.tar.xz -C /opt/llvm-22 --strip-components=1
-          rm /tmp/llvm.tar.xz
-          echo /opt/llvm-22/bin >> "$GITHUB_PATH"
-          echo LD_LIBRARY_PATH=/opt/llvm-22/lib >> "$GITHUB_ENV"
-      - name: Install Rust components
-        run: rustup component add rustfmt clippy
-      - name: Check formatting
-        run: cargo fmt --all -- --check
-      - name: Run clippy
-        run: |
-          cargo clippy --workspace --all-targets -- -D warnings
-          cargo clean
-      - name: Run tests
-        run: |
-          cargo run -p thaw-cli -- compat tests/typescript-compat.json
-          find target -mindepth 1 -maxdepth 1 -type d -name 'thaw-*' -exec rm -rf -- {} +
-          cargo run -p thaw-cli -- node-compat tests/typescript-runtime-compat.json
-          find target -mindepth 1 -maxdepth 1 -type d -name 'thaw-*' -exec rm -rf -- {} +
-          cargo run -p thaw-cli -- node-compat tests/node-compat.json
-          find target -mindepth 1 -maxdepth 1 -type d -name 'thaw-*' -exec rm -rf -- {} +
-          cargo clean
-          cargo test --workspace --exclude thaw-cli --exclude thaw-llvm --exclude thaw-registry
-          cargo test -p thaw-registry -- --test-threads=1
-          cargo test -p thaw-llvm -- --test-threads=1
-          cargo test -p thaw-cli -- --test-threads=1
-      - name: Install Prisma example
-        run: npm ci --prefix examples/hono-react-prisma-board
-      - name: Test Hono, Prisma, and PostgreSQL
-        env:
-          THAW_POSTGRES_URL: postgresql://postgres:password@127.0.0.1:5432/app
-        run: |
-          cargo test -p thaw-cli builds_and_serves_hono_react_prisma_postgres_when_enabled -- --nocapture
-          cargo test -p thaw-cli registry_add_queries_postgres_with_real_pg_when_enabled -- --nocapture
-      - name: Upload acceptance metrics
+      - name: Checkout workflow and frozen harness at this run SHA
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          path: control
+          persist-credentials: false
+
+      - name: Checkout complete product baseline
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: 8b353a99d4995c8217b9e73cd308ea85d2d6e5d8
+          path: baseline
+          persist-credentials: false
+
+      - name: Initialize diagnostic evidence
         if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: acceptance-metrics
-          path: target/acceptance/*.json
-          if-no-files-found: ignore
-
-  npm-integration:
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: [0, 1, 2, 3]
-    runs-on: ubuntu-latest
-    env:
-      LLVM_SYS_221_PREFIX: /opt/llvm-22
-      LD_LIBRARY_PATH: /opt/llvm-22/lib
-      CARGO_BUILD_JOBS: "1"
-      CARGO_INCREMENTAL: "0"
-      CARGO_PROFILE_DEV_DEBUG: "0"
-      CARGO_PROFILE_TEST_DEBUG: "0"
-      THAW_RUN_NPM_INTEGRATION: "1"
-      THAW_SOAK_SECONDS: "30"
-    steps:
-      - uses: actions/checkout@v4
-      - name: Free disk space
-        run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
-      - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y libuv1-dev
-      - name: Install LLVM 22
         run: |
-          curl -L https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.8/LLVM-22.1.8-Linux-X64.tar.xz -o /tmp/llvm.tar.xz
-          echo "df0e1ecf16caf3489a272a5eea4eec9b0d82878f6477fa309504f918a0006384  /tmp/llvm.tar.xz" | sha256sum -c -
-          sudo mkdir -p /opt/llvm-22
-          sudo tar -xJf /tmp/llvm.tar.xz -C /opt/llvm-22 --strip-components=1
-      - name: Test real web applications and packages (shard ${{ matrix.shard }})
-        env:
-          SHARD: ${{ matrix.shard }}
-        run: |
-          listing=$(cargo test -p thaw-cli registry_add -- --list) || exit 1
-          mapfile -t tests < <(sed -n 's/: test$//p' <<< "$listing")
-          if (( ${#tests[@]} == 0 )); then
-            echo 'No registry tests were listed' >&2
-            exit 1
+          mkdir -p "$RUNNER_TEMP/thaw-native-evidence"
+          helper="$GITHUB_WORKSPACE/control/.ci/native-return-v1/run.py"
+          if [[ -f "$helper" ]]; then
+            python3 "$helper" --initialize --evidence "$RUNNER_TEMP/thaw-native-evidence"
+          else
+            printf '{"schema_version":1,"status":"blocked","overall":{"status":"blocked","reason":"Control checkout unavailable before harness initialization."},"stages":{},"filters":[],"exit_code":1}\n' \
+              > "$RUNNER_TEMP/thaw-native-evidence/validation.json"
           fi
-          index=0
-          for test in "${tests[@]}"; do
-            if [[ "$test" != *postgres* ]] && (( index % 4 == SHARD )); then
-              cargo test -p thaw-cli "$test" -- --exact --test-threads=1 --nocapture
+
+      - name: Run standard-library harness tests
+        if: success()
+        working-directory: control
+        run: python3 -m unittest discover -s .ci/native-return-v1/tests -v
+
+      - name: Reconstruct and verify exact candidate before dependency setup
+        if: success()
+        working-directory: control
+        run: |
+          python3 .ci/native-return-v1/verify.py \
+            --baseline "$GITHUB_WORKSPACE/baseline" \
+            --candidate "$RUNNER_TEMP/thaw-native-return-candidate" \
+            --payload "$GITHUB_WORKSPACE/control/.ci/native-return-v1" \
+            --evidence "$RUNNER_TEMP/thaw-native-evidence"
+
+      - name: Install LLVM 22.1.8 and system dependency
+        if: success()
+        timeout-minutes: 15
+        env:
+          LLVM_ASSET: LLVM-22.1.8-Linux-X64.tar.xz
+          LLVM_URL: https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.8/LLVM-22.1.8-Linux-X64.tar.xz
+          LLVM_SHA256: df0e1ecf16caf3489a272a5eea4eec9b0d82878f6477fa309504f918a0006384
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = "x86_64"
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libuv1-dev
+          asset="$RUNNER_TEMP/$LLVM_ASSET"
+          curl --fail --location --silent --show-error --retry 2 \
+            --connect-timeout 20 --max-time 900 "$LLVM_URL" --output "$asset"
+          printf '%s  %s\n' "$LLVM_SHA256" "$asset" | sha256sum --check --status
+          sudo mkdir -p /opt/llvm-22
+          sudo tar -xJf "$asset" --directory /opt/llvm-22 --strip-components=1
+          printf 'LLVM_SYS_221_PREFIX=/opt/llvm-22\n' >> "$GITHUB_ENV"
+          printf '/opt/llvm-22/bin\n' >> "$GITHUB_PATH"
+          printf 'LD_LIBRARY_PATH=/opt/llvm-22/lib\n' >> "$GITHUB_ENV"
+
+      - name: Record runner and toolchain identity
+        if: always()
+        run: |
+          mkdir -p "$RUNNER_TEMP/thaw-native-evidence"
+          output="$RUNNER_TEMP/thaw-native-evidence/toolchain.txt"
+          {
+            printf 'repository=%s\n' "${GITHUB_REPOSITORY:-unknown}"
+            printf 'control_commit=%s\n' "${GITHUB_SHA:-unknown}"
+            printf 'ref=%s\n' "${GITHUB_REF:-unknown}"
+            printf 'run_id=%s\n' "${GITHUB_RUN_ID:-unknown}"
+            printf 'runner_image=%s\n' "${ImageOS:-unknown} ${ImageVersion:-unknown}"
+            printf 'architecture=%s\n' "$(uname -m 2>&1 || true)"
+            printf 'llvm_asset=%s\n' "$RUNNER_TEMP/LLVM-22.1.8-Linux-X64.tar.xz"
+            printf 'llvm_asset_sha256_expected=%s\n' 'df0e1ecf16caf3489a272a5eea4eec9b0d82878f6477fa309504f918a0006384'
+            if [[ -f "$RUNNER_TEMP/LLVM-22.1.8-Linux-X64.tar.xz" ]]; then
+              sha256sum "$RUNNER_TEMP/LLVM-22.1.8-Linux-X64.tar.xz" || true
+            else
+              printf 'llvm_asset_sha256_actual=not-downloaded\n'
             fi
-            index=$((index + 1))
-          done
-          if (( SHARD == 0 )); then
-            cargo test -p thaw-cli tests::node_http_matches_real_node_under_fifty_concurrent_keep_alive_connections_when_enabled -- --exact --nocapture
+            printf '\n[llvm-config]\n'
+            /opt/llvm-22/bin/llvm-config --version 2>&1 || true
+            printf '\n[rustc -vV]\n'
+            rustc -vV 2>&1 || true
+            printf '\n[cargo -V]\n'
+            cargo -V 2>&1 || true
+            printf '\n[c linker]\n'
+            cc --version 2>&1 | head -n 2 || true
+            printf '\n[cargo lock]\n'
+            sha256sum "$GITHUB_WORKSPACE/baseline/Cargo.lock" 2>&1 || true
+          } > "$output"
+
+      - name: Run independent compile diagnostics and focused controls
+        if: success()
+        working-directory: control
+        env:
+          LLVM_SYS_221_PREFIX: /opt/llvm-22
+          LD_LIBRARY_PATH: /opt/llvm-22/lib
+        run: |
+          python3 .ci/native-return-v1/run.py \
+            --baseline "$GITHUB_WORKSPACE/baseline" \
+            --candidate "$RUNNER_TEMP/thaw-native-return-candidate" \
+            --evidence "$RUNNER_TEMP/thaw-native-evidence"
+
+      - name: Finalize any blocked or unfinished stages
+        if: always()
+        run: |
+          helper="$GITHUB_WORKSPACE/control/.ci/native-return-v1/run.py"
+          if [[ -f "$helper" ]]; then
+            python3 "$helper" \
+              --finalize-if-incomplete \
+              --evidence "$RUNNER_TEMP/thaw-native-evidence" \
+              --reason 'An earlier checkout, harness, identity, or runner setup step did not complete.'
+          else
+            mkdir -p "$RUNNER_TEMP/thaw-native-evidence"
+            python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          out = Path(os.environ['RUNNER_TEMP']) / 'thaw-native-evidence' / 'validation.json'
+          value = {
+              'schema_version': 1,
+              'status': 'blocked',
+              'overall': {'status': 'blocked', 'reason': 'Control checkout unavailable; validation helper could not start.'},
+              'stages': {},
+              'filters': [],
+              'exit_code': 1,
+          }
+          out.write_text(json.dumps(value, sort_keys=True, indent=2) + '\n')
+          PY
           fi
 
-  runtime-comparison:
-    strategy:
-      matrix:
-        include:
-          - runner: ubuntu-latest
-            llvm_asset: LLVM-22.1.8-Linux-X64.tar.xz
-            llvm_sha256: df0e1ecf16caf3489a272a5eea4eec9b0d82878f6477fa309504f918a0006384
-            architecture: x64
-          - runner: ubuntu-24.04-arm
-            llvm_asset: LLVM-22.1.8-Linux-ARM64.tar.xz
-            llvm_sha256: 805efad2bb91cb4967fa569e0881d10c0f69c04461cf671cccbae19f547acc34
-            architecture: arm64
-    runs-on: ${{ matrix.runner }}
-    env:
-      LLVM_SYS_221_PREFIX: /opt/llvm-22
-      CARGO_BUILD_JOBS: "1"
-      CARGO_INCREMENTAL: "0"
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y libuv1-dev time
-      - name: Install LLVM 22
-        env:
-          LLVM_ASSET: ${{ matrix.llvm_asset }}
-          LLVM_SHA256: ${{ matrix.llvm_sha256 }}
-        run: |
-          curl -L "https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.8/$LLVM_ASSET" -o /tmp/llvm.tar.xz
-          echo "$LLVM_SHA256  /tmp/llvm.tar.xz" | sha256sum -c -
-          sudo mkdir -p /opt/llvm-22
-          sudo tar -xJf /tmp/llvm.tar.xz -C /opt/llvm-22 --strip-components=1
-          echo /opt/llvm-22/bin >> "$GITHUB_PATH"
-          echo LD_LIBRARY_PATH=/opt/llvm-22/lib >> "$GITHUB_ENV"
-      - uses: oven-sh/setup-bun@v2
-      - name: Compare Node, Bun, and Thaw
-        run: |
-          cargo build --release -p thaw-cli
-          benchmarks/runtime/run.sh target/release/thaw "runtime-${{ matrix.architecture }}.json"
-      - name: Check for a startup time / RSS regression
-        run: |
-          benchmarks/runtime/check_regression.sh \
-            "runtime-${{ matrix.architecture }}.json" \
-            "benchmarks/runtime/baseline-${{ matrix.architecture }}.json"
-      - uses: actions/upload-artifact@v4
+      - name: Upload diagnostic evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: runtime-${{ matrix.architecture }}
-          path: runtime-${{ matrix.architecture }}.json
+          name: thaw-native-return-diagnostics-${{ github.run_id }}
+          path: ${{ runner.temp }}/thaw-native-evidence/
+          if-no-files-found: error
+          retention-days: 14

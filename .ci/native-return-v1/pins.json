@@ -1,0 +1,228 @@
+{
+  "artifacts": {
+    "discard-v2.sha256": "c47d4ab7e4a805190e719b13b99bd7d233e24a5007afcbff6becebab9493e328",
+    "native-base.sha256": "da86c2c16619de2e236cdd50b9d2572465fbdd4dc3b75b680cf91c6b0f6bdb72",
+    "net-owners.txt": "b610b9fb013be8aec63fb6de065f98498070c8d8ddf4e5d0077bd9a5e3bc194d",
+    "original-native.sha256": "4e219dde2129cf5876497edd6f9032cebdbee89eded9cce20e50ecda041053ce",
+    "return-v1.sha256": "51b1d9dd9a501538cc44fcaf8bfa72cc5a3f9ceb34c2942d4a0c676acc2e7031",
+    "scope-v5-test-plan.md": "9eb740f8f418de5e7f8c7cd88607d5b269c7495a34600d937bf8653f7e55ae81",
+    "scope-v5.sha256": "227274cad19f045e158168cc2b341744fb62e2d0e78c633ece4703e462d7a8e3"
+  },
+  "baseline": {
+    "commit": "8b353a99d4995c8217b9e73cd308ea85d2d6e5d8",
+    "tree": "f3dd90940e1d36ce27e57774b62f87b9df4140af"
+  },
+  "control_owners": [
+    "crates/thaw-llvm/src/hir_codegen/tests/async/eval_then_returns.rs",
+    "crates/thaw-llvm/src/hir_codegen/tests/async/resolver_provenance.rs",
+    "crates/thaw-llvm/src/hir_codegen/tests/async/union_discard.rs",
+    "crates/thaw-llvm/src/hir_codegen/tests/async/union_discard_eval_then.rs",
+    "crates/thaw-llvm/src/hir_codegen/tests/async/union_discard_jit.rs"
+  ],
+  "native_base": {
+    "count": 24,
+    "file": "native-base.sha256",
+    "sha256": "da86c2c16619de2e236cdd50b9d2572465fbdd4dc3b75b680cf91c6b0f6bdb72"
+  },
+  "net_owners": {
+    "count": 35,
+    "file": "net-owners.txt",
+    "modified": 30,
+    "new": 5,
+    "sha256": "b610b9fb013be8aec63fb6de065f98498070c8d8ddf4e5d0077bd9a5e3bc194d"
+  },
+  "patch_order": [
+    "original-native",
+    "scope-v5",
+    "discard-v2",
+    "return-v1"
+  ],
+  "payload_patches": {
+    "discard-v2.patch": "0ffe9fcec530feb12a2ca084399643861c240cc81906c9aab4677cc529aceb39",
+    "return-v1.patch": "2e2e2057925542c0790d5ec879ce94d55e3ba5798b470aa5cd85327821fd1ec8"
+  },
+  "provenance_only_review_fingerprints": {
+    "discard_v2": "91f328cce86a8102e53045be4069b646487ea0acf48e141a11099197942571fd",
+    "return_v1": "b0935bbc26b8aaf0e4c20c4778660cd1729ba349a827d768fe5fff38dc7e018a",
+    "scope_v5": "ef1073a1d8204c08d2caa36611d3a02a8f34482cf7299f965fd13fe634e24d09"
+  },
+  "required_includes": {
+    "crates/thaw-llvm/src/hir_codegen/tests/async.rs": [
+      "async/syntax.rs",
+      "async/callbacks.rs",
+      "async/promises.rs",
+      "async/resolver_provenance.rs",
+      "async/expressions.rs",
+      "async/control_flow.rs",
+      "async/http_lambda.rs",
+      "async/union_discard.rs",
+      "async/union_discard_jit.rs",
+      "async/union_discard_eval_then.rs",
+      "async/eval_then_returns.rs"
+    ]
+  },
+  "runner_dependencies": {
+    "cargo_lock_sha256": "75b3cf821bfbde27d92f80d66b4db1accf368dffc0310375b986dc28d4578025",
+    "inkwell_feature": "llvm22-1",
+    "inkwell_version": "0.10.0",
+    "llvm_asset": {
+      "filename": "LLVM-22.1.8-Linux-X64.tar.xz",
+      "sha256": "df0e1ecf16caf3489a272a5eea4eec9b0d82878f6477fa309504f918a0006384",
+      "url": "https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.8/LLVM-22.1.8-Linux-X64.tar.xz"
+    },
+    "llvm_prefix": "/opt/llvm-22",
+    "llvm_sys_version": "221.0.1",
+    "system_packages": [
+      "libuv1-dev"
+    ]
+  },
+  "schema_version": 1,
+  "source_files": {
+    "cargo_lock": {
+      "path": "Cargo.lock",
+      "sha256": "75b3cf821bfbde27d92f80d66b4db1accf368dffc0310375b986dc28d4578025"
+    },
+    "handoff_manifest": {
+      "path": "docs/codebase-refactor-handoff/manifest.json",
+      "sha256": "e0c9d123c95e616576264708fff73bd91d23e2b83cee8281256d5aab617db5c9"
+    },
+    "original_patch": {
+      "path": "docs/codebase-refactor-handoff/drafts/native/candidate.patch",
+      "sha256": "359172c41195eb98f687f5f36d4ed9a07d8d5ff38e5e3564ce609552994a6506"
+    },
+    "scope_patch": {
+      "path": "docs/codebase-refactor-handoff/drafts/native/scope-boundary-continuation-20261005/delta.patch",
+      "sha256": "1387f9a75e443e2030656ec7d4a3b2eb8f1d89573dc0e02c32f881b2b4b50e22"
+    }
+  },
+  "stage_manifests": [
+    {
+      "count": 175,
+      "file": "original-native.sha256",
+      "name": "original-native",
+      "sha256": "4e219dde2129cf5876497edd6f9032cebdbee89eded9cce20e50ecda041053ce"
+    },
+    {
+      "count": 176,
+      "file": "scope-v5.sha256",
+      "name": "scope-v5",
+      "sha256": "227274cad19f045e158168cc2b341744fb62e2d0e78c633ece4703e462d7a8e3"
+    },
+    {
+      "count": 179,
+      "file": "discard-v2.sha256",
+      "name": "discard-v2",
+      "sha256": "c47d4ab7e4a805190e719b13b99bd7d233e24a5007afcbff6becebab9493e328"
+    },
+    {
+      "count": 180,
+      "file": "return-v1.sha256",
+      "name": "return-v1",
+      "sha256": "51b1d9dd9a501538cc44fcaf8bfa72cc5a3f9ceb34c2942d4a0c676acc2e7031"
+    }
+  ],
+  "subset_roots": [
+    ".gitignore",
+    "Cargo.lock",
+    "Cargo.toml",
+    "crates/thaw-arena",
+    "crates/thaw-hir",
+    "crates/thaw-llvm",
+    "crates/thaw-runtime"
+  ],
+  "test_filters": [
+    {
+      "filter": "native_eval_then_return_",
+      "package": "thaw-llvm"
+    },
+    {
+      "filter": "discarded_native_promise_union_",
+      "package": "thaw-llvm"
+    },
+    {
+      "filter": "discarded_promise_results_release_only_the_selected_owned_value",
+      "package": "thaw-llvm"
+    },
+    {
+      "filter": "named_and_closure_returns_retain_borrowed_promises",
+      "package": "thaw-llvm"
+    },
+    {
+      "filter": "native_promise_scope_boundaries_codegen_regression_control",
+      "package": "thaw-llvm"
+    },
+    {
+      "filter": "native_promise_scope_tables_restore_after_codegen_errors",
+      "package": "thaw-llvm"
+    },
+    {
+      "filter": "reactive_preheader_promotions_preserve_exact_scope_and_successor_context",
+      "package": "thaw-llvm"
+    },
+    {
+      "filter": "reactive_preheader_codegen_error_restores_nonempty_scope_exactly",
+      "package": "thaw-llvm"
+    },
+    {
+      "filter": "stack_owner_live_merge_preserves_exact_branch_bindings",
+      "package": "thaw-llvm"
+    },
+    {
+      "filter": "hir_if_live_arm_keeps_sibling_stack_binding_and_runtime_flag",
+      "package": "thaw-llvm"
+    },
+    {
+      "filter": "native_promise_exception_descriptor_survives_all_cleanup_handoffs",
+      "package": "thaw-llvm"
+    },
+    {
+      "filter": "nested_codegen_scope_contexts_restore_exact_nonempty_state",
+      "package": "thaw-llvm"
+    },
+    {
+      "filter": "compile_lambda_restores_scope_after_real_inner_body_error",
+      "package": "thaw-llvm"
+    },
+    {
+      "filter": "compile_async_lambda_restores_scope_after_real_inner_body_error",
+      "package": "thaw-llvm"
+    },
+    {
+      "filter": "published_throw_keeps_fresh_native_exception_descriptor",
+      "package": "thaw-llvm"
+    },
+    {
+      "filter": "text_only_throw_clears_stale_native_exception_descriptor",
+      "package": "thaw-llvm"
+    },
+    {
+      "filter": "blocking_and_async_exception_handoffs_copy_native_descriptor_before_release",
+      "package": "thaw-llvm"
+    },
+    {
+      "filter": "plain_string_resolver_clears_native_descriptor_from_real_typed_publisher",
+      "package": "thaw-llvm"
+    },
+    {
+      "filter": "typed_native_reason_resolver_preserves_its_published_descriptor",
+      "package": "thaw-llvm"
+    },
+    {
+      "filter": "pending_rethrow_keeps_text_and_descriptor_on_their_own_channels",
+      "package": "thaw-llvm"
+    },
+    {
+      "filter": "lowers_try_catch",
+      "package": "thaw-hir"
+    },
+    {
+      "filter": "finally_separates_text_only_throws_from_fresh_published_tuples",
+      "package": "thaw-hir"
+    },
+    {
+      "filter": "finally_snapshots_return_and_throw_values_before_mutation",
+      "package": "thaw-hir"
+    }
+  ],
+  "validation_branch": "validation/native-return"
+}

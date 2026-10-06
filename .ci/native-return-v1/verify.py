@@ -1,0 +1,804 @@
+#!/usr/bin/env python3
+"""Fail-closed, hash-pinned native overlay reconstruction (Python stdlib only)."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+from pathlib import Path, PurePosixPath
+import re
+import shutil
+import stat
+import subprocess
+import sys
+import tempfile
+from typing import Any
+
+
+MODULE_DIR = Path(__file__).resolve().parent
+VALIDATION_BRANCH = "validation/native-return"
+BASELINE_COMMIT = "8b353a99d4995c8217b9e73cd308ea85d2d6e5d8"
+BASELINE_TREE = "f3dd90940e1d36ce27e57774b62f87b9df4140af"
+EXPECTED: dict[str, Any] = {
+    "schema_version": 1,
+    "validation_branch": VALIDATION_BRANCH,
+    "baseline": {"commit": BASELINE_COMMIT, "tree": BASELINE_TREE},
+    "source_files": {
+        "handoff_manifest": {
+            "path": "docs/codebase-refactor-handoff/manifest.json",
+            "sha256": "e0c9d123c95e616576264708fff73bd91d23e2b83cee8281256d5aab617db5c9",
+        },
+        "original_patch": {
+            "path": "docs/codebase-refactor-handoff/drafts/native/candidate.patch",
+            "sha256": "359172c41195eb98f687f5f36d4ed9a07d8d5ff38e5e3564ce609552994a6506",
+        },
+        "scope_patch": {
+            "path": "docs/codebase-refactor-handoff/drafts/native/scope-boundary-continuation-20261005/delta.patch",
+            "sha256": "1387f9a75e443e2030656ec7d4a3b2eb8f1d89573dc0e02c32f881b2b4b50e22",
+        },
+        "cargo_lock": {
+            "path": "Cargo.lock",
+            "sha256": "75b3cf821bfbde27d92f80d66b4db1accf368dffc0310375b986dc28d4578025",
+        },
+    },
+    "payload_patches": {
+        "discard-v2.patch": "0ffe9fcec530feb12a2ca084399643861c240cc81906c9aab4677cc529aceb39",
+        "return-v1.patch": "2e2e2057925542c0790d5ec879ce94d55e3ba5798b470aa5cd85327821fd1ec8",
+    },
+    "artifacts": {
+        "original-native.sha256": "4e219dde2129cf5876497edd6f9032cebdbee89eded9cce20e50ecda041053ce",
+        "scope-v5.sha256": "227274cad19f045e158168cc2b341744fb62e2d0e78c633ece4703e462d7a8e3",
+        "discard-v2.sha256": "c47d4ab7e4a805190e719b13b99bd7d233e24a5007afcbff6becebab9493e328",
+        "return-v1.sha256": "51b1d9dd9a501538cc44fcaf8bfa72cc5a3f9ceb34c2942d4a0c676acc2e7031",
+        "native-base.sha256": "da86c2c16619de2e236cdd50b9d2572465fbdd4dc3b75b680cf91c6b0f6bdb72",
+        "net-owners.txt": "b610b9fb013be8aec63fb6de065f98498070c8d8ddf4e5d0077bd9a5e3bc194d",
+        "scope-v5-test-plan.md": "9eb740f8f418de5e7f8c7cd88607d5b269c7495a34600d937bf8653f7e55ae81",
+    },
+    "stage_manifests": [
+        {"name": "original-native", "file": "original-native.sha256", "sha256": "4e219dde2129cf5876497edd6f9032cebdbee89eded9cce20e50ecda041053ce", "count": 175},
+        {"name": "scope-v5", "file": "scope-v5.sha256", "sha256": "227274cad19f045e158168cc2b341744fb62e2d0e78c633ece4703e462d7a8e3", "count": 176},
+        {"name": "discard-v2", "file": "discard-v2.sha256", "sha256": "c47d4ab7e4a805190e719b13b99bd7d233e24a5007afcbff6becebab9493e328", "count": 179},
+        {"name": "return-v1", "file": "return-v1.sha256", "sha256": "51b1d9dd9a501538cc44fcaf8bfa72cc5a3f9ceb34c2942d4a0c676acc2e7031", "count": 180},
+    ],
+    "native_base": {"file": "native-base.sha256", "sha256": "da86c2c16619de2e236cdd50b9d2572465fbdd4dc3b75b680cf91c6b0f6bdb72", "count": 24},
+    "net_owners": {"file": "net-owners.txt", "sha256": "b610b9fb013be8aec63fb6de065f98498070c8d8ddf4e5d0077bd9a5e3bc194d", "count": 35, "modified": 30, "new": 5},
+    "patch_order": ["original-native", "scope-v5", "discard-v2", "return-v1"],
+    "subset_roots": [
+        ".gitignore",
+        "Cargo.lock",
+        "Cargo.toml",
+        "crates/thaw-arena",
+        "crates/thaw-hir",
+        "crates/thaw-llvm",
+        "crates/thaw-runtime",
+    ],
+    "control_owners": [
+        "crates/thaw-llvm/src/hir_codegen/tests/async/eval_then_returns.rs",
+        "crates/thaw-llvm/src/hir_codegen/tests/async/resolver_provenance.rs",
+        "crates/thaw-llvm/src/hir_codegen/tests/async/union_discard.rs",
+        "crates/thaw-llvm/src/hir_codegen/tests/async/union_discard_eval_then.rs",
+        "crates/thaw-llvm/src/hir_codegen/tests/async/union_discard_jit.rs",
+    ],
+    "required_includes": {
+        "crates/thaw-llvm/src/hir_codegen/tests/async.rs": [
+            "async/syntax.rs",
+            "async/callbacks.rs",
+            "async/promises.rs",
+            "async/resolver_provenance.rs",
+            "async/expressions.rs",
+            "async/control_flow.rs",
+            "async/http_lambda.rs",
+            "async/union_discard.rs",
+            "async/union_discard_jit.rs",
+            "async/union_discard_eval_then.rs",
+            "async/eval_then_returns.rs",
+        ]
+    },
+    "runner_dependencies": {
+        "llvm_asset": {
+            "filename": "LLVM-22.1.8-Linux-X64.tar.xz",
+            "url": "https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.8/LLVM-22.1.8-Linux-X64.tar.xz",
+            "sha256": "df0e1ecf16caf3489a272a5eea4eec9b0d82878f6477fa309504f918a0006384",
+        },
+        "system_packages": ["libuv1-dev"],
+        "llvm_prefix": "/opt/llvm-22",
+        "cargo_lock_sha256": "75b3cf821bfbde27d92f80d66b4db1accf368dffc0310375b986dc28d4578025",
+        "inkwell_version": "0.10.0",
+        "llvm_sys_version": "221.0.1",
+        "inkwell_feature": "llvm22-1",
+    },
+    "test_filters": [
+        {"package": "thaw-llvm", "filter": "native_eval_then_return_"},
+        {"package": "thaw-llvm", "filter": "discarded_native_promise_union_"},
+        {"package": "thaw-llvm", "filter": "discarded_promise_results_release_only_the_selected_owned_value"},
+        {"package": "thaw-llvm", "filter": "named_and_closure_returns_retain_borrowed_promises"},
+        {"package": "thaw-llvm", "filter": "native_promise_scope_boundaries_codegen_regression_control"},
+        {"package": "thaw-llvm", "filter": "native_promise_scope_tables_restore_after_codegen_errors"},
+        {"package": "thaw-llvm", "filter": "reactive_preheader_promotions_preserve_exact_scope_and_successor_context"},
+        {"package": "thaw-llvm", "filter": "reactive_preheader_codegen_error_restores_nonempty_scope_exactly"},
+        {"package": "thaw-llvm", "filter": "stack_owner_live_merge_preserves_exact_branch_bindings"},
+        {"package": "thaw-llvm", "filter": "hir_if_live_arm_keeps_sibling_stack_binding_and_runtime_flag"},
+        {"package": "thaw-llvm", "filter": "native_promise_exception_descriptor_survives_all_cleanup_handoffs"},
+        {"package": "thaw-llvm", "filter": "nested_codegen_scope_contexts_restore_exact_nonempty_state"},
+        {"package": "thaw-llvm", "filter": "compile_lambda_restores_scope_after_real_inner_body_error"},
+        {"package": "thaw-llvm", "filter": "compile_async_lambda_restores_scope_after_real_inner_body_error"},
+        {"package": "thaw-llvm", "filter": "published_throw_keeps_fresh_native_exception_descriptor"},
+        {"package": "thaw-llvm", "filter": "text_only_throw_clears_stale_native_exception_descriptor"},
+        {"package": "thaw-llvm", "filter": "blocking_and_async_exception_handoffs_copy_native_descriptor_before_release"},
+        {"package": "thaw-llvm", "filter": "plain_string_resolver_clears_native_descriptor_from_real_typed_publisher"},
+        {"package": "thaw-llvm", "filter": "typed_native_reason_resolver_preserves_its_published_descriptor"},
+        {"package": "thaw-llvm", "filter": "pending_rethrow_keeps_text_and_descriptor_on_their_own_channels"},
+        {"package": "thaw-hir", "filter": "lowers_try_catch"},
+        {"package": "thaw-hir", "filter": "finally_separates_text_only_throws_from_fresh_published_tuples"},
+        {"package": "thaw-hir", "filter": "finally_snapshots_return_and_throw_values_before_mutation"},
+    ],
+    # Informational fingerprints only; their underlying prose is not shipped or validated by CI.
+    "provenance_only_review_fingerprints": {
+        "scope_v5": "ef1073a1d8204c08d2caa36611d3a02a8f34482cf7299f965fd13fe634e24d09",
+        "discard_v2": "91f328cce86a8102e53045be4069b646487ea0acf48e141a11099197942571fd",
+        "return_v1": "b0935bbc26b8aaf0e4c20c4778660cd1729ba349a827d768fe5fff38dc7e018a",
+    },
+}
+
+
+class VerificationError(RuntimeError):
+    """A source identity, input pin, or reconstruction contract failed."""
+
+
+class EvidenceError(VerificationError):
+    """Required validation evidence could not be persisted."""
+
+
+def _sha(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def _safe_rel(value: str, label: str) -> PurePosixPath:
+    if not isinstance(value, str) or not value or "\\" in value:
+        raise VerificationError(f"{label}: unsafe path {value!r}")
+    path = PurePosixPath(value)
+    if path.is_absolute() or any(part in ("", ".", "..") for part in path.parts):
+        raise VerificationError(f"{label}: absolute or traversal path {value!r}")
+    if path.as_posix() != value:
+        raise VerificationError(f"{label}: non-canonical path {value!r}")
+    return path
+
+
+def _path_without_symlinks(root: Path, rel: str, label: str) -> Path:
+    pure = _safe_rel(rel, label)
+    root = root.resolve()
+    current = root
+    for part in pure.parts:
+        current = current / part
+        try:
+            if current.is_symlink():
+                raise VerificationError(f"{label}: symlink path is not allowed: {rel}")
+        except OSError as exc:
+            raise VerificationError(f"{label}: cannot inspect {rel}: {exc}") from exc
+    resolved = current.resolve(strict=False)
+    if resolved != root and root not in resolved.parents:
+        raise VerificationError(f"{label}: path escapes root: {rel}")
+    return current
+
+
+def _tracked_path(root: Path, rel: str) -> Path:
+    """Resolve a Git path without following parent symlinks; the leaf may be a link."""
+    pure = _safe_rel(rel, "tracked path")
+    current = root.resolve()
+    for part in pure.parts[:-1]:
+        current = current / part
+        if current.is_symlink():
+            raise VerificationError(f"tracked path has a symlink parent: {rel}")
+    return current / pure.parts[-1]
+
+
+def _json_no_duplicates(data: bytes, label: str) -> Any:
+    def hook(pairs):
+        out = {}
+        for key, value in pairs:
+            if key in out:
+                raise VerificationError(f"{label}: duplicate JSON key {key!r}")
+            out[key] = value
+        return out
+
+    try:
+        return json.loads(data.decode("utf-8"), object_pairs_hook=hook)
+    except VerificationError:
+        raise
+    except Exception as exc:
+        raise VerificationError(f"{label}: invalid JSON: {exc}") from exc
+
+
+def _run_git(root: Path, *args: str) -> str:
+    result = subprocess.run(
+        ["git", "-C", str(root), *args],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise VerificationError(f"git {' '.join(args)} failed ({result.returncode}): {result.stderr.strip()}")
+    return result.stdout.strip()
+
+
+def _git_tree_entries(root: Path) -> dict[str, tuple[str, str, str]]:
+    result = subprocess.run(
+        ["git", "-C", str(root), "ls-tree", "-r", "-z", "--full-tree", "HEAD"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if result.returncode != 0:
+        message = result.stderr.decode("utf-8", errors="replace").strip()
+        raise VerificationError(f"git ls-tree failed ({result.returncode}): {message}")
+    entries: dict[str, tuple[str, str, str]] = {}
+    for record in result.stdout.split(b"\0"):
+        if not record:
+            continue
+        try:
+            metadata, raw_path = record.split(b"\t", 1)
+            mode, object_type, object_id = metadata.decode("ascii").split(" ")
+            rel = os.fsdecode(raw_path)
+        except Exception as exc:
+            raise VerificationError(f"git ls-tree returned malformed tracked entry: {record[:120]!r}") from exc
+        _safe_rel(rel, "tracked baseline path")
+        if mode == "160000":
+            raise VerificationError(f"baseline contains an unsupported unmaterialized gitlink: {rel}")
+        if mode not in ("100644", "100755", "120000") or object_type != "blob":
+            raise VerificationError(f"baseline has unsupported tracked type/mode {object_type}/{mode}: {rel}")
+        if rel in entries:
+            raise VerificationError(f"git tree contains duplicate tracked path: {rel}")
+        entries[rel] = (mode, object_type, object_id)
+    if not entries:
+        raise VerificationError("baseline Git tree is empty")
+    return entries
+
+
+def _git_blob_sha1(data: bytes) -> str:
+    header = f"blob {len(data)}\0".encode("ascii")
+    return hashlib.sha1(header + data).hexdigest()
+
+
+def _verify_worktree_matches_tree(root: Path) -> None:
+    tracked = _git_tree_entries(root)
+    actual = _inventory(root)
+    tracked_paths = set(tracked)
+    actual_paths = set(actual)
+    if tracked_paths != actual_paths:
+        extra = sorted(actual_paths - tracked_paths)
+        missing = sorted(tracked_paths - actual_paths)
+        if extra:
+            raise VerificationError(f"baseline worktree has extra file outside Git tree: {extra[0]}")
+        raise VerificationError(f"baseline worktree is missing tracked Git tree path: {missing[0]}")
+    for rel, (mode, _object_type, object_id) in tracked.items():
+        path = _tracked_path(root, rel)
+        actual_type, actual_mode, _sha256 = actual[rel]
+        if mode == "120000":
+            if actual_type != "symlink":
+                raise VerificationError(f"tracked Git tree symlink type mismatch: {rel}")
+            data = os.fsencode(os.readlink(path))
+        else:
+            if actual_type != "file":
+                raise VerificationError(f"tracked Git tree regular-file type mismatch: {rel}")
+            expected_mode = 0o755 if mode == "100755" else 0o644
+            if actual_mode != expected_mode:
+                raise VerificationError(f"tracked Git tree file mode mismatch for {rel}: expected {expected_mode:04o}, got {actual_mode:04o}")
+            data = path.read_bytes()
+        if _git_blob_sha1(data) != object_id:
+            raise VerificationError(f"tracked Git tree blob mismatch for {rel}")
+
+
+def _baseline_identity(baseline: Path) -> dict[str, str]:
+    if not baseline.is_dir() or baseline.is_symlink():
+        raise VerificationError(f"baseline directory is missing or symlinked: {baseline}")
+    head = _run_git(baseline, "rev-parse", "HEAD")
+    tree = _run_git(baseline, "rev-parse", "HEAD^{tree}")
+    dirty = _run_git(baseline, "status", "--porcelain=v1", "--untracked-files=all")
+    if dirty:
+        raise VerificationError(f"baseline must be clean; dirty status: {dirty[:600]}")
+    expected = EXPECTED["baseline"]
+    if head != expected["commit"]:
+        raise VerificationError(f"baseline commit mismatch: expected {expected['commit']}, got {head}")
+    if tree != expected["tree"]:
+        raise VerificationError(f"baseline tree mismatch: expected {expected['tree']}, got {tree}")
+    _verify_worktree_matches_tree(baseline)
+    return {"commit": head, "tree": tree}
+
+
+def _paths_overlap(first: Path, second: Path) -> bool:
+    a = first.resolve(strict=False)
+    b = second.resolve(strict=False)
+    return a == b or a in b.parents or b in a.parents
+
+
+def _validate_independent_paths(baseline: Path, candidate: Path, payload: Path, evidence: Path | None = None) -> None:
+    roots = [("baseline", baseline), ("candidate", candidate), ("payload", payload)]
+    if evidence is not None:
+        if evidence.exists() and not evidence.is_dir():
+            raise VerificationError(f"evidence path must be a directory or absent, not a file: {evidence}")
+        roots.append(("evidence", evidence))
+    for index, (name, path) in enumerate(roots):
+        if path.is_symlink():
+            raise VerificationError(f"{name} root must not be a symlink: {path}")
+        for other_name, other_path in roots[index + 1 :]:
+            if _paths_overlap(path, other_path):
+                raise VerificationError(f"{name} and {other_name} roots must be independent and disjoint")
+
+
+def _parse_sha_manifest(path: Path, label: str, path_order: str = "components") -> list[tuple[str, str]]:
+    if not path.is_file() or path.is_symlink():
+        raise VerificationError(f"{label}: manifest is missing or symlinked: {path}")
+    result: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    previous: Any = None
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except Exception as exc:
+        raise VerificationError(f"{label}: cannot read manifest: {exc}") from exc
+    for number, line in enumerate(lines, 1):
+        match = re.fullmatch(r"([0-9a-f]{64})  (.+)", line)
+        if not match:
+            raise VerificationError(f"{label}: malformed sha256 line {number}")
+        digest, rel = match.groups()
+        _safe_rel(rel, f"{label} line {number}")
+        if rel in seen:
+            raise VerificationError(f"{label}: duplicate path {rel}")
+        if path_order == "components":
+            order_key: Any = tuple(PurePosixPath(rel).parts)
+        elif path_order == "lexical":
+            order_key = rel
+        else:
+            raise VerificationError(f"{label}: unknown path ordering {path_order!r}")
+        if previous is not None and order_key <= previous:
+            raise VerificationError(f"{label}: paths are not strictly sorted at {rel}")
+        seen.add(rel)
+        previous = order_key
+        result.append((digest, rel))
+    if not result:
+        raise VerificationError(f"{label}: empty manifest")
+    return result
+
+
+def _is_subset_path(rel: str, roots: list[str] | None = None) -> bool:
+    roots = roots or EXPECTED["subset_roots"]
+    return any(rel == root or rel.startswith(root.rstrip("/") + "/") for root in roots)
+
+
+def _subset_inventory(tree: Path) -> set[str]:
+    found: set[str] = set()
+    for rel_root in EXPECTED["subset_roots"]:
+        root_path = _path_without_symlinks(tree, rel_root, "subset root")
+        if not root_path.exists():
+            continue
+        if root_path.is_file():
+            found.add(rel_root)
+            continue
+        for current, dirs, files in os.walk(root_path, followlinks=False):
+            current_path = Path(current)
+            for name in list(dirs):
+                entry = current_path / name
+                if entry.is_symlink():
+                    rel = entry.relative_to(tree).as_posix()
+                    raise VerificationError(f"native subset contains symlink directory: {rel}")
+            for name in files:
+                entry = current_path / name
+                rel = entry.relative_to(tree).as_posix()
+                if entry.is_symlink():
+                    raise VerificationError(f"native subset contains symlink file: {rel}")
+                if not entry.is_file():
+                    raise VerificationError(f"native subset contains non-regular file: {rel}")
+                found.add(rel)
+    return found
+
+
+def verify_stage(tree: Path, manifest: Path, expected_count: int) -> dict[str, Any]:
+    """Validate one source subset against a canonical sorted sha256 manifest."""
+    rows = _parse_sha_manifest(manifest, "stage manifest")
+    if len(rows) != expected_count:
+        raise VerificationError(f"stage manifest count mismatch: expected {expected_count}, got {len(rows)}")
+    if not tree.is_dir() or tree.is_symlink():
+        raise VerificationError(f"stage tree is missing or symlinked: {tree}")
+    root = tree.resolve()
+    expected_paths = {rel for _, rel in rows}
+    bad_paths = sorted(rel for rel in expected_paths if not _is_subset_path(rel))
+    if bad_paths:
+        raise VerificationError(f"stage manifest contains path outside native subset: {bad_paths[0]}")
+    for digest, rel in rows:
+        file_path = _path_without_symlinks(root, rel, "stage manifest")
+        if not file_path.exists():
+            raise VerificationError(f"stage file missing (including possible control owner): {rel}")
+        if not file_path.is_file():
+            raise VerificationError(f"stage path is not a regular file: {rel}")
+        actual = _sha(file_path.read_bytes())
+        if actual != digest:
+            raise VerificationError(f"stage hash mismatch for {rel}: expected {digest}, got {actual}")
+    actual_paths = _subset_inventory(root)
+    if actual_paths != expected_paths:
+        missing = sorted(expected_paths - actual_paths)
+        extra = sorted(actual_paths - expected_paths)
+        if missing:
+            raise VerificationError(f"native subset inventory is missing {missing[0]}")
+        raise VerificationError(f"native subset inventory has extra file {extra[0]}")
+    return {"count": len(rows), "manifest_sha256": _sha(manifest.read_bytes()), "files": sorted(expected_paths)}
+
+
+def _read_owner_map(payload: Path) -> dict[str, str]:
+    descriptor = EXPECTED["native_base"]
+    path = _path_without_symlinks(payload, descriptor["file"], "native-base manifest")
+    rows = _parse_sha_manifest(path, "native-base manifest", path_order="lexical")
+    if len(rows) != descriptor["count"]:
+        raise VerificationError(f"native-base owner count mismatch: expected {descriptor['count']}, got {len(rows)}")
+    return {rel: digest for digest, rel in rows}
+
+
+def _read_net_roster(payload: Path) -> dict[str, str]:
+    descriptor = EXPECTED["net_owners"]
+    path = _path_without_symlinks(payload, descriptor["file"], "net-owner roster")
+    try:
+        rows = path.read_text(encoding="utf-8").splitlines()
+    except Exception as exc:
+        raise VerificationError(f"net-owner roster unreadable: {exc}") from exc
+    roster: dict[str, str] = {}
+    previous = ""
+    for number, line in enumerate(rows, 1):
+        match = re.fullmatch(r"(modified|new)  (.+)", line)
+        if not match:
+            raise VerificationError(f"net-owner roster malformed at line {number}")
+        status, rel = match.groups()
+        _safe_rel(rel, f"net-owner line {number}")
+        if rel in roster:
+            raise VerificationError(f"net-owner roster has duplicate path {rel}")
+        if previous and rel <= previous:
+            raise VerificationError(f"net-owner roster is not sorted by path at {rel}")
+        previous = rel
+        roster[rel] = status
+    counts = {status: sum(value == status for value in roster.values()) for status in ("modified", "new")}
+    if len(roster) != descriptor["count"] or counts["modified"] != descriptor["modified"] or counts["new"] != descriptor["new"]:
+        raise VerificationError(
+            "net-owner roster count mismatch: "
+            f"expected {descriptor['count']} ({descriptor['modified']} modified, {descriptor['new']} new), "
+            f"got {len(roster)} ({counts['modified']} modified, {counts['new']} new)"
+        )
+    return roster
+
+
+def verify_inputs(baseline: Path, payload: Path) -> dict[str, Any]:
+    """Validate descriptor, immutable bytes, clean baseline and roster preconditions."""
+    if not payload.is_dir() or payload.is_symlink():
+        raise VerificationError(f"payload directory is missing or symlinked: {payload}")
+    if _paths_overlap(baseline, payload):
+        raise VerificationError("baseline and payload roots must be independent and disjoint")
+    pins_path = _path_without_symlinks(payload, "pins.json", "descriptor")
+    descriptor = _json_no_duplicates(pins_path.read_bytes(), "pins.json")
+    if descriptor != EXPECTED:
+        raise VerificationError("pins.json descriptor differs from the immutable in-code expected descriptor")
+    current_ref = os.environ.get("GITHUB_REF")
+    expected_ref = f"refs/heads/{EXPECTED['validation_branch']}"
+    if current_ref and current_ref != expected_ref:
+        raise VerificationError(f"workflow ref mismatch: expected {expected_ref}, got {current_ref}")
+    identity = _baseline_identity(baseline)
+
+    # Verify baseline-resident copies (patches 1/2, handoff owner manifest and lockfile).
+    source_bytes: dict[str, bytes] = {}
+    for name, info in EXPECTED["source_files"].items():
+        path = _path_without_symlinks(baseline, info["path"], f"baseline source {name}")
+        if not path.is_file():
+            raise VerificationError(f"baseline source file missing: {info['path']}")
+        data = path.read_bytes()
+        actual = _sha(data)
+        if actual != info["sha256"]:
+            raise VerificationError(f"baseline source hash mismatch for {info['path']}: expected {info['sha256']}, got {actual}")
+        source_bytes[name] = data
+
+    # Every published payload artifact is independently fixed in code and in the descriptor.
+    for rel, expected_hash in EXPECTED["artifacts"].items():
+        path = _path_without_symlinks(payload, rel, "payload artifact")
+        if not path.is_file():
+            raise VerificationError(f"payload artifact missing: {rel}")
+        actual = _sha(path.read_bytes())
+        if actual != expected_hash:
+            raise VerificationError(f"payload artifact hash mismatch for {rel}: expected {expected_hash}, got {actual}")
+    for rel, expected_hash in EXPECTED["payload_patches"].items():
+        path = _path_without_symlinks(payload, rel, "payload patch")
+        if not path.is_file():
+            raise VerificationError(f"payload patch missing: {rel}")
+        actual = _sha(path.read_bytes())
+        if actual != expected_hash:
+            raise VerificationError(f"payload patch hash mismatch for {rel}: expected {expected_hash}, got {actual}")
+
+    owner_map = _read_owner_map(payload)
+    manifest = _json_no_duplicates(source_bytes["handoff_manifest"], "native handoff manifest")
+    try:
+        owners = manifest["drafts"]["native"]["owners"]
+    except (KeyError, TypeError) as exc:
+        raise VerificationError("native handoff manifest has no drafts.native.owners array") from exc
+    if not isinstance(owners, list) or len(owners) != EXPECTED["native_base"]["count"]:
+        raise VerificationError(f"native handoff owner count mismatch: expected {EXPECTED['native_base']['count']}, got {len(owners) if isinstance(owners, list) else 'non-array'}")
+    seen: set[str] = set()
+    for owner in owners:
+        if not isinstance(owner, dict) or owner.get("base_matches_checkpoint") is not True:
+            raise VerificationError("native base owner does not have base_matches_checkpoint=true")
+        rel = owner.get("path")
+        _safe_rel(rel, "native handoff owner")
+        if rel in seen:
+            raise VerificationError(f"native handoff manifest has duplicate owner {rel}")
+        seen.add(rel)
+        if owner.get("base_sha256") != owner_map.get(rel):
+            raise VerificationError(f"native-base manifest mismatch for owner {rel}")
+        base_file = _path_without_symlinks(baseline, rel, "native base owner")
+        if not base_file.is_file() or _sha(base_file.read_bytes()) != owner["base_sha256"]:
+            raise VerificationError(f"baseline native owner hash mismatch for {rel}")
+    if seen != set(owner_map):
+        raise VerificationError("native-base manifest owner set differs from handoff manifest")
+
+    net = _read_net_roster(payload)
+    for rel, status in net.items():
+        baseline_path = _path_without_symlinks(baseline, rel, "net owner")
+        if status == "new" and baseline_path.exists():
+            raise VerificationError(f"pre-existing new owner must be absent from baseline: {rel}")
+        if status == "modified" and (not baseline_path.is_file() or baseline_path.is_symlink()):
+            raise VerificationError(f"modified owner is not a baseline regular file: {rel}")
+
+    # Each manifest file is parsed here, before any patch is applied, so malformed or
+    # unsafe input cannot become a Cargo-time surprise.
+    for stage in EXPECTED["stage_manifests"]:
+        manifest_path = _path_without_symlinks(payload, stage["file"], "stage manifest")
+        rows = _parse_sha_manifest(manifest_path, stage["name"])
+        if len(rows) != stage["count"]:
+            raise VerificationError(f"{stage['name']} stage manifest count mismatch: expected {stage['count']}, got {len(rows)}")
+        for _, rel in rows:
+            if not _is_subset_path(rel):
+                raise VerificationError(f"{stage['name']} manifest path outside native subset: {rel}")
+    expected_order = [stage["name"] for stage in EXPECTED["stage_manifests"]]
+    if EXPECTED["patch_order"] != expected_order:
+        raise VerificationError(f"patch order mismatch: expected stage order {expected_order}")
+    return {
+        "baseline": identity,
+        "inputs": {**EXPECTED["payload_patches"], **EXPECTED["artifacts"]},
+        "native_owner_count": len(owner_map),
+        "net_owner_count": len(net),
+        "patch_order": list(EXPECTED["patch_order"]),
+    }
+
+
+def _inventory(tree: Path) -> dict[str, tuple[str, int, str]]:
+    """Hash full checkout content while excluding only Git metadata."""
+    inventory: dict[str, tuple[str, int, str]] = {}
+    root = tree.resolve()
+    for current, dirs, files in os.walk(root, topdown=True, followlinks=False):
+        current_path = Path(current)
+        if current_path == root:
+            dirs[:] = [name for name in dirs if name != ".git"]
+        for name in list(dirs):
+            path = current_path / name
+            if path.is_symlink():
+                rel = path.relative_to(root).as_posix()
+                target = os.readlink(path).encode("utf-8", errors="surrogateescape")
+                inventory[rel] = ("symlink", stat.S_IMODE(path.lstat().st_mode), _sha(target))
+                dirs.remove(name)
+        for name in files:
+            path = current_path / name
+            rel = path.relative_to(root).as_posix()
+            mode = stat.S_IMODE(path.lstat().st_mode)
+            if path.is_symlink():
+                target = os.readlink(path).encode("utf-8", errors="surrogateescape")
+                inventory[rel] = ("symlink", mode, _sha(target))
+            elif path.is_file():
+                inventory[rel] = ("file", mode, _sha(path.read_bytes()))
+            else:
+                raise VerificationError(f"checkout contains unsupported special file: {rel}")
+    return inventory
+
+
+def _verify_net_inventory(baseline: Path, candidate: Path, payload: Path) -> dict[str, Any]:
+    before = _inventory(baseline)
+    after = _inventory(candidate)
+    roster = _read_net_roster(payload)
+    actual: dict[str, str] = {}
+    for rel in sorted(set(before) | set(after)):
+        b = before.get(rel)
+        c = after.get(rel)
+        if b == c:
+            continue
+        if b is None:
+            actual[rel] = "new"
+        elif c is None:
+            actual[rel] = "deleted"
+        else:
+            actual[rel] = "modified"
+    if actual != roster:
+        unexpected = sorted(set(actual) - set(roster))
+        missing = sorted(set(roster) - set(actual))
+        changed = sorted(path for path in set(actual) & set(roster) if actual[path] != roster[path])
+        detail = []
+        if unexpected:
+            detail.append(f"unexpected owner {unexpected[0]} ({actual[unexpected[0]]})")
+        if missing:
+            detail.append(f"pinned owner was unchanged or absent {missing[0]} ({roster[missing[0]]})")
+        if changed:
+            detail.append(f"owner status differs for {changed[0]}: {actual[changed[0]]} vs {roster[changed[0]]}")
+        raise VerificationError("final net-owner roster mismatch: " + "; ".join(detail))
+    for rel, status in roster.items():
+        b, c = before.get(rel), after.get(rel)
+        if status == "modified":
+            if b is None or c is None:
+                raise VerificationError(f"modified owner missing on one side: {rel}")
+            if b[0] != "file" or c[0] != "file" or b[1] != c[1]:
+                raise VerificationError(f"modified owner changed file type or mode: {rel}")
+        elif status == "new" and (b is not None or c is None or c[0] != "file"):
+            raise VerificationError(f"new owner is not a fresh regular file: {rel}")
+    for rel in EXPECTED["control_owners"]:
+        entry = after.get(rel)
+        if entry is None or entry[0] != "file" or entry[1] != 0o644:
+            raise VerificationError(f"added control owner must be a regular 100644 file: {rel}")
+    return {"changed_count": len(actual), "modified": sum(v == "modified" for v in actual.values()), "new": sum(v == "new" for v in actual.values())}
+
+
+def check_required_controls(tree: Path, manifest_paths: set[str] | None = None) -> dict[str, Any]:
+    """Require candidate control files and every pinned include target to exist."""
+    final_manifest = EXPECTED["stage_manifests"][-1]["file"]
+    if manifest_paths is None:
+        rows = _parse_sha_manifest(MODULE_DIR / final_manifest, "final control manifest")
+        manifest_paths = {rel for _, rel in rows}
+    owners = EXPECTED["control_owners"]
+    for rel in owners:
+        path = _path_without_symlinks(tree, rel, "control owner")
+        if rel not in manifest_paths or not path.is_file():
+            raise VerificationError(f"required control owner missing from candidate: {rel}")
+    for owner, includes in EXPECTED["required_includes"].items():
+        path = _path_without_symlinks(tree, owner, "include owner")
+        if owner not in manifest_paths or not path.is_file():
+            raise VerificationError(f"required include owner missing from candidate: {owner}")
+        text = path.read_text(encoding="utf-8")
+        declared = set(re.findall(r'include!\s*\(\s*"([^"]+)"\s*\)', text))
+        for include in includes:
+            if include not in declared:
+                raise VerificationError(f"required include missing from {owner}: {include}")
+            include_rel = (PurePosixPath(owner).parent / include).as_posix()
+            _safe_rel(include_rel, "include target")
+            include_path = _path_without_symlinks(tree, include_rel, "include target")
+            if include_rel not in manifest_paths or not include_path.is_file():
+                raise VerificationError(f"missing include/control owner: {include_rel}")
+    return {"control_owner_count": len(owners), "include_owner_count": len(EXPECTED["required_includes"])}
+
+
+def _write_json(path: Path, value: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = (json.dumps(value, sort_keys=True, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
+    fd, temp_name = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=path.parent)
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temp_name, path)
+    finally:
+        try:
+            os.unlink(temp_name)
+        except FileNotFoundError:
+            pass
+
+
+def _evidence(evidence: Path, value: dict[str, Any]) -> None:
+    try:
+        _write_json(evidence / "reconstruction.json", value)
+    except Exception as exc:
+        raise EvidenceError(f"required reconstruction evidence write failed at {evidence}: {exc}") from exc
+
+
+def _apply_patch(tree: Path, patch: Path) -> dict[str, Any]:
+    for args in (("apply", "--check", str(patch)), ("apply", str(patch))):
+        result = subprocess.run(
+            ["git", "-C", str(tree), *args],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        if result.returncode != 0:
+            raise VerificationError(
+                f"git {' '.join(args[:2])} failed for {patch.name} ({result.returncode}): "
+                f"{result.stderr.strip()}"
+            )
+    return {"patch": patch.name, "check": "passed", "apply": "passed"}
+
+
+def _patch_path(baseline: Path, payload: Path, name: str) -> Path:
+    if name == "original-native":
+        rel = EXPECTED["source_files"]["original_patch"]["path"]
+        return _path_without_symlinks(baseline, rel, "original patch")
+    if name == "scope-v5":
+        rel = EXPECTED["source_files"]["scope_patch"]["path"]
+        return _path_without_symlinks(baseline, rel, "scope-v5 patch")
+    payload_name = {"discard-v2": "discard-v2.patch", "return-v1": "return-v1.patch"}.get(name)
+    if not payload_name:
+        raise VerificationError(f"unknown patch stage: {name}")
+    return _path_without_symlinks(payload, payload_name, f"{name} patch")
+
+
+def verify_prepared(baseline: Path, candidate: Path, payload: Path) -> dict[str, Any]:
+    """Revalidate identities for a prepared candidate without applying patches again."""
+    _validate_independent_paths(baseline, candidate, payload)
+    inputs = verify_inputs(baseline, payload)
+    if not candidate.is_dir() or candidate.is_symlink():
+        raise VerificationError(f"prepared candidate is missing or symlinked: {candidate}")
+    final = EXPECTED["stage_manifests"][-1]
+    stage = verify_stage(candidate, payload / final["file"], final["count"])
+    controls = check_required_controls(candidate, set(stage["files"]))
+    net = _verify_net_inventory(baseline, candidate, payload)
+    return {"inputs": inputs, "final_stage": stage, "controls": controls, "net": net}
+
+
+def reconstruct(baseline: Path, candidate: Path, payload: Path, evidence: Path) -> dict[str, Any]:
+    """Reconstruct the exact 180-file source overlay on an untouched full checkout."""
+    state: dict[str, Any] = {"status": "running", "baseline": str(baseline), "candidate": str(candidate), "stages": []}
+    _validate_independent_paths(baseline, candidate, payload, evidence)
+    try:
+        input_result = verify_inputs(baseline, payload)
+        state["input_validation"] = input_result
+        if candidate.exists() or candidate.is_symlink():
+            raise VerificationError(f"candidate destination must not already exist: {candidate}")
+        baseline_abs = baseline.resolve()
+        candidate_parent = candidate.parent.resolve()
+        if not candidate_parent.is_dir():
+            raise VerificationError(f"candidate parent directory does not exist: {candidate_parent}")
+        def ignore_git_at_checkout_root(directory: str, names: list[str]) -> set[str]:
+            return {".git"} if Path(directory).resolve() == baseline_abs and ".git" in names else set()
+
+        shutil.copytree(baseline, candidate, symlinks=True, ignore=ignore_git_at_checkout_root)
+        baseline_before = _inventory(baseline)
+        if _inventory(candidate) != baseline_before:
+            raise VerificationError("full candidate copy differs from the clean baseline before applying overlays")
+
+        if [stage["name"] for stage in EXPECTED["stage_manifests"]] != EXPECTED["patch_order"]:
+            raise VerificationError("patch order differs from immutable stage order")
+        for stage in EXPECTED["stage_manifests"]:
+            patch = _patch_path(baseline, payload, stage["name"])
+            applied = _apply_patch(candidate, patch)
+            manifest = payload / stage["file"]
+            result = verify_stage(candidate, manifest, stage["count"])
+            row = {**applied, "stage": stage["name"], "count": result["count"], "manifest_sha256": result["manifest_sha256"]}
+            state["stages"].append(row)
+            state["last_good_stage"] = stage["name"]
+
+        final_files = set(row[1] for row in _parse_sha_manifest(payload / EXPECTED["stage_manifests"][-1]["file"], "final manifest"))
+        controls = check_required_controls(candidate, final_files)
+        net = _verify_net_inventory(baseline, candidate, payload)
+        state.update({"status": "passed", "controls": controls, "net": net, "stage_counts": [x["count"] for x in state["stages"]]})
+        _evidence(evidence, state)
+        return state
+    except EvidenceError:
+        raise
+    except Exception as exc:
+        state["status"] = "failed"
+        state["error"] = f"{type(exc).__name__}: {exc}"
+        try:
+            _evidence(evidence, state)
+        except EvidenceError as write_exc:
+            raise VerificationError(f"{state['error']}; {write_exc}") from exc
+        if isinstance(exc, VerificationError):
+            raise
+        raise VerificationError(f"reconstruction failed: {exc}") from exc
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--baseline", type=Path, required=True)
+    parser.add_argument("--candidate", type=Path, required=True)
+    parser.add_argument("--payload", type=Path, default=MODULE_DIR)
+    parser.add_argument("--evidence", type=Path, required=True)
+    args = parser.parse_args(argv)
+    try:
+        result = reconstruct(args.baseline, args.candidate, args.payload, args.evidence)
+    except VerificationError as exc:
+        print(f"native candidate identity verification failed: {exc}", file=sys.stderr)
+        return 2
+    print(json.dumps(result, sort_keys=True, indent=2))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
