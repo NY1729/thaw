@@ -115,6 +115,9 @@ class Fixture:
             "crates/thaw-llvm/Cargo.toml": "[package]\nname='thaw-llvm'\n",
             "crates/thaw-llvm/src/hir_codegen/tests/async.rs": "// baseline async test owner\n",
             "crates/thaw-runtime/Cargo.toml": "[package]\nname='thaw-runtime'\n",
+            "crates/thaw-runtime/src/runtime/native_values/strings.rs": "runtime strings base\n",
+            "crates/thaw-runtime/src/runtime/promises.rs": "runtime promises base\n",
+            "crates/thaw-runtime/src/tests.rs": "runtime tests base\n",
             "crates/thaw-quickjs/src/quickjs/api.rs": "api baseline\n",
             "crates/thaw-quickjs/src/quickjs/platform_globals/runtime.js": "runtime baseline\n",
             "outside.txt": "unmodified product file\n",
@@ -124,6 +127,9 @@ class Fixture:
         repair_extra = "crates/thaw-std/src/json.rs"
         api_owner = "crates/thaw-quickjs/src/quickjs/api.rs"
         runtime_owner = "crates/thaw-quickjs/src/quickjs/platform_globals/runtime.js"
+        strings_owner = "crates/thaw-runtime/src/runtime/native_values/strings.rs"
+        promises_owner = "crates/thaw-runtime/src/runtime/promises.rs"
+        runtime_tests_owner = "crates/thaw-runtime/src/tests.rs"
         repair_extra_bytes = b"fixture json base\n"
         write(self.baseline / repair_extra, repair_extra_bytes)
 
@@ -229,6 +235,17 @@ class Fixture:
         forced_root_base[runtime_owner] = initial[runtime_owner]
         forced_root_final = dict(stage8)
         forced_root_final[repair_extra] = repair_json_bytes.decode()
+        dependency_final = dict(forced_root_final)
+        dependency_final[strings_owner] = "runtime strings dependency final\n"
+        dependency_final[promises_owner] = "runtime promises dependency final\n"
+        dependency_final[runtime_tests_owner] = "runtime tests dependency final\n"
+        dependency_json_bytes = b"fixture json dependency final\n"
+        dependency_final[repair_extra] = dependency_json_bytes.decode()
+        dependency_patch = patch_for(strings_owner, initial[strings_owner], dependency_final[strings_owner])
+        dependency_patch += patch_for(promises_owner, initial[promises_owner], dependency_final[promises_owner])
+        dependency_patch += patch_for(runtime_tests_owner, initial[runtime_tests_owner], dependency_final[runtime_tests_owner])
+        dependency_patch += patch_for(repair_extra, repair_json_bytes.decode(), dependency_json_bytes.decode())
+        write(self.payload / "dependency-compile-v1.patch", dependency_patch)
         for name, files in (
             ("compile-repairs-v1-base", paired_base),
             ("compile-repairs-v1", repair_final),
@@ -238,12 +255,14 @@ class Fixture:
             ("next-hir-v1", next_hir_final),
             ("forced-root-wire-v1-base", forced_root_base),
             ("forced-root-wire-v1", forced_root_final),
+            ("dependency-compile-v1", dependency_final),
         ):
             stage_dir = root / ("manifest-tree-" + name)
             for rel, text in files.items():
                 write(stage_dir / rel, text)
-            path_order = "lexical" if name in ("compile-repairs-v1", "cumulative-hir-v1-base", "cumulative-hir-v1", "next-hir-v1-base", "next-hir-v1", "forced-root-wire-v1-base", "forced-root-wire-v1") else "components"
+            path_order = "lexical" if name in ("compile-repairs-v1", "cumulative-hir-v1-base", "cumulative-hir-v1", "next-hir-v1-base", "next-hir-v1", "forced-root-wire-v1-base", "forced-root-wire-v1", "dependency-compile-v1") else "components"
             (self.payload / f"{name}.sha256").write_bytes(manifest_for(stage_dir, path_order))
+        (self.payload / "dependency-compile-v1-base.sha256").write_bytes((self.payload / "forced-root-wire-v1.sha256").read_bytes())
 
         for name, files in zip(("original-native", "scope-v5", "discard-v2", "return-v1"), (stage1, stage2, stage3, stage4)):
             stage_dir = root / ("manifest-tree-" + name)
@@ -285,6 +304,14 @@ class Fixture:
             "extra_paths": [repair_extra, api_owner, runtime_owner],
             "path_order": "lexical",
         })
+        stages.append({
+            "name": "dependency-compile-v1",
+            "file": "dependency-compile-v1.sha256",
+            "sha256": sha((self.payload / "dependency-compile-v1.sha256").read_bytes()),
+            "count": len(dependency_final),
+            "extra_paths": [repair_extra, api_owner, runtime_owner],
+            "path_order": "lexical",
+        })
 
         # Stage fixture trees are written above from text maps; preserve the
         # expected subset inventory separately for fast mutation tests.
@@ -296,6 +323,9 @@ class Fixture:
             f"modified  {repair_extra}\n",
             f"modified  {api_owner}\n",
             f"modified  {runtime_owner}\n",
+            f"modified  {strings_owner}\n",
+            f"modified  {promises_owner}\n",
+            f"modified  {runtime_tests_owner}\n",
             f"new  {v5_control}\n",
             f"new  {discard_control}\n",
             f"new  {return_control}\n",
@@ -324,7 +354,7 @@ class Fixture:
         }
         payload_files = {
             name: sha((self.payload / name).read_bytes())
-            for name in ("discard-v2.patch", "return-v1.patch", "compile-repairs-v1.patch", "cumulative-hir-v1.patch", "next-hir-v1.patch", "forced-root-wire-v1.patch")
+            for name in ("discard-v2.patch", "return-v1.patch", "compile-repairs-v1.patch", "cumulative-hir-v1.patch", "next-hir-v1.patch", "forced-root-wire-v1.patch", "dependency-compile-v1.patch")
         }
         artifact_hashes = {}
         for name, desc in self._artifact_paths().items():
@@ -341,8 +371,8 @@ class Fixture:
             "net_owners": {
                 "file": "net-owners.txt",
                 "sha256": sha((self.payload / "net-owners.txt").read_bytes()),
-                "count": 8,
-                "modified": 5,
+                "count": 11,
+                "modified": 8,
                 "new": 3,
             },
             "repair_base": {
@@ -392,7 +422,14 @@ class Fixture:
                     },
                 ],
             },
-            "patch_order": ["original-native", "scope-v5", "discard-v2", "return-v1", "compile-repairs-v1", "cumulative-hir-v1", "next-hir-v1", "forced-root-wire-v1"],
+            "dependency_compile_base": {
+                "file": "dependency-compile-v1-base.sha256",
+                "sha256": sha((self.payload / "dependency-compile-v1-base.sha256").read_bytes()),
+                "count": len(forced_root_final),
+                "path_order": "lexical",
+                "paired_after": "forced-root-wire-v1",
+            },
+            "patch_order": ["original-native", "scope-v5", "discard-v2", "return-v1", "compile-repairs-v1", "cumulative-hir-v1", "next-hir-v1", "forced-root-wire-v1", "dependency-compile-v1"],
             "subset_roots": [
                 ".gitignore",
                 "Cargo.lock",
@@ -436,6 +473,8 @@ class Fixture:
             "next_hir_final": "next-hir-v1.sha256",
             "forced_root_wire_base": "forced-root-wire-v1-base.sha256",
             "forced_root_wire_final": "forced-root-wire-v1.sha256",
+            "dependency_compile_base": "dependency-compile-v1-base.sha256",
+            "dependency_compile_final": "dependency-compile-v1.sha256",
             "native_base": "native-base.sha256",
             "net_owners": "net-owners.txt",
             "scope_test_plan": "scope-v5-test-plan.md",
@@ -470,7 +509,7 @@ class VerificationRedGreenTests(unittest.TestCase):
         with self.assertRaisesRegex(mod.VerificationError, pattern):
             call(*args, **kwargs)
 
-    def test_positive_reconstruction_replays_eight_stages_and_preserves_unrelated_file(self):
+    def test_positive_reconstruction_replays_nine_stages_and_preserves_unrelated_file(self):
         mod = self.require_implementation()
         result = mod.reconstruct(
             self.fixture.baseline,
@@ -479,7 +518,7 @@ class VerificationRedGreenTests(unittest.TestCase):
             self.fixture.evidence,
         )
         self.assertEqual([x["count"] for x in mod.EXPECTED["stage_manifests"]], result["stage_counts"])
-        self.assertEqual(8, len(result["stages"]))
+        self.assertEqual(9, len(result["stages"]))
         self.assertEqual("unmodified product file\n", (self.fixture.candidate / "outside.txt").read_text())
         self.assertTrue((self.fixture.evidence / "reconstruction.json").is_file())
 
@@ -492,7 +531,7 @@ class VerificationRedGreenTests(unittest.TestCase):
         self.assertEqual([extra], mod.EXPECTED["stage_manifests"][4]["extra_paths"])
         mod.reconstruct(self.fixture.baseline, self.fixture.candidate, self.fixture.payload, self.fixture.evidence)
         self.assertIn(extra, mod.verify_prepared(self.fixture.baseline, self.fixture.candidate, self.fixture.payload)["final_stage"]["files"])
-        self.assertEqual(b"fixture json repaired\n", (self.fixture.candidate / extra).read_bytes())
+        self.assertEqual(b"fixture json dependency final\n", (self.fixture.candidate / extra).read_bytes())
 
     def test_actual_frozen_final_repair_manifest_uses_its_pinned_lexical_order(self):
         mod = self.require_implementation()
@@ -553,7 +592,7 @@ class VerificationRedGreenTests(unittest.TestCase):
         self.assertEqual("next-hir-v1", pair["paired_after"])
         self.assertEqual("lexical", pair["path_order"])
         result = mod.verify_inputs(self.fixture.baseline, self.fixture.payload)
-        self.assertEqual(8, result["net_owner_count"])
+        self.assertEqual(11, result["net_owner_count"])
         self.assertEqual(2, len(pair["extra_owners"]))
         before = {rel: digest for digest, rel in mod._parse_sha_manifest(self.fixture.payload / pair["file"], "wire base", path_order="lexical")}
         previous = {rel: digest for digest, rel in mod._parse_sha_manifest(self.fixture.payload / "next-hir-v1.sha256", "next final", path_order="lexical")}
@@ -634,6 +673,77 @@ class VerificationRedGreenTests(unittest.TestCase):
         self.assertEqual("next-hir-v1.patch", applied[-1])
         self.assertNotIn("forced-root-wire-v1.patch", applied)
 
+    def test_dependency_compile_pair_preserves_wire_roots_and_changes_only_four_sources(self):
+        mod = self.require_implementation()
+        base = mod.EXPECTED["dependency_compile_base"]
+        stage = mod.EXPECTED["stage_manifests"][-1]
+        predecessor = next(item for item in mod.EXPECTED["stage_manifests"] if item["name"] == "forced-root-wire-v1")
+        self.assertEqual("forced-root-wire-v1", base["paired_after"])
+        self.assertEqual(9, len(mod.EXPECTED["stage_manifests"]))
+        self.assertEqual(predecessor["count"], base["count"])
+        self.assertEqual(base["count"], stage["count"])
+        self.assertEqual(predecessor["extra_paths"], stage["extra_paths"])
+        self.assertEqual(
+            (self.fixture.payload / predecessor["file"]).read_bytes(),
+            (self.fixture.payload / base["file"]).read_bytes(),
+        )
+        base_map = dict((rel, digest) for digest, rel in mod._parse_sha_manifest(self.fixture.payload / base["file"], "dependency base", path_order="lexical"))
+        final_map = dict((rel, digest) for digest, rel in mod._parse_sha_manifest(self.fixture.payload / stage["file"], "dependency final", path_order="lexical"))
+        changed = {rel for rel in base_map if base_map[rel] != final_map[rel]}
+        self.assertEqual(set(mod.DEPENDENCY_SOURCE_PATHS), changed)
+        self.assertEqual(set(base_map), set(final_map))
+        self.assertEqual(len(base_map) - 4, len(base_map) - len(changed))
+        result = mod.verify_inputs(self.fixture.baseline, self.fixture.payload)
+        self.assertEqual(4, len(result["dependency_compile"]["changed_source_owners"]))
+        self.assertEqual(base["count"] - 4, result["dependency_compile"]["unchanged_source_count"])
+
+    def test_dependency_compile_pair_is_checked_immediately_before_ninth_patch(self):
+        mod = self.require_implementation()
+        original_verify_stage = mod.verify_stage
+        original_apply = mod._apply_patch
+        applied = []
+
+        def apply_and_record(tree, patch):
+            applied.append(patch.name)
+            return original_apply(tree, patch)
+
+        def verify_then_drift(tree, manifest, *args, **kwargs):
+            result = original_verify_stage(tree, manifest, *args, **kwargs)
+            if Path(manifest).name == "forced-root-wire-v1.sha256":
+                write(tree / mod.DEPENDENCY_SOURCE_PATHS[1], "drift after wire final\n")
+            return result
+
+        with mock.patch.object(mod, "verify_stage", side_effect=verify_then_drift), mock.patch.object(mod, "_apply_patch", side_effect=apply_and_record):
+            self.assertVerifyError("dependency compile paired base|stage hash mismatch", mod.reconstruct, self.fixture.baseline, self.fixture.candidate, self.fixture.payload, self.fixture.evidence)
+        self.assertEqual("forced-root-wire-v1.patch", applied[-1])
+        self.assertNotIn("dependency-compile-v1.patch", applied)
+
+    def test_dependency_compile_final_json_drift_is_rejected(self):
+        mod = self.require_implementation()
+        mod.reconstruct(self.fixture.baseline, self.fixture.candidate, self.fixture.payload, self.fixture.evidence)
+        json_owner = mod.FORCED_ROOT_STAGE_EXTRA_PATHS[0]
+        path = self.fixture.candidate / json_owner
+        path.write_bytes(path.read_bytes() + b"drift\n")
+        self.assertVerifyError("stage hash mismatch", mod.verify_prepared, self.fixture.baseline, self.fixture.candidate, self.fixture.payload)
+
+    def test_dependency_compile_inputs_are_individually_pinned(self):
+        mod = self.require_implementation()
+        for name in ("dependency-compile-v1.patch", "dependency-compile-v1-base.sha256", "dependency-compile-v1.sha256"):
+            with self.subTest(name=name):
+                path = self.fixture.payload / name
+                original = path.read_bytes()
+                try:
+                    path.write_bytes(original + b"# drift\n")
+                    label = "payload patch hash mismatch" if name.endswith(".patch") else "payload artifact hash mismatch"
+                    self.assertVerifyError(label, mod.verify_inputs, self.fixture.baseline, self.fixture.payload)
+                finally:
+                    path.write_bytes(original)
+
+    def test_unexpected_dependency_compile_stage_input_is_rejected(self):
+        mod = self.require_implementation()
+        write(self.fixture.payload / "dependency-compile-v2.patch", "unexpected stage\n")
+        self.assertVerifyError("unexpected dependency compile input", mod.verify_inputs, self.fixture.baseline, self.fixture.payload)
+
     def test_forced_root_final_drift_is_rejected_after_reconstruction(self):
         mod = self.require_implementation()
         mod.reconstruct(self.fixture.baseline, self.fixture.candidate, self.fixture.payload, self.fixture.evidence)
@@ -641,217 +751,90 @@ class VerificationRedGreenTests(unittest.TestCase):
         path.write_bytes(path.read_bytes() + b"drift\n")
         self.assertVerifyError("stage hash mismatch", mod.verify_prepared, self.fixture.baseline, self.fixture.candidate, self.fixture.payload)
 
-    def test_actual_hir_and_forced_root_inputs_and_name_pins_match_the_immutable_source(self):
+    def test_actual_stage_inputs_and_49_group_contract_match_the_frozen_sources(self):
         mod = self.require_implementation()
-        production_expected = self.fixture.expected_before
-        pins_path = MODULE_DIR / "pins.json"
-        pins = json.loads(pins_path.read_text(encoding="utf-8"))
-        self.assertEqual(production_expected, pins)
-        self.assertEqual(39, len(production_expected["test_filters"]))
-        self.assertEqual("d94499d8d78d64e6dbb72fbac6abaa548398718f89b5685d1d5a759f944954f9", sha(json.dumps(production_expected["test_filters"][:30], sort_keys=True, separators=(",", ":")).encode()))
-        self.assertEqual("76007d26d76fa871bbc129d1ff94718df82a53a5bf363cf707e039a0561e669b", sha(json.dumps(production_expected["expected_test_names"], sort_keys=True, separators=(",", ":")).encode()))
-
-        self.assertIn("cumulative-hir-v1", [stage["name"] for stage in production_expected["stage_manifests"]])
-        cumulative_stage = next(stage for stage in production_expected["stage_manifests"] if stage["name"] == "cumulative-hir-v1")
-        patch_name = "cumulative-hir-v1.patch"
-        self.assertEqual("63744b75a96ce30ff503d90379b08ec20ffbebb5f5f68716972d6c7d6f17f368", production_expected["payload_patches"][patch_name])
-        self.assertEqual(production_expected["payload_patches"][patch_name], sha((MODULE_DIR / patch_name).read_bytes()))
-        self.assertEqual(181, cumulative_stage["count"])
-        self.assertEqual(["crates/thaw-std/src/json.rs"], cumulative_stage["extra_paths"])
-        self.assertEqual("lexical", cumulative_stage["path_order"])
-
-        cumulative_base = production_expected["cumulative_base"]
-        base_path = MODULE_DIR / cumulative_base["file"]
-        final_path = MODULE_DIR / cumulative_stage["file"]
-        repair_final = MODULE_DIR / next(stage["file"] for stage in production_expected["stage_manifests"] if stage["name"] == "compile-repairs-v1")
-        self.assertEqual("d3b7c0e06ca053f4b342dcbc8ac1247a3460c946a35a2b22d2645c76251a2aa9", cumulative_base["sha256"])
-        self.assertEqual(cumulative_base["sha256"], sha(base_path.read_bytes()))
-        self.assertEqual(repair_final.read_bytes(), base_path.read_bytes())
-        base_rows = mod._parse_sha_manifest(base_path, "actual cumulative base", path_order="lexical")
-        final_rows = mod._parse_sha_manifest(final_path, "actual cumulative final", path_order="lexical")
-        self.assertEqual(181, len(base_rows))
-        self.assertEqual(181, len(final_rows))
-        self.assertEqual(production_expected["cumulative_base"]["sha256"], sha(base_path.read_bytes()))
-        self.assertEqual(cumulative_stage["sha256"], sha(final_path.read_bytes()))
-        final_hashes = {rel: digest for digest, rel in final_rows}
-        repair_json = production_expected["repair_base"]["extra_owner"]
-        self.assertEqual(repair_json["final_sha256"], final_hashes[repair_json["path"]])
-
-        next_stage = next(stage for stage in production_expected["stage_manifests"] if stage["name"] == "next-hir-v1")
-        next_patch = MODULE_DIR / "next-hir-v1.patch"
-        self.assertEqual("c0d4addaf22a7c7c26a133153b8298cc39013794f0263228468dddb8e0f3936b", production_expected["payload_patches"][next_patch.name])
-        self.assertEqual(production_expected["payload_patches"][next_patch.name], sha(next_patch.read_bytes()))
-        next_base = production_expected["next_hir_base"]
-        next_base_path = MODULE_DIR / next_base["file"]
-        next_final_path = MODULE_DIR / next_stage["file"]
-        self.assertEqual("cumulative-hir-v1", next_base["paired_after"])
-        self.assertEqual(181, next_base["count"])
-        self.assertEqual("lexical", next_base["path_order"])
-        self.assertEqual("0be3783d6241706ba2dd492704162aa9e0076dcc4a1de96e309eca9b512ba81c", next_base["sha256"])
-        self.assertEqual(next_base["sha256"], sha(next_base_path.read_bytes()))
-        self.assertEqual(final_path.read_bytes(), next_base_path.read_bytes())
-        self.assertEqual("f8915460efcaafc82a4392d9ca6b656dc150045d5cad4458b66755ef5705635b", next_stage["sha256"])
-        self.assertEqual(next_stage["sha256"], sha(next_final_path.read_bytes()))
-        self.assertEqual(181, next_stage["count"])
-        self.assertEqual(["crates/thaw-std/src/json.rs"], next_stage["extra_paths"])
-        self.assertEqual("lexical", next_stage["path_order"])
-        next_base_rows = mod._parse_sha_manifest(next_base_path, "actual next HIR base", path_order="lexical")
-        next_final_rows = mod._parse_sha_manifest(next_final_path, "actual next HIR final", path_order="lexical")
-        self.assertEqual(181, len(next_base_rows))
-        self.assertEqual(181, len(next_final_rows))
-        self.assertEqual({rel for _, rel in next_base_rows}, {rel for _, rel in next_final_rows})
-        next_json_hash = dict((rel, digest) for digest, rel in next_final_rows)[repair_json["path"]]
-        self.assertEqual(repair_json["final_sha256"], next_json_hash)
-
-        net = production_expected["net_owners"]
-        roster_path = MODULE_DIR / net["file"]
-        roster_lines = roster_path.read_text(encoding="utf-8").splitlines()
-        self.assertEqual(net["sha256"], sha(roster_path.read_bytes()))
-        self.assertEqual("10fbe496127766ee0cdc18e35ba019968d2d4b7c2688f37c973cd2825551d654", sha(roster_path.read_bytes()))
-        self.assertEqual((56, 51, 5), (len(roster_lines), sum(line.startswith("modified  ") for line in roster_lines), sum(line.startswith("added  ") for line in roster_lines)))
-        self.assertEqual((56, 51, 5), (net["count"], net["modified"], net["new"]))
+        expected = self.fixture.expected_before
+        self.assertEqual(expected, json.loads((MODULE_DIR / "pins.json").read_text(encoding="utf-8")))
+        self.assertEqual(49, len(expected["test_filters"]))
+        self.assertEqual("36f8d90adffb57aac119cd538c9525e9dd13a9213cb8260832cdc2bee609e621", sha(json.dumps(expected["test_filters"][:39], sort_keys=True, separators=(",", ":")).encode()))
+        self.assertEqual("d94499d8d78d64e6dbb72fbac6abaa548398718f89b5685d1d5a759f944954f9", sha(json.dumps(expected["test_filters"][:30], sort_keys=True, separators=(",", ":")).encode()))
+        self.assertEqual("76007d26d76fa871bbc129d1ff94718df82a53a5bf363cf707e039a0561e669b", sha(json.dumps(expected["expected_test_names"], sort_keys=True, separators=(",", ":")).encode()))
+        old_full_names = {key: value for key, value in expected["expected_full_test_names"].items() if key not in {item["filter"] for item in expected["test_filters"][39:]}}
+        self.assertEqual("5efbf022609d87fda1346b2ed8a55b76113385735228ed176a0a2f2a8d996a7e", sha(json.dumps(old_full_names, sort_keys=True, separators=(",", ":")).encode()))
+        self.assertEqual((20, 9, 7, 7, 6), tuple(sum(item["package"] == package for item in expected["test_filters"]) for package in ("thaw-llvm", "thaw-hir", "thaw-std", "thaw-quickjs", "thaw-runtime")))
+        appended = expected["test_filters"][39:]
+        expected_appended = [
+            ("thaw-runtime", "tests::dependency_compile_uri_byte_iteration"),
+            ("thaw-runtime", "tests::dependency_compile_root_locale_case"),
+            ("thaw-runtime", "tests::dependency_compile_finally_adopt_deferred_frame"),
+            ("thaw-std", "json::tests::dependency_compile_writable_expression"),
+            ("thaw-std", "json::tests::dependency_compile_as_string_variants"),
+            ("thaw-runtime", "tests::private_exception_provenance_has_stable_nine_word_layout"),
+            ("thaw-runtime", "tests::finally_adopt_roots_original_result_object_and_aggregate_until_output_owns_them"),
+            ("thaw-runtime", "tests::purged_aggregate_callbacks_ignore_late_child_results_and_release_roots"),
+            ("thaw-std", "json::tests::jit_dictionary_callbacks_preserve_presence_and_typed_failures"),
+            ("thaw-std", "json::tests::a_missing_key_or_index_is_distinguishable_from_an_explicit_null"),
+        ]
+        self.assertEqual(expected_appended, [(item["package"], item["filter"]) for item in appended])
+        self.assertTrue(all(set(item) == {"package", "filter"} for item in appended))
+        self.assertEqual({name: [name] for _, name in expected_appended}, {key: expected["expected_full_test_names"][key] for _, key in expected_appended})
+        self.assertEqual(57, expected["net_owners"]["count"])
+        self.assertEqual((52, 5), (expected["net_owners"]["modified"], expected["net_owners"]["new"]))
+        net_path = MODULE_DIR / expected["net_owners"]["file"]
+        self.assertEqual("b716db27fa12c0995101ee93b1875510353245f0c20d8cbe660d957280eb23bb", sha(net_path.read_bytes()))
         fixture_expected = mod.EXPECTED
-        mod.EXPECTED = production_expected
+        mod.EXPECTED = expected
         try:
-            parsed_roster = mod._read_net_roster(MODULE_DIR)
+            roster = mod._read_net_roster(MODULE_DIR)
         finally:
             mod.EXPECTED = fixture_expected
-        self.assertEqual(56, len(parsed_roster))
-        self.assertEqual(51, sum(status == "modified" for status in parsed_roster.values()))
-        self.assertEqual(5, sum(status == "new" for status in parsed_roster.values()))
-        self.assertEqual("modified", parsed_roster["crates/thaw-hir/src/lower/invocations/arguments.rs"])
+        self.assertEqual(57, len(roster))
+        self.assertEqual((52, 5), (sum(value == "modified" for value in roster.values()), sum(value == "new" for value in roster.values())))
+        self.assertEqual("modified", roster["crates/thaw-runtime/src/runtime/native_values/strings.rs"])
 
-        added_filters = production_expected["test_filters"][-9:]
-        self.assertEqual(39, len(production_expected["test_filters"]))
-        self.assertEqual((20, 9, 3, 7), tuple(sum(item["package"] == package for item in production_expected["test_filters"]) for package in ("thaw-llvm", "thaw-hir", "thaw-std", "thaw-quickjs")))
-        self.assertEqual(
-            [
-                {"package": "thaw-quickjs", "filter": "forced_root_"},
-                {"package": "thaw-quickjs", "filter": "graph_codec_roundtrip_preserves_negative_zero"},
-                {"package": "thaw-quickjs", "filter": "graph_codec_roundtrip_retains_identity_and_releases_live_lease"},
-                {"package": "thaw-quickjs", "filter": "graph_codec_uses_bootstrap_intrinsics_after_global_replacement"},
-                {"package": "thaw-quickjs", "filter": "handle_registry_identity_ignores_later_object_is_override"},
-                {"package": "thaw-quickjs", "filter": "failed_exception_graph_grant_retires_producer_handle_lease"},
-                {"package": "thaw-quickjs", "filter": "exact_mixed_pre_dispatch_consumes_registered_graph_grant_once"},
-                {"package": "thaw-std", "filter": "unregistered_graph_wire_cannot_transfer_napi_lease_tokens"},
-                {"package": "thaw-std", "filter": "mutated_graph_wire_retires_only_registered_snapshot_leases"},
-            ],
-            added_filters,
-        )
-        exact_names = {
-            "thaw_binding_helper_": [
-                "thaw_binding_helper_declaration_flags_follow_resolved_symbols",
-                "thaw_binding_helper_iteration_cell_inherits_only_current_outer_immutability",
-            ],
-            "receiver_pattern_inference_": [
-                "receiver_pattern_inference_parsed_annotations_keep_pattern_and_legacy_states",
-                "receiver_pattern_inference_declarations_remain_accepted_without_calls",
-                "receiver_pattern_inference_source_negative_and_shape_controls",
-                "receiver_pattern_inference_physical_and_split_modes_match_receiver_first",
-                "receiver_pattern_inference_synthetic_and_contextual_modes_stay_separate",
-                "receiver_pattern_inference_distinguishes_absent_undefined_and_legacy_receivers",
-                "receiver_pattern_inference_optional_rest_indices_and_key_literals_stay_visible_only",
-                "receiver_pattern_inference_implicit_fallbacks_follow_actual_match_order",
-                "receiver_pattern_inference_explicit_constraints_precede_actual_mismatch",
-                "receiver_pattern_inference_type_only_and_receiver_free_promise_controls",
-            ],
-            "thaw_rethrow_cleanup_": [
-                "thaw_rethrow_cleanup_named_suffix_catches_publish_the_visible_carrier",
-                "thaw_rethrow_cleanup_unannotated_alias_keeps_and_publishes_the_carrier",
-                "thaw_rethrow_cleanup_mutation_retags_and_publishes_the_current_binding",
-                "thaw_rethrow_cleanup_nested_shadow_publishes_the_outer_carrier_alias",
-                "thaw_rethrow_cleanup_number_typeof_narrowing_uses_member_zero_f64",
-                "thaw_rethrow_cleanup_common_publisher_checks_all_carrier_arms_structurally",
-                "thaw_rethrow_cleanup_member_six_routes_original_pointer_to_object_setter",
-            ],
-            "error_argument_staging_": [
-                "error_argument_staging_keeps_all_raw_values_once",
-                "error_argument_staging_flattens_literal_spreads_in_order",
-                "error_argument_staging_snapshots_tuple_members_before_next_argument",
-                "error_argument_staging_evaluates_empty_tuple_and_extras",
-                "error_argument_staging_preserves_reference_and_union_representations",
-                "error_argument_staging_wrapper_precedes_message_work",
-                "error_argument_staging_retains_existing_spread_admission",
-            ],
-            "existing_native_spread_staging_mode_false_is_unchanged": [
-                "existing_native_spread_staging_mode_false_is_unchanged",
-            ],
-        }
-        for filter_name, expected_names in exact_names.items():
-            self.assertEqual(expected_names, production_expected["expected_test_names"][filter_name])
+        self.assertEqual(["original-native", "scope-v5", "discard-v2", "return-v1", "compile-repairs-v1", "cumulative-hir-v1", "next-hir-v1", "forced-root-wire-v1", "dependency-compile-v1"], expected["patch_order"])
+        self.assertEqual([175, 176, 179, 180, 181, 181, 181, 183, 183], [stage["count"] for stage in expected["stage_manifests"]])
+        self.assertEqual("83a99e4934c4108992f874ca75ff2ea366283fbc3c543afaf9fee6489cb95941", sha((MODULE_DIR / "forced-root-wire-v1.sha256").read_bytes()))
+        self.assertEqual("d3b7c0e06ca053f4b342dcbc8ac1247a3460c946a35a2b22d2645c76251a2aa9", expected["artifacts"]["compile-repairs-v1.sha256"])
+        self.assertEqual("0be3783d6241706ba2dd492704162aa9e0076dcc4a1de96e309eca9b512ba81c", expected["artifacts"]["cumulative-hir-v1.sha256"])
+        self.assertEqual("f8915460efcaafc82a4392d9ca6b656dc150045d5cad4458b66755ef5705635b", expected["artifacts"]["next-hir-v1.sha256"])
+        self.assertEqual("a7f04af1afa5b9d41d7a8dca984ccefba020cdd36f19175ef14a8f809a6e8683", expected["payload_patches"]["forced-root-wire-v1.patch"])
+        self.assertEqual("23da8386704a188e890bd7e591bb395ce611d45e8fbf0ad264716b5d61e3c9bf", expected["forced_root_wire_base"]["sha256"])
 
-        wire_stage = production_expected["stage_manifests"][-1]
-        wire_pair = production_expected["forced_root_wire_base"]
-        self.assertEqual(
-            ["original-native", "scope-v5", "discard-v2", "return-v1", "compile-repairs-v1", "cumulative-hir-v1", "next-hir-v1"],
-            [stage["name"] for stage in production_expected["stage_manifests"][:7]],
-        )
-        self.assertEqual([175, 176, 179, 180, 181, 181, 181], [stage["count"] for stage in production_expected["stage_manifests"][:7]])
-        self.assertEqual("forced-root-wire-v1", wire_stage["name"])
-        self.assertEqual(183, wire_stage["count"])
-        self.assertEqual(["crates/thaw-std/src/json.rs", *[owner["path"] for owner in wire_pair["extra_owners"]]], wire_stage["extra_paths"])
-        self.assertEqual("next-hir-v1", wire_pair["paired_after"])
-        self.assertEqual("lexical", wire_pair["path_order"])
-        self.assertEqual(183, wire_pair["count"])
-        self.assertEqual("a7f04af1afa5b9d41d7a8dca984ccefba020cdd36f19175ef14a8f809a6e8683", production_expected["payload_patches"]["forced-root-wire-v1.patch"])
-        self.assertEqual(production_expected["payload_patches"]["forced-root-wire-v1.patch"], sha((MODULE_DIR / "forced-root-wire-v1.patch").read_bytes()))
-        self.assertEqual(wire_pair["sha256"], sha((MODULE_DIR / wire_pair["file"]).read_bytes()))
-        self.assertEqual(wire_stage["sha256"], sha((MODULE_DIR / wire_stage["file"]).read_bytes()))
-        self.assertEqual(
-            [
-                ("crates/thaw-quickjs/src/quickjs/api.rs", "02907f79127e23ede4faea4fd89e4ac466cde76d5f4febc8831fa8b5df2d6d36", "4ade648dbe5203bff00014bd7903821d595680b0", "be84b1a2c295c8bcc62ec41427999d75f485b90b4711e8b384424782f9e1bbf9"),
-                ("crates/thaw-quickjs/src/quickjs/platform_globals/runtime.js", "0a223f6a0934dfddba0217e342f7ed1f09242b806d313f4da26eca012cd7ee3a", "73eeee5f1df8a84b65fd5b088c374aa0a6e1521e", "bdca00a406d512f19349d41b5ac70d145a28eb0d029c5521dd9c375a68e50a81"),
-            ],
-            [(owner["path"], owner["sha256"], owner["git_blob_sha1"], owner["final_sha256"]) for owner in wire_pair["extra_owners"]],
-        )
-        full_names = production_expected["expected_full_test_names"]
-        self.assertEqual(9, len(full_names))
-        self.assertEqual(16, sum(map(len, full_names.values())))
-        self.assertEqual(
-            {
-                "forced_root_": [
-                    "forced_root_graph_wire_controls::forced_root_transfer_failure_rolls_back_once",
-                    "forced_root_graph_wire_controls::forced_root_decoded_lease_outlives_consumed_input_and_root",
-                    "forced_root_graph_wire_controls::forced_root_guard_preserves_other_graph_modes",
-                    "forced_root_graph_wire_controls::forced_root_default_query_boundary_is_explicit",
-                    "forced_root_graph_wire_controls::forced_root_capture_packet_uses_existing_node_grammar",
-                    "forced_root_graph_wire_controls::forced_root_capture_preserves_identity_aliases_and_liveness",
-                    "forced_root_graph_wire_controls::forced_root_capture_performs_no_original_value_hooks",
-                    "forced_root_graph_wire_controls::forced_root_packet_ignores_replaced_intrinsics_and_metadata_hooks",
-                ],
-                "graph_codec_roundtrip_preserves_negative_zero": ["graph_codec_roundtrip_preserves_negative_zero"],
-                "graph_codec_roundtrip_retains_identity_and_releases_live_lease": ["graph_codec_roundtrip_retains_identity_and_releases_live_lease"],
-                "graph_codec_uses_bootstrap_intrinsics_after_global_replacement": ["graph_codec_uses_bootstrap_intrinsics_after_global_replacement"],
-                "handle_registry_identity_ignores_later_object_is_override": ["handle_registry_identity_ignores_later_object_is_override"],
-                "failed_exception_graph_grant_retires_producer_handle_lease": ["failed_exception_graph_grant_retires_producer_handle_lease"],
-                "exact_mixed_pre_dispatch_consumes_registered_graph_grant_once": ["exact_mixed_pre_dispatch_consumes_registered_graph_grant_once"],
-                "unregistered_graph_wire_cannot_transfer_napi_lease_tokens": ["json::unregistered_graph_wire_cannot_transfer_napi_lease_tokens"],
-                "mutated_graph_wire_retires_only_registered_snapshot_leases": ["json::mutated_graph_wire_retires_only_registered_snapshot_leases"],
-            },
-            full_names,
-        )
-
-        wire_base_rows = mod._parse_sha_manifest(MODULE_DIR / wire_pair["file"], "actual forced-root base", path_order="lexical")
-        wire_final_rows = mod._parse_sha_manifest(MODULE_DIR / wire_stage["file"], "actual forced-root final", path_order="lexical")
-        next_final_map = {rel: digest for digest, rel in next_final_rows}
-        wire_base_map = {rel: digest for digest, rel in wire_base_rows}
-        wire_final_map = {rel: digest for digest, rel in wire_final_rows}
-        expected_base_map = dict(next_final_map)
-        expected_final_map = dict(next_final_map)
-        for owner in wire_pair["extra_owners"]:
-            expected_base_map[owner["path"]] = owner["sha256"]
-            expected_final_map[owner["path"]] = owner["final_sha256"]
-        self.assertEqual(expected_base_map, wire_base_map)
-        self.assertEqual(expected_final_map, wire_final_map)
-        self.assertEqual(183, len(wire_base_rows))
-        self.assertEqual(183, len(wire_final_rows))
-        self.assertTrue(all(wire_final_map[rel] == digest for rel, digest in next_final_map.items()))
+        wire_stage = next(stage for stage in expected["stage_manifests"] if stage["name"] == "forced-root-wire-v1")
+        dependency_stage = expected["stage_manifests"][-1]
+        dependency_base = expected["dependency_compile_base"]
+        self.assertEqual("dependency-compile-v1", dependency_stage["name"])
+        self.assertEqual("forced-root-wire-v1", dependency_base["paired_after"])
+        self.assertEqual(183, dependency_stage["count"])
+        self.assertEqual(["crates/thaw-std/src/json.rs", "crates/thaw-quickjs/src/quickjs/api.rs", "crates/thaw-quickjs/src/quickjs/platform_globals/runtime.js"], dependency_stage["extra_paths"])
+        base_path = MODULE_DIR / dependency_base["file"]
+        wire_path = MODULE_DIR / wire_stage["file"]
+        final_path = MODULE_DIR / dependency_stage["file"]
+        patch_path = MODULE_DIR / "dependency-compile-v1.patch"
+        self.assertEqual("68a5c8e397df3462aeb83879d854837a423ef297d523f455ecd62d05b7281aea", sha(patch_path.read_bytes()))
+        self.assertEqual("83a99e4934c4108992f874ca75ff2ea366283fbc3c543afaf9fee6489cb95941", sha(base_path.read_bytes()))
+        self.assertEqual("605121c9db1c995897770fc223d6207d18e9a6075e11725c2c9c0e25f8e2288d", sha(final_path.read_bytes()))
+        self.assertEqual(wire_path.read_bytes(), base_path.read_bytes())
+        wire_map = dict((rel, digest) for digest, rel in mod._parse_sha_manifest(wire_path, "wire final", path_order="lexical"))
+        base_map = dict((rel, digest) for digest, rel in mod._parse_sha_manifest(base_path, "dependency base", path_order="lexical"))
+        final_map = dict((rel, digest) for digest, rel in mod._parse_sha_manifest(final_path, "dependency final", path_order="lexical"))
+        self.assertEqual(wire_map, base_map)
+        self.assertEqual(183, len(base_map))
+        self.assertEqual(set(base_map), set(final_map))
+        changed = {rel for rel in base_map if base_map[rel] != final_map[rel]}
+        self.assertEqual(set(mod.DEPENDENCY_SOURCE_PATHS), changed)
+        self.assertEqual(179, len(base_map) - len(changed))
+        self.assertEqual(dependency_stage["sha256"], sha(final_path.read_bytes()))
+        for rel, expected_hash in {**expected["payload_patches"], **expected["artifacts"]}.items():
+            with self.subTest(path=rel):
+                self.assertEqual(expected_hash, sha((MODULE_DIR / rel).read_bytes()), rel)
 
     def test_shipped_roster_artifact_descriptor_and_bytes_share_the_expected_pin(self):
         production_expected = self.fixture.expected_before
         roster_path = MODULE_DIR / "net-owners.txt"
         roster_digest = sha(roster_path.read_bytes())
-        self.assertEqual("10fbe496127766ee0cdc18e35ba019968d2d4b7c2688f37c973cd2825551d654", roster_digest)
+        self.assertEqual("b716db27fa12c0995101ee93b1875510353245f0c20d8cbe660d957280eb23bb", roster_digest)
         self.assertEqual(roster_digest, production_expected["net_owners"]["sha256"])
         self.assertEqual(roster_digest, production_expected["artifacts"]["net-owners.txt"])
         shipped_pins = json.loads((MODULE_DIR / "pins.json").read_text(encoding="utf-8"))
@@ -871,11 +854,11 @@ class VerificationRedGreenTests(unittest.TestCase):
     def test_next_hir_stage_order_cannot_move_ahead_of_its_paired_stage(self):
         mod = self.require_implementation()
         altered = copy.deepcopy(mod.EXPECTED)
-        altered["stage_manifests"][-2:] = reversed(altered["stage_manifests"][-2:])
-        altered["patch_order"][-2:] = reversed(altered["patch_order"][-2:])
+        altered["stage_manifests"][6:8] = reversed(altered["stage_manifests"][6:8])
+        altered["patch_order"][6:8] = reversed(altered["patch_order"][6:8])
         mod.EXPECTED = altered
         write(self.fixture.payload / "pins.json", json.dumps(altered, sort_keys=True, indent=2) + "\n")
-        self.assertVerifyError("next HIR paired base|immediately follow|patch order mismatch", mod.verify_inputs, self.fixture.baseline, self.fixture.payload)
+        self.assertVerifyError("next HIR paired base|forced-root wire paired base|immediately follow|patch order mismatch", mod.verify_inputs, self.fixture.baseline, self.fixture.payload)
 
     def test_next_hir_patch_source_drift_is_rejected(self):
         mod = self.require_implementation()
@@ -1234,6 +1217,9 @@ class VerificationRedGreenTests(unittest.TestCase):
             "crates/thaw-llvm/src/hir_codegen/tests/async/union_discard.rs",
             "crates/thaw-llvm/src/hir_codegen/tests/async/eval_then_returns.rs",
             "crates/thaw-runtime/Cargo.toml",
+            "crates/thaw-runtime/src/runtime/native_values/strings.rs",
+            "crates/thaw-runtime/src/runtime/promises.rs",
+            "crates/thaw-runtime/src/tests.rs",
         ]
 
 

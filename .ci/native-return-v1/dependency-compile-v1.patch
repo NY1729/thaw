@@ -1,0 +1,568 @@
+diff --git a/crates/thaw-runtime/src/runtime/native_values/strings.rs b/crates/thaw-runtime/src/runtime/native_values/strings.rs
+--- a/crates/thaw-runtime/src/runtime/native_values/strings.rs
++++ b/crates/thaw-runtime/src/runtime/native_values/strings.rs
+@@ -114,7 +114,7 @@
+     if value.is_null() {
+         return std::ptr::null();
+     }
+-    unsafe { wtf8_case_map(value, false, &Default::default()) }
++    unsafe { wtf8_case_map(value, false, &icu_locale_core::LanguageIdentifier::UNKNOWN) }
+ }
+ 
+ #[no_mangle]
+@@ -124,7 +124,7 @@
+     if value.is_null() {
+         return std::ptr::null();
+     }
+-    unsafe { wtf8_case_map(value, true, &Default::default()) }
++    unsafe { wtf8_case_map(value, true, &icu_locale_core::LanguageIdentifier::UNKNOWN) }
+ }
+ 
+ unsafe fn thaw_string_to_locale_case(
+@@ -136,7 +136,12 @@
+         return std::ptr::null();
+     }
+     let locale = unsafe { CStr::from_ptr(locale) }.to_string_lossy();
+-    let language = locale.split('-').next().unwrap_or("").parse().unwrap_or_default();
++    let language = locale
++        .split('-')
++        .next()
++        .unwrap_or("")
++        .parse::<icu_locale_core::LanguageIdentifier>()
++        .unwrap_or(icu_locale_core::LanguageIdentifier::UNKNOWN);
+     unsafe { wtf8_case_map(value, upper, &language) }
+ }
+ 
+@@ -179,7 +184,7 @@
+     if !wtf8_is_well_formed(bytes) { return std::ptr::null(); }
+     let value = wtf8_encode_utf16(&wtf8_decode_utf16(bytes));
+     let mut output = String::with_capacity(value.len());
+-    for byte in value.bytes() {
++    for byte in value {
+         match byte {
+             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'!' | b'~' | b'*'
+             | b'\'' | b'(' | b')' => output.push(byte as char),
+@@ -204,7 +209,7 @@
+     if !wtf8_is_well_formed(bytes) { return std::ptr::null(); }
+     let value = wtf8_encode_utf16(&wtf8_decode_utf16(bytes));
+     let mut output = String::with_capacity(value.len());
+-    for byte in value.bytes() {
++    for byte in value {
+         match byte {
+             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'!' | b'~' | b'*'
+             | b'\'' | b'(' | b')' | b';' | b'/' | b'?' | b':' | b'@' | b'&' | b'=' | b'+'
+diff --git a/crates/thaw-runtime/src/runtime/promises.rs b/crates/thaw-runtime/src/runtime/promises.rs
+--- a/crates/thaw-runtime/src/runtime/promises.rs
++++ b/crates/thaw-runtime/src/runtime/promises.rs
+@@ -877,8 +877,15 @@
+ ///
+ /// # Safety
+ ///
+-/// `output` and `input` must be distinct live Promises. `original` must remain
+-/// valid until `input` settles.
++/// If both handles are non-null and distinct, they must be live Promises with
++/// no competing destruction or mutation. The caller must have exclusive
++/// access to `input` on its owning event-loop thread during subscription and
++/// transfer exactly one live external `input` token to the deferred callback.
++/// `output` must remain live through callback settlement, unless the pending
++/// frame is cancelled first. `original` and `original_object` must remain
++/// valid through callback use unless existing arena roots retain them. Passing
++/// a null handle or equal handles returns zero without registering a frame or
++/// transferring the input token.
+ #[no_mangle]
+ pub unsafe extern "C" fn thaw_promise_finally_adopt(
+     output: *mut ThawPromise,
+@@ -891,11 +898,35 @@
+     original_bool: bool,
+     original_object: *const u8,
+ ) -> u8 {
+-    finally_adopt_with_source(output, input, original, original_rejected, original_tag,
+-        original_f64, original_i64, original_bool, original_object, std::ptr::null())
+-}
+-
+-#[no_mangle]
++    // SAFETY: This wrapper forwards its caller's contract above; the null
++    // source needs no snapshot and the helper's null/equal guards are safe.
++    unsafe {
++        finally_adopt_with_source(
++            output, input, original, original_rejected, original_tag,
++            original_f64, original_i64, original_bool, original_object, std::ptr::null(),
++        )
++    }
++}
++
++#[no_mangle]
++/// Waits for a Promise returned by `.finally`, snapshots the original
++/// Promise's synchronous metadata, then forwards the original settlement
++/// unless the returned Promise rejects.
++///
++/// # Safety
++///
++/// If `output` and `input` are non-null and distinct, both must be live
++/// Promises with no competing destruction or mutation. The caller must have
++/// exclusive access to `input` on its owning event-loop thread during
++/// subscription and transfer exactly one live external `input` token to the
++/// deferred callback. `output` must remain live through callback settlement,
++/// unless the pending frame is cancelled first. `source` must be null or a
++/// live, exclusively readable Promise for the synchronous snapshot only.
++/// `original`, `original_object`, and any payload pointer used by the callback
++/// must remain valid for that use unless existing arena roots retain them.
++/// Non-nullness alone does not establish lifetime. Passing a null handle or
++/// equal handles returns zero without registering a frame or transferring the
++/// input token.
+ pub unsafe extern "C" fn thaw_promise_finally_adopt_with_source(
+     output: *mut ThawPromise,
+     input: *mut ThawPromise,
+@@ -908,11 +939,32 @@
+     original_object: *const u8,
+     source: *const ThawPromise,
+ ) -> u8 {
+-    finally_adopt_with_source(output, input, original, original_rejected, original_tag,
+-        original_f64, original_i64, original_bool, original_object, source)
+-}
+-
+-fn finally_adopt_with_source(
++    // SAFETY: This wrapper forwards its caller's handle, ownership, payload,
++    // and source-snapshot contract to the private helper.
++    unsafe {
++        finally_adopt_with_source(
++            output, input, original, original_rejected, original_tag,
++            original_f64, original_i64, original_bool, original_object, source,
++        )
++    }
++}
++
++/// Registers the deferred forwarding frame after snapshotting `source`.
++///
++/// # Safety
++///
++/// For non-null, distinct `output` and `input`, both handles must be live with
++/// no competing destruction or mutation. `input` must be exclusively
++/// accessible on its owning event-loop thread through subscription, and one
++/// live external token is transferred to the deferred callback.
++/// `output` must remain live through callback settlement unless cancellation
++/// makes the frame inert first. `source` must be null or a live, exclusively
++/// readable Promise for this synchronous snapshot only. `original`,
++/// `original_object`, and callback payloads must remain valid through their
++/// use unless existing arena roots retain them; non-nullness alone proves no
++/// lifetime. Null or equal handles return zero without frame registration or
++/// input-token transfer.
++unsafe fn finally_adopt_with_source(
+     output: *mut ThawPromise,
+     input: *mut ThawPromise,
+     original: *const u8,
+@@ -956,7 +1008,10 @@
+         cancelled: false,
+     }));
+     PROMISE_FINALLY_ADOPT_STATES.with(|states| states.borrow_mut().push(state));
+-    thaw_promise_subscribe(input, resume_promise_finally_adopt, state.cast());
++    // SAFETY: The caller guarantees input is a live Promise and transfers one
++    // external token to this callback. subscribe queues settled inputs
++    // without invoking the callback inline, and the registered frame stays live.
++    unsafe { thaw_promise_subscribe(input, resume_promise_finally_adopt, state.cast()); }
+     1
+ }
+ 
+diff --git a/crates/thaw-runtime/src/tests.rs b/crates/thaw-runtime/src/tests.rs
+--- a/crates/thaw-runtime/src/tests.rs
++++ b/crates/thaw-runtime/src/tests.rs
+@@ -142,6 +142,93 @@
+     let embedded_nul = thaw_arena::arena_string(b" a\0b ");
+     let trimmed = unsafe { thaw_string_trim(embedded_nul) };
+     assert_eq!(unsafe { wtf8_bytes(trimmed) }, b"a\0b");
++}
++
++#[test]
++fn dependency_compile_uri_byte_iteration() {
++    let unreserved = c"AZaz09-_.!~*'()";
++    let component = unsafe { thaw_encode_uri_component(unreserved.as_ptr()) };
++    assert!(!component.is_null());
++    assert_eq!(unsafe { CStr::from_ptr(component) }.to_bytes(), b"AZaz09-_.!~*'()");
++    let uri = unsafe { thaw_encode_uri(unreserved.as_ptr()) };
++    assert!(!uri.is_null());
++    assert_eq!(unsafe { CStr::from_ptr(uri) }.to_bytes(), b"AZaz09-_.!~*'()");
++
++    let reserved = c";/?:@&=+$,#";
++    let component = unsafe { thaw_encode_uri_component(reserved.as_ptr()) };
++    assert!(!component.is_null());
++    assert_eq!(unsafe { CStr::from_ptr(component) }.to_bytes(), b"%3B%2F%3F%3A%40%26%3D%2B%24%2C%23");
++    let uri = unsafe { thaw_encode_uri(reserved.as_ptr()) };
++    assert!(!uri.is_null());
++    assert_eq!(unsafe { CStr::from_ptr(uri) }.to_bytes(), b";/?:@&=+$,#");
++
++    let native = thaw_arena::arena_string("é😀\0".as_bytes());
++    let encoded = unsafe { thaw_encode_uri_component(native.cast()) };
++    assert!(!encoded.is_null());
++    assert_eq!(unsafe { CStr::from_ptr(encoded) }.to_bytes(), b"%C3%A9%F0%9F%98%80%00");
++    let encoded = unsafe { thaw_encode_uri(native.cast()) };
++    assert!(!encoded.is_null());
++    assert_eq!(unsafe { CStr::from_ptr(encoded) }.to_bytes(), b"%C3%A9%F0%9F%98%80%00");
++
++    let high = thaw_string_from_char_code(0xD83D as f64);
++    let low = thaw_string_from_char_code(0xDE00 as f64);
++    let mut pair_bytes = unsafe { wtf8_bytes(high) }.to_vec();
++    pair_bytes.extend_from_slice(unsafe { wtf8_bytes(low) });
++    let pair = arena_wtf8(&pair_bytes).unwrap().cast();
++    let encoded = unsafe { thaw_encode_uri_component(pair) };
++    assert!(!encoded.is_null());
++    assert_eq!(unsafe { CStr::from_ptr(encoded) }.to_bytes(), b"%F0%9F%98%80");
++    let encoded = unsafe { thaw_encode_uri(pair) };
++    assert!(!encoded.is_null());
++    assert_eq!(unsafe { CStr::from_ptr(encoded) }.to_bytes(), b"%F0%9F%98%80");
++
++    for lone in [thaw_string_from_char_code(0xD800 as f64), thaw_string_from_char_code(0xDC00 as f64)] {
++        assert!(unsafe { thaw_encode_uri_component(lone) }.is_null());
++        assert!(unsafe { thaw_encode_uri(lone) }.is_null());
++    }
++    assert!(unsafe { thaw_encode_uri_component(std::ptr::null()) }.is_null());
++    assert!(unsafe { thaw_encode_uri(std::ptr::null()) }.is_null());
++    assert!(unsafe { thaw_decode_uri_component(std::ptr::null()) }.is_null());
++    assert!(unsafe { thaw_decode_uri(std::ptr::null()) }.is_null());
++}
++
++#[test]
++fn dependency_compile_root_locale_case() {
++    let root_lower = unsafe { thaw_string_to_lower_case(c"Iİß".as_ptr()) };
++    assert!(!root_lower.is_null());
++    assert_eq!(unsafe { CStr::from_ptr(root_lower) }.to_str().unwrap(), "ii\u{0307}ß");
++    let root_upper = unsafe { thaw_string_to_upper_case(c"Iİß".as_ptr()) };
++    assert!(!root_upper.is_null());
++    assert_eq!(unsafe { CStr::from_ptr(root_upper) }.to_str().unwrap(), "IİSS");
++
++    let turkish_lower = unsafe { thaw_string_to_locale_lower_case(c"Iİiı".as_ptr(), c"tr-TR".as_ptr()) };
++    assert!(!turkish_lower.is_null());
++    assert_eq!(unsafe { CStr::from_ptr(turkish_lower) }.to_str().unwrap(), "ıiiı");
++    let turkish_upper = unsafe { thaw_string_to_locale_upper_case(c"Iİiı".as_ptr(), c"tr-TR".as_ptr()) };
++    assert!(!turkish_upper.is_null());
++    assert_eq!(unsafe { CStr::from_ptr(turkish_upper) }.to_str().unwrap(), "IİİI");
++
++    for locale in [c"!", c""] {
++        let lower = unsafe { thaw_string_to_locale_lower_case(c"Iİß".as_ptr(), locale.as_ptr()) };
++        assert!(!lower.is_null());
++        assert_eq!(unsafe { CStr::from_ptr(lower) }.to_str().unwrap(), "ii\u{0307}ß");
++        let upper = unsafe { thaw_string_to_locale_upper_case(c"Iİß".as_ptr(), locale.as_ptr()) };
++        assert!(!upper.is_null());
++        assert_eq!(unsafe { CStr::from_ptr(upper) }.to_str().unwrap(), "IİSS");
++    }
++
++    let units = [0xD800, b'I' as u16, 0xDC00];
++    let segmented = arena_wtf8(&wtf8_encode_utf16(&units)).unwrap().cast();
++    let mapped = unsafe { thaw_string_to_locale_lower_case(segmented, c"tr".as_ptr()) };
++    assert!(!mapped.is_null());
++    assert_eq!(wtf8_decode_utf16(unsafe { wtf8_bytes(mapped) }), [0xD800, 0x0131, 0xDC00]);
++
++    assert!(unsafe { thaw_string_to_lower_case(std::ptr::null()) }.is_null());
++    assert!(unsafe { thaw_string_to_upper_case(std::ptr::null()) }.is_null());
++    assert!(unsafe { thaw_string_to_locale_lower_case(std::ptr::null(), c"tr".as_ptr()) }.is_null());
++    assert!(unsafe { thaw_string_to_locale_upper_case(std::ptr::null(), c"tr".as_ptr()) }.is_null());
++    assert!(unsafe { thaw_string_to_locale_lower_case(c"I".as_ptr(), std::ptr::null()) }.is_null());
++    assert!(unsafe { thaw_string_to_locale_upper_case(c"I".as_ptr(), std::ptr::null()) }.is_null());
+ }
+ 
+ static TLS_TEST_DIR_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+@@ -2550,6 +2637,75 @@
+ }
+ 
+ #[test]
++fn dependency_compile_finally_adopt_deferred_frame() {
++    let states_before = PROMISE_FINALLY_ADOPT_STATES.with(|states| states.borrow().len());
++    let ready_before = READY_CONTINUATIONS.with(|ready| ready.borrow().len());
++    let output = thaw_promise_new();
++    let input = thaw_promise_new();
++    let source = thaw_promise_new();
++    assert_ne!(output, input);
++    assert_ne!(output, source);
++    assert_ne!(input, source);
++
++    let original = thaw_arena::thaw_arena_alloc(size_of::<u64>(), align_of::<u64>()).cast::<u64>();
++    unsafe { original.write(0xCAFE_BABE_D00D_F00D) };
++    assert_eq!(thaw_promise_resolve(input, std::ptr::null()), 1);
++    assert_eq!(thaw_promise_resolve(source, original.cast()), 1);
++    assert_eq!(unsafe { (*input).references }, 1);
++    assert_eq!(thaw_promise_state(input), 1);
++
++    assert_eq!(unsafe { thaw_promise_finally_adopt_with_source(
++        output, input, original.cast(), 0, 0, 0.0, 0, false, std::ptr::null(), source,
++    ) }, 1);
++    assert_eq!(PROMISE_FINALLY_ADOPT_STATES.with(|states| states.borrow().len()), states_before + 1);
++    assert_eq!(READY_CONTINUATIONS.with(|ready| ready.borrow().len()), ready_before + 1);
++    assert_eq!(thaw_promise_state(output), 0);
++
++    // The source is read only while the helper snapshots its fields.
++    unsafe { thaw_promise_destroy(source) };
++    assert_eq!(thaw_promise_state(output), 0);
++    assert_eq!(thaw_runtime_poll_one(), 1);
++    assert_eq!(PROMISE_FINALLY_ADOPT_STATES.with(|states| states.borrow().len()), states_before);
++    assert_eq!(READY_CONTINUATIONS.with(|ready| ready.borrow().len()), ready_before);
++    assert_eq!(thaw_promise_state(output), 1);
++    assert_eq!(unsafe { (*output).result }, Some(original.cast()));
++    assert!(!ACTIVE_PROMISES.with(|active| active.borrow().contains(&input)));
++    assert!(ACTIVE_PROMISES.with(|active| active.borrow().contains(&output)));
++    unsafe { thaw_promise_destroy(output) };
++
++    let guard_input = thaw_promise_new();
++    assert_eq!(unsafe { thaw_promise_finally_adopt_with_source(
++        std::ptr::null_mut(), guard_input, std::ptr::null(), 0, 0, 0.0, 0, false,
++        std::ptr::null(), std::ptr::null(),
++    ) }, 0);
++    assert_eq!(PROMISE_FINALLY_ADOPT_STATES.with(|states| states.borrow().len()), states_before);
++    assert_eq!(unsafe { (*guard_input).references }, 1);
++    assert!(ACTIVE_PROMISES.with(|active| active.borrow().contains(&guard_input)));
++
++    let guard_output = thaw_promise_new();
++    assert_eq!(unsafe { thaw_promise_finally_adopt(
++        guard_output, std::ptr::null_mut(), std::ptr::null(), 0, 0, 0.0, 0, false,
++        std::ptr::null(),
++    ) }, 0);
++    assert_eq!(PROMISE_FINALLY_ADOPT_STATES.with(|states| states.borrow().len()), states_before);
++    assert_eq!(unsafe { (*guard_output).references }, 1);
++    assert!(ACTIVE_PROMISES.with(|active| active.borrow().contains(&guard_output)));
++
++    let equal = thaw_promise_new();
++    assert_eq!(unsafe { thaw_promise_finally_adopt_with_source(
++        equal, equal, std::ptr::null(), 0, 0, 0.0, 0, false, std::ptr::null(), std::ptr::null(),
++    ) }, 0);
++    assert_eq!(PROMISE_FINALLY_ADOPT_STATES.with(|states| states.borrow().len()), states_before);
++    assert_eq!(unsafe { (*equal).references }, 1);
++    assert!(ACTIVE_PROMISES.with(|active| active.borrow().contains(&equal)));
++    unsafe {
++        thaw_promise_destroy(guard_input);
++        thaw_promise_destroy(guard_output);
++        thaw_promise_destroy(equal);
++    }
++}
++
++#[test]
+ fn terminal_reporting_activity_is_distinct_from_work_and_failure() {
+     thaw_promise_take_report_activity();
+     thaw_promise_take_unhandled_failure();
+@@ -2982,7 +3138,7 @@
+     let errors = thaw_arena::thaw_arena_alloc(8, 8);
+     let object = thaw_arena::thaw_arena_alloc(8, 8);
+     let record = thaw_exception_provenance_new(
+-        original, text, errors, 7, 1.25, 19, 1, object, std::ptr::null(),
++        original, text, errors, 7, 1.25, 19, 1, object,
+     );
+     assert!(!record.is_null());
+     let record = unsafe { &*record };
+diff --git a/crates/thaw-std/src/json.rs b/crates/thaw-std/src/json.rs
+--- a/crates/thaw-std/src/json.rs
++++ b/crates/thaw-std/src/json.rs
+@@ -904,7 +904,7 @@
+     if unsafe { thaw_object_state(state_key, 2) } {
+         return false;
+     }
+-    unsafe { thaw_object_state(state_key, 0) }
++    (unsafe { thaw_object_state(state_key, 0) })
+         || unsafe { object.as_ref() }.is_some_and(|object| json_has_own_value(object, key))
+ }
+ 
+@@ -3694,6 +3694,7 @@
+ 
+ unsafe extern "C" {
+     fn thaw_string_to_number(value: *const c_char) -> f64;
++    fn thaw_number_to_string(value: f64) -> *const c_char;
+     /// Defined in thaw-runtime's `native_values/date.rs` -- resolved at
+     /// link time the same way `thaw_string_to_number` above already is
+     /// (thaw-std has no direct crate dependency on thaw-runtime; both
+@@ -3775,14 +3776,23 @@
+ #[no_mangle]
+ pub extern "C" fn thaw_json_as_string(value: *mut Value) -> *const c_char {
+     let value = unsafe { &*value };
+-    // A lone-surrogate string keeps its raw WTF-8 bytes (a `String`
+-    // couldn't hold them).
+-    if let Value::Wtf8(bytes) = value {
+-        return thaw_arena::owned_string(bytes);
+-    }
+     let text = match value {
++        Value::Bool(flag) => {
++            if *flag { "true".to_string() } else { "false".to_string() }
++        }
++        Value::Number(_) => {
++            let formatted = unsafe { thaw_number_to_string(json_to_number(value)) };
++            if formatted.is_null() {
++                return std::ptr::null();
++            }
++            let bytes = unsafe { CStr::from_ptr(formatted) }.to_bytes();
++            return thaw_arena::owned_string(bytes);
++        }
+         Value::String(s) => s.clone(),
+         Value::BigInt(decimal) => decimal.clone(),
++        // A lone-surrogate string keeps its raw WTF-8 bytes (a `String`
++        // couldn't hold them).
++        Value::Wtf8(bytes) => return thaw_arena::owned_string(bytes),
+         Value::Null => "null".to_string(),
+         // Matches real JS `String(undefined)` -- without this, `other`
+         // below would stringify the sentinel's own raw JSON shape
+@@ -7438,4 +7448,170 @@
+             assert!(ARENA_OWNED_JSON_ROOTS.with(|roots| roots.borrow().is_empty()));
+         }).join().unwrap();
+     }
+-}
++
++    #[test]
++    fn dependency_compile_writable_expression() {
++        unsafe extern "C" {
++            fn thaw_object_set_state(object: *const u8, operation: u8) -> bool;
++        }
++
++        let assert_number = |object: *mut Value, key: *const c_char, expected: f64| {
++            let value = thaw_json_get(object, key);
++            assert_eq!(thaw_json_as_number(value), expected);
++            unsafe { thaw_json_destroy(value) };
++        };
++
++        let extensible = parse(r#"{"own":1}"#);
++        let extensible_alias = leak(unsafe { (&*extensible).clone() });
++        assert_eq!(unsafe { thaw_json_strict_equal(extensible, extensible_alias) }, 1);
++        thaw_json_object_set_number(extensible, c"own".as_ptr(), 2.0);
++        thaw_json_object_set_number(extensible_alias, c"new".as_ptr(), 3.0);
++        assert_number(extensible, c"own".as_ptr(), 2.0);
++        assert_number(extensible_alias, c"new".as_ptr(), 3.0);
++        let extensible_source = parse(r#"{"own":4,"assigned":5}"#);
++        unsafe { thaw_json_object_assign(extensible_alias, extensible_source) };
++        assert_eq!(thaw_json_take_assign_error(), 0);
++        assert_number(extensible, c"own".as_ptr(), 4.0);
++        assert_number(extensible, c"assigned".as_ptr(), 5.0);
++
++        let prevented = parse(r#"{"own":1}"#);
++        let prevented_alias = leak(unsafe { (&*prevented).clone() });
++        assert_eq!(unsafe { thaw_json_strict_equal(prevented, prevented_alias) }, 1);
++        assert!(unsafe { thaw_object_set_state(thaw_json_state_key(prevented), 1) });
++        thaw_json_object_set_number(prevented, c"own".as_ptr(), 2.0);
++        thaw_json_object_set_number(prevented_alias, c"new".as_ptr(), 3.0);
++        assert_number(prevented_alias, c"own".as_ptr(), 2.0);
++        assert_eq!(unsafe { thaw_json_has_own(prevented, c"new".as_ptr()) }, 0);
++        let prevented_source = parse(r#"{"own":4,"new":5}"#);
++        unsafe { thaw_json_object_assign(prevented_alias, prevented_source) };
++        assert_eq!(thaw_json_take_assign_error(), 1);
++        assert_number(prevented, c"own".as_ptr(), 4.0);
++        assert_eq!(unsafe { thaw_json_has_own(prevented_alias, c"new".as_ptr()) }, 0);
++
++        let sealed = parse(r#"{"own":1}"#);
++        let sealed_alias = leak(unsafe { (&*sealed).clone() });
++        assert_eq!(unsafe { thaw_json_strict_equal(sealed, sealed_alias) }, 1);
++        assert!(unsafe { thaw_object_set_state(thaw_json_state_key(sealed), 2) });
++        thaw_json_object_set_number(sealed, c"own".as_ptr(), 2.0);
++        thaw_json_object_set_number(sealed_alias, c"new".as_ptr(), 3.0);
++        assert_number(sealed_alias, c"own".as_ptr(), 2.0);
++        assert_eq!(unsafe { thaw_json_has_own(sealed, c"new".as_ptr()) }, 0);
++        let sealed_source = parse(r#"{"own":4,"new":5}"#);
++        unsafe { thaw_json_object_assign(sealed, sealed_source) };
++        assert_eq!(thaw_json_take_assign_error(), 1);
++        assert_number(sealed_alias, c"own".as_ptr(), 4.0);
++        assert_eq!(unsafe { thaw_json_has_own(sealed_alias, c"new".as_ptr()) }, 0);
++
++        let frozen = parse(r#"{"own":1}"#);
++        let frozen_alias = leak(unsafe { (&*frozen).clone() });
++        assert_eq!(unsafe { thaw_json_strict_equal(frozen, frozen_alias) }, 1);
++        assert!(unsafe { thaw_object_set_state(thaw_json_state_key(frozen), 3) });
++        thaw_json_object_set_number(frozen, c"own".as_ptr(), 2.0);
++        thaw_json_object_set_number(frozen_alias, c"new".as_ptr(), 3.0);
++        assert_number(frozen, c"own".as_ptr(), 1.0);
++        assert_eq!(unsafe { thaw_json_has_own(frozen_alias, c"new".as_ptr()) }, 0);
++        let frozen_source = parse(r#"{"own":4,"new":5}"#);
++        unsafe { thaw_json_object_assign(frozen_alias, frozen_source) };
++        assert_eq!(thaw_json_take_assign_error(), 1);
++        assert_number(frozen, c"own".as_ptr(), 1.0);
++        assert_eq!(unsafe { thaw_json_has_own(frozen, c"new".as_ptr()) }, 0);
++
++        unsafe {
++            thaw_json_destroy(extensible_source);
++            thaw_json_destroy(extensible_alias);
++            thaw_json_destroy(extensible);
++            thaw_json_destroy(prevented_source);
++            thaw_json_destroy(prevented_alias);
++            thaw_json_destroy(prevented);
++            thaw_json_destroy(sealed_source);
++            thaw_json_destroy(sealed_alias);
++            thaw_json_destroy(sealed);
++            thaw_json_destroy(frozen_source);
++            thaw_json_destroy(frozen_alias);
++            thaw_json_destroy(frozen);
++        }
++    }
++
++    #[test]
++    fn dependency_compile_as_string_variants() {
++        let assert_string_after_destroy = |value: *mut Value, expected: &[u8]| {
++            let output = thaw_json_as_string(value);
++            assert!(!output.is_null());
++            unsafe { thaw_json_destroy(value) };
++            assert_eq!(unsafe { thaw_arena::NativeStr::from_ptr(output) }.to_bytes(), expected);
++            unsafe { thaw_cstring_destroy(output.cast_mut()) };
++        };
++
++        assert_string_after_destroy(leak(Value::Bool(true)), b"true");
++        assert_string_after_destroy(leak(Value::Bool(false)), b"false");
++
++        for (number, source, expected) in [
++            (serde_json::Number::from(-7_i64), None, "-7"),
++            (serde_json::Number::from(42_u64), None, "42"),
++            (
++                serde_json::Number::from(9_007_199_254_740_993_u64),
++                Some("9007199254740993"),
++                "9007199254740992",
++            ),
++            (
++                serde_json::Number::from(i64::MAX),
++                Some("9223372036854775807"),
++                "9223372036854776000",
++            ),
++            (
++                serde_json::Number::from(u64::MAX),
++                Some("18446744073709551615"),
++                "18446744073709552000",
++            ),
++        ] {
++            let constructed = leak(Value::Number(number));
++            if let Some(source) = source {
++                let parsed = parse(source);
++                assert_eq!(
++                    thaw_json_as_number(constructed).to_bits(),
++                    thaw_json_as_number(parsed).to_bits(),
++                );
++                assert_string_after_destroy(parsed, expected.as_bytes());
++            }
++            assert_string_after_destroy(constructed, expected.as_bytes());
++        }
++
++        for (number, expected) in [
++            (1.0, "1"),
++            (-0.0, "0"),
++            (1.5, "1.5"),
++            (1e20, "100000000000000000000"),
++            (1e21, "1e+21"),
++            (1e-6, "0.000001"),
++            (1e-7, "1e-7"),
++        ] {
++            let value = leak(number_value(number));
++            assert_eq!(thaw_json_as_number(value).to_bits(), number.to_bits());
++            assert_string_after_destroy(value, expected.as_bytes());
++        }
++
++        for (number, expected) in [
++            (f64::NAN, "NaN"),
++            (f64::INFINITY, "Infinity"),
++            (f64::NEG_INFINITY, "-Infinity"),
++        ] {
++            assert_string_after_destroy(leak(number_value(number)), expected.as_bytes());
++        }
++
++        assert_string_after_destroy(parse(r#""text""#), b"text");
++        assert_string_after_destroy(
++            leak(Value::BigInt("-18446744073709551617".to_string())),
++            b"-18446744073709551617",
++        );
++        assert_string_after_destroy(thaw_json_null(), b"null");
++        assert_string_after_destroy(
++            parse(r#"{"$__thaw_napi_undefined$":true}"#),
++            b"undefined",
++        );
++        assert_string_after_destroy(parse(r#"[1,null,"x"]"#), b"1,,x");
++        assert_string_after_destroy(parse("{}"), b"[object Object]");
++
++        let wtf8 = wtf8_encode_utf16(&[0xD800, 0]);
++        assert_string_after_destroy(leak(Value::Wtf8(wtf8.clone())), &wtf8);
++    }
++}

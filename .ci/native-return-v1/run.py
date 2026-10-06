@@ -31,7 +31,7 @@ TIMEOUTS = {
 }
 TEST_FILTERS = tuple(item["filter"] for item in verify.EXPECTED["test_filters"])
 FILTER_PACKAGES = {item["filter"]: item["package"] for item in verify.EXPECTED["test_filters"]}
-STAGE_NAMES = ("identity", "baseline_check", "candidate_check", "quickjs_no_run", "std_no_run", "llvm_no_run", "hir_no_run")
+STAGE_NAMES = ("identity", "baseline_check", "candidate_check", "quickjs_no_run", "std_no_run", "runtime_no_run", "llvm_no_run", "hir_no_run")
 ALLOWED_STATES = {"not-run", "passed", "failed", "timed-out", "blocked"}
 
 
@@ -180,6 +180,7 @@ def _persist(evidence: Path, state: dict[str, Any]) -> None:
         "baseline_check": state.get("stages", {}).get("baseline_check"),
         "candidate_check": state.get("stages", {}).get("candidate_check"),
         "quickjs_no_run": state.get("stages", {}).get("quickjs_no_run"),
+        "runtime_no_run": state.get("stages", {}).get("runtime_no_run"),
         "llvm_no_run": state.get("stages", {}).get("llvm_no_run"),
         "hir_no_run": state.get("stages", {}).get("hir_no_run"),
         "std_no_run": state.get("stages", {}).get("std_no_run"),
@@ -573,7 +574,7 @@ def _run_filter(
 def _overall(state: dict[str, Any]) -> tuple[str, int, str]:
     required = [
         state["stages"][name]["status"]
-        for name in ("baseline_check", "candidate_check", "quickjs_no_run", "llvm_no_run", "hir_no_run", "std_no_run")
+        for name in ("baseline_check", "candidate_check", "quickjs_no_run", "llvm_no_run", "hir_no_run", "std_no_run", "runtime_no_run")
     ]
     filters = [item["status"] for item in state["filters"]]
     if all(value == "passed" for value in required + filters):
@@ -600,7 +601,7 @@ def _run_validation_impl(
     except Exception as exc:
         reason = f"identity verification failed: {type(exc).__name__}: {exc}"
         state["stages"]["identity"].update({"status": "failed", "reason": reason})
-        for stage in ("baseline_check", "candidate_check", "quickjs_no_run", "std_no_run", "llvm_no_run", "hir_no_run"):
+        for stage in ("baseline_check", "candidate_check", "quickjs_no_run", "std_no_run", "runtime_no_run", "llvm_no_run", "hir_no_run"):
             _block_stage(state, stage, reason)
         _block_filters(state, 0, reason)
         state["overall"] = {"status": "failed", "reason": reason}
@@ -643,12 +644,45 @@ def _run_validation_impl(
     )
     _persist(evidence, state)
 
-    # New QuickJS/std groups are independent: a failed focused command cannot
-    # suppress another eligible group, and each package uses only its own gate.
-    for index in range(30, len(state["filters"])):
+    # Preserve the original nine wire controls ahead of the additional runtime
+    # test compilation; each package uses only its own existing preflight.
+    for index in range(30, 39):
         item = state["filters"][index]
         package = item["package"]
         preflight = quickjs_result if package == "thaw-quickjs" else std_result if package == "thaw-std" else None
+        if preflight is None:
+            _block_filter(item, f"no independent preflight is defined for package {package}")
+        elif preflight["status"] != "passed":
+            _block_filter(item, f"{package} test no-run {preflight['status']}: {preflight.get('reason') or preflight.get('exit_code')}")
+        else:
+            _run_filter(state, item, index + 1, execute, evidence, candidate_target, candidate, started_wall)
+        _persist(evidence, state)
+
+    runtime_result = _run_stage(
+        state,
+        evidence,
+        execute,
+        "candidate",
+        candidate,
+        ["cargo", "test", "--locked", "-p", "thaw-runtime", "--lib", "--no-run"],
+        candidate_target,
+        "runtime_no_run",
+        TIMEOUTS["no_run"],
+        started_wall,
+    )
+    _persist(evidence, state)
+
+    # The appended dependency controls use package-local gates, so one failed
+    # test compilation does not suppress eligible controls from other crates.
+    for index in range(39, len(state["filters"])):
+        item = state["filters"][index]
+        package = item["package"]
+        preflight = (
+            quickjs_result if package == "thaw-quickjs"
+            else std_result if package == "thaw-std"
+            else runtime_result if package == "thaw-runtime"
+            else None
+        )
         if preflight is None:
             _block_filter(item, f"no independent preflight is defined for package {package}")
         elif preflight["status"] != "passed":

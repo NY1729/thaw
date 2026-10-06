@@ -4,11 +4,13 @@
     "compile-repairs-v1.sha256": "d3b7c0e06ca053f4b342dcbc8ac1247a3460c946a35a2b22d2645c76251a2aa9",
     "cumulative-hir-v1-base.sha256": "d3b7c0e06ca053f4b342dcbc8ac1247a3460c946a35a2b22d2645c76251a2aa9",
     "cumulative-hir-v1.sha256": "0be3783d6241706ba2dd492704162aa9e0076dcc4a1de96e309eca9b512ba81c",
+    "dependency-compile-v1-base.sha256": "83a99e4934c4108992f874ca75ff2ea366283fbc3c543afaf9fee6489cb95941",
+    "dependency-compile-v1.sha256": "605121c9db1c995897770fc223d6207d18e9a6075e11725c2c9c0e25f8e2288d",
     "discard-v2.sha256": "c47d4ab7e4a805190e719b13b99bd7d233e24a5007afcbff6becebab9493e328",
     "forced-root-wire-v1-base.sha256": "23da8386704a188e890bd7e591bb395ce611d45e8fbf0ad264716b5d61e3c9bf",
     "forced-root-wire-v1.sha256": "83a99e4934c4108992f874ca75ff2ea366283fbc3c543afaf9fee6489cb95941",
     "native-base.sha256": "da86c2c16619de2e236cdd50b9d2572465fbdd4dc3b75b680cf91c6b0f6bdb72",
-    "net-owners.txt": "10fbe496127766ee0cdc18e35ba019968d2d4b7c2688f37c973cd2825551d654",
+    "net-owners.txt": "b716db27fa12c0995101ee93b1875510353245f0c20d8cbe660d957280eb23bb",
     "next-hir-v1-base.sha256": "0be3783d6241706ba2dd492704162aa9e0076dcc4a1de96e309eca9b512ba81c",
     "next-hir-v1.sha256": "f8915460efcaafc82a4392d9ca6b656dc150045d5cad4458b66755ef5705635b",
     "original-native.sha256": "4e219dde2129cf5876497edd6f9032cebdbee89eded9cce20e50ecda041053ce",
@@ -33,6 +35,13 @@
     "paired_after": "compile-repairs-v1",
     "path_order": "lexical",
     "sha256": "d3b7c0e06ca053f4b342dcbc8ac1247a3460c946a35a2b22d2645c76251a2aa9"
+  },
+  "dependency_compile_base": {
+    "count": 183,
+    "file": "dependency-compile-v1-base.sha256",
+    "paired_after": "forced-root-wire-v1",
+    "path_order": "lexical",
+    "sha256": "83a99e4934c4108992f874ca75ff2ea366283fbc3c543afaf9fee6489cb95941"
   },
   "expected_full_test_names": {
     "exact_mixed_pre_dispatch_consumes_registered_graph_grant_once": [
@@ -63,8 +72,38 @@
     "handle_registry_identity_ignores_later_object_is_override": [
       "handle_registry_identity_ignores_later_object_is_override"
     ],
+    "json::tests::a_missing_key_or_index_is_distinguishable_from_an_explicit_null": [
+      "json::tests::a_missing_key_or_index_is_distinguishable_from_an_explicit_null"
+    ],
+    "json::tests::dependency_compile_as_string_variants": [
+      "json::tests::dependency_compile_as_string_variants"
+    ],
+    "json::tests::dependency_compile_writable_expression": [
+      "json::tests::dependency_compile_writable_expression"
+    ],
+    "json::tests::jit_dictionary_callbacks_preserve_presence_and_typed_failures": [
+      "json::tests::jit_dictionary_callbacks_preserve_presence_and_typed_failures"
+    ],
     "mutated_graph_wire_retires_only_registered_snapshot_leases": [
       "json::mutated_graph_wire_retires_only_registered_snapshot_leases"
+    ],
+    "tests::dependency_compile_finally_adopt_deferred_frame": [
+      "tests::dependency_compile_finally_adopt_deferred_frame"
+    ],
+    "tests::dependency_compile_root_locale_case": [
+      "tests::dependency_compile_root_locale_case"
+    ],
+    "tests::dependency_compile_uri_byte_iteration": [
+      "tests::dependency_compile_uri_byte_iteration"
+    ],
+    "tests::finally_adopt_roots_original_result_object_and_aggregate_until_output_owns_them": [
+      "tests::finally_adopt_roots_original_result_object_and_aggregate_until_output_owns_them"
+    ],
+    "tests::private_exception_provenance_has_stable_nine_word_layout": [
+      "tests::private_exception_provenance_has_stable_nine_word_layout"
+    ],
+    "tests::purged_aggregate_callbacks_ignore_late_child_results_and_release_roots": [
+      "tests::purged_aggregate_callbacks_ignore_late_child_results_and_release_roots"
     ],
     "unregistered_graph_wire_cannot_transfer_napi_lease_tokens": [
       "json::unregistered_graph_wire_cannot_transfer_napi_lease_tokens"
@@ -149,11 +188,11 @@
     "sha256": "da86c2c16619de2e236cdd50b9d2572465fbdd4dc3b75b680cf91c6b0f6bdb72"
   },
   "net_owners": {
-    "count": 56,
+    "count": 57,
     "file": "net-owners.txt",
-    "modified": 51,
+    "modified": 52,
     "new": 5,
-    "sha256": "10fbe496127766ee0cdc18e35ba019968d2d4b7c2688f37c973cd2825551d654"
+    "sha256": "b716db27fa12c0995101ee93b1875510353245f0c20d8cbe660d957280eb23bb"
   },
   "next_hir_base": {
     "count": 181,
@@ -170,11 +209,13 @@
     "compile-repairs-v1",
     "cumulative-hir-v1",
     "next-hir-v1",
-    "forced-root-wire-v1"
+    "forced-root-wire-v1",
+    "dependency-compile-v1"
   ],
   "payload_patches": {
     "compile-repairs-v1.patch": "2994f62e98a4fb9cbd0b792b20da09bf505874d749447bf8f0e43776d25e0f05",
     "cumulative-hir-v1.patch": "63744b75a96ce30ff503d90379b08ec20ffbebb5f5f68716972d6c7d6f17f368",
+    "dependency-compile-v1.patch": "68a5c8e397df3462aeb83879d854837a423ef297d523f455ecd62d05b7281aea",
     "discard-v2.patch": "0ffe9fcec530feb12a2ca084399643861c240cc81906c9aab4677cc529aceb39",
     "forced-root-wire-v1.patch": "a7f04af1afa5b9d41d7a8dca984ccefba020cdd36f19175ef14a8f809a6e8683",
     "next-hir-v1.patch": "c0d4addaf22a7c7c26a133153b8298cc39013794f0263228468dddb8e0f3936b",
@@ -312,6 +353,18 @@
       "name": "forced-root-wire-v1",
       "path_order": "lexical",
       "sha256": "83a99e4934c4108992f874ca75ff2ea366283fbc3c543afaf9fee6489cb95941"
+    },
+    {
+      "count": 183,
+      "extra_paths": [
+        "crates/thaw-std/src/json.rs",
+        "crates/thaw-quickjs/src/quickjs/api.rs",
+        "crates/thaw-quickjs/src/quickjs/platform_globals/runtime.js"
+      ],
+      "file": "dependency-compile-v1.sha256",
+      "name": "dependency-compile-v1",
+      "path_order": "lexical",
+      "sha256": "605121c9db1c995897770fc223d6207d18e9a6075e11725c2c9c0e25f8e2288d"
     }
   ],
   "subset_roots": [
@@ -478,6 +531,46 @@
     },
     {
       "filter": "mutated_graph_wire_retires_only_registered_snapshot_leases",
+      "package": "thaw-std"
+    },
+    {
+      "filter": "tests::dependency_compile_uri_byte_iteration",
+      "package": "thaw-runtime"
+    },
+    {
+      "filter": "tests::dependency_compile_root_locale_case",
+      "package": "thaw-runtime"
+    },
+    {
+      "filter": "tests::dependency_compile_finally_adopt_deferred_frame",
+      "package": "thaw-runtime"
+    },
+    {
+      "filter": "json::tests::dependency_compile_writable_expression",
+      "package": "thaw-std"
+    },
+    {
+      "filter": "json::tests::dependency_compile_as_string_variants",
+      "package": "thaw-std"
+    },
+    {
+      "filter": "tests::private_exception_provenance_has_stable_nine_word_layout",
+      "package": "thaw-runtime"
+    },
+    {
+      "filter": "tests::finally_adopt_roots_original_result_object_and_aggregate_until_output_owns_them",
+      "package": "thaw-runtime"
+    },
+    {
+      "filter": "tests::purged_aggregate_callbacks_ignore_late_child_results_and_release_roots",
+      "package": "thaw-runtime"
+    },
+    {
+      "filter": "json::tests::jit_dictionary_callbacks_preserve_presence_and_typed_failures",
+      "package": "thaw-std"
+    },
+    {
+      "filter": "json::tests::a_missing_key_or_index_is_distinguishable_from_an_explicit_null",
       "package": "thaw-std"
     }
   ],
