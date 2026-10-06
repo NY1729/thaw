@@ -1,0 +1,561 @@
+diff --color -ruN ../candidate/crates/thaw-registry/src/registry/builtins/filesystem.rs crates/thaw-registry/src/registry/builtins/filesystem.rs
+--- ../candidate/crates/thaw-registry/src/registry/builtins/filesystem.rs	2026-10-07 00:48:52.955039192 +0900
++++ crates/thaw-registry/src/registry/builtins/filesystem.rs	2026-10-07 00:50:52.676597770 +0900
+@@ -34,7 +34,7 @@
+              var fileDescriptors = new Map(); function FileHandle(path, flags, fd) { EventEmitter.call(this); this.path = Buffer.isBuffer(path) ? Buffer.from(path) : pathValue(path); this.flags = flagsValue(flags, 'r'); this.fd = fd === undefined ? invoke('fd_open', this.path, (typeof flags === 'number' ? '#' + flags : this.flags) + ',438').fd : fd; this.closed = false; this._pendingOperations = new Set(); this._closing = false; this._closePromise = null; fileDescriptors.set(this.fd, this); } FileHandle.prototype = Object.create(EventEmitter.prototype); FileHandle.prototype.constructor = FileHandle; FileHandle.prototype._check = function() { if (this.closed) { var error = new Error('file closed'); error.code = 'EBADF'; throw error; } }; FileHandle.prototype._trackOperation = function(action) { if (this._closing || this.closed) { var closed = new Error('file closed'); closed.code = 'EBADF'; return Promise.reject(closed); } var complete, pending = new Promise(function(resolve) { complete = resolve; }), self = this, operation; this._pendingOperations.add(pending); try { operation = action(); } catch (error) { this._pendingOperations.delete(pending); complete(); throw error; } Promise.resolve(operation).then(function() { self._pendingOperations.delete(pending); complete(); }, function() { self._pendingOperations.delete(pending); complete(); }); return operation; }; FileHandle.prototype.close = function() { if (this._closePromise) return this._closePromise; var self = this; this._closing = true; this._closePromise = Promise.all(Array.from(this._pendingOperations)).then(function() { if (!self.closed) __thaw_fs.closeSync(self.fd); }); return this._closePromise; }; FileHandle.prototype.readFile = function(options) { var self = this, signal, entryError; try { signal = fsAbortSignal(options); entryError = fsAbortError(signal); } catch (error) { return Promise.reject(error); } return Promise.resolve().then(function() { var error = entryError || fsAbortError(signal); if (error) throw error; self._check(); return fsReadFile(self, options, signal); }); }; FileHandle.prototype.writeFile = function(value, options) { var self = this; return fsWriteAsync(self, value, options, 'w'); }; FileHandle.prototype.appendFile = function(value, options) { var self = this; return fsWriteAsync(self, value, options, 'a'); }; FileHandle.prototype.read = function(buffer, offset, length, position) { var self = this; if (buffer && !ArrayBuffer.isView(buffer)) { var options = buffer; offset = options.offset; length = options.length; position = options.position; if (options.buffer === undefined) { var allocationOffset = offset === undefined ? 0 : Number(offset), allocationLength = length === undefined ? 16384 : Number(length); if (!Number.isSafeInteger(allocationOffset) || !Number.isSafeInteger(allocationLength) || allocationOffset < 0 || allocationLength < 0 || !Number.isSafeInteger(allocationOffset + allocationLength)) throw new RangeError('Invalid read range'); buffer = Buffer.alloc(allocationOffset + allocationLength); } else buffer = options.buffer; } buffer = buffer || Buffer.alloc(16384); return Promise.resolve().then(function() { self._check(); return { bytesRead: __thaw_fs.readSync(self.fd, buffer, offset, length, position), buffer: buffer }; }); }; FileHandle.prototype.write = function(value, offset, length, position) { var self = this; return Promise.resolve().then(function() { self._check(); return { bytesWritten: __thaw_fs.writeSync(self.fd, value, offset, length, position), buffer: value }; }); }; FileHandle.prototype.stat = function(options) { var self = this; return Promise.resolve().then(function() { self._check(); return __thaw_fs.fstatSync(self.fd, options); }); }; FileHandle.prototype.truncate = function(length) { var self = this; return Promise.resolve().then(function() { self._check(); __thaw_fs.ftruncateSync(self.fd, length); }); }; FileHandle.prototype.createReadStream = function(options) { this._check(); return new ReadStream(this.path, Object.assign({ fd: this.fd }, options || {})); }; FileHandle.prototype.createWriteStream = function(options) { this._check(); return new WriteStream(this.path, Object.assign({ fd: this.fd, flags: this.flags }, options || {})); }; FileHandle.prototype[Symbol.asyncDispose] = FileHandle.prototype.close; __thaw_fs.FileHandle = FileHandle;\n\
+              __thaw_fs.constants = globalThis.__thaw_fs_constants || (globalThis.__thaw_fs_constants = { F_OK: 0, X_OK: 1, W_OK: 2, R_OK: 4, O_RDONLY: 0, O_WRONLY: 1, O_RDWR: 2, O_CREAT: 64, O_EXCL: 128, O_NOCTTY: 256, O_TRUNC: 512, O_APPEND: 1024, O_DIRECTORY: 65536, O_NOFOLLOW: 131072, O_SYNC: 1052672, S_IFMT: 61440, S_IFREG: 32768, S_IFDIR: 16384, S_IFCHR: 8192, S_IFBLK: 24576, S_IFIFO: 4096, S_IFLNK: 40960, S_IFSOCK: 49152, COPYFILE_EXCL: 1, COPYFILE_FICLONE: 2, COPYFILE_FICLONE_FORCE: 4 });\n\
+              function fdHandle(fd) { var handle = fileDescriptors.get(Number(fd)); if (!handle || handle.closed) { var error = new Error('EBADF: bad file descriptor'); error.code = 'EBADF'; error.errno = -1; error.syscall = 'fd'; throw error; } return handle; } function fdInvoke(operation, fd, value) { fdHandle(fd); return invoke('fd_' + operation, String(fd), value === undefined ? '' : String(value)); } function fdPosition(value) { if (value === null || value === undefined || value === -1) return '-1'; if (!Number.isSafeInteger(Number(value)) || Number(value) < 0) throw new RangeError('Invalid file position'); return String(value); } function fdView(buffer) { if (!ArrayBuffer.isView(buffer)) throw new TypeError('buffer must be an ArrayBuffer view'); return new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength); } __thaw_fs.openSync = function(path, flags, mode) { return fsOpenHandle(path, flags, mode).fd; }; __thaw_fs.closeSync = function(fd) { var handle = fdHandle(fd); fdInvoke('close', fd); fileDescriptors.delete(handle.fd); handle.closed = true; handle.fd = -1; handle.emit('close'); }; __thaw_fs.readSync = function(fd, buffer, offset, length, position) { if (offset && typeof offset === 'object') { var options = offset; offset = options.offset; length = options.length; position = options.position; } var view = fdView(buffer); offset = offset === undefined ? 0 : Number(offset); length = length === undefined ? view.byteLength - offset : Number(length); if (!Number.isSafeInteger(offset) || !Number.isSafeInteger(length) || offset < 0 || length < 0 || offset + length > view.byteLength) throw new RangeError('Invalid read range'); var source = Buffer.from(fdInvoke('read', fd, fdPosition(position) + ',' + length).data, 'hex'); view.set(source, offset); return source.length; }; __thaw_fs.writeSync = function(fd, value, offset, length, position) { var bytes; if (offset && typeof offset === 'object') { var writeOptions = offset; offset = writeOptions.offset; length = writeOptions.length; position = writeOptions.position; } if (typeof value === 'string') { var encodingName = typeof length === 'string' ? length : 'utf8'; position = offset; bytes = Buffer.from(value, encodingName); } else { var view = fdView(value); offset = offset === undefined ? 0 : Number(offset); length = length === undefined ? view.byteLength - offset : Number(length); if (!Number.isSafeInteger(offset) || !Number.isSafeInteger(length) || offset < 0 || length < 0 || offset + length > view.byteLength) throw new RangeError('Invalid write range'); bytes = Buffer.from(view.subarray(offset, offset + length)); } return fdInvoke('write', fd, fdPosition(position) + ':' + bytes.toString('hex')).length; }; __thaw_fs.fstatSync = function(fd, options) { return new Stats(fdInvoke('stat', fd), Boolean(options && options.bigint)); }; __thaw_fs.ftruncateSync = function(fd, length) { length = length === undefined ? 0 : Number(length); if (!Number.isSafeInteger(length) || length < 0) throw new RangeError('Invalid truncate length'); fdInvoke('truncate', fd, length); }; __thaw_fs.fchmodSync = function(fd, mode) { fdInvoke('chmod', fd, fsMode({ mode: mode }, 0)); }; __thaw_fs.fchownSync = function(fd, uid, gid) { fdInvoke('chown', fd, String(uid) + ',' + String(gid)); }; __thaw_fs.futimesSync = function(fd, atime, mtime) { fdInvoke('utimes', fd, String(timeValue(atime)) + ',' + String(timeValue(mtime))); }; __thaw_fs.fsyncSync = function(fd) { fdInvoke('sync', fd); }; __thaw_fs.fdatasyncSync = function(fd) { fdInvoke('datasync', fd); }; __thaw_fs.readvSync = function(fd, buffers, position) { var views = buffers.map(fdView), total = 0, cursor = position === -1 ? null : position; for (var index = 0; index < views.length; index++) { var size = views[index].byteLength, count = __thaw_fs.readSync(fd, buffers[index], 0, size, cursor); total += count; if (cursor !== null && cursor !== undefined) cursor = Number(cursor) + count; if (count < size) break; } return total; }; __thaw_fs.writevSync = function(fd, buffers, position) { var views = buffers.map(fdView), total = 0, cursor = position === -1 ? null : position; for (var index = 0; index < views.length; index++) { var size = views[index].byteLength, count = __thaw_fs.writeSync(fd, buffers[index], 0, size, cursor); total += count; if (cursor !== null && cursor !== undefined) cursor = Number(cursor) + count; if (count < size) break; } return total; };;\n\
+-             function fsAbortSignal(options) { var signal = options && typeof options === 'object' ? options.signal : undefined; if (signal !== undefined && (signal === null || typeof signal !== 'object' || !('aborted' in signal))) { var error = new TypeError('The "options.signal" argument must be an AbortSignal'); error.code = 'ERR_INVALID_ARG_TYPE'; throw error; } return signal; } function fsAbortError(signal) { if (!signal || !signal.aborted) return null; var error = new Error('The operation was aborted'); error.name = 'AbortError'; error.code = 'ABORT_ERR'; error.cause = signal.reason; return error; } function snapshotBufferArgs(args) { return Array.prototype.map.call(args, function(value) { return Buffer.isBuffer(value) ? Buffer.from(value) : value; }); } function promised(method, abortIndex) { return function() { var input = arguments; return new Promise(function(resolve, reject) { var args, signal, entryError; try { args = snapshotBufferArgs(input); signal = abortIndex === undefined ? undefined : fsAbortSignal(args[abortIndex]); entryError = fsAbortError(signal); } catch (error) { reject(error); return; } queueMicrotask(function() { try { var error = entryError || fsAbortError(signal); if (error) throw error; resolve(method.apply(__thaw_fs, abortIndex === undefined ? args : args.concat([signal]))); } catch (error) { reject(error); } }); }); }; } __thaw_fs.promises = { access: promised(__thaw_fs.accessSync), open: function(path, flags) { return promised(function() { return new FileHandle(path, flags); })(); }, readFile: promised(__thaw_fs.readFileSync, 1), readdir: promised(__thaw_fs.readdirSync), opendir: promised(__thaw_fs.opendirSync), stat: promised(__thaw_fs.statSync), lstat: promised(function(path, options) { return statLookup('lstat', path, options, false); }), writeFile: function(path, value, options) { return path instanceof FileHandle ? path._trackOperation(function() { return fsWriteAsync(path, value, options, 'w'); }) : fsWriteAsync(path, value, options, 'w'); }, appendFile: function(path, value, options) { return path instanceof FileHandle ? path._trackOperation(function() { return fsWriteAsync(path, value, options, 'a'); }) : fsWriteAsync(path, value, options, 'a'); }, mkdir: promised(__thaw_fs.mkdirSync), unlink: promised(__thaw_fs.unlinkSync), rm: promised(__thaw_fs.rmSync), rmdir: promised(__thaw_fs.rmdirSync), rename: promised(__thaw_fs.renameSync), copyFile: promised(__thaw_fs.copyFileSync), cp: promised(__thaw_fs.cpSync), realpath: promised(__thaw_fs.realpathSync), mkdtemp: promised(__thaw_fs.mkdtempSync), statfs: promised(__thaw_fs.statfsSync), lutimes: promised(__thaw_fs.lutimesSync), truncate: promised(__thaw_fs.truncateSync) }; __thaw_fs.promises.mkdtempDisposable = function(prefix, options) { if (Buffer.isBuffer(prefix)) prefix = Buffer.from(prefix); return Promise.resolve().then(function() { var created = mkdtempCreated(prefix, options), path = created.path, rawPath = created.rawPath, removal, disposable = { path: path, remove: function() { if (!removal) removal = __thaw_fs.promises.rm(rawPath, { recursive: true, force: true }); return removal; } }; if (Symbol.asyncDispose) disposable[Symbol.asyncDispose] = disposable.remove; return disposable; }); }; function callbackMethod(method, valueResult, abortIndex) { return function() { var args = Array.prototype.slice.call(arguments), callback = args.pop(); if (typeof callback !== 'function') throw new TypeError('callback must be a function'); var signal, entryError; try { args = snapshotBufferArgs(args); signal = abortIndex === undefined ? undefined : fsAbortSignal(args[abortIndex]); entryError = fsAbortError(signal); } catch (error) { queueMicrotask(function() { callback(error); }); return; } queueMicrotask(function() { var value; try { var error = entryError || fsAbortError(signal); if (error) throw error; value = method.apply(__thaw_fs, abortIndex === undefined ? args : args.concat([signal])); } catch (error) { callback(error); return; } if (valueResult) callback(null, value); else callback(null); }); }; } __thaw_fs.readFile = callbackMethod(__thaw_fs.readFileSync, true, 1); __thaw_fs.readdir = callbackMethod(__thaw_fs.readdirSync, true); __thaw_fs.opendir = callbackMethod(__thaw_fs.opendirSync, true); __thaw_fs.stat = callbackMethod(__thaw_fs.statSync, true); __thaw_fs.lstat = callbackMethod(function(path, options) { return statLookup('lstat', path, options, false); }, true); __thaw_fs.writeFile = callbackMethod(__thaw_fs.writeFileSync, false, 2); __thaw_fs.appendFile = callbackMethod(__thaw_fs.appendFileSync, false, 2); __thaw_fs.mkdir = callbackMethod(__thaw_fs.mkdirSync, false); __thaw_fs.unlink = callbackMethod(__thaw_fs.unlinkSync, false); __thaw_fs.rm = callbackMethod(__thaw_fs.rmSync, false); __thaw_fs.rmdir = callbackMethod(__thaw_fs.rmdirSync, false); __thaw_fs.rename = callbackMethod(__thaw_fs.renameSync, false); __thaw_fs.copyFile = callbackMethod(__thaw_fs.copyFileSync, false); __thaw_fs.cp = callbackMethod(__thaw_fs.cpSync, false); __thaw_fs.realpath = callbackMethod(__thaw_fs.realpathSync, true); __thaw_fs.realpath.native = __thaw_fs.realpath; __thaw_fs.mkdtemp = callbackMethod(__thaw_fs.mkdtempSync, true);\n\
++             function fsAbortSignal(options) { var signal = options && typeof options === 'object' ? options.signal : undefined; if (signal !== undefined && (signal === null || typeof signal !== 'object' || !('aborted' in signal))) { var error = new TypeError('The \"options.signal\" argument must be an AbortSignal'); error.code = 'ERR_INVALID_ARG_TYPE'; throw error; } return signal; } function fsAbortError(signal) { if (!signal || !signal.aborted) return null; var error = new Error('The operation was aborted'); error.name = 'AbortError'; error.code = 'ABORT_ERR'; error.cause = signal.reason; return error; } function snapshotBufferArgs(args) { return Array.prototype.map.call(args, function(value) { return Buffer.isBuffer(value) ? Buffer.from(value) : value; }); } function promised(method, abortIndex) { return function() { var input = arguments; return new Promise(function(resolve, reject) { var args, signal, entryError; try { args = snapshotBufferArgs(input); signal = abortIndex === undefined ? undefined : fsAbortSignal(args[abortIndex]); entryError = fsAbortError(signal); } catch (error) { reject(error); return; } queueMicrotask(function() { try { var error = entryError || fsAbortError(signal); if (error) throw error; resolve(method.apply(__thaw_fs, abortIndex === undefined ? args : args.concat([signal]))); } catch (error) { reject(error); } }); }); }; } __thaw_fs.promises = { access: promised(__thaw_fs.accessSync), open: function(path, flags) { return promised(function() { return new FileHandle(path, flags); })(); }, readFile: promised(__thaw_fs.readFileSync, 1), readdir: promised(__thaw_fs.readdirSync), opendir: promised(__thaw_fs.opendirSync), stat: promised(__thaw_fs.statSync), lstat: promised(function(path, options) { return statLookup('lstat', path, options, false); }), writeFile: function(path, value, options) { return path instanceof FileHandle ? path._trackOperation(function() { return fsWriteAsync(path, value, options, 'w'); }) : fsWriteAsync(path, value, options, 'w'); }, appendFile: function(path, value, options) { return path instanceof FileHandle ? path._trackOperation(function() { return fsWriteAsync(path, value, options, 'a'); }) : fsWriteAsync(path, value, options, 'a'); }, mkdir: promised(__thaw_fs.mkdirSync), unlink: promised(__thaw_fs.unlinkSync), rm: promised(__thaw_fs.rmSync), rmdir: promised(__thaw_fs.rmdirSync), rename: promised(__thaw_fs.renameSync), copyFile: promised(__thaw_fs.copyFileSync), cp: promised(__thaw_fs.cpSync), realpath: promised(__thaw_fs.realpathSync), mkdtemp: promised(__thaw_fs.mkdtempSync), statfs: promised(__thaw_fs.statfsSync), lutimes: promised(__thaw_fs.lutimesSync), truncate: promised(__thaw_fs.truncateSync) }; __thaw_fs.promises.mkdtempDisposable = function(prefix, options) { if (Buffer.isBuffer(prefix)) prefix = Buffer.from(prefix); return Promise.resolve().then(function() { var created = mkdtempCreated(prefix, options), path = created.path, rawPath = created.rawPath, removal, disposable = { path: path, remove: function() { if (!removal) removal = __thaw_fs.promises.rm(rawPath, { recursive: true, force: true }); return removal; } }; if (Symbol.asyncDispose) disposable[Symbol.asyncDispose] = disposable.remove; return disposable; }); }; function callbackMethod(method, valueResult, abortIndex) { return function() { var args = Array.prototype.slice.call(arguments), callback = args.pop(); if (typeof callback !== 'function') throw new TypeError('callback must be a function'); var signal, entryError; try { args = snapshotBufferArgs(args); signal = abortIndex === undefined ? undefined : fsAbortSignal(args[abortIndex]); entryError = fsAbortError(signal); } catch (error) { queueMicrotask(function() { callback(error); }); return; } queueMicrotask(function() { var value; try { var error = entryError || fsAbortError(signal); if (error) throw error; value = method.apply(__thaw_fs, abortIndex === undefined ? args : args.concat([signal])); } catch (error) { callback(error); return; } if (valueResult) callback(null, value); else callback(null); }); }; } __thaw_fs.readFile = callbackMethod(__thaw_fs.readFileSync, true, 1); __thaw_fs.readdir = callbackMethod(__thaw_fs.readdirSync, true); __thaw_fs.opendir = callbackMethod(__thaw_fs.opendirSync, true); __thaw_fs.stat = callbackMethod(__thaw_fs.statSync, true); __thaw_fs.lstat = callbackMethod(function(path, options) { return statLookup('lstat', path, options, false); }, true); __thaw_fs.writeFile = callbackMethod(__thaw_fs.writeFileSync, false, 2); __thaw_fs.appendFile = callbackMethod(__thaw_fs.appendFileSync, false, 2); __thaw_fs.mkdir = callbackMethod(__thaw_fs.mkdirSync, false); __thaw_fs.unlink = callbackMethod(__thaw_fs.unlinkSync, false); __thaw_fs.rm = callbackMethod(__thaw_fs.rmSync, false); __thaw_fs.rmdir = callbackMethod(__thaw_fs.rmdirSync, false); __thaw_fs.rename = callbackMethod(__thaw_fs.renameSync, false); __thaw_fs.copyFile = callbackMethod(__thaw_fs.copyFileSync, false); __thaw_fs.cp = callbackMethod(__thaw_fs.cpSync, false); __thaw_fs.realpath = callbackMethod(__thaw_fs.realpathSync, true); __thaw_fs.realpath.native = __thaw_fs.realpath; __thaw_fs.mkdtemp = callbackMethod(__thaw_fs.mkdtempSync, true);\n\
+              FileHandle.prototype.utimes = function(atime, mtime) { var self = this; return Promise.resolve().then(function() { self._check(); __thaw_fs.futimesSync(self.fd, atime, mtime); }); }; FileHandle.prototype.chmod = function(mode) { var self = this; return Promise.resolve().then(function() { self._check(); __thaw_fs.fchmodSync(self.fd, mode); }); }; FileHandle.prototype.sync = function() { var self = this; return Promise.resolve().then(function() { self._check(); __thaw_fs.fsyncSync(self.fd); }); }; FileHandle.prototype.datasync = function() { var self = this; return Promise.resolve().then(function() { self._check(); __thaw_fs.fdatasyncSync(self.fd); }); }; FileHandle.prototype.chown = function(uid, gid) { var self = this; return Promise.resolve().then(function() { self._check(); __thaw_fs.fchownSync(self.fd, uid, gid); }); }; Object.assign(__thaw_fs.promises, { link: promised(__thaw_fs.linkSync), symlink: promised(__thaw_fs.symlinkSync), readlink: promised(__thaw_fs.readlinkSync), chmod: promised(__thaw_fs.chmodSync), utimes: promised(__thaw_fs.utimesSync), chown: promised(__thaw_fs.chownSync), lchown: promised(__thaw_fs.lchownSync) }); __thaw_fs.link = callbackMethod(__thaw_fs.linkSync, false); __thaw_fs.symlink = callbackMethod(__thaw_fs.symlinkSync, false); __thaw_fs.readlink = callbackMethod(__thaw_fs.readlinkSync, true); __thaw_fs.chmod = callbackMethod(__thaw_fs.chmodSync, false); __thaw_fs.utimes = callbackMethod(__thaw_fs.utimesSync, false); __thaw_fs.lutimes = callbackMethod(__thaw_fs.lutimesSync, false); __thaw_fs.chown = callbackMethod(__thaw_fs.chownSync, false); __thaw_fs.lchown = callbackMethod(__thaw_fs.lchownSync, false); __thaw_fs.access = callbackMethod(__thaw_fs.accessSync, false); __thaw_fs.statfs = callbackMethod(__thaw_fs.statfsSync, true); __thaw_fs.truncate = callbackMethod(__thaw_fs.truncateSync, false); __thaw_fs.open = callbackMethod(__thaw_fs.openSync, true); __thaw_fs.close = callbackMethod(__thaw_fs.closeSync, false); __thaw_fs.fstat = callbackMethod(__thaw_fs.fstatSync, true); __thaw_fs.ftruncate = callbackMethod(__thaw_fs.ftruncateSync, false); __thaw_fs.fchmod = callbackMethod(__thaw_fs.fchmodSync, false); __thaw_fs.fchown = callbackMethod(__thaw_fs.fchownSync, false); __thaw_fs.futimes = callbackMethod(__thaw_fs.futimesSync, false); __thaw_fs.fsync = callbackMethod(__thaw_fs.fsyncSync, false); __thaw_fs.fdatasync = callbackMethod(__thaw_fs.fdatasyncSync, false); __thaw_fs.read = function(fd, buffer) { var args = Array.prototype.slice.call(arguments), callback = args.pop(); if (typeof callback !== 'function') throw new TypeError('callback must be a function'); queueMicrotask(function() { var count; try { count = __thaw_fs.readSync.apply(__thaw_fs, args); } catch (error) { callback(error); return; } callback(null, count, buffer); }); }; __thaw_fs.write = function(fd, value, offset, length, position, callback) { var args = Array.prototype.slice.call(arguments), done = args.pop(); if (typeof done !== 'function') throw new TypeError('callback must be a function'); queueMicrotask(function() { var count; try { count = __thaw_fs.writeSync.apply(__thaw_fs, args); } catch (error) { done(error); return; } done(null, count, value); }); }; FileHandle.prototype.statfs = function(options) { var self = this; return Promise.resolve().then(function() { self._check(); return new StatFs(fdInvoke('statfs', self.fd), Boolean(options && options.bigint)); }); }; FileHandle.prototype.readv = function(buffers, position) { var self = this; return Promise.resolve().then(function() { self._check(); return { bytesRead: __thaw_fs.readvSync(self.fd, buffers, position), buffers: buffers }; }); }; FileHandle.prototype.writev = function(buffers, position) { var self = this; return Promise.resolve().then(function() { self._check(); return { bytesWritten: __thaw_fs.writevSync(self.fd, buffers, position), buffers: buffers }; }); }; __thaw_fs.readv = function(fd, buffers, position, callback) { if (typeof position === 'function') { callback = position; position = null; } if (typeof callback !== 'function') throw new TypeError('callback must be a function'); queueMicrotask(function() { var count; try { count = __thaw_fs.readvSync(fd, buffers, position); } catch (error) { callback(error); return; } callback(null, count, buffers); }); }; __thaw_fs.writev = function(fd, buffers, position, callback) { if (typeof position === 'function') { callback = position; position = null; } if (typeof callback !== 'function') throw new TypeError('callback must be a function'); queueMicrotask(function() { var count; try { count = __thaw_fs.writevSync(fd, buffers, position); } catch (error) { callback(error); return; } callback(null, count, buffers); }); };;\n\
+              ['readFile','writeFile','appendFile','read','write','stat','truncate','utimes','chmod','sync','datasync','chown','statfs','readv','writev'].forEach(function(name) { var original = FileHandle.prototype[name]; FileHandle.prototype[name] = function() { var self = this, args = arguments; return this._trackOperation(function() { return original.apply(self, args); }); }; });\n\
+              function watchSnapshot(path, recursive, prefix, output) { output = output || Object.create(null); prefix = prefix || Buffer.alloc(0); var stats = __thaw_fs.statSync(path); if (!stats.isDirectory()) { var bytes = cpBytes(path), slash = bytes.lastIndexOf(47), name = prefix.length ? prefix : bytes.subarray(slash + 1); output[name.toString('hex')] = { name: name, signature: String(stats.size) + ':' + String(stats.mtimeMs) }; return output; } __thaw_fs.readdirSync(path, { withFileTypes: true, encoding: 'buffer' }).forEach(function(entry) { var name = prefix.length ? Buffer.concat([prefix, Buffer.from('/'), entry.name]) : entry.name, full = entry._rawPath, value = __thaw_fs.statSync(full); output[name.toString('hex')] = { name: name, signature: String(value.size) + ':' + String(value.mtimeMs) }; if (recursive && value.isDirectory() && !entry.isSymbolicLink()) watchSnapshot(full, true, name, output); }); return output; } function FSWatcher(path, options, listener) { var watchedPath = Buffer.isBuffer(path) ? Buffer.from(path) : pathValue(path); this.path = Buffer.isBuffer(watchedPath) ? Buffer.from(watchedPath) : watchedPath; this.closed = false; this._refed = options.persistent !== false; this._listeners = { change: [], error: [], close: [] }; if (typeof listener === 'function') this.on('change', listener); this._options = options; this._snapshot = watchSnapshot(watchedPath, Boolean(options.recursive)); var self = this; this._timer = setInterval(function() { if (self.closed) return; var current; try { current = watchSnapshot(watchedPath, Boolean(options.recursive)); } catch (error) { self.emit('error', error); self.close(); return; } var previous = self._snapshot, names = Object.keys(Object.assign({}, previous, current)); names.forEach(function(name) { var entry = current[name] || previous[name], filename = options.encoding === 'buffer' ? Buffer.from(entry.name) : entry.name.toString(options.encoding || 'utf8'); if (!(name in previous) || !(name in current)) self.emit('change', 'rename', filename); else if (previous[name].signature !== current[name].signature) self.emit('change', 'change', filename); }); self._snapshot = current; }, Math.max(1, Number(options.interval || 50))); if (!this._refed) this._timer.unref(); this._signal = options.signal; this._abort = function() { self.close(); }; if (this._signal) { if (this._signal.aborted) this.close(); else this._signal.addEventListener('abort', this._abort, { once: true }); } } FSWatcher.prototype.on = FSWatcher.prototype.addListener = function(event, listener) { (this._listeners[event] || (this._listeners[event] = [])).push(listener); return this; }; FSWatcher.prototype.once = function(event, listener) { var self = this, wrapped = function() { self.removeListener(event, wrapped); return listener.apply(self, arguments); }; return this.on(event, wrapped); }; FSWatcher.prototype.removeListener = function(event, listener) { if (this._listeners[event]) this._listeners[event] = this._listeners[event].filter(function(value) { return value !== listener; }); return this; }; FSWatcher.prototype.emit = function(event) { var args = Array.prototype.slice.call(arguments, 1), self = this; (this._listeners[event] || []).slice().forEach(function(listener) { listener.apply(self, args); }); return Boolean((this._listeners[event] || []).length); }; FSWatcher.prototype.close = function() { if (!this.closed) { this.closed = true; clearInterval(this._timer); this._timer = null; if (this._signal) this._signal.removeEventListener('abort', this._abort); this.emit('close'); } return this; }; FSWatcher.prototype.ref = function() { this._refed = true; if (this._timer) this._timer.ref(); return this; }; FSWatcher.prototype.unref = function() { this._refed = false; if (this._timer) this._timer.unref(); return this; }; FSWatcher.prototype.hasRef = function() { return this._refed; }; __thaw_fs.FSWatcher = FSWatcher; __thaw_fs.watch = function(path, options, listener) { if (typeof options === 'function') { listener = options; options = {}; } else if (typeof options === 'string') options = { encoding: options }; return new FSWatcher(path, options || {}, listener); };\n\
+diff --color -ruN ../candidate/crates/thaw-registry/src/registry/builtins/http/http1.rs crates/thaw-registry/src/registry/builtins/http/http1.rs
+--- ../candidate/crates/thaw-registry/src/registry/builtins/http/http1.rs	2026-10-07 00:48:52.955084967 +0900
++++ crates/thaw-registry/src/registry/builtins/http/http1.rs	2026-10-07 00:54:49.793997501 +0900
+@@ -77,6 +77,7 @@
+                return destination;
+              };
+              IncomingMessage.prototype.unpipe = function(destination) { var records = this._pipeRecords.slice(), thrown, hasThrown = false, source = this; records.forEach(function(record) { if (!record.active || (destination !== undefined && record.destination !== destination)) return; try { source._removePipe(record); } catch (error) { if (!hasThrown) { thrown = error; hasThrown = true; } } if (typeof record.destination.emit === 'function') try { record.destination.emit('unpipe', source); } catch (error) { if (!hasThrown) { thrown = error; hasThrown = true; } } }); if (hasThrown) throw thrown; return this; };
++             function normalizeOptions(input, options) { var result = {}; if (typeof input === 'string' || input instanceof URL) { var url = input instanceof URL ? input : new URL(String(input)); result.protocol = url.protocol; result.hostname = url.hostname; if (url.port) result.port = Number(url.port); result.path = url.pathname + url.search; result.auth = url.username ? decodeURIComponent(url.username) + ':' + decodeURIComponent(url.password) : undefined; } else if (input) Object.assign(result, input); if (options) Object.assign(result, options); var expectedProtocol = result._defaultProtocol || 'http:'; result.protocol = result.protocol || expectedProtocol; if (result.protocol !== expectedProtocol) throw new Error('Protocol "' + result.protocol + '" not supported. Expected "' + expectedProtocol + '"'); result.hostname = result.hostname || result.host || 'localhost'; result.port = result.port === undefined ? (expectedProtocol === 'https:' ? 443 : 80) : Number(result.port); result.path = result.path || '/'; result.method = String(result.method || 'GET').toUpperCase(); return result; }
+              function ClientRequest(input, options, callback) { if (!(this instanceof ClientRequest)) return new ClientRequest(input, options, callback); EventEmitter.call(this); if (typeof options === 'function') { callback = options; options = undefined; } this._options = normalizeOptions(input, options); this.method = this._options.method; this.path = this._options.path; this.host = this._options.hostname; this.protocol = this._options.protocol; this.agent = this._options.agent === false ? undefined : (this._options.agent || this._options._globalAgent || globalAgent); this.socket = this.connection = null; this.aborted = false; this.destroyed = false; this.finished = false; this.writableEnded = false; this._headers = Object.create(null); this._headerNames = Object.create(null); this._chunks = []; if (this._options.headers) for (var name of Object.keys(this._options.headers)) this.setHeader(name, this._options.headers[name]); var defaultPort = this.protocol === 'https:' ? 443 : 80; if (!this.hasHeader('host')) this.setHeader('Host', this.host + (this._options.port === defaultPort ? '' : ':' + this._options.port)); if (this._options.auth && !this.hasHeader('authorization')) this.setHeader('Authorization', 'Basic ' + Buffer.from(this._options.auth).toString('base64')); if (typeof callback === 'function') this.once('response', callback); }
+              function validateHeaderName(name, label) { var value = String(name); if (!value || !/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/.test(value)) { var error = new TypeError((label || 'Header name') + ' must be a valid HTTP token ["' + value + '"]'); error.code = 'ERR_INVALID_HTTP_TOKEN'; throw error; } return value; } function validateHeaderValue(name, value) { if (value === undefined) { var missing = new TypeError('Invalid value "undefined" for header "' + name + '"'); missing.code = 'ERR_HTTP_INVALID_HEADER_VALUE'; throw missing; } var values = Array.isArray(value) ? value : [value]; for (var item of values) if (/[^\t\x20-\x7e\x80-\xff]/.test(String(item))) { var error = new TypeError('Invalid character in header content ["' + name + '"]'); error.code = 'ERR_INVALID_CHAR'; throw error; } return value; }
+              ClientRequest.prototype = Object.create(EventEmitter.prototype); ClientRequest.prototype.constructor = ClientRequest; ClientRequest.prototype.setHeader = function(name, value) { name = validateHeaderName(name); validateHeaderValue(name, value); var key = name.toLowerCase(); this._headers[key] = value; this._headerNames[key] = name; return this; }; ClientRequest.prototype.getHeader = function(name) { return this._headers[String(name).toLowerCase()]; }; ClientRequest.prototype.getHeaders = function() { return Object.assign({}, this._headers); }; ClientRequest.prototype.getHeaderNames = function() { return Object.keys(this._headers); }; ClientRequest.prototype.hasHeader = function(name) { return Object.prototype.hasOwnProperty.call(this._headers, String(name).toLowerCase()); }; ClientRequest.prototype.removeHeader = function(name) { var key = String(name).toLowerCase(); delete this._headers[key]; delete this._headerNames[key]; }; ClientRequest.prototype.flushHeaders = function() { return this; }; ClientRequest.prototype.write = function(chunk, encoding, callback) { if (typeof encoding === 'function') { callback = encoding; encoding = undefined; } if (this.writableEnded) throw new Error('write after end'); var value = Buffer.isBuffer(chunk) ? chunk : ArrayBuffer.isView(chunk) ? Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength) : chunk instanceof ArrayBuffer ? Buffer.from(chunk) : Buffer.from(String(chunk), encoding); this._chunks.push(value); if (typeof callback === 'function') queueMicrotask(callback); return true; };
+diff --color -ruN ../candidate/crates/thaw-registry/src/registry/bundle/render.rs crates/thaw-registry/src/registry/bundle/render.rs
+--- ../candidate/crates/thaw-registry/src/registry/bundle/render.rs	2026-10-07 00:48:52.956999374 +0900
++++ crates/thaw-registry/src/registry/bundle/render.rs	2026-10-07 00:50:52.677466719 +0900
+@@ -706,7 +706,7 @@
+          globalThis.__thaw_bundle_create_import = __thaw_bundle_create_import;\n\
+          globalThis.__thaw_bundle_create_import_async = __thaw_bundle_create_import_async;\n\
+          var __thaw_worker_bundle_source =\n\
+-         \x20\x20'(function() {\\nvar __thaw_worker_bundle_source = globalThis.__thaw_worker_bundle_source;\\nvar require = function(name) { if (name === "worker_threads" || name === "node:worker_threads") return globalThis.__thaw_worker_module; if (String(name).endsWith(".node") && typeof require.addon === "function") return require.addon(); var error = new Error("Cannot find module " + name); error.code = "MODULE_NOT_FOUND"; throw error; };\\nrequire.addon = globalThis.require && globalThis.require.addon;\\nvar __thaw_bundle_exports = globalThis.__thaw_bundle_exports || (globalThis.__thaw_bundle_exports = {});\\nvar __thaw_bundle_builtin_names = Object.freeze(' + JSON.stringify(__thaw_bundle_builtin_names) + ');\\nvar __thaw_bundle_cache = {};\\nvar __thaw_bundle_async_keys = ' + JSON.stringify(__thaw_bundle_async_keys) + ';\\nvar __thaw_bundle_edges = Object.create(null);\\nvar __thaw_bundle_star_linkers = Object.create(null);\\nvar __thaw_bundle_edge_version = 0;\\nvar __thaw_bundle_factories = {' +\n\
++         \x20\x20'(function() {\\nvar __thaw_worker_bundle_source = globalThis.__thaw_worker_bundle_source;\\nvar require = function(name) { if (name === \"worker_threads\" || name === \"node:worker_threads\") return globalThis.__thaw_worker_module; if (String(name).endsWith(\".node\") && typeof require.addon === \"function\") return require.addon(); var error = new Error(\"Cannot find module \" + name); error.code = \"MODULE_NOT_FOUND\"; throw error; };\\nrequire.addon = globalThis.require && globalThis.require.addon;\\nvar __thaw_bundle_exports = globalThis.__thaw_bundle_exports || (globalThis.__thaw_bundle_exports = {});\\nvar __thaw_bundle_builtin_names = Object.freeze(' + JSON.stringify(__thaw_bundle_builtin_names) + ');\\nvar __thaw_bundle_cache = {};\\nvar __thaw_bundle_async_keys = ' + JSON.stringify(__thaw_bundle_async_keys) + ';\\nvar __thaw_bundle_edges = Object.create(null);\\nvar __thaw_bundle_star_linkers = Object.create(null);\\nvar __thaw_bundle_edge_version = 0;\\nvar __thaw_bundle_factories = {' +\n\
+          \x20\x20Object.keys(__thaw_bundle_factories).map(function(key) { return JSON.stringify(key) + ': ' + __thaw_bundle_factories[key].toString(); }).join(',\\n') +\n\
+          \x20\x20'};\\nvar __thaw_bundle_require_maps = ' + JSON.stringify(__thaw_bundle_require_maps) + ';\\n' +\n\
+          \x20\x20'var __thaw_bundle_import_maps = ' + JSON.stringify(__thaw_bundle_import_maps) + ';\\n' +\n\
+diff --color -ruN ../candidate/crates/thaw-registry/src/registry/bundle.rs crates/thaw-registry/src/registry/bundle.rs
+--- ../candidate/crates/thaw-registry/src/registry/bundle.rs	2026-10-07 00:48:52.956518421 +0900
++++ crates/thaw-registry/src/registry/bundle.rs	2026-10-07 00:54:27.015030898 +0900
+@@ -126,7 +126,7 @@
+                     let expanded = subpath.replacen('*', capture, 1);
+                     if validate_export_subpath(&expanded).is_ok()
+                         && package_subpath_runtime_target(
+-                            manifest,
++                            &manifest,
+                             &expanded,
+                             conditions,
+                         ).is_some()
+diff --color -ruN ../candidate/crates/thaw-registry/src/registry/install/declarations.rs crates/thaw-registry/src/registry/install/declarations.rs
+--- ../candidate/crates/thaw-registry/src/registry/install/declarations.rs	2026-10-07 00:48:52.957084973 +0900
++++ crates/thaw-registry/src/registry/install/declarations.rs	2026-10-07 00:54:27.013336415 +0900
+@@ -219,9 +219,10 @@
+             }
+             if rest.is_empty() { break; }
+             if rest.starts_with("///") {
+-                if let Some(start) = rest.find("path=\"").map(|index| index + "path=\"".len())
+-                    && let Some(end) = rest[start..].find('"') {
+-                    paths.push(rest[start..start + end].to_string());
++                if let Some(start) = rest.find("path=\"").map(|index| index + "path=\"".len()) {
++                    if let Some(end) = rest[start..].find('"') {
++                        paths.push(rest[start..start + end].to_string());
++                    }
+                 }
+                 break;
+             }
+@@ -2942,7 +2943,7 @@
+             };
+             match declaration {
+                 Some(Decl::TsModule(namespace)) if matches!(&namespace.id,
+-                    TsModuleName::Ident(id) if id.sym == local) => Some(namespace),
++                    TsModuleName::Ident(id) if id.sym == local) => Some(namespace.as_ref()),
+                 _ => None,
+             }
+         })
+@@ -5996,7 +5997,7 @@
+             let mut left = name;
+             while let TsEntityName::TsQualifiedName(qualified) = left {
+                 names.push(qualified.right.sym.to_string());
+-                left = qualified.left.as_ref();
++                left = &qualified.left;
+             }
+             let TsEntityName::Ident(root) = left else { return };
+             names.push(root.sym.to_string());
+diff --color -ruN ../candidate/crates/thaw-registry/src/tests/filesystem.rs crates/thaw-registry/src/tests/filesystem.rs
+--- ../candidate/crates/thaw-registry/src/tests/filesystem.rs	2026-10-07 00:48:52.958084976 +0900
++++ crates/thaw-registry/src/tests/filesystem.rs	2026-10-07 00:56:42.082634259 +0900
+@@ -145,7 +145,7 @@
+     let empty_node_modules = temp_registry("builtin_fs_promises_node_modules");
+     let (bundle, _, file_count, _) =
+         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+-    assert_eq!(file_count, 4);
++    assert_eq!(file_count, 5);
+     let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFsPromises = module.exports;");
+     let source = CString::new(script).unwrap();
+     assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+@@ -227,7 +227,7 @@
+     let empty_node_modules = temp_registry("builtin_fs_paths_node_modules");
+     let (bundle, _, file_count, _) =
+         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+-    assert_eq!(file_count, 4);
++    assert_eq!(file_count, 5);
+     let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFsPaths = module.exports;");
+     let source = CString::new(script).unwrap();
+     assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+@@ -259,7 +259,7 @@
+     let empty_node_modules = temp_registry("builtin_fs_disposable_mkdtemp_node_modules");
+     let (bundle, _, file_count, _) =
+         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+-    assert_eq!(file_count, 4);
++    assert_eq!(file_count, 5);
+     let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseDisposableMkdtemp = module.exports;");
+     let source = CString::new(script).unwrap();
+     assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+@@ -288,7 +288,7 @@
+     let empty_node_modules = temp_registry("builtin_fs_open_as_blob_node_modules");
+     let (bundle, _, file_count, _) =
+         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+-    assert_eq!(file_count, 3);
++    assert_eq!(file_count, 4);
+     let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseOpenAsBlob = module.exports;");
+     let source = CString::new(script).unwrap();
+     assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+@@ -352,7 +352,7 @@
+     let empty_node_modules = temp_registry("builtin_blob_streams_node_modules");
+     let (bundle, _, file_count, _) =
+         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+-    assert_eq!(file_count, 3);
++    assert_eq!(file_count, 4);
+     let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseBlobStreams = module.exports;");
+     let source = CString::new(script).unwrap();
+     assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+@@ -381,7 +381,7 @@
+     let empty_node_modules = temp_registry("builtin_fs_cp_node_modules");
+     let (bundle, _, file_count, _) =
+         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+-    assert_eq!(file_count, 4);
++    assert_eq!(file_count, 5);
+     let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFsCp = module.exports;");
+     let source = CString::new(script).unwrap();
+     assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+@@ -410,7 +410,7 @@
+     let empty_node_modules = temp_registry("builtin_fs_cp_options_node_modules");
+     let (bundle, _, file_count, _) =
+         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+-    assert_eq!(file_count, 4);
++    assert_eq!(file_count, 5);
+     let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFsCpOptions = module.exports;");
+     let source = CString::new(script).unwrap();
+     assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+@@ -442,7 +442,7 @@
+     let empty_node_modules = temp_registry("builtin_fs_file_handle_node_modules");
+     let (bundle, _, file_count, _) =
+         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+-    assert_eq!(file_count, 4);
++    assert_eq!(file_count, 5);
+     let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFsFileHandle = module.exports;");
+     let source = CString::new(script).unwrap();
+     assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+@@ -473,7 +473,7 @@
+     let empty_node_modules = temp_registry("builtin_fs_file_handle_positions_node_modules");
+     let (bundle, _, file_count, _) =
+         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+-    assert_eq!(file_count, 4);
++    assert_eq!(file_count, 5);
+     let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFsFileHandlePositions = module.exports;");
+     let source = CString::new(script).unwrap();
+     assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+@@ -503,7 +503,7 @@
+     let empty_node_modules = temp_registry("builtin_fs_directory_handles_node_modules");
+     let (bundle, _, file_count, _) =
+         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+-    assert_eq!(file_count, 4);
++    assert_eq!(file_count, 5);
+     let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFsDirectoryHandles = module.exports;");
+     let source = CString::new(script).unwrap();
+     assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+@@ -536,7 +536,7 @@
+     let empty_node_modules = temp_registry("builtin_fs_links_node_modules");
+     let (bundle, _, file_count, _) =
+         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+-    assert_eq!(file_count, 4);
++    assert_eq!(file_count, 5);
+     let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFsLinks = module.exports;");
+     let source = CString::new(script).unwrap();
+     assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+@@ -577,7 +577,7 @@
+     let empty_node_modules = temp_registry("builtin_fs_timestamps_node_modules");
+     let (bundle, _, file_count, _) =
+         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+-    assert_eq!(file_count, 4);
++    assert_eq!(file_count, 5);
+     let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFsTimestamps = module.exports;");
+     let source = CString::new(script).unwrap();
+     assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+@@ -609,7 +609,7 @@
+     let empty_node_modules = temp_registry("builtin_fs_ownership_node_modules");
+     let (bundle, _, file_count, _) =
+         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+-    assert_eq!(file_count, 4);
++    assert_eq!(file_count, 5);
+     let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFsOwnership = module.exports;");
+     let source = CString::new(script).unwrap();
+     assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+@@ -649,7 +649,7 @@
+     let empty_node_modules = temp_registry("builtin_fs_watch_file_node_modules");
+     let (bundle, _, file_count, _) =
+         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+-    assert_eq!(file_count, 3);
++    assert_eq!(file_count, 4);
+     let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFsWatchFile = module.exports;");
+     let source = CString::new(script).unwrap();
+     assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+@@ -677,7 +677,7 @@
+     let empty_node_modules = temp_registry("builtin_fs_watch_node_modules");
+     let (bundle, _, file_count, _) =
+         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+-    assert_eq!(file_count, 3);
++    assert_eq!(file_count, 4);
+     let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFsWatch = module.exports;");
+     let source = CString::new(script).unwrap();
+     assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+@@ -709,7 +709,7 @@
+     let empty_node_modules = temp_registry("builtin_fs_glob_node_modules");
+     let (bundle, _, file_count, _) =
+         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+-    assert_eq!(file_count, 4);
++    assert_eq!(file_count, 5);
+     let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFsGlob = module.exports;");
+     let source = CString::new(script).unwrap();
+     assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+@@ -741,7 +741,7 @@
+     let empty_node_modules = temp_registry("builtin_fs_access_node_modules");
+     let (bundle, _, file_count, _) =
+         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+-    assert_eq!(file_count, 4);
++    assert_eq!(file_count, 5);
+     let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFsAccess = module.exports;");
+     let source = CString::new(script).unwrap();
+     assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+@@ -777,7 +777,7 @@
+     let empty_node_modules = temp_registry("builtin_fs_numeric_descriptors_node_modules");
+     let (bundle, _, file_count, _) =
+         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+-    assert_eq!(file_count, 3);
++    assert_eq!(file_count, 4);
+     let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFsNumericDescriptors = module.exports;");
+     let source = CString::new(script).unwrap();
+     assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+@@ -810,7 +810,7 @@
+     let empty_node_modules = temp_registry("builtin_fs_scatter_gather_node_modules");
+     let (bundle, _, file_count, _) =
+         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+-    assert_eq!(file_count, 4);
++    assert_eq!(file_count, 5);
+     let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFsScatterGather = module.exports;");
+     let source = CString::new(script).unwrap();
+     assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+@@ -841,7 +841,7 @@
+     let empty_node_modules = temp_registry("builtin_fs_statfs_node_modules");
+     let (bundle, _, file_count, _) =
+         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+-    assert_eq!(file_count, 4);
++    assert_eq!(file_count, 5);
+     let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFsStatfs = module.exports;");
+     let source = CString::new(script).unwrap();
+     assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+@@ -888,7 +888,7 @@
+     let empty_node_modules = temp_registry("builtin_fs_lstat_symlinks_node_modules");
+     let (bundle, _, file_count, _) =
+         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+-    assert_eq!(file_count, 4);
++    assert_eq!(file_count, 5);
+     let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFsLstatSymlinks = module.exports;");
+     let source = CString::new(script).unwrap();
+     assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+@@ -920,7 +920,7 @@
+     let empty_node_modules = temp_registry("builtin_fs_lutimes_node_modules");
+     let (bundle, _, file_count, _) =
+         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+-    assert_eq!(file_count, 4);
++    assert_eq!(file_count, 5);
+     let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFsLutimes = module.exports;");
+     let source = CString::new(script).unwrap();
+     assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+@@ -952,7 +952,7 @@
+     let empty_node_modules = temp_registry("builtin_fs_operation_options_node_modules");
+     let (bundle, _, file_count, _) =
+         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+-    assert_eq!(file_count, 4);
++    assert_eq!(file_count, 5);
+     let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFsOperationOptions = module.exports;");
+     let source = CString::new(script).unwrap();
+     assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+@@ -988,7 +988,7 @@
+     let empty_node_modules = temp_registry("builtin_fs_recursive_readdir_node_modules");
+     let (bundle, _, file_count, _) =
+         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+-    assert_eq!(file_count, 4);
++    assert_eq!(file_count, 5);
+     let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFsRecursiveReaddir = module.exports;");
+     let source = CString::new(script).unwrap();
+     assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+@@ -1048,7 +1048,7 @@
+     let empty_node_modules = temp_registry("builtin_fs_write_flags_node_modules");
+     let (bundle, _, file_count, _) =
+         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+-    assert_eq!(file_count, 4);
++    assert_eq!(file_count, 5);
+     let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFsWriteFlags = module.exports;");
+     let source = CString::new(script).unwrap();
+     assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+@@ -1096,7 +1096,7 @@
+     let empty_node_modules = temp_registry("builtin_fs_numeric_flags_node_modules");
+     let (bundle, _, file_count, _) =
+         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+-    assert_eq!(file_count, 3);
++    assert_eq!(file_count, 4);
+     let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFsNumericFlags = module.exports;");
+     let source = CString::new(script).unwrap();
+     assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+@@ -1156,7 +1156,7 @@
+     let empty_node_modules = temp_registry("builtin_fs_stream_positions_modules");
+     let (bundle, _, file_count, _) =
+         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+-    assert_eq!(file_count, 3);
++    assert_eq!(file_count, 4);
+     let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFsStreamPositions = module.exports;");
+     let source = CString::new(script).unwrap();
+     assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+@@ -1213,7 +1213,7 @@
+     let empty_node_modules = temp_registry("builtin_fs_creation_modes_node_modules");
+     let (bundle, _, file_count, _) =
+         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+-    assert_eq!(file_count, 4);
++    assert_eq!(file_count, 5);
+     let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFsCreationModes = module.exports;");
+     let source = CString::new(script).unwrap();
+     assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+@@ -1243,7 +1243,7 @@
+     let empty_node_modules = temp_registry("builtin_fs_truncate_sync_node_modules");
+     let (bundle, _, file_count, _) =
+         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+-    assert_eq!(file_count, 4);
++    assert_eq!(file_count, 5);
+     let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFsTruncateSync = module.exports;");
+     let source = CString::new(script).unwrap();
+     assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+@@ -1277,7 +1277,7 @@
+     let empty_node_modules = temp_registry("builtin_fs_bigint_stats_node_modules");
+     let (bundle, _, file_count, _) =
+         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+-    assert_eq!(file_count, 4);
++    assert_eq!(file_count, 5);
+     let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFsBigintStats = module.exports;");
+     let source = CString::new(script).unwrap();
+     assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+@@ -1333,7 +1333,7 @@
+     let empty_node_modules = temp_registry("builtin_fs_promises_watch_node_modules");
+     let (bundle, _, file_count, _) =
+         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+-    assert_eq!(file_count, 4);
++    assert_eq!(file_count, 5);
+     let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFsPromisesWatch = module.exports;");
+     let source = CString::new(script).unwrap();
+     assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+@@ -1366,7 +1366,7 @@
+     let empty_node_modules = temp_registry("builtin_fs_retained_descriptors_node_modules");
+     let (bundle, _, file_count, _) =
+         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+-    assert_eq!(file_count, 3);
++    assert_eq!(file_count, 4);
+     let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFsRetainedDescriptors = module.exports;");
+     let source = CString::new(script).unwrap();
+     assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+@@ -1396,7 +1396,7 @@
+     let empty_node_modules = temp_registry("builtin_fs_fd_short_vector_node_modules");
+     let (bundle, _, file_count, _) =
+         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+-    assert_eq!(file_count, 3);
++    assert_eq!(file_count, 4);
+     let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFsFdShortVector = module.exports;");
+     let source = CString::new(script).unwrap();
+     assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+@@ -1424,7 +1424,7 @@
+     let empty_node_modules = temp_registry("builtin_fs_watch_missing_bigint_node_modules");
+     let (bundle, _, file_count, _) =
+         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+-    assert_eq!(file_count, 3);
++    assert_eq!(file_count, 4);
+     let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFsWatchMissing = module.exports;");
+     let source = CString::new(script).unwrap();
+     assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+@@ -1603,7 +1603,7 @@
+     let empty_node_modules = temp_registry("builtin_fs_raw_names_node_modules");
+     let (bundle, _, file_count, _) =
+         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+-    assert_eq!(file_count, 3);
++    assert_eq!(file_count, 4);
+     let raw_file = dir.join(OsString::from_vec(vec![0xff]));
+     let raw_directory = dir.join(OsString::from_vec(vec![0xfe]));
+     fs::write(&raw_file, b"F").unwrap();
+@@ -1638,7 +1638,7 @@
+     let empty_node_modules = temp_registry("builtin_fs_second_file_urls_node_modules");
+     let (bundle, _, file_count, _) =
+         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+-    assert_eq!(file_count, 3);
++    assert_eq!(file_count, 4);
+     let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseSecondFileUrls = module.exports;");
+     let source = CString::new(script).unwrap();
+     assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+@@ -1669,7 +1669,7 @@
+     let empty_node_modules = temp_registry("builtin_fs_raw_disposable_node_modules");
+     let (bundle, _, file_count, _) =
+         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+-    assert_eq!(file_count, 3);
++    assert_eq!(file_count, 4);
+     let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseRawDisposable = module.exports;");
+     let source = CString::new(script).unwrap();
+     assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+@@ -1734,7 +1734,7 @@
+     let empty_node_modules = temp_registry("builtin_fs_deferred_buffer_paths_node_modules");
+     let (bundle, _, file_count, _) =
+         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+-    assert_eq!(file_count, 3);
++    assert_eq!(file_count, 4);
+     let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseDeferredBufferPaths = module.exports;");
+     let source = CString::new(script).unwrap();
+     assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+@@ -1821,7 +1821,7 @@
+     let modules = temp_registry("builtin_fs_statfs_bigint_exact_wire_modules");
+     let (bundle, _, file_count, _) =
+         bundle_commonjs_package(&modules, "pkg", &dir, "index.js").unwrap();
+-    assert_eq!(file_count, 3);
++    assert_eq!(file_count, 4);
+     let source = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseStatfsExact = module.exports;")).unwrap();
+     assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+     let function = CString::new("exerciseStatfsExact").unwrap();
+@@ -1921,7 +1921,7 @@
+     let empty_node_modules = temp_registry("builtin_fs_write_stream_encoding_modules");
+     let (bundle, _, file_count, _) =
+         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+-    assert_eq!(file_count, 3);
++    assert_eq!(file_count, 4);
+     let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFsWriteStreamEncoding = module.exports;");
+     let source = CString::new(script).unwrap();
+     assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+@@ -1972,7 +1972,7 @@
+     let empty_node_modules = temp_registry("builtin_fs_filehandle_pending_close_modules");
+     let (bundle, _, file_count, _) =
+         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+-    assert_eq!(file_count, 3);
++    assert_eq!(file_count, 4);
+     let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFsFilehandleClose = module.exports;");
+     let source = CString::new(script).unwrap();
+     assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+@@ -2012,7 +2012,7 @@
+     let empty_node_modules = temp_registry("builtin_fs_write_stream_close_modules");
+     let (bundle, _, file_count, _) =
+         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+-    assert_eq!(file_count, 3);
++    assert_eq!(file_count, 4);
+     let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFsWriteStreamClose = module.exports;");
+     let source = CString::new(script).unwrap();
+     assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+diff --color -ruN ../candidate/crates/thaw-registry/src/tests/network.rs crates/thaw-registry/src/tests/network.rs
+--- ../candidate/crates/thaw-registry/src/tests/network.rs	2026-10-07 00:48:52.958084976 +0900
++++ crates/thaw-registry/src/tests/network.rs	2026-10-07 00:56:42.085634267 +0900
+@@ -30,7 +30,7 @@
+     let empty_node_modules = temp_registry("builtin_constants_node_modules");
+     let (bundle, _, file_count, _) =
+         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+-    assert_eq!(file_count, 4);
++    assert_eq!(file_count, 5);
+     let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseConstants = module.exports;");
+     let source = CString::new(script).unwrap();
+     assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+@@ -1080,7 +1080,7 @@
+     let empty_node_modules = temp_registry("global_fetch_node_modules");
+     let (bundle, _, file_count, _) =
+         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+-    assert_eq!(file_count, 6);
++    assert_eq!(file_count, 7);
+     let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFetch = module.exports;");
+     let source = CString::new(script).unwrap();
+     assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+@@ -1910,7 +1910,7 @@
+     assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+     let function = CString::new("exerciseHttpsClient").unwrap();
+     let ca = fs::read_to_string(&cert_pem).unwrap();
+-    let arguments = CString::new(serde_json::to_string(&(port, ca)).unwrap()).unwrap();
++    let arguments = CString::new(serde_json::to_string(&(port, &ca)).unwrap()).unwrap();
+     let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+     let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+     assert_eq!(
+diff --color -ruN ../candidate/crates/thaw-registry/src/tests/node_core.rs crates/thaw-registry/src/tests/node_core.rs
+--- ../candidate/crates/thaw-registry/src/tests/node_core.rs	2026-10-07 00:48:52.958084976 +0900
++++ crates/thaw-registry/src/tests/node_core.rs	2026-10-07 00:56:42.087634273 +0900
+@@ -139,7 +139,7 @@
+     let empty_node_modules = temp_registry("builtin_url_legacy_node_modules");
+     let (bundle, _, file_count, _) =
+         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+-    assert_eq!(file_count, 2);
++    assert_eq!(file_count, 3);
+     let script = format!(
+         "globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseUrl = module.exports;"
+     );
+diff --color -ruN ../candidate/crates/thaw-registry/src/tests/platform.rs crates/thaw-registry/src/tests/platform.rs
+--- ../candidate/crates/thaw-registry/src/tests/platform.rs	2026-10-07 00:48:52.959084979 +0900
++++ crates/thaw-registry/src/tests/platform.rs	2026-10-07 00:50:52.679466725 +0900
+@@ -311,7 +311,7 @@
+     let dir = temp_registry("builtin_worker_threads");
+     fs::write(
+             dir.join("index.js"),
+-            "var workers = require('node:worker_threads'); module.exports = async function () { var channel = new workers.MessageChannel(); var original = { value: 7 }; channel.port1.postMessage(original); original.value = 9; var received = workers.receiveMessageOnPort(channel.port2); var pending = new Promise(function(resolve) { channel.port2.once('message', resolve); }); channel.port1.postMessage(new Map([['answer', 42]])); var asynchronous = await pending; workers.setEnvironmentData('config', { enabled: true }); var environment = workers.getEnvironmentData('config'); environment.enabled = false; var freshEnvironment = workers.getEnvironmentData('config'); var protectedBuffer = new ArrayBuffer(4); workers.markAsUntransferable(protectedBuffer); var transferRejected = false; try { channel.port1.postMessage('x', [protectedBuffer]); } catch (error) { transferRejected = error.name === 'DataCloneError'; } var transferStillAttached = protectedBuffer.byteLength === 4; var cloneTransferRejected = false; try { structuredClone(protectedBuffer, { transfer: [protectedBuffer] }); } catch (error) { cloneTransferRejected = error.name === 'DataCloneError'; } var cloneTransferStillAttached = protectedBuffer.byteLength === 4; var originalSpawn = globalThis.__thaw_worker_spawn, nativeSpawns = 0; globalThis.__thaw_worker_spawn = function() { nativeSpawns++; return 48701; }; var workerTransferRejected = false; try { new workers.Worker("void 0;", { eval: true, transferList: [protectedBuffer] }); } catch (error) { workerTransferRejected = error.name === "DataCloneError"; } finally { globalThis.__thaw_worker_spawn = originalSpawn; } var workerTransferStillAttached = protectedBuffer.byteLength === 4; var protectedObject = { value: 1 }; workers.markAsUncloneable(protectedObject); var cloneRejected = false; try { structuredClone({ nested: protectedObject }); } catch (error) { cloneRejected = error.name === 'DataCloneError'; } var cloneReads = 0, cloneGetter = structuredClone({ get value() { cloneReads++; return cloneReads; } }); var portReads = 0; channel.port1.postMessage({ get value() { portReads++; return portReads; } }); var portGetter = workers.receiveMessageOnPort(channel.port2); var nestedReads = 0, nestedRejected = false; try { structuredClone({ get nested() { nestedReads++; return protectedObject; } }); } catch (error) { nestedRejected = error.name === 'DataCloneError'; } var cycle = {}; cycle.self = cycle; cycle.marked = protectedObject; var mapRejected = false, setRejected = false; try { structuredClone(new Map([[cycle, 1]])); } catch (error) { mapRejected = error.name === 'DataCloneError'; } try { structuredClone(new Set([cycle])); } catch (error) { setRejected = error.name === 'DataCloneError'; } var portMarkedRejected = false; try { channel.port1.postMessage({ child: protectedObject }); } catch (error) { portMarkedRejected = error.name === 'DataCloneError'; } var extra = new workers.MessageChannel(); channel.port1.postMessage({ port: extra.port1 }, [extra.port1]); var transferred = workers.receiveMessageOnPort(channel.port2); transferred.message.port.postMessage('through'); var through = workers.receiveMessageOnPort(extra.port2).message; var broadcastSender = new workers.BroadcastChannel('sync-receive'), broadcastReceiver = new workers.BroadcastChannel('sync-receive'); broadcastSender.postMessage({ value: 5 }); var broadcast = workers.receiveMessageOnPort(broadcastReceiver); broadcastSender.close(); broadcastReceiver.close(); extra.port1.close(); extra.port2.close(); channel.port1.unref(); var refed = channel.port1.hasRef(); channel.port1.ref(); channel.port1.close(); channel.port2.close(); return [workers.isMainThread, workers.threadId, workers.parentPort, received.message.value, asynchronous.get('answer'), freshEnvironment.enabled, refed, channel.port1.hasRef(), workers.SHARE_ENV === Symbol.for('nodejs.worker_threads.SHARE_ENV'), workers.receiveMessageOnPort(channel.port2) === undefined, workers.isMarkedAsUntransferable(protectedBuffer), transferRejected, transferStillAttached, cloneTransferRejected, cloneTransferStillAttached, workerTransferRejected, workerTransferStillAttached, nativeSpawns, cloneRejected, cloneReads, cloneGetter.value, portReads, portGetter.message.value, nestedReads, nestedRejected, mapRejected, setRejected, portMarkedRejected, broadcast.message.value, through]; };",
++            "var workers = require('node:worker_threads'); module.exports = async function () { var channel = new workers.MessageChannel(); var original = { value: 7 }; channel.port1.postMessage(original); original.value = 9; var received = workers.receiveMessageOnPort(channel.port2); var pending = new Promise(function(resolve) { channel.port2.once('message', resolve); }); channel.port1.postMessage(new Map([['answer', 42]])); var asynchronous = await pending; workers.setEnvironmentData('config', { enabled: true }); var environment = workers.getEnvironmentData('config'); environment.enabled = false; var freshEnvironment = workers.getEnvironmentData('config'); var protectedBuffer = new ArrayBuffer(4); workers.markAsUntransferable(protectedBuffer); var transferRejected = false; try { channel.port1.postMessage('x', [protectedBuffer]); } catch (error) { transferRejected = error.name === 'DataCloneError'; } var transferStillAttached = protectedBuffer.byteLength === 4; var cloneTransferRejected = false; try { structuredClone(protectedBuffer, { transfer: [protectedBuffer] }); } catch (error) { cloneTransferRejected = error.name === 'DataCloneError'; } var cloneTransferStillAttached = protectedBuffer.byteLength === 4; var originalSpawn = globalThis.__thaw_worker_spawn, nativeSpawns = 0; globalThis.__thaw_worker_spawn = function() { nativeSpawns++; return 48701; }; var workerTransferRejected = false; try { new workers.Worker(\"void 0;\", { eval: true, transferList: [protectedBuffer] }); } catch (error) { workerTransferRejected = error.name === \"DataCloneError\"; } finally { globalThis.__thaw_worker_spawn = originalSpawn; } var workerTransferStillAttached = protectedBuffer.byteLength === 4; var protectedObject = { value: 1 }; workers.markAsUncloneable(protectedObject); var cloneRejected = false; try { structuredClone({ nested: protectedObject }); } catch (error) { cloneRejected = error.name === 'DataCloneError'; } var cloneReads = 0, cloneGetter = structuredClone({ get value() { cloneReads++; return cloneReads; } }); var portReads = 0; channel.port1.postMessage({ get value() { portReads++; return portReads; } }); var portGetter = workers.receiveMessageOnPort(channel.port2); var nestedReads = 0, nestedRejected = false; try { structuredClone({ get nested() { nestedReads++; return protectedObject; } }); } catch (error) { nestedRejected = error.name === 'DataCloneError'; } var cycle = {}; cycle.self = cycle; cycle.marked = protectedObject; var mapRejected = false, setRejected = false; try { structuredClone(new Map([[cycle, 1]])); } catch (error) { mapRejected = error.name === 'DataCloneError'; } try { structuredClone(new Set([cycle])); } catch (error) { setRejected = error.name === 'DataCloneError'; } var portMarkedRejected = false; try { channel.port1.postMessage({ child: protectedObject }); } catch (error) { portMarkedRejected = error.name === 'DataCloneError'; } var extra = new workers.MessageChannel(); channel.port1.postMessage({ port: extra.port1 }, [extra.port1]); var transferred = workers.receiveMessageOnPort(channel.port2); transferred.message.port.postMessage('through'); var through = workers.receiveMessageOnPort(extra.port2).message; var broadcastSender = new workers.BroadcastChannel('sync-receive'), broadcastReceiver = new workers.BroadcastChannel('sync-receive'); broadcastSender.postMessage({ value: 5 }); var broadcast = workers.receiveMessageOnPort(broadcastReceiver); broadcastSender.close(); broadcastReceiver.close(); extra.port1.close(); extra.port2.close(); channel.port1.unref(); var refed = channel.port1.hasRef(); channel.port1.ref(); channel.port1.close(); channel.port2.close(); return [workers.isMainThread, workers.threadId, workers.parentPort, received.message.value, asynchronous.get('answer'), freshEnvironment.enabled, refed, channel.port1.hasRef(), workers.SHARE_ENV === Symbol.for('nodejs.worker_threads.SHARE_ENV'), workers.receiveMessageOnPort(channel.port2) === undefined, workers.isMarkedAsUntransferable(protectedBuffer), transferRejected, transferStillAttached, cloneTransferRejected, cloneTransferStillAttached, workerTransferRejected, workerTransferStillAttached, nativeSpawns, cloneRejected, cloneReads, cloneGetter.value, portReads, portGetter.message.value, nestedReads, nestedRejected, mapRejected, setRejected, portMarkedRejected, broadcast.message.value, through]; };",
+         )
+         .unwrap();
+     let empty_node_modules = temp_registry("builtin_worker_threads_node_modules");
+diff --color -ruN ../candidate/crates/thaw-registry/src/tests/stream_web.rs crates/thaw-registry/src/tests/stream_web.rs
+--- ../candidate/crates/thaw-registry/src/tests/stream_web.rs	2026-10-07 00:48:52.960084982 +0900
++++ crates/thaw-registry/src/tests/stream_web.rs	2026-10-07 00:56:42.084015362 +0900
+@@ -10,7 +10,7 @@
+     let empty_node_modules = temp_registry("builtin_fs_streams_node_modules");
+     let (bundle, _, file_count, _) =
+         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+-    assert_eq!(file_count, 3);
++    assert_eq!(file_count, 4);
+     let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFsStreams = module.exports;");
+     let source = CString::new(script).unwrap();
+     assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+@@ -41,7 +41,7 @@
+     let empty_node_modules = temp_registry("builtin_fs_incremental_streams_node_modules");
+     let (bundle, _, file_count, _) =
+         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+-    assert_eq!(file_count, 3);
++    assert_eq!(file_count, 4);
+     let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseIncrementalFsStreams = module.exports;");
+     let source = CString::new(script).unwrap();
+     assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+@@ -74,7 +74,7 @@
+     let empty_node_modules = temp_registry("builtin_fs_stream_backpressure_node_modules");
+     let (bundle, _, file_count, _) =
+         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+-    assert_eq!(file_count, 3);
++    assert_eq!(file_count, 4);
+     let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFsStreamBackpressure = module.exports;");
+     let source = CString::new(script).unwrap();
+     assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+diff --color -ruN ../candidate/crates/thaw-registry/src/tests.rs crates/thaw-registry/src/tests.rs
+--- ../candidate/crates/thaw-registry/src/tests.rs	2026-10-07 00:48:52.957084973 +0900
++++ crates/thaw-registry/src/tests.rs	2026-10-07 00:56:50.380186980 +0900
+@@ -165,8 +165,8 @@
+     let (bundle, _, file_count, _) =
+         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+     assert_eq!(
+-        file_count, 5,
+-        "pkg's index.js + fs/path/os/stream polyfills"
++        file_count, 6,
++        "pkg's index.js + fs/path/os/stream/events polyfills"
+     );
+ 
+     let script = format!(

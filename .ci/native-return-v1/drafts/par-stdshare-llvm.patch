@@ -1,0 +1,15 @@
+diff --color -ruN snap/crates-base-2/thaw-llvm/src/hir_codegen/runtime_declarations.rs ws-stdshare/crates/thaw-llvm/src/hir_codegen/runtime_declarations.rs
+--- snap/crates-base-2/thaw-llvm/src/hir_codegen/runtime_declarations.rs	2026-10-07 00:48:54.171534441 +0900
++++ ws-stdshare/crates/thaw-llvm/src/hir_codegen/runtime_declarations.rs	2026-10-07 01:16:52.467227671 +0900
+@@ -2298,6 +2298,11 @@
+             Some(Linkage::External),
+         );
+         self.module.add_function(
++            "thaw_json_share",
++            i8_ptr.fn_type(&[i8_ptr.into()], false),
++            Some(Linkage::External),
++        );
++        self.module.add_function(
+             "thaw_json_state_key",
+             i8_ptr.fn_type(&[i8_ptr.into()], false),
+             Some(Linkage::External),

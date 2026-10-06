@@ -1,0 +1,506 @@
+diff --color -ruN candidate/crates/thaw-hir/src/lower/expressions/lowering.rs ws-hir/crates/thaw-hir/src/lower/expressions/lowering.rs
+--- candidate/crates/thaw-hir/src/lower/expressions/lowering.rs	2026-10-07 00:48:54.424236656 +0900
++++ ws-hir/crates/thaw-hir/src/lower/expressions/lowering.rs	2026-10-07 00:57:22.081590717 +0900
+@@ -704,18 +704,6 @@
+             ])),
+             Expr::Ident(ident) => {
+                 let name = self.resolve_binding(ident.sym.as_ref());
+-                if let Some((reserved, read)) = self.parameter_tdz_fallbacks.get(ident.sym.as_ref()) {
+-                    // A nested arrow/function may bind the same spelling.
+-                    // Its own parameter is initialized independently of the
+-                    // enclosing method's still-uninitialized parameter.
+-                    if reserved == &name { return Ok(read.clone()); }
+-                }
+-                if let Some((reserved, cell, payload)) = self.parameter_shared_cells.get(ident.sym.as_ref()) {
+-                    if reserved == &name {
+-                        return Ok(target_to_read_expr(&Target::ParameterCell(
+-                            cell.clone(), payload.clone()))?);
+-                    }
+-                }
+                 // A read of a `new Proxy(target, handler)`'s own `target`
+                 // identifier, redirected to re-read the live QuickJS
+                 // handle a `set` trap's mutation actually reaches (see
+@@ -745,7 +733,13 @@
+                         } else {
+                             signature.ret.clone()
+                         };
+-                        return self.function_ref_from_signature(name, signature, ret);
++                        // ponytail: a `this`-using function stays a plain FunctionRef;
++                        // FunctionRefThis needs `.bind` lowering and llvm support first.
++                        return Ok(HirExpr::FunctionRef(
++                            name,
++                            signature.params.clone(),
++                            ret,
++                        ));
+                     }
+                     // A bare class-name reference (not immediately
+                     // `new`'d) -- real trigger: `class-transformer`'s
+@@ -992,17 +986,10 @@
+                     return Ok(HirExpr::Lit(HirLit::Undefined));
+                 }
+                 if self.class_static_context {
+-                    let bound = self.resolve_binding("this");
+-                    if self.scope.contains_key(&bound) {
+-                        return Ok(HirExpr::Var(bound));
+-                    }
+                     let class = self
+                         .class_context
+                         .as_deref()
+                         .ok_or("static `this` is missing its class context")?;
+-                    if let Some(token) = self.class_value_token(class) {
+-                        return Ok(HirExpr::Var(token));
+-                    }
+                     let constructor = class_constructor_symbol(class);
+                     let signature = self.signatures.get(&constructor).ok_or_else(|| {
+                         format!("static `this` constructor `{constructor}` is not declared")
+@@ -3327,31 +3314,6 @@
+                     .ok_or("`super` property access is only valid in a derived class")?;
+                 let property = super_property_name(&member.prop)?;
+                 if self.class_static_context {
+-                    if let Some(base_token) = self.static_super_base_handle() {
+-                        if let Some(receiver) = self.static_this_token_expr() {
+-                            let field = class_static_field_symbol(&base_name, &property);
+-                            let ty = self.scope.get(&field).cloned().or_else(|| {
+-                                self.signatures.get(&class_getter_symbol(&base_name, &property, true))
+-                                    .map(|signature| signature.ret.clone())
+-                            });
+-                            let has_method = self.signatures.contains_key(
+-                                &class_static_method_symbol(&base_name, &property));
+-                            if ty.is_some() || has_method {
+-                                let capture = format!("__thaw_super_read_base_{}", self.next_binding);
+-                                self.next_binding += 1;
+-                                let live = HirExpr::Call(
+-                                    Box::new(HirExpr::Var("__thaw_get_super_static_property_json".into())),
+-                                    vec![HirExpr::Var(capture.clone()), receiver,
+-                                        HirExpr::Lit(HirLit::Str(property))],
+-                                );
+-                                let live = self.wrap_static_super_base_use(capture, base_token, live)?;
+-                                return Ok(match ty {
+-                                    Some(HirType::Function(..) | HirType::CallableFunction(..) | HirType::FunctionWithThis(..)) | None => live,
+-                                    Some(ty) => HirExpr::JsonAsNative(Box::new(live), ty),
+-                                });
+-                            }
+-                        }
+-                    }
+                     let storage = class_static_field_symbol(&base_name, &property);
+                     if self.scope.contains_key(&storage) {
+                         return Ok(HirExpr::Var(storage));
+diff --color -ruN candidate/crates/thaw-hir/src/lower/invocations/calls.rs ws-hir/crates/thaw-hir/src/lower/invocations/calls.rs
+--- candidate/crates/thaw-hir/src/lower/invocations/calls.rs	2026-10-07 00:48:54.424236656 +0900
++++ ws-hir/crates/thaw-hir/src/lower/invocations/calls.rs	2026-10-07 00:54:10.512421575 +0900
+@@ -2559,3 +2559,119 @@
+         }
+     }
+ }
++
++// The ordinary Error classes still travel as a tagged string (`Error`
++// annotations lower to `Str`; `__thaw_error_initialize_slot` has no codegen),
++// so these helpers keep the pre-f15 representation instead of inventing a
++// record layout the backend cannot build.
++impl<'a> FnLowerer<'a> {
++    /// `new Error(message?, options?)` and the other ordinary error classes.
++    fn lower_builtin_error_object(
++        &mut self,
++        class_name: &str,
++        args: &[swc_ecma_ast::ExprOrSpread],
++    ) -> Result<HirExpr, String> {
++        if args.iter().any(|argument| argument.spread.is_some()) {
++            return Err(format!("`new {class_name}()` does not support spread arguments"));
++        }
++        if args.len() > 2 {
++            return Err(format!(
++                "`new {class_name}()` expects at most a message and options argument"
++            ));
++        }
++        let message = match args.first() {
++            Some(argument) => {
++                let message = self.lower_expr(&argument.expr)?;
++                self.coerce_primitive_to_string(message)?
++            }
++            None => HirExpr::Lit(HirLit::Str(String::new())),
++        };
++        let tagged = HirExpr::Call(
++            Box::new(HirExpr::Var("__thaw_error_frame".to_string())),
++            vec![HirExpr::Lit(HirLit::Str(class_name.to_string())), message],
++        );
++        let Some(options) = args.get(1) else {
++            return Ok(tagged);
++        };
++        let options = self.lower_expr(&options.expr)?;
++        let options_type = self.infer_expr_type(&options)?;
++        let HirType::Object(fields) = &options_type else {
++            return Err("Error options must be an object with a `cause` field".into());
++        };
++        let cause_type = fields
++            .iter()
++            .find(|(name, _)| name == "cause")
++            .map(|(_, ty)| ty)
++            .ok_or("Error options must have a `cause` field")?;
++        let cause = HirExpr::PropAccess(Box::new(options), options_type.clone(), "cause".to_string());
++        let cause = match cause_type {
++            HirType::Str => cause,
++            _ => self.coerce_primitive_to_string(cause)?,
++        };
++        let with_marker = HirExpr::Call(
++            Box::new(HirExpr::Var("__thaw_string_concat".to_string())),
++            vec![tagged, HirExpr::Lit(HirLit::Str("\u{2}".to_string()))],
++        );
++        Ok(HirExpr::Call(
++            Box::new(HirExpr::Var("__thaw_string_concat".to_string())),
++            vec![with_marker, cause],
++        ))
++    }
++
++    /// A trusted Error-family record: the first field is the class-identity
++    /// marker, kept hidden from enumeration like every other marker.
++    // ponytail: `message_present`/`cause_present` (own-property presence) are
++    // not representable without `__thaw_error_initialize_slot` codegen, so an
++    // omitted message reads as "" and an omitted cause as undefined.
++    fn lower_trusted_error_fields(
++        &mut self,
++        fields: Vec<(Symbol, HirExpr)>,
++        _message_present: HirExpr,
++        _cause_present: Option<HirExpr>,
++    ) -> Result<HirExpr, String> {
++        let marker = match fields.first() {
++            Some((name, _)) if name.starts_with("__thaw_class_identity_\u{1e}") => name.clone(),
++            _ => return Err("Error record needs a leading class-identity marker".into()),
++        };
++        Ok(HirExpr::Call(
++            Box::new(HirExpr::Var("__thaw_object_hide_marker".to_string())),
++            vec![HirExpr::ObjectLit(fields), HirExpr::Lit(HirLit::Str(marker))],
++        ))
++    }
++
++    /// `AggregateError`'s `errors`: only statically typed arrays/tuples have a
++    /// native representation today.
++    fn native_aggregate_errors_as_json(
++        &mut self,
++        source: HirExpr,
++        ty: &HirType,
++    ) -> Result<HirExpr, String> {
++        if matches!(ty, HirType::Array(_) | HirType::Tuple(_)) {
++            Ok(source)
++        } else {
++            Err("`AggregateError` errors must be a statically typed array or tuple".into())
++        }
++    }
++
++    /// No live nominal projection of an options object exists yet; `None` tells
++    /// the caller to use its typed/Json paths (it is not an empty `cause`).
++    fn native_error_options_live_json(
++        &mut self,
++        _source: HirExpr,
++        _ty: &HirType,
++    ) -> Result<Option<HirExpr>, String> {
++        Ok(None)
++    }
++
++    /// `(has cause, cause)` for a fixed-layout options object that has no
++    /// `cause` slot and no accessor: the property is simply absent.
++    fn native_error_options_cause(
++        &mut self,
++        _source: HirExpr,
++        ty: &HirType,
++    ) -> Result<Option<(HirExpr, HirExpr)>, String> {
++        Ok(matches!(ty, HirType::Object(_)).then(|| {
++            (HirExpr::Lit(HirLit::Bool(false)), HirExpr::Lit(HirLit::Undefined))
++        }))
++    }
++}
+diff --color -ruN candidate/crates/thaw-hir/src/lower/invocations/static_builtins.rs ws-hir/crates/thaw-hir/src/lower/invocations/static_builtins.rs
+--- candidate/crates/thaw-hir/src/lower/invocations/static_builtins.rs	2026-10-07 00:48:54.424598486 +0900
++++ ws-hir/crates/thaw-hir/src/lower/invocations/static_builtins.rs	2026-10-07 00:57:22.083377734 +0900
+@@ -62,6 +62,67 @@
+         })
+     }
+ 
++    /// Iterate a tuple view to its actual runtime length. A contextual
++    /// annotation describes only a typed prefix, so using the native tuple
++    /// buffer here would silently discard a reflected array's tail.
++    fn lower_tuple_as_json_array(
++        &mut self, source: HirExpr, elements: Vec<HirType>,
++    ) -> Result<HirExpr, String> {
++        let tuple_type = HirType::Tuple(elements);
++        let array_type = HirType::Array(Box::new(HirType::Json));
++        let source_name = format!("__thaw_tuple_iterator_{}", self.next_binding);
++        self.next_binding += 1;
++        self.scope.insert(source_name.clone(), tuple_type.clone());
++        let output_name = format!("__thaw_tuple_iterator_output_{}", self.next_binding);
++        self.next_binding += 1;
++        self.scope.insert(output_name.clone(), array_type.clone());
++        let index_name = format!("__thaw_tuple_iterator_index_{}", self.next_binding);
++        self.next_binding += 1;
++        self.scope.insert(index_name.clone(), HirType::F64);
++        let var = |name: &str| HirExpr::Var(name.into());
++        let body = HirExpr::Block(vec![
++            HirStmt::Let(output_name.clone(), array_type, HirExpr::ArrayLit(Vec::new())),
++            HirStmt::Let(index_name.clone(), HirType::F64, HirExpr::Lit(HirLit::F64(0.0))),
++            HirStmt::While(
++                HirExpr::BinOp(BinOp::Lt, Box::new(var(&index_name)),
++                    Box::new(HirExpr::ArrayLen(Box::new(var(&source_name))))),
++                vec![
++                    HirStmt::Expr(HirExpr::Call(Box::new(var("__thaw_array_push")),
++                        vec![var(&output_name), HirExpr::TypedIndex(
++                            Box::new(var(&source_name)), Box::new(var(&index_name)),
++                            HirType::Json)])),
++                    HirStmt::Expr(HirExpr::Assign(index_name.clone(),
++                        Box::new(HirExpr::BinOp(BinOp::Add,
++                            Box::new(var(&index_name)),
++                            Box::new(HirExpr::Lit(HirLit::F64(1.0))))))),
++                ],
++            ),
++            HirStmt::Return(Some(var(&output_name))),
++        ]);
++        self.wrap_call_argument_bindings(body, &[(source_name, tuple_type, source)])
++    }
++
++    /// True when every leaf of `ty` has a canonical Json encoding, so a tuple
++    /// of such members can be read through the Json array path.
++    fn spread_json_encodable_type(ty: &HirType) -> bool {
++        match ty {
++            HirType::F64 | HirType::Str | HirType::Bool | HirType::Null
++            | HirType::Undefined | HirType::Json => true,
++            HirType::Array(element) | HirType::Optional(element)
++            | HirType::Nullable(element) | HirType::Nullish(element) => {
++                Self::spread_json_encodable_type(element)
++            }
++            HirType::Tuple(members) | HirType::Union(members) => {
++                members.iter().all(Self::spread_json_encodable_type)
++            }
++            HirType::Object(fields) => {
++                fields.iter().all(|(_, ty)| Self::spread_json_encodable_type(ty))
++            }
++            // Opaque/native categories have no bridge to Json here.
++            _ => false,
++        }
++    }
++
+     // A fixed layout can contain a hidden native marker or an ordinary user
+     // field with exactly the same name. Query the bound receiver before each
+     // read, then append only visible fields to a runtime-length array.
+diff --color -ruN candidate/crates/thaw-hir/src/lower/module/helpers.rs ws-hir/crates/thaw-hir/src/lower/module/helpers.rs
+--- candidate/crates/thaw-hir/src/lower/module/helpers.rs	2026-10-07 00:48:52.890402223 +0900
++++ ws-hir/crates/thaw-hir/src/lower/module/helpers.rs	2026-10-07 00:54:10.513266974 +0900
+@@ -221,6 +221,16 @@
+ /// Whether an object type's identity chain (see `module/classes.rs`) makes
+ /// it an `Error`-family instance -- the built-ins themselves, or any user
+ /// class transitively `extends`ing one of them.
++/// The shared physical prefix of every Error-family record: identity marker,
++/// then `message` and `name`.
++fn builtin_error_object_type() -> HirType {
++    HirType::Object(vec![
++        ("__thaw_class_identity_\u{1e}Error".to_string(), HirType::Bool),
++        ("message".to_string(), HirType::Json),
++        ("name".to_string(), HirType::Json),
++    ])
++}
++
+ fn object_type_is_error_family(ty: &HirType) -> bool {
+     let HirType::Object(fields) = ty else {
+         return false;
+diff --color -ruN candidate/crates/thaw-hir/src/lower/statements/lowering.rs ws-hir/crates/thaw-hir/src/lower/statements/lowering.rs
+--- candidate/crates/thaw-hir/src/lower/statements/lowering.rs	2026-10-07 00:48:54.501147960 +0900
++++ ws-hir/crates/thaw-hir/src/lower/statements/lowering.rs	2026-10-07 00:53:23.492982040 +0900
+@@ -1063,41 +1063,6 @@
+             let (_, base_type, base_name) = self.super_initializer.clone()
+                 .ok_or("`super` property assignment is only valid in a derived class")?;
+             let property = super_property_name(&member.prop)?;
+-            if self.class_static_context {
+-                if let (Some(selected_base), Some(receiver)) = (
+-                    self.static_super_base_handle(), self.static_this_token_expr(),
+-                ) {
+-                    // `super.x = yield value` writes with the live derived
+-                    // constructor as receiver. Select HomeObject's current
+-                    // prototype before suspending; resume must not reselect.
+-                    let mut before_yield = Vec::new();
+-                    let base = self.bind_generator_assignment_reference(
+-                        &mut before_yield, selected_base,
+-                    )?;
+-                    let HirExpr::Var(base_owner) = &base else {
+-                        return Err("generator static-super base has no owner cell".into());
+-                    };
+-                    let Some(HirStmt::Let(_, _, selected)) = before_yield.last_mut() else {
+-                        return Err("generator static-super selection is missing".into());
+-                    };
+-                    let selected = std::mem::replace(selected, HirExpr::Lit(HirLit::I64(0)));
+-                    before_yield.push(HirStmt::Expr(HirExpr::Assign(
+-                        base_owner.clone(), Box::new(HirExpr::Call(
+-                        Box::new(HirExpr::Var("__thaw_track_generator_super_base".into())),
+-                        vec![selected, HirExpr::Var(base_owner.clone())],
+-                    )))));
+-                    let receiver = self.bind_generator_assignment_reference(
+-                        &mut before_yield, receiver,
+-                    )?;
+-                    let encoded = self.coerce_to_declared(&HirType::Json, value)?;
+-                    let write = HirExpr::Call(
+-                        Box::new(HirExpr::Var("__thaw_set_super_static_property_json".into())),
+-                        vec![base, receiver,
+-                            HirExpr::Lit(HirLit::Str(property)), encoded],
+-                    );
+-                    return Ok(Some((before_yield, vec![HirStmt::Expr(write)])));
+-                }
+-            }
+             let owner = if self.class_static_context {
+                 base_name
+             } else {
+@@ -1136,10 +1101,6 @@
+             let static_symbol = class_setter_symbol(receiver.sym.as_ref(), &property, true);
+             if self.is_unshadowed_class_identifier(receiver.sym.as_ref()) {
+                 if self.signatures.contains_key(&static_symbol) {
+-                    if self.class_value_token(receiver.sym.as_ref()).is_some() {
+-                        let target = self.lower_assign_target(target)?;
+-                        return Ok(Some(self.lower_generator_resume_target(target, value)?));
+-                    }
+                     let write = self.call_class_static_setter(static_symbol, value)?;
+                     return Ok(Some((Vec::new(), vec![HirStmt::Expr(write)])));
+                 }
+@@ -1153,10 +1114,6 @@
+                 .expect("static setter retains its class context");
+             let symbol = class_setter_symbol(class, &property, true);
+             if self.signatures.contains_key(&symbol) {
+-                if self.class_value_token(class).is_some() {
+-                    let target = self.lower_assign_target(target)?;
+-                    return Ok(Some(self.lower_generator_resume_target(target, value)?));
+-                }
+                 let write = self.call_class_static_setter(symbol, value)?;
+                 return Ok(Some((Vec::new(), vec![HirStmt::Expr(write)])));
+             }
+@@ -1238,11 +1195,6 @@
+         let mut before_yield = Vec::new();
+         let target = match target {
+             Target::Var(name) => Target::Var(name),
+-            Target::ParameterCell(cell, payload) => Target::ParameterCell(cell, payload),
+-            Target::StaticProperty(token, property, ty) => Target::StaticProperty(
+-                self.bind_generator_assignment_reference(&mut before_yield, token)?,
+-                property, ty,
+-            ),
+             Target::Prop(object, ty, field) => Target::Prop(
+                 self.bind_generator_assignment_reference(&mut before_yield, object)?,
+                 ty,
+@@ -1279,7 +1231,6 @@
+             }
+         }
+         let value = match &target {
+-            Target::ParameterCell(_, payload) => self.coerce_to_declared(payload, value)?,
+             Target::Var(name) => match self.scope.get(name).cloned() {
+                 Some(ty) => self.coerce_to_declared(&ty, value)?,
+                 None => value,
+@@ -1304,11 +1255,6 @@
+                 self.expect_type(&HirType::F64, index, "JSON array index")?;
+                 self.coerce_to_declared(&HirType::Json, value)?
+             }
+-            Target::StaticProperty(token, property, _) => {
+-                return Ok((before_yield, vec![HirStmt::Expr(self.lower_static_property_write(
+-                    token.clone(), property, value,
+-                )?)]));
+-            }
+             Target::DynamicProperty(object, key) => {
+                 let value = self.coerce_to_declared(&HirType::Json, value)?;
+                 return Ok((before_yield, vec![HirStmt::Expr(HirExpr::Call(
+diff --color -ruN candidate/crates/thaw-hir/src/lower/tests/control_flow.rs ws-hir/crates/thaw-hir/src/lower/tests/control_flow.rs
+--- candidate/crates/thaw-hir/src/lower/tests/control_flow.rs	2026-10-07 00:48:54.501147960 +0900
++++ ws-hir/crates/thaw-hir/src/lower/tests/control_flow.rs	2026-10-07 01:00:32.942052822 +0900
+@@ -505,19 +505,19 @@
+     "#);
+     let returned = program.functions.iter().find(|function| function.name == "returned").unwrap();
+     let thrown = program.functions.iter().find(|function| function.name == "thrown").unwrap();
+-    let HirStmt::Try(return_body, _, _, _) = &returned.body[1] else {
++    let HirStmt::Try(return_body, _, _, _) = &returned.body[2] else {
+         panic!("expected return try");
+     };
+     assert!(matches!(return_body.as_slice(),
+         [HirStmt::Let(_, _, HirExpr::Var(_)), HirStmt::Finally(_, 1), HirStmt::Return(Some(HirExpr::Var(_)))]),
+         "{return_body:?}");
+-    let HirStmt::Try(_, _, throw_body, _) = &thrown.body[1] else {
++    let HirStmt::Try(_, _, throw_body, _) = &thrown.body[2] else {
+         panic!("expected throw try");
+     };
+     assert!(matches!(throw_body.as_slice(), [HirStmt::Try(guarded, _, failure, _)]
+         if matches!(guarded.as_slice(),
+             [.., HirStmt::Try(captured, _, failed, _), HirStmt::Finally(_, 1), HirStmt::Finally(rethrow, 1)]
+-                if captured.len() == 7 && captured.iter().all(|stmt| matches!(stmt, HirStmt::Let(..)))
++                if captured.len() == 8 && captured.iter().all(|stmt| matches!(stmt, HirStmt::Let(..)))
+                     && matches!(failed.as_slice(), [HirStmt::Finally(_, 1), HirStmt::Finally(throw, 1)]
+                         if matches!(throw.as_slice(), [HirStmt::Throw(_)]))
+                     && matches!(rethrow.as_slice(), [HirStmt::Throw(HirExpr::Call(callee, args))]
+@@ -655,12 +655,12 @@
+         (HirType::FunctionWithThis(Box::new(HirType::F64), Box::new(HirType::Str)), 28),
+     ];
+     for (ty, expected_tag) in cases {
+-        assert_eq!(native_exception_tag(&ty), Some(expected_tag));
+-        assert!(native_exception_layout_token(&ty).is_some());
++        assert_eq!(crate::native_exception_tag(&ty), Some(expected_tag));
++        assert!(crate::native_exception_layout_token(&ty).is_some());
+     }
+     assert_ne!(
+-        native_exception_layout_token(&HirType::Array(Box::new(HirType::F64))),
+-        native_exception_layout_token(&HirType::Array(Box::new(HirType::Str))),
++        crate::native_exception_layout_token(&HirType::Array(Box::new(HirType::F64))),
++        crate::native_exception_layout_token(&HirType::Array(Box::new(HirType::Str))),
+     );
+ }
+ 
+@@ -1274,11 +1274,30 @@
+     catch_name: &str,
+     members: &[HirType],
+ ) {
+-    let HirExpr::BinOp(BinOp::EqEqEq, value_typeof, literal) = condition else {
++    // Strict equality binds both operands once:
++    // ((left) => ((right) => left === right)("number"))(typeof ...).
++    let HirExpr::Call(wrapper, wrapper_args) = condition else {
+         panic!("expected strict equality between typeof result and number literal: {condition:#?}");
+     };
+-    assert_eq!(literal.as_ref(), &HirExpr::Lit(HirLit::Str("number".into())));
+-    let HirExpr::Call(callee, args) = value_typeof.as_ref() else {
++    let HirExpr::Lambda(_, left, HirType::Bool, wrapper_body) = wrapper.as_ref() else {
++        panic!("expected the strict-equality left binding lambda: {wrapper:#?}");
++    };
++    let HirExpr::Call(compare_lambda, compare_args) = wrapper_body.as_ref() else {
++        panic!("expected the strict-equality right binding call: {wrapper_body:#?}");
++    };
++    assert_eq!(compare_args, &vec![HirExpr::Lit(HirLit::Str("number".into()))]);
++    let HirExpr::Lambda(_, right, HirType::Bool, compare) = compare_lambda.as_ref() else {
++        panic!("expected the strict-equality comparison lambda: {compare_lambda:#?}");
++    };
++    assert_eq!(compare.as_ref(), &HirExpr::BinOp(
++        BinOp::EqEqEq,
++        Box::new(HirExpr::Var(left[0].name.clone())),
++        Box::new(HirExpr::Var(right[0].name.clone())),
++    ));
++    let [value_typeof] = wrapper_args.as_slice() else {
++        panic!("strict equality binds exactly one left operand: {wrapper_args:#?}");
++    };
++    let HirExpr::Call(callee, args) = value_typeof else {
+         panic!("expected the source-backed one-evaluation carrier typeof wrapper: {value_typeof:#?}");
+     };
+     let HirExpr::Lambda(captures, params, HirType::Str, body) = callee.as_ref() else {
+@@ -1567,15 +1586,18 @@
+     let expected_prefix = [HirStmt::Expr(HirExpr::Assign(
+         binding.into(), Box::new(injected),
+     ))];
++    // After `e = 42` the binding is narrowed to its F64 member, so the rethrow
++    // publishes that member read from the retagged carrier as a scalar.
+     let (thrown_name, tail) = thaw_rethrow_cleanup_find_publisher(
+         catch_body,
+         &expected_prefix,
+-        &HirExpr::Var(binding.into()),
+-        &carrier,
+-    );
+-    thaw_rethrow_cleanup_assert_carrier_publication(
+-        thrown_name, tail, "thaw_rethrow_cleanup_effectful_input",
++        &HirExpr::UnionValue(Box::new(HirExpr::Var(binding.into())), 0, members.clone()),
++        &HirType::F64,
+     );
++    assert_eq!(tail.len(), 4, "{tail:?}");
++    assert!(matches!(&tail[2], HirStmt::Expr(HirExpr::Call(callee, args))
++        if callee.as_ref() == &HirExpr::Var("__thaw_set_pending_exception_f64".into())
++            && args.as_slice() == [HirExpr::Var(thrown_name.into())]), "{tail:?}");
+ }
+ 
+ #[test]
+@@ -1765,3 +1787,4 @@
+     }
+     assert_ne!(catch_names[0], catch_names[1]);
+ }
++

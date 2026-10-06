@@ -1,0 +1,272 @@
+diff --color -ruN snap/crates-base-all/thaw-llvm/src/hir_codegen/async_frames/codegen.rs ws-llvm/crates/thaw-llvm/src/hir_codegen/async_frames/codegen.rs
+--- snap/crates-base-all/thaw-llvm/src/hir_codegen/async_frames/codegen.rs	2026-10-07 00:48:54.170088651 +0900
++++ ws-llvm/crates/thaw-llvm/src/hir_codegen/async_frames/codegen.rs	2026-10-07 01:03:43.598245168 +0900
+@@ -805,7 +805,7 @@
+             let ptr_ty = self.context.ptr_type(AddressSpace::default());
+             self.builder.build_store(cell, ptr_ty.const_null()).map_err(|error| error.to_string())?;
+         }
+-        self.compile_and_store_arena_promise_expression(cell, cell, ty, expression)?;
++        let value = self.compile_and_store_arena_promise_expression(cell, cell, ty, expression)?;
+         self.builder.build_store(frame_slot, cell).map_err(|error| error.to_string())?;
+         self.variables.insert(name.to_string(), (cell, llvm_ty));
+         self.variable_hir_types.insert(name.to_string(), ty.clone());
+@@ -1232,7 +1232,7 @@
+             self.builder.build_store(slot, self.context.bool_type().const_int(enabled as u64, false))
+                 .map_err(|e| e.to_string())?;
+         }
+-        self.capture_pending_async_catch(frame, plan, handler, pending)?;
++        self.capture_pending_async_catch(frame, plan, handler, pending.into_pointer_value())?;
+         self.builder.build_store(self.pending_exception().as_pointer_value(), ptr_ty.const_null())
+             .map_err(|e| e.to_string())?;
+         self.clear_pending_native_text()?;
+diff --color -ruN snap/crates-base-all/thaw-llvm/src/hir_codegen/async_frames/planning/loops.rs ws-llvm/crates/thaw-llvm/src/hir_codegen/async_frames/planning/loops.rs
+--- snap/crates-base-all/thaw-llvm/src/hir_codegen/async_frames/planning/loops.rs	2026-10-07 00:48:52.934376782 +0900
++++ ws-llvm/crates/thaw-llvm/src/hir_codegen/async_frames/planning/loops.rs	2026-10-07 01:04:50.224805005 +0900
+@@ -66,6 +66,7 @@
+         if let Some(handler) = &loop_rejection_handler {
+             guarded_rethrow_handlers.insert(enabled_guard.clone(), handler.clone());
+         }
++        let condition_state = segments.len();
+         let current = segments.last_mut().unwrap();
+         current.stmts.push(HirStmt::Let(
+             enabled_guard.clone(),
+@@ -96,7 +97,6 @@
+                 vec![HirExpr::Lit(HirLit::F64(0.0))],
+             )
+         };
+-        let condition_state = segments.len();
+         current.await_next = Some(condition_state);
+         segments.push(AsyncSegment {
+             stmts: Vec::new(),
+diff --color -ruN snap/crates-base-all/thaw-llvm/src/hir_codegen/collections.rs ws-llvm/crates/thaw-llvm/src/hir_codegen/collections.rs
+--- snap/crates-base-all/thaw-llvm/src/hir_codegen/collections.rs	2026-10-07 00:48:52.935084907 +0900
++++ ws-llvm/crates/thaw-llvm/src/hir_codegen/collections.rs	2026-10-07 01:03:39.395933549 +0900
+@@ -688,7 +688,7 @@
+         for (handle, array, length) in arrays {
+             let bytes = self
+                 .builder
+-                .build_int_mul(length, element_bytes, "spread_copy_size")
++                .build_int_mul(length, i64_type.const_int(element_width, false), "spread_copy_size")
+                 .map_err(|error| error.to_string())?;
+             let source = unsafe {
+                 self.builder
+diff --color -ruN snap/crates-base-all/thaw-llvm/src/hir_codegen/dynamic_host/callbacks.rs ws-llvm/crates/thaw-llvm/src/hir_codegen/dynamic_host/callbacks.rs
+--- snap/crates-base-all/thaw-llvm/src/hir_codegen/dynamic_host/callbacks.rs	2026-10-07 00:48:54.170088651 +0900
++++ ws-llvm/crates/thaw-llvm/src/hir_codegen/dynamic_host/callbacks.rs	2026-10-07 01:04:36.914878106 +0900
+@@ -890,7 +890,8 @@
+                 .map_err(|error| error.to_string())?
+                 .try_as_basic_value()
+                 .basic()
+-                .unwrap();
++                .unwrap()
++                .into_pointer_value();
+             argument_json.push(argument);
+             self.builder.build_store(argument_slots[graph_index], argument)
+                 .map_err(|error| error.to_string())?;
+@@ -900,7 +901,7 @@
+                     return Err("native method receiver requires an object type".into());
+                 };
+                 let (pointer, valid) = self.query_native_object_receiver(
+-                    argument.into_pointer_value(), fields,
++                    argument, fields,
+                 )?;
+                 let accepted = self.context.append_basic_block(adapter, "native_method_receiver_valid");
+                 let rejected = self.context.append_basic_block(adapter, "native_method_receiver_invalid");
+@@ -912,7 +913,7 @@
+                 Ok(self.builder.build_int_to_ptr(pointer, ptr_type, "native_method_original_receiver")
+                     .map_err(|error| error.to_string())?.into())
+             } else {
+-                self.compile_json_value_to_native(argument, param)
++                self.compile_json_value_to_native(argument.into(), param)
+             };
+             self.pop_catch_target();
+             let converted = converted?;
+@@ -1052,7 +1053,7 @@
+                     ).map_err(|error| error.to_string())?;
+                 }
+             }
+-            for value in argument_json.iter().copied().chain(std::iter::once(args_json)) {
++            for value in argument_json.iter().copied().chain(std::iter::once(args_json.into_pointer_value())) {
+                 self.builder.build_call(
+                     self.module.get_function("thaw_json_destroy").unwrap(),
+                     &[value.into()],
+@@ -1254,7 +1255,7 @@
+                         .map_err(|error| error.to_string())?;
+                 }
+             }
+-            for value in argument_json.into_iter().chain(std::iter::once(args_json)) {
++            for value in argument_json.into_iter().chain(std::iter::once(args_json.into_pointer_value())) {
+                 self.builder
+                     .build_call(
+                         self.module.get_function("thaw_json_destroy").unwrap(),
+@@ -2567,7 +2568,7 @@
+         // Dropping a Host child may re-enter compiled code. The original
+         // exception tuple must win over any cleanup callback's own state.
+         let ptr = self.context.ptr_type(AddressSpace::default());
+-        let globals = [
++        let globals: [(PointerValue<'ctx>, BasicTypeEnum<'ctx>, BasicValueEnum<'ctx>); 8] = [
+             (self.pending_exception().as_pointer_value(), ptr.into(), ptr.const_null().into()),
+             (self.pending_exception_native_text().as_pointer_value(), ptr.into(), ptr.const_null().into()),
+             (self.pending_exception_object().as_pointer_value(), ptr.into(), ptr.const_null().into()),
+diff --color -ruN snap/crates-base-all/thaw-llvm/src/hir_codegen/dynamic_host/napi.rs ws-llvm/crates/thaw-llvm/src/hir_codegen/dynamic_host/napi.rs
+--- snap/crates-base-all/thaw-llvm/src/hir_codegen/dynamic_host/napi.rs	2026-10-07 00:48:54.171317994 +0900
++++ ws-llvm/crates/thaw-llvm/src/hir_codegen/dynamic_host/napi.rs	2026-10-07 01:04:36.915989053 +0900
+@@ -672,6 +672,6 @@
+         self.clear_pending_native_text()?;
+         self.mark_pending_native_text(error)?;
+         self.branch_on_pending_exception()?;
+-        self.compile_decode_quickjs_graph(value)
++        self.compile_decode_quickjs_graph(value.into())
+     }
+ }
+diff --color -ruN snap/crates-base-all/thaw-llvm/src/hir_codegen/invocations/dynamic_calls.rs ws-llvm/crates/thaw-llvm/src/hir_codegen/invocations/dynamic_calls.rs
+--- snap/crates-base-all/thaw-llvm/src/hir_codegen/invocations/dynamic_calls.rs	2026-10-07 00:48:52.938421940 +0900
++++ ws-llvm/crates/thaw-llvm/src/hir_codegen/invocations/dynamic_calls.rs	2026-10-07 01:04:50.226254207 +0900
+@@ -380,7 +380,7 @@
+             .try_as_basic_value()
+             .basic()
+             .unwrap();
+-        let args_json = self.compile_check_json_stringify_error_with_cleanup(args_json, &[array])?;
++        let args_json = self.compile_check_json_stringify_error_with_cleanup(args_json, &[array.into()])?;
+         let result = self
+             .builder
+             .build_call(
+@@ -462,7 +462,7 @@
+             "cached_native_object_tag")
+             .map_err(|error| error.to_string())?.into_struct_value();
+         self.builder.build_insert_value(tagged, handle, 1, "cached_native_object_value")
+-            .map(Into::into).map_err(|error| error.to_string())
++            .map(|value| value.into_struct_value().into()).map_err(|error| error.to_string())
+     }
+ 
+     fn compile_require_native_owner(
+@@ -606,7 +606,7 @@
+         let tagged = self.builder.build_insert_value(ty.get_undef(), present, 0,
+             "native_projector_tag").map_err(|error| error.to_string())?.into_struct_value();
+         self.builder.build_insert_value(tagged, projector, 1, "native_projector_value")
+-            .map(Into::into).map_err(|error| error.to_string())
++            .map(|value| value.into_struct_value().into()).map_err(|error| error.to_string())
+     }
+ 
+     fn compile_intern_native_object(
+diff --color -ruN snap/crates-base-all/thaw-llvm/src/hir_codegen/invocations/json_calls.rs ws-llvm/crates/thaw-llvm/src/hir_codegen/invocations/json_calls.rs
+--- snap/crates-base-all/thaw-llvm/src/hir_codegen/invocations/json_calls.rs	2026-10-07 00:48:52.938421940 +0900
++++ ws-llvm/crates/thaw-llvm/src/hir_codegen/invocations/json_calls.rs	2026-10-07 01:04:50.225111861 +0900
+@@ -372,7 +372,7 @@
+                     .map_err(|error| error.to_string())?
+                     .try_as_basic_value()
+                     .basic()
+-                    .ok_or("JSON.stringify returned no value".into())?;
++                    .ok_or_else(|| String::from("JSON.stringify returned no value"))?;
+                 return self.compile_check_json_stringify_error(result);
+             }
+             "__thaw_json_stringify_string_space" => {
+@@ -393,7 +393,7 @@
+                     .map_err(|error| error.to_string())?
+                     .try_as_basic_value()
+                     .basic()
+-                    .ok_or("JSON.stringify returned no value".into())?;
++                    .ok_or_else(|| String::from("JSON.stringify returned no value"))?;
+                 return self.compile_check_json_stringify_error(result);
+             }
+             "__thaw_json_stringify_keys" => {
+@@ -414,7 +414,7 @@
+                     .map_err(|error| error.to_string())?
+                     .try_as_basic_value()
+                     .basic()
+-                    .ok_or("JSON.stringify returned no value".into())?;
++                    .ok_or_else(|| String::from("JSON.stringify returned no value"))?;
+                 return self.compile_check_json_stringify_error(result);
+             }
+             "__thaw_json_stringify_keys_number_space"
+@@ -439,7 +439,7 @@
+                     .map_err(|error| error.to_string())?
+                     .try_as_basic_value()
+                     .basic()
+-                    .ok_or("JSON.stringify returned no value".into())?;
++                    .ok_or_else(|| String::from("JSON.stringify returned no value"))?;
+                 return self.compile_check_json_stringify_error(result);
+             }
+             "__thaw_json_array_join" => {
+diff --color -ruN snap/crates-base-all/thaw-llvm/src/hir_codegen/json_bridge/decoding.rs ws-llvm/crates/thaw-llvm/src/hir_codegen/json_bridge/decoding.rs
+--- snap/crates-base-all/thaw-llvm/src/hir_codegen/json_bridge/decoding.rs	2026-10-07 00:48:52.938421940 +0900
++++ ws-llvm/crates/thaw-llvm/src/hir_codegen/json_bridge/decoding.rs	2026-10-07 01:04:36.916438607 +0900
+@@ -585,7 +585,7 @@
+             .builder
+             .build_int_mul(
+                 index.as_basic_value().into_int_value(),
+-                element_bytes,
++                self.context.i64_type().const_int(element_bytes, false),
+                 "json_array_element_offset",
+             )
+             .map_err(|error| error.to_string())?;
+diff --color -ruN snap/crates-base-all/thaw-llvm/src/hir_codegen/json_values.rs ws-llvm/crates/thaw-llvm/src/hir_codegen/json_values.rs
+--- snap/crates-base-all/thaw-llvm/src/hir_codegen/json_values.rs	2026-10-07 00:48:54.120088500 +0900
++++ ws-llvm/crates/thaw-llvm/src/hir_codegen/json_values.rs	2026-10-07 01:04:04.204741632 +0900
+@@ -106,11 +106,12 @@
+             self.pending_exception_value(PENDING_EXCEPTION_VALUE_TAG_SYMBOL).as_pointer_value(),
+             self.context.i64_type().const_int(7, false),
+         ).map_err(|error| error.to_string())?;
+-        for (symbol, zero) in [
++        let zeros: [(&str, BasicValueEnum<'ctx>); 3] = [
+             (PENDING_EXCEPTION_F64_SYMBOL, self.context.f64_type().const_zero().into()),
+             (PENDING_EXCEPTION_I64_SYMBOL, self.context.i64_type().const_zero().into()),
+             (PENDING_EXCEPTION_BOOL_SYMBOL, self.context.bool_type().const_zero().into()),
+-        ] {
++        ];
++        for (symbol, zero) in zeros {
+             self.builder.build_store(self.pending_exception_value(symbol).as_pointer_value(), zero)
+                 .map_err(|error| error.to_string())?;
+         }
+diff --color -ruN snap/crates-base-all/thaw-llvm/src/hir_codegen/statements.rs ws-llvm/crates/thaw-llvm/src/hir_codegen/statements.rs
+--- snap/crates-base-all/thaw-llvm/src/hir_codegen/statements.rs	2026-10-07 00:48:54.260366215 +0900
++++ ws-llvm/crates/thaw-llvm/src/hir_codegen/statements.rs	2026-10-07 01:04:04.203839428 +0900
+@@ -1179,7 +1179,7 @@
+             let boolean = self.builder.build_load(self.context.bool_type(), stored_bool, "caught_value_bool")
+                 .map_err(|e| e.to_string())?.into_int_value();
+             let tagged = self.build_caught_exception_carrier(
+-                thrown, thrown_object, native_descriptor, exception_tag, number, bigint, boolean, true,
++                thrown.into_pointer_value(), thrown_object.into_pointer_value(), native_descriptor, exception_tag, number, bigint, boolean, true,
+             )?;
+             self.builder.build_store(carrier_slot, tagged).map_err(|e| e.to_string())?;
+         }
+diff --color -ruN snap/crates-base-all/thaw-llvm/src/hir_codegen/values/expressions.rs ws-llvm/crates/thaw-llvm/src/hir_codegen/values/expressions.rs
+--- snap/crates-base-all/thaw-llvm/src/hir_codegen/values/expressions.rs	2026-10-07 00:48:54.218659737 +0900
++++ ws-llvm/crates/thaw-llvm/src/hir_codegen/values/expressions.rs	2026-10-07 01:04:04.204406533 +0900
+@@ -58,12 +58,13 @@
+             self.pending_exception_object().as_pointer_value(),
+             self.context.ptr_type(AddressSpace::default()).const_null(),
+         ).map_err(|error| error.to_string())?;
+-        for (symbol, zero) in [
++        let zeros: [(&str, BasicValueEnum<'ctx>); 4] = [
+             (PENDING_EXCEPTION_VALUE_TAG_SYMBOL, self.context.i64_type().const_zero().into()),
+             (PENDING_EXCEPTION_F64_SYMBOL, self.context.f64_type().const_zero().into()),
+             (PENDING_EXCEPTION_I64_SYMBOL, self.context.i64_type().const_zero().into()),
+             (PENDING_EXCEPTION_BOOL_SYMBOL, self.context.bool_type().const_zero().into()),
+-        ] {
++        ];
++        for (symbol, zero) in zeros {
+             self.builder.build_store(self.pending_exception_value(symbol).as_pointer_value(), zero)
+                 .map_err(|error| error.to_string())?;
+         }
+diff --color -ruN snap/crates-base-all/thaw-llvm/src/hir_codegen.rs ws-llvm/crates/thaw-llvm/src/hir_codegen.rs
+--- snap/crates-base-all/thaw-llvm/src/hir_codegen.rs	2026-10-07 00:48:54.170088651 +0900
++++ ws-llvm/crates/thaw-llvm/src/hir_codegen.rs	2026-10-07 01:03:39.405459902 +0900
+@@ -459,7 +459,7 @@
+             | HirExpr::NullableNone(_) | HirExpr::NullishNull(_)
+             | HirExpr::NullishUndefined(_) | HirExpr::EnvVar(_)
+             | HirExpr::ObjectAlloc(_) | HirExpr::ClassAlloc(_)
+-            | HirExpr::FunctionRef(..) | HirExpr::MethodRef(..)
++            | HirExpr::FunctionRef(..) | HirExpr::FunctionRefThis(..) | HirExpr::MethodRef(..)
+             | HirExpr::PostfixUpdate(_, _) => false,
+         }
+     }
+@@ -786,7 +786,7 @@
+         let state = self.module.add_global(state_ty, None, &format!("{name}_state"));
+         state.set_linkage(Linkage::Internal);
+         state.set_initializer(&state_ty.const_zero());
+-        let exception_slots = [
++        let exception_slots: [(&str, BasicTypeEnum<'ctx>); 9] = [
+             (PENDING_EXCEPTION_SYMBOL, self.context.ptr_type(AddressSpace::default()).into()),
+             (PENDING_EXCEPTION_NATIVE_TEXT_SYMBOL, self.context.ptr_type(AddressSpace::default()).into()),
+             (PENDING_EXCEPTION_OBJECT_SYMBOL, self.context.ptr_type(AddressSpace::default()).into()),

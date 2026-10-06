@@ -1,0 +1,49 @@
+diff --color -ruN snap/crates-base-2/thaw-std/src/json.rs ws-stdshare/crates/thaw-std/src/json.rs
+--- snap/crates-base-2/thaw-std/src/json.rs	2026-10-07 00:49:08.946133455 +0900
++++ ws-stdshare/crates/thaw-std/src/json.rs	2026-10-07 01:17:07.048130349 +0900
+@@ -1246,6 +1246,22 @@
+         .unwrap_or(Value::Null))
+ }
+ 
++/// Gives a borrowed Json value (e.g. the arena-owned result of a caught
++/// exception projection) a new owned handle that shares its containers
++/// (`Value::clone` is `Rc::clone` for arrays/objects), so the caller can
++/// destroy or arena-root the result without invalidating the borrowed one.
++/// Null stays null. Unlike `thaw_json_clone` this is not a deep copy.
++///
++/// # Safety
++/// `value` must be null or point to a valid JSON `Value`.
++#[no_mangle]
++pub unsafe extern "C" fn thaw_json_share(value: *const Value) -> *mut Value {
++    let Some(value) = (unsafe { value.as_ref() }) else {
++        return std::ptr::null_mut();
++    };
++    leak(value.clone())
++}
++
+ #[no_mangle]
+ /// `structuredClone` on a dynamic (`Json`-typed) value -- unlike this
+ /// file's derived `Clone` (which shares the same `Rc`-backed `Array`/
+@@ -6072,6 +6088,22 @@
+     }
+ 
+     #[test]
++    fn share_gives_an_independent_owner_of_the_same_containers() {
++        assert!(unsafe { thaw_json_share(std::ptr::null()) }.is_null());
++        let object = parse(r#"{"answer":42}"#);
++        let shared = unsafe { thaw_json_share(object) };
++        assert!(!shared.is_null() && shared != object);
++        // Same Rc-backed container: a write through one handle is visible in the other.
++        let key = CString::new("extra").unwrap();
++        thaw_json_object_set_number(object, key.as_ptr(), 7.0);
++        assert_eq!(thaw_json_as_number(thaw_json_get(shared, key.as_ptr())), 7.0);
++        // Destroying the shared owner must not invalidate the borrowed original.
++        unsafe { thaw_json_destroy(shared) };
++        assert_eq!(thaw_json_as_number(thaw_json_get(object, key.as_ptr())), 7.0);
++        unsafe { thaw_json_destroy(object) };
++    }
++
++    #[test]
+     fn deletes_object_properties_and_succeeds_for_missing_keys() {
+         let object = parse(r#"{"answer":42}"#);
+         let answer = CString::new("answer").unwrap();

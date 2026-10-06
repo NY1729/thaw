@@ -1,0 +1,13 @@
+--- a/src/module_graph.rs	2026-10-07 00:48:52.872713929 +0900
++++ b/src/module_graph.rs	2026-10-07 02:19:28.625930570 +0900
+@@ -2152,8 +2152,9 @@
+     }
+     for (specifier, index) in external_module_indices {
+         let Some(export_map) = external_exports.get(specifier) else { continue; };
++        // EXPERIMENT 2: typed native externs are call-only and cannot be function values.
+         let mut getters = export_map.iter()
+-            .filter(|(_, target)| !target.starts_with("__thaw_type_"))
++            .filter(|(_, target)| !target.starts_with("__thaw_type_") && !target.starts_with("__thaw_typed_"))
+             .map(|(name, target)| {
+                 let key = serde_json::to_string(name).map_err(|error| error.to_string())?;
+                 Ok(format!("get {key}() {{ return {target}; }}"))

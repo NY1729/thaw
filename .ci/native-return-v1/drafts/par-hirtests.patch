@@ -1,0 +1,286 @@
+diff --color -ruN snap/crates-base-all/thaw-hir/src/lower/assignments/updates.rs ws-hirtests/crates/thaw-hir/src/lower/assignments/updates.rs
+--- snap/crates-base-all/thaw-hir/src/lower/assignments/updates.rs	2026-10-07 00:48:52.884251530 +0900
++++ ws-hirtests/crates/thaw-hir/src/lower/assignments/updates.rs	2026-10-07 01:10:11.096053450 +0900
+@@ -491,7 +491,9 @@
+             );
+         }
+         let current = self.lower_assignment_target_read(&target)?;
+-        let current = if matches!(&target, Target::Prop(_, HirType::Object(fields), field)
++        // An array element read is `T | undefined`; `undefined++` is NaN, so coerce it.
++        let current = if matches!(&target, Target::Index(..))
++            || matches!(&target, Target::Prop(_, HirType::Object(fields), field)
+             if fields.iter().any(|(name, _)| name == &format!("__thaw_setter_{field}")))
+         {
+             self.coerce_primitive_to_number(current)?
+diff --color -ruN snap/crates-base-all/thaw-hir/src/lower/generic_calls.rs ws-hirtests/crates/thaw-hir/src/lower/generic_calls.rs
+--- snap/crates-base-all/thaw-hir/src/lower/generic_calls.rs	2026-10-07 00:48:54.424236656 +0900
++++ ws-hirtests/crates/thaw-hir/src/lower/generic_calls.rs	2026-10-07 01:05:35.434641281 +0900
+@@ -404,7 +404,11 @@
+             lambda = HirExpr::RecursiveClosure(self_name, self_type, Box::new(lambda));
+         }
+         let result = if let Some(this_name) = this_name {
+-            let result_type = self.infer_expr_type(&lambda)?;
++            // A non-arrow function infers as FunctionWithThis(this, visible signature).
++            let result_type = match self.infer_expr_type(&lambda)? {
++                HirType::FunctionWithThis(_, visible) => *visible,
++                other => other,
++            };
+             let return_type = match &result_type {
+                 HirType::Function(_, ret) | HirType::CallableFunction(_, _, _, ret) => ret.as_ref().clone(),
+                 other => return Err(format!("generic function has non-callable type {other:?}")),
+diff --color -ruN snap/crates-base-all/thaw-hir/src/lower/inference/types.rs ws-hirtests/crates/thaw-hir/src/lower/inference/types.rs
+--- snap/crates-base-all/thaw-hir/src/lower/inference/types.rs	2026-10-07 00:48:54.170088651 +0900
++++ ws-hirtests/crates/thaw-hir/src/lower/inference/types.rs	2026-10-07 01:08:28.837524636 +0900
+@@ -2930,11 +2930,15 @@
+             // instead of discarding or pretending to know that ABI.
+             HirExpr::RecursiveClosure(_, ty, _) => Ok(ty.clone()),
+             HirExpr::TypedClosure(ty, inner) => {
+-                if let HirType::FunctionWithThis(receiver, _) = self.infer_expr_type(inner)? {
+-                    Ok(HirType::FunctionWithThis(receiver, Box::new(ty.clone())))
+-                } else {
+-                    Ok(ty.clone())
++                // Only a function type can carry a `this` receiver; other closures
++                // (e.g. `new Map()` over the `__thaw_map_new` intrinsic) must not
++                // have their inner intrinsic call inferred.
++                if matches!(ty, HirType::Function(..) | HirType::CallableFunction(..)) {
++                    if let HirType::FunctionWithThis(receiver, _) = self.infer_expr_type(inner)? {
++                        return Ok(HirType::FunctionWithThis(receiver, Box::new(ty.clone())));
++                    }
+                 }
++                Ok(ty.clone())
+             },
+             HirExpr::NonArrowFunction(closure) => match closure.as_ref() {
+                 HirExpr::Lambda(_, params, ret, _) if params.first().is_some_and(|param| param.name == "__thaw_this") =>
+diff --color -ruN snap/crates-base-all/thaw-hir/src/lower/tests/classes.rs ws-hirtests/crates/thaw-hir/src/lower/tests/classes.rs
+--- snap/crates-base-all/thaw-hir/src/lower/tests/classes.rs	2026-10-07 00:48:52.891847488 +0900
++++ ws-hirtests/crates/thaw-hir/src/lower/tests/classes.rs	2026-10-07 01:12:52.037520477 +0900
+@@ -236,7 +236,7 @@
+     );
+ 
+     assert_eq!(
+-        program.functions[0].body[0],
++        unstage_let(&program.functions[0].body[0]),
+         HirStmt::Let(
+             "point".into(),
+             HirType::Object(vec![
+diff --color -ruN snap/crates-base-all/thaw-hir/src/lower/tests/control_flow.rs ws-hirtests/crates/thaw-hir/src/lower/tests/control_flow.rs
+--- snap/crates-base-all/thaw-hir/src/lower/tests/control_flow.rs	2026-10-07 01:01:35.621636525 +0900
++++ ws-hirtests/crates/thaw-hir/src/lower/tests/control_flow.rs	2026-10-07 01:06:39.412082417 +0900
+@@ -1,3 +1,8 @@
++/// Non-empty and made only of `Let` statements.
++fn only_lets(statements: &[HirStmt]) -> bool {
++    !statements.is_empty() && statements.iter().all(|statement| matches!(statement, HirStmt::Let(..)))
++}
++
+ #[test]
+ fn creates_distinct_native_instantiations_for_polymorphic_uses() {
+     let program = lower(
+@@ -471,7 +476,7 @@
+         }
+         function main(): void { console.log(f()); }"#,
+     );
+-    let HirStmt::Try(body, _, catch_body, _) = &program.functions[0].body[0] else {
++    let HirStmt::Try(body, _, catch_body, _) = &program.functions[0].body[1] else {
+         panic!("expected lowered try");
+     };
+     assert!(matches!(body.as_slice(), [HirStmt::Let(..), HirStmt::Finally(cleanup, 1), HirStmt::Return(Some(HirExpr::Var(_)))]
+@@ -481,12 +486,13 @@
+     };
+     assert!(matches!(guarded.as_slice(),
+         [.., HirStmt::Try(captured, _, failed, _), HirStmt::Finally(_, 1), HirStmt::Finally(rethrow, 1)]
+-            if matches!(captured.as_slice(), [HirStmt::Let(..)])
++            if only_lets(captured)
+                 && matches!(failed.as_slice(), [HirStmt::Finally(_, 1), HirStmt::Finally(throw, 1)]
+                     if matches!(throw.as_slice(), [HirStmt::Throw(_)]))
+                 && matches!(rethrow.as_slice(), [HirStmt::Throw(_)])), "{guarded:?}");
+-    assert!(matches!(failure.as_slice(), [HirStmt::Let(..), HirStmt::Finally(_, 0), HirStmt::Throw(_)]), "{failure:?}");
+-    assert!(matches!(program.functions[0].body[1], HirStmt::Expr(_)));
++    // A caught exception publishes its provenance through a run of Lets before the finalizer.
++    assert!(matches!(failure.as_slice(), [lets @ .., HirStmt::Finally(_, 0), HirStmt::Throw(_)] if only_lets(lets)), "{failure:?}");
++    assert!(matches!(program.functions[0].body[2], HirStmt::Expr(_)));
+ }
+ 
+ #[test]
+@@ -538,7 +544,7 @@
+         }
+     "#);
+     let choose = program.functions.iter().find(|function| function.name == "choose").unwrap();
+-    let HirStmt::Try(_, _, catch_body, _) = &choose.body[0] else {
++    let HirStmt::Try(_, _, catch_body, _) = &choose.body[1] else {
+         panic!("expected try");
+     };
+     assert!(matches!(catch_body.as_slice(), [HirStmt::Try(guarded, _, failure, _)]
+@@ -561,7 +567,7 @@
+         }
+     "#);
+     let keep = program.functions.iter().find(|function| function.name == "keep").unwrap();
+-    let HirStmt::Try(_, _, catch_body, _) = &keep.body[0] else {
++    let HirStmt::Try(_, _, catch_body, _) = &keep.body[1] else {
+         panic!("expected try");
+     };
+     let [HirStmt::Try(guarded, _, _, _)] = catch_body.as_slice() else {
+@@ -587,7 +593,7 @@
+         }
+     "#);
+     let chosen = program.functions.iter().find(|function| function.name == "chosen").unwrap();
+-    let HirStmt::Try(body, _, _, _) = &chosen.body[1] else {
++    let HirStmt::Try(body, _, _, _) = &chosen.body[2] else {
+         panic!("expected try");
+     };
+     assert!(matches!(body.first(), Some(HirStmt::Let(_, _, HirExpr::Var(_)))), "{body:?}");
+@@ -611,12 +617,12 @@
+         }"#,
+     );
+     let body = &program.functions[0].body;
+-    let HirStmt::Try(_, catch_name, catch_body, _) = &body[1] else {
++    let HirStmt::Try(_, catch_name, catch_body, _) = &body[2] else {
+         panic!("expected lowered try");
+     };
+-    assert_eq!(catch_name, "error__thaw_local_0");
+-    assert!(format!("{:?}", catch_body).contains("error__thaw_local_0"));
+-    assert!(format!("{:?}", body[2]).contains("Var(\"error\")"));
++    assert!(catch_name.starts_with("error__thaw_local_"), "{catch_name}");
++    assert!(format!("{:?}", catch_body).contains(catch_name.as_str()));
++    assert!(format!("{:?}", body[3]).contains("Var(\"error\")"));
+ }
+ 
+ #[test]
+diff --color -ruN snap/crates-base-all/thaw-hir/src/lower/tests/types.rs ws-hirtests/crates/thaw-hir/src/lower/tests/types.rs
+--- snap/crates-base-all/thaw-hir/src/lower/tests/types.rs	2026-10-07 00:48:54.501488250 +0900
++++ ws-hirtests/crates/thaw-hir/src/lower/tests/types.rs	2026-10-07 01:12:52.036498007 +0900
+@@ -1209,7 +1209,7 @@
+     // reordered to the interface's field order (same machinery as
+     // inline object type literals).
+     assert_eq!(
+-        main.body[0],
++        unstage_let(&main.body[0]),
+         HirStmt::Let(
+             "p".into(),
+             point_ty,
+@@ -1250,7 +1250,7 @@
+     ]);
+ 
+     assert_eq!(
+-        program.functions[0].body[0],
++        unstage_let(&program.functions[0].body[0]),
+         HirStmt::Let(
+             "l".into(),
+             line_ty,
+@@ -1306,7 +1306,7 @@
+         }]
+     );
+     assert_eq!(
+-        program.functions[1].body[0],
++        unstage_let(&program.functions[1].body[0]),
+         HirStmt::Let(
+             "b".into(),
+             box_number_ty,
+@@ -1401,7 +1401,7 @@
+         ("radius".into(), HirType::F64),
+     ]);
+     assert_eq!(
+-        program.functions[0].body[0],
++        unstage_let(&program.functions[0].body[0]),
+         HirStmt::Let(
+             "c".into(),
+             circle_ty,
+@@ -1432,7 +1432,7 @@
+         ("c".into(), HirType::F64),
+     ]);
+     assert_eq!(
+-        program.functions[0].body[0],
++        unstage_let(&program.functions[0].body[0]),
+         HirStmt::Let(
+             "v".into(),
+             c_ty,
+diff --color -ruN snap/crates-base-all/thaw-hir/src/lower/tests/values.rs ws-hirtests/crates/thaw-hir/src/lower/tests/values.rs
+--- snap/crates-base-all/thaw-hir/src/lower/tests/values.rs	2026-10-07 00:48:52.891847488 +0900
++++ ws-hirtests/crates/thaw-hir/src/lower/tests/values.rs	2026-10-07 01:12:52.035399042 +0900
+@@ -838,7 +838,7 @@
+     let obj_ty = HirType::Object(vec![("x".into(), HirType::F64), ("y".into(), HirType::F64)]);
+ 
+     assert_eq!(
+-        f.body[0],
++        unstage_let(&f.body[0]),
+         HirStmt::Let(
+             "p".into(),
+             obj_ty.clone(),
+@@ -890,7 +890,7 @@
+     );
+ 
+     assert_eq!(
+-        program.functions[0].body[2],
++        unstage_let(&program.functions[0].body[2]),
+         HirStmt::Let(
+             "point".into(),
+             HirType::Object(vec![
+@@ -920,7 +920,7 @@
+     ]);
+ 
+     assert_eq!(
+-        program.functions[0].body[1],
++        unstage_let(&program.functions[0].body[1]),
+         HirStmt::Let(
+             "point".into(),
+             base_type.clone(),
+@@ -952,7 +952,7 @@
+     );
+ 
+     assert_eq!(
+-        program.functions[0].body[0],
++        unstage_let(&program.functions[0].body[0]),
+         HirStmt::Let(
+             "point".into(),
+             HirType::Object(vec![
+diff --color -ruN snap/crates-base-all/thaw-hir/src/lower/tests.rs ws-hirtests/crates/thaw-hir/src/lower/tests.rs
+--- snap/crates-base-all/thaw-hir/src/lower/tests.rs	2026-10-07 00:48:52.891323294 +0900
++++ ws-hirtests/crates/thaw-hir/src/lower/tests.rs	2026-10-07 01:13:36.007860832 +0900
+@@ -6,6 +6,48 @@
+     lower_module(&module).expect("lowering error")
+ }
+ 
++/// Strip the object-literal lowering scaffolding so tests can assert the literal itself:
++/// per-field evaluation-order temporaries (`__thaw_object_field_N` IIFE parameters) and the
++/// native-projection owner wrapper (`__thaw_full_native_owner_N`) are inlined back.
++fn unstage_object_literal(expr: &HirExpr, subst: &[(String, HirExpr)]) -> HirExpr {
++    let is_staging = |name: &str| {
++        name.starts_with("__thaw_object_field_")
++            || name.starts_with("__thaw_object_spread_")
++            || name.starts_with("__thaw_full_native_owner_")
++    };
++    match expr {
++        HirExpr::Call(callee, args) => match callee.as_ref() {
++            HirExpr::Lambda(_, params, _, body)
++                if params.len() == args.len() && params.iter().all(|param| is_staging(&param.name)) =>
++            {
++                let mut inner = subst.to_vec();
++                for (param, arg) in params.iter().zip(args) {
++                    inner.push((param.name.clone(), unstage_object_literal(arg, subst)));
++                }
++                unstage_object_literal(body, &inner)
++            }
++            _ => expr.clone(),
++        },
++        // The registration prelude only records layout; the value is the owner itself.
++        HirExpr::EvalThen(_, value) if matches!(value.as_ref(), HirExpr::Var(name) if is_staging(name)) => {
++            unstage_object_literal(value, subst)
++        }
++        HirExpr::ObjectLit(fields) => HirExpr::ObjectLit(
++            fields.iter().map(|(name, value)| (name.clone(), unstage_object_literal(value, subst))).collect(),
++        ),
++        HirExpr::Var(name) => subst.iter().rev().find(|(bound, _)| bound == name)
++            .map_or_else(|| expr.clone(), |(_, value)| value.clone()),
++        other => other.clone(),
++    }
++}
++
++fn unstage_let(statement: &HirStmt) -> HirStmt {
++    match statement {
++        HirStmt::Let(name, ty, init) => HirStmt::Let(name.clone(), ty.clone(), unstage_object_literal(init, &[])),
++        other => other.clone(),
++    }
++}
++
+ include!("tests/async.rs");
+ include!("tests/classes.rs");
+ include!("tests/control_flow.rs");

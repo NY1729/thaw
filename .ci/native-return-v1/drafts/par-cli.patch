@@ -1,0 +1,142 @@
+diff --color -ruN snap/crates-base-2/thaw-cli/src/registry_integration/jit/control_flow.rs ws-cli/crates/thaw-cli/src/registry_integration/jit/control_flow.rs
+--- snap/crates-base-2/thaw-cli/src/registry_integration/jit/control_flow.rs	2026-10-07 00:48:52.874428369 +0900
++++ ws-cli/crates/thaw-cli/src/registry_integration/jit/control_flow.rs	2026-10-07 01:17:01.505246861 +0900
+@@ -1338,7 +1338,7 @@
+                 let target = context.loop_depth;
+                 context
+                     .loop_labels
+-                    .push((labeled.label.sym.to_string(), target));
++                    .push((labeled.label.sym.to_string(), target, false));
+                 let result = encode_aggregate_return_effects(
+                     labeled.body.as_ref(),
+                     requested,
+@@ -1361,8 +1361,8 @@
+                     .loop_labels
+                     .iter()
+                     .rev()
+-                    .find(|(name, _)| name == &label)
+-                    .map(|(_, depth)| *depth)?;
++                    .find(|(name, _, _)| name == &label)
++                    .map(|(_, depth, _)| *depth)?;
+                 let distance = context
+                     .loop_depth
+                     .checked_sub(target.checked_add(1)?)?;
+@@ -1375,8 +1375,8 @@
+                     .loop_labels
+                     .iter()
+                     .rev()
+-                    .find(|(name, _)| name == &label)
+-                    .map(|(_, depth)| *depth)?;
++                    .find(|(name, _, _)| name == &label)
++                    .map(|(_, depth, _)| *depth)?;
+                 let distance = context
+                     .loop_depth
+                     .checked_sub(target.checked_add(1)?)?;
+@@ -1437,7 +1437,7 @@
+                 let target = context.loop_depth;
+                 context
+                     .loop_labels
+-                    .push((labeled.label.sym.to_string(), target));
++                    .push((labeled.label.sym.to_string(), target, false));
+                 let nested = std::iter::once(labeled.body.as_ref())
+                     .chain(rest.iter().copied())
+                     .collect::<Vec<_>>();
+diff --color -ruN snap/crates-base-2/thaw-cli/src/registry_integration/shim_support.rs ws-cli/crates/thaw-cli/src/registry_integration/shim_support.rs
+--- snap/crates-base-2/thaw-cli/src/registry_integration/shim_support.rs	2026-10-07 00:48:52.876084728 +0900
++++ ws-cli/crates/thaw-cli/src/registry_integration/shim_support.rs	2026-10-07 01:17:01.505890871 +0900
+@@ -709,7 +709,7 @@
+ /// name used by constructor helpers. Unresolved imports still reserve their
+ /// local name, so they cannot fall through to a different package's bare class.
+ fn constructor_imports(
+-    module: &swc_ecma_ast::Module,
++    module: &thaw_parser::ast::Module,
+     package_qualifiers: &std::collections::HashMap<String, String>,
+ ) -> (
+     std::collections::HashMap<String, (String, String)>,
+diff --color -ruN snap/crates-base-2/thaw-cli/src/tests/external_classes.rs ws-cli/crates/thaw-cli/src/tests/external_classes.rs
+--- snap/crates-base-2/thaw-cli/src/tests/external_classes.rs	2026-10-07 00:48:52.877084731 +0900
++++ ws-cli/crates/thaw-cli/src/tests/external_classes.rs	2026-10-07 01:17:32.649103166 +0900
+@@ -475,7 +475,6 @@
+             false,
+             vec![tuple],
+         )],
+-        &std::collections::HashMap::new(),
+     )
+     .unwrap();
+     assert!(!rewritten.contains("new PairBox"));
+@@ -634,7 +633,6 @@
+             false,
+             methods[0].4.clone(),
+         )],
+-        &std::collections::HashMap::new(),
+     )
+     .unwrap();
+     assert!(!rewritten.contains("new NullableBox"));
+@@ -798,7 +796,6 @@
+             inherited.3,
+             inherited.4.clone(),
+         )],
+-        &std::collections::HashMap::new(),
+     )
+     .unwrap();
+     assert!(rewritten.contains(&format!("{}(value, 4)", inherited.1)));
+@@ -822,7 +819,6 @@
+             false,
+             vec![thaw_hir::HirType::Str, thaw_hir::HirType::F64],
+         )],
+-        &std::collections::HashMap::new(),
+     )
+     .unwrap();
+     assert_eq!(
+@@ -1079,7 +1075,6 @@
+             false,
+             vec![],
+         )],
+-        &std::collections::HashMap::new(),
+     )
+     .unwrap();
+     assert_eq!(
+@@ -1106,7 +1101,6 @@
+             false,
+             vec![],
+         )],
+-        &std::collections::HashMap::new(),
+     )
+     .unwrap();
+     assert_eq!(
+@@ -1133,7 +1127,6 @@
+             false,
+             vec![],
+         )],
+-        &std::collections::HashMap::new(),
+     )
+     .unwrap();
+     assert_eq!(
+@@ -1160,7 +1153,6 @@
+             false,
+             vec![],
+         )],
+-        &std::collections::HashMap::new(),
+     )
+     .unwrap();
+     assert_eq!(
+diff --color -ruN snap/crates-base-2/thaw-cli/src/tests.rs ws-cli/crates/thaw-cli/src/tests.rs
+--- snap/crates-base-2/thaw-cli/src/tests.rs	2026-10-07 00:48:52.876084728 +0900
++++ ws-cli/crates/thaw-cli/src/tests.rs	2026-10-07 01:23:00.550672371 +0900
+@@ -1495,12 +1495,12 @@
+ fn intl_host_detection_only_enables_intl_users() {
+     assert!(!source_uses_intl("module.exports = value => value + 1"));
+     assert!(!source_uses_intl("value.localeCompare(other)"));
+-    // DateTimeFormat/NumberFormat/ListFormat keep a pure-JS,
+-    // English-only fast path that needs no icu4x data -- only the
+-    // capabilities with no non-icu4x implementation should enable this.
++    // Every Intl constructor is backed by the icu4x data now (see
++    // `required_runtime_features` and quickjs `intl_list.rs`), so each one
++    // enables the feature.
+     assert!(source_uses_intl("new Intl.DateTimeFormat('ja-JP')"));
+     assert!(source_uses_intl("new Intl.NumberFormat('de-DE')"));
+-    assert!(!source_uses_intl("new Intl.ListFormat('fr')"));
++    assert!(source_uses_intl("new Intl.ListFormat('fr')"));
+     assert!(source_uses_intl("new Intl.Locale('ja-JP')"));
+     assert!(source_uses_intl(
+         "Intl.PluralRules.supportedLocalesOf(['en'])"

@@ -1,0 +1,254 @@
+diff --color -ruN snap/crates-base-all/thaw-bridge/src/bridge/classification.rs ws-bridge/crates/thaw-bridge/src/bridge/classification.rs
+--- snap/crates-base-all/thaw-bridge/src/bridge/classification.rs	2026-10-07 00:48:52.870106892 +0900
++++ ws-bridge/crates/thaw-bridge/src/bridge/classification.rs	2026-10-07 01:02:43.459100673 +0900
+@@ -258,6 +258,9 @@
+         }
+         HirType::Set(element) => format!("Set<{}>", render_ts_type(element)),
+         HirType::WeakSet(element) => format!("WeakSet<{}>", render_ts_type(element)),
++        // The `this` type is not part of the declared TS signature.
++        HirType::FunctionWithThis(_, visible) => render_ts_type(visible),
++        HirType::NativeException => "Error".to_string(),
+         HirType::Union(_) | HirType::Dynamic => "any".to_string(),
+     }
+ }
+diff --color -ruN snap/crates-base-all/thaw-bridge/src/bridge/dts/exports.rs ws-bridge/crates/thaw-bridge/src/bridge/dts/exports.rs
+--- snap/crates-base-all/thaw-bridge/src/bridge/dts/exports.rs	2026-10-07 00:48:52.870442042 +0900
++++ ws-bridge/crates/thaw-bridge/src/bridge/dts/exports.rs	2026-10-07 01:05:02.055631279 +0900
+@@ -1248,7 +1248,7 @@
+         .params
+         .iter()
+         .take(fixed_param_count)
+-        .take_while(|param| matches!(param, TsFnParam::Ident(binding) if !binding.id.optional))
++        .take_while(|param| !matches!(param, TsFnParam::Ident(binding) if binding.id.optional))
+         .count();
+     let mut param_field_constraints = Vec::new();
+     let params = call
+@@ -1426,7 +1426,7 @@
+         .params
+         .iter()
+         .take(fixed_param_count)
+-        .take_while(|param| matches!(param, TsFnParam::Ident(binding) if !binding.id.optional))
++        .take_while(|param| !matches!(param, TsFnParam::Ident(binding) if binding.id.optional))
+         .count();
+     let mut param_field_constraints = Vec::new();
+     let params = function
+@@ -1529,7 +1529,7 @@
+             Some(import.specifiers.iter().filter_map(|specifier| {
+                 match specifier {
+                     swc_ecma_ast::ImportSpecifier::Namespace(namespace)
+-                        if import.src.value.starts_with('.') => {
++                        if import.src.value.starts_with(".") => {
+                         Some(namespace.local.sym.to_string())
+                     }
+                     _ => None,
+diff --color -ruN snap/crates-base-all/thaw-bridge/src/bridge/dts/interfaces.rs ws-bridge/crates/thaw-bridge/src/bridge/dts/interfaces.rs
+--- snap/crates-base-all/thaw-bridge/src/bridge/dts/interfaces.rs	2026-10-07 00:48:52.870442042 +0900
++++ ws-bridge/crates/thaw-bridge/src/bridge/dts/interfaces.rs	2026-10-07 01:05:02.055104860 +0900
+@@ -33,7 +33,7 @@
+             if let DefaultDecl::Fn(function) = &export.decl {
+                 if let Some(name) = &function.ident {
+                     let name = name.sym.to_string();
+-                    found.push((name.clone(), name, &function.function));
++                    found.push((name.clone(), name, &*function.function));
+                 }
+             }
+             continue;
+@@ -46,7 +46,7 @@
+         if let Decl::Fn(function) = decl {
+             let bare = function.ident.sym.to_string();
+             let full = if scope.is_empty() { bare.clone() } else { format!("{scope}.{bare}") };
+-            found.push((full, bare, &function.function));
++            found.push((full, bare, &*function.function));
+         }
+     }
+     found
+@@ -822,7 +822,7 @@
+         .params
+         .iter()
+         .take(fixed_param_count)
+-        .take_while(|param| matches!(&param.pat, Pat::Ident(binding) if !binding.optional))
++        .take_while(|param| !matches!(&param.pat, Pat::Ident(binding) if binding.optional))
+         .count();
+     let params = func
+         .params
+@@ -981,7 +981,7 @@
+         .params
+         .iter()
+         .take(fixed_param_count)
+-        .take_while(|param| matches!(param, TsFnParam::Ident(binding) if !binding.optional))
++        .take_while(|param| !matches!(param, TsFnParam::Ident(binding) if binding.optional))
+         .count();
+     let params = method
+         .params
+diff --color -ruN snap/crates-base-all/thaw-bridge/src/bridge/generation.rs ws-bridge/crates/thaw-bridge/src/bridge/generation.rs
+--- snap/crates-base-all/thaw-bridge/src/bridge/generation.rs	2026-10-07 00:48:52.870993107 +0900
++++ ws-bridge/crates/thaw-bridge/src/bridge/generation.rs	2026-10-07 01:07:34.591400096 +0900
+@@ -205,7 +205,12 @@
+                     .map(|((name, _), ty)| format!("{name}: {}", render_ts_type(ty)))
+                     .collect::<Vec<_>>();
+                 if let (Some((name, _)), Some(variadic)) = (&func.rest_param, &sig.variadic) {
+-                    params.push(format!("...{name}: ({})[]", render_ts_type(variadic)));
++                    // Only unions and function types need grouping before `[]`.
++                    let element = render_ts_type(variadic);
++                    let element = if element.contains('|') || element.contains("=>") {
++                        format!("({element})")
++                    } else { element };
++                    params.push(format!("...{name}: {element}[]"));
+                 }
+                 let params = params.join(", ");
+                 out.push_str(&format!(
+@@ -684,7 +689,7 @@
+          \x20\x20var __thaw_napi_reference_value = function(id, active) {{ var stored = __thaw_napi_reference_values.get(id), value = stored && typeof stored.deref === 'function' ? stored.deref() : stored, properties = {{}}; if (!value) return properties; Object.keys(value).forEach(function(key) {{ properties[key] = __thaw_napi_argument(value[key], active); }}); return properties; }};\n\
+          \x20\x20var __thaw_napi_argument = function(value, active) {{\n\
+          \x20\x20\x20\x20if (value === null || (typeof value !== 'function' && typeof value !== 'object')) return value;\n\
+-         \x20\x20\x20\x20var handle = __thaw_napi_handles.get(value); if (handle) {{ var owner = globalThis.__thaw_json_graph_owner_of_handle(String(handle)); if (__thaw_napi_owner_metadata && !__thaw_napi_owner_ids.has(owner)) throw new TypeError('native object belongs to another addon'); return {{ __thaw_napi_handle__: handle }}; }} if (__thaw_napi_proxy_owners.has(value)) throw new TypeError('native object belongs to another addon');\n\
++         \x20\x20\x20\x20var handle = __thaw_napi_handles.get(value); if (handle) {{ var owner = globalThis.__thaw_json_graph_owner_of_handle(String(handle)); if (__thaw_napi_owner_metadata ? !__thaw_napi_owner_ids.has(owner) : (__thaw_napi_proxy_owners.has(value) && __thaw_napi_proxy_owners.get(value) !== __thaw_addon)) throw new TypeError('native object belongs to another addon'); return {{ __thaw_napi_handle__: handle }}; }} if (__thaw_napi_proxy_owners.has(value)) throw new TypeError('native object belongs to another addon');\n\
+          \x20\x20\x20\x20active = active || new WeakSet();\n\
+          \x20\x20\x20\x20var id = __thaw_napi_reference_ids.get(value);\n\
+          \x20\x20\x20\x20if (id && active.has(value)) return {{ __thaw_napi_ref__: id }};\n\
+@@ -778,7 +783,7 @@
+          \x20\x20\x20\x20\x20\x20dispatch.__thaw_addons = addons; return dispatch;\n\
+          \x20\x20\x20\x20}})(globalThis.process.dlopen);\n\
+          \x20\x20}}\n\
+-         \x20\x20globalThis.process.dlopen.__thaw_addons["{native_package}"] = __thaw_addon;\n\
++         \x20\x20globalThis.process.dlopen.__thaw_addons[\"{native_package}\"] = __thaw_addon;\n\
+          \x20\x20if (__thaw_addon.QueryEngine && !globalThis.process.env.PRISMA_QUERY_ENGINE_LIBRARY) globalThis.process.env.PRISMA_QUERY_ENGINE_LIBRARY = '/proc/self/exe';\n\
+          \x20\x20return __thaw_addon;\n\
+          \x20\x20}})();\n\
+diff --color -ruN snap/crates-base-all/thaw-bridge/src/tests/diagnostics_and_classes.rs ws-bridge/crates/thaw-bridge/src/tests/diagnostics_and_classes.rs
+--- snap/crates-base-all/thaw-bridge/src/tests/diagnostics_and_classes.rs	2026-10-07 00:48:52.871084712 +0900
++++ ws-bridge/crates/thaw-bridge/src/tests/diagnostics_and_classes.rs	2026-10-07 01:05:38.501430545 +0900
+@@ -827,7 +827,7 @@
+             export { Maker as Public };
+         }
+     "#).unwrap();
+-    let maker = classes.iter().find(|class| class.name == "Maker").unwrap();
++    let maker = classes.iter().find(|class| class.name == "API.Maker").unwrap();
+     assert_eq!(maker.constructors[0].params[0].1,
+         DtsType::Native(HirType::Object(vec![("x".into(), HirType::F64)])));
+ }
+diff --color -ruN snap/crates-base-all/thaw-bridge/src/tests/generic_types.rs ws-bridge/crates/thaw-bridge/src/tests/generic_types.rs
+--- snap/crates-base-all/thaw-bridge/src/tests/generic_types.rs	2026-10-07 00:48:52.871084712 +0900
++++ ws-bridge/crates/thaw-bridge/src/tests/generic_types.rs	2026-10-07 01:06:00.067805249 +0900
+@@ -10,16 +10,16 @@
+         root_export: None,
+     }]);
+     assert!(init.contains("function __thaw_native_module_init(): void"));
+-    assert!(init.contains(r#"loadNativeAddonEmbedded("deadbeef", "", "native-add");"#));
+-    assert!(init.contains(r#"loadNativeSharedLibraryEmbedded("cafe");"#));
++    assert!(init.contains(r#"if (!loadNativeAddonEmbedded("deadbeef", "", "native-add")) throw"#));
++    assert!(init.contains(r#"if (!loadNativeSharedLibraryEmbedded("cafe")) throw"#));
+     let init = generate_native_addon_path_init(&[NativeAddonPath {
+         package_name: "native-add",
+         path: "/registry/native-add/native.node",
+         dependencies: vec!["/registry/native-add/libvalue.so"],
+         root_export: Some("NativeAdd"),
+     }]);
+-    assert!(init.contains(r#"loadNativeSharedLibrary("/registry/native-add/libvalue.so");"#));
+-    assert!(init.contains(r#"loadNativeAddon("/registry/native-add/native.node", "NativeAdd", "native-add");"#));
++    assert!(init.contains(r#"if (!loadNativeSharedLibrary("/registry/native-add/libvalue.so")) throw"#));
++    assert!(init.contains(r#"if (!loadNativeAddon("/registry/native-add/native.node", "NativeAdd", "native-add")) throw"#));
+ }
+ 
+ #[test]
+@@ -154,9 +154,11 @@
+ #[test]
+ fn classifies_primitive_constrained_generic_function_as_fast_path() {
+     let funcs =
+-        parse_dts("export declare function nanoid<Type extends string>(size?: number): Type;")
++        parse_dts("export declare function nanoid<Type extends string>(size: number): Type;")
+             .unwrap();
+-    assert_eq!(funcs[0].required_params, 0);
++    // An optional parameter would classify as Fallback (see
++    // `optional_native_function_uses_fallback_arity`), so the fast path needs a required one.
++    assert_eq!(funcs[0].required_params, 1);
+     assert!(matches!(
+         classify(&funcs[0]),
+         Classification::FastPath(signature)
+diff --color -ruN snap/crates-base-all/thaw-bridge/src/tests/shims_and_bundles.rs ws-bridge/crates/thaw-bridge/src/tests/shims_and_bundles.rs
+--- snap/crates-base-all/thaw-bridge/src/tests/shims_and_bundles.rs	2026-10-07 00:48:52.871084712 +0900
++++ ws-bridge/crates/thaw-bridge/src/tests/shims_and_bundles.rs	2026-10-07 01:07:06.097763916 +0900
+@@ -386,7 +386,7 @@
+     let wrapped = wrap_as_commonjs_module("module.exports = {};", &[], &[], &[], "")
+         .replacen("return __thaw_addon;", "globalThis.__thaw_napi_test = { handles: __thaw_napi_handles, argument: __thaw_napi_argument }; return __thaw_addon;", 1);
+     let script = format!(
+-        "globalThis.__thaw_napi_bridge_exports = function() {{ return '{{\"names\":[],\"qualifiedPackages\":[]}}'; }}; \
++        "globalThis.__thaw_napi_bridge_available = () => true; globalThis.__thaw_napi_bridge_exports = function() {{ return '{{\"names\":[],\"qualifiedPackages\":[]}}'; }}; \
+          globalThis.__thaw_napi_bridge_handle = function() {{ return JSON.stringify({{value: null}}); }}; \
+          {wrapped} \
+          globalThis.inspectNativeCallbackArgs = function() {{ \
+@@ -862,7 +862,7 @@
+     let wrapped = wrap_as_commonjs_module("module.exports = {};", &[], &[], &[], "")
+         .replacen("return __thaw_addon;", "globalThis.__thaw_napi_test = { argument: __thaw_napi_argument, sync: __thaw_napi_sync_arguments, handle: __thaw_napi_handle }; return __thaw_addon;", 1);
+     let script = [r#"
+-        globalThis.__thaw_napi_bridge_exports = () => JSON.stringify({names:['direct'],qualifiedPackages:[]});
++        globalThis.__thaw_napi_bridge_available = () => true; globalThis.__thaw_napi_bridge_exports = () => JSON.stringify({names:['direct'],qualifiedPackages:[]});
+         globalThis.__thaw_napi_bridge_call = () => JSON.stringify({
+           kind: 'value',
+           value: JSON.parse('{"timestamp":0,"__thaw_napi_error__":"data","__thaw_napi_promise__":"ordinary","$__thaw_napi_undefined$":true,"nested":{"__proto__":null,"invalid":null,"numbers":[null,null,null]}}'),
+@@ -935,7 +935,7 @@
+           constructor(value) { this.value = value; }
+           deref() { return this.value; }
+         };
+-        globalThis.__thaw_napi_bridge_exports = () => JSON.stringify({names:['direct'],qualifiedPackages:[]});
++        globalThis.__thaw_napi_bridge_available = () => true; globalThis.__thaw_napi_bridge_exports = () => JSON.stringify({names:['direct'],qualifiedPackages:[]});
+         globalThis.__thaw_napi_bridge_call = () => JSON.stringify({kind:'value', value:{__thaw_napi_handle__:'91'}});
+         globalThis.releasedNativeHandles = [];
+         globalThis.__thaw_napi_bridge_handle = (operation, target) => {
+@@ -952,11 +952,12 @@
+           const second = require.addon().direct();
+           registry.callback(oldRecord.held);
+           const retained = require.addon().direct() === second;
+-          const noEarlyRelease = releasedNativeHandles.length === 0;
++          // Each wrapper owns one renew/release pair: the stale finalizer releases only its own claim.
++          const noEarlyRelease = releasedNativeHandles.length === 1;
+           const newRecord = registry.records.find(record => record.object === second);
+           registry.callback(newRecord.held);
+           return [first !== second, retained, noEarlyRelease,
+-            releasedNativeHandles.length === 1 && releasedNativeHandles[0] === '91'];
++            releasedNativeHandles.length === 2 && releasedNativeHandles.every(handle => handle === '91')];
+         };
+     "#].join("\n");
+     assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
+@@ -979,7 +980,7 @@
+           constructor(value) { this.value = value; }
+           deref() { return this.value; }
+         };
+-        globalThis.__thaw_napi_bridge_exports = () => JSON.stringify({names:['direct'],qualifiedPackages:[]});
++        globalThis.__thaw_napi_bridge_available = () => true; globalThis.__thaw_napi_bridge_exports = () => JSON.stringify({names:['direct'],qualifiedPackages:[]});
+         globalThis.__thaw_napi_bridge_call = () => JSON.stringify({kind:'value', value:{
+           __thaw_napi_binary__:'92', kind:'ArrayBuffer', data:[1, 2]
+         }});
+@@ -998,11 +999,12 @@
+           const second = require.addon().direct();
+           registry.callback(oldRecord.held);
+           const retained = require.addon().direct() === second;
+-          const noEarlyRelease = releasedNativeHandles.length === 0;
++          // Each wrapper owns one renew/release pair: the stale finalizer releases only its own claim.
++          const noEarlyRelease = releasedNativeHandles.length === 1;
+           const newRecord = registry.records.find(record => record.object === second);
+           registry.callback(newRecord.held);
+           return [first !== second, retained, noEarlyRelease,
+-            releasedNativeHandles.length === 1 && releasedNativeHandles[0] === '92'];
++            releasedNativeHandles.length === 2 && releasedNativeHandles.every(handle => handle === '92')];
+         };
+     "#].join("\n");
+     assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
+@@ -1029,7 +1031,7 @@
+           constructor(callback) { this.callback = callback; this.records = []; fakeRegistries.push(this); }
+           register(object, held) { this.records.push({object, held}); }
+         };
+-        globalThis.__thaw_napi_bridge_exports = () => JSON.stringify({
++        globalThis.__thaw_napi_bridge_available = () => true; globalThis.__thaw_napi_bridge_exports = () => JSON.stringify({
+           names:['first-pkg::make','first-pkg::accept','second-pkg::accept'],
+           qualifiedPackages:['first-pkg','second-pkg']
+         });
+@@ -1088,7 +1090,7 @@
+     use std::ffi::CString;
+ 
+     let bridge = CString::new(
+-        "globalThis.__thaw_napi_bridge_exports = function() { return JSON.stringify({ names: ['first-pkg::same', 'second-pkg::same', '@scope/third::same', 'legacy'], qualifiedPackages: ['first-pkg', 'second-pkg', '@scope/third', 'zero-pkg'] }); };\n\
++        "globalThis.__thaw_napi_bridge_available = () => true; globalThis.__thaw_napi_bridge_exports = function() { return JSON.stringify({ names: ['first-pkg::same', 'second-pkg::same', '@scope/third::same', 'legacy'], qualifiedPackages: ['first-pkg', 'second-pkg', '@scope/third', 'zero-pkg'] }); };\n\
+          globalThis.__thaw_napi_bridge_call = function(name) { return JSON.stringify({kind:'value',value:name,origins:[]}); };"
+     ).unwrap();
+     assert_eq!(thaw_quickjs::thaw_js_load(bridge.as_ptr()), 1);

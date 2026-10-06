@@ -1,0 +1,121 @@
+diff --color -ruN snap/crates-base-2/thaw-llvm/src/hir_codegen/dynamic_host/callbacks.rs ws-llvmdbg/crates/thaw-llvm/src/hir_codegen/dynamic_host/callbacks.rs
+--- snap/crates-base-2/thaw-llvm/src/hir_codegen/dynamic_host/callbacks.rs	2026-10-07 01:15:53.210302558 +0900
++++ ws-llvmdbg/crates/thaw-llvm/src/hir_codegen/dynamic_host/callbacks.rs	2026-10-07 02:26:58.859298518 +0900
+@@ -1067,6 +1067,13 @@
+             let HirType::Promise(resolved) = ret else {
+                 unreachable!()
+             };
++            // This early return skips the result-marshalling code below, the
++            // only user of `result_marshalling_failed`: terminate the unused
++            // block so the module verifies, then resume at `return_block`.
++            let resume = self.builder.get_insert_block().ok_or("no insert block")?;
++            self.builder.position_at_end(result_marshalling_failed);
++            self.builder.build_unreachable().map_err(|error| error.to_string())?;
++            self.builder.position_at_end(resume);
+             let guarded = self.compile_host_callback_pending_guard(adapter, true)?;
+             let finish = self.compile_native_promise_callback_finisher(resolved)?;
+             return Ok((
+diff --color -ruN snap/crates-base-2/thaw-llvm/src/hir_codegen/dynamic_host/quickjs.rs ws-llvmdbg/crates/thaw-llvm/src/hir_codegen/dynamic_host/quickjs.rs
+--- snap/crates-base-2/thaw-llvm/src/hir_codegen/dynamic_host/quickjs.rs	2026-10-07 00:48:54.171372426 +0900
++++ ws-llvmdbg/crates/thaw-llvm/src/hir_codegen/dynamic_host/quickjs.rs	2026-10-07 02:39:13.810382900 +0900
+@@ -689,6 +689,9 @@
+             &[receiver.into()], "release_selected_receiver_on_argument_error")
+             .map_err(|error| error.to_string())?;
+         self.branch_on_pending_exception()?;
++        // Entered only with an exception pending, so `call_ok` is never reached;
++        // branching it into `success` would add an edge that breaks dominance.
++        self.builder.build_unreachable().map_err(|error| error.to_string())?;
+         self.builder.position_at_end(success);
+         compiled
+     }
+@@ -699,6 +702,10 @@
+     ) -> Result<BasicValueEnum<'ctx>, String> {
+         self.uses_quickjs = true;
+         self.uses_quickjs_handles = true;
++        // May be the first QuickJS operation on the thread; Json arguments can
++        // carry Host leases, so install the retained-value callbacks first
++        // (same reasoning as compile_call_dynamic_value_mixed_exact).
++        self.compile_register_js_callback_host_operations()?;
+         let [handle, name, call_args] = args else {
+             return Err("callDynamicMethod expects exactly three arguments".into());
+         };
+@@ -787,6 +794,10 @@
+     ) -> Result<BasicValueEnum<'ctx>, String> {
+         self.uses_quickjs = true;
+         self.uses_quickjs_handles = true;
++        // May be the first QuickJS operation on the thread; Json arguments can
++        // carry Host leases, so install the retained-value callbacks first
++        // (same reasoning as compile_call_dynamic_value_mixed_exact).
++        self.compile_register_js_callback_host_operations()?;
+         let [handle, name, call_args] = args else {
+             return Err("callDynamicMethod expects exactly three arguments".into());
+         };
+@@ -863,6 +874,10 @@
+     ) -> Result<BasicValueEnum<'ctx>, String> {
+         self.uses_quickjs = true;
+         self.uses_quickjs_handles = true;
++        // May be the first QuickJS operation on the thread; Json arguments can
++        // carry Host leases, so install the retained-value callbacks first
++        // (same reasoning as compile_call_dynamic_value_mixed_exact).
++        self.compile_register_js_callback_host_operations()?;
+         let [handle, name, call_args] = args else {
+             return Err("callDynamicMethodHandle expects exactly three arguments".into());
+         };
+@@ -947,6 +962,10 @@
+     ) -> Result<BasicValueEnum<'ctx>, String> {
+         self.uses_quickjs = true;
+         self.uses_quickjs_handles = true;
++        // May be the first QuickJS operation on the thread; Json arguments can
++        // carry Host leases, so install the retained-value callbacks first
++        // (same reasoning as compile_call_dynamic_value_mixed_exact).
++        self.compile_register_js_callback_host_operations()?;
+         let [handle, name, call_args] = args else {
+             return Err("callDynamicMethodHandle expects exactly three arguments".into());
+         };
+@@ -1144,6 +1163,8 @@
+             .map_err(|error| error.to_string())?;
+         self.builder.position_at_end(propagate);
+         self.branch_on_pending_exception()?;
++        // Exception-only path (see compile_selected_dynamic_arguments).
++        self.builder.build_unreachable().map_err(|error| error.to_string())?;
+         self.builder.position_at_end(success);
+         let (callable, json_args) = staged?;
+         let raw = self.builder.build_alloca(i64_type.array_type((direct.len() + 1) as u32),
+diff --color -ruN snap/crates-base-2/thaw-llvm/src/hir_codegen/invocations/json_calls.rs ws-llvmdbg/crates/thaw-llvm/src/hir_codegen/invocations/json_calls.rs
+--- snap/crates-base-2/thaw-llvm/src/hir_codegen/invocations/json_calls.rs	2026-10-07 01:15:53.212397182 +0900
++++ ws-llvmdbg/crates/thaw-llvm/src/hir_codegen/invocations/json_calls.rs	2026-10-07 02:13:22.358909421 +0900
+@@ -984,6 +984,7 @@
+         self.clear_pending_native_text()?;
+         self.mark_pending_native_text(host_error)?;
+         self.branch_on_pending_exception()?;
++        self.builder.build_unconditional_branch(host_valid).map_err(|error| error.to_string())?;
+         self.builder.position_at_end(host_valid);
+         Ok(result)
+     }
+diff --color -ruN snap/crates-base-2/thaw-llvm/src/hir_codegen/json_values.rs ws-llvmdbg/crates/thaw-llvm/src/hir_codegen/json_values.rs
+--- snap/crates-base-2/thaw-llvm/src/hir_codegen/json_values.rs	2026-10-07 01:15:53.213566409 +0900
++++ ws-llvmdbg/crates/thaw-llvm/src/hir_codegen/json_values.rs	2026-10-07 02:13:22.359471426 +0900
+@@ -189,6 +189,7 @@
+         self.clear_pending_native_text()?;
+         self.mark_pending_native_text(error)?;
+         self.branch_on_pending_exception()?;
++        self.builder.build_unconditional_branch(succeeded).map_err(|error| error.to_string())?;
+         self.builder.position_at_end(succeeded);
+         Ok(result)
+     }
+diff --color -ruN snap/crates-base-2/thaw-llvm/src/hir_codegen/values/closures.rs ws-llvmdbg/crates/thaw-llvm/src/hir_codegen/values/closures.rs
+--- snap/crates-base-2/thaw-llvm/src/hir_codegen/values/closures.rs	2026-10-07 00:48:54.260366215 +0900
++++ ws-llvmdbg/crates/thaw-llvm/src/hir_codegen/values/closures.rs	2026-10-07 02:38:37.988828570 +0900
+@@ -1082,6 +1082,12 @@
+         // Closure captures retain their variable cells so mutations remain
+         // visible when the function value is invoked later.
+         let closure = self.allocate_lambda_environment(entry, this_adapter, captures)?;
++        // Promoting a Promise capture splits the block, so the builder is no
++        // longer in the block it started in: resume after the body there.
++        let parent_block = self
++            .builder
++            .get_insert_block()
++            .ok_or("lambda must be emitted inside a function")?;
+         let arena_captures = captures
+             .iter()
+             .filter(|capture| self.arena_variables.contains(&capture.name))
