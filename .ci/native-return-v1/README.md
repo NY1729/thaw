@@ -1,37 +1,23 @@
-# Native Return CI candidate diagnostics
+# Native Return compile-repair CI diagnostics
 
-This payload supports one isolated, disposable-branch diagnostic run for the frozen native Return candidate. The workflow replaces the repository's broad inherited CI only on `validation/native-return`; it does not change `main`, `refactor/codebase`, product sources, or any Cargo manifest or lockfile.
+This harness validates a disposable candidate built from the pinned product baseline `8b353a99d4995c8217b9e73cd308ea85d2d6e5d8` on the `validation/native-return` branch. It does not change product sources outside the candidate overlay or run broader repository CI.
 
-## What the runner does
+## Pinned reconstruction
 
-1. Checks out the complete product baseline at `8b353a99d4995c8217b9e73cd308ea85d2d6e5d8` and the workflow/payload at the triggering commit.
-2. Runs the Python-standard-library harness tests, verifies the baseline Git tree against every checked-out tracked blob, and reconstructs the candidate in a separate temporary directory.
-3. Replays the exact lineage in this order: the existing native draft patch, the existing scope-v5 patch, `discard-v2.patch`, then `return-v1.patch`. It checks every source-stage manifest and the final 35-owner delta before running Cargo.
-4. Installs `libuv1-dev` and the hash-pinned official LLVM 22.1.8 x64 asset on the GitHub runner only. It records runner, Rust, Cargo, LLVM, C-linker, and lockfile identity.
-5. Runs independent locked `thaw-llvm` library checks for baseline and candidate. A baseline failure does not suppress the candidate check. Candidate LLVM/HIR no-run compiles and the 23 focused filters are gated on their required predecessor stages.
-6. Writes separate command logs and atomic status summaries including the exact control commit, repository, branch ref, run ID, and baseline SHA. Failures, timeouts, blocked gates, and never-run controls stay distinguishable; evidence is uploaded even after failure.
+The harness preserves the existing four-stage chain and manifests at 175, 176, 179, and 180 files. It then verifies the exact paired repair base: those 180 files plus only `crates/thaw-std/src/json.rs`, for 181 files. The hash-pinned `compile-repairs-v1.patch` is applied as stage five and checked against the final 181-file manifest. The full checkout delta is pinned to 44 owners: 39 modified and five new. The earlier stage roots remain unchanged.
 
-The four source-stage manifests contain 175, 176, 179, and 180 files. The final candidate differs from the product baseline by 30 modified owners and five added owners. No source repairs, three-way patch application, runtime benchmarks, NPM/Postgres lanes, PR, merge, deployment, or local product compiler setup belong to this experiment.
+## Diagnostics
 
-## Important source-review limit
+The runner performs independent locked `thaw-llvm` library checks for baseline and candidate. Candidate no-run gates remain LLVM first, then HIR, followed by `thaw-std --lib --no-run`. After those gates, the original 23 filters remain in order; the HIR `thaw_remaining_` filter and typed JSON decode-scope std filter are appended. The HIR filter must list and execute exactly its eight pinned test identifiers; the std filter must list and execute its one pinned identifier. The fully qualified selected and executed names are retained in evidence. Empty, substituted, duplicate, ignored, malformed-summary, partial, and wrong-count results fail closed.
 
-The candidate inherits the original 24-owner native draft, which remains unreviewed/HOLD. This experiment verifies source identity and records compiler/test diagnostics; it does not establish runtime reclamation, product integration, or broad semantic acceptance. Review prose is not bundled or checked by CI. A green focused diagnostic would apply only to the exact pinned source and toolchain recorded by that run.
+This is still an LLVM-first lane: if LLVM compilation or its no-run gate fails, the later HIR/std compile and focused controls are blocked. It is not a standalone HIR-only diagnostic.
 
 ## Local harness tests
 
-These tests use Python's standard library and synthetic Git fixtures. They do not run Rust/Cargo, install dependencies, download LLVM, or contact a network service.
+Run the standard-library-only harness tests with:
 
 ```sh
 python3 -m unittest discover -s .ci/native-return-v1/tests -v
 ```
 
-The `verify.py` runner CLI requires the complete pinned baseline checkout, a new candidate destination outside the checkout, this payload directory, and an independent evidence directory. It is invoked before dependency setup in the workflow. `run.py --initialize` prepares not-run evidence before setup; `run.py --finalize-if-incomplete` marks outstanding stages blocked after a workflow step fails.
-
-## Immutable inputs
-
-- The handoff manifest, original native patch, and scope-v5 patch are read from their existing paths in the pinned baseline; they are not duplicated here.
-- `discard-v2.patch` and `return-v1.patch` are the two successor deltas. Their hashes, stage manifests, native base owners, final owner roster, v5 test plan, dependency identities, and filter order are listed in `pins.json` and also fixed in `verify.py`.
-- `provenance_only_review_fingerprints` in `pins.json` holds informational digests only. The underlying prose is not present in the payload and is not checked by the workflow.
-- `original-native.sha256`, `scope-v5.sha256`, `discard-v2.sha256`, and `return-v1.sha256` verify the ordered 175→176→179→180 source chain. `native-base.sha256` verifies the 24 inherited owner bases; `net-owners.txt` verifies the exact 30-modified/5-new product delta.
-
-The baseline checkout and the reconstructed candidate remain separate. Cargo target directories and evidence live outside both source trees. This harness is diagnostic tooling, not a product change.
+These tests use synthetic Git fixtures and do not run Rust/Cargo, install dependencies, download LLVM, or contact a network service. The GitHub workflow installs the pinned LLVM asset only on its runner. A green harness test result confirms harness behavior, not product compilation or runtime behavior.

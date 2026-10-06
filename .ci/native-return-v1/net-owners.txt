@@ -1,8 +1,16 @@
+modified  crates/thaw-hir/src/hir/closure_analysis.rs
+modified  crates/thaw-hir/src/hir/ir.rs
+modified  crates/thaw-hir/src/hir/program.rs
 modified  crates/thaw-hir/src/hir/types.rs
+modified  crates/thaw-hir/src/lower/arrays/transformations.rs
+modified  crates/thaw-hir/src/lower/bytes_erasure.rs
+modified  crates/thaw-hir/src/lower/classes/normalization.rs
 modified  crates/thaw-hir/src/lower/control_flow.rs
+modified  crates/thaw-hir/src/lower/expressions/coercions.rs
 modified  crates/thaw-hir/src/lower/expressions/lowering.rs
 modified  crates/thaw-hir/src/lower/inference/types.rs
 modified  crates/thaw-hir/src/lower/invocations/calls.rs
+modified  crates/thaw-hir/src/lower/objects.rs
 modified  crates/thaw-hir/src/lower/promises.rs
 modified  crates/thaw-hir/src/lower/statements/lowering.rs
 modified  crates/thaw-hir/src/lower/tests/control_flow.rs
@@ -33,3 +41,4 @@ modified  crates/thaw-llvm/src/hir_codegen/values/unions.rs
 modified  crates/thaw-runtime/src/lib.rs
 modified  crates/thaw-runtime/src/runtime/promises.rs
 modified  crates/thaw-runtime/src/tests.rs
+modified  crates/thaw-std/src/json.rs

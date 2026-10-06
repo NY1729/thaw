@@ -1,0 +1,425 @@
+diff --git a/crates/thaw-hir/src/hir/closure_analysis.rs b/crates/thaw-hir/src/hir/closure_analysis.rs
+index ce94cc1..cf354c9 100644
+--- a/crates/thaw-hir/src/hir/closure_analysis.rs
++++ b/crates/thaw-hir/src/hir/closure_analysis.rs
+@@ -169,6 +169,7 @@ fn collect_closure_captures_expr(expr: &HirExpr, names: &mut BTreeSet<Symbol>) {
+         | HirExpr::ObjectAlloc(_)
+         | HirExpr::ClassAlloc(_)
+         | HirExpr::FunctionRef(..)
++        | HirExpr::FunctionRefThis(..)
+         | HirExpr::MethodRef(..) => {}
+     }
+ }
+@@ -213,3 +214,35 @@ fn collect_closure_captures_stmt(stmt: &HirStmt, names: &mut BTreeSet<Symbol>) {
+         | HirStmt::ContinueDepth(_) => {}
+     }
+ }
++
++#[cfg(test)]
++mod thaw_remaining_traversals_closure_controls {
++    use super::*;
++
++    #[test]
++    fn thaw_remaining_function_ref_this_contributes_no_captured_names() {
++        let callable = HirExpr::FunctionRefThis(
++            "callable_with_this".into(),
++            HirType::Bytes,
++            vec![HirType::Bytes],
++            HirType::Bytes,
++        );
++
++        assert!(closure_captured_names_in_while(&callable, &[]).is_empty());
++    }
++
++    #[test]
++    fn thaw_remaining_lambda_uses_declared_captures_without_scanning_its_body() {
++        let lambda = HirExpr::Lambda(
++            vec![HirParam { name: "declared_capture".into(), ty: HirType::F64 }],
++            Vec::new(),
++            HirType::Void,
++            Box::new(HirExpr::Var("body_only_name".into())),
++        );
++
++        assert_eq!(
++            closure_captured_names_in_while(&lambda, &[]),
++            ["declared_capture".to_string()].into_iter().collect()
++        );
++    }
++}
+diff --git a/crates/thaw-hir/src/hir/ir.rs b/crates/thaw-hir/src/hir/ir.rs
+index c62fb73..5243d1b 100644
+--- a/crates/thaw-hir/src/hir/ir.rs
++++ b/crates/thaw-hir/src/hir/ir.rs
+@@ -310,9 +310,12 @@ pub enum HirStmt {
+ /// async frame planning preserve it across suspension.
+ pub fn caught_exception_carrier_prelude(name: Symbol) -> HirStmt {
+     let carrier = caught_exception_carrier_type();
+-    let HirType::Union(members) = &carrier else { unreachable!() };
++    let members = match &carrier {
++        HirType::Union(members) => members.clone(),
++        _ => unreachable!(),
++    };
+     HirStmt::Let(name, carrier, HirExpr::UnionInject(
+-        Box::new(HirExpr::Lit(HirLit::Undefined)), 4, members.clone(),
++        Box::new(HirExpr::Lit(HirLit::Undefined)), 4, members,
+     ))
+ }
+ 
+diff --git a/crates/thaw-hir/src/hir/program.rs b/crates/thaw-hir/src/hir/program.rs
+index 31e9c84..a99981f 100644
+--- a/crates/thaw-hir/src/hir/program.rs
++++ b/crates/thaw-hir/src/hir/program.rs
+@@ -190,6 +190,7 @@ pub fn set_ffi_error_abi(
+             | HirExpr::ObjectAlloc(_)
+             | HirExpr::ClassAlloc(_)
+             | HirExpr::FunctionRef(..)
++            | HirExpr::FunctionRefThis(..)
+             | HirExpr::MethodRef(..)
+             | HirExpr::PostfixUpdate(_, _) => {}
+         }
+@@ -418,6 +419,7 @@ pub fn set_ffi_ownership(
+             | HirExpr::ObjectAlloc(_)
+             | HirExpr::ClassAlloc(_)
+             | HirExpr::FunctionRef(..)
++            | HirExpr::FunctionRefThis(..)
+             | HirExpr::MethodRef(..)
+             | HirExpr::PostfixUpdate(_, _) => {}
+         }
+@@ -948,6 +950,7 @@ pub fn set_ffi_string_abi(
+             | HirExpr::ObjectAlloc(_)
+             | HirExpr::ClassAlloc(_)
+             | HirExpr::FunctionRef(..)
++            | HirExpr::FunctionRefThis(..)
+             | HirExpr::MethodRef(..)
+             | HirExpr::PostfixUpdate(_, _) => {}
+         }
+@@ -1301,3 +1304,111 @@ pub fn set_ffi_variadic_abi(
+     signature.variadic_abi = abi;
+     Ok(())
+ }
++
++#[cfg(test)]
++mod thaw_remaining_traversals_program_controls {
++    use super::*;
++
++    fn signature() -> FfiSignature {
++        FfiSignature {
++            symbol: "traversal_target".into(),
++            params: vec![HirType::Str],
++            variadic: None,
++            variadic_abi: FfiVariadicAbi::Native,
++            ret: HirType::Str,
++            error_abi: FfiErrorAbi::Direct,
++            return_ownership: FfiOwnership::Borrowed,
++            error_ownership: FfiOwnership::Borrowed,
++            param_string_abis: vec![FfiStringAbi::NullTerminated],
++            return_string_abi: FfiStringAbi::NullTerminated,
++            calling_convention: FfiCallingConvention::C,
++            aggregate_return_abi: FfiAggregateAbi::Internal,
++            aggregate_return_layout: None,
++        }
++    }
++
++    fn program_with_neighbor_ffi_call() -> HirProgram {
++        let call_signature = signature();
++        HirProgram {
++            extern_functions: vec![call_signature.clone()],
++            functions: vec![HirFunction {
++                name: "traversal_test".into(),
++                params: Vec::new(),
++                ret: HirType::Void,
++                is_async: false,
++                body: vec![HirStmt::Expr(HirExpr::ArrayLit(vec![
++                    HirExpr::FunctionRefThis(
++                        "callable_with_this".into(),
++                        HirType::Bytes,
++                        vec![HirType::Bytes],
++                        HirType::Bytes,
++                    ),
++                    HirExpr::FfiCall(
++                        Box::new(call_signature),
++                        vec![HirExpr::Lit(HirLit::Str("argument".into()))],
++                    ),
++                ]))],
++            }],
++            ..HirProgram::default()
++        }
++    }
++
++    fn nested_call(program: &HirProgram) -> &FfiSignature {
++        let HirStmt::Expr(HirExpr::ArrayLit(values)) = &program.functions[0].body[0] else {
++            panic!("expected adjacent callable reference and FFI call");
++        };
++        let HirExpr::FfiCall(signature, _) = &values[1] else {
++            panic!("expected FFI call after callable reference");
++        };
++        signature
++    }
++
++    #[test]
++    fn thaw_remaining_program_error_abi_mutator_reaches_neighboring_ffi_call() {
++        let mut program = program_with_neighbor_ffi_call();
++        set_ffi_error_abi(&mut program, "traversal_target", FfiErrorAbi::ThawResult).unwrap();
++
++        assert_eq!(program.extern_functions[0].error_abi, FfiErrorAbi::ThawResult);
++        assert_eq!(nested_call(&program).error_abi, FfiErrorAbi::ThawResult);
++    }
++
++    #[test]
++    fn thaw_remaining_program_ownership_mutator_reaches_neighboring_ffi_call() {
++        let mut program = program_with_neighbor_ffi_call();
++        let returns = FfiOwnership::Owned { destroy: "destroy_result".into() };
++        let errors = FfiOwnership::ArenaCopy { destroy: Some("destroy_error".into()) };
++        set_ffi_ownership(
++            &mut program,
++            "traversal_target",
++            returns.clone(),
++            errors.clone(),
++        )
++        .unwrap();
++
++        assert_eq!(program.extern_functions[0].return_ownership, returns);
++        assert_eq!(program.extern_functions[0].error_ownership, errors);
++        assert_eq!(nested_call(&program).return_ownership, returns);
++        assert_eq!(nested_call(&program).error_ownership, errors);
++    }
++
++    #[test]
++    fn thaw_remaining_program_string_abi_mutator_reaches_neighboring_ffi_call() {
++        let mut program = program_with_neighbor_ffi_call();
++        set_ffi_string_abi(
++            &mut program,
++            "traversal_target",
++            vec![FfiStringAbi::PointerLength],
++            FfiStringAbi::PointerLength,
++            FfiCallingConvention::Fast,
++            FfiAggregateAbi::Portable,
++        )
++        .unwrap();
++
++        assert_eq!(program.extern_functions[0].param_string_abis, vec![FfiStringAbi::PointerLength]);
++        assert_eq!(program.extern_functions[0].return_string_abi, FfiStringAbi::PointerLength);
++        assert_eq!(nested_call(&program).param_string_abis, vec![FfiStringAbi::PointerLength]);
++        assert_eq!(nested_call(&program).return_string_abi, FfiStringAbi::PointerLength);
++        assert_eq!(nested_call(&program).calling_convention, FfiCallingConvention::Fast);
++        assert_eq!(nested_call(&program).aggregate_return_abi, FfiAggregateAbi::Portable);
++    }
++}
+diff --git a/crates/thaw-hir/src/lower/arrays/transformations.rs b/crates/thaw-hir/src/lower/arrays/transformations.rs
+index 0127f83..4f2eb12 100644
+--- a/crates/thaw-hir/src/lower/arrays/transformations.rs
++++ b/crates/thaw-hir/src/lower/arrays/transformations.rs
+@@ -302,7 +302,7 @@ impl<'a> FnLowerer<'a> {
+                 HirExpr::BinOp(
+                     BinOp::Lt,
+                     Box::new(HirExpr::Var(index_name.clone())),
+-                    Box::new(HirExpr::Var(length_name)),
++                    Box::new(HirExpr::Var(length_name.clone())),
+                 ),
+                 vec![
+                     HirStmt::Expr(HirExpr::IndexAssign(
+diff --git a/crates/thaw-hir/src/lower/bytes_erasure.rs b/crates/thaw-hir/src/lower/bytes_erasure.rs
+index 0d1265d..84cf1eb 100644
+--- a/crates/thaw-hir/src/lower/bytes_erasure.rs
++++ b/crates/thaw-hir/src/lower/bytes_erasure.rs
+@@ -143,6 +143,10 @@ fn erase_ty(ty: &mut HirType) {
+             }
+             erase_ty(ret);
+         }
++        HirType::FunctionWithThis(receiver, signature) => {
++            erase_ty(receiver);
++            erase_ty(signature);
++        }
+         HirType::CallableFunction(params, _, rest, ret) => {
+             for param in params {
+                 erase_ty(param);
+@@ -163,6 +167,7 @@ fn erase_ty(ty: &mut HirType) {
+         | HirType::StrLiteral(_)
+         | HirType::Json
+         | HirType::JsValue
++        | HirType::NativeException
+         | HirType::Dynamic => {}
+     }
+ }
+@@ -371,6 +376,11 @@ fn erase_expr(expr: &mut HirExpr) {
+             erase_tys(types);
+             erase_ty(ret);
+         }
++        HirExpr::FunctionRefThis(_, receiver, types, ret) => {
++            erase_ty(receiver);
++            erase_tys(types);
++            erase_ty(ret);
++        }
+         HirExpr::Block(stmts) => erase_stmts(stmts),
+ 
+         HirExpr::FfiCall(sig, args) => {
+@@ -445,3 +455,61 @@ fn erase_expr(expr: &mut HirExpr) {
+         | HirExpr::JsValueAsJson(value) => erase_expr(value),
+     }
+ }
++
++#[cfg(test)]
++mod thaw_remaining_traversals_bytes_controls {
++    use super::*;
++
++    #[test]
++    fn thaw_remaining_bytes_erasure_visits_this_signature_and_callable_reference_types() {
++        let mut program = HirProgram {
++            globals: vec![crate::HirGlobal {
++                name: "callable".into(),
++                ty: HirType::FunctionWithThis(
++                    Box::new(HirType::Bytes),
++                    Box::new(HirType::Function(
++                        vec![HirType::Bytes],
++                        Box::new(HirType::Bytes),
++                    )),
++                ),
++                init: HirExpr::FunctionRefThis(
++                    "callable_with_this".into(),
++                    HirType::Bytes,
++                    vec![HirType::Bytes],
++                    HirType::Bytes,
++                ),
++                mutable: false,
++            }],
++            ..HirProgram::default()
++        };
++
++        erase_bytes(&mut program);
++
++        let bytes_array = || HirType::Array(Box::new(HirType::F64));
++        assert_eq!(
++            program.globals[0].ty,
++            HirType::FunctionWithThis(
++                Box::new(bytes_array()),
++                Box::new(HirType::Function(
++                    vec![bytes_array()],
++                    Box::new(bytes_array()),
++                )),
++            )
++        );
++        let HirExpr::FunctionRefThis(_, receiver, params, ret) = &program.globals[0].init else {
++            panic!("expected function reference with explicit receiver");
++        };
++        assert_eq!(receiver, &bytes_array());
++        assert_eq!(params, &vec![bytes_array()]);
++        assert_eq!(ret, &bytes_array());
++    }
++
++    #[test]
++    fn thaw_remaining_native_exception_is_preserved_as_an_opaque_type_leaf() {
++        let mut ty = HirType::NativeException;
++
++        erase_ty(&mut ty);
++
++        assert_eq!(ty, HirType::NativeException);
++    }
++}
+diff --git a/crates/thaw-hir/src/lower/classes/normalization.rs b/crates/thaw-hir/src/lower/classes/normalization.rs
+index 3d9267a..34ce22d 100644
+--- a/crates/thaw-hir/src/lower/classes/normalization.rs
++++ b/crates/thaw-hir/src/lower/classes/normalization.rs
+@@ -305,7 +305,7 @@ fn normalize_static_computed_class_members(module: &Module) -> Module {
+     let mut normalized = module.clone();
+     let mut initialized = HashMap::new();
+     for item in &mut normalized.body {
+-        let variable = match item {
++        let variable = match &*item {
+             ModuleItem::Stmt(Stmt::Decl(Decl::Var(variable))) => Some(variable.as_ref()),
+             ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export)) => match &export.decl {
+                 Decl::Var(variable) => Some(variable.as_ref()),
+diff --git a/crates/thaw-hir/src/lower/control_flow.rs b/crates/thaw-hir/src/lower/control_flow.rs
+index 83ffc16..3b9fc48 100644
+--- a/crates/thaw-hir/src/lower/control_flow.rs
++++ b/crates/thaw-hir/src/lower/control_flow.rs
+@@ -227,6 +227,7 @@ fn collect_referenced_bindings(expr: &HirExpr, names: &mut BTreeSet<Symbol>) {
+         | HirExpr::ObjectAlloc(_)
+         | HirExpr::ClassAlloc(_)
+         | HirExpr::FunctionRef(..)
++        | HirExpr::FunctionRefThis(..)
+         | HirExpr::MethodRef(..) => {}
+     }
+ }
+@@ -324,6 +325,7 @@ fn contains_await(expr: &HirExpr) -> bool {
+         | HirExpr::NonArrowFunction(..)
+         | HirExpr::Lambda(..)
+         | HirExpr::FunctionRef(..)
++        | HirExpr::FunctionRefThis(..)
+         | HirExpr::MethodRef(..)
+         | HirExpr::Lit(_)
+         | HirExpr::OptionalNone(_)
+@@ -891,3 +893,24 @@ fn equivalent_union_members(left: &[HirType], right: &[HirType]) -> bool {
+         && left.iter().all(|member| right.contains(member))
+         && right.iter().all(|member| left.contains(member))
+ }
++
++#[cfg(test)]
++mod thaw_remaining_traversals_control_flow_controls {
++    use super::*;
++
++    #[test]
++    fn thaw_remaining_function_ref_this_has_no_binding_or_await_facts() {
++        let callable = HirExpr::FunctionRefThis(
++            "callable_with_this".into(),
++            HirType::Bytes,
++            vec![HirType::Bytes],
++            HirType::Bytes,
++        );
++        let mut bindings = std::collections::BTreeSet::new();
++
++        collect_referenced_bindings(&callable, &mut bindings);
++
++        assert!(bindings.is_empty());
++        assert!(!contains_await(&callable));
++    }
++}
+diff --git a/crates/thaw-hir/src/lower/expressions/coercions.rs b/crates/thaw-hir/src/lower/expressions/coercions.rs
+index 04a013c..b437757 100644
+--- a/crates/thaw-hir/src/lower/expressions/coercions.rs
++++ b/crates/thaw-hir/src/lower/expressions/coercions.rs
+@@ -1284,6 +1284,8 @@ impl<'a> FnLowerer<'a> {
+         let right = HirExpr::Var(rhs_name.clone());
+         let tagged_function_pair = Self::contains_function_value(&lhs_type)
+             || Self::contains_function_value(&rhs_type);
++        let left_for_observable_absence = left.clone();
++        let right_for_observable_absence = right.clone();
+         let base = if tagged_function_pair {
+             self.function_present_pair(left.clone(), &lhs_type, right.clone(), &rhs_type, true)?
+         } else if let Some(result) =
+@@ -1339,8 +1341,8 @@ impl<'a> FnLowerer<'a> {
+                     Box::new(right_status.clone()), Box::new(zero()))),
+                 Box::new(HirExpr::Lit(HirLit::Bool(false))), HirType::Bool,
+             );
+-            let left_status_expr = self.function_observable_absence(left.clone(), &lhs_type);
+-            let right_status_expr = self.function_observable_absence(right.clone(), &rhs_type);
++            let left_status_expr = self.function_observable_absence(left_for_observable_absence, &lhs_type);
++            let right_status_expr = self.function_observable_absence(right_for_observable_absence, &rhs_type);
+             self.wrap_call_argument_bindings(
+                 HirExpr::Conditional(Box::new(both_present), Box::new(base),
+                     Box::new(HirExpr::BinOp(BinOp::EqEqEq,
+diff --git a/crates/thaw-hir/src/lower/objects.rs b/crates/thaw-hir/src/lower/objects.rs
+index 9ec460f..cca8bfd 100644
+--- a/crates/thaw-hir/src/lower/objects.rs
++++ b/crates/thaw-hir/src/lower/objects.rs
+@@ -1037,7 +1037,7 @@ impl<'a> FnLowerer<'a> {
+                 }
+                 if let Some((_, existing)) = field_types.iter_mut().find(|(field, _)| field == &name) {
+                     if name.starts_with("__thaw_class_identity_\u{1e}") && *existing != ty {
+-                        let mut members = match existing {
++                        let mut members = match &*existing {
+                             HirType::Union(members) => members.clone(),
+                             previous => vec![previous.clone()],
+                         };
+diff --git a/crates/thaw-std/src/json.rs b/crates/thaw-std/src/json.rs
+index 088b48b..e7a8f32 100644
+--- a/crates/thaw-std/src/json.rs
++++ b/crates/thaw-std/src/json.rs
+@@ -7189,7 +7189,7 @@ mod tests {
+             let nested = leak(Value::shared_array(vec![Value::shared_object(
+                 indexmap::IndexMap::from([(b"ok".to_vec(), number_value(1.0))]),
+             )]));
+-            let Value::Array(items) = unsafe { &*nested } else { unreachable!() };
++            let Value::Array(items) = (unsafe { &*nested }) else { unreachable!() };
+             let Value::Object(fields) = &shared_array_ref(items)[0] else { unreachable!() };
+             let before = Rc::strong_count(fields);
+             thaw_json_typed_decode_scope_begin();

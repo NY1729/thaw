@@ -31,7 +31,7 @@ TIMEOUTS = {
 }
 TEST_FILTERS = tuple(item["filter"] for item in verify.EXPECTED["test_filters"])
 FILTER_PACKAGES = {item["filter"]: item["package"] for item in verify.EXPECTED["test_filters"]}
-STAGE_NAMES = ("identity", "baseline_check", "candidate_check", "llvm_no_run", "hir_no_run")
+STAGE_NAMES = ("identity", "baseline_check", "candidate_check", "llvm_no_run", "hir_no_run", "std_no_run")
 ALLOWED_STATES = {"not-run", "passed", "failed", "timed-out", "blocked"}
 
 
@@ -181,6 +181,7 @@ def _persist(evidence: Path, state: dict[str, Any]) -> None:
         "candidate_check": state.get("stages", {}).get("candidate_check"),
         "llvm_no_run": state.get("stages", {}).get("llvm_no_run"),
         "hir_no_run": state.get("stages", {}).get("hir_no_run"),
+        "std_no_run": state.get("stages", {}).get("std_no_run"),
         "filter_counts": {
             status: sum(item.get("status") == status for item in state.get("filters", []))
             for status in sorted(ALLOWED_STATES)
@@ -405,7 +406,7 @@ def _filter_list(output: str) -> list[str]:
     return names
 
 
-def _filter_run_counts(output: str, selected: list[str]) -> tuple[dict[str, int] | None, str | None]:
+def _filter_run_counts(output: str, selected: list[str]) -> tuple[dict[str, int] | None, list[str], str | None]:
     summary = None
     pattern = re.compile(r"test result:\s+(?:ok|FAILED)\.\s+(\d+) passed;\s+(\d+) failed;\s+(\d+) ignored;")
     for line in output.splitlines():
@@ -413,27 +414,29 @@ def _filter_run_counts(output: str, selected: list[str]) -> tuple[dict[str, int]
         if match:
             summary = {"passed": int(match.group(1)), "failed": int(match.group(2)), "ignored": int(match.group(3))}
     if summary is None:
-        return None, "actual cargo test output had no parseable Rust test summary"
+        return None, [], "actual cargo test output had no parseable Rust test summary"
     outcome_by_name: dict[str, str] = {}
+    outcome_names: list[str] = []
     for line in output.splitlines():
         match = re.match(r"^test\s+(.+?)\s+\.\.\.\s+(ok|FAILED|ignored)\s*$", line)
         if match:
+            outcome_names.append(match.group(1))
             outcome_by_name[match.group(1)] = match.group(2)
     missing = [name for name in selected if name not in outcome_by_name]
     if missing:
-        return summary, f"actual cargo output omitted a selected test outcome: {missing[0]}"
-    if len(outcome_by_name) != len(selected):
-        return summary, f"actual execution count {len(outcome_by_name)} differs from listed selection {len(selected)}"
+        return summary, outcome_names, f"actual cargo output omitted a selected test outcome: {missing[0]}"
+    if len(outcome_names) != len(selected) or len(outcome_by_name) != len(selected):
+        return summary, outcome_names, f"actual execution count {len(outcome_names)} differs from listed selection {len(selected)}"
     observed = {
         "passed": sum(outcome == "ok" for outcome in outcome_by_name.values()),
         "failed": sum(outcome == "FAILED" for outcome in outcome_by_name.values()),
         "ignored": sum(outcome == "ignored" for outcome in outcome_by_name.values()),
     }
     if observed != summary:
-        return summary, f"per-test outcomes {observed} do not match Rust summary {summary}"
+        return summary, outcome_names, f"per-test outcomes {observed} do not match Rust summary {summary}"
     if summary["passed"] <= 0 or summary["failed"] != 0 or summary["ignored"] != 0:
-        return summary, f"control execution requires passed>0, failed=0, ignored=0; observed {summary}"
-    return summary, None
+        return summary, outcome_names, f"control execution requires passed>0, failed=0, ignored=0; observed {summary}"
+    return summary, outcome_names, None
 
 
 def _run_filter(
@@ -478,6 +481,20 @@ def _run_filter(
     selected = _filter_list(listed.get("stdout", ""))
     item["selected_names"] = selected
     item["selected_count"] = len(selected)
+    expected = verify.EXPECTED.get("expected_test_names", {}).get(filter_name)
+    if expected is not None:
+        observed_leaves = [name.rsplit("::", 1)[-1] for name in selected]
+        exact = (
+            len(selected) == len(expected)
+            and len(set(expected)) == len(expected)
+            and all("::" in name and name.split("::", 1)[0] for name in selected)
+            and sorted(observed_leaves) == sorted(expected)
+        )
+        if not exact:
+            item.update({"status": "failed", "reason": f"cargo --list names/count differ from exact expected identifiers: expected {len(expected)} unique names, got {len(selected)}"})
+            item["run"].update({"status": "blocked", "reason": "exact expected test listing was not established"})
+            _persist(evidence, state)
+            return False
     if not selected:
         item.update({"status": "failed", "reason": "cargo --list selected zero tests"})
         item["run"].update({"status": "blocked", "reason": "cargo --list selected zero tests"})
@@ -502,8 +519,9 @@ def _run_filter(
         return False
     item["run"].update(executed)
     _persist(evidence, state)
-    counts, output_error = _filter_run_counts(executed.get("stdout", ""), selected)
+    counts, execution_names, output_error = _filter_run_counts(executed.get("stdout", ""), selected)
     item["execution"] = counts
+    item["execution_names"] = execution_names
     if executed["status"] != "passed":
         reason = f"control command {executed['status']}: exit={executed.get('exit_code')} signal={executed.get('signal')}"
     elif output_error:
@@ -518,7 +536,7 @@ def _run_filter(
 
 def _overall(state: dict[str, Any]) -> tuple[str, int, str]:
     baseline = state["stages"]["baseline_check"]["status"]
-    required = [state["stages"][name]["status"] for name in ("candidate_check", "llvm_no_run", "hir_no_run")]
+    required = [state["stages"][name]["status"] for name in ("candidate_check", "llvm_no_run", "hir_no_run", "std_no_run")]
     filters = [item["status"] for item in state["filters"]]
     if baseline != "passed":
         return "failed", 1, "baseline compilation diagnostic failed or did not complete"
@@ -546,7 +564,7 @@ def _run_validation_impl(
     except Exception as exc:
         reason = f"identity verification failed: {type(exc).__name__}: {exc}"
         state["stages"]["identity"].update({"status": "failed", "reason": reason})
-        for stage in ("baseline_check", "candidate_check", "llvm_no_run", "hir_no_run"):
+        for stage in ("baseline_check", "candidate_check", "llvm_no_run", "hir_no_run", "std_no_run"):
             _block_stage(state, stage, reason)
         _block_filters(state, 0, reason)
         state["overall"] = {"status": "failed", "reason": reason}
@@ -571,6 +589,7 @@ def _run_validation_impl(
         reason = f"candidate check {candidate_result['status']}: {candidate_result.get('reason') or candidate_result.get('exit_code')}"
         _block_stage(state, "llvm_no_run", reason)
         _block_stage(state, "hir_no_run", reason)
+        _block_stage(state, "std_no_run", reason)
         _block_filters(state, 0, reason)
     else:
         llvm_result = _run_stage(
@@ -589,6 +608,7 @@ def _run_validation_impl(
         if llvm_result["status"] != "passed":
             reason = f"LLVM no-run {llvm_result['status']}: {llvm_result.get('reason') or llvm_result.get('exit_code')}"
             _block_stage(state, "hir_no_run", reason)
+            _block_stage(state, "std_no_run", reason)
             _block_filters(state, 0, reason)
         else:
             hir_result = _run_stage(
@@ -606,16 +626,34 @@ def _run_validation_impl(
             _persist(evidence, state)
             if hir_result["status"] != "passed":
                 reason = f"HIR no-run {hir_result['status']}: {hir_result.get('reason') or hir_result.get('exit_code')}"
+                _block_stage(state, "std_no_run", reason)
                 _block_filters(state, 0, reason)
             else:
-                for index, item in enumerate(state["filters"]):
-                    passed = _run_filter(state, item, index + 1, execute, evidence, candidate_target, candidate, started_wall)
-                    _persist(evidence, state)
-                    if not passed:
-                        reason = item.get("reason", "focused control did not pass")
-                        _block_filters(state, index + 1, f"prior focused control blocked sequence: {reason}")
+                std_result = _run_stage(
+                    state,
+                    evidence,
+                    execute,
+                    "candidate",
+                    candidate,
+                    ["cargo", "test", "--locked", "-p", "thaw-std", "--lib", "--no-run"],
+                    candidate_target,
+                    "std_no_run",
+                    TIMEOUTS["no_run"],
+                    started_wall,
+                )
+                _persist(evidence, state)
+                if std_result["status"] != "passed":
+                    reason = f"std no-run {std_result['status']}: {std_result.get('reason') or std_result.get('exit_code')}"
+                    _block_filters(state, 0, reason)
+                else:
+                    for index, item in enumerate(state["filters"]):
+                        passed = _run_filter(state, item, index + 1, execute, evidence, candidate_target, candidate, started_wall)
                         _persist(evidence, state)
-                        break
+                        if not passed:
+                            reason = item.get("reason", "focused control did not pass")
+                            _block_filters(state, index + 1, f"prior focused control blocked sequence: {reason}")
+                            _persist(evidence, state)
+                            break
 
     # Recheck both source trees after all Cargo commands before recording a final verdict.
     try:

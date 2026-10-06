@@ -68,11 +68,12 @@ def patch_for(path: str, old: str | None, new: str | None) -> bytes:
     return (header + "".join(chunks)).encode()
 
 
-def manifest_for(tree: Path) -> bytes:
+def manifest_for(tree: Path, path_order: str = "components") -> bytes:
     rows = []
+    key = (lambda rel: tuple(PurePosixPath(rel).parts)) if path_order == "components" else (lambda rel: rel)
     for path in sorted(
         (p for p in tree.rglob("*") if p.is_file() and ".git" not in p.parts),
-        key=lambda p: tuple(PurePosixPath(p.relative_to(tree).as_posix()).parts),
+        key=lambda p: key(p.relative_to(tree).as_posix()),
     ):
         rel = path.relative_to(tree).as_posix()
         rows.append(f"{sha(path.read_bytes())}  {rel}\n")
@@ -92,7 +93,7 @@ def create_git_repo(root: Path) -> tuple[str, str]:
 
 
 class Fixture:
-    """Tiny four-stage baseline whose patch bytes and pins are self-consistent."""
+    """Tiny five-stage baseline whose patch bytes and pins are self-consistent."""
 
     def __init__(self, root: Path):
         self.root = root
@@ -117,6 +118,9 @@ class Fixture:
         }
         for rel, text in initial.items():
             write(self.baseline / rel, text)
+        repair_extra = "crates/thaw-std/src/json.rs"
+        repair_extra_bytes = b"fixture json base\n"
+        write(self.baseline / repair_extra, repair_extra_bytes)
 
         lib = "crates/thaw-hir/src/lib.rs"
         async_owner = "crates/thaw-llvm/src/hir_codegen/tests/async.rs"
@@ -184,6 +188,27 @@ class Fixture:
         p4 += patch_for(return_control, None, stage4[return_control])
         write(self.payload / "return-v1.patch", p4)
 
+        # Patch 5 is a single isolated repair. The thaw-std JSON owner is
+        # allowed only in the paired base/final manifests, never the first
+        # four stage roots.
+        stage5 = dict(stage4)
+        stage5[lib] = "pub fn fixture() -> &'static str { \"compile-repairs-v1\" }\n"
+        repair_json_bytes = b"fixture json repaired\n"
+        repair_patch = patch_for(lib, stage4[lib], stage5[lib])
+        repair_patch += patch_for(repair_extra, repair_extra_bytes.decode(), repair_json_bytes.decode())
+        write(self.payload / "compile-repairs-v1.patch", repair_patch)
+        paired_base = dict(stage4)
+        paired_base[repair_extra] = repair_extra_bytes.decode()
+        final_stage = dict(stage5)
+        final_stage[repair_extra] = repair_json_bytes.decode()
+        for name, files in (("compile-repairs-v1-base", paired_base), ("compile-repairs-v1", final_stage)):
+            stage_dir = root / ("manifest-tree-" + name)
+            for rel, text in files.items():
+                write(stage_dir / rel, text)
+            (self.payload / f"{name}.sha256").write_bytes(
+                manifest_for(stage_dir, "lexical" if name == "compile-repairs-v1" else "components")
+            )
+
         for name, files in zip(("original-native", "scope-v5", "discard-v2", "return-v1"), (stage1, stage2, stage3, stage4)):
             stage_dir = root / ("manifest-tree-" + name)
             for rel, text in files.items():
@@ -191,6 +216,15 @@ class Fixture:
             data = manifest_for(stage_dir)
             (self.payload / f"{name}.sha256").write_bytes(data)
             stages.append({"name": name, "file": f"{name}.sha256", "sha256": sha(data), "count": len(files)})
+        final_manifest_bytes = (self.payload / "compile-repairs-v1.sha256").read_bytes()
+        stages.append({
+            "name": "compile-repairs-v1",
+            "file": "compile-repairs-v1.sha256",
+            "sha256": sha(final_manifest_bytes),
+            "count": len(final_stage),
+            "extra_paths": [repair_extra],
+            "path_order": "lexical",
+        })
 
         # Stage fixture trees are written above from text maps; preserve the
         # expected subset inventory separately for fast mutation tests.
@@ -199,6 +233,7 @@ class Fixture:
         net_rows = [
             f"modified  {lib}\n",
             f"modified  {async_owner}\n",
+            f"modified  {repair_extra}\n",
             f"new  {v5_control}\n",
             f"new  {discard_control}\n",
             f"new  {return_control}\n",
@@ -227,7 +262,7 @@ class Fixture:
         }
         payload_files = {
             name: sha((self.payload / name).read_bytes())
-            for name in ("discard-v2.patch", "return-v1.patch")
+            for name in ("discard-v2.patch", "return-v1.patch", "compile-repairs-v1.patch")
         }
         artifact_hashes = {}
         for name, desc in self._artifact_paths().items():
@@ -244,11 +279,23 @@ class Fixture:
             "net_owners": {
                 "file": "net-owners.txt",
                 "sha256": sha((self.payload / "net-owners.txt").read_bytes()),
-                "count": 5,
-                "modified": 2,
+                "count": 6,
+                "modified": 3,
                 "new": 3,
             },
-            "patch_order": ["original-native", "scope-v5", "discard-v2", "return-v1"],
+            "repair_base": {
+                "file": "compile-repairs-v1-base.sha256",
+                "sha256": sha((self.payload / "compile-repairs-v1-base.sha256").read_bytes()),
+                "count": len(paired_base),
+                "path_order": "components",
+                "extra_owner": {
+                    "path": repair_extra,
+                    "sha256": sha(repair_extra_bytes),
+                    "git_blob_sha1": verify._git_blob_sha1(repair_extra_bytes) if verify is not None else "",
+                    "final_sha256": sha(repair_json_bytes),
+                },
+            },
+            "patch_order": ["original-native", "scope-v5", "discard-v2", "return-v1", "compile-repairs-v1"],
             "subset_roots": [
                 ".gitignore",
                 "Cargo.lock",
@@ -268,6 +315,7 @@ class Fixture:
             "control_owners": [v5_control, discard_control, return_control],
             "runner_dependencies": copy.deepcopy(verify.EXPECTED["runner_dependencies"]) if verify is not None else {},
             "test_filters": copy.deepcopy(verify.EXPECTED["test_filters"]) if verify is not None else [],
+            "expected_test_names": copy.deepcopy(verify.EXPECTED.get("expected_test_names", {})) if verify is not None else {},
             "provenance_only_review_fingerprints": copy.deepcopy(verify.EXPECTED["provenance_only_review_fingerprints"]) if verify is not None else {},
         }
         write(self.payload / "pins.json", json.dumps(self.expected, sort_keys=True, indent=2) + "\n")
@@ -281,6 +329,9 @@ class Fixture:
             "scope_manifest": "scope-v5.sha256",
             "discard_manifest": "discard-v2.sha256",
             "return_manifest": "return-v1.sha256",
+            "compile_repair_patch": "compile-repairs-v1.patch",
+            "compile_repair_base": "compile-repairs-v1-base.sha256",
+            "compile_repair_final": "compile-repairs-v1.sha256",
             "native_base": "native-base.sha256",
             "net_owners": "net-owners.txt",
             "scope_test_plan": "scope-v5-test-plan.md",
@@ -315,7 +366,7 @@ class VerificationRedGreenTests(unittest.TestCase):
         with self.assertRaisesRegex(mod.VerificationError, pattern):
             call(*args, **kwargs)
 
-    def test_positive_reconstruction_replays_four_stages_and_preserves_unrelated_file(self):
+    def test_positive_reconstruction_replays_five_stages_and_preserves_unrelated_file(self):
         mod = self.require_implementation()
         result = mod.reconstruct(
             self.fixture.baseline,
@@ -324,8 +375,92 @@ class VerificationRedGreenTests(unittest.TestCase):
             self.fixture.evidence,
         )
         self.assertEqual([x["count"] for x in mod.EXPECTED["stage_manifests"]], result["stage_counts"])
+        self.assertEqual(5, len(result["stages"]))
         self.assertEqual("unmodified product file\n", (self.fixture.candidate / "outside.txt").read_text())
         self.assertTrue((self.fixture.evidence / "reconstruction.json").is_file())
+
+    def test_repair_json_owner_is_stage_scoped_and_first_four_inventories_stay_fixed(self):
+        mod = self.require_implementation()
+        extra = mod.EXPECTED["repair_base"]["extra_owner"]["path"]
+        self.assertEqual(4, len([stage for stage in mod.EXPECTED["stage_manifests"][:4]]))
+        for stage in mod.EXPECTED["stage_manifests"][:4]:
+            self.assertNotIn(extra, {rel for _, rel in mod._parse_sha_manifest(self.fixture.payload / stage["file"], stage["name"])})
+        self.assertEqual([extra], mod.EXPECTED["stage_manifests"][4]["extra_paths"])
+        mod.reconstruct(self.fixture.baseline, self.fixture.candidate, self.fixture.payload, self.fixture.evidence)
+        self.assertIn(extra, mod.verify_prepared(self.fixture.baseline, self.fixture.candidate, self.fixture.payload)["final_stage"]["files"])
+        self.assertEqual(b"fixture json repaired\n", (self.fixture.candidate / extra).read_bytes())
+
+    def test_actual_frozen_final_repair_manifest_uses_its_pinned_lexical_order(self):
+        mod = self.require_implementation()
+        fixture_expected = mod.EXPECTED
+        production_expected = self.fixture.expected_before
+        mod.EXPECTED = production_expected
+        try:
+            stage = production_expected["stage_manifests"][-1]
+            manifest = MODULE_DIR / stage["file"]
+            self.assertEqual(stage["sha256"], sha(manifest.read_bytes()))
+            with self.assertRaisesRegex(mod.VerificationError, "not strictly sorted"):
+                mod._parse_sha_manifest(manifest, "actual final repair manifest")
+            rows = mod._parse_sha_manifest(manifest, "actual final repair manifest", path_order=stage["path_order"])
+            self.assertEqual(181, len(rows))
+            final_hashes = {rel: digest for digest, rel in rows}
+            json_owner = production_expected["repair_base"]["extra_owner"]
+            self.assertEqual(json_owner["final_sha256"], final_hashes[json_owner["path"]])
+        finally:
+            mod.EXPECTED = fixture_expected
+
+    def test_wrong_repair_patch_hash_and_paired_base_hash_are_rejected(self):
+        mod = self.require_implementation()
+        repair_patch = self.fixture.payload / "compile-repairs-v1.patch"
+        repair_patch.write_bytes(repair_patch.read_bytes() + b"# mutation\n")
+        self.assertVerifyError("compile-repairs-v1.patch|hash|pin", mod.verify_inputs, self.fixture.baseline, self.fixture.payload)
+
+        # Restore the patch and corrupt the independently pinned paired base.
+        repair_patch.write_bytes((self.fixture.payload / "compile-repairs-v1.patch").read_bytes().removesuffix(b"# mutation\n"))
+        base = self.fixture.payload / "compile-repairs-v1-base.sha256"
+        base.write_bytes(base.read_bytes() + b"0" * 64 + b"  crates/thaw-hir/src/extra.rs\n")
+        self.assertVerifyError("compile-repairs-v1-base.sha256|hash|pin", mod.verify_inputs, self.fixture.baseline, self.fixture.payload)
+
+    def test_missing_paired_json_owner_is_rejected_after_reconstruction(self):
+        mod = self.require_implementation()
+        mod.reconstruct(self.fixture.baseline, self.fixture.candidate, self.fixture.payload, self.fixture.evidence)
+        extra = mod.EXPECTED["repair_base"]["extra_owner"]["path"]
+        (self.fixture.candidate / extra).unlink()
+        self.assertVerifyError("missing|stage file", mod.verify_prepared, self.fixture.baseline, self.fixture.candidate, self.fixture.payload)
+
+    def test_wrong_repair_extra_owner_or_stage_pin_is_rejected(self):
+        mod = self.require_implementation()
+        data = json.loads((self.fixture.payload / "pins.json").read_text())
+        data["repair_base"]["extra_owner"]["path"] = "crates/thaw-hir/src/lib.rs"
+        write(self.fixture.payload / "pins.json", json.dumps(data, sort_keys=True, indent=2) + "\n")
+        self.assertVerifyError("descriptor|pins.json|immutable|expected", mod.verify_inputs, self.fixture.baseline, self.fixture.payload)
+        write(self.fixture.payload / "pins.json", json.dumps(self.fixture.expected, sort_keys=True, indent=2) + "\n")
+        data = json.loads((self.fixture.payload / "pins.json").read_text())
+        data["stage_manifests"][4]["extra_paths"] = []
+        write(self.fixture.payload / "pins.json", json.dumps(data, sort_keys=True, indent=2) + "\n")
+        self.assertVerifyError("descriptor|pins.json|immutable|expected", mod.verify_inputs, self.fixture.baseline, self.fixture.payload)
+
+    def test_repair_json_base_blob_sha1_is_independently_pinned(self):
+        mod = self.require_implementation()
+        original = copy.deepcopy(mod.EXPECTED)
+        mod.EXPECTED["repair_base"]["extra_owner"]["git_blob_sha1"] = "f" * 40
+        write(self.fixture.payload / "pins.json", json.dumps(mod.EXPECTED, sort_keys=True, indent=2) + "\n")
+        try:
+            self.assertVerifyError("Git blob SHA-1", mod.verify_inputs, self.fixture.baseline, self.fixture.payload)
+        finally:
+            mod.EXPECTED = original
+            write(self.fixture.payload / "pins.json", json.dumps(self.fixture.expected, sort_keys=True, indent=2) + "\n")
+
+    def test_repair_json_final_sha256_is_separate_from_base_pin(self):
+        mod = self.require_implementation()
+        original = copy.deepcopy(mod.EXPECTED)
+        mod.EXPECTED["repair_base"]["extra_owner"]["final_sha256"] = "0" * 64
+        write(self.fixture.payload / "pins.json", json.dumps(mod.EXPECTED, sort_keys=True, indent=2) + "\n")
+        try:
+            self.assertVerifyError("compile repair final manifest", mod.verify_inputs, self.fixture.baseline, self.fixture.payload)
+        finally:
+            mod.EXPECTED = original
+            write(self.fixture.payload / "pins.json", json.dumps(self.fixture.expected, sort_keys=True, indent=2) + "\n")
 
     def test_wrong_baseline_commit_is_rejected_and_recorded_before_return(self):
         mod = self.require_implementation()

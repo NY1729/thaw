@@ -1,8 +1,10 @@
 {
   "artifacts": {
+    "compile-repairs-v1-base.sha256": "88bb3556306a13f8148d229b88057ed4324f9ac43861cbc5d2b3fd52df03e80e",
+    "compile-repairs-v1.sha256": "d3b7c0e06ca053f4b342dcbc8ac1247a3460c946a35a2b22d2645c76251a2aa9",
     "discard-v2.sha256": "c47d4ab7e4a805190e719b13b99bd7d233e24a5007afcbff6becebab9493e328",
     "native-base.sha256": "da86c2c16619de2e236cdd50b9d2572465fbdd4dc3b75b680cf91c6b0f6bdb72",
-    "net-owners.txt": "b610b9fb013be8aec63fb6de065f98498070c8d8ddf4e5d0077bd9a5e3bc194d",
+    "net-owners.txt": "03d79766e0f168682bb74385db88b178a55e09aeeada5b09206043b39e3be8b6",
     "original-native.sha256": "4e219dde2129cf5876497edd6f9032cebdbee89eded9cce20e50ecda041053ce",
     "return-v1.sha256": "51b1d9dd9a501538cc44fcaf8bfa72cc5a3f9ceb34c2942d4a0c676acc2e7031",
     "scope-v5-test-plan.md": "9eb740f8f418de5e7f8c7cd88607d5b269c7495a34600d937bf8653f7e55ae81",
@@ -19,25 +21,42 @@
     "crates/thaw-llvm/src/hir_codegen/tests/async/union_discard_eval_then.rs",
     "crates/thaw-llvm/src/hir_codegen/tests/async/union_discard_jit.rs"
   ],
+  "expected_test_names": {
+    "thaw_remaining_": [
+      "thaw_remaining_program_error_abi_mutator_reaches_neighboring_ffi_call",
+      "thaw_remaining_program_ownership_mutator_reaches_neighboring_ffi_call",
+      "thaw_remaining_program_string_abi_mutator_reaches_neighboring_ffi_call",
+      "thaw_remaining_function_ref_this_contributes_no_captured_names",
+      "thaw_remaining_lambda_uses_declared_captures_without_scanning_its_body",
+      "thaw_remaining_function_ref_this_has_no_binding_or_await_facts",
+      "thaw_remaining_bytes_erasure_visits_this_signature_and_callable_reference_types",
+      "thaw_remaining_native_exception_is_preserved_as_an_opaque_type_leaf"
+    ],
+    "typed_decode_scope_tracks_dynamic_retains_merges_and_excludes_reentry": [
+      "typed_decode_scope_tracks_dynamic_retains_merges_and_excludes_reentry"
+    ]
+  },
   "native_base": {
     "count": 24,
     "file": "native-base.sha256",
     "sha256": "da86c2c16619de2e236cdd50b9d2572465fbdd4dc3b75b680cf91c6b0f6bdb72"
   },
   "net_owners": {
-    "count": 35,
+    "count": 44,
     "file": "net-owners.txt",
-    "modified": 30,
+    "modified": 39,
     "new": 5,
-    "sha256": "b610b9fb013be8aec63fb6de065f98498070c8d8ddf4e5d0077bd9a5e3bc194d"
+    "sha256": "03d79766e0f168682bb74385db88b178a55e09aeeada5b09206043b39e3be8b6"
   },
   "patch_order": [
     "original-native",
     "scope-v5",
     "discard-v2",
-    "return-v1"
+    "return-v1",
+    "compile-repairs-v1"
   ],
   "payload_patches": {
+    "compile-repairs-v1.patch": "2994f62e98a4fb9cbd0b792b20da09bf505874d749447bf8f0e43776d25e0f05",
     "discard-v2.patch": "0ffe9fcec530feb12a2ca084399643861c240cc81906c9aab4677cc529aceb39",
     "return-v1.patch": "2e2e2057925542c0790d5ec879ce94d55e3ba5798b470aa5cd85327821fd1ec8"
   },
@@ -45,6 +64,18 @@
     "discard_v2": "91f328cce86a8102e53045be4069b646487ea0acf48e141a11099197942571fd",
     "return_v1": "b0935bbc26b8aaf0e4c20c4778660cd1729ba349a827d768fe5fff38dc7e018a",
     "scope_v5": "ef1073a1d8204c08d2caa36611d3a02a8f34482cf7299f965fd13fe634e24d09"
+  },
+  "repair_base": {
+    "count": 181,
+    "extra_owner": {
+      "final_sha256": "3e4873700556b7bbc35b3d54e09d5a761f66119a0651c453923489254ee18dca",
+      "git_blob_sha1": "088b48b46641ca9beda9e1847e86a0ad47faaf5b",
+      "path": "crates/thaw-std/src/json.rs",
+      "sha256": "2844a99da40572ae069bfc37cd71f620a6c9a22116bece38862ae552273948b6"
+    },
+    "file": "compile-repairs-v1-base.sha256",
+    "path_order": "components",
+    "sha256": "88bb3556306a13f8148d229b88057ed4324f9ac43861cbc5d2b3fd52df03e80e"
   },
   "required_includes": {
     "crates/thaw-llvm/src/hir_codegen/tests/async.rs": [
@@ -119,6 +150,16 @@
       "file": "return-v1.sha256",
       "name": "return-v1",
       "sha256": "51b1d9dd9a501538cc44fcaf8bfa72cc5a3f9ceb34c2942d4a0c676acc2e7031"
+    },
+    {
+      "count": 181,
+      "extra_paths": [
+        "crates/thaw-std/src/json.rs"
+      ],
+      "file": "compile-repairs-v1.sha256",
+      "name": "compile-repairs-v1",
+      "path_order": "lexical",
+      "sha256": "d3b7c0e06ca053f4b342dcbc8ac1247a3460c946a35a2b22d2645c76251a2aa9"
     }
   ],
   "subset_roots": [
@@ -222,6 +263,14 @@
     {
       "filter": "finally_snapshots_return_and_throw_values_before_mutation",
       "package": "thaw-hir"
+    },
+    {
+      "filter": "thaw_remaining_",
+      "package": "thaw-hir"
+    },
+    {
+      "filter": "typed_decode_scope_tracks_dynamic_retains_merges_and_excludes_reentry",
+      "package": "thaw-std"
     }
   ],
   "validation_branch": "validation/native-return"

@@ -46,6 +46,7 @@ EXPECTED: dict[str, Any] = {
     "payload_patches": {
         "discard-v2.patch": "0ffe9fcec530feb12a2ca084399643861c240cc81906c9aab4677cc529aceb39",
         "return-v1.patch": "2e2e2057925542c0790d5ec879ce94d55e3ba5798b470aa5cd85327821fd1ec8",
+        "compile-repairs-v1.patch": "2994f62e98a4fb9cbd0b792b20da09bf505874d749447bf8f0e43776d25e0f05",
     },
     "artifacts": {
         "original-native.sha256": "4e219dde2129cf5876497edd6f9032cebdbee89eded9cce20e50ecda041053ce",
@@ -53,18 +54,33 @@ EXPECTED: dict[str, Any] = {
         "discard-v2.sha256": "c47d4ab7e4a805190e719b13b99bd7d233e24a5007afcbff6becebab9493e328",
         "return-v1.sha256": "51b1d9dd9a501538cc44fcaf8bfa72cc5a3f9ceb34c2942d4a0c676acc2e7031",
         "native-base.sha256": "da86c2c16619de2e236cdd50b9d2572465fbdd4dc3b75b680cf91c6b0f6bdb72",
-        "net-owners.txt": "b610b9fb013be8aec63fb6de065f98498070c8d8ddf4e5d0077bd9a5e3bc194d",
+        "net-owners.txt": "03d79766e0f168682bb74385db88b178a55e09aeeada5b09206043b39e3be8b6",
         "scope-v5-test-plan.md": "9eb740f8f418de5e7f8c7cd88607d5b269c7495a34600d937bf8653f7e55ae81",
+        "compile-repairs-v1-base.sha256": "88bb3556306a13f8148d229b88057ed4324f9ac43861cbc5d2b3fd52df03e80e",
+        "compile-repairs-v1.sha256": "d3b7c0e06ca053f4b342dcbc8ac1247a3460c946a35a2b22d2645c76251a2aa9",
     },
     "stage_manifests": [
         {"name": "original-native", "file": "original-native.sha256", "sha256": "4e219dde2129cf5876497edd6f9032cebdbee89eded9cce20e50ecda041053ce", "count": 175},
         {"name": "scope-v5", "file": "scope-v5.sha256", "sha256": "227274cad19f045e158168cc2b341744fb62e2d0e78c633ece4703e462d7a8e3", "count": 176},
         {"name": "discard-v2", "file": "discard-v2.sha256", "sha256": "c47d4ab7e4a805190e719b13b99bd7d233e24a5007afcbff6becebab9493e328", "count": 179},
         {"name": "return-v1", "file": "return-v1.sha256", "sha256": "51b1d9dd9a501538cc44fcaf8bfa72cc5a3f9ceb34c2942d4a0c676acc2e7031", "count": 180},
+        {"name": "compile-repairs-v1", "file": "compile-repairs-v1.sha256", "sha256": "d3b7c0e06ca053f4b342dcbc8ac1247a3460c946a35a2b22d2645c76251a2aa9", "count": 181, "extra_paths": ["crates/thaw-std/src/json.rs"], "path_order": "lexical"},
     ],
+    "repair_base": {
+        "file": "compile-repairs-v1-base.sha256",
+        "sha256": "88bb3556306a13f8148d229b88057ed4324f9ac43861cbc5d2b3fd52df03e80e",
+        "count": 181,
+        "path_order": "components",
+        "extra_owner": {
+            "path": "crates/thaw-std/src/json.rs",
+            "sha256": "2844a99da40572ae069bfc37cd71f620a6c9a22116bece38862ae552273948b6",
+            "git_blob_sha1": "088b48b46641ca9beda9e1847e86a0ad47faaf5b",
+            "final_sha256": "3e4873700556b7bbc35b3d54e09d5a761f66119a0651c453923489254ee18dca",
+        },
+    },
     "native_base": {"file": "native-base.sha256", "sha256": "da86c2c16619de2e236cdd50b9d2572465fbdd4dc3b75b680cf91c6b0f6bdb72", "count": 24},
-    "net_owners": {"file": "net-owners.txt", "sha256": "b610b9fb013be8aec63fb6de065f98498070c8d8ddf4e5d0077bd9a5e3bc194d", "count": 35, "modified": 30, "new": 5},
-    "patch_order": ["original-native", "scope-v5", "discard-v2", "return-v1"],
+    "net_owners": {"file": "net-owners.txt", "sha256": "03d79766e0f168682bb74385db88b178a55e09aeeada5b09206043b39e3be8b6", "count": 44, "modified": 39, "new": 5},
+    "patch_order": ["original-native", "scope-v5", "discard-v2", "return-v1", "compile-repairs-v1"],
     "subset_roots": [
         ".gitignore",
         "Cargo.lock",
@@ -133,7 +149,24 @@ EXPECTED: dict[str, Any] = {
         {"package": "thaw-hir", "filter": "lowers_try_catch"},
         {"package": "thaw-hir", "filter": "finally_separates_text_only_throws_from_fresh_published_tuples"},
         {"package": "thaw-hir", "filter": "finally_snapshots_return_and_throw_values_before_mutation"},
+        {"package": "thaw-hir", "filter": "thaw_remaining_"},
+        {"package": "thaw-std", "filter": "typed_decode_scope_tracks_dynamic_retains_merges_and_excludes_reentry"},
     ],
+    "expected_test_names": {
+        "thaw_remaining_": [
+            "thaw_remaining_program_error_abi_mutator_reaches_neighboring_ffi_call",
+            "thaw_remaining_program_ownership_mutator_reaches_neighboring_ffi_call",
+            "thaw_remaining_program_string_abi_mutator_reaches_neighboring_ffi_call",
+            "thaw_remaining_function_ref_this_contributes_no_captured_names",
+            "thaw_remaining_lambda_uses_declared_captures_without_scanning_its_body",
+            "thaw_remaining_function_ref_this_has_no_binding_or_await_facts",
+            "thaw_remaining_bytes_erasure_visits_this_signature_and_callable_reference_types",
+            "thaw_remaining_native_exception_is_preserved_as_an_opaque_type_leaf",
+        ],
+        "typed_decode_scope_tracks_dynamic_retains_merges_and_excludes_reentry": [
+            "typed_decode_scope_tracks_dynamic_retains_merges_and_excludes_reentry",
+        ],
+    },
     # Informational fingerprints only; their underlying prose is not shipped or validated by CI.
     "provenance_only_review_fingerprints": {
         "scope_v5": "ef1073a1d8204c08d2caa36611d3a02a8f34482cf7299f965fd13fe634e24d09",
@@ -394,16 +427,26 @@ def _subset_inventory(tree: Path) -> set[str]:
     return found
 
 
-def verify_stage(tree: Path, manifest: Path, expected_count: int) -> dict[str, Any]:
+def verify_stage(
+    tree: Path,
+    manifest: Path,
+    expected_count: int,
+    extra_paths: list[str] | None = None,
+    path_order: str = "components",
+) -> dict[str, Any]:
     """Validate one source subset against a canonical sorted sha256 manifest."""
-    rows = _parse_sha_manifest(manifest, "stage manifest")
+    extra_paths = extra_paths or []
+    allowed_extra = EXPECTED.get("repair_base", {}).get("extra_owner", {}).get("path")
+    if extra_paths and extra_paths != [allowed_extra]:
+        raise VerificationError(f"stage has an unapproved extra path scope: {extra_paths!r}")
+    rows = _parse_sha_manifest(manifest, "stage manifest", path_order=path_order)
     if len(rows) != expected_count:
         raise VerificationError(f"stage manifest count mismatch: expected {expected_count}, got {len(rows)}")
     if not tree.is_dir() or tree.is_symlink():
         raise VerificationError(f"stage tree is missing or symlinked: {tree}")
     root = tree.resolve()
     expected_paths = {rel for _, rel in rows}
-    bad_paths = sorted(rel for rel in expected_paths if not _is_subset_path(rel))
+    bad_paths = sorted(rel for rel in expected_paths if not _is_subset_path(rel) and rel not in extra_paths)
     if bad_paths:
         raise VerificationError(f"stage manifest contains path outside native subset: {bad_paths[0]}")
     for digest, rel in rows:
@@ -416,6 +459,11 @@ def verify_stage(tree: Path, manifest: Path, expected_count: int) -> dict[str, A
         if actual != digest:
             raise VerificationError(f"stage hash mismatch for {rel}: expected {digest}, got {actual}")
     actual_paths = _subset_inventory(root)
+    for rel in extra_paths:
+        extra_file = _path_without_symlinks(root, rel, "stage-scoped extra owner")
+        if not extra_file.is_file():
+            raise VerificationError(f"stage-scoped extra owner is missing or not a regular file: {rel}")
+        actual_paths.add(rel)
     if actual_paths != expected_paths:
         missing = sorted(expected_paths - actual_paths)
         extra = sorted(actual_paths - expected_paths)
@@ -544,17 +592,66 @@ def verify_inputs(baseline: Path, payload: Path) -> dict[str, Any]:
 
     # Each manifest file is parsed here, before any patch is applied, so malformed or
     # unsafe input cannot become a Cargo-time surprise.
-    for stage in EXPECTED["stage_manifests"]:
+    for index, stage in enumerate(EXPECTED["stage_manifests"]):
+        extra_paths = stage.get("extra_paths", [])
+        if index < len(EXPECTED["stage_manifests"]) - 1 and extra_paths:
+            raise VerificationError(f"only the final repair stage may have stage-scoped extra paths: {stage['name']}")
+        expected_extra = [EXPECTED["repair_base"]["extra_owner"]["path"]] if stage["name"] == "compile-repairs-v1" else []
+        if extra_paths != expected_extra:
+            raise VerificationError(f"{stage['name']} has an unexpected stage-scoped extra path set")
         manifest_path = _path_without_symlinks(payload, stage["file"], "stage manifest")
-        rows = _parse_sha_manifest(manifest_path, stage["name"])
+        path_order = stage.get("path_order", "components")
+        if stage["name"] != "compile-repairs-v1" and path_order != "components":
+            raise VerificationError(f"only the final repair manifest may use lexical path order: {stage['name']}")
+        rows = _parse_sha_manifest(manifest_path, stage["name"], path_order=path_order)
         if len(rows) != stage["count"]:
             raise VerificationError(f"{stage['name']} stage manifest count mismatch: expected {stage['count']}, got {len(rows)}")
         for _, rel in rows:
-            if not _is_subset_path(rel):
+            if not _is_subset_path(rel) and rel not in extra_paths:
                 raise VerificationError(f"{stage['name']} manifest path outside native subset: {rel}")
     expected_order = [stage["name"] for stage in EXPECTED["stage_manifests"]]
     if EXPECTED["patch_order"] != expected_order:
         raise VerificationError(f"patch order mismatch: expected stage order {expected_order}")
+
+    # The fifth patch is pinned to exactly the preceding 180-file stage plus
+    # the one explicitly scoped thaw-std JSON owner. The repair may modify
+    # that owner, so only its pre-patch hash is compared to the baseline pin;
+    # the post-patch hash is independently fixed by the final manifest.
+    repair = EXPECTED["repair_base"]
+    if repair.get("path_order", "components") != "components":
+        raise VerificationError("paired repair base must retain component path ordering")
+    if EXPECTED["stage_manifests"][-1].get("path_order") != "lexical":
+        raise VerificationError("final compile repair manifest must use its pinned lexical path ordering")
+    base_rows = _parse_sha_manifest(
+        _path_without_symlinks(payload, repair["file"], "paired repair base"),
+        "paired repair base",
+        path_order=repair.get("path_order", "components"),
+    )
+    if len(base_rows) != repair["count"]:
+        raise VerificationError(f"paired repair base count mismatch: expected {repair['count']}, got {len(base_rows)}")
+    previous_rows = _parse_sha_manifest(payload / EXPECTED["stage_manifests"][-2]["file"], "pre-repair stage")
+    expected_base = {rel: digest for digest, rel in previous_rows}
+    extra = repair["extra_owner"]
+    if extra["path"] in expected_base:
+        raise VerificationError("paired repair base extra owner is not the pinned thaw-std JSON source")
+    base_json = _path_without_symlinks(baseline, extra["path"], "paired repair base JSON owner")
+    if not base_json.is_file() or base_json.is_symlink():
+        raise VerificationError(f"paired repair base JSON owner is missing or not a regular file: {extra['path']}")
+    json_bytes = base_json.read_bytes()
+    if _sha(json_bytes) != extra["sha256"] or _git_blob_sha1(json_bytes) != extra["git_blob_sha1"]:
+        raise VerificationError("paired repair base JSON owner does not match its pinned SHA-256 and Git blob SHA-1")
+    expected_base[extra["path"]] = extra["sha256"]
+    if {rel: digest for digest, rel in base_rows} != expected_base:
+        raise VerificationError("paired repair base manifest differs from the exact 180-file predecessor plus JSON owner")
+    final_stage = EXPECTED["stage_manifests"][-1]
+    final_rows = _parse_sha_manifest(
+        payload / final_stage["file"],
+        "compile repair final",
+        path_order=final_stage.get("path_order", "components"),
+    )
+    final_json_hash = dict((rel, digest) for digest, rel in final_rows).get(extra["path"])
+    if {rel for _, rel in final_rows} != set(expected_base) or final_json_hash != extra["final_sha256"]:
+        raise VerificationError("compile repair final manifest changed the paired base path set")
     return {
         "baseline": identity,
         "inputs": {**EXPECTED["payload_patches"], **EXPECTED["artifacts"]},
@@ -641,7 +738,8 @@ def check_required_controls(tree: Path, manifest_paths: set[str] | None = None) 
     """Require candidate control files and every pinned include target to exist."""
     final_manifest = EXPECTED["stage_manifests"][-1]["file"]
     if manifest_paths is None:
-        rows = _parse_sha_manifest(MODULE_DIR / final_manifest, "final control manifest")
+        final_stage = EXPECTED["stage_manifests"][-1]
+        rows = _parse_sha_manifest(MODULE_DIR / final_manifest, "final control manifest", path_order=final_stage.get("path_order", "components"))
         manifest_paths = {rel for _, rel in rows}
     owners = EXPECTED["control_owners"]
     for rel in owners:
@@ -713,7 +811,7 @@ def _patch_path(baseline: Path, payload: Path, name: str) -> Path:
     if name == "scope-v5":
         rel = EXPECTED["source_files"]["scope_patch"]["path"]
         return _path_without_symlinks(baseline, rel, "scope-v5 patch")
-    payload_name = {"discard-v2": "discard-v2.patch", "return-v1": "return-v1.patch"}.get(name)
+    payload_name = {"discard-v2": "discard-v2.patch", "return-v1": "return-v1.patch", "compile-repairs-v1": "compile-repairs-v1.patch"}.get(name)
     if not payload_name:
         raise VerificationError(f"unknown patch stage: {name}")
     return _path_without_symlinks(payload, payload_name, f"{name} patch")
@@ -726,7 +824,13 @@ def verify_prepared(baseline: Path, candidate: Path, payload: Path) -> dict[str,
     if not candidate.is_dir() or candidate.is_symlink():
         raise VerificationError(f"prepared candidate is missing or symlinked: {candidate}")
     final = EXPECTED["stage_manifests"][-1]
-    stage = verify_stage(candidate, payload / final["file"], final["count"])
+    stage = verify_stage(
+        candidate,
+        payload / final["file"],
+        final["count"],
+        final.get("extra_paths", []),
+        final.get("path_order", "components"),
+    )
     controls = check_required_controls(candidate, set(stage["files"]))
     net = _verify_net_inventory(baseline, candidate, payload)
     return {"inputs": inputs, "final_stage": stage, "controls": controls, "net": net}
@@ -757,14 +861,42 @@ def reconstruct(baseline: Path, candidate: Path, payload: Path, evidence: Path) 
             raise VerificationError("patch order differs from immutable stage order")
         for stage in EXPECTED["stage_manifests"]:
             patch = _patch_path(baseline, payload, stage["name"])
+            if stage["name"] == "compile-repairs-v1":
+                repair_base = EXPECTED["repair_base"]
+                paired = verify_stage(
+                    candidate,
+                    payload / repair_base["file"],
+                    repair_base["count"],
+                    [repair_base["extra_owner"]["path"]],
+                    repair_base.get("path_order", "components"),
+                )
+                state["paired_repair_base"] = {
+                    "count": paired["count"],
+                    "manifest_sha256": paired["manifest_sha256"],
+                    "extra_owner": repair_base["extra_owner"]["path"],
+                }
             applied = _apply_patch(candidate, patch)
             manifest = payload / stage["file"]
-            result = verify_stage(candidate, manifest, stage["count"])
+            result = verify_stage(
+                candidate,
+                manifest,
+                stage["count"],
+                stage.get("extra_paths", []),
+                stage.get("path_order", "components"),
+            )
             row = {**applied, "stage": stage["name"], "count": result["count"], "manifest_sha256": result["manifest_sha256"]}
             state["stages"].append(row)
             state["last_good_stage"] = stage["name"]
 
-        final_files = set(row[1] for row in _parse_sha_manifest(payload / EXPECTED["stage_manifests"][-1]["file"], "final manifest"))
+        final_stage = EXPECTED["stage_manifests"][-1]
+        final_files = set(
+            row[1]
+            for row in _parse_sha_manifest(
+                payload / final_stage["file"],
+                "final manifest",
+                path_order=final_stage.get("path_order", "components"),
+            )
+        )
         controls = check_required_controls(candidate, final_files)
         net = _verify_net_inventory(baseline, candidate, payload)
         state.update({"status": "passed", "controls": controls, "net": net, "stage_counts": [x["count"] for x in state["stages"]]})
