@@ -63,6 +63,108 @@ QUICKJS_API_FOLLOWUP_SOURCE_PATHS = [
     QUICKJS_WASM_PATH,
     QUICKJS_TESTS_PATH,
 ]
+INTEGRATED_REPAIR_EXTRA_OWNERS = [
+    {"path": "crates/thaw-bridge/src/bridge/classification.rs", "sha256": "02eb8290ce3ea489e663e046edf5691ce3b5bd73917e2734b24c66fe062cbc93", "git_blob_sha1": "3decfaf234527b9e2e0ed403893edcdd1e98e485", "final_sha256": "70ffb7d273d206b1b30bdaefb7a0658e76a144f4b747c9a6ab0fae0f02103c52"},
+    {"path": "crates/thaw-bridge/src/bridge/dts/exports.rs", "sha256": "0344c3c12445bd738728f6a23e0080a2aa89c26d0344069bc8323f47a541ab4c", "git_blob_sha1": "5dabf58ceb0069f81fefec38d09f3a33d492daf8", "final_sha256": "12a34f556f429b7b59f886c8d390f82739905a52a0f151fcdfe687cee356d4d3"},
+    {"path": "crates/thaw-bridge/src/bridge/dts/interfaces.rs", "sha256": "c670f2ee5c51026a0c3005d9c80ef55ae2f1be1393eb9f975599ea108abefb43", "git_blob_sha1": "d3f459e5a87e96893f95fd75c0d0ce64b2732699", "final_sha256": "59945dbe23067d664c7c6c12023c97498cc980a64abe1b102ef7c0d2eb16918d"},
+    {"path": "crates/thaw-bridge/src/bridge/generation.rs", "sha256": "62b85553eb66b68c05cdcf0ddfe862605cb0db69ca379ab5314c571058bbe915", "git_blob_sha1": "3d53e52ae5312ccd1b7ae7b0a327b7f9d291552d", "final_sha256": "c72000d3c33b4b31ad34083f94f1d2db63f2b9a4ac67b5d4ba005405d0019dcf"},
+    {"path": "crates/thaw-bridge/src/tests/diagnostics_and_classes.rs", "sha256": "ac2967c7fd3f9bcc5e1169f25d54a7e2bf34e7c52cb4449198b45d135120f3be", "git_blob_sha1": "c89f4fa72fdc1ad35b235bbb44005cfc85751ab1", "final_sha256": "39e3169af7ded62fab86ab9ec769f33a5fd94b0139559d7a70f8b9bbca6d301c"},
+    {"path": "crates/thaw-bridge/src/tests/generic_types.rs", "sha256": "8f45f4f6b1f2903381da46c29ff94356b67632e1229e82e39077bde218c163fa", "git_blob_sha1": "e7cc60bdc19a07a679a18dbd2e080922aef69c30", "final_sha256": "e9ac22a235b5aca84828bf789486a1c62e42dca4f6aacc7b93c192e877b81db4"},
+    {"path": "crates/thaw-bridge/src/tests/shims_and_bundles.rs", "sha256": "ec1b0d835d7ae3a65d43a6bb69ed6804aef369238ac3d216b2d287cdd92e1288", "git_blob_sha1": "f1935f9e94a17c040c5576e82c08a31327830af0", "final_sha256": "26b1b7187dc91333c1fa9ccfaf8084e6f1cb4b53e725b7f00c224862f0055041"},
+    {"path": "crates/thaw-cli/src/module_graph.rs", "sha256": "eb355695ba186122d677854bbb456bc3e56bce6776613387ea44ccb55ba1a84f", "git_blob_sha1": "4341f92cecd1f067a505fe90a8ae0e930526e1aa", "final_sha256": "62f9d9f795bc74461993165047abe10cbfdbeb18c779a25835f4f2a3c41ab201"},
+    {"path": "crates/thaw-cli/src/registry_integration/jit/control_flow.rs", "sha256": "6bd4eeffc54e1db641676fc7a3e4604d95cb3e62ea6606c27640d2c82229641b", "git_blob_sha1": "e98b7f20079f98cd914863bd83637cce2a107109", "final_sha256": "78d6acb00628190b388af2105fe51f02c074660f6be11b8f14407fc53edf4a3c"},
+    {"path": "crates/thaw-cli/src/registry_integration/shim_support.rs", "sha256": "0493fcc27157fc342a39fb131e41f0945705c2c6e9f629ac4d5548108700e696", "git_blob_sha1": "5280eb9e2556e811dd57828b4d378d6b0fe2b01c", "final_sha256": "c075d54dccefd2142eb476cc8076d5be8694e7119ded08c6d4e827b18efcc407"},
+    {"path": "crates/thaw-cli/src/tests/external_classes.rs", "sha256": "d02fdc4c1dce42d56d7fb15f0ab4a1ce9aefbe82cc660bc41a056b8b10cf3b0f", "git_blob_sha1": "6c56f380e6eea040c947c213719a670cf9104766", "final_sha256": "cbab0e91e9d9f7783767524f446ef94dc35356c413b740960da7cce3b42ed180"},
+    {"path": "crates/thaw-cli/src/tests.rs", "sha256": "36f71b073d3fbf61a36872a66088cb80a2418765edf2f3bad1452d9cc6b5106f", "git_blob_sha1": "aab3b8a26d831b35f87c2ade0f20e0c436f8d2a3", "final_sha256": "03a2847952bf36cc861d6699516b8cc2d56d9658dad719fc919259ac01dffc1a"},
+    {"path": "crates/thaw-napi/src/napi/classes.rs", "sha256": "7458044cd347d7834477ee0b90a5a688260e02f9a721b7bf5ca2740bfb31588c", "git_blob_sha1": "6cc69d47c43e615e2203a54aa2b29b8b11ee5202", "final_sha256": "4f5de66451dc8c16fdcf9e27543d577e1af3414fcb483a1774d994e0ad9b0bd8"},
+    {"path": "crates/thaw-napi/src/napi/module_host.rs", "sha256": "e017ea5491d5bbb7587f6bbe45b2fbd6ab4c597d32e67f1901ee76749864f33c", "git_blob_sha1": "63d7f5e635ba1fde0c2ee4e26375e8fe6ef6d061", "final_sha256": "791ae0601e9f11118b0a2bdd21463cfb83f8f347cc348017f79a33a22936adf0"},
+    {"path": "crates/thaw-napi/src/tests/async_runtime.rs", "sha256": "a4a975c0f3899ee3a11ef61cf7202dc1fb9f505c3cd8e09ca1239b77c3b8290b", "git_blob_sha1": "66a1974d8d8385fb10877a8d494f13f47dcf1bf5", "final_sha256": "070a5a87b8664c84b1193bf15cf12496b792dfea13ea92fdb88c1ae4b8946cb3"},
+    {"path": "crates/thaw-napi/src/tests/handles.rs", "sha256": "b1280061c9204ce8cab1d2c1483b3d25de591c44b45831680ad4a2f57aac9250", "git_blob_sha1": "e1b32d224a47587feb6dfc76a8988ba816230ede", "final_sha256": "7e16cc1ee233828c67e4532ac5be3802353987a4022dda5eaa0fd39a3117b330"},
+    {"path": "crates/thaw-napi/src/tests/objects_classes.rs", "sha256": "226fdb71d173e689e0f3140b1eedf6a30e02c3cc37da31cb540ae57f43d61304", "git_blob_sha1": "2136ae2bcda3b9f3c6431b88ee774f2c1f4e29f4", "final_sha256": "e1cbe2aad9c9b649698fee9ff3325df8f1ee68606c6faa8f7bb6e31dcc5f1f67"},
+    {"path": "crates/thaw-napi/src/tests.rs", "sha256": "5551950bc17cc3b228016af3be8fe0596e5dd5d38eb811bc98f32573112c7bdb", "git_blob_sha1": "0a0981cda62adcc429d64c7f320a9500031bcfae", "final_sha256": "0efce312cad74e4923349f903de4552a382bdc95d10fb6055facd351885ba500"},
+    {"path": "crates/thaw-quickjs/src/lib.rs", "sha256": "65848d5d51716015b3285c534cfc390a517676e74843f7127806188d0ab2556a", "git_blob_sha1": "c29813cae26b3eafe7eb92e8b3f2b67e60e0c3ff", "final_sha256": "b06e314ac6fca3cd81ca1100d5b6f51dec05d56bf873305f492523463ba7e85a"},
+    {"path": "crates/thaw-quickjs/src/quickjs/filesystem.rs", "sha256": "877d2d08445bc94e6b2d1095cf8b40943e3a8d79840535961b3f951d65b944ed", "git_blob_sha1": "d8d660f06c282650e3efe392219e67509765f185", "final_sha256": "4677a999ad895ee2d190bd72b4e4374248136b766e8c643c7b4a58606a9e8463"},
+    {"path": "crates/thaw-quickjs/src/quickjs/platform_globals/webassembly.js", "sha256": "e81b910bbec01ac145abc06521b664997310c3d63f4b27036297b5ebe29327f1", "git_blob_sha1": "4a30a650e48be04af5f190541d644d2793d515ce", "final_sha256": "0c4480cfe460d6747acffbecfb16c849ef3b5c12b878920b9e94b3ce1f8953da"},
+    {"path": "crates/thaw-registry/src/registry/builtins/filesystem.rs", "sha256": "24c171163d7737d22ff46c59b7235ded6a3cd24bd8ffd704d4a96a62ddfa7f3b", "git_blob_sha1": "2bdaec73aaee7ae7b662ae36836e530fd9fffecb", "final_sha256": "c29ee7ecaf5587503b49dfd893de78f9f8f8ad47fa321a88aee60b73e603aa8b"},
+    {"path": "crates/thaw-registry/src/registry/builtins/http/http1.rs", "sha256": "b2e1e01f2accf6b6d85170601c6abecd3ece8c0ee6ae5243476a8f741c68e125", "git_blob_sha1": "044885b373d0c6c067757d3bfb5a9cf8b06d5a39", "final_sha256": "a5a8f3fb2c05c27d8f95496e6dcb33a7c559096667302844d94f0154a6e002ab"},
+    {"path": "crates/thaw-registry/src/registry/bundle/render.rs", "sha256": "73df0361495332c75d3b0f479c7114eeee1ecdd7b926dc6c4ea8370ff81747c8", "git_blob_sha1": "cab54090977a051a912987339835f6b4074bb6ed", "final_sha256": "73a4bc528fec004e410fff3804dae1ed4c95707c2a391e8404ea41db0665ca75"},
+    {"path": "crates/thaw-registry/src/registry/bundle.rs", "sha256": "5aa0eae2f039291cb3ba708a1e5404434b34913935e4ebf92bdc81183f592ba9", "git_blob_sha1": "f14f23c11818b224335f22d8b3bb4460936ca7aa", "final_sha256": "f6854f6d93b3b13d7266e60ddcbdec3d1e4eedc29c67f64c54022ca63bca616d"},
+    {"path": "crates/thaw-registry/src/registry/install/declarations.rs", "sha256": "433bd953f14da64721d8a12114c018645caec38442a2c7a5ac7c3c51342af2aa", "git_blob_sha1": "56a12dbf5a70b0b73df7ffe3ab936783d0c52b72", "final_sha256": "4e776b2dbbf15296a011dc77571bc874b8f59077b4e83287dd8d3fc300d9c9ef"},
+    {"path": "crates/thaw-registry/src/tests/filesystem.rs", "sha256": "a074ce70485cfc71be385cadbfe608a4ae87714cefffc5a791fe2b2f5802fedc", "git_blob_sha1": "4e897fad33e26b3f19389d6194ef8cbf324a952a", "final_sha256": "5bf34341b10994b6b097d178692ff5f85fa3a7c421f5898998d9728838cdeb7c"},
+    {"path": "crates/thaw-registry/src/tests/network.rs", "sha256": "4df1db3e772acf512bd322430c7bc26ee5a06371d3bd9b134a3b5f9d93d05af0", "git_blob_sha1": "c73acab6464646aa39939c247f6f9a56004b5e8e", "final_sha256": "0bf1f77533ce240a6ea2299135f4b5fae9740b43697454a20e7b276da8f3459e"},
+    {"path": "crates/thaw-registry/src/tests/node_core.rs", "sha256": "83230904efea96fcae2dc2044ba5fc07ec13b631d0e50e1b573038bc00f3657c", "git_blob_sha1": "323c31a2d858adc0d6f670eb62a585a573384012", "final_sha256": "651372f55c8c0c247f2917711759260bf353a573cc680125ac14d84caf4978b6"},
+    {"path": "crates/thaw-registry/src/tests/platform.rs", "sha256": "2194858509fc0d0acb4840b843dff68bb6c5c59e3fa62771bc3eb366e6041de3", "git_blob_sha1": "d12a88aca1041ade973d52d8ef48fba8d9429be1", "final_sha256": "2a55863725c929ac727942d61118fd360d9010881260bf2f9e2060f3f488bd4c"},
+    {"path": "crates/thaw-registry/src/tests/stream_web.rs", "sha256": "a291f5eaff89a0d3a1c7431cb21c4f4aafcddd3479a44332ce6a93e2b0784796", "git_blob_sha1": "9d404bf2b3208d2543d85a06885ff5fd1a8acb22", "final_sha256": "9adce8bb9d8db0f1ab737190f467a9b20b753d7f7ec86f359fe7304e910c794b"},
+    {"path": "crates/thaw-registry/src/tests.rs", "sha256": "982ac4ca35435172751d58aa6c5e666dc862d17707854c0757783bd222f71187", "git_blob_sha1": "c45a631d8b8f3f7e5e7d100ba3ca62f11b005022", "final_sha256": "4377fd3130884fdc160762d6c2490543a2f3ae561b9fc5913bb715c3f26e9779"},
+]
+INTEGRATED_REPAIR_EXTRA_PATHS = [*QUICKJS_API_FOLLOWUP_EXTRA_PATHS, *[owner["path"] for owner in INTEGRATED_REPAIR_EXTRA_OWNERS]]
+INTEGRATED_REPAIR_SOURCE_PATHS = [
+    "crates/thaw-arena/src/strings.rs",
+    "crates/thaw-bridge/src/bridge/classification.rs",
+    "crates/thaw-bridge/src/bridge/dts/exports.rs",
+    "crates/thaw-bridge/src/bridge/dts/interfaces.rs",
+    "crates/thaw-bridge/src/bridge/generation.rs",
+    "crates/thaw-bridge/src/tests/diagnostics_and_classes.rs",
+    "crates/thaw-bridge/src/tests/generic_types.rs",
+    "crates/thaw-bridge/src/tests/shims_and_bundles.rs",
+    "crates/thaw-cli/src/module_graph.rs",
+    "crates/thaw-cli/src/registry_integration/jit/control_flow.rs",
+    "crates/thaw-cli/src/registry_integration/shim_support.rs",
+    "crates/thaw-cli/src/tests.rs",
+    "crates/thaw-cli/src/tests/external_classes.rs",
+    "crates/thaw-hir/src/lower/assignments/updates.rs",
+    "crates/thaw-hir/src/lower/expressions/lowering.rs",
+    "crates/thaw-hir/src/lower/generic_calls.rs",
+    "crates/thaw-hir/src/lower/inference/types.rs",
+    "crates/thaw-hir/src/lower/invocations/calls.rs",
+    "crates/thaw-hir/src/lower/invocations/static_builtins.rs",
+    "crates/thaw-hir/src/lower/module/helpers.rs",
+    "crates/thaw-hir/src/lower/statements/lowering.rs",
+    "crates/thaw-hir/src/lower/tests.rs",
+    "crates/thaw-hir/src/lower/tests/classes.rs",
+    "crates/thaw-hir/src/lower/tests/control_flow.rs",
+    "crates/thaw-hir/src/lower/tests/types.rs",
+    "crates/thaw-hir/src/lower/tests/values.rs",
+    "crates/thaw-llvm/src/hir_codegen.rs",
+    "crates/thaw-llvm/src/hir_codegen/async_frames/codegen.rs",
+    "crates/thaw-llvm/src/hir_codegen/async_frames/planning/loops.rs",
+    "crates/thaw-llvm/src/hir_codegen/collections.rs",
+    "crates/thaw-llvm/src/hir_codegen/dynamic_host/callbacks.rs",
+    "crates/thaw-llvm/src/hir_codegen/dynamic_host/napi.rs",
+    "crates/thaw-llvm/src/hir_codegen/dynamic_host/quickjs.rs",
+    "crates/thaw-llvm/src/hir_codegen/invocations/dynamic_calls.rs",
+    "crates/thaw-llvm/src/hir_codegen/invocations/json_calls.rs",
+    "crates/thaw-llvm/src/hir_codegen/json_bridge/decoding.rs",
+    "crates/thaw-llvm/src/hir_codegen/json_values.rs",
+    "crates/thaw-llvm/src/hir_codegen/runtime_declarations.rs",
+    "crates/thaw-llvm/src/hir_codegen/statements.rs",
+    "crates/thaw-llvm/src/hir_codegen/values/closures.rs",
+    "crates/thaw-llvm/src/hir_codegen/values/expressions.rs",
+    "crates/thaw-napi/src/napi/classes.rs",
+    "crates/thaw-napi/src/napi/module_host.rs",
+    "crates/thaw-napi/src/tests.rs",
+    "crates/thaw-napi/src/tests/async_runtime.rs",
+    "crates/thaw-napi/src/tests/handles.rs",
+    "crates/thaw-napi/src/tests/objects_classes.rs",
+    "crates/thaw-quickjs/src/lib.rs",
+    "crates/thaw-quickjs/src/quickjs/api.rs",
+    "crates/thaw-quickjs/src/quickjs/filesystem.rs",
+    "crates/thaw-quickjs/src/quickjs/platform_globals/runtime.js",
+    "crates/thaw-quickjs/src/quickjs/platform_globals/webassembly.js",
+    "crates/thaw-quickjs/src/tests.rs",
+    "crates/thaw-registry/src/registry/builtins/filesystem.rs",
+    "crates/thaw-registry/src/registry/builtins/http/http1.rs",
+    "crates/thaw-registry/src/registry/bundle.rs",
+    "crates/thaw-registry/src/registry/bundle/render.rs",
+    "crates/thaw-registry/src/registry/install/declarations.rs",
+    "crates/thaw-registry/src/tests.rs",
+    "crates/thaw-registry/src/tests/filesystem.rs",
+    "crates/thaw-registry/src/tests/network.rs",
+    "crates/thaw-registry/src/tests/node_core.rs",
+    "crates/thaw-registry/src/tests/platform.rs",
+    "crates/thaw-registry/src/tests/stream_web.rs",
+    "crates/thaw-std/src/json.rs",
+]
 EXPECTED: dict[str, Any] = {
     "schema_version": 1,
     "validation_branch": VALIDATION_BRANCH,
@@ -444,7 +546,7 @@ EXPECTED["payload_patches"]["quickjs-api-followup-v1.patch"] = "3e4daa17ed3234d3
 EXPECTED["artifacts"].update({
     "quickjs-api-followup-v1-base.sha256": "daf200a9aea71a2726db0c2754dbeb9da958bfafb53792a4d13adada892e4ae0",
     "quickjs-api-followup-v1.sha256": "2fc7c97c06059974628930e661751c3a4cf7603bb1c2e795fe6a56d7f862d06b",
-    "net-owners.txt": "6c5e242bcbe3a8e247943cc644174df43d08ad9af376422d0ffed91bdb0b4ba0",
+    "net-owners.txt": "2a464d409e7673622ffce78a8864f69a5a19133bb13bdc37287d6b1189208e84",
 })
 EXPECTED["stage_manifests"].append({
     "name": "quickjs-api-followup-v1",
@@ -470,12 +572,35 @@ EXPECTED["quickjs_api_followup_base"] = {
 EXPECTED["quickjs_api_followup_source_paths"] = QUICKJS_API_FOLLOWUP_SOURCE_PATHS
 EXPECTED["net_owners"] = {
     "file": "net-owners.txt",
-    "sha256": "6c5e242bcbe3a8e247943cc644174df43d08ad9af376422d0ffed91bdb0b4ba0",
-    "count": 62,
-    "modified": 57,
+    "sha256": "2a464d409e7673622ffce78a8864f69a5a19133bb13bdc37287d6b1189208e84",
+    "count": 105,
+    "modified": 100,
     "new": 5,
 }
 EXPECTED["patch_order"].append("quickjs-api-followup-v1")
+EXPECTED["payload_patches"]["integrated-repair-v1.patch"] = "81cafd231902115b5c690717df23e0e8f62e04a3b2ca5558827223fe9b566bb8"
+EXPECTED["artifacts"].update({
+    "integrated-repair-v1-base.sha256": "eb5bce4fc8202ef190456bd3336ce3f18f832a48024322ebcf80be6d82c39edb",
+    "integrated-repair-v1.sha256": "9ea9050c4d053a4c620ae259025404042f9c30e0c63127fd87d892bd15239902",
+})
+EXPECTED["stage_manifests"].append({
+    "name": "integrated-repair-v1",
+    "file": "integrated-repair-v1.sha256",
+    "sha256": "9ea9050c4d053a4c620ae259025404042f9c30e0c63127fd87d892bd15239902",
+    "count": 218,
+    "extra_paths": INTEGRATED_REPAIR_EXTRA_PATHS,
+    "path_order": "lexical",
+})
+EXPECTED["integrated_repair_base"] = {
+    "file": "integrated-repair-v1-base.sha256",
+    "sha256": "eb5bce4fc8202ef190456bd3336ce3f18f832a48024322ebcf80be6d82c39edb",
+    "count": 218,
+    "path_order": "lexical",
+    "paired_after": "quickjs-api-followup-v1",
+    "extra_owners": INTEGRATED_REPAIR_EXTRA_OWNERS,
+}
+EXPECTED["integrated_repair_source_paths"] = INTEGRATED_REPAIR_SOURCE_PATHS
+EXPECTED["patch_order"].append("integrated-repair-v1")
 EXPECTED["test_filters"].extend([
     {"package": "thaw-quickjs", "filter": "tests::terminal_pending_work_is_separate_from_failure_and_exit_code"},
     {"package": "thaw-quickjs", "filter": "tests::private_graph_arguments_do_not_revive_user_marker_shapes"},
@@ -754,6 +879,7 @@ def verify_stage(
         STD_COMPILE_EXTRA_PATHS,
         QUICKJS_RUNTIME_EXTRA_PATHS,
         QUICKJS_API_FOLLOWUP_EXTRA_PATHS,
+        INTEGRATED_REPAIR_EXTRA_PATHS,
     ]
     if extra_paths and extra_paths not in allowed_extra_sets:
         raise VerificationError(f"stage has an unapproved extra path scope: {extra_paths!r}")
@@ -1068,7 +1194,12 @@ def _verify_quickjs_api_followup_inputs(
     stage = stage_by_name.get("quickjs-api-followup-v1")
     if not isinstance(base, dict) or previous is None or stage is None:
         raise VerificationError("QuickJS API follow-up paired base or stage is missing")
-    if base.get("paired_after") != previous["name"] or EXPECTED["patch_order"][-2:] != ["quickjs-runtime-compile-v1", "quickjs-api-followup-v1"]:
+    quickjs_api_index = EXPECTED["patch_order"].index("quickjs-api-followup-v1")
+    if (
+        base.get("paired_after") != previous["name"]
+        or quickjs_api_index == 0
+        or EXPECTED["patch_order"][quickjs_api_index - 1] != "quickjs-runtime-compile-v1"
+    ):
         raise VerificationError("QuickJS API follow-up paired base must immediately follow quickjs-runtime-compile-v1")
     if base.get("path_order") != "lexical" or previous.get("path_order") != "lexical":
         raise VerificationError("QuickJS API follow-up base and predecessor must retain lexical path ordering")
@@ -1125,6 +1256,80 @@ def _verify_quickjs_api_followup_inputs(
         "paired_after": previous["name"],
         "tests_baseline_sha256": QUICKJS_TESTS_BASE_SHA256,
         "tests_baseline_git_blob_sha1": QUICKJS_TESTS_BASE_GIT_BLOB_SHA1,
+    }
+
+
+def _verify_integrated_repair_inputs(
+    payload: Path, baseline: Path, stage_by_name: dict[str, dict[str, Any]], net: dict[str, str]
+) -> dict[str, Any]:
+    """Pin stage thirteen to stage twelve plus the baseline copies of its extra owners."""
+    base = EXPECTED.get("integrated_repair_base")
+    previous = stage_by_name.get("quickjs-api-followup-v1")
+    stage = stage_by_name.get("integrated-repair-v1")
+    if not isinstance(base, dict) or previous is None or stage is None:
+        raise VerificationError("integrated repair paired base or stage is missing")
+    order = EXPECTED["patch_order"]
+    index = order.index("integrated-repair-v1")
+    if base.get("paired_after") != previous["name"] or index == 0 or order[index - 1] != "quickjs-api-followup-v1":
+        raise VerificationError("integrated repair paired base must immediately follow quickjs-api-followup-v1")
+    if base.get("path_order") != "lexical" or previous.get("path_order") != "lexical":
+        raise VerificationError("integrated repair base and predecessor must retain lexical path ordering")
+    if previous.get("extra_paths") != QUICKJS_API_FOLLOWUP_EXTRA_PATHS or stage.get("extra_paths") != INTEGRATED_REPAIR_EXTRA_PATHS:
+        raise VerificationError("integrated repair stage has an unexpected stage-scoped path set")
+    owners = base.get("extra_owners")
+    if not isinstance(owners, list) or [owner.get("path") for owner in owners] != INTEGRATED_REPAIR_EXTRA_PATHS[len(QUICKJS_API_FOLLOWUP_EXTRA_PATHS):]:
+        raise VerificationError("integrated repair paired base extra owners differ from the pinned stage-scoped path set")
+    source_paths = EXPECTED.get("integrated_repair_source_paths")
+    if not isinstance(source_paths, list) or sorted(set(source_paths)) != sorted(source_paths):
+        raise VerificationError("integrated repair source path pin is missing or not unique")
+    extra_count = len(owners)
+    if stage.get("path_order") != "lexical" or base.get("count") != previous["count"] + extra_count or stage.get("count") != base["count"]:
+        raise VerificationError("integrated repair paired base and final must contain exactly the predecessor plus the baseline extra owners")
+    if base.get("file") != "integrated-repair-v1-base.sha256" or stage.get("file") != "integrated-repair-v1.sha256":
+        raise VerificationError("integrated repair paired input filenames differ from the pinned contract")
+    for descriptor in (base, stage):
+        if descriptor.get("sha256") != EXPECTED["artifacts"].get(descriptor["file"]):
+            raise VerificationError(f"integrated repair manifest pin is stale for {descriptor['file']}")
+    for owner in owners:
+        owner_path = _path_without_symlinks(baseline, owner["path"], "integrated repair baseline extra owner")
+        if not owner_path.is_file() or owner_path.is_symlink():
+            raise VerificationError(f"integrated repair baseline extra owner is missing or not a regular file: {owner['path']}")
+        owner_bytes = owner_path.read_bytes()
+        if _sha(owner_bytes) != owner["sha256"] or _git_blob_sha1(owner_bytes) != owner["git_blob_sha1"]:
+            raise VerificationError(f"baseline extra owner SHA-256 or Git blob identity mismatch: {owner['path']}")
+    base_path = _path_without_symlinks(payload, base["file"], "integrated repair paired base")
+    previous_path = _path_without_symlinks(payload, previous["file"], "integrated repair predecessor final")
+    final_path = _path_without_symlinks(payload, stage["file"], "integrated repair final")
+    previous_rows = _parse_sha_manifest(previous_path, "integrated repair predecessor final", path_order="lexical")
+    base_rows = _parse_sha_manifest(base_path, "integrated repair paired base", path_order="lexical")
+    final_rows = _parse_sha_manifest(final_path, "integrated repair final", path_order="lexical")
+    previous_map = {rel: digest for digest, rel in previous_rows}
+    base_map = {rel: digest for digest, rel in base_rows}
+    final_map = {rel: digest for digest, rel in final_rows}
+    expected_base = dict(previous_map)
+    for owner in owners:
+        if owner["path"] in expected_base:
+            raise VerificationError(f"integrated repair extra owner is already in the preceding source set: {owner['path']}")
+        expected_base[owner["path"]] = owner["sha256"]
+    if base_map != expected_base or len(base_rows) != base["count"]:
+        raise VerificationError("integrated repair paired base differs from the stage-twelve final plus the baseline extra owners")
+    if set(final_map) != set(base_map) or len(final_rows) != stage["count"]:
+        raise VerificationError("integrated repair final changed the paired base path set")
+    changed = {rel for rel in base_map if base_map[rel] != final_map[rel]}
+    if changed != set(source_paths):
+        raise VerificationError("integrated repair final must change exactly the pinned source owners")
+    for owner in owners:
+        if final_map.get(owner["path"]) != owner["final_sha256"]:
+            raise VerificationError(f"integrated repair final hash differs from the pinned extra owner: {owner['path']}")
+    if any(net.get(rel) != "modified" for rel in source_paths):
+        raise VerificationError("integrated repair source owners must all be modified net owners")
+    return {
+        "base_count": len(base_map),
+        "final_count": len(final_map),
+        "changed_source_owners": sorted(changed),
+        "unchanged_source_count": len(base_map) - len(changed),
+        "paired_after": previous["name"],
+        "extra_owner_count": extra_count,
     }
 
 
@@ -1202,6 +1407,12 @@ def verify_inputs(baseline: Path, payload: Path) -> dict[str, Any]:
         unexpected = sorted(actual_quickjs_api_followup_inputs - expected_quickjs_api_followup_inputs)
         raise VerificationError(f"unexpected QuickJS API follow-up input: {unexpected[0]}")
 
+    expected_integrated_repair_inputs = {"integrated-repair-v1.patch", "integrated-repair-v1-base.sha256", "integrated-repair-v1.sha256"}
+    actual_integrated_repair_inputs = {entry.name for entry in payload.iterdir() if entry.name.startswith("integrated-repair-v")}
+    if actual_integrated_repair_inputs - expected_integrated_repair_inputs:
+        unexpected = sorted(actual_integrated_repair_inputs - expected_integrated_repair_inputs)
+        raise VerificationError(f"unexpected integrated repair input: {unexpected[0]}")
+
     owner_map = _read_owner_map(payload)
     manifest = _json_no_duplicates(source_bytes["handoff_manifest"], "native handoff manifest")
     try:
@@ -1237,7 +1448,7 @@ def verify_inputs(baseline: Path, payload: Path) -> dict[str, Any]:
 
     # Each manifest file is parsed here, before any patch is applied, so malformed or
     # unsafe input cannot become a Cargo-time surprise.
-    lexical_stage_names = {"compile-repairs-v1", "cumulative-hir-v1", "next-hir-v1", "forced-root-wire-v1", "dependency-compile-v1", "std-compile-v1", "quickjs-runtime-compile-v1", "quickjs-api-followup-v1"}
+    lexical_stage_names = {"compile-repairs-v1", "cumulative-hir-v1", "next-hir-v1", "forced-root-wire-v1", "dependency-compile-v1", "std-compile-v1", "quickjs-runtime-compile-v1", "quickjs-api-followup-v1", "integrated-repair-v1"}
     extra_path = EXPECTED["repair_base"]["extra_owner"]["path"]
     extra_paths_by_stage = {
         "compile-repairs-v1": [extra_path],
@@ -1248,6 +1459,7 @@ def verify_inputs(baseline: Path, payload: Path) -> dict[str, Any]:
         "std-compile-v1": STD_COMPILE_EXTRA_PATHS,
         "quickjs-runtime-compile-v1": QUICKJS_RUNTIME_EXTRA_PATHS,
         "quickjs-api-followup-v1": QUICKJS_API_FOLLOWUP_EXTRA_PATHS,
+        "integrated-repair-v1": INTEGRATED_REPAIR_EXTRA_PATHS,
     }
     for stage in EXPECTED["stage_manifests"]:
         extra_paths = stage.get("extra_paths", [])
@@ -1432,6 +1644,7 @@ def verify_inputs(baseline: Path, payload: Path) -> dict[str, Any]:
     std_compile_inputs = _verify_std_compile_inputs(payload, baseline, stage_by_name, net)
     quickjs_runtime_inputs = _verify_quickjs_runtime_inputs(payload, baseline, stage_by_name, net)
     quickjs_api_followup_inputs = _verify_quickjs_api_followup_inputs(payload, baseline, stage_by_name, net)
+    integrated_repair_inputs = _verify_integrated_repair_inputs(payload, baseline, stage_by_name, net)
     return {
         "baseline": identity,
         "inputs": {**EXPECTED["payload_patches"], **EXPECTED["artifacts"]},
@@ -1441,6 +1654,7 @@ def verify_inputs(baseline: Path, payload: Path) -> dict[str, Any]:
         "std_compile": std_compile_inputs,
         "quickjs_runtime_compile": quickjs_runtime_inputs,
         "quickjs_api_followup": quickjs_api_followup_inputs,
+        "integrated_repair": integrated_repair_inputs,
         "patch_order": list(EXPECTED["patch_order"]),
     }
 
@@ -1606,6 +1820,7 @@ def _patch_path(baseline: Path, payload: Path, name: str) -> Path:
         "std-compile-v1": "std-compile-v1.patch",
         "quickjs-runtime-compile-v1": "quickjs-runtime-compile-v1.patch",
         "quickjs-api-followup-v1": "quickjs-api-followup-v1.patch",
+        "integrated-repair-v1": "integrated-repair-v1.patch",
     }.get(name)
     if not payload_name:
         raise VerificationError(f"unknown patch stage: {name}")
@@ -1841,6 +2056,34 @@ def reconstruct(baseline: Path, candidate: Path, payload: Path, evidence: Path) 
                     "extra_owner": QUICKJS_TESTS_PATH,
                     "tests_baseline_sha256": QUICKJS_TESTS_BASE_SHA256,
                     "tests_baseline_git_blob_sha1": QUICKJS_TESTS_BASE_GIT_BLOB_SHA1,
+                }
+            elif stage["name"] == "integrated-repair-v1":
+                repair_base = EXPECTED["integrated_repair_base"]
+                paired_stage_name = repair_base["paired_after"]
+                if not state["stages"] or state["stages"][-1]["stage"] != paired_stage_name:
+                    raise VerificationError("integrated repair paired base is not immediately after the QuickJS API follow-up final")
+                previous = stage_by_name[paired_stage_name]
+                previous_result = verify_stage(
+                    candidate,
+                    payload / previous["file"],
+                    previous["count"],
+                    previous.get("extra_paths", []),
+                    previous.get("path_order", "components"),
+                )
+                if previous_result["manifest_sha256"] != state["stages"][-1]["manifest_sha256"]:
+                    raise VerificationError("integrated repair predecessor no longer matches the reconstructed QuickJS API follow-up final")
+                paired = verify_stage(
+                    candidate,
+                    payload / repair_base["file"],
+                    repair_base["count"],
+                    INTEGRATED_REPAIR_EXTRA_PATHS,
+                    repair_base["path_order"],
+                )
+                state["paired_integrated_repair_base"] = {
+                    "count": paired["count"],
+                    "manifest_sha256": paired["manifest_sha256"],
+                    "paired_after": paired_stage_name,
+                    "extra_owner_count": len(repair_base["extra_owners"]),
                 }
             applied = _apply_patch(candidate, patch)
             manifest = payload / stage["file"]
