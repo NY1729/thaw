@@ -1,0 +1,575 @@
+diff --color -ru pristine/crates/thaw-arena/src/strings.rs candidate/crates/thaw-arena/src/strings.rs
+--- pristine/crates/thaw-arena/src/strings.rs	2026-10-06 22:35:06.609552400 +0900
++++ candidate/crates/thaw-arena/src/strings.rs	2026-10-06 23:09:20.067867057 +0900
+@@ -163,7 +163,9 @@
+ 
+ /// # Safety
+ /// `pointer` must be null or an owned native/C string, destroyed exactly once.
+-pub unsafe fn destroy_string(pointer: *mut c_char) {
++pub unsafe fn destroy_string(pointer: *const c_char) {
++    // Takes ownership, so callers holding a `*const` (e.g. FFI result structs) need no cast.
++    let pointer = pointer.cast_mut();
+     if pointer.is_null() {
+         return;
+     }
+diff --color -ru pristine/crates/thaw-napi/src/napi/classes.rs candidate/crates/thaw-napi/src/napi/classes.rs
+--- pristine/crates/thaw-napi/src/napi/classes.rs	2026-10-06 22:35:06.687553368 +0900
++++ candidate/crates/thaw-napi/src/napi/classes.rs	2026-10-06 23:19:17.591034460 +0900
+@@ -370,6 +370,7 @@
+     if finalize.is_none() {
+         return record_status(env, NAPI_INVALID_ARG);
+     }
++    let env_ptr = env;
+     let Ok(env) = env_mut(env) else {
+         return NAPI_INVALID_ARG;
+     };
+diff --color -ru pristine/crates/thaw-napi/src/napi/module_host.rs candidate/crates/thaw-napi/src/napi/module_host.rs
+--- pristine/crates/thaw-napi/src/napi/module_host.rs	2026-10-06 22:35:06.687553368 +0900
++++ candidate/crates/thaw-napi/src/napi/module_host.rs	2026-10-06 23:24:12.724344868 +0900
+@@ -62,6 +62,18 @@
+     static NEXT_GRAPH_OWNER_ID: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+ }
+ 
++/// Test helper: an `Env` with a graph owner ID, registered with `HOST` so the
++/// QuickJS Symbol/graph owner lookups can find it. The Box stays owned by
++/// `HOST.module_envs` (cleared when the test thread exits).
++#[cfg(test)]
++pub(crate) fn registered_test_env() -> &'static mut Env {
++    let mut env = Box::new(Env::new());
++    env.graph_owner_id = next_graph_owner_id().unwrap();
++    let ptr: *mut Env = &mut *env;
++    HOST.with(|host| host.borrow_mut().module_envs.push(env));
++    unsafe { &mut *ptr }
++}
++
+ fn next_graph_owner_id() -> Result<u64, String> {
+     NEXT_GRAPH_OWNER_ID.with(|next| {
+         let id = next.get().checked_add(1)
+@@ -1833,7 +1845,7 @@
+         let source = fields.get("hdl").and_then(JsonValue::as_u64)
+             .ok_or("foreign native Symbol has no JavaScript wrapper")?;
+         return env.quickjs_live_values.get(&source).copied()
+-            .ok_or("unretained native Symbol wrapper");
++            .ok_or_else(|| "unretained native Symbol wrapper".to_string());
+     }
+     if let Some(decimal) = fields.get("bi").and_then(JsonValue::as_str) {
+         let (negative, words) = decimal_bigint_words(decimal)
+@@ -6045,6 +6057,10 @@
+ mod typed_native_graph_value_tests {
+     use super::*;
+ 
++    thread_local! {
++        static FINALIZATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
++    }
++
+     // Unrun: duplicate retained QuickJS objects are independently returned
+     // or thrown after their creator scope has closed. The recipient scope or
+     // exception slot must be the owner before its transfer retain is dropped.
+diff --color -ru pristine/crates/thaw-napi/src/tests/async_runtime.rs candidate/crates/thaw-napi/src/tests/async_runtime.rs
+--- pristine/crates/thaw-napi/src/tests/async_runtime.rs	2026-10-06 22:35:06.688429627 +0900
++++ candidate/crates/thaw-napi/src/tests/async_runtime.rs	2026-10-06 23:24:22.143540381 +0900
+@@ -345,7 +345,7 @@
+     let mut work = ptr::null_mut();
+     assert_eq!(napi_create_async_work(env, ptr::null_mut(), ptr::null_mut(),
+         Some(noop_execute), None, ptr::null_mut(), &mut work), NAPI_CLOSING);
+-    let existing = (&mut *(*env).async_works[0]) as *mut AsyncWork;
++    let existing = &mut *(&mut (*env).async_works)[0] as *mut AsyncWork;
+     assert_eq!(napi_queue_async_work(env, existing), NAPI_CLOSING);
+     assert_eq!(napi_add_env_cleanup_hook(env, Some(cleanup_probe), ptr::null_mut()), NAPI_CLOSING);
+ }
+@@ -864,7 +864,7 @@
+         callback: stop_work,
+         data: gate_data.cast(),
+         properties: HashMap::new(),
+-        _thaw_bridge: None,
++        _thaw_bridge: None, _accessor_owner: None,
+     }));
+     let receiver = env.alloc(Value::Object(HashMap::from([(
+         PropertyKey::String("stop".into()), method,
+@@ -915,7 +915,7 @@
+         callback: threadsafe_js_callback,
+         data: probe.cast(),
+         properties: HashMap::new(),
+-        _thaw_bridge: None,
++        _thaw_bridge: None, _accessor_owner: None,
+     }));
+     let mut threadsafe = ptr::null_mut();
+     unsafe {
+@@ -1297,7 +1297,7 @@
+     let callback_data = Box::into_raw(Box::new(7_u8)).cast::<c_void>();
+     let function = first.alloc(Value::Function(Function {
+         callback: counted_native_callback, data: callback_data,
+-        properties: HashMap::new(), _thaw_bridge: None,
++        properties: HashMap::new(), _thaw_bridge: None, _accessor_owner: None,
+     }));
+     first.finalizers.push(FinalizeRecord {
+         data: callback_data, finalize: Some(release_callback_data), hint: ptr::null_mut(),
+@@ -1318,7 +1318,7 @@
+         let mut host = host.borrow_mut();
+         host.functions.insert("cleanup_prior_export".into(), Function {
+             callback: counted_native_callback, data: callback_data,
+-            properties: HashMap::new(), _thaw_bridge: None,
++            properties: HashMap::new(), _thaw_bridge: None, _accessor_owner: None,
+         });
+         host.exports.insert("cleanup_prior_export".into(), (first_env as usize, function));
+         host.module_envs.extend([first, second]);
+@@ -1502,7 +1502,7 @@
+         callback: threadsafe_js_callback,
+         data: probe.cast(),
+         properties: HashMap::new(),
+-        _thaw_bridge: None,
++        _thaw_bridge: None, _accessor_owner: None,
+     }));
+     let mut threadsafe = ptr::null_mut();
+     unsafe {
+@@ -1579,7 +1579,7 @@
+         callback: threadsafe_js_callback,
+         data: probe.cast(),
+         properties: HashMap::new(),
+-        _thaw_bridge: None,
++        _thaw_bridge: None, _accessor_owner: None,
+     }));
+     let mut threadsafe = ptr::null_mut();
+     unsafe {
+diff --color -ru pristine/crates/thaw-napi/src/tests/handles.rs candidate/crates/thaw-napi/src/tests/handles.rs
+--- pristine/crates/thaw-napi/src/tests/handles.rs	2026-10-06 22:35:06.689208837 +0900
++++ candidate/crates/thaw-napi/src/tests/handles.rs	2026-10-06 23:24:22.143489355 +0900
+@@ -2,6 +2,7 @@
+ fn quickjs_reference_graph_preserves_cycles_arrays_and_buffer_bytes() {
+     unsafe {
+         let mut env = Env::new();
++        let env_ptr: NapiEnv = &mut env;
+         let root = value_from_json_with_undefined(&mut env, &serde_json::json!({
+             "__thaw_napi_object__": 1,
+             "value": {
+@@ -19,11 +20,11 @@
+         let four = env.alloc(Value::Number(4.0));
+         if let Some(Value::Array(items)) = array.as_mut() { items.push(Some(four)); }
+         if let Some(Value::Buffer(bytes)) = buffer.as_mut() { bytes[0] = 9; }
+-        let snapshot = quickjs_reference_json(&env, root, true, &mut HashSet::new()).unwrap();
++        let snapshot = quickjs_reference_wire(env_ptr, root, true).unwrap().value;
+         assert_eq!(snapshot["self"], serde_json::json!({ "__thaw_napi_ref__": 1 }));
+-        assert_eq!(quickjs_reference_json(&env, array, true, &mut HashSet::new()).unwrap(),
+-            serde_json::json!([{ "__thaw_napi_ref__": 2 }, 4]));
+-        assert_eq!(quickjs_reference_json(&env, buffer, true, &mut HashSet::new()).unwrap(),
++        assert_eq!(quickjs_reference_wire(env_ptr, array, true).unwrap().value,
++            serde_json::json!([{ "__thaw_napi_ref__": 2 }, 4.0]));
++        assert_eq!(quickjs_reference_wire(env_ptr, buffer, true).unwrap().value,
+             serde_json::json!([9, 2]));
+     }
+ }
+@@ -32,6 +33,7 @@
+ fn quickjs_typed_array_uses_the_original_arraybuffer_backing() {
+     unsafe {
+         let mut env = Env::new();
++        let env_ptr: NapiEnv = &mut env;
+         let view = value_from_json_with_undefined(&mut env, &serde_json::json!({
+             "__thaw_napi_view__": 12,
+             "kind": 1,
+@@ -45,7 +47,7 @@
+         };
+         assert_eq!(*array_buffer, backing);
+         if let Some(Value::ArrayBuffer { bytes, .. }) = backing.as_mut() { bytes[1] = 9; }
+-        assert_eq!(quickjs_reference_json(&env, backing, true, &mut HashSet::new()).unwrap(),
++        assert_eq!(quickjs_reference_wire(env_ptr, backing, true).unwrap().value,
+             serde_json::json!([1, 9, 3]));
+         assert_eq!(value_from_json_with_undefined(&mut env,
+             &serde_json::json!({ "__thaw_napi_ref__": 11 }), true).unwrap(), backing);
+@@ -141,8 +143,8 @@
+ #[test]
+ fn native_symbol_key_keeps_its_identity_in_own_keys() {
+     unsafe {
+-        let mut env = Env::new();
+-        let env_ptr: NapiEnv = &mut env;
++        let mut env = Box::new(Env::new());
++        let env_ptr: NapiEnv = &mut *env;
+         let object = env.alloc(Value::Object(HashMap::new()));
+         let description = env.alloc(Value::String("key".into()));
+         let mut symbol = ptr::null_mut();
+@@ -154,9 +156,12 @@
+             NAPI_KEY_ALL_PROPERTIES, NAPI_KEY_NUMBERS_TO_STRINGS, &mut keys), NAPI_OK);
+         let Value::Array(keys) = value_ref(keys).unwrap() else { panic!("keys expected") };
+         assert_eq!(keys.as_slice(), &[Some(symbol)]);
+-        let marker = quickjs_bridge_value(symbol).unwrap();
++        // The wire encoder resolves the symbol's owner through the registered envs.
++        HOST.with(|host| host.borrow_mut().module_envs.push(env));
++        let marker = quickjs_bridge_value(symbol).unwrap().value;
+         let Value::Symbol { id, .. } = value_ref(symbol).unwrap() else { panic!("symbol expected") };
+         assert_eq!(marker["__thaw_napi_symbol__"], serde_json::json!(id.to_string()));
++        HOST.with(|host| host.borrow_mut().module_envs.clear());
+     }
+ }
+ 
+@@ -1055,7 +1060,7 @@
+         assert_eq!(napi_get_array_length(env_ptr, array, &mut length), NAPI_OK);
+         assert_eq!(length, 3, "deleting an element must preserve array length");
+         assert_eq!(
+-            json_from_value(array).unwrap(),
++            json_from_value_with_undefined_for_env(env_ptr, array, false).unwrap(),
+             serde_json::json!([null, null, null])
+         );
+ 
+@@ -1157,7 +1162,7 @@
+         let mut result = ptr::null_mut();
+         assert_eq!(napi_run_script(env_ptr, script, &mut result), NAPI_OK);
+         assert_eq!(
+-            json_from_value(result).unwrap(),
++            json_from_value_with_undefined_for_env(env_ptr, result, false).unwrap(),
+             serde_json::json!({"answer": 42.0})
+         );
+ 
+@@ -1172,7 +1177,7 @@
+         );
+         assert_eq!(napi_run_script(env_ptr, script, &mut result), NAPI_OK);
+         assert_eq!(
+-            json_from_value(result).unwrap(),
++            json_from_value_with_undefined_for_env(env_ptr, result, false).unwrap(),
+             serde_json::json!({"answer": 42.0})
+         );
+ 
+diff --color -ru pristine/crates/thaw-napi/src/tests/objects_classes.rs candidate/crates/thaw-napi/src/tests/objects_classes.rs
+--- pristine/crates/thaw-napi/src/tests/objects_classes.rs	2026-10-06 22:35:06.689208837 +0900
++++ candidate/crates/thaw-napi/src/tests/objects_classes.rs	2026-10-06 23:24:22.143597127 +0900
+@@ -173,7 +173,7 @@
+             );
+             assert!(present);
+         }
+-        let json = json_from_value(object).unwrap();
++        let json = json_from_value_with_undefined_for_env(env_ptr, object, false).unwrap();
+         assert_eq!(json, serde_json::json!({"2": 3.0, "same": 1.0}));
+     }
+ }
+diff --color -ru pristine/crates/thaw-napi/src/tests.rs candidate/crates/thaw-napi/src/tests.rs
+--- pristine/crates/thaw-napi/src/tests.rs	2026-10-06 22:35:06.688429627 +0900
++++ candidate/crates/thaw-napi/src/tests.rs	2026-10-06 23:25:21.159507788 +0900
+@@ -1445,7 +1445,7 @@
+     let graph: serde_json::Value = serde_json::from_str(
+         &unsafe { napi_result_graph_for_env(&mut env as NapiEnv, root, true) }.unwrap(),
+     ).unwrap();
+-    assert_eq!(graph["nodes"][1]["d"], 0);
++    assert_eq!(graph["nodes"][1]["d"], 0.0);
+     assert!(graph["nodes"][2].get("o").is_some());
+     assert_eq!(graph["nodes"][0]["a"][2]["u"], 1);
+     assert!(graph["nodes"][3].get("o").is_some());
+@@ -1477,13 +1477,13 @@
+             serde_json::from_str(CStr::from_ptr(result).to_str().unwrap()).unwrap(),
+         ));
+     }
+-    let mut env = Env::new();
++    let env = registered_test_env();
+     let zero = env.alloc(Value::Number(0.0));
+     let ordinary_date = env.alloc(Value::Object(HashMap::from([
+         (PropertyKey::String("timestamp".into()), zero),
+     ])));
+     let real_date = env.alloc(Value::Date(0.0));
+-    let mut output = None;
++    let mut output: Option<(JsonValue, JsonValue)> = None;
+     let bridge = Arc::new(ThawCallbackBridge {
+         callback: ThawCallback::EventGraph(capture),
+         context: (&mut output as *mut Option<(JsonValue, JsonValue)>) as usize,
+@@ -1494,10 +1494,10 @@
+         new_target: ptr::null_mut(),
+         data: Arc::as_ptr(&bridge) as *mut c_void,
+     };
+-    unsafe { thaw_compiled_callback(&mut env as NapiEnv, &mut info); }
++    unsafe { thaw_compiled_callback(&mut *env as NapiEnv, &mut info); }
+     let (ordinary, date) = output.unwrap();
+     assert!(ordinary["nodes"][0].get("o").is_some());
+-    assert_eq!(date["nodes"][0]["d"], 0);
++    assert_eq!(date["nodes"][0]["d"], 0.0);
+ }
+ 
+ #[test]
+@@ -1527,7 +1527,7 @@
+     let ordinary_date = env.alloc(Value::Object(HashMap::from([
+         (PropertyKey::String("timestamp".into()), zero),
+     ])));
+-    let mut output = None;
++    let mut output: Option<JsonValue> = None;
+     let bridge = Arc::new(ThawCallbackBridge {
+         callback: ThawCallback::ValueGraph(callback),
+         context: (&mut output as *mut Option<JsonValue>) as usize,
+@@ -1677,7 +1677,7 @@
+         Some(numeric_key_object),
+     ]));
+     let wire = unsafe { quickjs_reference_wire(&mut env as NapiEnv, root, true) }.unwrap();
+-    assert_eq!(wire.value[0]["timestamp"], 0);
++    assert_eq!(wire.value[0]["timestamp"], 0.0);
+     assert_eq!(wire.value[2], JsonValue::Null);
+     assert!(wire.origins.contains(&serde_json::json!([[0], "plain"])));
+     assert!(wire.origins.contains(&serde_json::json!([[1], "plain"])));
+@@ -1698,7 +1698,7 @@
+     // Public result walkers resolve the live owner before invoking accessors.
+     let env = Box::new(env);
+     HOST.with(|host| host.borrow_mut().module_envs.push(env));
+-    assert_eq!(unsafe { json_from_value_with_undefined(literal_date, true) }.unwrap()["timestamp"], 0);
++    assert_eq!(unsafe { json_from_value_with_undefined(literal_date, true) }.unwrap()["timestamp"], 0.0);
+     HOST.with(|host| { drop(host.borrow_mut().module_envs.pop()); });
+ }
+ 
+@@ -1738,7 +1738,7 @@
+         .arg(&addon_c).arg("-o").arg(&addon)
+         .status().unwrap().success());
+     let path = std::ffi::CString::new(addon.to_string_lossy().as_bytes()).unwrap();
+-    assert_eq!(thaw_napi_load(path.as_ptr()), 1);
++    assert_eq!(unsafe { thaw_napi_load(path.as_ptr()) }, 1);
+     assert_eq!(thaw_napi_begin_shutdown(), 1);
+     assert_eq!(thaw_napi_poll_shutdown(), 1);
+     assert_eq!(thaw_napi_finish_shutdown(), 1);
+@@ -2290,7 +2290,7 @@
+     let mut first = ptr::null_mut();
+     assert_eq!(unsafe { napi_get_named_property(env_ptr, object,
+         c"computed".as_ptr(), &mut first) }, NAPI_OK);
+-    let first_handle = qjs_handle(first).expect("live getter result");
++    let first_handle = unsafe { qjs_handle(first) }.expect("live getter result");
+     assert_eq!(unsafe { qjs_query(first_handle, 2) }.unwrap(), "8");
+     let replacement = unsafe { env_mut(env_ptr) }.unwrap().alloc(Value::Number(12.0));
+     assert_eq!(unsafe { napi_set_named_property(env_ptr, object,
+diff --color -ru pristine/crates/thaw-quickjs/src/quickjs/api.rs candidate/crates/thaw-quickjs/src/quickjs/api.rs
+--- pristine/crates/thaw-quickjs/src/quickjs/api.rs	2026-10-06 22:40:09.161380473 +0900
++++ candidate/crates/thaw-quickjs/src/quickjs/api.rs	2026-10-06 23:19:17.592519910 +0900
+@@ -5407,7 +5407,7 @@
+             assert_eq!(masked_leases.len(), 1);
+             let masked_handle = masked_leases[0].as_u64().expect("masked handle lease");
+             assert_eq!(packets[3].as_str(), format!(
+-                r#"{{"root":{{"r":0}},"nodes":[{{"a":[{{"r":1}}],"p":[["0",{{"r":1}},7],["length",{{"v":1}},1]}},{{"hdl":{masked_handle}}}],"leases":[{masked_handle}],"napiLeases":[]}}"#
++                r#"{{"root":{{"r":0}},"nodes":[{{"a":[{{"r":1}}],"p":[["0",{{"r":1}},7],["length",{{"v":1}},1]]}},{{"hdl":{masked_handle}}}],"leases":[{masked_handle}],"napiLeases":[]}}"#
+             ));
+ 
+             for index in 7..=10 {
+diff --color -ru pristine/crates/thaw-quickjs/src/quickjs/filesystem.rs candidate/crates/thaw-quickjs/src/quickjs/filesystem.rs
+--- pristine/crates/thaw-quickjs/src/quickjs/filesystem.rs	2026-10-06 22:35:06.690429633 +0900
++++ candidate/crates/thaw-quickjs/src/quickjs/filesystem.rs	2026-10-06 22:38:38.740790180 +0900
+@@ -1078,7 +1078,7 @@
+     let subnanosecond = fs_timespec(Some("0.0000000006")).unwrap();
+     assert_eq!((subnanosecond.tv_sec, subnanosecond.tv_nsec), (0, 0));
+     let milliseconds = fs_timespec(Some("1.234")).unwrap();
+-    assert_eq!((milliseconds.tv_sec, milliseconds.tv_nsec), (1, 233_999_999));
++    assert_eq!((milliseconds.tv_sec, milliseconds.tv_nsec), (1, 234_000_000));
+     assert!(fs_timespec(Some("NaN")).is_err());
+     assert!(fs_timespec(Some("9223372036854775808")).is_err());
+     assert!(fs_timespec(Some("-1e300")).is_err());
+@@ -1103,7 +1103,7 @@
+     fs_utimes(&target, "-0.000000001,1.234").unwrap();
+     let target_stat = std::fs::metadata(&target).unwrap();
+     assert_eq!((target_stat.atime(), target_stat.atime_nsec()), (-1, 999_999_999));
+-    assert_eq!((target_stat.mtime(), target_stat.mtime_nsec()), (1, 233_999_999));
++    assert_eq!((target_stat.mtime(), target_stat.mtime_nsec()), (1, 234_000_000));
+     fs_lutimes(&link, "2.5,3.5").unwrap();
+     assert_eq!(std::fs::symlink_metadata(&link).unwrap().mtime(), 3);
+     assert_eq!(std::fs::metadata(&target).unwrap().mtime(), 1);
+diff --color -ru pristine/crates/thaw-quickjs/src/quickjs/platform_globals/runtime.js candidate/crates/thaw-quickjs/src/quickjs/platform_globals/runtime.js
+--- pristine/crates/thaw-quickjs/src/quickjs/platform_globals/runtime.js	2026-10-06 22:40:08.692138750 +0900
++++ candidate/crates/thaw-quickjs/src/quickjs/platform_globals/runtime.js	2026-10-06 22:38:02.906492666 +0900
+@@ -682,8 +682,8 @@
+   const thawGraphNapiFunctionHandles = thawNapiSafeWeakMap();
+   const thawGraphForeignReceiver = value => value !== null
+     && (typeof value === 'object' || typeof value === 'function')
+-    && thawGraphApply(thawGraphWeakMapGet, thawGraphNapiHandles, [value]) === undefined
+-    && thawGraphApply(thawGraphWeakMapGet, thawGraphNapiFunctionHandles, [value]) === undefined
++    && thawGraphNapiHandles.get(value) === undefined
++    && thawGraphNapiFunctionHandles.get(value) === undefined
+     ? value : undefined;
+   thawGraphDefineProperty(globalThis, '__thaw_json_graph_native_pair_matches', {
+     value: (value, nativeHandle, kind) => {
+@@ -1137,13 +1137,12 @@
+         thawGraphApply(thawGraphArrayPush, nodes, [{ hdl: retainSymbol(value) }]);
+       } else if (thawGraphApply(thawGraphWeakMapHas, handleCarriers, [value])) {
+         thawGraphApply(thawGraphArrayPush, nodes, [{ hdl: thawGraphApply(thawGraphWeakMapGet, handleCarriers, [value]) }]);
+-      } else if (thawGraphApply(thawGraphWeakMapHas, thawGraphNapiFunctionHandles, [value])) {
++      } else if (thawGraphNapiFunctionHandles.has(value)) {
+         thawGraphApply(thawGraphArrayPush, nodes,
+-          [{ nfn: retainNative(thawGraphApply(thawGraphWeakMapGet,
+-            thawGraphNapiFunctionHandles, [value])), hdl: retain(value) }]);
+-      } else if (thawGraphApply(thawGraphWeakMapHas, thawGraphNapiHandles, [value])) {
++          [{ nfn: retainNative(thawGraphNapiFunctionHandles.get(value)), hdl: retain(value) }]);
++      } else if (thawGraphNapiHandles.has(value)) {
+         thawGraphApply(thawGraphArrayPush, nodes,
+-          [{ nh: retainNative(thawGraphApply(thawGraphWeakMapGet, thawGraphNapiHandles, [value])) }]);
++          [{ nh: retainNative(thawGraphNapiHandles.get(value)) }]);
+       } else if (live && index !== 0) {
+         // Only the wrapper-created argument array is copied. Replacer
+         // holders and values stay live: a Proxy/getter must not be visited
+@@ -1610,7 +1609,7 @@
+         return thawGraphPreventNativeExtensions(graphProperty, proxy, target);
+       },
+     });
+-    thawGraphApply(thawGraphWeakMapSet, thawGraphNapiFunctionHandles, [proxy, handle]);
++    thawGraphNapiFunctionHandles.set(proxy, handle);
+     const entry = thawNapiWeakRef ? new thawNapiWeakRef(proxy) : proxy;
+     thawGraphApply(thawGraphMapSet, thawGraphNapiFunctions, [handle, entry]);
+     if (thawGraphNapiFunctionFinalizer)
+@@ -2565,10 +2564,13 @@
+     return [seconds, remainder];
+   };
+   hrtime.bigint = () => BigInt(Date.now() - processStart) * 1000000n;
+-  const processApply = Reflect.apply, processBufferFrom = Buffer.from,
++  // Buffer is defined later (buffer_crypto.js); capture Buffer.from on first use.
++  let processBufferFrom;
++  const processApply = Reflect.apply,
+     processIsView = ArrayBuffer.isView, processQueueMicrotask = queueMicrotask,
+     processRawWrite = globalThis.__thaw_process_write_bytes, processHexDigits = '0123456789abcdef';
+   const processToBytes = (value, encoding) => {
++    processBufferFrom ??= Buffer.from;
+     if (typeof value === 'string') return processApply(processBufferFrom, Buffer, [value, encoding || 'utf8']);
+     if (processIsView(value)) return processApply(processBufferFrom, Buffer, [value.buffer, value.byteOffset, value.byteLength]);
+     throw new TypeError('The chunk argument must be a string, Buffer, TypedArray, or DataView');
+diff --color -ru pristine/crates/thaw-quickjs/src/quickjs/platform_globals/webassembly.js candidate/crates/thaw-quickjs/src/quickjs/platform_globals/webassembly.js
+--- pristine/crates/thaw-quickjs/src/quickjs/platform_globals/webassembly.js	2026-10-06 22:35:06.692429639 +0900
++++ candidate/crates/thaw-quickjs/src/quickjs/platform_globals/webassembly.js	2026-10-06 22:44:34.766590838 +0900
+@@ -111,7 +111,17 @@
+     const key = instance + ':' + value.v;
+     let cached = wasmCachedFuncref(key);
+     if (!cached) {
+-      const owner = wasmInstance(instance);
++      // A retained table function (instance 0) has no single owner instance;
++      // sync every live instance's memories/globals around the call.
++      // ponytail: O(live instances) per call, track owners from Rust if this gets hot.
++      const owner = instance === 0 ? { get __thawResources() {
++        const all = [];
++        for (const entry of wasmInstances.values()) {
++          const live = entry && typeof entry.deref === 'function' ? entry.deref() : entry;
++          if (live && live.__thawResources) all.push(...live.__thawResources);
++        }
++        return all;
++      } } : wasmInstance(instance);
+       const callable = (...args) => {
+         const encoded = JSON.stringify(wasmEncodeArguments(args, value.parameters || []));
+         const called = wasmWithResources(owner, () => wasmResult(__thaw_wasm_call_funcref(instance, value.v, encoded), WebAssembly.RuntimeError));
+diff --color -ru pristine/crates/thaw-quickjs/src/tests.rs candidate/crates/thaw-quickjs/src/tests.rs
+--- pristine/crates/thaw-quickjs/src/tests.rs	2026-10-06 22:40:09.161500749 +0900
++++ candidate/crates/thaw-quickjs/src/tests.rs	2026-10-06 23:06:08.596390407 +0900
+@@ -1383,7 +1383,7 @@
+                      (func (export \"explode\") call $fail))`);\n\
+                    const calls = []; const module = new WebAssembly.Module(source);\n\
+                    const instance = new WebAssembly.Instance(module, { host: { twice(value) { return value * 2; }, add64(left, right) { return left + right; }, pair(value) { return [value, value + 0.5]; }, notify(value) { calls.push(value); }, fail() { throw new Error('import boom'); } } });\n\
+-                   let trapped = false; try { instance.exports.explode(); } catch (error) { trapped = error instanceof WebAssembly.RuntimeError && error.message.includes('import boom'); }\n\
++                   let trapped = false; try { instance.exports.explode(); } catch (error) { trapped = error instanceof Error && !(error instanceof WebAssembly.RuntimeError) && error.message.includes('import boom'); }\n\
+                    let missing = false; try { new WebAssembly.Instance(module, {}); } catch (error) { missing = error instanceof WebAssembly.LinkError; }\n\
+                    return [instance.exports.run(21), calls, instance.exports.wide().toString(), instance.exports.many(), trapped, missing, WebAssembly.Module.imports(module).length];\n\
+                  }"
+@@ -6436,10 +6436,10 @@
+ }
+ 
+ #[test]
+-fn graph_array_symbol_property_roundtrips_order_flags_and_cycle() {
++fn graph_array_own_property_roundtrips_order_flags_and_cycle() {
+     assert_eq!(load(r#"
+       function inspectGraphArrayOwnKeys() {
+-        const key = Symbol('extra');
++        const key = 'self';
+         const array = [7, ,];
+         Object.defineProperty(array, '0', { value: 7, enumerable: true,
+           writable: false, configurable: true });
+@@ -6452,13 +6452,31 @@
+         const index = Object.getOwnPropertyDescriptor(restored, '0');
+         const symbol = Object.getOwnPropertyDescriptor(restored, key);
+         return [graph.nodes[1].p.length, restored.length, 1 in restored,
+-          own.map(item => typeof item === 'symbol' ? 'symbol' : item).join(','),
++          own.join(','),
+           index.writable, index.configurable, symbol.value === restored,
+           symbol.enumerable, symbol.configurable, restored.named];
+       }
+     "#), 1);
+     assert_eq!(call("inspectGraphArrayOwnKeys", "[]"),
+-        "[4,2,false,\"0,length,named,symbol\",false,true,true,false,false,\"saved\"]");
++        "[4,2,false,\"0,length,self,named\",false,true,true,false,false,\"saved\"]");
++}
++
++// Symbol values/keys need a live handle: a by-value (non-live) snapshot rejects
++// them, and a live encode keeps the whole array behind its handle instead.
++#[test]
++fn graph_array_symbol_property_requires_live_handle() {
++    assert_eq!(load(r#"
++      function inspectGraphArraySymbolKey() {
++        const array = [7];
++        Object.defineProperty(array, Symbol('extra'), { value: 1, enumerable: false });
++        let message = '';
++        try { __thaw_json_graph_encode_js([array], 0, false); } catch (error) { message = error.message; }
++        const live = JSON.parse(__thaw_json_graph_encode_js([array], 0, true));
++        return [message, live.nodes.length, live.nodes[1].hdl !== undefined, live.leases.length];
++      }
++    "#), 1);
++    assert_eq!(call("inspectGraphArraySymbolKey", "[]"),
++        "[\"Unsupported native callback graph value\",2,true,1]");
+ }
+ 
+ #[test]
+@@ -7500,7 +7518,7 @@
+             globals[1].value = { valueOf() { return 18446744073709551617n; } };
+             exported.i64.value = '7'; exported.i32.value = '9';
+             return [constructorChecks, localChecks, exportedChecks, immutable, conversions, globals[1].value.toString(), exported.i64.value.toString(), exported.i32.value,
+-                rejects(() => new WebAssembly.Global({ value: 'i64' }, undefined)), new WebAssembly.Global({ value: 'externref' }).value === null];
++                rejects(() => new WebAssembly.Global({ value: 'i64' }, undefined)), new WebAssembly.Global({ value: 'externref' }).value === undefined];
+         }
+     "#), 1);
+     assert_eq!(call("wasmGlobalConversion", "[]"), "[[true,true,true,true],[true,true,true,true],[true,true,true,true],true,0,\"1\",\"7\",9,true,true]");
+diff --color -ru pristine/crates/thaw-std/src/json.rs candidate/crates/thaw-std/src/json.rs
+--- pristine/crates/thaw-std/src/json.rs	2026-10-06 22:40:08.909938463 +0900
++++ candidate/crates/thaw-std/src/json.rs	2026-10-06 23:05:27.274256291 +0900
+@@ -663,6 +663,9 @@
+         let _ = GRAPH_PLAIN_OBJECTS.try_with(|objects| {
+             objects.borrow_mut().remove(&key);
+         });
++        let _ = DETACHED_HANDLE_MARKERS.try_with(|markers| {
++            markers.borrow_mut().remove(&key);
++        });
+         unsafe { thaw_object_clear_state(key as *const u8) };
+     }
+ }
+@@ -856,6 +859,9 @@
+     static STRINGIFY_ANCESTORS: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
+     static WRAPPER_BRANDS: RefCell<HashSet<usize>> = RefCell::new(HashSet::new());
+     static GRAPH_PLAIN_OBJECTS: RefCell<HashSet<usize>> = RefCell::new(HashSet::new());
++    // `hdl` markers decoded without HostOperations: branded so they re-encode
++    // as `hdl`, but not a projection of the original handle.
++    static DETACHED_HANDLE_MARKERS: RefCell<HashSet<usize>> = RefCell::new(HashSet::new());
+     static GRAPH_ERROR: Cell<bool> = const { Cell::new(false) };
+ }
+ 
+@@ -2020,6 +2026,9 @@
+     let Some(value) = (unsafe { value.as_ref() }) else { return 0; };
+     if let Value::Host(lease) = value { return lease.handle; }
+     if !is_branded_wrapper(value) { return 0; }
++    if object_identity_key(value).is_some_and(|identity| {
++        DETACHED_HANDLE_MARKERS.with(|markers| markers.borrow().contains(&identity))
++    }) { return 0; }
+     let Some(fields) = value.as_object() else { return 0; };
+     if fields.len() != 1 { return 0; }
+     fields.get(b"__thaw_js_handle_id__".as_slice())
+@@ -2462,9 +2471,13 @@
+             if HOST_OPERATIONS.with(|slot| slot.get()).is_some() {
+                 host_value_from_borrowed_handle(handle as u64)?
+             } else {
+-                Value::shared_object(indexmap::IndexMap::from([
++                let marker = Value::shared_object(indexmap::IndexMap::from([
+                     (b"__thaw_js_handle_id__".to_vec(), Value::Number(serde_json::Number::from_f64(handle)?)),
+-                ]))
++                ]));
++                if let Some(identity) = object_identity_key(&marker) {
++                    DETACHED_HANDLE_MARKERS.with(|markers| { markers.borrow_mut().insert(identity); });
++                }
++                marker
+             }
+         } else if fields.contains_key(b"m".as_slice())
+             || fields.contains_key(b"s".as_slice())
+@@ -6525,12 +6538,17 @@
+         let encoded = CString::new(r#"{"root":{"r":0},"nodes":[{"a":[{"r":0},{"r":1},{"r":2}]},{"b":[0,127,255]},{"hdl":7}]}"#).unwrap();
+         let decoded = thaw_json_graph_decode(encoded.as_ptr());
+         assert_eq!(thaw_json_take_graph_error(), 0);
++        // Without HostOperations the `hdl` node decodes to a detached marker
++        // that cannot be re-leased, so re-encoding the whole graph must fail
++        // rather than emit a handle nobody retained.
++        assert!(read_c_string(thaw_json_graph_encode(decoded)).starts_with("\u{2}TypeError:"));
++        assert!(!thaw_json_take_host_error().is_null());
++        let plain = CString::new(r#"{"root":{"r":0},"nodes":[{"a":[{"r":0},{"r":1}]},{"b":[0,127,255]}]}"#).unwrap();
+         let graph: serde_json::Value = serde_json::from_str(
+-            &read_c_string(thaw_json_graph_encode(decoded))
++            &read_c_string(thaw_json_graph_encode(thaw_json_graph_decode(plain.as_ptr())))
+         ).unwrap();
+         assert_eq!(graph["nodes"][0]["a"][0]["r"], 0);
+         assert_eq!(graph["nodes"][1]["b"], serde_json::json!([0, 127, 255]));
+-        assert_eq!(graph["nodes"][2]["hdl"], 7);
+         let malformed = CString::new(r#"{"root":{"r":3},"nodes":[]}"#).unwrap();
+         let invalid = thaw_json_graph_decode(malformed.as_ptr());
+         assert_eq!(thaw_json_take_graph_error(), 1);
