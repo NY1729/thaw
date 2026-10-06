@@ -1,0 +1,1765 @@
+diff --git a/crates/thaw-hir/src/lower.rs b/crates/thaw-hir/src/lower.rs
+index 782d237..0bf863d 100644
+--- a/crates/thaw-hir/src/lower.rs
++++ b/crates/thaw-hir/src/lower.rs
+@@ -122,6 +122,10 @@ struct FnSignature {
+     generic_type_defaults: Vec<Option<Box<TsType>>>,
+     generic_param_patterns: Vec<GenericTypePattern>,
+     generic_param_optional: Vec<bool>,
++    /// Generic top-level explicit `this` metadata, when it can be represented
++    /// by the generic matcher. `LegacyUnmatched` preserves accepted physical
++    /// receiver annotations that the pattern grammar cannot express.
++    generic_this_pattern: Option<GenericReceiverPattern>,
+     generic_return_type: Option<Box<TsType>>,
+     type_predicate: Option<(usize, GenericTypePattern, bool)>,
+     /// The return type's own `GenericTypePattern`, when the type
+@@ -303,6 +307,12 @@ enum GenericTypePattern {
+     ),
+ }
+ 
++#[derive(Clone, Debug, PartialEq)]
++enum GenericReceiverPattern {
++    Pattern(GenericTypePattern),
++    LegacyUnmatched,
++}
++
+ #[derive(Clone, Debug, PartialEq)]
+ enum GenericIndexKeys {
+     Finite(Vec<Symbol>),
+diff --git a/crates/thaw-hir/src/lower/declarations.rs b/crates/thaw-hir/src/lower/declarations.rs
+index 8f0249c..0a43b78 100644
+--- a/crates/thaw-hir/src/lower/declarations.rs
++++ b/crates/thaw-hir/src/lower/declarations.rs
+@@ -1452,7 +1452,7 @@ fn lower_function_statements(
+                     Box::new(HirExpr::Lit(HirLit::Bool(true))),
+                 )),
+                 HirStmt::Try(
+-                    self.inject_finally_before_exits(
++                    lowerer.inject_finally_before_exits(
+                         generator_body,
+                         std::slice::from_ref(&clear_running),
+                         false,
+diff --git a/crates/thaw-hir/src/lower/expressions/functions.rs b/crates/thaw-hir/src/lower/expressions/functions.rs
+index a34c3ad..97f9093 100644
+--- a/crates/thaw-hir/src/lower/expressions/functions.rs
++++ b/crates/thaw-hir/src/lower/expressions/functions.rs
+@@ -668,7 +668,7 @@ impl<'a> FnLowerer<'a> {
+         let types = resolve_explicit_generic_type_tuple(
+             signature,
+             &instantiation.type_args.params,
+-            &[],
++            GenericMatchActuals::TypeOnly,
+             self.interfaces,
+             self.generic_interfaces,
+         )?;
+@@ -918,6 +918,7 @@ impl<'a> FnLowerer<'a> {
+                 is_async: false,
+                 returns_sparse_array: false,
+                 uses_this: false,
++                generic_this_pattern: None,
+                 is_extern: false,
+                 source_range: (arrow.span.lo.0, arrow.span.hi.0),
+                 accessor_owner: None,
+diff --git a/crates/thaw-hir/src/lower/expressions/lowering.rs b/crates/thaw-hir/src/lower/expressions/lowering.rs
+index b2c5954..d8fbe13 100644
+--- a/crates/thaw-hir/src/lower/expressions/lowering.rs
++++ b/crates/thaw-hir/src/lower/expressions/lowering.rs
+@@ -3141,7 +3141,7 @@ impl<'a> FnLowerer<'a> {
+                             let name = format!("__thaw_iterator_{}", self.next_binding);
+                             self.next_binding += 1;
+                             if let Some((producer, producer_type)) =
+-                                iterator_object_adapter(self, iterator, &iterator_type, name)
++                                iterator_object_adapter(self, iterator, &iterator_type, name, false)
+                             {
+                                 if let Some((collected, _)) = self
+                                     .collect_generator_for_array_spread(producer, &producer_type)?
+diff --git a/crates/thaw-hir/src/lower/generic_calls.rs b/crates/thaw-hir/src/lower/generic_calls.rs
+index afe9658..2ce660c 100644
+--- a/crates/thaw-hir/src/lower/generic_calls.rs
++++ b/crates/thaw-hir/src/lower/generic_calls.rs
+@@ -249,7 +249,7 @@ impl<'a> FnLowerer<'a> {
+             .map(|argument| self.infer_expr_type(argument))
+             .collect::<Result<Vec<_>, _>>()?;
+         let mut inference_signature = signature.clone();
+-        let mut inference_types = parameter_types.clone();
++        let inference_types = parameter_types.clone();
+         if has_rest {
+             let Some(GenericTypePattern::Array(element)) = signature.generic_param_patterns.last() else {
+                 return Err("generic rest parameter needs an array type annotation".into());
+@@ -258,22 +258,42 @@ impl<'a> FnLowerer<'a> {
+             inference_signature.generic_param_patterns.extend(
+                 parameter_types.iter().skip(fixed_count).map(|_| element.as_ref().clone()));
+         }
+-        if let (Some(template), Some((_, this_ty))) = (
+-            self.generic_non_arrow_receiver_templates.get(name), this_argument.as_ref())
+-        {
+-            let variables = signature.generic_type_params.iter().cloned()
+-                .map(|name| (name.clone(), GenericTypePattern::Variable(name)))
+-                .collect::<HashMap<_, _>>();
+-            let pattern = generic_type_pattern(template, &variables,
+-                self.interfaces, self.generic_interfaces, &mut Vec::new())?;
+-            inference_signature.generic_param_patterns.insert(0, pattern);
+-            inference_types.insert(0, this_ty.clone());
+-        }
++        let synthetic_receiver_pattern = match (
++            self.generic_non_arrow_receiver_templates.get(name),
++            this_argument.as_ref(),
++        ) {
++            (Some(template), Some(_)) => {
++                let variables = signature
++                    .generic_type_params
++                    .iter()
++                    .cloned()
++                    .map(|name| (name.clone(), GenericTypePattern::Variable(name)))
++                    .collect::<HashMap<_, _>>();
++                Some(generic_type_pattern(
++                    template,
++                    &variables,
++                    self.interfaces,
++                    self.generic_interfaces,
++                    &mut Vec::new(),
++                )?)
++            }
++            _ => None,
++        };
++        let actuals = match (synthetic_receiver_pattern.as_ref(), this_argument.as_ref()) {
++            (Some(pattern), Some((_, this_ty))) => {
++                GenericMatchActuals::SyntheticReceiverAndVisible {
++                    pattern,
++                    receiver: this_ty,
++                    visible: &inference_types,
++                }
++            }
++            _ => GenericMatchActuals::ContextualVisible(&inference_types),
++        };
+         let concrete_types = if let Some(type_args) = &call.type_args {
+             resolve_explicit_generic_type_tuple(
+                 &inference_signature,
+                 &type_args.params,
+-                &inference_types,
++                actuals,
+                 self.interfaces,
+                 self.generic_interfaces,
+             )
+@@ -281,9 +301,9 @@ impl<'a> FnLowerer<'a> {
+                 format!("cannot explicitly specialize generic arrow `{name}`: {error}")
+             })?
+         } else {
+-            infer_generic_type_tuple(
++            infer_generic_type_tuple_for_call(
+                 &inference_signature,
+-                &inference_types,
++                actuals,
+                 self.interfaces,
+                 self.generic_interfaces,
+                 None,
+@@ -517,6 +537,7 @@ impl<'a> FnLowerer<'a> {
+             is_async: false,
+             returns_sparse_array: false,
+             uses_this: false,
++            generic_this_pattern: None,
+             is_extern: false,
+             source_range: (arrow.span.lo.0, arrow.span.hi.0),
+             accessor_owner: None,
+@@ -684,6 +705,7 @@ impl<'a> FnLowerer<'a> {
+             is_async: false,
+             returns_sparse_array: false,
+             uses_this: false,
++            generic_this_pattern: None,
+             is_extern: false,
+             source_range: (interface.span.lo.0, interface.span.hi.0),
+             accessor_owner: None,
+@@ -811,6 +833,7 @@ impl<'a> FnLowerer<'a> {
+             is_async: false,
+             returns_sparse_array: false,
+             uses_this: false,
++            generic_this_pattern: None,
+             is_extern: false,
+             source_range,
+             accessor_owner: None,
+diff --git a/crates/thaw-hir/src/lower/invocations/calls.rs b/crates/thaw-hir/src/lower/invocations/calls.rs
+index c0cd740..4e9ecae 100644
+--- a/crates/thaw-hir/src/lower/invocations/calls.rs
++++ b/crates/thaw-hir/src/lower/invocations/calls.rs
+@@ -1621,7 +1621,7 @@ impl<'a> FnLowerer<'a> {
+             let generic_context = signature
+                 .as_ref()
+                 .filter(|_| argument.spread.is_none())
+-                .and_then(|signature| signature.generic_param_patterns.get(index))
++                .and_then(|signature| generic_pattern_for_physical_argument(signature, index))
+                 .and_then(|pattern| match pattern {
+                     GenericTypePattern::Function(params, optional, rest, result) => {
+                         let params = params
+@@ -1743,7 +1743,7 @@ impl<'a> FnLowerer<'a> {
+             };
+             if let Some(pattern) = signature
+                 .as_ref()
+-                .and_then(|signature| signature.generic_param_patterns.get(index))
++                .and_then(|signature| generic_pattern_for_physical_argument(signature, index))
+             {
+                 let actual = self.infer_expr_type(&value)?;
+                 let _ = match_generic_pattern(pattern, &actual, &mut generic_inferred);
+@@ -2002,7 +2002,8 @@ impl<'a> FnLowerer<'a> {
+                     .generic_param_optional
+                     .iter()
+                     .take_while(|optional| !**optional)
+-                    .count();
++                    .count()
++                    + usize::from(signature.uses_this);
+                 lowered_arguments.len() < required || lowered_arguments.len() > params.len()
+             } else if variadic.is_some() {
+                 lowered_arguments.len() < params.len()
+@@ -2092,7 +2093,7 @@ impl<'a> FnLowerer<'a> {
+         {
+             let preserves_key_literal = |index: usize| {
+                 let Some(GenericTypePattern::Variable(name)) =
+-                    signature.generic_param_patterns.get(index)
++                    generic_pattern_for_physical_argument(signature, index)
+                 else {
+                     return false;
+                 };
+@@ -2140,14 +2141,14 @@ impl<'a> FnLowerer<'a> {
+                 resolve_explicit_generic_type_tuple(
+                     signature,
+                     &type_args.params,
+-                    &actual,
++                    GenericMatchActuals::Physical(&actual),
+                     self.interfaces,
+                     self.generic_interfaces,
+                 )
+             } else {
+-                infer_generic_type_tuple(
++                infer_generic_type_tuple_for_call(
+                     signature,
+-                    &actual,
++                    GenericMatchActuals::Physical(&actual),
+                     self.interfaces,
+                     self.generic_interfaces,
+                     expected_return_hint.as_ref(),
+@@ -2371,8 +2372,8 @@ impl<'a> FnLowerer<'a> {
+                 .collect::<HashMap<_, _>>();
+             if call.type_args.is_some() {
+                 for (index, arg) in args.iter_mut().enumerate() {
+-                    let Some(pattern) = signature.generic_param_patterns.get(index) else {
+-                        break;
++                    let Some(pattern) = generic_pattern_for_physical_argument(signature, index) else {
++                        continue;
+                     };
+                     let declared = instantiate_generic_pattern(pattern, &substitution)?;
+                     if matches!(declared, HirType::F64 | HirType::Str)
+diff --git a/crates/thaw-hir/src/lower/invocations/static_builtins.rs b/crates/thaw-hir/src/lower/invocations/static_builtins.rs
+index 24c305c..9c4af05 100644
+--- a/crates/thaw-hir/src/lower/invocations/static_builtins.rs
++++ b/crates/thaw-hir/src/lower/invocations/static_builtins.rs
+@@ -2925,7 +2925,7 @@ impl<'a> FnLowerer<'a> {
+                                         Some(callback)
+                                         }
+                                     } else {
+-                                        let callback = match &call.args[1].expr {
++                                        let callback = match &*call.args[1].expr {
+                                             Expr::Arrow(_) | Expr::Fn(_) => self.lower_array_from_callback(
+                                                 &call.args[1].expr, &HirType::Undefined,
+                                             )?,
+diff --git a/crates/thaw-hir/src/lower/module/pipeline.rs b/crates/thaw-hir/src/lower/module/pipeline.rs
+index 1ba53a7..1d95851 100644
+--- a/crates/thaw-hir/src/lower/module/pipeline.rs
++++ b/crates/thaw-hir/src/lower/module/pipeline.rs
+@@ -379,6 +379,23 @@ fn normalize_interface_merges(module: &Module) -> Result<Module, String> {
+     Ok(merged)
+ }
+ 
++fn generic_receiver_pattern_from_annotation(
++    ty: &TsType,
++    substitutions: &HashMap<Symbol, GenericTypePattern>,
++    interfaces: &HashMap<Symbol, HirType>,
++    generic_interfaces: &GenericInterfaces<'_>,
++) -> GenericReceiverPattern {
++    generic_type_pattern(
++        ty,
++        substitutions,
++        interfaces,
++        generic_interfaces,
++        &mut Vec::new(),
++    )
++    .map(GenericReceiverPattern::Pattern)
++    .unwrap_or(GenericReceiverPattern::LegacyUnmatched)
++}
++
+ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
+     let (mut interfaces, generic_interfaces) = resolve_interfaces(module)?;
+     let specialized = specialize_generic_classes(module, &interfaces, &generic_interfaces)
+@@ -567,20 +584,27 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
+                 if name.ends_with(PROMISE_REJECTION_CALLBACK_SUFFIX) && !params.is_empty() {
+                     params[0] = HirType::Str;
+                 }
++                let mut generic_this_pattern = None;
+                 if let Some(this) = &func.this_param {
+                     let annotation = this.type_ann.as_ref().ok_or_else(|| {
+                         format!("function `{name}` needs a type annotation for `this`")
+                     })?;
+-                    params.insert(
+-                        0,
+-                        resolve_ts_type_with_substitution(
++                    let receiver_type = resolve_ts_type_with_substitution(
++                        &annotation.type_ann,
++                        &type_substitution,
++                        &interfaces,
++                        &generic_interfaces,
++                        &mut Vec::new(),
++                    )?;
++                    params.insert(0, receiver_type);
++                    if let Some(substitutions) = &generic_substitutions {
++                        generic_this_pattern = Some(generic_receiver_pattern_from_annotation(
+                             &annotation.type_ann,
+-                            &type_substitution,
++                            substitutions,
+                             &interfaces,
+                             &generic_interfaces,
+-                            &mut Vec::new(),
+-                        )?,
+-                    );
++                        ));
++                    }
+                 }
+                 let assertion_function = matches!(
+                     func.return_type.as_deref().map(|ann| ann.type_ann.as_ref()),
+@@ -693,6 +717,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
+                                 matches!(&parameter.pat, Pat::Ident(binding) if binding.id.optional)
+                             })
+                             .collect(),
++                        generic_this_pattern,
+                         generic_return_type: func.return_type.as_ref().map(|ann| ann.type_ann.clone()),
+                         generic_return_pattern,
+                         type_predicate,
+@@ -779,6 +804,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
+                         generic_type_defaults: Vec::new(),
+                         generic_param_patterns: Vec::new(),
+                         generic_param_optional: Vec::new(),
++                        generic_this_pattern: None,
+                         generic_return_type: None,
+                         generic_return_pattern: None,
+                         type_predicate: None,
+@@ -810,6 +836,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
+                         generic_type_defaults: Vec::new(),
+                         generic_param_patterns: Vec::new(),
+                         generic_param_optional: Vec::new(),
++                        generic_this_pattern: None,
+                         generic_return_type: None,
+                         generic_return_pattern: None,
+                         type_predicate: None,
+@@ -996,6 +1023,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
+                             generic_type_defaults: Vec::new(),
+                             generic_param_patterns: Vec::new(),
+                             generic_param_optional: Vec::new(),
++                            generic_this_pattern: None,
+                             generic_return_type: None,
+                             generic_return_pattern: None,
+                             type_predicate: None,
+@@ -1025,6 +1053,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
+                             unbound.params.remove(0);
+                         }
+                         unbound.uses_this = false;
++                        unbound.generic_this_pattern = None;
+                         signatures.insert(unbound_symbol.clone(), unbound);
+                     }
+                     if let Some(default_start) = trailing_omittable_start(&patterns) {
+@@ -1295,6 +1324,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
+                             unbound
+                         });
+                     unbound_signature.uses_this = false;
++                    unbound_signature.generic_this_pattern = None;
+                     signatures.insert(derived_unbound, unbound_signature);
+                 }
+                 if !derived.class.is_abstract {
+@@ -1551,6 +1581,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
+                         generic_type_defaults: Vec::new(),
+                         generic_param_patterns: Vec::new(),
+                         generic_param_optional: Vec::new(),
++                        generic_this_pattern: None,
+                         generic_return_type: None,
+                         generic_return_pattern: None,
+                         type_predicate: None,
+@@ -1584,6 +1615,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
+                             generic_type_defaults: Vec::new(),
+                             generic_param_patterns: Vec::new(),
+                             generic_param_optional: Vec::new(),
++                            generic_this_pattern: None,
+                             generic_return_type: None,
+                             generic_return_pattern: None,
+                             type_predicate: None,
+diff --git a/crates/thaw-hir/src/lower/statements/lowering.rs b/crates/thaw-hir/src/lower/statements/lowering.rs
+index 2fd6533..132990b 100644
+--- a/crates/thaw-hir/src/lower/statements/lowering.rs
++++ b/crates/thaw-hir/src/lower/statements/lowering.rs
+@@ -1538,7 +1538,7 @@ impl<'a> FnLowerer<'a> {
+                     function: fn_decl.function.clone(),
+                 };
+                 if let Some((hir_name, ty, value)) =
+-                    self.lower_recursive_function_expression(&name, &expression, None)?
++                    self.lower_recursive_function_expression(&name, &expression, None, false)?
+                 {
+                     return Ok(vec![HirStmt::Let(hir_name, ty, value)]);
+                 }
+diff --git a/crates/thaw-hir/src/lower/statements/narrowing.rs b/crates/thaw-hir/src/lower/statements/narrowing.rs
+index ee1685b..12f6e1c 100644
+--- a/crates/thaw-hir/src/lower/statements/narrowing.rs
++++ b/crates/thaw-hir/src/lower/statements/narrowing.rs
+@@ -60,9 +60,19 @@ impl<'a> FnLowerer<'a> {
+         hir_name
+     }
+ 
++    fn bind_decl_local(&mut self, source_name: &str, ty: HirType, immutable: bool) -> Symbol {
++        let hir_name = self.bind_local(source_name, ty);
++        if immutable {
++            self.immutable_bindings.insert(hir_name.clone());
++        }
++        hir_name
++    }
++
+     // The name marks a binding whose cell must be replaced on every for-loop
+     // iteration, including when an async function resumes in a new frame call.
+     fn bind_for_iteration_local(&mut self, source_name: &str, ty: HirType) -> Symbol {
++        let outer_name = self.resolve_binding(source_name);
++        let immutable = self.immutable_bindings.contains(&outer_name);
+         let hir_name = format!("@@thaw_for_iteration_{}", self.next_binding);
+         self.next_binding += 1;
+         self.scope.insert(hir_name.clone(), ty);
+@@ -71,6 +81,9 @@ impl<'a> FnLowerer<'a> {
+             .entry(source_name.to_string())
+             .or_default()
+             .push(hir_name.clone());
++        if immutable {
++            self.immutable_bindings.insert(hir_name.clone());
++        }
+         hir_name
+     }
+ 
+@@ -1411,3 +1424,108 @@ impl<'a> FnLowerer<'a> {
+     }
+ 
+ }
++
++#[cfg(test)]
++mod thaw_binding_helper_controls {
++    use super::*;
++
++    #[test]
++    fn thaw_binding_helper_declaration_flags_follow_resolved_symbols() {
++        let signatures = HashMap::<Symbol, FnSignature>::new();
++        let interfaces = HashMap::<Symbol, HirType>::new();
++        let generic_interfaces = GenericInterfaces::new();
++        let enum_values = EnumValues::new();
++        let enum_reverse_values = EnumReverseValues::new();
++        let mut lowerer = FnLowerer::new(
++            &signatures,
++            &interfaces,
++            &generic_interfaces,
++            &enum_values,
++            &enum_reverse_values,
++            HirType::Void,
++            None,
++        );
++
++        let outer_const = lowerer.bind_decl_local("value", HirType::F64, true);
++        assert_eq!(lowerer.resolve_binding("value"), outer_const);
++        assert!(lowerer.immutable_bindings.contains(&outer_const));
++
++        let mutable_shadow = lowerer.bind_decl_local("value", HirType::F64, false);
++        assert_ne!(mutable_shadow, outer_const);
++        assert_eq!(lowerer.resolve_binding("value"), mutable_shadow);
++        assert!(lowerer.immutable_bindings.contains(&outer_const));
++        assert!(!lowerer.immutable_bindings.contains(&mutable_shadow));
++
++        let const_shadow = lowerer.bind_decl_local("value", HirType::F64, true);
++        assert_ne!(const_shadow, mutable_shadow);
++        assert_eq!(lowerer.resolve_binding("value"), const_shadow);
++        assert!(lowerer.immutable_bindings.contains(&outer_const));
++        assert!(!lowerer.immutable_bindings.contains(&mutable_shadow));
++        assert!(lowerer.immutable_bindings.contains(&const_shadow));
++
++        // `using` is intentionally routed through a synthetic `const` declaration.
++        let using_binding = lowerer.bind_decl_local("resource", HirType::Json, true);
++        assert!(lowerer.immutable_bindings.contains(&using_binding));
++
++        let temporary = lowerer.bind_local("temporary", HirType::Bool);
++        assert_eq!(lowerer.resolve_binding("temporary"), temporary);
++        assert!(!lowerer.immutable_bindings.contains(&temporary));
++    }
++
++    #[test]
++    fn thaw_binding_helper_iteration_cell_inherits_only_current_outer_immutability() {
++        let signatures = HashMap::<Symbol, FnSignature>::new();
++        let interfaces = HashMap::<Symbol, HirType>::new();
++        let generic_interfaces = GenericInterfaces::new();
++        let enum_values = EnumValues::new();
++        let enum_reverse_values = EnumReverseValues::new();
++        let mut lowerer = FnLowerer::new(
++            &signatures,
++            &interfaces,
++            &generic_interfaces,
++            &enum_values,
++            &enum_reverse_values,
++            HirType::Void,
++            None,
++        );
++
++        let const_outer = lowerer.bind_decl_local("const_index", HirType::F64, true);
++        let const_inner = lowerer.bind_for_iteration_local("const_index", HirType::F64);
++        assert_ne!(const_inner, const_outer);
++        assert!(const_inner.starts_with("@@thaw_for_iteration_"));
++        assert_eq!(lowerer.resolve_binding("const_index"), const_inner);
++        assert!(lowerer.immutable_bindings.contains(&const_outer));
++        assert!(lowerer.immutable_bindings.contains(&const_inner));
++
++        let shadowed_const = lowerer.bind_decl_local("shadowed_index", HirType::F64, true);
++        let current_mutable_shadow =
++            lowerer.bind_decl_local("shadowed_index", HirType::F64, false);
++        assert_ne!(shadowed_const, current_mutable_shadow);
++        let mutable_shadow_inner =
++            lowerer.bind_for_iteration_local("shadowed_index", HirType::F64);
++        assert_eq!(lowerer.resolve_binding("shadowed_index"), mutable_shadow_inner);
++        assert!(lowerer.immutable_bindings.contains(&shadowed_const));
++        assert!(!lowerer.immutable_bindings.contains(&current_mutable_shadow));
++        assert!(!lowerer.immutable_bindings.contains(&mutable_shadow_inner));
++
++        let mutable_source =
++            lowerer.bind_decl_local("renamed_const_index", HirType::F64, false);
++        let renamed_const =
++            lowerer.bind_decl_local("renamed_const_index", HirType::F64, true);
++        assert_ne!(renamed_const, "renamed_const_index");
++        assert_ne!(renamed_const, mutable_source);
++        let renamed_const_inner =
++            lowerer.bind_for_iteration_local("renamed_const_index", HirType::F64);
++        assert_eq!(lowerer.resolve_binding("renamed_const_index"), renamed_const_inner);
++        assert!(lowerer.immutable_bindings.contains(&renamed_const));
++        assert!(lowerer.immutable_bindings.contains(&renamed_const_inner));
++        assert!(!lowerer.immutable_bindings.contains(&mutable_source));
++
++        let let_outer = lowerer.bind_decl_local("let_index", HirType::F64, false);
++        let let_inner = lowerer.bind_for_iteration_local("let_index", HirType::F64);
++        assert_ne!(let_inner, let_outer);
++        assert_eq!(lowerer.resolve_binding("let_index"), let_inner);
++        assert!(!lowerer.immutable_bindings.contains(&let_outer));
++        assert!(!lowerer.immutable_bindings.contains(&let_inner));
++    }
++}
+diff --git a/crates/thaw-hir/src/lower/tests/types.rs b/crates/thaw-hir/src/lower/tests/types.rs
+index b37e850..a7a8e4f 100644
+--- a/crates/thaw-hir/src/lower/tests/types.rs
++++ b/crates/thaw-hir/src/lower/tests/types.rs
+@@ -2455,3 +2455,965 @@ fn dynamic_symbol_rejects_nonascii_hex_without_slicing_codepoints() {
+     assert_eq!(dynamic_symbol("__thaw_typed_js_666f6f__arity_1"),
+         Some((DynamicBackend::QuickJs, "foo".into())));
+ }
++
++// Receiver-generic inference controls for the reviewed r1 prerequisite. These
++// tests deliberately stop at metadata and actual-call type inference; they do
++// not claim a receiver-aware specialization ABI or runtime function value.
++fn receiver_pattern_inference_function<'a>(
++    module: &'a swc_ecma_ast::Module,
++) -> &'a swc_ecma_ast::FnDecl {
++    module
++        .body
++        .iter()
++        .find_map(|item| match item {
++            ModuleItem::Stmt(Stmt::Decl(Decl::Fn(function))) => Some(function),
++            _ => None,
++        })
++        .expect("parsed source contains a function declaration")
++}
++
++fn receiver_pattern_inference_this_type(source: &str) -> TsType {
++    let module = thaw_parser::parse_typescript(source).expect("parse receiver annotation fixture");
++    let function = receiver_pattern_inference_function(&module);
++    function
++        .function
++        .this_param
++        .as_ref()
++        .and_then(|parameter| parameter.type_ann.as_ref())
++        .expect("function has an annotated this parameter")
++        .type_ann
++        .as_ref()
++        .clone()
++}
++
++fn receiver_pattern_inference_type_parameters(
++    source: &str,
++) -> Vec<(Option<Box<TsType>>, Option<Box<TsType>>)> {
++    let module = thaw_parser::parse_typescript(source).expect("parse generic type fixture");
++    let function = receiver_pattern_inference_function(&module);
++    function
++        .function
++        .type_params
++        .as_ref()
++        .expect("function has generic type parameters")
++        .params
++        .iter()
++        .map(|parameter| (parameter.constraint.clone(), parameter.default.clone()))
++        .collect()
++}
++
++fn receiver_pattern_inference_type_from_return(source: &str) -> TsType {
++    let module = thaw_parser::parse_typescript(source).expect("parse explicit type fixture");
++    let function = receiver_pattern_inference_function(&module);
++    function
++        .function
++        .return_type
++        .as_ref()
++        .expect("function has an annotated return type")
++        .type_ann
++        .as_ref()
++        .clone()
++}
++
++fn receiver_pattern_inference_signature(
++    uses_this: bool,
++    generic_this_pattern: Option<GenericReceiverPattern>,
++    type_parameters: &[&str],
++    visible_patterns: Vec<GenericTypePattern>,
++) -> FnSignature {
++    let physical_parameter_count = visible_patterns.len() + usize::from(uses_this);
++    FnSignature {
++        params: vec![HirType::Dynamic; physical_parameter_count],
++        variadic: None,
++        native_rest: None,
++        abstract_class_constructor: false,
++        ret: HirType::Dynamic,
++        is_async: false,
++        returns_sparse_array: false,
++        uses_this,
++        is_extern: false,
++        source_range: (0, 0),
++        accessor_owner: None,
++        generic_type_params: type_parameters.iter().map(|name| (*name).to_string()).collect(),
++        generic_type_constraints: vec![None; type_parameters.len()],
++        generic_type_defaults: vec![None; type_parameters.len()],
++        generic_param_patterns: visible_patterns.clone(),
++        generic_param_optional: vec![false; visible_patterns.len()],
++        generic_return_type: None,
++        type_predicate: None,
++        generic_return_pattern: None,
++        generic_this_pattern,
++    }
++}
++
++fn receiver_pattern_inference_apply_type_parameters(
++    signature: &mut FnSignature,
++    source: &str,
++) {
++    let parameters = receiver_pattern_inference_type_parameters(source);
++    assert_eq!(parameters.len(), signature.generic_type_params.len());
++    signature.generic_type_constraints = parameters
++        .iter()
++        .map(|(constraint, _)| constraint.clone())
++        .collect();
++    signature.generic_type_defaults = parameters
++        .iter()
++        .map(|(_, default)| default.clone())
++        .collect();
++}
++
++#[test]
++fn receiver_pattern_inference_parsed_annotations_keep_pattern_and_legacy_states() {
++    let mut substitutions = HashMap::new();
++    substitutions.insert("T".to_string(), GenericTypePattern::Variable("T".to_string()));
++    let interfaces = HashMap::new();
++    let generic_interfaces = GenericInterfaces::new();
++
++    let variable = receiver_pattern_inference_this_type(
++        "declare function receiver_pattern_inference_pick<T>(this: T): T;",
++    );
++    assert!(matches!(
++        generic_receiver_pattern_from_annotation(
++            &variable,
++            &substitutions,
++            &interfaces,
++            &generic_interfaces,
++        ),
++        GenericReceiverPattern::Pattern(GenericTypePattern::Variable(name)) if name == "T"
++    ));
++
++    let concrete = receiver_pattern_inference_this_type(
++        "declare function receiver_pattern_inference_concrete<T>(this: number, value: T): T;",
++    );
++    assert!(matches!(
++        generic_receiver_pattern_from_annotation(
++            &concrete,
++            &substitutions,
++            &interfaces,
++            &generic_interfaces,
++        ),
++        GenericReceiverPattern::Pattern(GenericTypePattern::Concrete(HirType::F64))
++    ));
++
++    let union = receiver_pattern_inference_this_type(
++        "declare function receiver_pattern_inference_union<T>(this: T | number, value: T): T;",
++    );
++    assert!(matches!(
++        generic_receiver_pattern_from_annotation(
++            &union,
++            &substitutions,
++            &interfaces,
++            &generic_interfaces,
++        ),
++        GenericReceiverPattern::LegacyUnmatched
++    ));
++}
++
++#[test]
++fn receiver_pattern_inference_declarations_remain_accepted_without_calls() {
++    let module = thaw_parser::parse_typescript(
++        r#"
++        declare function receiver_pattern_inference_pick<T>(this: T): T;
++        declare function receiver_pattern_inference_concrete<T>(this: number, value: T): T;
++        declare function receiver_pattern_inference_union<T>(this: T | number, value: T): T;
++        declare function receiver_pattern_inference_id<T>(value: T): T;
++        function receiver_pattern_inference_main(): void {}
++        "#,
++    )
++    .expect("parse accepted generic-this declaration fixture");
++    let program = lower_module(&module)
++        .expect("generic this annotations accepted by physical type resolution remain accepted");
++    assert!(program
++        .functions
++        .iter()
++        .any(|function| function.name == "receiver_pattern_inference_main"));
++}
++
++#[test]
++fn receiver_pattern_inference_source_negative_and_shape_controls() {
++    // The two unbound names in the source-order case fail during type
++    // extraction. Seeing the receiver name first checks lowering order only;
++    // this is not a runtime side-effect-order claim.
++    for (source, expected) in [
++        (
++            r#"declare function receiver_pattern_inference_same<T>(this: T, value: T): T;
++               function receiver_pattern_inference_main(): void {
++                   receiver_pattern_inference_same.call(1, "visible");
++               }"#,
++            "conflicting call-site types F64 and Str",
++        ),
++        (
++            r#"declare function receiver_pattern_inference_apply<T>(this: T, value: T): T;
++               function receiver_pattern_inference_main(): void {
++                   receiver_pattern_inference_apply.apply(1, ["visible"]);
++               }"#,
++            "conflicting call-site types F64 and Str",
++        ),
++        (
++            r#"declare function receiver_pattern_inference_number<T>(this: number, value: T): T;
++               function receiver_pattern_inference_main(): void {
++                   receiver_pattern_inference_number.call("wrong", 1);
++               }"#,
++            "incompatible with parameter pattern",
++        ),
++        (
++            r#"declare function receiver_pattern_inference_needs_this<T>(this: T): T;
++               function receiver_pattern_inference_main(): void {
++                   receiver_pattern_inference_needs_this.call();
++               }"#,
++            "thisArg",
++        ),
++        (
++            r#"declare function receiver_pattern_inference_optional<T>(this: T, required: T, optional?: T): T;
++               function receiver_pattern_inference_main(): void {
++                   receiver_pattern_inference_optional.call("receiver");
++               }"#,
++            "expects",
++        ),
++        (
++            r#"declare function receiver_pattern_inference_optional_overrun<T>(this: T, value?: T): T;
++               function receiver_pattern_inference_main(): void {
++                   receiver_pattern_inference_optional_overrun.call("receiver", 1, 2);
++               }"#,
++            "expects 2 argument(s), got 3",
++        ),
++        (
++            r#"function receiver_pattern_inference_rest<T>(this: T, value: T, ...values: T[]): T {
++                   return value;
++               }
++               function receiver_pattern_inference_main(): void {
++                   receiver_pattern_inference_rest.call(1, "visible", ...["tail"]);
++               }"#,
++            "conflicting call-site types F64 and Str",
++        ),
++        (
++            r#"declare function receiver_pattern_inference_free<T>(left: T, right: T): T;
++               function receiver_pattern_inference_main(): void {
++                   receiver_pattern_inference_free(1, "different");
++               }"#,
++            "conflicting call-site types",
++        ),
++        (
++            r#"function receiver_pattern_inference_order<T>(this: T, value: T): T { return value; }
++               function receiver_pattern_inference_main(): void {
++                   receiver_pattern_inference_order.call(receiver_first_missing, visible_second_missing);
++               }"#,
++            "unknown variable `receiver_first_missing`",
++        ),
++        (
++            r#"function receiver_pattern_inference_key<T, K extends keyof T>(this: T, key: K): T[K] {
++                   return this[key];
++               }
++               function receiver_pattern_inference_main(): void {
++                   receiver_pattern_inference_key.call({ name: "value" }, "missing");
++               }"#,
++            "indexed access key `missing` does not exist on the object type",
++        ),
++        (
++            r#"function receiver_pattern_inference_non_arrow<T>(this: T, value: T): T { return value; }
++               function receiver_pattern_inference_main(): void {
++                   const fn = function<T>(this: T, value: T): T { return value; };
++                   fn.call("receiver", 1);
++               }"#,
++            "conflicting call-site types",
++        ),
++    ] {
++        let module = thaw_parser::parse_typescript(source).expect("parse call-shape fixture");
++        let error = lower_module(&module).expect_err("fixture records a negative control");
++        assert!(error.contains(expected), "expected {expected:?}, got {error}");
++    }
++}
++
++#[test]
++fn receiver_pattern_inference_physical_and_split_modes_match_receiver_first() {
++    let interfaces = HashMap::new();
++    let generic_interfaces = GenericInterfaces::new();
++    let receiver_pattern = GenericTypePattern::Variable("T".to_string());
++    let mut signature = receiver_pattern_inference_signature(
++        true,
++        Some(GenericReceiverPattern::Pattern(receiver_pattern.clone())),
++        &["T"],
++        vec![GenericTypePattern::Variable("T".to_string())],
++    );
++    let receiver_only = [HirType::F64];
++    let receiver_only_signature = receiver_pattern_inference_signature(
++        true,
++        Some(GenericReceiverPattern::Pattern(receiver_pattern.clone())),
++        &["T"],
++        vec![],
++    );
++    assert_eq!(
++        infer_generic_type_tuple_for_call(
++            &receiver_only_signature,
++            GenericMatchActuals::Physical(&receiver_only),
++            &interfaces,
++            &generic_interfaces,
++            None,
++        )
++        .unwrap(),
++        vec![HirType::F64]
++    );
++    let physical_agreement = [HirType::F64, HirType::F64];
++    assert_eq!(
++        infer_generic_type_tuple_for_call(
++            &signature,
++            GenericMatchActuals::Physical(&physical_agreement),
++            &interfaces,
++            &generic_interfaces,
++            None,
++        )
++        .unwrap(),
++        vec![HirType::F64]
++    );
++
++    let receiver = HirType::Str;
++    let visible = [HirType::Str];
++    assert_eq!(
++        infer_generic_type_tuple_for_call(
++            &signature,
++            GenericMatchActuals::ReceiverAndVisible {
++                receiver: Some(&receiver),
++                visible: &visible,
++            },
++            &interfaces,
++            &generic_interfaces,
++            None,
++        )
++        .unwrap(),
++        vec![HirType::Str]
++    );
++
++    let physical_conflict = [HirType::Str, HirType::F64];
++    let error = infer_generic_type_tuple_for_call(
++        &signature,
++        GenericMatchActuals::Physical(&physical_conflict),
++        &interfaces,
++        &generic_interfaces,
++        None,
++    )
++    .unwrap_err();
++    assert!(error.contains("conflicting call-site types"), "{error}");
++
++    signature.generic_this_pattern = Some(GenericReceiverPattern::Pattern(
++        GenericTypePattern::Concrete(HirType::F64),
++    ));
++    let concrete_mismatch = [HirType::Str, HirType::Str];
++    let error = infer_generic_type_tuple_for_call(
++        &signature,
++        GenericMatchActuals::Physical(&concrete_mismatch),
++        &interfaces,
++        &generic_interfaces,
++        None,
++    )
++    .unwrap_err();
++    assert!(error.contains("incompatible with parameter pattern"), "{error}");
++}
++
++#[test]
++fn receiver_pattern_inference_synthetic_and_contextual_modes_stay_separate() {
++    let interfaces = HashMap::new();
++    let generic_interfaces = GenericInterfaces::new();
++    let synthetic_pattern = GenericTypePattern::Variable("R".to_string());
++    let mut signature = receiver_pattern_inference_signature(
++        false,
++        None,
++        &["R", "T"],
++        vec![GenericTypePattern::Variable("T".to_string())],
++    );
++    signature.params.clear();
++    assert!(signature.params.is_empty());
++    assert!(!signature.uses_this);
++    assert!(signature.generic_this_pattern.is_none());
++    let receiver = HirType::Str;
++    let visible = [HirType::F64];
++    assert_eq!(
++        infer_generic_type_tuple_for_call(
++            &signature,
++            GenericMatchActuals::SyntheticReceiverAndVisible {
++                pattern: &synthetic_pattern,
++                receiver: &receiver,
++                visible: &visible,
++            },
++            &interfaces,
++            &generic_interfaces,
++            None,
++        )
++        .unwrap(),
++        vec![HirType::Str, HirType::F64]
++    );
++
++    let synthetic_receiver_only = receiver_pattern_inference_signature(
++        false,
++        None,
++        &["T"],
++        vec![],
++    );
++    let undefined_receiver = HirType::Undefined;
++    assert_eq!(
++        infer_generic_type_tuple_for_call(
++            &synthetic_receiver_only,
++            GenericMatchActuals::SyntheticReceiverAndVisible {
++                pattern: &GenericTypePattern::Variable("T".to_string()),
++                receiver: &undefined_receiver,
++                visible: &[],
++            },
++            &interfaces,
++            &generic_interfaces,
++            None,
++        )
++        .unwrap(),
++        vec![HirType::Undefined]
++    );
++
++    let mut contextual_signature = receiver_pattern_inference_signature(
++        true,
++        None,
++        &["T"],
++        vec![GenericTypePattern::Variable("T".to_string())],
++    );
++    assert_eq!(contextual_signature.params.len(), 2);
++    assert_eq!(
++        infer_generic_type_tuple_for_call(
++            &contextual_signature,
++            GenericMatchActuals::ContextualVisible(&visible),
++            &interfaces,
++            &generic_interfaces,
++            None,
++        )
++        .unwrap(),
++        vec![HirType::F64]
++    );
++    contextual_signature.generic_return_pattern =
++        Some(GenericTypePattern::Variable("T".to_string()));
++    assert_eq!(
++        infer_generic_type_tuple_for_call(
++            &contextual_signature,
++            GenericMatchActuals::ContextualVisible(&[]),
++            &interfaces,
++            &generic_interfaces,
++            Some(&HirType::Bool),
++        )
++        .unwrap(),
++        vec![HirType::Bool]
++    );
++
++    let explicit_number = Box::new(receiver_pattern_inference_type_from_return(
++        "declare function receiver_pattern_inference_number(): number;",
++    ));
++    let mut explicit_contextual = receiver_pattern_inference_signature(
++        true,
++        None,
++        &["T"],
++        vec![GenericTypePattern::Variable("T".to_string())],
++    );
++    explicit_contextual.generic_this_pattern = None;
++    let contextual_actual = [HirType::Str];
++    let error = resolve_explicit_generic_type_tuple(
++        &explicit_contextual,
++        &[explicit_number],
++        GenericMatchActuals::ContextualVisible(&contextual_actual),
++        &interfaces,
++        &generic_interfaces,
++    )
++    .unwrap_err();
++    assert!(
++        error.contains("argument infers T as Str, but explicit type is F64"),
++        "{error}"
++    );
++
++    let mut explicit_synthetic = receiver_pattern_inference_signature(
++        false,
++        None,
++        &["R", "T"],
++        vec![GenericTypePattern::Variable("T".to_string())],
++    );
++    explicit_synthetic.params.clear();
++    assert!(explicit_synthetic.params.is_empty());
++    assert!(!explicit_synthetic.uses_this);
++    assert!(explicit_synthetic.generic_this_pattern.is_none());
++    let explicit_number = Box::new(receiver_pattern_inference_type_from_return(
++        "declare function receiver_pattern_inference_number(): number;",
++    ));
++    let explicit_receiver = HirType::Str;
++    let explicit_visible = [HirType::F64];
++    let error = resolve_explicit_generic_type_tuple(
++        &explicit_synthetic,
++        &[explicit_number.clone(), explicit_number],
++        GenericMatchActuals::SyntheticReceiverAndVisible {
++            pattern: &synthetic_pattern,
++            receiver: &explicit_receiver,
++            visible: &explicit_visible,
++        },
++        &interfaces,
++        &generic_interfaces,
++    )
++    .unwrap_err();
++    assert!(
++        error.contains("argument infers R as Str, but explicit type is F64"),
++        "{error}"
++    );
++}
++
++#[test]
++fn receiver_pattern_inference_distinguishes_absent_undefined_and_legacy_receivers() {
++    let interfaces = HashMap::new();
++    let generic_interfaces = GenericInterfaces::new();
++    let signature = receiver_pattern_inference_signature(
++        true,
++        Some(GenericReceiverPattern::Pattern(GenericTypePattern::Variable(
++            "T".to_string(),
++        ))),
++        &["T"],
++        vec![],
++    );
++    let undefined = HirType::Undefined;
++    assert_eq!(
++        infer_generic_type_tuple_for_call(
++            &signature,
++            GenericMatchActuals::ReceiverAndVisible {
++                receiver: Some(&undefined),
++                visible: &[],
++            },
++            &interfaces,
++            &generic_interfaces,
++            None,
++        )
++        .unwrap(),
++        vec![HirType::Undefined]
++    );
++    let error = infer_generic_type_tuple_for_call(
++        &signature,
++        GenericMatchActuals::ReceiverAndVisible {
++            receiver: None,
++            visible: &[],
++        },
++        &interfaces,
++        &generic_interfaces,
++        None,
++    )
++    .unwrap_err();
++    assert!(error.contains("receiver") || error.contains("thisArg"), "{error}");
++
++    let mut missing_metadata = signature.clone();
++    missing_metadata.generic_this_pattern = None;
++    let error = infer_generic_type_tuple_for_call(
++        &missing_metadata,
++        GenericMatchActuals::Physical(&[HirType::F64]),
++        &interfaces,
++        &generic_interfaces,
++        None,
++    )
++    .unwrap_err();
++    assert!(error.contains("metadata") || error.contains("receiver"), "{error}");
++
++    let legacy = receiver_pattern_inference_signature(
++        true,
++        Some(GenericReceiverPattern::LegacyUnmatched),
++        &["T"],
++        vec![GenericTypePattern::Variable("T".to_string())],
++    );
++    let legacy_actuals = [HirType::Bool, HirType::Str];
++    assert_eq!(
++        infer_generic_type_tuple_for_call(
++            &legacy,
++            GenericMatchActuals::Physical(&legacy_actuals),
++            &interfaces,
++            &generic_interfaces,
++            None,
++        )
++        .unwrap(),
++        vec![HirType::Str]
++    );
++    let error = infer_generic_type_tuple_for_call(
++        &legacy,
++        GenericMatchActuals::Physical(&[]),
++        &interfaces,
++        &generic_interfaces,
++        None,
++    )
++    .unwrap_err();
++    assert!(error.contains("receiver") || error.contains("thisArg"), "{error}");
++}
++
++#[test]
++fn receiver_pattern_inference_optional_rest_indices_and_key_literals_stay_visible_only() {
++    let interfaces = HashMap::new();
++    let generic_interfaces = GenericInterfaces::new();
++    let mut optional = receiver_pattern_inference_signature(
++        true,
++        Some(GenericReceiverPattern::Pattern(GenericTypePattern::Variable(
++            "T".to_string(),
++        ))),
++        &["T"],
++        vec![GenericTypePattern::Variable("T".to_string())],
++    );
++    optional.generic_param_optional = vec![true];
++    let receiver = HirType::Str;
++    assert_eq!(
++        infer_generic_type_tuple_for_call(
++            &optional,
++            GenericMatchActuals::ReceiverAndVisible {
++                receiver: Some(&receiver),
++                visible: &[],
++            },
++            &interfaces,
++            &generic_interfaces,
++            None,
++        )
++        .unwrap(),
++        vec![HirType::Str]
++    );
++
++    let rest = receiver_pattern_inference_signature(
++        true,
++        Some(GenericReceiverPattern::Pattern(GenericTypePattern::Variable(
++            "R".to_string(),
++        ))),
++        &["R", "T"],
++        vec![GenericTypePattern::Array(Box::new(
++            GenericTypePattern::Variable("T".to_string()),
++        ))],
++    );
++    let physical = [HirType::Bool, HirType::Array(Box::new(HirType::F64))];
++    assert_eq!(
++        infer_generic_type_tuple_for_call(
++            &rest,
++            GenericMatchActuals::Physical(&physical),
++            &interfaces,
++            &generic_interfaces,
++            None,
++        )
++        .unwrap(),
++        vec![HirType::Bool, HirType::F64]
++    );
++    assert!(matches!(
++        generic_pattern_for_physical_argument(&rest, 0),
++        Some(GenericTypePattern::Variable(name)) if name == "R"
++    ));
++    assert!(matches!(
++        generic_pattern_for_physical_argument(&rest, 1),
++        Some(GenericTypePattern::Array(inner))
++            if matches!(inner.as_ref(), GenericTypePattern::Variable(name) if name == "T")
++    ));
++    assert!(generic_pattern_for_physical_argument(&rest, 2).is_none());
++
++    let mut key_signature = receiver_pattern_inference_signature(
++        true,
++        Some(GenericReceiverPattern::Pattern(GenericTypePattern::Variable(
++            "T".to_string(),
++        ))),
++        &["T", "Key"],
++        vec![GenericTypePattern::Variable("Key".to_string())],
++    );
++    receiver_pattern_inference_apply_type_parameters(
++        &mut key_signature,
++        "declare function receiver_pattern_inference_key<T, Key extends keyof T>(this: T, key: Key): T[Key];",
++    );
++    let literal_key = HirType::StrLiteral("name".to_string());
++    let key_actuals = [HirType::Object(vec![("name".to_string(), HirType::Str)]), literal_key.clone()];
++    assert!(matches!(
++        generic_pattern_for_physical_argument(&key_signature, 1),
++        Some(GenericTypePattern::Variable(name)) if name == "Key"
++    ));
++    assert_eq!(
++        infer_generic_type_tuple_for_call(
++            &key_signature,
++            GenericMatchActuals::Physical(&key_actuals),
++            &interfaces,
++            &generic_interfaces,
++            None,
++        )
++        .unwrap(),
++        vec![key_actuals[0].clone(), literal_key]
++    );
++
++    let no_this = receiver_pattern_inference_signature(
++        false,
++        None,
++        &["T"],
++        vec![GenericTypePattern::Variable("T".to_string())],
++    );
++    assert!(matches!(
++        generic_pattern_for_physical_argument(&no_this, 0),
++        Some(GenericTypePattern::Variable(name)) if name == "T"
++    ));
++    assert_eq!(
++        infer_generic_type_tuple_for_call(
++            &no_this,
++            GenericMatchActuals::Physical(&[HirType::Str]),
++            &interfaces,
++            &generic_interfaces,
++            None,
++        )
++        .unwrap(),
++        vec![HirType::Str]
++    );
++    assert_eq!(
++        infer_generic_type_tuple(
++            &no_this,
++            &[HirType::F64],
++            &interfaces,
++            &generic_interfaces,
++            None,
++        )
++        .unwrap(),
++        vec![HirType::F64]
++    );
++    let legacy_receiver_index = receiver_pattern_inference_signature(
++        true,
++        Some(GenericReceiverPattern::LegacyUnmatched),
++        &["T", "U"],
++        vec![
++            GenericTypePattern::Variable("T".to_string()),
++            GenericTypePattern::Variable("U".to_string()),
++        ],
++    );
++    assert!(generic_pattern_for_physical_argument(&legacy_receiver_index, 0).is_none());
++    assert!(matches!(
++        generic_pattern_for_physical_argument(&legacy_receiver_index, 1),
++        Some(GenericTypePattern::Variable(name)) if name == "T"
++    ));
++    assert!(matches!(
++        generic_pattern_for_physical_argument(&legacy_receiver_index, 2),
++        Some(GenericTypePattern::Variable(name)) if name == "U"
++    ));
++    assert!(generic_pattern_for_physical_argument(&legacy_receiver_index, 3).is_none());
++}
++
++#[test]
++fn receiver_pattern_inference_implicit_fallbacks_follow_actual_match_order() {
++    let interfaces = HashMap::new();
++    let generic_interfaces = GenericInterfaces::new();
++    let receiver = HirType::Bool;
++    let mut defaulted = receiver_pattern_inference_signature(
++        true,
++        Some(GenericReceiverPattern::LegacyUnmatched),
++        &["T"],
++        vec![],
++    );
++    receiver_pattern_inference_apply_type_parameters(
++        &mut defaulted,
++        "declare function receiver_pattern_inference_default<T = string>(): T;",
++    );
++    defaulted.generic_return_pattern = Some(GenericTypePattern::Variable("T".to_string()));
++    assert_eq!(
++        infer_generic_type_tuple_for_call(
++            &defaulted,
++            GenericMatchActuals::ReceiverAndVisible {
++                receiver: Some(&receiver),
++                visible: &[],
++            },
++            &interfaces,
++            &generic_interfaces,
++            Some(&HirType::F64),
++        )
++        .unwrap(),
++        vec![HirType::F64]
++    );
++    assert_eq!(
++        infer_generic_type_tuple_for_call(
++            &defaulted,
++            GenericMatchActuals::ReceiverAndVisible {
++                receiver: Some(&receiver),
++                visible: &[],
++            },
++            &interfaces,
++            &generic_interfaces,
++            None,
++        )
++        .unwrap(),
++        vec![HirType::Str]
++    );
++
++    let mut constrained = receiver_pattern_inference_signature(
++        true,
++        Some(GenericReceiverPattern::LegacyUnmatched),
++        &["T"],
++        vec![],
++    );
++    receiver_pattern_inference_apply_type_parameters(
++        &mut constrained,
++        "declare function receiver_pattern_inference_constraint<T extends number>(): T;",
++    );
++    constrained.generic_return_pattern = Some(GenericTypePattern::Variable("T".to_string()));
++    let error = infer_generic_type_tuple_for_call(
++        &constrained,
++        GenericMatchActuals::ReceiverAndVisible {
++            receiver: Some(&receiver),
++            visible: &[],
++        },
++        &interfaces,
++        &generic_interfaces,
++        Some(&HirType::Str),
++    )
++    .unwrap_err();
++    assert!(error.contains("does not satisfy constraint"), "{error}");
++    assert_eq!(
++        infer_generic_type_tuple_for_call(
++            &constrained,
++            GenericMatchActuals::ReceiverAndVisible {
++                receiver: Some(&receiver),
++                visible: &[],
++            },
++            &interfaces,
++            &generic_interfaces,
++            None,
++        )
++        .unwrap(),
++        vec![HirType::F64]
++    );
++
++    let mut extern_fallback = receiver_pattern_inference_signature(
++        true,
++        Some(GenericReceiverPattern::LegacyUnmatched),
++        &["T"],
++        vec![],
++    );
++    extern_fallback.is_extern = true;
++    assert_eq!(
++        infer_generic_type_tuple_for_call(
++            &extern_fallback,
++            GenericMatchActuals::ReceiverAndVisible {
++                receiver: Some(&receiver),
++                visible: &[],
++            },
++            &interfaces,
++            &generic_interfaces,
++            None,
++        )
++        .unwrap(),
++        vec![HirType::Dynamic]
++    );
++
++    let mut conflicting = receiver_pattern_inference_signature(
++        true,
++        Some(GenericReceiverPattern::Pattern(GenericTypePattern::Variable(
++            "T".to_string(),
++        ))),
++        &["T"],
++        vec![GenericTypePattern::Variable("T".to_string())],
++    );
++    receiver_pattern_inference_apply_type_parameters(
++        &mut conflicting,
++        "declare function receiver_pattern_inference_default<T extends number = number>(): T;",
++    );
++    conflicting.generic_return_pattern = Some(GenericTypePattern::Variable("T".to_string()));
++    conflicting.is_extern = true;
++    let actuals = [HirType::Str, HirType::F64];
++    let error = infer_generic_type_tuple_for_call(
++        &conflicting,
++        GenericMatchActuals::Physical(&actuals),
++        &interfaces,
++        &generic_interfaces,
++        Some(&HirType::Bool),
++    )
++    .unwrap_err();
++    assert!(error.contains("conflicting call-site types"), "{error}");
++}
++
++#[test]
++fn receiver_pattern_inference_explicit_constraints_precede_actual_mismatch() {
++    let interfaces = HashMap::new();
++    let generic_interfaces = GenericInterfaces::new();
++    let mut constrained = receiver_pattern_inference_signature(
++        true,
++        Some(GenericReceiverPattern::Pattern(GenericTypePattern::Concrete(
++            HirType::F64,
++        ))),
++        &["T"],
++        vec![],
++    );
++    receiver_pattern_inference_apply_type_parameters(
++        &mut constrained,
++        "declare function receiver_pattern_inference_constraint<T extends number>(): T;",
++    );
++    let explicit_string = Box::new(receiver_pattern_inference_type_from_return(
++        "declare function receiver_pattern_inference_string(): string;",
++    ));
++    let actual_receiver = [HirType::Str];
++    let error = resolve_explicit_generic_type_tuple(
++        &constrained,
++        &[explicit_string.clone()],
++        GenericMatchActuals::Physical(&actual_receiver),
++        &interfaces,
++        &generic_interfaces,
++    )
++    .unwrap_err();
++    assert!(
++        error.contains("explicit type Str does not satisfy constraint F64"),
++        "{error}"
++    );
++    assert!(!error.contains("argument infers"), "{error}");
++    assert!(
++        !error.contains("incompatible with parameter pattern"),
++        "{error}"
++    );
++
++    let mut valid_constraint = receiver_pattern_inference_signature(
++        true,
++        Some(GenericReceiverPattern::Pattern(GenericTypePattern::Variable(
++            "T".to_string(),
++        ))),
++        &["T"],
++        vec![],
++    );
++    receiver_pattern_inference_apply_type_parameters(
++        &mut valid_constraint,
++        "declare function receiver_pattern_inference_constraint<T extends string>(): T;",
++    );
++    let receiver_conflict = [HirType::F64];
++    let error = resolve_explicit_generic_type_tuple(
++        &valid_constraint,
++        &[explicit_string],
++        GenericMatchActuals::Physical(&receiver_conflict),
++        &interfaces,
++        &generic_interfaces,
++    )
++    .unwrap_err();
++    assert!(
++        error.contains("argument infers T as F64, but explicit type is Str"),
++        "{error}"
++    );
++}
++
++#[test]
++fn receiver_pattern_inference_type_only_and_receiver_free_promise_controls() {
++    let interfaces = HashMap::new();
++    let generic_interfaces = GenericInterfaces::new();
++    let mut defaulted = receiver_pattern_inference_signature(
++        true,
++        None,
++        &["T"],
++        vec![GenericTypePattern::Variable("T".to_string())],
++    );
++    receiver_pattern_inference_apply_type_parameters(
++        &mut defaulted,
++        "declare function receiver_pattern_inference_default<T = string>(): T;",
++    );
++    assert_eq!(
++        resolve_explicit_generic_type_tuple(
++            &defaulted,
++            &[],
++            GenericMatchActuals::TypeOnly,
++            &interfaces,
++            &generic_interfaces,
++        )
++        .unwrap(),
++        vec![HirType::Str]
++    );
++
++    let module = thaw_parser::parse_typescript(
++        r#"
++        function receiver_pattern_inference_id<T>(value: T): T { return value; }
++        function receiver_pattern_inference_callback<T>(value: T): T { return value; }
++        function receiver_pattern_inference_main(): void {
++            const specialized = receiver_pattern_inference_id<number>;
++            const pending = new Promise<string>((resolve) => resolve("ok"))
++                .then(receiver_pattern_inference_callback);
++        }
++        "#,
++    )
++    .expect("parse receiver-free instantiation and named Promise callback fixture");
++    lower_module(&module)
++        .expect("receiver-free explicit instantiation and named contextual Promise callback remain controls");
++}
+diff --git a/crates/thaw-hir/src/lower/types.rs b/crates/thaw-hir/src/lower/types.rs
+index 97c7178..25484d5 100644
+--- a/crates/thaw-hir/src/lower/types.rs
++++ b/crates/thaw-hir/src/lower/types.rs
+@@ -1416,17 +1416,144 @@ fn match_generic_pattern(
+     }
+ }
+ 
+-fn infer_generic_type_tuple(
++#[derive(Clone, Copy)]
++enum GenericMatchActuals<'a> {
++    /// Physical HIR actuals, including the explicit receiver at index zero
++    /// when `signature.uses_this` is true.
++    Physical(&'a [HirType]),
++    /// Physical actuals already split by a caller that has preserved the
++    /// receiver slot separately.
++    ReceiverAndVisible {
++        receiver: Option<&'a HirType>,
++        visible: &'a [HirType],
++    },
++    /// Temporary receiver template used by generic non-arrow expressions.
++    /// It does not change the synthetic signature's physical parameters.
++    SyntheticReceiverAndVisible {
++        pattern: &'a GenericTypePattern,
++        receiver: &'a HirType,
++        visible: &'a [HirType],
++    },
++    /// Contextual inference for visible parameters only, as used by arrows
++    /// and callback signatures that do not represent an actual call.
++    ContextualVisible(&'a [HirType]),
++    /// Explicit type-only instantiation, with no argument matching.
++    TypeOnly,
++}
++
++fn generic_pattern_for_physical_argument(
+     signature: &FnSignature,
+-    actual_params: &[HirType],
++    index: usize,
++) -> Option<&GenericTypePattern> {
++    if signature.uses_this {
++        if index == 0 {
++            return match signature.generic_this_pattern.as_ref()? {
++                GenericReceiverPattern::Pattern(pattern) => Some(pattern),
++                GenericReceiverPattern::LegacyUnmatched => None,
++            };
++        }
++        signature.generic_param_patterns.get(index - 1)
++    } else {
++        signature.generic_param_patterns.get(index)
++    }
++}
++
++fn validate_actual_call_generic_receiver_metadata(
++    signature: &FnSignature,
++) -> Result<(), String> {
++    match (signature.uses_this, signature.generic_this_pattern.as_ref()) {
++        (true, Some(_)) | (false, None) => Ok(()),
++        (true, None) => Err(
++            "generic function with `this` is missing receiver generic metadata".into(),
++        ),
++        (false, Some(_)) => Err(
++            "generic function without `this` has receiver generic metadata".into(),
++        ),
++    }
++}
++
++fn match_visible_generic_patterns(
++    signature: &FnSignature,
++    visible: &[HirType],
++    inferred: &mut HashMap<Symbol, HirType>,
++) -> Result<(), String> {
++    for (pattern, actual) in signature.generic_param_patterns.iter().zip(visible) {
++        match_generic_pattern(pattern, actual, inferred)?;
++    }
++    Ok(())
++}
++
++fn match_generic_actuals(
++    signature: &FnSignature,
++    actuals: GenericMatchActuals<'_>,
++) -> Result<HashMap<Symbol, HirType>, String> {
++    let actual_call = matches!(
++        actuals,
++        GenericMatchActuals::Physical(_) | GenericMatchActuals::ReceiverAndVisible { .. }
++    );
++    if actual_call {
++        validate_actual_call_generic_receiver_metadata(signature)?;
++    }
++
++    let mut inferred = HashMap::new();
++    match actuals {
++        GenericMatchActuals::Physical(physical) => {
++            let visible = if signature.uses_this {
++                let (receiver, visible) = physical
++                    .split_first()
++                    .ok_or_else(|| "generic function needs a thisArg".to_owned())?;
++                match signature.generic_this_pattern.as_ref() {
++                    Some(GenericReceiverPattern::Pattern(pattern)) => {
++                        match_generic_pattern(pattern, receiver, &mut inferred)?;
++                    }
++                    Some(GenericReceiverPattern::LegacyUnmatched) => {}
++                    None => unreachable!("actual-call metadata was validated above"),
++                }
++                visible
++            } else {
++                physical
++            };
++            match_visible_generic_patterns(signature, visible, &mut inferred)?;
++        }
++        GenericMatchActuals::ReceiverAndVisible { receiver, visible } => {
++            if signature.uses_this {
++                let receiver = receiver
++                    .ok_or_else(|| "generic function needs a thisArg".to_owned())?;
++                match signature.generic_this_pattern.as_ref() {
++                    Some(GenericReceiverPattern::Pattern(pattern)) => {
++                        match_generic_pattern(pattern, receiver, &mut inferred)?;
++                    }
++                    Some(GenericReceiverPattern::LegacyUnmatched) => {}
++                    None => unreachable!("actual-call metadata was validated above"),
++                }
++            } else if receiver.is_some() {
++                return Err("generic function without `this` received a thisArg".into());
++            }
++            match_visible_generic_patterns(signature, visible, &mut inferred)?;
++        }
++        GenericMatchActuals::SyntheticReceiverAndVisible {
++            pattern,
++            receiver,
++            visible,
++        } => {
++            match_generic_pattern(pattern, receiver, &mut inferred)?;
++            match_visible_generic_patterns(signature, visible, &mut inferred)?;
++        }
++        GenericMatchActuals::ContextualVisible(visible) => {
++            match_visible_generic_patterns(signature, visible, &mut inferred)?;
++        }
++        GenericMatchActuals::TypeOnly => {}
++    }
++    Ok(inferred)
++}
++
++fn finalize_inferred_generic_type_tuple(
++    signature: &FnSignature,
++    mut inferred: HashMap<Symbol, HirType>,
+     interfaces: &HashMap<Symbol, HirType>,
+     generic_interfaces: &GenericInterfaces,
+     expected_return: Option<&HirType>,
+ ) -> Result<Vec<HirType>, String> {
+-    let mut inferred = HashMap::new();
+-    for (pattern, actual) in signature.generic_param_patterns.iter().zip(actual_params) {
+-        match_generic_pattern(pattern, actual, &mut inferred)?;
+-    }
+     // A type parameter that appears in no argument at all (e.g. `nanoid
+     // <Type extends string>(size?: number): Type`, where `Type` shows up
+     // solely in the return position) has nothing above to infer it from.
+@@ -1546,10 +1673,64 @@ fn infer_generic_type_tuple(
+     Ok(types)
+ }
+ 
++fn infer_generic_type_tuple(
++    signature: &FnSignature,
++    actual_params: &[HirType],
++    interfaces: &HashMap<Symbol, HirType>,
++    generic_interfaces: &GenericInterfaces,
++    expected_return: Option<&HirType>,
++) -> Result<Vec<HirType>, String> {
++    let inferred = match_generic_actuals(
++        signature,
++        GenericMatchActuals::ContextualVisible(actual_params),
++    )?;
++    finalize_inferred_generic_type_tuple(
++        signature,
++        inferred,
++        interfaces,
++        generic_interfaces,
++        expected_return,
++    )
++}
++
++fn infer_generic_type_tuple_for_call(
++    signature: &FnSignature,
++    actuals: GenericMatchActuals<'_>,
++    interfaces: &HashMap<Symbol, HirType>,
++    generic_interfaces: &GenericInterfaces,
++    expected_return: Option<&HirType>,
++) -> Result<Vec<HirType>, String> {
++    let inferred = match_generic_actuals(signature, actuals)?;
++    finalize_inferred_generic_type_tuple(
++        signature,
++        inferred,
++        interfaces,
++        generic_interfaces,
++        expected_return,
++    )
++}
++
++fn infer_generic_type_tuple_with_receiver(
++    signature: &FnSignature,
++    visible: &[HirType],
++    receiver: Option<&HirType>,
++    interfaces: &HashMap<Symbol, HirType>,
++    generic_interfaces: &GenericInterfaces,
++    expected_return: Option<&HirType>,
++) -> Result<Vec<HirType>, String> {
++    infer_generic_type_tuple_for_call(
++        signature,
++        GenericMatchActuals::ReceiverAndVisible { receiver, visible },
++        interfaces,
++        generic_interfaces,
++        expected_return,
++    )
++}
++
+ fn resolve_explicit_generic_type_tuple(
+     signature: &FnSignature,
+     arguments: &[Box<TsType>],
+-    actual_params: &[HirType],
++    actuals: GenericMatchActuals<'_>,
+     interfaces: &HashMap<Symbol, HirType>,
+     generic_interfaces: &GenericInterfaces,
+ ) -> Result<Vec<HirType>, String> {
+@@ -1570,6 +1751,16 @@ fn resolve_explicit_generic_type_tuple(
+         ));
+     }
+ 
++    if matches!(
++        actuals,
++        GenericMatchActuals::Physical(_) | GenericMatchActuals::ReceiverAndVisible { .. }
++    ) {
++        // Explicit type arguments still validate malformed signature metadata
++        // before resolving those types, but defer receiver presence and all
++        // actual-pattern matching until after defaults and constraints.
++        validate_actual_call_generic_receiver_metadata(signature)?;
++    }
++
+     let mut types = Vec::with_capacity(signature.generic_type_params.len());
+     let mut substitution = HashMap::new();
+     for (index, name) in signature.generic_type_params.iter().enumerate() {
+@@ -1621,10 +1812,7 @@ fn resolve_explicit_generic_type_tuple(
+         }
+     }
+ 
+-    let mut inferred = HashMap::new();
+-    for (pattern, actual) in signature.generic_param_patterns.iter().zip(actual_params) {
+-        match_generic_pattern(pattern, actual, &mut inferred)?;
+-    }
++    let inferred = match_generic_actuals(signature, actuals)?;
+     for (name, inferred) in inferred {
+         let explicit = &substitution[&name];
+         if inferred != runtime_generic_type(explicit) {

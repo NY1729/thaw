@@ -49,7 +49,7 @@ class DiagnosticRunnerTests(unittest.TestCase):
             run.PAYLOAD_DIR = self.old_payload_dir
         self.temp.cleanup()
 
-    def successful_executor(self, *, fail=None, list_zero=None, ignored=None, raise_on=None, list_variant=None, run_variant=None):
+    def successful_executor(self, *, fail=None, list_zero=None, ignored=None, raise_on=None, list_variant=None, list_variant_filter=None, run_variant=None, run_variant_filter=None, failed_run_filter=None):
         calls = []
 
         def execute(argv, cwd, env, log, timeout_seconds):
@@ -71,12 +71,18 @@ class DiagnosticRunnerTests(unittest.TestCase):
                 return {"exit_code": 1, "stdout": "list failed\n", "timed_out": False}
             if fail == "failed-run" and "--list" not in argv and "--no-run" not in argv and argv[1:2] == ["test"]:
                 filter_name = next((x for x in argv if x in run.TEST_FILTERS), "control")
-                name = filter_name + "::selected"
-                return {
-                    "exit_code": 101,
-                    "stdout": f"test {name} ... FAILED\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n",
-                    "timed_out": False,
-                }
+                if failed_run_filter is None or failed_run_filter == filter_name:
+                    expected = verify.EXPECTED.get("expected_test_names", {}).get(filter_name)
+                    if expected:
+                        package = verify.EXPECTED["test_filters"][run.TEST_FILTERS.index(filter_name)]["package"].replace("-", "_")
+                        names = [f"{package}::tests::{leaf}" for leaf in expected]
+                    else:
+                        names = [filter_name + "::selected"]
+                    return {
+                        "exit_code": 101,
+                        "stdout": "".join(f"test {name} ... FAILED\n" for name in names) + f"test result: FAILED. 0 passed; {len(names)} failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n",
+                        "timed_out": False,
+                    }
             if argv[1:2] == ["check"]:
                 return {"exit_code": 0, "stdout": "Finished dev profile\n", "timed_out": False}
             if "--no-run" in argv:
@@ -89,12 +95,13 @@ class DiagnosticRunnerTests(unittest.TestCase):
                 if expected:
                     package = verify.EXPECTED["test_filters"][run.TEST_FILTERS.index(filter_name)]["package"].replace("-", "_")
                     leaves = list(expected)
-                    if list_variant == "substitute":
+                    variant = list_variant if list_variant_filter is None or list_variant_filter == filter_name else None
+                    if variant == "substitute":
                         leaves[0] = "thaw_remaining_substituted_name"
-                    if list_variant == "short":
+                    if variant == "short":
                         leaves = leaves[:-1]
                     names = [f"{package}::tests::{leaf}" for leaf in leaves]
-                    if list_variant == "duplicate":
+                    if variant == "duplicate":
                         names.append(names[0])
                     return {"exit_code": 0, "stdout": "".join(f"{name}: test\n" for name in names) + f"{len(names)} tests, 0 benchmarks\n", "timed_out": False}
                 name = filter_name + "::selected"
@@ -112,9 +119,10 @@ class DiagnosticRunnerTests(unittest.TestCase):
                     "stdout": "".join(f"test {name} ... ignored\n" for name in names) + f"test result: ok. 0 passed; 0 failed; {len(names)} ignored; 0 measured; 0 filtered out; finished in 0.00s\n",
                     "timed_out": False,
                 }
-            if expected and run_variant == "malformed":
+            variant = run_variant if run_variant_filter is None or run_variant_filter == filter_name else None
+            if expected and variant == "malformed":
                 return {"exit_code": 0, "stdout": "running tests\n" + "".join(f"test {name} ... ok\n" for name in names), "timed_out": False}
-            if expected and run_variant == "partial":
+            if expected and variant == "partial":
                 partial_names = names[:-1]
                 return {
                     "exit_code": 0,
@@ -144,7 +152,7 @@ class DiagnosticRunnerTests(unittest.TestCase):
         result = self.run_case(executor)
         self.assertEqual("failed", result["stages"]["baseline_check"]["status"])
         self.assertEqual("passed", result["stages"]["candidate_check"]["status"])
-        self.assertEqual(25, len(result["filters"]))
+        self.assertEqual(27, len(result["filters"]))
         self.assertTrue(all(item["status"] == "passed" for item in result["filters"]))
         self.assertEqual(1, result["exit_code"])
 
@@ -242,12 +250,12 @@ class DiagnosticRunnerTests(unittest.TestCase):
         self.assertEqual("failed", result["stages"]["identity"]["status"])
         self.assertTrue(all(stage["status"] == "blocked" for stage in result["stages"].values() if stage["name"] not in ("identity",)))
 
-    def test_success_uses_25_pinned_filters_locked_and_separate_target_dirs(self):
+    def test_success_uses_27_pinned_filters_locked_and_separate_target_dirs(self):
         executor = self.successful_executor()
         result = self.run_case(executor)
-        self.assertEqual(25, len(result["filters"]))
+        self.assertEqual(27, len(result["filters"]))
         self.assertEqual(20, sum(f["package"] == "thaw-llvm" for f in result["filters"]))
-        self.assertEqual(4, sum(f["package"] == "thaw-hir" for f in result["filters"]))
+        self.assertEqual(6, sum(f["package"] == "thaw-hir" for f in result["filters"]))
         self.assertEqual(1, sum(f["package"] == "thaw-std" for f in result["filters"]))
         cargo_calls = executor.calls
         self.assertTrue(cargo_calls)
@@ -256,43 +264,61 @@ class DiagnosticRunnerTests(unittest.TestCase):
         self.assertEqual(2, len(target_dirs))
         self.assertNotEqual(*sorted(target_dirs))
         run_calls = [call["argv"] for call in cargo_calls if call["argv"][1:2] == ["test"] and "--no-run" not in call["argv"] and "--list" not in call["argv"]]
-        self.assertEqual(25, len(run_calls))
+        self.assertEqual(27, len(run_calls))
         self.assertTrue(all("--test-threads=1" in argv for argv in run_calls))
         no_runs = [call["argv"] for call in cargo_calls if "--no-run" in call["argv"]]
         self.assertEqual(["thaw-llvm", "thaw-hir", "thaw-std"], [argv[argv.index("-p") + 1] for argv in no_runs])
 
     def test_new_filters_preserve_exact_full_names_counts_and_execution_evidence(self):
         result = self.run_case(self.successful_executor())
-        hir_filter, std_filter = result["filters"][-2:]
-        expected_hir = verify.EXPECTED["expected_test_names"][hir_filter["filter"]]
-        expected_std = verify.EXPECTED["expected_test_names"][std_filter["filter"]]
-        self.assertEqual(8, len(expected_hir))
-        self.assertEqual(1, len(expected_std))
-        self.assertEqual(expected_hir, [name.rsplit("::", 1)[-1] for name in hir_filter["selected_names"]])
-        self.assertEqual(expected_std, [name.rsplit("::", 1)[-1] for name in std_filter["selected_names"]])
-        self.assertEqual(hir_filter["selected_names"], hir_filter["execution_names"])
-        self.assertEqual(std_filter["selected_names"], std_filter["execution_names"])
+        hir_filters = result["filters"][-2:]
+        self.assertEqual(["thaw_binding_helper_", "receiver_pattern_inference_"], [item["filter"] for item in hir_filters])
+        self.assertEqual([2, 10], [len(verify.EXPECTED["expected_test_names"][item["filter"]]) for item in hir_filters])
+        for item in hir_filters:
+            expected = verify.EXPECTED["expected_test_names"][item["filter"]]
+            self.assertEqual(expected, [name.rsplit("::", 1)[-1] for name in item["selected_names"]])
+            self.assertEqual(item["selected_names"], item["execution_names"])
 
     def test_new_filters_reject_substituted_or_duplicate_listed_names(self):
-        for variant in ("substitute", "duplicate", "short"):
-            result = self.run_case(self.successful_executor(list_variant=variant))
-            self.assertEqual("failed", result["filters"][-2]["status"])
-            self.assertIn("expected", result["filters"][-2]["reason"])
-            self.assertEqual("blocked", result["filters"][-1]["status"])
-            self.evidence = Path(self.temp.name) / f"run-evidence-{variant}"
+        for filter_name in run.TEST_FILTERS[-2:]:
+            for variant in ("substitute", "duplicate", "short"):
+                result = self.run_case(self.successful_executor(list_variant=variant, list_variant_filter=filter_name))
+                index = run.TEST_FILTERS.index(filter_name)
+                self.assertEqual("failed", result["filters"][index]["status"])
+                self.assertIn("expected", result["filters"][index]["reason"])
+                if index + 1 < len(result["filters"]):
+                    self.assertEqual("blocked", result["filters"][index + 1]["status"])
+                self.evidence = Path(self.temp.name) / f"run-evidence-{filter_name}-{variant}"
 
     def test_new_filter_rejects_ignored_only_execution(self):
-        json_filter = run.TEST_FILTERS[-1]
-        result = self.run_case(self.successful_executor(ignored=json_filter))
-        self.assertEqual("failed", result["filters"][-1]["status"])
-        self.assertIn("ignored", result["filters"][-1]["reason"])
+        for filter_name in run.TEST_FILTERS[-2:]:
+            result = self.run_case(self.successful_executor(ignored=filter_name))
+            index = run.TEST_FILTERS.index(filter_name)
+            self.assertEqual("failed", result["filters"][index]["status"])
+            self.assertIn("ignored", result["filters"][index]["reason"])
+            self.evidence = Path(self.temp.name) / f"run-evidence-ignored-{filter_name}"
 
     def test_new_filter_rejects_malformed_summary_and_partial_execution(self):
-        for variant in ("malformed", "partial"):
-            result = self.run_case(self.successful_executor(run_variant=variant))
-            self.assertEqual("failed", result["filters"][-2]["status"])
-            self.assertTrue(any(term in result["filters"][-2]["reason"] for term in ("summary", "omitted", "execution count")))
-            self.evidence = Path(self.temp.name) / f"run-evidence-{variant}"
+        for filter_name in run.TEST_FILTERS[-2:]:
+            for variant in ("malformed", "partial"):
+                result = self.run_case(self.successful_executor(run_variant=variant, run_variant_filter=filter_name))
+                index = run.TEST_FILTERS.index(filter_name)
+                self.assertEqual("failed", result["filters"][index]["status"])
+                self.assertTrue(any(term in result["filters"][index]["reason"] for term in ("summary", "omitted", "execution count")))
+                self.evidence = Path(self.temp.name) / f"run-evidence-{filter_name}-{variant}"
+
+    def test_each_new_filter_rejects_zero_selected_and_failed_execution(self):
+        for filter_name in run.TEST_FILTERS[-2:]:
+            index = run.TEST_FILTERS.index(filter_name)
+            zero = self.run_case(self.successful_executor(list_zero=filter_name))
+            self.assertEqual("failed", zero["filters"][index]["status"])
+            self.assertIn("got 0", zero["filters"][index]["reason"])
+            self.evidence = Path(self.temp.name) / f"run-evidence-zero-{filter_name}"
+
+            failed = self.run_case(self.successful_executor(fail="failed-run", failed_run_filter=filter_name))
+            self.assertEqual("failed", failed["filters"][index]["status"])
+            self.assertIn("failed", failed["filters"][index]["reason"])
+            self.evidence = Path(self.temp.name) / f"run-evidence-failed-{filter_name}"
 
     def test_timeout_command_kills_process_group_and_writes_log(self):
         with tempfile.TemporaryDirectory(prefix="thaw-timeout-test-") as temp:
@@ -330,7 +356,7 @@ class DiagnosticRunnerTests(unittest.TestCase):
             self.assertEqual(0, initialized.returncode, initialized.stderr)
             initial_state = json.loads((evidence / "validation.json").read_text())
             self.assertEqual("running", initial_state["status"])
-            self.assertEqual(25, len(initial_state["filters"]))
+            self.assertEqual(27, len(initial_state["filters"]))
             finalized = subprocess.run(
                 [sys.executable, str(helper), "--finalize-if-incomplete", "--evidence", str(evidence), "--reason", "setup failed"],
                 capture_output=True,

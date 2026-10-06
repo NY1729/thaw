@@ -2,9 +2,11 @@
   "artifacts": {
     "compile-repairs-v1-base.sha256": "88bb3556306a13f8148d229b88057ed4324f9ac43861cbc5d2b3fd52df03e80e",
     "compile-repairs-v1.sha256": "d3b7c0e06ca053f4b342dcbc8ac1247a3460c946a35a2b22d2645c76251a2aa9",
+    "cumulative-hir-v1-base.sha256": "d3b7c0e06ca053f4b342dcbc8ac1247a3460c946a35a2b22d2645c76251a2aa9",
+    "cumulative-hir-v1.sha256": "0be3783d6241706ba2dd492704162aa9e0076dcc4a1de96e309eca9b512ba81c",
     "discard-v2.sha256": "c47d4ab7e4a805190e719b13b99bd7d233e24a5007afcbff6becebab9493e328",
     "native-base.sha256": "da86c2c16619de2e236cdd50b9d2572465fbdd4dc3b75b680cf91c6b0f6bdb72",
-    "net-owners.txt": "03d79766e0f168682bb74385db88b178a55e09aeeada5b09206043b39e3be8b6",
+    "net-owners.txt": "2b44f2be32a7ba49a50436af2bb3890f853a0ea5e9cca38d7abaf43c68f92c76",
     "original-native.sha256": "4e219dde2129cf5876497edd6f9032cebdbee89eded9cce20e50ecda041053ce",
     "return-v1.sha256": "51b1d9dd9a501538cc44fcaf8bfa72cc5a3f9ceb34c2942d4a0c676acc2e7031",
     "scope-v5-test-plan.md": "9eb740f8f418de5e7f8c7cd88607d5b269c7495a34600d937bf8653f7e55ae81",
@@ -21,7 +23,30 @@
     "crates/thaw-llvm/src/hir_codegen/tests/async/union_discard_eval_then.rs",
     "crates/thaw-llvm/src/hir_codegen/tests/async/union_discard_jit.rs"
   ],
+  "cumulative_base": {
+    "count": 181,
+    "file": "cumulative-hir-v1-base.sha256",
+    "paired_after": "compile-repairs-v1",
+    "path_order": "lexical",
+    "sha256": "d3b7c0e06ca053f4b342dcbc8ac1247a3460c946a35a2b22d2645c76251a2aa9"
+  },
   "expected_test_names": {
+    "receiver_pattern_inference_": [
+      "receiver_pattern_inference_parsed_annotations_keep_pattern_and_legacy_states",
+      "receiver_pattern_inference_declarations_remain_accepted_without_calls",
+      "receiver_pattern_inference_source_negative_and_shape_controls",
+      "receiver_pattern_inference_physical_and_split_modes_match_receiver_first",
+      "receiver_pattern_inference_synthetic_and_contextual_modes_stay_separate",
+      "receiver_pattern_inference_distinguishes_absent_undefined_and_legacy_receivers",
+      "receiver_pattern_inference_optional_rest_indices_and_key_literals_stay_visible_only",
+      "receiver_pattern_inference_implicit_fallbacks_follow_actual_match_order",
+      "receiver_pattern_inference_explicit_constraints_precede_actual_mismatch",
+      "receiver_pattern_inference_type_only_and_receiver_free_promise_controls"
+    ],
+    "thaw_binding_helper_": [
+      "thaw_binding_helper_declaration_flags_follow_resolved_symbols",
+      "thaw_binding_helper_iteration_cell_inherits_only_current_outer_immutability"
+    ],
     "thaw_remaining_": [
       "thaw_remaining_program_error_abi_mutator_reaches_neighboring_ffi_call",
       "thaw_remaining_program_ownership_mutator_reaches_neighboring_ffi_call",
@@ -42,21 +67,23 @@
     "sha256": "da86c2c16619de2e236cdd50b9d2572465fbdd4dc3b75b680cf91c6b0f6bdb72"
   },
   "net_owners": {
-    "count": 44,
+    "count": 53,
     "file": "net-owners.txt",
-    "modified": 39,
+    "modified": 48,
     "new": 5,
-    "sha256": "03d79766e0f168682bb74385db88b178a55e09aeeada5b09206043b39e3be8b6"
+    "sha256": "2b44f2be32a7ba49a50436af2bb3890f853a0ea5e9cca38d7abaf43c68f92c76"
   },
   "patch_order": [
     "original-native",
     "scope-v5",
     "discard-v2",
     "return-v1",
-    "compile-repairs-v1"
+    "compile-repairs-v1",
+    "cumulative-hir-v1"
   ],
   "payload_patches": {
     "compile-repairs-v1.patch": "2994f62e98a4fb9cbd0b792b20da09bf505874d749447bf8f0e43776d25e0f05",
+    "cumulative-hir-v1.patch": "63744b75a96ce30ff503d90379b08ec20ffbebb5f5f68716972d6c7d6f17f368",
     "discard-v2.patch": "0ffe9fcec530feb12a2ca084399643861c240cc81906c9aab4677cc529aceb39",
     "return-v1.patch": "2e2e2057925542c0790d5ec879ce94d55e3ba5798b470aa5cd85327821fd1ec8"
   },
@@ -160,6 +187,16 @@
       "name": "compile-repairs-v1",
       "path_order": "lexical",
       "sha256": "d3b7c0e06ca053f4b342dcbc8ac1247a3460c946a35a2b22d2645c76251a2aa9"
+    },
+    {
+      "count": 181,
+      "extra_paths": [
+        "crates/thaw-std/src/json.rs"
+      ],
+      "file": "cumulative-hir-v1.sha256",
+      "name": "cumulative-hir-v1",
+      "path_order": "lexical",
+      "sha256": "0be3783d6241706ba2dd492704162aa9e0076dcc4a1de96e309eca9b512ba81c"
     }
   ],
   "subset_roots": [
@@ -271,6 +308,14 @@
     {
       "filter": "typed_decode_scope_tracks_dynamic_retains_merges_and_excludes_reentry",
       "package": "thaw-std"
+    },
+    {
+      "filter": "thaw_binding_helper_",
+      "package": "thaw-hir"
+    },
+    {
+      "filter": "receiver_pattern_inference_",
+      "package": "thaw-hir"
     }
   ],
   "validation_branch": "validation/native-return"

@@ -47,6 +47,7 @@ EXPECTED: dict[str, Any] = {
         "discard-v2.patch": "0ffe9fcec530feb12a2ca084399643861c240cc81906c9aab4677cc529aceb39",
         "return-v1.patch": "2e2e2057925542c0790d5ec879ce94d55e3ba5798b470aa5cd85327821fd1ec8",
         "compile-repairs-v1.patch": "2994f62e98a4fb9cbd0b792b20da09bf505874d749447bf8f0e43776d25e0f05",
+        "cumulative-hir-v1.patch": "63744b75a96ce30ff503d90379b08ec20ffbebb5f5f68716972d6c7d6f17f368",
     },
     "artifacts": {
         "original-native.sha256": "4e219dde2129cf5876497edd6f9032cebdbee89eded9cce20e50ecda041053ce",
@@ -54,10 +55,12 @@ EXPECTED: dict[str, Any] = {
         "discard-v2.sha256": "c47d4ab7e4a805190e719b13b99bd7d233e24a5007afcbff6becebab9493e328",
         "return-v1.sha256": "51b1d9dd9a501538cc44fcaf8bfa72cc5a3f9ceb34c2942d4a0c676acc2e7031",
         "native-base.sha256": "da86c2c16619de2e236cdd50b9d2572465fbdd4dc3b75b680cf91c6b0f6bdb72",
-        "net-owners.txt": "03d79766e0f168682bb74385db88b178a55e09aeeada5b09206043b39e3be8b6",
+        "net-owners.txt": "2b44f2be32a7ba49a50436af2bb3890f853a0ea5e9cca38d7abaf43c68f92c76",
         "scope-v5-test-plan.md": "9eb740f8f418de5e7f8c7cd88607d5b269c7495a34600d937bf8653f7e55ae81",
         "compile-repairs-v1-base.sha256": "88bb3556306a13f8148d229b88057ed4324f9ac43861cbc5d2b3fd52df03e80e",
         "compile-repairs-v1.sha256": "d3b7c0e06ca053f4b342dcbc8ac1247a3460c946a35a2b22d2645c76251a2aa9",
+        "cumulative-hir-v1-base.sha256": "d3b7c0e06ca053f4b342dcbc8ac1247a3460c946a35a2b22d2645c76251a2aa9",
+        "cumulative-hir-v1.sha256": "0be3783d6241706ba2dd492704162aa9e0076dcc4a1de96e309eca9b512ba81c",
     },
     "stage_manifests": [
         {"name": "original-native", "file": "original-native.sha256", "sha256": "4e219dde2129cf5876497edd6f9032cebdbee89eded9cce20e50ecda041053ce", "count": 175},
@@ -65,6 +68,7 @@ EXPECTED: dict[str, Any] = {
         {"name": "discard-v2", "file": "discard-v2.sha256", "sha256": "c47d4ab7e4a805190e719b13b99bd7d233e24a5007afcbff6becebab9493e328", "count": 179},
         {"name": "return-v1", "file": "return-v1.sha256", "sha256": "51b1d9dd9a501538cc44fcaf8bfa72cc5a3f9ceb34c2942d4a0c676acc2e7031", "count": 180},
         {"name": "compile-repairs-v1", "file": "compile-repairs-v1.sha256", "sha256": "d3b7c0e06ca053f4b342dcbc8ac1247a3460c946a35a2b22d2645c76251a2aa9", "count": 181, "extra_paths": ["crates/thaw-std/src/json.rs"], "path_order": "lexical"},
+        {"name": "cumulative-hir-v1", "file": "cumulative-hir-v1.sha256", "sha256": "0be3783d6241706ba2dd492704162aa9e0076dcc4a1de96e309eca9b512ba81c", "count": 181, "extra_paths": ["crates/thaw-std/src/json.rs"], "path_order": "lexical"},
     ],
     "repair_base": {
         "file": "compile-repairs-v1-base.sha256",
@@ -78,9 +82,16 @@ EXPECTED: dict[str, Any] = {
             "final_sha256": "3e4873700556b7bbc35b3d54e09d5a761f66119a0651c453923489254ee18dca",
         },
     },
+    "cumulative_base": {
+        "file": "cumulative-hir-v1-base.sha256",
+        "sha256": "d3b7c0e06ca053f4b342dcbc8ac1247a3460c946a35a2b22d2645c76251a2aa9",
+        "count": 181,
+        "path_order": "lexical",
+        "paired_after": "compile-repairs-v1",
+    },
     "native_base": {"file": "native-base.sha256", "sha256": "da86c2c16619de2e236cdd50b9d2572465fbdd4dc3b75b680cf91c6b0f6bdb72", "count": 24},
-    "net_owners": {"file": "net-owners.txt", "sha256": "03d79766e0f168682bb74385db88b178a55e09aeeada5b09206043b39e3be8b6", "count": 44, "modified": 39, "new": 5},
-    "patch_order": ["original-native", "scope-v5", "discard-v2", "return-v1", "compile-repairs-v1"],
+    "net_owners": {"file": "net-owners.txt", "sha256": "2b44f2be32a7ba49a50436af2bb3890f853a0ea5e9cca38d7abaf43c68f92c76", "count": 53, "modified": 48, "new": 5},
+    "patch_order": ["original-native", "scope-v5", "discard-v2", "return-v1", "compile-repairs-v1", "cumulative-hir-v1"],
     "subset_roots": [
         ".gitignore",
         "Cargo.lock",
@@ -151,6 +162,8 @@ EXPECTED: dict[str, Any] = {
         {"package": "thaw-hir", "filter": "finally_snapshots_return_and_throw_values_before_mutation"},
         {"package": "thaw-hir", "filter": "thaw_remaining_"},
         {"package": "thaw-std", "filter": "typed_decode_scope_tracks_dynamic_retains_merges_and_excludes_reentry"},
+        {"package": "thaw-hir", "filter": "thaw_binding_helper_"},
+        {"package": "thaw-hir", "filter": "receiver_pattern_inference_"},
     ],
     "expected_test_names": {
         "thaw_remaining_": [
@@ -165,6 +178,22 @@ EXPECTED: dict[str, Any] = {
         ],
         "typed_decode_scope_tracks_dynamic_retains_merges_and_excludes_reentry": [
             "typed_decode_scope_tracks_dynamic_retains_merges_and_excludes_reentry",
+        ],
+        "thaw_binding_helper_": [
+            "thaw_binding_helper_declaration_flags_follow_resolved_symbols",
+            "thaw_binding_helper_iteration_cell_inherits_only_current_outer_immutability",
+        ],
+        "receiver_pattern_inference_": [
+            "receiver_pattern_inference_parsed_annotations_keep_pattern_and_legacy_states",
+            "receiver_pattern_inference_declarations_remain_accepted_without_calls",
+            "receiver_pattern_inference_source_negative_and_shape_controls",
+            "receiver_pattern_inference_physical_and_split_modes_match_receiver_first",
+            "receiver_pattern_inference_synthetic_and_contextual_modes_stay_separate",
+            "receiver_pattern_inference_distinguishes_absent_undefined_and_legacy_receivers",
+            "receiver_pattern_inference_optional_rest_indices_and_key_literals_stay_visible_only",
+            "receiver_pattern_inference_implicit_fallbacks_follow_actual_match_order",
+            "receiver_pattern_inference_explicit_constraints_precede_actual_mismatch",
+            "receiver_pattern_inference_type_only_and_receiver_free_promise_controls",
         ],
     },
     # Informational fingerprints only; their underlying prose is not shipped or validated by CI.
@@ -592,17 +621,19 @@ def verify_inputs(baseline: Path, payload: Path) -> dict[str, Any]:
 
     # Each manifest file is parsed here, before any patch is applied, so malformed or
     # unsafe input cannot become a Cargo-time surprise.
-    for index, stage in enumerate(EXPECTED["stage_manifests"]):
+    lexical_stage_names = {"compile-repairs-v1", "cumulative-hir-v1"}
+    extra_path = EXPECTED["repair_base"]["extra_owner"]["path"]
+    extra_paths_by_stage = {"compile-repairs-v1": [extra_path], "cumulative-hir-v1": [extra_path]}
+    for stage in EXPECTED["stage_manifests"]:
         extra_paths = stage.get("extra_paths", [])
-        if index < len(EXPECTED["stage_manifests"]) - 1 and extra_paths:
-            raise VerificationError(f"only the final repair stage may have stage-scoped extra paths: {stage['name']}")
-        expected_extra = [EXPECTED["repair_base"]["extra_owner"]["path"]] if stage["name"] == "compile-repairs-v1" else []
+        expected_extra = extra_paths_by_stage.get(stage["name"], [])
         if extra_paths != expected_extra:
             raise VerificationError(f"{stage['name']} has an unexpected stage-scoped extra path set")
         manifest_path = _path_without_symlinks(payload, stage["file"], "stage manifest")
         path_order = stage.get("path_order", "components")
-        if stage["name"] != "compile-repairs-v1" and path_order != "components":
-            raise VerificationError(f"only the final repair manifest may use lexical path order: {stage['name']}")
+        expected_path_order = "lexical" if stage["name"] in lexical_stage_names else "components"
+        if path_order != expected_path_order:
+            raise VerificationError(f"{stage['name']} manifest must use {expected_path_order} path order")
         rows = _parse_sha_manifest(manifest_path, stage["name"], path_order=path_order)
         if len(rows) != stage["count"]:
             raise VerificationError(f"{stage['name']} stage manifest count mismatch: expected {stage['count']}, got {len(rows)}")
@@ -613,15 +644,24 @@ def verify_inputs(baseline: Path, payload: Path) -> dict[str, Any]:
     if EXPECTED["patch_order"] != expected_order:
         raise VerificationError(f"patch order mismatch: expected stage order {expected_order}")
 
-    # The fifth patch is pinned to exactly the preceding 180-file stage plus
+    # The repair patch is pinned to exactly the preceding 180-file stage plus
     # the one explicitly scoped thaw-std JSON owner. The repair may modify
     # that owner, so only its pre-patch hash is compared to the baseline pin;
     # the post-patch hash is independently fixed by the final manifest.
     repair = EXPECTED["repair_base"]
     if repair.get("path_order", "components") != "components":
         raise VerificationError("paired repair base must retain component path ordering")
-    if EXPECTED["stage_manifests"][-1].get("path_order") != "lexical":
-        raise VerificationError("final compile repair manifest must use its pinned lexical path ordering")
+    stage_by_name = {stage["name"]: stage for stage in EXPECTED["stage_manifests"]}
+    repair_stage = stage_by_name.get("compile-repairs-v1")
+    if repair_stage is None or repair_stage.get("path_order") != "lexical":
+        raise VerificationError("compile repair manifest must use its pinned lexical path ordering")
+    repair_index = EXPECTED["patch_order"].index("compile-repairs-v1")
+    if repair_index == 0:
+        raise VerificationError("compile repair has no named predecessor stage")
+    repair_predecessor_name = EXPECTED["patch_order"][repair_index - 1]
+    repair_predecessor = stage_by_name.get(repair_predecessor_name)
+    if repair_predecessor is None:
+        raise VerificationError("compile repair predecessor stage is missing")
     base_rows = _parse_sha_manifest(
         _path_without_symlinks(payload, repair["file"], "paired repair base"),
         "paired repair base",
@@ -629,7 +669,11 @@ def verify_inputs(baseline: Path, payload: Path) -> dict[str, Any]:
     )
     if len(base_rows) != repair["count"]:
         raise VerificationError(f"paired repair base count mismatch: expected {repair['count']}, got {len(base_rows)}")
-    previous_rows = _parse_sha_manifest(payload / EXPECTED["stage_manifests"][-2]["file"], "pre-repair stage")
+    previous_rows = _parse_sha_manifest(
+        payload / repair_predecessor["file"],
+        f"pre-repair stage {repair_predecessor_name}",
+        path_order=repair_predecessor.get("path_order", "components"),
+    )
     expected_base = {rel: digest for digest, rel in previous_rows}
     extra = repair["extra_owner"]
     if extra["path"] in expected_base:
@@ -643,7 +687,7 @@ def verify_inputs(baseline: Path, payload: Path) -> dict[str, Any]:
     expected_base[extra["path"]] = extra["sha256"]
     if {rel: digest for digest, rel in base_rows} != expected_base:
         raise VerificationError("paired repair base manifest differs from the exact 180-file predecessor plus JSON owner")
-    final_stage = EXPECTED["stage_manifests"][-1]
+    final_stage = repair_stage
     final_rows = _parse_sha_manifest(
         payload / final_stage["file"],
         "compile repair final",
@@ -652,6 +696,30 @@ def verify_inputs(baseline: Path, payload: Path) -> dict[str, Any]:
     final_json_hash = dict((rel, digest) for digest, rel in final_rows).get(extra["path"])
     if {rel for _, rel in final_rows} != set(expected_base) or final_json_hash != extra["final_sha256"]:
         raise VerificationError("compile repair final manifest changed the paired base path set")
+
+    cumulative_base = EXPECTED["cumulative_base"]
+    if cumulative_base.get("path_order") != "lexical" or cumulative_base.get("paired_after") != "compile-repairs-v1":
+        raise VerificationError("cumulative paired base must be lexical and follow compile-repairs-v1")
+    if cumulative_base.get("count") != repair_stage["count"]:
+        raise VerificationError("cumulative paired base count differs from compile-repairs-v1 final")
+    cumulative_base_path = _path_without_symlinks(payload, cumulative_base["file"], "cumulative paired base")
+    repair_final_path = _path_without_symlinks(payload, repair_stage["file"], "compile repair final")
+    if cumulative_base_path.read_bytes() != repair_final_path.read_bytes():
+        raise VerificationError("cumulative paired base manifest is not byte-identical to the compile repair final manifest")
+    cumulative_base_rows = _parse_sha_manifest(cumulative_base_path, "cumulative paired base", path_order="lexical")
+    if len(cumulative_base_rows) != cumulative_base["count"] or {rel: digest for digest, rel in cumulative_base_rows} != {rel: digest for digest, rel in final_rows}:
+        raise VerificationError("cumulative paired base differs from the exact compile repair final source")
+    cumulative_stage = stage_by_name.get("cumulative-hir-v1")
+    if cumulative_stage is None or cumulative_stage.get("path_order") != "lexical":
+        raise VerificationError("cumulative final manifest must use its pinned lexical path ordering")
+    cumulative_rows = _parse_sha_manifest(
+        payload / cumulative_stage["file"],
+        "cumulative HIR final",
+        path_order="lexical",
+    )
+    cumulative_json_hash = dict((rel, digest) for digest, rel in cumulative_rows).get(extra["path"])
+    if {rel for _, rel in cumulative_rows} != {rel for _, rel in cumulative_base_rows} or cumulative_json_hash != extra["final_sha256"]:
+        raise VerificationError("cumulative HIR final manifest changed the paired base path set or pinned JSON hash")
     return {
         "baseline": identity,
         "inputs": {**EXPECTED["payload_patches"], **EXPECTED["artifacts"]},
@@ -811,7 +879,12 @@ def _patch_path(baseline: Path, payload: Path, name: str) -> Path:
     if name == "scope-v5":
         rel = EXPECTED["source_files"]["scope_patch"]["path"]
         return _path_without_symlinks(baseline, rel, "scope-v5 patch")
-    payload_name = {"discard-v2": "discard-v2.patch", "return-v1": "return-v1.patch", "compile-repairs-v1": "compile-repairs-v1.patch"}.get(name)
+    payload_name = {
+        "discard-v2": "discard-v2.patch",
+        "return-v1": "return-v1.patch",
+        "compile-repairs-v1": "compile-repairs-v1.patch",
+        "cumulative-hir-v1": "cumulative-hir-v1.patch",
+    }.get(name)
     if not payload_name:
         raise VerificationError(f"unknown patch stage: {name}")
     return _path_without_symlinks(payload, payload_name, f"{name} patch")
@@ -837,7 +910,7 @@ def verify_prepared(baseline: Path, candidate: Path, payload: Path) -> dict[str,
 
 
 def reconstruct(baseline: Path, candidate: Path, payload: Path, evidence: Path) -> dict[str, Any]:
-    """Reconstruct the exact 180-file source overlay on an untouched full checkout."""
+    """Reconstruct the hash-pinned source stages on an untouched full checkout."""
     state: dict[str, Any] = {"status": "running", "baseline": str(baseline), "candidate": str(candidate), "stages": []}
     _validate_independent_paths(baseline, candidate, payload, evidence)
     try:
@@ -874,6 +947,27 @@ def reconstruct(baseline: Path, candidate: Path, payload: Path, evidence: Path) 
                     "count": paired["count"],
                     "manifest_sha256": paired["manifest_sha256"],
                     "extra_owner": repair_base["extra_owner"]["path"],
+                }
+            elif stage["name"] == "cumulative-hir-v1":
+                cumulative_base = EXPECTED["cumulative_base"]
+                repair_stage = next((item for item in EXPECTED["stage_manifests"] if item["name"] == cumulative_base["paired_after"]), None)
+                if repair_stage is None or not state["stages"] or state["stages"][-1]["stage"] != repair_stage["name"]:
+                    raise VerificationError("cumulative HIR paired base is not immediately after the named repair final")
+                paired = verify_stage(
+                    candidate,
+                    payload / cumulative_base["file"],
+                    cumulative_base["count"],
+                    [EXPECTED["repair_base"]["extra_owner"]["path"]],
+                    cumulative_base.get("path_order", "components"),
+                )
+                previous = state["stages"][-1]
+                if paired["manifest_sha256"] != previous["manifest_sha256"] or paired["count"] != previous["count"]:
+                    raise VerificationError("cumulative paired base does not equal the immediately preceding compile repair final")
+                state["paired_cumulative_base"] = {
+                    "count": paired["count"],
+                    "manifest_sha256": paired["manifest_sha256"],
+                    "paired_after": repair_stage["name"],
+                    "extra_owner": EXPECTED["repair_base"]["extra_owner"]["path"],
                 }
             applied = _apply_patch(candidate, patch)
             manifest = payload / stage["file"]

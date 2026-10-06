@@ -93,7 +93,7 @@ def create_git_repo(root: Path) -> tuple[str, str]:
 
 
 class Fixture:
-    """Tiny five-stage baseline whose patch bytes and pins are self-consistent."""
+    """Tiny six-stage baseline whose patch bytes and pins are self-consistent."""
 
     def __init__(self, root: Path):
         self.root = root
@@ -197,16 +197,27 @@ class Fixture:
         repair_patch = patch_for(lib, stage4[lib], stage5[lib])
         repair_patch += patch_for(repair_extra, repair_extra_bytes.decode(), repair_json_bytes.decode())
         write(self.payload / "compile-repairs-v1.patch", repair_patch)
+        stage6 = dict(stage5)
+        stage6[lib] = "pub fn fixture() -> &'static str { \"cumulative-hir-v1\" }\n"
+        write(self.payload / "cumulative-hir-v1.patch", patch_for(lib, stage5[lib], stage6[lib]))
         paired_base = dict(stage4)
         paired_base[repair_extra] = repair_extra_bytes.decode()
-        final_stage = dict(stage5)
+        repair_final = dict(stage5)
+        repair_final[repair_extra] = repair_json_bytes.decode()
+        cumulative_base = dict(repair_final)
+        final_stage = dict(stage6)
         final_stage[repair_extra] = repair_json_bytes.decode()
-        for name, files in (("compile-repairs-v1-base", paired_base), ("compile-repairs-v1", final_stage)):
+        for name, files in (
+            ("compile-repairs-v1-base", paired_base),
+            ("compile-repairs-v1", repair_final),
+            ("cumulative-hir-v1-base", cumulative_base),
+            ("cumulative-hir-v1", final_stage),
+        ):
             stage_dir = root / ("manifest-tree-" + name)
             for rel, text in files.items():
                 write(stage_dir / rel, text)
             (self.payload / f"{name}.sha256").write_bytes(
-                manifest_for(stage_dir, "lexical" if name == "compile-repairs-v1" else "components")
+                manifest_for(stage_dir, "lexical" if name in ("compile-repairs-v1", "cumulative-hir-v1-base", "cumulative-hir-v1") else "components")
             )
 
         for name, files in zip(("original-native", "scope-v5", "discard-v2", "return-v1"), (stage1, stage2, stage3, stage4)):
@@ -221,6 +232,14 @@ class Fixture:
             "name": "compile-repairs-v1",
             "file": "compile-repairs-v1.sha256",
             "sha256": sha(final_manifest_bytes),
+            "count": len(repair_final),
+            "extra_paths": [repair_extra],
+            "path_order": "lexical",
+        })
+        stages.append({
+            "name": "cumulative-hir-v1",
+            "file": "cumulative-hir-v1.sha256",
+            "sha256": sha((self.payload / "cumulative-hir-v1.sha256").read_bytes()),
             "count": len(final_stage),
             "extra_paths": [repair_extra],
             "path_order": "lexical",
@@ -262,7 +281,7 @@ class Fixture:
         }
         payload_files = {
             name: sha((self.payload / name).read_bytes())
-            for name in ("discard-v2.patch", "return-v1.patch", "compile-repairs-v1.patch")
+            for name in ("discard-v2.patch", "return-v1.patch", "compile-repairs-v1.patch", "cumulative-hir-v1.patch")
         }
         artifact_hashes = {}
         for name, desc in self._artifact_paths().items():
@@ -295,7 +314,14 @@ class Fixture:
                     "final_sha256": sha(repair_json_bytes),
                 },
             },
-            "patch_order": ["original-native", "scope-v5", "discard-v2", "return-v1", "compile-repairs-v1"],
+            "cumulative_base": {
+                "file": "cumulative-hir-v1-base.sha256",
+                "sha256": sha((self.payload / "cumulative-hir-v1-base.sha256").read_bytes()),
+                "count": len(cumulative_base),
+                "path_order": "lexical",
+                "paired_after": "compile-repairs-v1",
+            },
+            "patch_order": ["original-native", "scope-v5", "discard-v2", "return-v1", "compile-repairs-v1", "cumulative-hir-v1"],
             "subset_roots": [
                 ".gitignore",
                 "Cargo.lock",
@@ -332,6 +358,8 @@ class Fixture:
             "compile_repair_patch": "compile-repairs-v1.patch",
             "compile_repair_base": "compile-repairs-v1-base.sha256",
             "compile_repair_final": "compile-repairs-v1.sha256",
+            "cumulative_hir_base": "cumulative-hir-v1-base.sha256",
+            "cumulative_hir_final": "cumulative-hir-v1.sha256",
             "native_base": "native-base.sha256",
             "net_owners": "net-owners.txt",
             "scope_test_plan": "scope-v5-test-plan.md",
@@ -366,7 +394,7 @@ class VerificationRedGreenTests(unittest.TestCase):
         with self.assertRaisesRegex(mod.VerificationError, pattern):
             call(*args, **kwargs)
 
-    def test_positive_reconstruction_replays_five_stages_and_preserves_unrelated_file(self):
+    def test_positive_reconstruction_replays_six_stages_and_preserves_unrelated_file(self):
         mod = self.require_implementation()
         result = mod.reconstruct(
             self.fixture.baseline,
@@ -375,7 +403,7 @@ class VerificationRedGreenTests(unittest.TestCase):
             self.fixture.evidence,
         )
         self.assertEqual([x["count"] for x in mod.EXPECTED["stage_manifests"]], result["stage_counts"])
-        self.assertEqual(5, len(result["stages"]))
+        self.assertEqual(6, len(result["stages"]))
         self.assertEqual("unmodified product file\n", (self.fixture.candidate / "outside.txt").read_text())
         self.assertTrue((self.fixture.evidence / "reconstruction.json").is_file())
 
@@ -396,7 +424,7 @@ class VerificationRedGreenTests(unittest.TestCase):
         production_expected = self.fixture.expected_before
         mod.EXPECTED = production_expected
         try:
-            stage = production_expected["stage_manifests"][-1]
+            stage = next(stage for stage in production_expected["stage_manifests"] if stage["name"] == "compile-repairs-v1")
             manifest = MODULE_DIR / stage["file"]
             self.assertEqual(stage["sha256"], sha(manifest.read_bytes()))
             with self.assertRaisesRegex(mod.VerificationError, "not strictly sorted"):
@@ -408,6 +436,100 @@ class VerificationRedGreenTests(unittest.TestCase):
             self.assertEqual(json_owner["final_sha256"], final_hashes[json_owner["path"]])
         finally:
             mod.EXPECTED = fixture_expected
+
+    def test_sixth_cumulative_patch_changes_a_native_owner_after_the_repair_stage(self):
+        mod = self.require_implementation()
+        lib = "crates/thaw-hir/src/lib.rs"
+        result = mod.reconstruct(self.fixture.baseline, self.fixture.candidate, self.fixture.payload, self.fixture.evidence)
+        repair_bytes = (self.fixture.root / "manifest-tree-compile-repairs-v1" / lib).read_bytes()
+        expected_repair_hash = next(
+            digest for digest, rel in mod._parse_sha_manifest(self.fixture.payload / "compile-repairs-v1.sha256", "repair final", path_order="lexical")
+            if rel == lib
+        )
+        self.assertEqual("cumulative-hir-v1", result["stages"][-1]["stage"])
+        self.assertEqual(sha(repair_bytes), expected_repair_hash)
+        self.assertEqual(b'pub fn fixture() -> &\'static str { "cumulative-hir-v1" }\n', (self.fixture.candidate / lib).read_bytes())
+
+    def test_actual_cumulative_inputs_and_name_pins_match_the_immutable_source(self):
+        mod = self.require_implementation()
+        production_expected = self.fixture.expected_before
+        pins_path = MODULE_DIR / "pins.json"
+        pins = json.loads(pins_path.read_text(encoding="utf-8"))
+        self.assertEqual(production_expected, pins)
+
+        self.assertIn("cumulative-hir-v1", [stage["name"] for stage in production_expected["stage_manifests"]])
+        cumulative_stage = next(stage for stage in production_expected["stage_manifests"] if stage["name"] == "cumulative-hir-v1")
+        patch_name = "cumulative-hir-v1.patch"
+        self.assertEqual("63744b75a96ce30ff503d90379b08ec20ffbebb5f5f68716972d6c7d6f17f368", production_expected["payload_patches"][patch_name])
+        self.assertEqual(production_expected["payload_patches"][patch_name], sha((MODULE_DIR / patch_name).read_bytes()))
+        self.assertEqual(181, cumulative_stage["count"])
+        self.assertEqual(["crates/thaw-std/src/json.rs"], cumulative_stage["extra_paths"])
+        self.assertEqual("lexical", cumulative_stage["path_order"])
+
+        cumulative_base = production_expected["cumulative_base"]
+        base_path = MODULE_DIR / cumulative_base["file"]
+        final_path = MODULE_DIR / cumulative_stage["file"]
+        repair_final = MODULE_DIR / next(stage["file"] for stage in production_expected["stage_manifests"] if stage["name"] == "compile-repairs-v1")
+        self.assertEqual("d3b7c0e06ca053f4b342dcbc8ac1247a3460c946a35a2b22d2645c76251a2aa9", cumulative_base["sha256"])
+        self.assertEqual(cumulative_base["sha256"], sha(base_path.read_bytes()))
+        self.assertEqual(repair_final.read_bytes(), base_path.read_bytes())
+        base_rows = mod._parse_sha_manifest(base_path, "actual cumulative base", path_order="lexical")
+        final_rows = mod._parse_sha_manifest(final_path, "actual cumulative final", path_order="lexical")
+        self.assertEqual(181, len(base_rows))
+        self.assertEqual(181, len(final_rows))
+        self.assertEqual(production_expected["cumulative_base"]["sha256"], sha(base_path.read_bytes()))
+        self.assertEqual(cumulative_stage["sha256"], sha(final_path.read_bytes()))
+        final_hashes = {rel: digest for digest, rel in final_rows}
+        repair_json = production_expected["repair_base"]["extra_owner"]
+        self.assertEqual(repair_json["final_sha256"], final_hashes[repair_json["path"]])
+
+        net = production_expected["net_owners"]
+        roster_path = MODULE_DIR / net["file"]
+        roster_lines = roster_path.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(net["sha256"], sha(roster_path.read_bytes()))
+        self.assertEqual("2b44f2be32a7ba49a50436af2bb3890f853a0ea5e9cca38d7abaf43c68f92c76", sha(roster_path.read_bytes()))
+        self.assertEqual((53, 48, 5), (len(roster_lines), sum(line.startswith("modified  ") for line in roster_lines), sum(line.startswith("new  ") for line in roster_lines)))
+        self.assertEqual((53, 48, 5), (net["count"], net["modified"], net["new"]))
+        fixture_expected = mod.EXPECTED
+        mod.EXPECTED = production_expected
+        try:
+            parsed_roster = mod._read_net_roster(MODULE_DIR)
+        finally:
+            mod.EXPECTED = fixture_expected
+        self.assertEqual(53, len(parsed_roster))
+        self.assertEqual(48, sum(status == "modified" for status in parsed_roster.values()))
+        self.assertEqual(5, sum(status == "new" for status in parsed_roster.values()))
+
+        added_filters = production_expected["test_filters"][-2:]
+        self.assertEqual(27, len(production_expected["test_filters"]))
+        self.assertEqual((20, 6, 1), tuple(sum(item["package"] == package for item in production_expected["test_filters"]) for package in ("thaw-llvm", "thaw-hir", "thaw-std")))
+        self.assertEqual(
+            [
+                {"package": "thaw-hir", "filter": "thaw_binding_helper_"},
+                {"package": "thaw-hir", "filter": "receiver_pattern_inference_"},
+            ],
+            added_filters,
+        )
+        exact_names = {
+            "thaw_binding_helper_": [
+                "thaw_binding_helper_declaration_flags_follow_resolved_symbols",
+                "thaw_binding_helper_iteration_cell_inherits_only_current_outer_immutability",
+            ],
+            "receiver_pattern_inference_": [
+                "receiver_pattern_inference_parsed_annotations_keep_pattern_and_legacy_states",
+                "receiver_pattern_inference_declarations_remain_accepted_without_calls",
+                "receiver_pattern_inference_source_negative_and_shape_controls",
+                "receiver_pattern_inference_physical_and_split_modes_match_receiver_first",
+                "receiver_pattern_inference_synthetic_and_contextual_modes_stay_separate",
+                "receiver_pattern_inference_distinguishes_absent_undefined_and_legacy_receivers",
+                "receiver_pattern_inference_optional_rest_indices_and_key_literals_stay_visible_only",
+                "receiver_pattern_inference_implicit_fallbacks_follow_actual_match_order",
+                "receiver_pattern_inference_explicit_constraints_precede_actual_mismatch",
+                "receiver_pattern_inference_type_only_and_receiver_free_promise_controls",
+            ],
+        }
+        for filter_name, expected_names in exact_names.items():
+            self.assertEqual(expected_names, production_expected["expected_test_names"][filter_name])
 
     def test_wrong_repair_patch_hash_and_paired_base_hash_are_rejected(self):
         mod = self.require_implementation()
