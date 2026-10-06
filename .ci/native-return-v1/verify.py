@@ -48,6 +48,7 @@ EXPECTED: dict[str, Any] = {
         "return-v1.patch": "2e2e2057925542c0790d5ec879ce94d55e3ba5798b470aa5cd85327821fd1ec8",
         "compile-repairs-v1.patch": "2994f62e98a4fb9cbd0b792b20da09bf505874d749447bf8f0e43776d25e0f05",
         "cumulative-hir-v1.patch": "63744b75a96ce30ff503d90379b08ec20ffbebb5f5f68716972d6c7d6f17f368",
+        "next-hir-v1.patch": "c0d4addaf22a7c7c26a133153b8298cc39013794f0263228468dddb8e0f3936b",
     },
     "artifacts": {
         "original-native.sha256": "4e219dde2129cf5876497edd6f9032cebdbee89eded9cce20e50ecda041053ce",
@@ -55,12 +56,14 @@ EXPECTED: dict[str, Any] = {
         "discard-v2.sha256": "c47d4ab7e4a805190e719b13b99bd7d233e24a5007afcbff6becebab9493e328",
         "return-v1.sha256": "51b1d9dd9a501538cc44fcaf8bfa72cc5a3f9ceb34c2942d4a0c676acc2e7031",
         "native-base.sha256": "da86c2c16619de2e236cdd50b9d2572465fbdd4dc3b75b680cf91c6b0f6bdb72",
-        "net-owners.txt": "2b44f2be32a7ba49a50436af2bb3890f853a0ea5e9cca38d7abaf43c68f92c76",
+        "net-owners.txt": "673d4f32930cd141ac8e3562179a9c61b0d3a8a1da55ac7c342d2914f1ed40ab",
         "scope-v5-test-plan.md": "9eb740f8f418de5e7f8c7cd88607d5b269c7495a34600d937bf8653f7e55ae81",
         "compile-repairs-v1-base.sha256": "88bb3556306a13f8148d229b88057ed4324f9ac43861cbc5d2b3fd52df03e80e",
         "compile-repairs-v1.sha256": "d3b7c0e06ca053f4b342dcbc8ac1247a3460c946a35a2b22d2645c76251a2aa9",
         "cumulative-hir-v1-base.sha256": "d3b7c0e06ca053f4b342dcbc8ac1247a3460c946a35a2b22d2645c76251a2aa9",
         "cumulative-hir-v1.sha256": "0be3783d6241706ba2dd492704162aa9e0076dcc4a1de96e309eca9b512ba81c",
+        "next-hir-v1-base.sha256": "0be3783d6241706ba2dd492704162aa9e0076dcc4a1de96e309eca9b512ba81c",
+        "next-hir-v1.sha256": "f8915460efcaafc82a4392d9ca6b656dc150045d5cad4458b66755ef5705635b",
     },
     "stage_manifests": [
         {"name": "original-native", "file": "original-native.sha256", "sha256": "4e219dde2129cf5876497edd6f9032cebdbee89eded9cce20e50ecda041053ce", "count": 175},
@@ -69,6 +72,7 @@ EXPECTED: dict[str, Any] = {
         {"name": "return-v1", "file": "return-v1.sha256", "sha256": "51b1d9dd9a501538cc44fcaf8bfa72cc5a3f9ceb34c2942d4a0c676acc2e7031", "count": 180},
         {"name": "compile-repairs-v1", "file": "compile-repairs-v1.sha256", "sha256": "d3b7c0e06ca053f4b342dcbc8ac1247a3460c946a35a2b22d2645c76251a2aa9", "count": 181, "extra_paths": ["crates/thaw-std/src/json.rs"], "path_order": "lexical"},
         {"name": "cumulative-hir-v1", "file": "cumulative-hir-v1.sha256", "sha256": "0be3783d6241706ba2dd492704162aa9e0076dcc4a1de96e309eca9b512ba81c", "count": 181, "extra_paths": ["crates/thaw-std/src/json.rs"], "path_order": "lexical"},
+        {"name": "next-hir-v1", "file": "next-hir-v1.sha256", "sha256": "f8915460efcaafc82a4392d9ca6b656dc150045d5cad4458b66755ef5705635b", "count": 181, "extra_paths": ["crates/thaw-std/src/json.rs"], "path_order": "lexical"},
     ],
     "repair_base": {
         "file": "compile-repairs-v1-base.sha256",
@@ -89,9 +93,16 @@ EXPECTED: dict[str, Any] = {
         "path_order": "lexical",
         "paired_after": "compile-repairs-v1",
     },
+    "next_hir_base": {
+        "file": "next-hir-v1-base.sha256",
+        "sha256": "0be3783d6241706ba2dd492704162aa9e0076dcc4a1de96e309eca9b512ba81c",
+        "count": 181,
+        "path_order": "lexical",
+        "paired_after": "cumulative-hir-v1",
+    },
     "native_base": {"file": "native-base.sha256", "sha256": "da86c2c16619de2e236cdd50b9d2572465fbdd4dc3b75b680cf91c6b0f6bdb72", "count": 24},
-    "net_owners": {"file": "net-owners.txt", "sha256": "2b44f2be32a7ba49a50436af2bb3890f853a0ea5e9cca38d7abaf43c68f92c76", "count": 53, "modified": 48, "new": 5},
-    "patch_order": ["original-native", "scope-v5", "discard-v2", "return-v1", "compile-repairs-v1", "cumulative-hir-v1"],
+    "net_owners": {"file": "net-owners.txt", "sha256": "673d4f32930cd141ac8e3562179a9c61b0d3a8a1da55ac7c342d2914f1ed40ab", "count": 54, "modified": 49, "new": 5},
+    "patch_order": ["original-native", "scope-v5", "discard-v2", "return-v1", "compile-repairs-v1", "cumulative-hir-v1", "next-hir-v1"],
     "subset_roots": [
         ".gitignore",
         "Cargo.lock",
@@ -164,6 +175,9 @@ EXPECTED: dict[str, Any] = {
         {"package": "thaw-std", "filter": "typed_decode_scope_tracks_dynamic_retains_merges_and_excludes_reentry"},
         {"package": "thaw-hir", "filter": "thaw_binding_helper_"},
         {"package": "thaw-hir", "filter": "receiver_pattern_inference_"},
+        {"package": "thaw-hir", "filter": "thaw_rethrow_cleanup_"},
+        {"package": "thaw-hir", "filter": "error_argument_staging_"},
+        {"package": "thaw-hir", "filter": "existing_native_spread_staging_mode_false_is_unchanged"},
     ],
     "expected_test_names": {
         "thaw_remaining_": [
@@ -194,6 +208,27 @@ EXPECTED: dict[str, Any] = {
             "receiver_pattern_inference_implicit_fallbacks_follow_actual_match_order",
             "receiver_pattern_inference_explicit_constraints_precede_actual_mismatch",
             "receiver_pattern_inference_type_only_and_receiver_free_promise_controls",
+        ],
+        "thaw_rethrow_cleanup_": [
+            "thaw_rethrow_cleanup_named_suffix_catches_publish_the_visible_carrier",
+            "thaw_rethrow_cleanup_unannotated_alias_keeps_and_publishes_the_carrier",
+            "thaw_rethrow_cleanup_mutation_retags_and_publishes_the_current_binding",
+            "thaw_rethrow_cleanup_nested_shadow_publishes_the_outer_carrier_alias",
+            "thaw_rethrow_cleanup_number_typeof_narrowing_uses_member_zero_f64",
+            "thaw_rethrow_cleanup_common_publisher_checks_all_carrier_arms_structurally",
+            "thaw_rethrow_cleanup_member_six_routes_original_pointer_to_object_setter",
+        ],
+        "error_argument_staging_": [
+            "error_argument_staging_keeps_all_raw_values_once",
+            "error_argument_staging_flattens_literal_spreads_in_order",
+            "error_argument_staging_snapshots_tuple_members_before_next_argument",
+            "error_argument_staging_evaluates_empty_tuple_and_extras",
+            "error_argument_staging_preserves_reference_and_union_representations",
+            "error_argument_staging_wrapper_precedes_message_work",
+            "error_argument_staging_retains_existing_spread_admission",
+        ],
+        "existing_native_spread_staging_mode_false_is_unchanged": [
+            "existing_native_spread_staging_mode_false_is_unchanged",
         ],
     },
     # Informational fingerprints only; their underlying prose is not shipped or validated by CI.
@@ -521,10 +556,13 @@ def _read_net_roster(payload: Path) -> dict[str, str]:
     roster: dict[str, str] = {}
     previous = ""
     for number, line in enumerate(rows, 1):
-        match = re.fullmatch(r"(modified|new)  (.+)", line)
+        match = re.fullmatch(r"(modified|new|added)  (.+)", line)
         if not match:
             raise VerificationError(f"net-owner roster malformed at line {number}")
-        status, rel = match.groups()
+        source_status, rel = match.groups()
+        # The frozen source roster spells inherited new-file rows "added";
+        # normalize that one allowed spelling to the verifier's internal "new".
+        status = "new" if source_status == "added" else source_status
         _safe_rel(rel, f"net-owner line {number}")
         if rel in roster:
             raise VerificationError(f"net-owner roster has duplicate path {rel}")
@@ -585,6 +623,11 @@ def verify_inputs(baseline: Path, payload: Path) -> dict[str, Any]:
         actual = _sha(path.read_bytes())
         if actual != expected_hash:
             raise VerificationError(f"payload patch hash mismatch for {rel}: expected {expected_hash}, got {actual}")
+    expected_next_hir_inputs = {"next-hir-v1.patch", "next-hir-v1-base.sha256", "next-hir-v1.sha256"}
+    actual_next_hir_inputs = {entry.name for entry in payload.iterdir() if entry.name.startswith("next-hir-v")}
+    if actual_next_hir_inputs - expected_next_hir_inputs:
+        unexpected = sorted(actual_next_hir_inputs - expected_next_hir_inputs)
+        raise VerificationError(f"unexpected next HIR input: {unexpected[0]}")
 
     owner_map = _read_owner_map(payload)
     manifest = _json_no_duplicates(source_bytes["handoff_manifest"], "native handoff manifest")
@@ -621,9 +664,9 @@ def verify_inputs(baseline: Path, payload: Path) -> dict[str, Any]:
 
     # Each manifest file is parsed here, before any patch is applied, so malformed or
     # unsafe input cannot become a Cargo-time surprise.
-    lexical_stage_names = {"compile-repairs-v1", "cumulative-hir-v1"}
+    lexical_stage_names = {"compile-repairs-v1", "cumulative-hir-v1", "next-hir-v1"}
     extra_path = EXPECTED["repair_base"]["extra_owner"]["path"]
-    extra_paths_by_stage = {"compile-repairs-v1": [extra_path], "cumulative-hir-v1": [extra_path]}
+    extra_paths_by_stage = {"compile-repairs-v1": [extra_path], "cumulative-hir-v1": [extra_path], "next-hir-v1": [extra_path]}
     for stage in EXPECTED["stage_manifests"]:
         extra_paths = stage.get("extra_paths", [])
         expected_extra = extra_paths_by_stage.get(stage["name"], [])
@@ -712,14 +755,41 @@ def verify_inputs(baseline: Path, payload: Path) -> dict[str, Any]:
     cumulative_stage = stage_by_name.get("cumulative-hir-v1")
     if cumulative_stage is None or cumulative_stage.get("path_order") != "lexical":
         raise VerificationError("cumulative final manifest must use its pinned lexical path ordering")
+    cumulative_final_path = _path_without_symlinks(payload, cumulative_stage["file"], "cumulative HIR final")
     cumulative_rows = _parse_sha_manifest(
-        payload / cumulative_stage["file"],
+        cumulative_final_path,
         "cumulative HIR final",
         path_order="lexical",
     )
     cumulative_json_hash = dict((rel, digest) for digest, rel in cumulative_rows).get(extra["path"])
     if {rel for _, rel in cumulative_rows} != {rel for _, rel in cumulative_base_rows} or cumulative_json_hash != extra["final_sha256"]:
         raise VerificationError("cumulative HIR final manifest changed the paired base path set or pinned JSON hash")
+
+    next_base = EXPECTED["next_hir_base"]
+    if next_base.get("path_order") != "lexical" or next_base.get("paired_after") != "cumulative-hir-v1":
+        raise VerificationError("next HIR paired base must be lexical and immediately follow cumulative-hir-v1")
+    next_index = EXPECTED["patch_order"].index("next-hir-v1")
+    if next_index == 0 or EXPECTED["patch_order"][next_index - 1] != next_base["paired_after"]:
+        raise VerificationError("next HIR paired base does not immediately precede its patch stage")
+    next_stage = stage_by_name.get("next-hir-v1")
+    if next_stage is None or next_stage.get("path_order") != "lexical" or next_stage.get("extra_paths") != [extra["path"]]:
+        raise VerificationError("next HIR final manifest must preserve lexical ordering and the stage-scoped JSON owner")
+    if next_base.get("count") != cumulative_stage["count"] or next_stage.get("count") != next_base["count"]:
+        raise VerificationError("next HIR paired base and final counts must match the cumulative HIR stage")
+    next_base_path = _path_without_symlinks(payload, next_base["file"], "next HIR paired base")
+    if not next_base_path.is_file():
+        raise VerificationError(f"next HIR paired base manifest missing: {next_base['file']}")
+    if next_base_path.read_bytes() != cumulative_final_path.read_bytes():
+        raise VerificationError("next HIR paired base manifest is not byte-identical to the cumulative HIR final manifest")
+    next_base_rows = _parse_sha_manifest(next_base_path, "next HIR paired base", path_order="lexical")
+    if len(next_base_rows) != next_base["count"] or {rel: digest for digest, rel in next_base_rows} != {rel: digest for digest, rel in cumulative_rows}:
+        raise VerificationError("next HIR paired base differs from the exact cumulative HIR final source")
+    next_base_map = {rel: digest for digest, rel in next_base_rows}
+    next_final_path = _path_without_symlinks(payload, next_stage["file"], "next HIR final")
+    next_final_rows = _parse_sha_manifest(next_final_path, "next HIR final", path_order="lexical")
+    next_final_map = {rel: digest for digest, rel in next_final_rows}
+    if len(next_final_rows) != next_stage["count"] or set(next_final_map) != set(next_base_map) or next_final_map.get(extra["path"]) != extra["final_sha256"]:
+        raise VerificationError("next HIR final manifest changed the paired base path set or pinned JSON hash")
     return {
         "baseline": identity,
         "inputs": {**EXPECTED["payload_patches"], **EXPECTED["artifacts"]},
@@ -884,6 +954,7 @@ def _patch_path(baseline: Path, payload: Path, name: str) -> Path:
         "return-v1": "return-v1.patch",
         "compile-repairs-v1": "compile-repairs-v1.patch",
         "cumulative-hir-v1": "cumulative-hir-v1.patch",
+        "next-hir-v1": "next-hir-v1.patch",
     }.get(name)
     if not payload_name:
         raise VerificationError(f"unknown patch stage: {name}")
@@ -967,6 +1038,27 @@ def reconstruct(baseline: Path, candidate: Path, payload: Path, evidence: Path) 
                     "count": paired["count"],
                     "manifest_sha256": paired["manifest_sha256"],
                     "paired_after": repair_stage["name"],
+                    "extra_owner": EXPECTED["repair_base"]["extra_owner"]["path"],
+                }
+            elif stage["name"] == "next-hir-v1":
+                next_base = EXPECTED["next_hir_base"]
+                paired_stage_name = next_base["paired_after"]
+                if not state["stages"] or state["stages"][-1]["stage"] != paired_stage_name:
+                    raise VerificationError("next HIR paired base is not immediately after the named cumulative HIR final")
+                paired = verify_stage(
+                    candidate,
+                    payload / next_base["file"],
+                    next_base["count"],
+                    [EXPECTED["repair_base"]["extra_owner"]["path"]],
+                    next_base.get("path_order", "components"),
+                )
+                previous = state["stages"][-1]
+                if paired["manifest_sha256"] != previous["manifest_sha256"] or paired["count"] != previous["count"]:
+                    raise VerificationError("next HIR paired base does not equal the immediately preceding cumulative HIR final")
+                state["paired_next_hir_base"] = {
+                    "count": paired["count"],
+                    "manifest_sha256": paired["manifest_sha256"],
+                    "paired_after": paired_stage_name,
                     "extra_owner": EXPECTED["repair_base"]["extra_owner"]["path"],
                 }
             applied = _apply_patch(candidate, patch)

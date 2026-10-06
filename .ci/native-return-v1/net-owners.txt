@@ -13,6 +13,7 @@ modified  crates/thaw-hir/src/lower/expressions/functions.rs
 modified  crates/thaw-hir/src/lower/expressions/lowering.rs
 modified  crates/thaw-hir/src/lower/generic_calls.rs
 modified  crates/thaw-hir/src/lower/inference/types.rs
+modified  crates/thaw-hir/src/lower/invocations/arguments.rs
 modified  crates/thaw-hir/src/lower/invocations/calls.rs
 modified  crates/thaw-hir/src/lower/invocations/static_builtins.rs
 modified  crates/thaw-hir/src/lower/module/pipeline.rs
@@ -37,13 +38,13 @@ modified  crates/thaw-llvm/src/hir_codegen/promises.rs
 modified  crates/thaw-llvm/src/hir_codegen/runtime_declarations.rs
 modified  crates/thaw-llvm/src/hir_codegen/statements.rs
 modified  crates/thaw-llvm/src/hir_codegen/tests/async.rs
-new  crates/thaw-llvm/src/hir_codegen/tests/async/eval_then_returns.rs
+added  crates/thaw-llvm/src/hir_codegen/tests/async/eval_then_returns.rs
 modified  crates/thaw-llvm/src/hir_codegen/tests/async/expressions.rs
 modified  crates/thaw-llvm/src/hir_codegen/tests/async/promises.rs
-new  crates/thaw-llvm/src/hir_codegen/tests/async/resolver_provenance.rs
-new  crates/thaw-llvm/src/hir_codegen/tests/async/union_discard.rs
-new  crates/thaw-llvm/src/hir_codegen/tests/async/union_discard_eval_then.rs
-new  crates/thaw-llvm/src/hir_codegen/tests/async/union_discard_jit.rs
+added  crates/thaw-llvm/src/hir_codegen/tests/async/resolver_provenance.rs
+added  crates/thaw-llvm/src/hir_codegen/tests/async/union_discard.rs
+added  crates/thaw-llvm/src/hir_codegen/tests/async/union_discard_eval_then.rs
+added  crates/thaw-llvm/src/hir_codegen/tests/async/union_discard_jit.rs
 modified  crates/thaw-llvm/src/hir_codegen/values/closures.rs
 modified  crates/thaw-llvm/src/hir_codegen/values/expressions.rs
 modified  crates/thaw-llvm/src/hir_codegen/values/unions.rs

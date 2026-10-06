@@ -6,7 +6,9 @@
     "cumulative-hir-v1.sha256": "0be3783d6241706ba2dd492704162aa9e0076dcc4a1de96e309eca9b512ba81c",
     "discard-v2.sha256": "c47d4ab7e4a805190e719b13b99bd7d233e24a5007afcbff6becebab9493e328",
     "native-base.sha256": "da86c2c16619de2e236cdd50b9d2572465fbdd4dc3b75b680cf91c6b0f6bdb72",
-    "net-owners.txt": "2b44f2be32a7ba49a50436af2bb3890f853a0ea5e9cca38d7abaf43c68f92c76",
+    "net-owners.txt": "673d4f32930cd141ac8e3562179a9c61b0d3a8a1da55ac7c342d2914f1ed40ab",
+    "next-hir-v1-base.sha256": "0be3783d6241706ba2dd492704162aa9e0076dcc4a1de96e309eca9b512ba81c",
+    "next-hir-v1.sha256": "f8915460efcaafc82a4392d9ca6b656dc150045d5cad4458b66755ef5705635b",
     "original-native.sha256": "4e219dde2129cf5876497edd6f9032cebdbee89eded9cce20e50ecda041053ce",
     "return-v1.sha256": "51b1d9dd9a501538cc44fcaf8bfa72cc5a3f9ceb34c2942d4a0c676acc2e7031",
     "scope-v5-test-plan.md": "9eb740f8f418de5e7f8c7cd88607d5b269c7495a34600d937bf8653f7e55ae81",
@@ -31,6 +33,18 @@
     "sha256": "d3b7c0e06ca053f4b342dcbc8ac1247a3460c946a35a2b22d2645c76251a2aa9"
   },
   "expected_test_names": {
+    "error_argument_staging_": [
+      "error_argument_staging_keeps_all_raw_values_once",
+      "error_argument_staging_flattens_literal_spreads_in_order",
+      "error_argument_staging_snapshots_tuple_members_before_next_argument",
+      "error_argument_staging_evaluates_empty_tuple_and_extras",
+      "error_argument_staging_preserves_reference_and_union_representations",
+      "error_argument_staging_wrapper_precedes_message_work",
+      "error_argument_staging_retains_existing_spread_admission"
+    ],
+    "existing_native_spread_staging_mode_false_is_unchanged": [
+      "existing_native_spread_staging_mode_false_is_unchanged"
+    ],
     "receiver_pattern_inference_": [
       "receiver_pattern_inference_parsed_annotations_keep_pattern_and_legacy_states",
       "receiver_pattern_inference_declarations_remain_accepted_without_calls",
@@ -57,6 +71,15 @@
       "thaw_remaining_bytes_erasure_visits_this_signature_and_callable_reference_types",
       "thaw_remaining_native_exception_is_preserved_as_an_opaque_type_leaf"
     ],
+    "thaw_rethrow_cleanup_": [
+      "thaw_rethrow_cleanup_named_suffix_catches_publish_the_visible_carrier",
+      "thaw_rethrow_cleanup_unannotated_alias_keeps_and_publishes_the_carrier",
+      "thaw_rethrow_cleanup_mutation_retags_and_publishes_the_current_binding",
+      "thaw_rethrow_cleanup_nested_shadow_publishes_the_outer_carrier_alias",
+      "thaw_rethrow_cleanup_number_typeof_narrowing_uses_member_zero_f64",
+      "thaw_rethrow_cleanup_common_publisher_checks_all_carrier_arms_structurally",
+      "thaw_rethrow_cleanup_member_six_routes_original_pointer_to_object_setter"
+    ],
     "typed_decode_scope_tracks_dynamic_retains_merges_and_excludes_reentry": [
       "typed_decode_scope_tracks_dynamic_retains_merges_and_excludes_reentry"
     ]
@@ -67,11 +90,18 @@
     "sha256": "da86c2c16619de2e236cdd50b9d2572465fbdd4dc3b75b680cf91c6b0f6bdb72"
   },
   "net_owners": {
-    "count": 53,
+    "count": 54,
     "file": "net-owners.txt",
-    "modified": 48,
+    "modified": 49,
     "new": 5,
-    "sha256": "2b44f2be32a7ba49a50436af2bb3890f853a0ea5e9cca38d7abaf43c68f92c76"
+    "sha256": "673d4f32930cd141ac8e3562179a9c61b0d3a8a1da55ac7c342d2914f1ed40ab"
+  },
+  "next_hir_base": {
+    "count": 181,
+    "file": "next-hir-v1-base.sha256",
+    "paired_after": "cumulative-hir-v1",
+    "path_order": "lexical",
+    "sha256": "0be3783d6241706ba2dd492704162aa9e0076dcc4a1de96e309eca9b512ba81c"
   },
   "patch_order": [
     "original-native",
@@ -79,12 +109,14 @@
     "discard-v2",
     "return-v1",
     "compile-repairs-v1",
-    "cumulative-hir-v1"
+    "cumulative-hir-v1",
+    "next-hir-v1"
   ],
   "payload_patches": {
     "compile-repairs-v1.patch": "2994f62e98a4fb9cbd0b792b20da09bf505874d749447bf8f0e43776d25e0f05",
     "cumulative-hir-v1.patch": "63744b75a96ce30ff503d90379b08ec20ffbebb5f5f68716972d6c7d6f17f368",
     "discard-v2.patch": "0ffe9fcec530feb12a2ca084399643861c240cc81906c9aab4677cc529aceb39",
+    "next-hir-v1.patch": "c0d4addaf22a7c7c26a133153b8298cc39013794f0263228468dddb8e0f3936b",
     "return-v1.patch": "2e2e2057925542c0790d5ec879ce94d55e3ba5798b470aa5cd85327821fd1ec8"
   },
   "provenance_only_review_fingerprints": {
@@ -197,6 +229,16 @@
       "name": "cumulative-hir-v1",
       "path_order": "lexical",
       "sha256": "0be3783d6241706ba2dd492704162aa9e0076dcc4a1de96e309eca9b512ba81c"
+    },
+    {
+      "count": 181,
+      "extra_paths": [
+        "crates/thaw-std/src/json.rs"
+      ],
+      "file": "next-hir-v1.sha256",
+      "name": "next-hir-v1",
+      "path_order": "lexical",
+      "sha256": "f8915460efcaafc82a4392d9ca6b656dc150045d5cad4458b66755ef5705635b"
     }
   ],
   "subset_roots": [
@@ -315,6 +357,18 @@
     },
     {
       "filter": "receiver_pattern_inference_",
+      "package": "thaw-hir"
+    },
+    {
+      "filter": "thaw_rethrow_cleanup_",
+      "package": "thaw-hir"
+    },
+    {
+      "filter": "error_argument_staging_",
+      "package": "thaw-hir"
+    },
+    {
+      "filter": "existing_native_spread_staging_mode_false_is_unchanged",
       "package": "thaw-hir"
     }
   ],
