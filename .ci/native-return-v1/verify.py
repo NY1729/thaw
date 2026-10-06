@@ -45,6 +45,10 @@ QUICKJS_WASM_PATH = "crates/thaw-quickjs/src/quickjs/wasm.rs"
 QUICKJS_WASM_BASE_SHA256 = "6eabef4cc98d6d123f8c8772f3b534ad06682e5e0792f6d18e56a350558f2a56"
 QUICKJS_WASM_BASE_GIT_BLOB_SHA1 = "8735b64671f7b03806397986e9fbbe08d08ac747"
 QUICKJS_WASM_FINAL_SHA256 = "6982e1394e32a2ddd083d3f5c31c9e8cf1f5e8b41105722c7cd4826efb73c0db"
+QUICKJS_TESTS_PATH = "crates/thaw-quickjs/src/tests.rs"
+QUICKJS_TESTS_BASE_SHA256 = "f9fd787016d9dcf3ec30aa52a0ff23c8f1bc970d88bbac375c0e4d65634992c6"
+QUICKJS_TESTS_BASE_GIT_BLOB_SHA1 = "a146b07ee0b1d398e3abb9a51e58a6f3bbce607a"
+QUICKJS_TESTS_FINAL_SHA256 = "c49ffdf065c4fd7d2d5765affed1daf773c07ef6b46eca137fa3c25ec1d5cab1"
 QUICKJS_RUNTIME_EXTRA_PATHS = [*STD_COMPILE_EXTRA_PATHS, QUICKJS_WASM_PATH]
 QUICKJS_RUNTIME_SOURCE_PATHS = [
     "crates/thaw-quickjs/src/quickjs/api.rs",
@@ -52,6 +56,12 @@ QUICKJS_RUNTIME_SOURCE_PATHS = [
     "crates/thaw-runtime/src/runtime/native_values/numbers.rs",
     "crates/thaw-runtime/src/runtime/native_values/template_strings.rs",
     "crates/thaw-runtime/src/tests.rs",
+]
+QUICKJS_API_FOLLOWUP_EXTRA_PATHS = [*QUICKJS_RUNTIME_EXTRA_PATHS, QUICKJS_TESTS_PATH]
+QUICKJS_API_FOLLOWUP_SOURCE_PATHS = [
+    "crates/thaw-quickjs/src/quickjs/api.rs",
+    QUICKJS_WASM_PATH,
+    QUICKJS_TESTS_PATH,
 ]
 EXPECTED: dict[str, Any] = {
     "schema_version": 1,
@@ -430,6 +440,53 @@ EXPECTED["expected_full_test_names"].update({
     )
 })
 
+EXPECTED["payload_patches"]["quickjs-api-followup-v1.patch"] = "3e4daa17ed3234d378d02ce34b19178a0bb3a6fae744d2a134b84c286d9fb1d0"
+EXPECTED["artifacts"].update({
+    "quickjs-api-followup-v1-base.sha256": "daf200a9aea71a2726db0c2754dbeb9da958bfafb53792a4d13adada892e4ae0",
+    "quickjs-api-followup-v1.sha256": "2fc7c97c06059974628930e661751c3a4cf7603bb1c2e795fe6a56d7f862d06b",
+    "net-owners.txt": "6c5e242bcbe3a8e247943cc644174df43d08ad9af376422d0ffed91bdb0b4ba0",
+})
+EXPECTED["stage_manifests"].append({
+    "name": "quickjs-api-followup-v1",
+    "file": "quickjs-api-followup-v1.sha256",
+    "sha256": "2fc7c97c06059974628930e661751c3a4cf7603bb1c2e795fe6a56d7f862d06b",
+    "count": 186,
+    "extra_paths": QUICKJS_API_FOLLOWUP_EXTRA_PATHS,
+    "path_order": "lexical",
+})
+EXPECTED["quickjs_api_followup_base"] = {
+    "file": "quickjs-api-followup-v1-base.sha256",
+    "sha256": "daf200a9aea71a2726db0c2754dbeb9da958bfafb53792a4d13adada892e4ae0",
+    "count": 186,
+    "path_order": "lexical",
+    "paired_after": "quickjs-runtime-compile-v1",
+    "extra_owner": {
+        "path": QUICKJS_TESTS_PATH,
+        "sha256": QUICKJS_TESTS_BASE_SHA256,
+        "git_blob_sha1": QUICKJS_TESTS_BASE_GIT_BLOB_SHA1,
+        "final_sha256": QUICKJS_TESTS_FINAL_SHA256,
+    },
+}
+EXPECTED["quickjs_api_followup_source_paths"] = QUICKJS_API_FOLLOWUP_SOURCE_PATHS
+EXPECTED["net_owners"] = {
+    "file": "net-owners.txt",
+    "sha256": "6c5e242bcbe3a8e247943cc644174df43d08ad9af376422d0ffed91bdb0b4ba0",
+    "count": 62,
+    "modified": 57,
+    "new": 5,
+}
+EXPECTED["patch_order"].append("quickjs-api-followup-v1")
+EXPECTED["test_filters"].extend([
+    {"package": "thaw-quickjs", "filter": "tests::terminal_pending_work_is_separate_from_failure_and_exit_code"},
+    {"package": "thaw-quickjs", "filter": "tests::private_graph_arguments_do_not_revive_user_marker_shapes"},
+])
+EXPECTED["expected_full_test_names"].update({
+    name: [name] for name in (
+        "tests::terminal_pending_work_is_separate_from_failure_and_exit_code",
+        "tests::private_graph_arguments_do_not_revive_user_marker_shapes",
+    )
+})
+
 
 class VerificationError(RuntimeError):
     """A source identity, input pin, or reconstruction contract failed."""
@@ -696,6 +753,7 @@ def verify_stage(
         FORCED_ROOT_STAGE_EXTRA_PATHS,
         STD_COMPILE_EXTRA_PATHS,
         QUICKJS_RUNTIME_EXTRA_PATHS,
+        QUICKJS_API_FOLLOWUP_EXTRA_PATHS,
     ]
     if extra_paths and extra_paths not in allowed_extra_sets:
         raise VerificationError(f"stage has an unapproved extra path scope: {extra_paths!r}")
@@ -937,7 +995,13 @@ def _verify_quickjs_runtime_inputs(
     stage = stage_by_name.get("quickjs-runtime-compile-v1")
     if not isinstance(base, dict) or previous is None or stage is None:
         raise VerificationError("QuickJS/runtime paired base or stage is missing")
-    if base.get("paired_after") != previous["name"] or EXPECTED["patch_order"][-2:] != ["std-compile-v1", "quickjs-runtime-compile-v1"]:
+    quickjs_runtime_index = EXPECTED["patch_order"].index("quickjs-runtime-compile-v1")
+    if (
+        base.get("paired_after") != previous["name"]
+        or quickjs_runtime_index == 0
+        or EXPECTED["patch_order"][quickjs_runtime_index - 1] != "std-compile-v1"
+        or EXPECTED["patch_order"][quickjs_runtime_index + 1] != "quickjs-api-followup-v1"
+    ):
         raise VerificationError("QuickJS/runtime paired base must immediately follow std-compile-v1")
     if base.get("path_order") != "lexical" or previous.get("path_order") != "lexical":
         raise VerificationError("QuickJS/runtime base and predecessor must retain lexical path ordering")
@@ -992,6 +1056,75 @@ def _verify_quickjs_runtime_inputs(
         "changed_source_owners": sorted(changed),
         "unchanged_source_count": len(base_map) - len(changed),
         "paired_after": previous["name"],
+    }
+
+
+def _verify_quickjs_api_followup_inputs(
+    payload: Path, baseline: Path, stage_by_name: dict[str, dict[str, Any]], net: dict[str, str]
+) -> dict[str, Any]:
+    """Pin stage twelve to stage eleven plus the original QuickJS tests.rs."""
+    base = EXPECTED.get("quickjs_api_followup_base")
+    previous = stage_by_name.get("quickjs-runtime-compile-v1")
+    stage = stage_by_name.get("quickjs-api-followup-v1")
+    if not isinstance(base, dict) or previous is None or stage is None:
+        raise VerificationError("QuickJS API follow-up paired base or stage is missing")
+    if base.get("paired_after") != previous["name"] or EXPECTED["patch_order"][-2:] != ["quickjs-runtime-compile-v1", "quickjs-api-followup-v1"]:
+        raise VerificationError("QuickJS API follow-up paired base must immediately follow quickjs-runtime-compile-v1")
+    if base.get("path_order") != "lexical" or previous.get("path_order") != "lexical":
+        raise VerificationError("QuickJS API follow-up base and predecessor must retain lexical path ordering")
+    if previous.get("extra_paths") != QUICKJS_RUNTIME_EXTRA_PATHS or stage.get("extra_paths") != QUICKJS_API_FOLLOWUP_EXTRA_PATHS:
+        raise VerificationError("QuickJS API follow-up stage has an unexpected stage-scoped path set")
+    if stage.get("path_order") != "lexical" or base.get("count") != previous["count"] + 1 or stage.get("count") != base["count"]:
+        raise VerificationError("QuickJS API follow-up paired base and final must contain exactly the predecessor plus baseline tests.rs")
+    if base.get("file") != "quickjs-api-followup-v1-base.sha256" or stage.get("file") != "quickjs-api-followup-v1.sha256":
+        raise VerificationError("QuickJS API follow-up paired input filenames differ from the pinned contract")
+    for descriptor in (base, stage):
+        if descriptor.get("sha256") != EXPECTED["artifacts"].get(descriptor["file"]):
+            raise VerificationError(f"QuickJS API follow-up manifest pin is stale for {descriptor['file']}")
+    expected_owner = {
+        "path": QUICKJS_TESTS_PATH,
+        "sha256": QUICKJS_TESTS_BASE_SHA256,
+        "git_blob_sha1": QUICKJS_TESTS_BASE_GIT_BLOB_SHA1,
+        "final_sha256": QUICKJS_TESTS_FINAL_SHA256,
+    }
+    if base.get("extra_owner") != expected_owner:
+        raise VerificationError("QuickJS API follow-up paired base tests.rs identity differs from the pinned baseline")
+    tests_path = _path_without_symlinks(baseline, QUICKJS_TESTS_PATH, "QuickJS API follow-up baseline tests owner")
+    if not tests_path.is_file() or tests_path.is_symlink():
+        raise VerificationError(f"QuickJS API follow-up baseline tests owner is missing or not a regular file: {QUICKJS_TESTS_PATH}")
+    tests_bytes = tests_path.read_bytes()
+    if _sha(tests_bytes) != QUICKJS_TESTS_BASE_SHA256 or _git_blob_sha1(tests_bytes) != QUICKJS_TESTS_BASE_GIT_BLOB_SHA1:
+        raise VerificationError("baseline QuickJS tests.rs owner SHA-256 or Git blob identity mismatch")
+    base_path = _path_without_symlinks(payload, base["file"], "QuickJS API follow-up paired base")
+    previous_path = _path_without_symlinks(payload, previous["file"], "QuickJS API follow-up predecessor final")
+    final_path = _path_without_symlinks(payload, stage["file"], "QuickJS API follow-up final")
+    previous_rows = _parse_sha_manifest(previous_path, "QuickJS API follow-up predecessor final", path_order="lexical")
+    base_rows = _parse_sha_manifest(base_path, "QuickJS API follow-up paired base", path_order="lexical")
+    final_rows = _parse_sha_manifest(final_path, "QuickJS API follow-up final", path_order="lexical")
+    previous_map = {rel: digest for digest, rel in previous_rows}
+    base_map = {rel: digest for digest, rel in base_rows}
+    final_map = {rel: digest for digest, rel in final_rows}
+    expected_base = dict(previous_map)
+    if QUICKJS_TESTS_PATH in expected_base:
+        raise VerificationError("QuickJS API follow-up paired base tests.rs is already in the preceding source set")
+    expected_base[QUICKJS_TESTS_PATH] = QUICKJS_TESTS_BASE_SHA256
+    if base_map != expected_base or len(base_rows) != base["count"]:
+        raise VerificationError("QuickJS API follow-up paired base differs from QuickJS/runtime final plus original baseline tests.rs")
+    if set(final_map) != set(base_map) or len(final_rows) != stage["count"]:
+        raise VerificationError("QuickJS API follow-up final changed the paired base path set")
+    changed = {rel for rel in base_map if base_map[rel] != final_map[rel]}
+    if changed != set(QUICKJS_API_FOLLOWUP_SOURCE_PATHS) or final_map.get(QUICKJS_TESTS_PATH) != QUICKJS_TESTS_FINAL_SHA256:
+        raise VerificationError("QuickJS API follow-up final must change exactly the three pinned QuickJS source owners")
+    if any(net.get(rel) != "modified" for rel in QUICKJS_API_FOLLOWUP_SOURCE_PATHS):
+        raise VerificationError("QuickJS API follow-up source owners must all be modified net owners")
+    return {
+        "base_count": len(base_map),
+        "final_count": len(final_map),
+        "changed_source_owners": sorted(changed),
+        "unchanged_source_count": len(base_map) - len(changed),
+        "paired_after": previous["name"],
+        "tests_baseline_sha256": QUICKJS_TESTS_BASE_SHA256,
+        "tests_baseline_git_blob_sha1": QUICKJS_TESTS_BASE_GIT_BLOB_SHA1,
     }
 
 
@@ -1063,6 +1196,11 @@ def verify_inputs(baseline: Path, payload: Path) -> dict[str, Any]:
     if actual_quickjs_runtime_inputs - expected_quickjs_runtime_inputs:
         unexpected = sorted(actual_quickjs_runtime_inputs - expected_quickjs_runtime_inputs)
         raise VerificationError(f"unexpected QuickJS/runtime compile input: {unexpected[0]}")
+    expected_quickjs_api_followup_inputs = {"quickjs-api-followup-v1.patch", "quickjs-api-followup-v1-base.sha256", "quickjs-api-followup-v1.sha256"}
+    actual_quickjs_api_followup_inputs = {entry.name for entry in payload.iterdir() if entry.name.startswith("quickjs-api-followup-v")}
+    if actual_quickjs_api_followup_inputs - expected_quickjs_api_followup_inputs:
+        unexpected = sorted(actual_quickjs_api_followup_inputs - expected_quickjs_api_followup_inputs)
+        raise VerificationError(f"unexpected QuickJS API follow-up input: {unexpected[0]}")
 
     owner_map = _read_owner_map(payload)
     manifest = _json_no_duplicates(source_bytes["handoff_manifest"], "native handoff manifest")
@@ -1099,7 +1237,7 @@ def verify_inputs(baseline: Path, payload: Path) -> dict[str, Any]:
 
     # Each manifest file is parsed here, before any patch is applied, so malformed or
     # unsafe input cannot become a Cargo-time surprise.
-    lexical_stage_names = {"compile-repairs-v1", "cumulative-hir-v1", "next-hir-v1", "forced-root-wire-v1", "dependency-compile-v1", "std-compile-v1", "quickjs-runtime-compile-v1"}
+    lexical_stage_names = {"compile-repairs-v1", "cumulative-hir-v1", "next-hir-v1", "forced-root-wire-v1", "dependency-compile-v1", "std-compile-v1", "quickjs-runtime-compile-v1", "quickjs-api-followup-v1"}
     extra_path = EXPECTED["repair_base"]["extra_owner"]["path"]
     extra_paths_by_stage = {
         "compile-repairs-v1": [extra_path],
@@ -1109,6 +1247,7 @@ def verify_inputs(baseline: Path, payload: Path) -> dict[str, Any]:
         "dependency-compile-v1": FORCED_ROOT_STAGE_EXTRA_PATHS,
         "std-compile-v1": STD_COMPILE_EXTRA_PATHS,
         "quickjs-runtime-compile-v1": QUICKJS_RUNTIME_EXTRA_PATHS,
+        "quickjs-api-followup-v1": QUICKJS_API_FOLLOWUP_EXTRA_PATHS,
     }
     for stage in EXPECTED["stage_manifests"]:
         extra_paths = stage.get("extra_paths", [])
@@ -1292,6 +1431,7 @@ def verify_inputs(baseline: Path, payload: Path) -> dict[str, Any]:
     dependency_inputs = _verify_dependency_compile_inputs(payload, stage_by_name, net)
     std_compile_inputs = _verify_std_compile_inputs(payload, baseline, stage_by_name, net)
     quickjs_runtime_inputs = _verify_quickjs_runtime_inputs(payload, baseline, stage_by_name, net)
+    quickjs_api_followup_inputs = _verify_quickjs_api_followup_inputs(payload, baseline, stage_by_name, net)
     return {
         "baseline": identity,
         "inputs": {**EXPECTED["payload_patches"], **EXPECTED["artifacts"]},
@@ -1300,6 +1440,7 @@ def verify_inputs(baseline: Path, payload: Path) -> dict[str, Any]:
         "dependency_compile": dependency_inputs,
         "std_compile": std_compile_inputs,
         "quickjs_runtime_compile": quickjs_runtime_inputs,
+        "quickjs_api_followup": quickjs_api_followup_inputs,
         "patch_order": list(EXPECTED["patch_order"]),
     }
 
@@ -1464,6 +1605,7 @@ def _patch_path(baseline: Path, payload: Path, name: str) -> Path:
         "dependency-compile-v1": "dependency-compile-v1.patch",
         "std-compile-v1": "std-compile-v1.patch",
         "quickjs-runtime-compile-v1": "quickjs-runtime-compile-v1.patch",
+        "quickjs-api-followup-v1": "quickjs-api-followup-v1.patch",
     }.get(name)
     if not payload_name:
         raise VerificationError(f"unknown patch stage: {name}")
@@ -1669,6 +1811,36 @@ def reconstruct(baseline: Path, candidate: Path, payload: Path, evidence: Path) 
                     "extra_owner": QUICKJS_WASM_PATH,
                     "wasm_baseline_sha256": QUICKJS_WASM_BASE_SHA256,
                     "wasm_baseline_git_blob_sha1": QUICKJS_WASM_BASE_GIT_BLOB_SHA1,
+                }
+            elif stage["name"] == "quickjs-api-followup-v1":
+                api_base = EXPECTED["quickjs_api_followup_base"]
+                paired_stage_name = api_base["paired_after"]
+                if not state["stages"] or state["stages"][-1]["stage"] != paired_stage_name:
+                    raise VerificationError("QuickJS API follow-up paired base is not immediately after the QuickJS/runtime final")
+                previous = stage_by_name[paired_stage_name]
+                previous_result = verify_stage(
+                    candidate,
+                    payload / previous["file"],
+                    previous["count"],
+                    previous.get("extra_paths", []),
+                    previous.get("path_order", "components"),
+                )
+                if previous_result["manifest_sha256"] != state["stages"][-1]["manifest_sha256"]:
+                    raise VerificationError("QuickJS API follow-up predecessor no longer matches the reconstructed QuickJS/runtime final")
+                paired = verify_stage(
+                    candidate,
+                    payload / api_base["file"],
+                    api_base["count"],
+                    QUICKJS_API_FOLLOWUP_EXTRA_PATHS,
+                    api_base["path_order"],
+                )
+                state["paired_quickjs_api_followup_base"] = {
+                    "count": paired["count"],
+                    "manifest_sha256": paired["manifest_sha256"],
+                    "paired_after": paired_stage_name,
+                    "extra_owner": QUICKJS_TESTS_PATH,
+                    "tests_baseline_sha256": QUICKJS_TESTS_BASE_SHA256,
+                    "tests_baseline_git_blob_sha1": QUICKJS_TESTS_BASE_GIT_BLOB_SHA1,
                 }
             applied = _apply_patch(candidate, patch)
             manifest = payload / stage["file"]

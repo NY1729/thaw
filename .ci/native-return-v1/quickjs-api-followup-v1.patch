@@ -1,0 +1,59 @@
+diff --git a/crates/thaw-quickjs/src/quickjs/api.rs b/crates/thaw-quickjs/src/quickjs/api.rs
+--- a/crates/thaw-quickjs/src/quickjs/api.rs
++++ b/crates/thaw-quickjs/src/quickjs/api.rs
+@@ -4611,7 +4611,7 @@
+ /// values, so a thrown Promise remains the original rejection value.
+ #[no_mangle]
+ pub extern "C" fn thaw_js_capture_handle_graph_result(handle: u64) -> ThawResult {
+-    let result = with_active_or_context(|ctx| {
++    let result: Result<String, String> = with_active_or_context(|ctx| {
+         let value = value_for_handle(&ctx, handle)?;
+         let encode: Function = ctx.globals().get("__thaw_json_graph_encode_js")
+             .map_err(|error| error.to_string())?;
+diff --git a/crates/thaw-quickjs/src/quickjs/wasm.rs b/crates/thaw-quickjs/src/quickjs/wasm.rs
+--- a/crates/thaw-quickjs/src/quickjs/wasm.rs
++++ b/crates/thaw-quickjs/src/quickjs/wasm.rs
+@@ -982,7 +982,7 @@
+             let mut converted = 0i64;
+             // QuickJS applies ToBigInt and signed 64-bit wrapping directly.
+             // No Caller borrow is held while user-defined coercion can reenter.
+-            if unsafe { rquickjs::qjs::JS_ToBigInt64(ctx.as_ptr(), &mut converted, value.as_js_value()) } < 0 {
++            if unsafe { rquickjs::qjs::JS_ToBigInt64(ctx.as_raw().as_ptr(), &mut converted, value.as_raw()) } < 0 {
+                 return Err(wasm_js_error(&ctx, rquickjs::Error::Exception));
+             }
+             Ok(WasmPreparedValue::Scalar(WasmVal::I64(converted)))
+@@ -2508,7 +2508,7 @@
+                         } else if retained_function {
+                             wasm_retain_table_function(*function, references.clone(), owners.clone(), &context)
+                         } else if let Some(owner) = native_owner {
+-                            let identity = context.as_context().data().identity.clone();
++                            let identity = context.data().identity.clone();
+                             let active = WASM_ACTIVE_CALLERS.with(|stack| {
+                                 stack.borrow().iter().rev().find_map(|entry| {
+                                     if !std::rc::Rc::ptr_eq(&entry.store_identity, &identity) { return None; }
+diff --git a/crates/thaw-quickjs/src/tests.rs b/crates/thaw-quickjs/src/tests.rs
+--- a/crates/thaw-quickjs/src/tests.rs
++++ b/crates/thaw-quickjs/src/tests.rs
+@@ -201,7 +201,7 @@
+     ) -> rquickjs::qjs::JSValue {
+         let source = c"globalThis.afterFailedJob = 1";
+         unsafe { rquickjs::qjs::JS_Eval(
+-            ctx, source.as_ptr(), source.to_bytes().len(), c"<terminal-test>".as_ptr(),
++            ctx, source.as_ptr(), source.to_bytes().len().try_into().expect("terminal test source length fits QuickJS size_t"), c"<terminal-test>".as_ptr(),
+             rquickjs::qjs::JS_EVAL_TYPE_GLOBAL as i32,
+         ) }
+     }
+@@ -6632,11 +6632,11 @@
+     let graph = c"{\"root\":{\"r\":0},\"nodes\":[{\"a\":[{\"r\":1},{\"r\":2},{\"u\":1},{\"r\":3}]},{\"d\":0},{\"o\":[[\"timestamp\",{\"v\":0}]]},{\"o\":[[\"$__thaw_napi_undefined$\",{\"v\":true}]]}],\"leases\":[]}";
+     let result = thaw_js_call_graph_result(c"inspectGraphArguments".as_ptr(), graph.as_ptr());
+     assert!(result.error.is_null());
+-    let result: serde_json::Value = serde_json::from_str(
++    let decoded: serde_json::Value = serde_json::from_str(
+         &unsafe { CStr::from_ptr(result.value) }.to_string_lossy(),
+     ).unwrap();
+     unsafe { thaw_arena::destroy_string(result.value.cast_mut()); }
+-    assert_eq!(result["nodes"][0]["a"], serde_json::json!([
++    assert_eq!(decoded["nodes"][0]["a"], serde_json::json!([
+         {"v": true}, {"v": false}, {"v": true}, {"v": false}, {"v": 0}, {"v": true}
+     ]));
+ }

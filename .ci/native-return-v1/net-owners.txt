@@ -51,6 +51,7 @@ modified  crates/thaw-llvm/src/hir_codegen/values/unions.rs
 modified  crates/thaw-quickjs/src/quickjs/api.rs
 modified  crates/thaw-quickjs/src/quickjs/platform_globals/runtime.js
 modified  crates/thaw-quickjs/src/quickjs/wasm.rs
+modified  crates/thaw-quickjs/src/tests.rs
 modified  crates/thaw-runtime/src/lib.rs
 modified  crates/thaw-runtime/src/runtime/native_values/numbers.rs
 modified  crates/thaw-runtime/src/runtime/native_values/strings.rs

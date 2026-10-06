@@ -122,6 +122,7 @@ class Fixture:
             "crates/thaw-runtime/src/tests.rs": "runtime tests base\n",
             "crates/thaw-quickjs/src/quickjs/api.rs": "api baseline\n",
             "crates/thaw-quickjs/src/quickjs/wasm.rs": "wasm baseline\n",
+            "crates/thaw-quickjs/src/tests.rs": "quickjs tests baseline\n",
             "crates/thaw-quickjs/src/quickjs/platform_globals/runtime.js": "runtime baseline\n",
             "outside.txt": "unmodified product file\n",
         }
@@ -134,6 +135,7 @@ class Fixture:
         promises_owner = "crates/thaw-runtime/src/runtime/promises.rs"
         runtime_tests_owner = "crates/thaw-runtime/src/tests.rs"
         http_owner = "crates/thaw-std/src/http.rs"
+        quickjs_tests_owner = "crates/thaw-quickjs/src/tests.rs"
         repair_extra_bytes = b"fixture json base\n"
         write(self.baseline / repair_extra, repair_extra_bytes)
 
@@ -167,7 +169,7 @@ class Fixture:
             json.dumps(handoff_manifest, sort_keys=True) + "\n",
         )
 
-        stage1 = {key: value for key, value in initial.items() if key not in ("outside.txt", api_owner, runtime_owner, "crates/thaw-quickjs/src/quickjs/wasm.rs")}
+        stage1 = {key: value for key, value in initial.items() if key not in ("outside.txt", api_owner, runtime_owner, "crates/thaw-quickjs/src/quickjs/wasm.rs", quickjs_tests_owner)}
         stage1[lib] = "pub fn fixture() -> &'static str { \"native\" }\n"
 
         # Patch 2: add one v5 control and wire it immediately.
@@ -279,6 +281,18 @@ class Fixture:
             for path in quickjs_paths
         )
         write(self.payload / "quickjs-runtime-compile-v1.patch", quickjs_patch)
+        quickjs_api_base = dict(quickjs_final)
+        quickjs_api_base[quickjs_tests_owner] = initial[quickjs_tests_owner]
+        quickjs_api_final = dict(quickjs_api_base)
+        quickjs_api_final[api_owner] = "api QuickJS API follow-up final\n"
+        quickjs_api_final[wasm_owner] = "wasm QuickJS API follow-up final\n"
+        quickjs_api_final[quickjs_tests_owner] = "QuickJS API follow-up tests final\n"
+        quickjs_api_paths = [api_owner, wasm_owner, quickjs_tests_owner]
+        quickjs_api_patch = b"".join(
+            patch_for(path, quickjs_api_base[path], quickjs_api_final[path])
+            for path in quickjs_api_paths
+        )
+        write(self.payload / "quickjs-api-followup-v1.patch", quickjs_api_patch)
         for name, files in (
             ("compile-repairs-v1-base", paired_base),
             ("compile-repairs-v1", repair_final),
@@ -293,11 +307,13 @@ class Fixture:
             ("std-compile-v1", std_final),
             ("quickjs-runtime-compile-v1-base", quickjs_base),
             ("quickjs-runtime-compile-v1", quickjs_final),
+            ("quickjs-api-followup-v1-base", quickjs_api_base),
+            ("quickjs-api-followup-v1", quickjs_api_final),
         ):
             stage_dir = root / ("manifest-tree-" + name)
             for rel, text in files.items():
                 write(stage_dir / rel, text)
-            path_order = "lexical" if name in ("compile-repairs-v1", "cumulative-hir-v1-base", "cumulative-hir-v1", "next-hir-v1-base", "next-hir-v1", "forced-root-wire-v1-base", "forced-root-wire-v1", "dependency-compile-v1", "std-compile-v1-base", "std-compile-v1", "quickjs-runtime-compile-v1-base", "quickjs-runtime-compile-v1") else "components"
+            path_order = "lexical" if name in ("compile-repairs-v1", "cumulative-hir-v1-base", "cumulative-hir-v1", "next-hir-v1-base", "next-hir-v1", "forced-root-wire-v1-base", "forced-root-wire-v1", "dependency-compile-v1", "std-compile-v1-base", "std-compile-v1", "quickjs-runtime-compile-v1-base", "quickjs-runtime-compile-v1", "quickjs-api-followup-v1-base", "quickjs-api-followup-v1") else "components"
             (self.payload / f"{name}.sha256").write_bytes(manifest_for(stage_dir, path_order))
         (self.payload / "dependency-compile-v1-base.sha256").write_bytes((self.payload / "forced-root-wire-v1.sha256").read_bytes())
 
@@ -365,6 +381,14 @@ class Fixture:
             "extra_paths": [repair_extra, api_owner, runtime_owner, http_owner, wasm_owner],
             "path_order": "lexical",
         })
+        stages.append({
+            "name": "quickjs-api-followup-v1",
+            "file": "quickjs-api-followup-v1.sha256",
+            "sha256": sha((self.payload / "quickjs-api-followup-v1.sha256").read_bytes()),
+            "count": len(quickjs_api_final),
+            "extra_paths": [repair_extra, api_owner, runtime_owner, http_owner, wasm_owner, quickjs_tests_owner],
+            "path_order": "lexical",
+        })
 
         # Stage fixture trees are written above from text maps; preserve the
         # expected subset inventory separately for fast mutation tests.
@@ -383,6 +407,7 @@ class Fixture:
             f"modified  {wasm_owner}\n",
             f"modified  {numbers_owner}\n",
             f"modified  {template_owner}\n",
+            f"modified  {quickjs_tests_owner}\n",
             f"new  {v5_control}\n",
             f"new  {discard_control}\n",
             f"new  {return_control}\n",
@@ -411,7 +436,7 @@ class Fixture:
         }
         payload_files = {
             name: sha((self.payload / name).read_bytes())
-            for name in ("discard-v2.patch", "return-v1.patch", "compile-repairs-v1.patch", "cumulative-hir-v1.patch", "next-hir-v1.patch", "forced-root-wire-v1.patch", "dependency-compile-v1.patch", "std-compile-v1.patch", "quickjs-runtime-compile-v1.patch")
+            for name in ("discard-v2.patch", "return-v1.patch", "compile-repairs-v1.patch", "cumulative-hir-v1.patch", "next-hir-v1.patch", "forced-root-wire-v1.patch", "dependency-compile-v1.patch", "std-compile-v1.patch", "quickjs-runtime-compile-v1.patch", "quickjs-api-followup-v1.patch")
         }
         artifact_hashes = {}
         for name, desc in self._artifact_paths().items():
@@ -428,8 +453,8 @@ class Fixture:
             "net_owners": {
                 "file": "net-owners.txt",
                 "sha256": sha((self.payload / "net-owners.txt").read_bytes()),
-            "count": 15,
-            "modified": 12,
+            "count": 16,
+            "modified": 13,
                 "new": 3,
             },
             "repair_base": {
@@ -513,7 +538,21 @@ class Fixture:
                 },
             },
             "quickjs_runtime_source_paths": quickjs_paths,
-            "patch_order": ["original-native", "scope-v5", "discard-v2", "return-v1", "compile-repairs-v1", "cumulative-hir-v1", "next-hir-v1", "forced-root-wire-v1", "dependency-compile-v1", "std-compile-v1", "quickjs-runtime-compile-v1"],
+            "quickjs_api_followup_base": {
+                "file": "quickjs-api-followup-v1-base.sha256",
+                "sha256": sha((self.payload / "quickjs-api-followup-v1-base.sha256").read_bytes()),
+                "count": len(quickjs_api_base),
+                "path_order": "lexical",
+                "paired_after": "quickjs-runtime-compile-v1",
+                "extra_owner": {
+                    "path": quickjs_tests_owner,
+                    "sha256": sha(initial[quickjs_tests_owner].encode()),
+                    "git_blob_sha1": verify._git_blob_sha1(initial[quickjs_tests_owner].encode()) if verify is not None else "",
+                    "final_sha256": sha(quickjs_api_final[quickjs_tests_owner].encode()),
+                },
+            },
+            "quickjs_api_followup_source_paths": quickjs_api_paths,
+            "patch_order": ["original-native", "scope-v5", "discard-v2", "return-v1", "compile-repairs-v1", "cumulative-hir-v1", "next-hir-v1", "forced-root-wire-v1", "dependency-compile-v1", "std-compile-v1", "quickjs-runtime-compile-v1", "quickjs-api-followup-v1"],
             "subset_roots": [
                 ".gitignore",
                 "Cargo.lock",
@@ -543,8 +582,8 @@ class Fixture:
         self.expected["net_owners"] = {
             "file": "net-owners.txt",
             "sha256": sha((self.payload / "net-owners.txt").read_bytes()),
-            "count": 15,
-            "modified": 12,
+            "count": 16,
+            "modified": 13,
             "new": 3,
         }
         write(self.payload / "pins.json", json.dumps(self.expected, sort_keys=True, indent=2) + "\n")
@@ -573,6 +612,10 @@ class Fixture:
             "std_compile_final": "std-compile-v1.sha256",
             "quickjs_runtime_base": "quickjs-runtime-compile-v1-base.sha256",
             "quickjs_runtime_final": "quickjs-runtime-compile-v1.sha256",
+            "quickjs_api_followup_base": "quickjs-api-followup-v1-base.sha256",
+            "quickjs_api_followup_final": "quickjs-api-followup-v1.sha256",
+            "quickjs_api_followup_base": "quickjs-api-followup-v1-base.sha256",
+            "quickjs_api_followup_final": "quickjs-api-followup-v1.sha256",
             "quickjs_runtime_base": "quickjs-runtime-compile-v1-base.sha256",
             "quickjs_runtime_final": "quickjs-runtime-compile-v1.sha256",
             "native_base": "native-base.sha256",
@@ -595,6 +638,11 @@ class Fixture:
             verify.QUICKJS_WASM_BASE_GIT_BLOB_SHA1,
             verify.QUICKJS_WASM_FINAL_SHA256,
         )
+        self.quickjs_tests_constants_before = (
+            verify.QUICKJS_TESTS_BASE_SHA256,
+            verify.QUICKJS_TESTS_BASE_GIT_BLOB_SHA1,
+            verify.QUICKJS_TESTS_FINAL_SHA256,
+        )
         owner = self.expected["std_compile_base"]["extra_owner"]
         verify.STD_HTTP_BASE_SHA256 = owner["sha256"]
         verify.STD_HTTP_BASE_GIT_BLOB_SHA1 = owner["git_blob_sha1"]
@@ -603,6 +651,10 @@ class Fixture:
         verify.QUICKJS_WASM_BASE_SHA256 = wasm_owner["sha256"]
         verify.QUICKJS_WASM_BASE_GIT_BLOB_SHA1 = wasm_owner["git_blob_sha1"]
         verify.QUICKJS_WASM_FINAL_SHA256 = wasm_owner["final_sha256"]
+        tests_owner = self.expected["quickjs_api_followup_base"]["extra_owner"]
+        verify.QUICKJS_TESTS_BASE_SHA256 = tests_owner["sha256"]
+        verify.QUICKJS_TESTS_BASE_GIT_BLOB_SHA1 = tests_owner["git_blob_sha1"]
+        verify.QUICKJS_TESTS_FINAL_SHA256 = tests_owner["final_sha256"]
         verify.EXPECTED = copy.deepcopy(self.expected)
 
 
@@ -630,6 +682,11 @@ class VerificationRedGreenTests(unittest.TestCase):
                 verify.QUICKJS_WASM_BASE_GIT_BLOB_SHA1,
                 verify.QUICKJS_WASM_FINAL_SHA256,
             ) = self.fixture.quickjs_wasm_constants_before
+            (
+                verify.QUICKJS_TESTS_BASE_SHA256,
+                verify.QUICKJS_TESTS_BASE_GIT_BLOB_SHA1,
+                verify.QUICKJS_TESTS_FINAL_SHA256,
+            ) = self.fixture.quickjs_tests_constants_before
         self.temp.cleanup()
 
     def assertVerifyError(self, pattern: str, call, *args, **kwargs):
@@ -637,7 +694,7 @@ class VerificationRedGreenTests(unittest.TestCase):
         with self.assertRaisesRegex(mod.VerificationError, pattern):
             call(*args, **kwargs)
 
-    def test_positive_reconstruction_replays_eleven_stages_and_preserves_unrelated_file(self):
+    def test_positive_reconstruction_replays_twelve_stages_and_preserves_unrelated_file(self):
         mod = self.require_implementation()
         result = mod.reconstruct(
             self.fixture.baseline,
@@ -646,9 +703,10 @@ class VerificationRedGreenTests(unittest.TestCase):
             self.fixture.evidence,
         )
         self.assertEqual([x["count"] for x in mod.EXPECTED["stage_manifests"]], result["stage_counts"])
-        self.assertEqual(11, len(result["stages"]))
-        self.assertEqual("quickjs-runtime-compile-v1", result["stages"][-1]["stage"])
+        self.assertEqual(12, len(result["stages"]))
+        self.assertEqual("quickjs-api-followup-v1", result["stages"][-1]["stage"])
         self.assertEqual(mod.EXPECTED["quickjs_runtime_compile_base"]["count"], result["paired_quickjs_runtime_base"]["count"])
+        self.assertEqual(mod.EXPECTED["quickjs_api_followup_base"]["count"], result["paired_quickjs_api_followup_base"]["count"])
         self.assertEqual(mod.EXPECTED["stage_manifests"][-1]["count"], result["stage_counts"][-1])
         self.assertEqual("unmodified product file\n", (self.fixture.candidate / "outside.txt").read_text())
         self.assertTrue((self.fixture.evidence / "reconstruction.json").is_file())
@@ -723,7 +781,7 @@ class VerificationRedGreenTests(unittest.TestCase):
         self.assertEqual("next-hir-v1", pair["paired_after"])
         self.assertEqual("lexical", pair["path_order"])
         result = mod.verify_inputs(self.fixture.baseline, self.fixture.payload)
-        self.assertEqual(15, result["net_owner_count"])
+        self.assertEqual(16, result["net_owner_count"])
         self.assertEqual(2, len(pair["extra_owners"]))
         before = {rel: digest for digest, rel in mod._parse_sha_manifest(self.fixture.payload / pair["file"], "wire base", path_order="lexical")}
         previous = {rel: digest for digest, rel in mod._parse_sha_manifest(self.fixture.payload / "next-hir-v1.sha256", "next final", path_order="lexical")}
@@ -810,7 +868,7 @@ class VerificationRedGreenTests(unittest.TestCase):
         stage = next(item for item in mod.EXPECTED["stage_manifests"] if item["name"] == "dependency-compile-v1")
         predecessor = next(item for item in mod.EXPECTED["stage_manifests"] if item["name"] == "forced-root-wire-v1")
         self.assertEqual("forced-root-wire-v1", base["paired_after"])
-        self.assertEqual(11, len(mod.EXPECTED["stage_manifests"]))
+        self.assertEqual(12, len(mod.EXPECTED["stage_manifests"]))
         self.assertEqual(predecessor["count"], base["count"])
         self.assertEqual(base["count"], stage["count"])
         self.assertEqual(predecessor["extra_paths"], stage["extra_paths"])
@@ -886,14 +944,14 @@ class VerificationRedGreenTests(unittest.TestCase):
         mod = self.require_implementation()
         expected = self.fixture.expected_before
         self.assertEqual(expected, json.loads((MODULE_DIR / "pins.json").read_text(encoding="utf-8")))
-        self.assertEqual(56, len(expected["test_filters"]))
+        self.assertEqual(58, len(expected["test_filters"]))
         self.assertEqual("0c2490af44241dfc80bef8ca25c321323722ab899842a0a84b6fd57906a48113", sha(json.dumps(expected["test_filters"][:49], sort_keys=True, separators=(",", ":")).encode()))
         self.assertEqual("36f8d90adffb57aac119cd538c9525e9dd13a9213cb8260832cdc2bee609e621", sha(json.dumps(expected["test_filters"][:39], sort_keys=True, separators=(",", ":")).encode()))
         self.assertEqual("d94499d8d78d64e6dbb72fbac6abaa548398718f89b5685d1d5a759f944954f9", sha(json.dumps(expected["test_filters"][:30], sort_keys=True, separators=(",", ":")).encode()))
         self.assertEqual("76007d26d76fa871bbc129d1ff94718df82a53a5bf363cf707e039a0561e669b", sha(json.dumps(expected["expected_test_names"], sort_keys=True, separators=(",", ":")).encode()))
         old_full_names = {key: value for key, value in expected["expected_full_test_names"].items() if key not in {item["filter"] for item in expected["test_filters"][39:]}}
         self.assertEqual("5efbf022609d87fda1346b2ed8a55b76113385735228ed176a0a2f2a8d996a7e", sha(json.dumps(old_full_names, sort_keys=True, separators=(",", ":")).encode()))
-        self.assertEqual((20, 9, 8, 9, 10), tuple(sum(item["package"] == package for item in expected["test_filters"]) for package in ("thaw-llvm", "thaw-hir", "thaw-std", "thaw-quickjs", "thaw-runtime")))
+        self.assertEqual((20, 9, 8, 11, 10), tuple(sum(item["package"] == package for item in expected["test_filters"]) for package in ("thaw-llvm", "thaw-hir", "thaw-std", "thaw-quickjs", "thaw-runtime")))
         appended = expected["test_filters"][39:50]
         expected_appended = [
             ("thaw-runtime", "tests::dependency_compile_uri_byte_iteration"),
@@ -911,22 +969,22 @@ class VerificationRedGreenTests(unittest.TestCase):
         self.assertEqual(expected_appended, [(item["package"], item["filter"]) for item in appended])
         self.assertTrue(all(set(item) == {"package", "filter"} for item in appended))
         self.assertEqual({name: [name] for _, name in expected_appended}, {key: expected["expected_full_test_names"][key] for _, key in expected_appended})
-        self.assertEqual(61, expected["net_owners"]["count"])
-        self.assertEqual((56, 5), (expected["net_owners"]["modified"], expected["net_owners"]["new"]))
+        self.assertEqual(62, expected["net_owners"]["count"])
+        self.assertEqual((57, 5), (expected["net_owners"]["modified"], expected["net_owners"]["new"]))
         net_path = MODULE_DIR / expected["net_owners"]["file"]
-        self.assertEqual("50d21ac22ff6888bd58eee813964c5a843e4a476620e480482cb7a88bddb0874", sha(net_path.read_bytes()))
+        self.assertEqual("6c5e242bcbe3a8e247943cc644174df43d08ad9af376422d0ffed91bdb0b4ba0", sha(net_path.read_bytes()))
         fixture_expected = mod.EXPECTED
         mod.EXPECTED = expected
         try:
             roster = mod._read_net_roster(MODULE_DIR)
         finally:
             mod.EXPECTED = fixture_expected
-        self.assertEqual(61, len(roster))
-        self.assertEqual((56, 5), (sum(value == "modified" for value in roster.values()), sum(value == "new" for value in roster.values())))
+        self.assertEqual(62, len(roster))
+        self.assertEqual((57, 5), (sum(value == "modified" for value in roster.values()), sum(value == "new" for value in roster.values())))
         self.assertEqual("modified", roster["crates/thaw-runtime/src/runtime/native_values/strings.rs"])
 
-        self.assertEqual(["original-native", "scope-v5", "discard-v2", "return-v1", "compile-repairs-v1", "cumulative-hir-v1", "next-hir-v1", "forced-root-wire-v1", "dependency-compile-v1", "std-compile-v1", "quickjs-runtime-compile-v1"], expected["patch_order"])
-        self.assertEqual([175, 176, 179, 180, 181, 181, 181, 183, 183, 184, 185], [stage["count"] for stage in expected["stage_manifests"]])
+        self.assertEqual(["original-native", "scope-v5", "discard-v2", "return-v1", "compile-repairs-v1", "cumulative-hir-v1", "next-hir-v1", "forced-root-wire-v1", "dependency-compile-v1", "std-compile-v1", "quickjs-runtime-compile-v1", "quickjs-api-followup-v1"], expected["patch_order"])
+        self.assertEqual([175, 176, 179, 180, 181, 181, 181, 183, 183, 184, 185, 186], [stage["count"] for stage in expected["stage_manifests"]])
         self.assertEqual("83a99e4934c4108992f874ca75ff2ea366283fbc3c543afaf9fee6489cb95941", sha((MODULE_DIR / "forced-root-wire-v1.sha256").read_bytes()))
         self.assertEqual("d3b7c0e06ca053f4b342dcbc8ac1247a3460c946a35a2b22d2645c76251a2aa9", expected["artifacts"]["compile-repairs-v1.sha256"])
         self.assertEqual("0be3783d6241706ba2dd492704162aa9e0076dcc4a1de96e309eca9b512ba81c", expected["artifacts"]["cumulative-hir-v1.sha256"])
@@ -959,8 +1017,8 @@ class VerificationRedGreenTests(unittest.TestCase):
         self.assertEqual(set(mod.DEPENDENCY_SOURCE_PATHS), changed)
         self.assertEqual(179, len(base_map) - len(changed))
         self.assertEqual(dependency_stage["sha256"], sha(final_path.read_bytes()))
-        self.assertEqual("std-compile-v1", expected["stage_manifests"][-2]["name"])
-        self.assertEqual(184, expected["stage_manifests"][-2]["count"])
+        self.assertEqual("std-compile-v1", expected["stage_manifests"][-3]["name"])
+        self.assertEqual(184, expected["stage_manifests"][-3]["count"])
         for rel, expected_hash in {**expected["payload_patches"], **expected["artifacts"]}.items():
             with self.subTest(path=rel):
                 self.assertEqual(expected_hash, sha((MODULE_DIR / rel).read_bytes()), rel)
@@ -972,16 +1030,16 @@ class VerificationRedGreenTests(unittest.TestCase):
             "0c2490af44241dfc80bef8ca25c321323722ab899842a0a84b6fd57906a48113",
             sha(json.dumps(expected["test_filters"][:49], sort_keys=True, separators=(",", ":")).encode()),
         )
-        self.assertEqual(56, len(expected["test_filters"]))
+        self.assertEqual(58, len(expected["test_filters"]))
         self.assertEqual(
             {"package": "thaw-std", "filter": "http::tests::peer_send_eof_preserves_pending_streamed_response"},
             expected["test_filters"][49],
         )
         self.assertEqual(
-            ["original-native", "scope-v5", "discard-v2", "return-v1", "compile-repairs-v1", "cumulative-hir-v1", "next-hir-v1", "forced-root-wire-v1", "dependency-compile-v1", "std-compile-v1", "quickjs-runtime-compile-v1"],
+            ["original-native", "scope-v5", "discard-v2", "return-v1", "compile-repairs-v1", "cumulative-hir-v1", "next-hir-v1", "forced-root-wire-v1", "dependency-compile-v1", "std-compile-v1", "quickjs-runtime-compile-v1", "quickjs-api-followup-v1"],
             expected["patch_order"],
         )
-        stage = expected["stage_manifests"][-2]
+        stage = expected["stage_manifests"][-3]
         self.assertEqual(("std-compile-v1", 184, "lexical"), (stage["name"], stage["count"], stage["path_order"]))
         self.assertEqual(
             ["crates/thaw-std/src/json.rs", "crates/thaw-quickjs/src/quickjs/api.rs", "crates/thaw-quickjs/src/quickjs/platform_globals/runtime.js", "crates/thaw-std/src/http.rs"],
@@ -1013,8 +1071,8 @@ class VerificationRedGreenTests(unittest.TestCase):
     def test_eleventh_quickjs_runtime_stage_is_pinned_to_the_original_wasm_and_five_owners(self):
         self.require_implementation()
         expected = json.loads((MODULE_DIR / "pins.json").read_text(encoding="utf-8"))
-        self.assertEqual(11, len(expected["stage_manifests"]))
-        stage = expected["stage_manifests"][-1]
+        self.assertEqual(12, len(expected["stage_manifests"]))
+        stage = expected["stage_manifests"][-2]
         pair = expected["quickjs_runtime_compile_base"]
         self.assertEqual(("quickjs-runtime-compile-v1", 185, "lexical"), (stage["name"], stage["count"], stage["path_order"]))
         self.assertEqual(("std-compile-v1", 185, "lexical"), (pair["paired_after"], pair["count"], pair["path_order"]))
@@ -1037,13 +1095,75 @@ class VerificationRedGreenTests(unittest.TestCase):
             ],
             expected["quickjs_runtime_source_paths"],
         )
-        self.assertEqual((61, 56, 5), (expected["net_owners"]["count"], expected["net_owners"]["modified"], expected["net_owners"]["new"]))
+        self.assertEqual((62, 57, 5), (expected["net_owners"]["count"], expected["net_owners"]["modified"], expected["net_owners"]["new"]))
+
+    def test_twelfth_quickjs_api_stage_pins_original_tests_and_three_changed_owners(self):
+        self.require_implementation()
+        expected = json.loads((MODULE_DIR / "pins.json").read_text(encoding="utf-8"))
+        self.assertEqual(12, len(expected["stage_manifests"]))
+        stage = expected["stage_manifests"][-1]
+        pair = expected["quickjs_api_followup_base"]
+        self.assertEqual(("quickjs-api-followup-v1", 186, "lexical"), (stage["name"], stage["count"], stage["path_order"]))
+        self.assertEqual(("quickjs-runtime-compile-v1", 186, "lexical"), (pair["paired_after"], pair["count"], pair["path_order"]))
+        self.assertEqual(
+            {
+                "path": "crates/thaw-quickjs/src/tests.rs",
+                "sha256": "f9fd787016d9dcf3ec30aa52a0ff23c8f1bc970d88bbac375c0e4d65634992c6",
+                "git_blob_sha1": "a146b07ee0b1d398e3abb9a51e58a6f3bbce607a",
+                "final_sha256": "c49ffdf065c4fd7d2d5765affed1daf773c07ef6b46eca137fa3c25ec1d5cab1",
+            },
+            pair["extra_owner"],
+        )
+        self.assertEqual(
+            [
+                "crates/thaw-quickjs/src/quickjs/api.rs",
+                "crates/thaw-quickjs/src/quickjs/wasm.rs",
+                "crates/thaw-quickjs/src/tests.rs",
+            ],
+            expected["quickjs_api_followup_source_paths"],
+        )
+        self.assertEqual((62, 57, 5), (expected["net_owners"]["count"], expected["net_owners"]["modified"], expected["net_owners"]["new"]))
+
+    def test_quickjs_api_followup_pair_rejects_changed_original_tests_identity(self):
+        mod = self.require_implementation()
+        helper = getattr(mod, "_verify_quickjs_api_followup_inputs", None)
+        self.assertTrue(callable(helper), "QuickJS API follow-up source identity verifier is missing")
+        stage_by_name = {stage["name"]: stage for stage in mod.EXPECTED["stage_manifests"]}
+        net = mod._read_net_roster(self.fixture.payload)
+        result = helper(self.fixture.payload, self.fixture.baseline, stage_by_name, net)
+        self.assertEqual(stage_by_name["quickjs-api-followup-v1"]["count"], result["base_count"])
+        tests = self.fixture.baseline / mod.QUICKJS_TESTS_PATH
+        original = tests.read_bytes()
+        try:
+            tests.write_bytes(original + b"changed tests identity\n")
+            self.assertVerifyError("baseline QuickJS tests.rs owner SHA-256 or Git blob identity mismatch", helper, self.fixture.payload, self.fixture.baseline, stage_by_name, net)
+        finally:
+            tests.write_bytes(original)
+
+    def test_reconstruct_checks_live_quickjs_pair_before_twelfth_apply(self):
+        mod = self.require_implementation()
+        real_verify_stage = mod.verify_stage
+        changed = False
+
+        def mutate_after_quickjs_runtime(candidate, manifest, *args, **kwargs):
+            nonlocal changed
+            result = real_verify_stage(candidate, manifest, *args, **kwargs)
+            if not changed and Path(manifest).name == "quickjs-runtime-compile-v1.sha256":
+                tests = candidate / mod.QUICKJS_TESTS_PATH
+                tests.write_bytes(tests.read_bytes() + b"candidate drift before stage twelve\n")
+                changed = True
+            return result
+
+        with mock.patch.object(mod, "verify_stage", side_effect=mutate_after_quickjs_runtime):
+            self.assertVerifyError("manifest mismatch|hash mismatch", mod.reconstruct, self.fixture.baseline, self.fixture.candidate, self.fixture.payload, self.fixture.evidence)
+        self.assertTrue(changed)
 
 
-    def test_old_fifty_filters_are_immutable_and_six_singletons_are_appended_in_source_order(self):
+    def test_old_fifty_six_filters_are_immutable_and_two_singletons_are_appended_in_source_order(self):
         expected = json.loads((MODULE_DIR / "pins.json").read_text(encoding="utf-8"))
         filters = expected["test_filters"]
-        self.assertEqual(56, len(filters))
+        self.assertEqual(58, len(filters))
+        self.assertEqual("0c8e0771e2b854bcd2130ca6508001e09c79b25256ed11a9272078d3e42347bd", sha(json.dumps(filters[:56], sort_keys=True, separators=(",", ":")).encode()))
         self.assertEqual("b30830ae72fff32c343259618f9c335b2c4785ec2462c9cd7aab40796949a596", sha(json.dumps(filters[:50], sort_keys=True, separators=(",", ":")).encode()))
         self.assertEqual(
             [
@@ -1054,11 +1174,22 @@ class VerificationRedGreenTests(unittest.TestCase):
                 ("thaw-quickjs", "tests::webassembly_callback_exception_identity"),
                 ("thaw-quickjs", "tests::webassembly_start_trap_error_kind"),
             ],
-            [(item["package"], item["filter"]) for item in filters[50:]],
+            [(item["package"], item["filter"]) for item in filters[50:56]],
         )
         self.assertEqual(
-            {item["filter"]: [item["filter"]] for item in filters[50:]},
-            {item["filter"]: expected["expected_full_test_names"][item["filter"]] for item in filters[50:]},
+            {item["filter"]: [item["filter"]] for item in filters[50:56]},
+            {item["filter"]: expected["expected_full_test_names"][item["filter"]] for item in filters[50:56]},
+        )
+        self.assertEqual(
+            [
+                ("thaw-quickjs", "tests::terminal_pending_work_is_separate_from_failure_and_exit_code"),
+                ("thaw-quickjs", "tests::private_graph_arguments_do_not_revive_user_marker_shapes"),
+            ],
+            [(item["package"], item["filter"]) for item in filters[56:]],
+        )
+        self.assertEqual(
+            {item["filter"]: [item["filter"]] for item in filters[56:]},
+            {item["filter"]: expected["expected_full_test_names"][item["filter"]] for item in filters[56:]},
         )
 
     def test_std_compile_pair_rejects_wrong_baseline_http_identity(self):
@@ -1081,7 +1212,7 @@ class VerificationRedGreenTests(unittest.TestCase):
         production_expected = self.fixture.expected_before
         roster_path = MODULE_DIR / "net-owners.txt"
         roster_digest = sha(roster_path.read_bytes())
-        self.assertEqual("50d21ac22ff6888bd58eee813964c5a843e4a476620e480482cb7a88bddb0874", roster_digest)
+        self.assertEqual("6c5e242bcbe3a8e247943cc644174df43d08ad9af376422d0ffed91bdb0b4ba0", roster_digest)
         self.assertEqual(roster_digest, production_expected["net_owners"]["sha256"])
         self.assertEqual(roster_digest, production_expected["artifacts"]["net-owners.txt"])
         shipped_pins = json.loads((MODULE_DIR / "pins.json").read_text(encoding="utf-8"))

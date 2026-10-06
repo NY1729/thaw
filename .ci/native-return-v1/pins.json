@@ -10,10 +10,12 @@
     "forced-root-wire-v1-base.sha256": "23da8386704a188e890bd7e591bb395ce611d45e8fbf0ad264716b5d61e3c9bf",
     "forced-root-wire-v1.sha256": "83a99e4934c4108992f874ca75ff2ea366283fbc3c543afaf9fee6489cb95941",
     "native-base.sha256": "da86c2c16619de2e236cdd50b9d2572465fbdd4dc3b75b680cf91c6b0f6bdb72",
-    "net-owners.txt": "50d21ac22ff6888bd58eee813964c5a843e4a476620e480482cb7a88bddb0874",
+    "net-owners.txt": "6c5e242bcbe3a8e247943cc644174df43d08ad9af376422d0ffed91bdb0b4ba0",
     "next-hir-v1-base.sha256": "0be3783d6241706ba2dd492704162aa9e0076dcc4a1de96e309eca9b512ba81c",
     "next-hir-v1.sha256": "f8915460efcaafc82a4392d9ca6b656dc150045d5cad4458b66755ef5705635b",
     "original-native.sha256": "4e219dde2129cf5876497edd6f9032cebdbee89eded9cce20e50ecda041053ce",
+    "quickjs-api-followup-v1-base.sha256": "daf200a9aea71a2726db0c2754dbeb9da958bfafb53792a4d13adada892e4ae0",
+    "quickjs-api-followup-v1.sha256": "2fc7c97c06059974628930e661751c3a4cf7603bb1c2e795fe6a56d7f862d06b",
     "quickjs-runtime-compile-v1-base.sha256": "2bd5d6ebe24b70d971ba1e9fbaee069562c333a075f48ff3097d11cf541127a2",
     "quickjs-runtime-compile-v1.sha256": "15614690c79ade16025fded42bc9905fb9aef1add904c6280ef6538f67979538",
     "return-v1.sha256": "51b1d9dd9a501538cc44fcaf8bfa72cc5a3f9ceb34c2942d4a0c676acc2e7031",
@@ -121,8 +123,14 @@
     "tests::private_exception_provenance_has_stable_nine_word_layout": [
       "tests::private_exception_provenance_has_stable_nine_word_layout"
     ],
+    "tests::private_graph_arguments_do_not_revive_user_marker_shapes": [
+      "tests::private_graph_arguments_do_not_revive_user_marker_shapes"
+    ],
     "tests::purged_aggregate_callbacks_ignore_late_child_results_and_release_roots": [
       "tests::purged_aggregate_callbacks_ignore_late_child_results_and_release_roots"
+    ],
+    "tests::terminal_pending_work_is_separate_from_failure_and_exit_code": [
+      "tests::terminal_pending_work_is_separate_from_failure_and_exit_code"
     ],
     "tests::webassembly_callback_exception_identity": [
       "tests::webassembly_callback_exception_identity"
@@ -213,11 +221,11 @@
     "sha256": "da86c2c16619de2e236cdd50b9d2572465fbdd4dc3b75b680cf91c6b0f6bdb72"
   },
   "net_owners": {
-    "count": 61,
+    "count": 62,
     "file": "net-owners.txt",
-    "modified": 56,
+    "modified": 57,
     "new": 5,
-    "sha256": "50d21ac22ff6888bd58eee813964c5a843e4a476620e480482cb7a88bddb0874"
+    "sha256": "6c5e242bcbe3a8e247943cc644174df43d08ad9af376422d0ffed91bdb0b4ba0"
   },
   "next_hir_base": {
     "count": 181,
@@ -237,7 +245,8 @@
     "forced-root-wire-v1",
     "dependency-compile-v1",
     "std-compile-v1",
-    "quickjs-runtime-compile-v1"
+    "quickjs-runtime-compile-v1",
+    "quickjs-api-followup-v1"
   ],
   "payload_patches": {
     "compile-repairs-v1.patch": "2994f62e98a4fb9cbd0b792b20da09bf505874d749447bf8f0e43776d25e0f05",
@@ -246,6 +255,7 @@
     "discard-v2.patch": "0ffe9fcec530feb12a2ca084399643861c240cc81906c9aab4677cc529aceb39",
     "forced-root-wire-v1.patch": "a7f04af1afa5b9d41d7a8dca984ccefba020cdd36f19175ef14a8f809a6e8683",
     "next-hir-v1.patch": "c0d4addaf22a7c7c26a133153b8298cc39013794f0263228468dddb8e0f3936b",
+    "quickjs-api-followup-v1.patch": "3e4daa17ed3234d378d02ce34b19178a0bb3a6fae744d2a134b84c286d9fb1d0",
     "quickjs-runtime-compile-v1.patch": "ab6405f01b6d8377b7d9282edf90a14003ad762b5dfc0cc5a8d7252db98f9a50",
     "return-v1.patch": "2e2e2057925542c0790d5ec879ce94d55e3ba5798b470aa5cd85327821fd1ec8",
     "std-compile-v1.patch": "25263410104929b361693cf228056514e27a41c262f8680c3e7bfb4a0c09cc18"
@@ -255,6 +265,24 @@
     "return_v1": "b0935bbc26b8aaf0e4c20c4778660cd1729ba349a827d768fe5fff38dc7e018a",
     "scope_v5": "ef1073a1d8204c08d2caa36611d3a02a8f34482cf7299f965fd13fe634e24d09"
   },
+  "quickjs_api_followup_base": {
+    "count": 186,
+    "extra_owner": {
+      "final_sha256": "c49ffdf065c4fd7d2d5765affed1daf773c07ef6b46eca137fa3c25ec1d5cab1",
+      "git_blob_sha1": "a146b07ee0b1d398e3abb9a51e58a6f3bbce607a",
+      "path": "crates/thaw-quickjs/src/tests.rs",
+      "sha256": "f9fd787016d9dcf3ec30aa52a0ff23c8f1bc970d88bbac375c0e4d65634992c6"
+    },
+    "file": "quickjs-api-followup-v1-base.sha256",
+    "paired_after": "quickjs-runtime-compile-v1",
+    "path_order": "lexical",
+    "sha256": "daf200a9aea71a2726db0c2754dbeb9da958bfafb53792a4d13adada892e4ae0"
+  },
+  "quickjs_api_followup_source_paths": [
+    "crates/thaw-quickjs/src/quickjs/api.rs",
+    "crates/thaw-quickjs/src/quickjs/wasm.rs",
+    "crates/thaw-quickjs/src/tests.rs"
+  ],
   "quickjs_runtime_compile_base": {
     "count": 185,
     "extra_owner": {
@@ -441,6 +469,21 @@
       "name": "quickjs-runtime-compile-v1",
       "path_order": "lexical",
       "sha256": "15614690c79ade16025fded42bc9905fb9aef1add904c6280ef6538f67979538"
+    },
+    {
+      "count": 186,
+      "extra_paths": [
+        "crates/thaw-std/src/json.rs",
+        "crates/thaw-quickjs/src/quickjs/api.rs",
+        "crates/thaw-quickjs/src/quickjs/platform_globals/runtime.js",
+        "crates/thaw-std/src/http.rs",
+        "crates/thaw-quickjs/src/quickjs/wasm.rs",
+        "crates/thaw-quickjs/src/tests.rs"
+      ],
+      "file": "quickjs-api-followup-v1.sha256",
+      "name": "quickjs-api-followup-v1",
+      "path_order": "lexical",
+      "sha256": "2fc7c97c06059974628930e661751c3a4cf7603bb1c2e795fe6a56d7f862d06b"
     }
   ],
   "std_compile_base": {
@@ -688,6 +731,14 @@
     },
     {
       "filter": "tests::webassembly_start_trap_error_kind",
+      "package": "thaw-quickjs"
+    },
+    {
+      "filter": "tests::terminal_pending_work_is_separate_from_failure_and_exit_code",
+      "package": "thaw-quickjs"
+    },
+    {
+      "filter": "tests::private_graph_arguments_do_not_revive_user_marker_shapes",
       "package": "thaw-quickjs"
     }
   ],
