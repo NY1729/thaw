@@ -204,6 +204,38 @@ INTEGRATED_REPAIR_V2_SOURCE_PATHS = [
     "crates/thaw-std/src/json.rs",
     "crates/thaw-std/src/lib.rs",
 ]
+INTEGRATED_REPAIR_V3_SOURCE_PATHS = [
+    "crates/thaw-hir/src/hir/ir.rs",
+    "crates/thaw-hir/src/lower/control_flow.rs",
+    "crates/thaw-hir/src/lower/expressions/lowering.rs",
+    "crates/thaw-hir/src/lower/generators.rs",
+    "crates/thaw-hir/src/lower/inference/coercions.rs",
+    "crates/thaw-hir/src/lower/inference/properties.rs",
+    "crates/thaw-hir/src/lower/inference/types.rs",
+    "crates/thaw-hir/src/lower/invocations/calls.rs",
+    "crates/thaw-hir/src/lower/invocations/instance_builtins/array_transform_methods.rs",
+    "crates/thaw-hir/src/lower/invocations/instance_builtins/regex_methods.rs",
+    "crates/thaw-hir/src/lower/objects.rs",
+    "crates/thaw-hir/src/lower/statements/lowering.rs",
+    "crates/thaw-llvm/src/hir_codegen/console.rs",
+    "crates/thaw-llvm/src/hir_codegen/dynamic_host/callbacks.rs",
+    "crates/thaw-llvm/src/hir_codegen/dynamic_host/quickjs.rs",
+    "crates/thaw-llvm/src/hir_codegen/entrypoints.rs",
+    "crates/thaw-llvm/src/hir_codegen/invocations/calls.rs",
+    "crates/thaw-llvm/src/hir_codegen/invocations/dynamic_calls.rs",
+    "crates/thaw-llvm/src/hir_codegen/invocations/json_calls.rs",
+    "crates/thaw-llvm/src/hir_codegen/runtime_declarations.rs",
+    "crates/thaw-llvm/src/hir_codegen/tests.rs",
+    "crates/thaw-llvm/src/hir_codegen/tests/ffi.rs",
+    "crates/thaw-llvm/src/hir_codegen/tests/native_builtins.rs",
+    "crates/thaw-llvm/src/hir_codegen/tests/values/dynamic_and_json.rs",
+    "crates/thaw-llvm/src/hir_codegen/values/expressions.rs",
+    "crates/thaw-quickjs/src/quickjs/api.rs",
+    "crates/thaw-quickjs/src/quickjs/platform_globals/runtime.js",
+    "crates/thaw-runtime/src/runtime/native_values/objects.rs",
+    "crates/thaw-std/src/inspect.rs",
+    "crates/thaw-std/src/json.rs",
+]
 EXPECTED: dict[str, Any] = {
     "schema_version": 1,
     "validation_branch": VALIDATION_BRANCH,
@@ -585,7 +617,7 @@ EXPECTED["payload_patches"]["quickjs-api-followup-v1.patch"] = "3e4daa17ed3234d3
 EXPECTED["artifacts"].update({
     "quickjs-api-followup-v1-base.sha256": "daf200a9aea71a2726db0c2754dbeb9da958bfafb53792a4d13adada892e4ae0",
     "quickjs-api-followup-v1.sha256": "2fc7c97c06059974628930e661751c3a4cf7603bb1c2e795fe6a56d7f862d06b",
-    "net-owners.txt": "8b4dbac6c20fa735d491b128510ec2cc9d7ee70578746555550a54a70809afad",
+    "net-owners.txt": "288b854d4a2b8559c1c5c0ed3d458441772fd627f8e43da3d52c37ef12b9b3ed",
 })
 EXPECTED["stage_manifests"].append({
     "name": "quickjs-api-followup-v1",
@@ -611,9 +643,9 @@ EXPECTED["quickjs_api_followup_base"] = {
 EXPECTED["quickjs_api_followup_source_paths"] = QUICKJS_API_FOLLOWUP_SOURCE_PATHS
 EXPECTED["net_owners"] = {
     "file": "net-owners.txt",
-    "sha256": "8b4dbac6c20fa735d491b128510ec2cc9d7ee70578746555550a54a70809afad",
-    "count": 117,
-    "modified": 109,
+    "sha256": "288b854d4a2b8559c1c5c0ed3d458441772fd627f8e43da3d52c37ef12b9b3ed",
+    "count": 127,
+    "modified": 119,
     "new": 8,
 }
 EXPECTED["patch_order"].append("quickjs-api-followup-v1")
@@ -664,6 +696,28 @@ EXPECTED["integrated_repair_v2_base"] = {
 }
 EXPECTED["integrated_repair_v2_source_paths"] = INTEGRATED_REPAIR_V2_SOURCE_PATHS
 EXPECTED["patch_order"].append("integrated-repair-v2")
+EXPECTED["payload_patches"]["integrated-repair-v3.patch"] = "4e78af3e5208f16d9c39cd616be8a9dc9ede9d6c7e8fcac53287729ad606126b"
+EXPECTED["artifacts"].update({
+    "integrated-repair-v3-base.sha256": "7ef304f8d7469d52d17080e7e380898cb79f5f8be349e1a96b4f4eea5dcfb78f",
+    "integrated-repair-v3.sha256": "690ac46276a2d42e39f98d5ad3fdb583c330fe122588673e13c62e0137bb20e3",
+})
+EXPECTED["stage_manifests"].append({
+    "name": "integrated-repair-v3",
+    "file": "integrated-repair-v3.sha256",
+    "sha256": "690ac46276a2d42e39f98d5ad3fdb583c330fe122588673e13c62e0137bb20e3",
+    "count": 223,
+    "extra_paths": INTEGRATED_REPAIR_V2_FINAL_EXTRA_PATHS,
+    "path_order": "lexical",
+})
+EXPECTED["integrated_repair_v3_base"] = {
+    "file": "integrated-repair-v3-base.sha256",
+    "sha256": "7ef304f8d7469d52d17080e7e380898cb79f5f8be349e1a96b4f4eea5dcfb78f",
+    "count": 223,
+    "path_order": "lexical",
+    "paired_after": "integrated-repair-v2",
+}
+EXPECTED["integrated_repair_v3_source_paths"] = INTEGRATED_REPAIR_V3_SOURCE_PATHS
+EXPECTED["patch_order"].append("integrated-repair-v3")
 EXPECTED["test_filters"].extend([
     {"package": "thaw-quickjs", "filter": "tests::terminal_pending_work_is_separate_from_failure_and_exit_code"},
     {"package": "thaw-quickjs", "filter": "tests::private_graph_arguments_do_not_revive_user_marker_shapes"},
@@ -1478,6 +1532,54 @@ def _verify_integrated_repair_v2_inputs(
     }
 
 
+def _verify_integrated_repair_v3_inputs(
+    payload: Path, stage_by_name: dict[str, dict[str, Any]], net: dict[str, str]
+) -> dict[str, Any]:
+    """Pin stage fifteen to the stage-fourteen final: same path set, exactly the pinned source owners change."""
+    base = EXPECTED.get("integrated_repair_v3_base")
+    previous = stage_by_name.get("integrated-repair-v2")
+    stage = stage_by_name.get("integrated-repair-v3")
+    source_paths = EXPECTED.get("integrated_repair_v3_source_paths")
+    if not isinstance(base, dict) or previous is None or stage is None or not isinstance(source_paths, list):
+        raise VerificationError("integrated repair v3 paired base or stage is missing")
+    order = EXPECTED["patch_order"]
+    index = order.index("integrated-repair-v3")
+    if base.get("paired_after") != previous["name"] or index == 0 or order[index - 1] != "integrated-repair-v2":
+        raise VerificationError("integrated repair v3 paired base must immediately follow integrated-repair-v2")
+    if base.get("path_order") != "lexical" or previous.get("path_order") != "lexical" or stage.get("path_order") != "lexical":
+        raise VerificationError("integrated repair v3 base, predecessor and final must retain lexical path ordering")
+    if stage.get("extra_paths") != INTEGRATED_REPAIR_V2_FINAL_EXTRA_PATHS or previous.get("extra_paths") != INTEGRATED_REPAIR_V2_FINAL_EXTRA_PATHS:
+        raise VerificationError("integrated repair v3 must retain the stage-fourteen extra path scope")
+    if base.get("count") != previous["count"] or stage.get("count") != base["count"]:
+        raise VerificationError("integrated repair v3 base and final counts must equal the preceding stage")
+    if base.get("file") != "integrated-repair-v3-base.sha256" or stage.get("file") != "integrated-repair-v3.sha256":
+        raise VerificationError("integrated repair v3 paired input filenames differ from the pinned contract")
+    for descriptor in (base, stage):
+        if descriptor.get("sha256") != EXPECTED["artifacts"].get(descriptor["file"]):
+            raise VerificationError(f"integrated repair v3 manifest pin is stale for {descriptor['file']}")
+    base_path = _path_without_symlinks(payload, base["file"], "integrated repair v3 paired base")
+    previous_path = _path_without_symlinks(payload, previous["file"], "integrated repair v3 predecessor final")
+    final_path = _path_without_symlinks(payload, stage["file"], "integrated repair v3 final")
+    if base_path.read_bytes() != previous_path.read_bytes():
+        raise VerificationError("integrated repair v3 paired base is not byte-identical to the stage-fourteen final")
+    base_map = {rel: digest for digest, rel in _parse_sha_manifest(base_path, "integrated repair v3 paired base", path_order="lexical")}
+    final_rows = _parse_sha_manifest(final_path, "integrated repair v3 final", path_order="lexical")
+    final_map = {rel: digest for digest, rel in final_rows}
+    if len(final_rows) != stage["count"] or set(final_map) != set(base_map):
+        raise VerificationError("integrated repair v3 final changed the predecessor's exact path set")
+    changed = {rel for rel in base_map if base_map[rel] != final_map[rel]}
+    if sorted(set(source_paths)) != sorted(source_paths) or changed != set(source_paths):
+        raise VerificationError("integrated repair v3 final must change exactly the pinned source owners")
+    if any(net.get(rel) not in ("modified", "new") for rel in source_paths):
+        raise VerificationError("integrated repair v3 source owners must all be net owners")
+    return {
+        "base_count": len(base_map),
+        "final_count": len(final_map),
+        "changed_source_owners": sorted(changed),
+        "paired_after": previous["name"],
+    }
+
+
 def verify_inputs(baseline: Path, payload: Path) -> dict[str, Any]:
     """Validate descriptor, immutable bytes, clean baseline and roster preconditions."""
     if not payload.is_dir() or payload.is_symlink():
@@ -1563,6 +1665,12 @@ def verify_inputs(baseline: Path, payload: Path) -> dict[str, Any]:
         unexpected = sorted(actual_integrated_repair_v2_inputs - expected_integrated_repair_v2_inputs)
         raise VerificationError(f"unexpected integrated repair v2 input: {unexpected[0]}")
 
+    expected_integrated_repair_v3_inputs = {"integrated-repair-v3.patch", "integrated-repair-v3-base.sha256", "integrated-repair-v3.sha256"}
+    actual_integrated_repair_v3_inputs = {entry.name for entry in payload.iterdir() if entry.name.startswith("integrated-repair-v3")}
+    if actual_integrated_repair_v3_inputs - expected_integrated_repair_v3_inputs:
+        unexpected = sorted(actual_integrated_repair_v3_inputs - expected_integrated_repair_v3_inputs)
+        raise VerificationError(f"unexpected integrated repair v3 input: {unexpected[0]}")
+
     owner_map = _read_owner_map(payload)
     manifest = _json_no_duplicates(source_bytes["handoff_manifest"], "native handoff manifest")
     try:
@@ -1598,7 +1706,7 @@ def verify_inputs(baseline: Path, payload: Path) -> dict[str, Any]:
 
     # Each manifest file is parsed here, before any patch is applied, so malformed or
     # unsafe input cannot become a Cargo-time surprise.
-    lexical_stage_names = {"compile-repairs-v1", "cumulative-hir-v1", "next-hir-v1", "forced-root-wire-v1", "dependency-compile-v1", "std-compile-v1", "quickjs-runtime-compile-v1", "quickjs-api-followup-v1", "integrated-repair-v1", "integrated-repair-v2"}
+    lexical_stage_names = {"compile-repairs-v1", "cumulative-hir-v1", "next-hir-v1", "forced-root-wire-v1", "dependency-compile-v1", "std-compile-v1", "quickjs-runtime-compile-v1", "quickjs-api-followup-v1", "integrated-repair-v1", "integrated-repair-v2", "integrated-repair-v3"}
     extra_path = EXPECTED["repair_base"]["extra_owner"]["path"]
     extra_paths_by_stage = {
         "compile-repairs-v1": [extra_path],
@@ -1611,6 +1719,7 @@ def verify_inputs(baseline: Path, payload: Path) -> dict[str, Any]:
         "quickjs-api-followup-v1": QUICKJS_API_FOLLOWUP_EXTRA_PATHS,
         "integrated-repair-v1": INTEGRATED_REPAIR_EXTRA_PATHS,
         "integrated-repair-v2": INTEGRATED_REPAIR_V2_FINAL_EXTRA_PATHS,
+        "integrated-repair-v3": INTEGRATED_REPAIR_V2_FINAL_EXTRA_PATHS,
     }
     for stage in EXPECTED["stage_manifests"]:
         extra_paths = stage.get("extra_paths", [])
@@ -1797,6 +1906,7 @@ def verify_inputs(baseline: Path, payload: Path) -> dict[str, Any]:
     quickjs_api_followup_inputs = _verify_quickjs_api_followup_inputs(payload, baseline, stage_by_name, net)
     integrated_repair_inputs = _verify_integrated_repair_inputs(payload, baseline, stage_by_name, net)
     integrated_repair_v2_inputs = _verify_integrated_repair_v2_inputs(payload, baseline, stage_by_name, net)
+    integrated_repair_v3_inputs = _verify_integrated_repair_v3_inputs(payload, stage_by_name, net)
     return {
         "baseline": identity,
         "inputs": {**EXPECTED["payload_patches"], **EXPECTED["artifacts"]},
@@ -1808,6 +1918,7 @@ def verify_inputs(baseline: Path, payload: Path) -> dict[str, Any]:
         "quickjs_api_followup": quickjs_api_followup_inputs,
         "integrated_repair": integrated_repair_inputs,
         "integrated_repair_v2": integrated_repair_v2_inputs,
+        "integrated_repair_v3": integrated_repair_v3_inputs,
         "patch_order": list(EXPECTED["patch_order"]),
     }
 
@@ -1975,6 +2086,7 @@ def _patch_path(baseline: Path, payload: Path, name: str) -> Path:
         "quickjs-api-followup-v1": "quickjs-api-followup-v1.patch",
         "integrated-repair-v1": "integrated-repair-v1.patch",
         "integrated-repair-v2": "integrated-repair-v2.patch",
+        "integrated-repair-v3": "integrated-repair-v3.patch",
     }.get(name)
     if not payload_name:
         raise VerificationError(f"unknown patch stage: {name}")
@@ -2267,6 +2379,26 @@ def reconstruct(baseline: Path, candidate: Path, payload: Path, evidence: Path) 
                     "paired_after": paired_stage_name,
                     "extra_owner_count": len(repair_base["extra_owners"]),
                     "added_file_count": len(repair_base["added_paths"]),
+                }
+            elif stage["name"] == "integrated-repair-v3":
+                v3_base = EXPECTED["integrated_repair_v3_base"]
+                paired_stage_name = v3_base["paired_after"]
+                if not state["stages"] or state["stages"][-1]["stage"] != paired_stage_name:
+                    raise VerificationError("integrated repair v3 paired base is not immediately after the integrated repair v2 final")
+                paired = verify_stage(
+                    candidate,
+                    payload / v3_base["file"],
+                    v3_base["count"],
+                    INTEGRATED_REPAIR_V2_FINAL_EXTRA_PATHS,
+                    v3_base["path_order"],
+                )
+                previous = state["stages"][-1]
+                if paired["manifest_sha256"] != previous["manifest_sha256"] or paired["count"] != previous["count"]:
+                    raise VerificationError("integrated repair v3 paired base does not equal the immediately preceding v2 final")
+                state["paired_integrated_repair_v3_base"] = {
+                    "count": paired["count"],
+                    "manifest_sha256": paired["manifest_sha256"],
+                    "paired_after": paired_stage_name,
                 }
             applied = _apply_patch(candidate, patch)
             manifest = payload / stage["file"]
