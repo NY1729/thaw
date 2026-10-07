@@ -151,6 +151,9 @@ class Fixture:
         v4_extra_paths = [owner["path"] for owner in verify.INTEGRATED_REPAIR_V4_EXTRA_OWNERS] if verify is not None else []
         for rel in v4_extra_paths:
             write(self.baseline / rel, f"baseline {rel}\n")
+        v6_extra_paths = [owner["path"] for owner in verify.INTEGRATED_REPAIR_V6_EXTRA_OWNERS] if verify is not None else []
+        for rel in v6_extra_paths:
+            write(self.baseline / rel, f"baseline {rel}\n")
 
         lib = "crates/thaw-hir/src/lib.rs"
         async_owner = "crates/thaw-llvm/src/hir_codegen/tests/async.rs"
@@ -353,6 +356,15 @@ class Fixture:
         v5_final[api_owner] = "api integrated repair v5 final\n"
         v5_patch = patch_for(api_owner, v5_base[api_owner], v5_final[api_owner])
         write(self.payload / "integrated-repair-v5.patch", v5_patch)
+        v6_base = dict(v5_final)
+        for rel in v6_extra_paths:
+            v6_base[rel] = f"baseline {rel}\n"
+        v6_final = dict(v6_base)
+        v6_final[api_owner] = "api integrated repair v6 final\n"
+        for rel in v6_extra_paths:
+            v6_final[rel] = f"integrated repair v6 final {rel}\n"
+        v6_patch = b"".join(patch_for(path, v6_base[path], v6_final[path]) for path in [api_owner, *v6_extra_paths])
+        write(self.payload / "integrated-repair-v6.patch", v6_patch)
         for name, files in (
             ("compile-repairs-v1-base", paired_base),
             ("compile-repairs-v1", repair_final),
@@ -379,11 +391,13 @@ class Fixture:
             ("integrated-repair-v4", v4_final),
             ("integrated-repair-v5-base", v5_base),
             ("integrated-repair-v5", v5_final),
+            ("integrated-repair-v6-base", v6_base),
+            ("integrated-repair-v6", v6_final),
         ):
             stage_dir = root / ("manifest-tree-" + name)
             for rel, text in files.items():
                 write(stage_dir / rel, text)
-            path_order = "lexical" if name in ("compile-repairs-v1", "cumulative-hir-v1-base", "cumulative-hir-v1", "next-hir-v1-base", "next-hir-v1", "forced-root-wire-v1-base", "forced-root-wire-v1", "dependency-compile-v1", "std-compile-v1-base", "std-compile-v1", "quickjs-runtime-compile-v1-base", "quickjs-runtime-compile-v1", "quickjs-api-followup-v1-base", "quickjs-api-followup-v1", "integrated-repair-v1-base", "integrated-repair-v1", "integrated-repair-v2-base", "integrated-repair-v2", "integrated-repair-v3-base", "integrated-repair-v3", "integrated-repair-v4-base", "integrated-repair-v4", "integrated-repair-v5-base", "integrated-repair-v5") else "components"
+            path_order = "lexical" if name in ("compile-repairs-v1", "cumulative-hir-v1-base", "cumulative-hir-v1", "next-hir-v1-base", "next-hir-v1", "forced-root-wire-v1-base", "forced-root-wire-v1", "dependency-compile-v1", "std-compile-v1-base", "std-compile-v1", "quickjs-runtime-compile-v1-base", "quickjs-runtime-compile-v1", "quickjs-api-followup-v1-base", "quickjs-api-followup-v1", "integrated-repair-v1-base", "integrated-repair-v1", "integrated-repair-v2-base", "integrated-repair-v2", "integrated-repair-v3-base", "integrated-repair-v3", "integrated-repair-v4-base", "integrated-repair-v4", "integrated-repair-v5-base", "integrated-repair-v5", "integrated-repair-v6-base", "integrated-repair-v6") else "components"
             (self.payload / f"{name}.sha256").write_bytes(manifest_for(stage_dir, path_order))
         (self.payload / "dependency-compile-v1-base.sha256").write_bytes((self.payload / "forced-root-wire-v1.sha256").read_bytes())
 
@@ -499,6 +513,14 @@ class Fixture:
             "extra_paths": [repair_extra, api_owner, runtime_owner, http_owner, wasm_owner, quickjs_tests_owner, *integrated_extra_paths, *v2_extra_paths, *v2_added_paths, *v4_extra_paths],
             "path_order": "lexical",
         })
+        stages.append({
+            "name": "integrated-repair-v6",
+            "file": "integrated-repair-v6.sha256",
+            "sha256": sha((self.payload / "integrated-repair-v6.sha256").read_bytes()),
+            "count": len(v6_final),
+            "extra_paths": [repair_extra, api_owner, runtime_owner, http_owner, wasm_owner, quickjs_tests_owner, *integrated_extra_paths, *v2_extra_paths, *v2_added_paths, *v4_extra_paths, *v6_extra_paths],
+            "path_order": "lexical",
+        })
 
         # Stage fixture trees are written above from text maps; preserve the
         # expected subset inventory separately for fast mutation tests.
@@ -521,6 +543,7 @@ class Fixture:
             *[f"modified  {rel}\n" for rel in integrated_extra_paths],
             *[f"modified  {rel}\n" for rel in v2_extra_paths],
             *[f"modified  {rel}\n" for rel in v4_extra_paths],
+            *[f"modified  {rel}\n" for rel in v6_extra_paths],
             *[f"new  {rel}\n" for rel in v2_added_paths],
             f"new  {v5_control}\n",
             f"new  {discard_control}\n",
@@ -550,7 +573,7 @@ class Fixture:
         }
         payload_files = {
             name: sha((self.payload / name).read_bytes())
-            for name in ("discard-v2.patch", "return-v1.patch", "compile-repairs-v1.patch", "cumulative-hir-v1.patch", "next-hir-v1.patch", "forced-root-wire-v1.patch", "dependency-compile-v1.patch", "std-compile-v1.patch", "quickjs-runtime-compile-v1.patch", "quickjs-api-followup-v1.patch", "integrated-repair-v1.patch", "integrated-repair-v2.patch", "integrated-repair-v3.patch", "integrated-repair-v4.patch", "integrated-repair-v5.patch")
+            for name in ("discard-v2.patch", "return-v1.patch", "compile-repairs-v1.patch", "cumulative-hir-v1.patch", "next-hir-v1.patch", "forced-root-wire-v1.patch", "dependency-compile-v1.patch", "std-compile-v1.patch", "quickjs-runtime-compile-v1.patch", "quickjs-api-followup-v1.patch", "integrated-repair-v1.patch", "integrated-repair-v2.patch", "integrated-repair-v3.patch", "integrated-repair-v4.patch", "integrated-repair-v5.patch", "integrated-repair-v6.patch")
         }
         artifact_hashes = {}
         for name, desc in self._artifact_paths().items():
@@ -734,7 +757,24 @@ class Fixture:
                 "paired_after": "integrated-repair-v4",
             },
             "integrated_repair_v5_source_paths": [api_owner],
-            "patch_order": ["original-native", "scope-v5", "discard-v2", "return-v1", "compile-repairs-v1", "cumulative-hir-v1", "next-hir-v1", "forced-root-wire-v1", "dependency-compile-v1", "std-compile-v1", "quickjs-runtime-compile-v1", "quickjs-api-followup-v1", "integrated-repair-v1", "integrated-repair-v2", "integrated-repair-v3", "integrated-repair-v4", "integrated-repair-v5"],
+            "integrated_repair_v6_base": {
+                "file": "integrated-repair-v6-base.sha256",
+                "sha256": sha((self.payload / "integrated-repair-v6-base.sha256").read_bytes()),
+                "count": len(v6_base),
+                "path_order": "lexical",
+                "paired_after": "integrated-repair-v5",
+                "extra_owners": [
+                    {
+                        "path": rel,
+                        "sha256": sha(f"baseline {rel}\n".encode()),
+                        "git_blob_sha1": verify._git_blob_sha1(f"baseline {rel}\n".encode()) if verify is not None else "",
+                        "final_sha256": sha(v6_final[rel].encode()),
+                    }
+                    for rel in v6_extra_paths
+                ],
+            },
+            "integrated_repair_v6_source_paths": sorted([api_owner, *v6_extra_paths]),
+            "patch_order": ["original-native", "scope-v5", "discard-v2", "return-v1", "compile-repairs-v1", "cumulative-hir-v1", "next-hir-v1", "forced-root-wire-v1", "dependency-compile-v1", "std-compile-v1", "quickjs-runtime-compile-v1", "quickjs-api-followup-v1", "integrated-repair-v1", "integrated-repair-v2", "integrated-repair-v3", "integrated-repair-v4", "integrated-repair-v5", "integrated-repair-v6"],
             "subset_roots": [
                 ".gitignore",
                 "Cargo.lock",
@@ -764,8 +804,8 @@ class Fixture:
         self.expected["net_owners"] = {
             "file": "net-owners.txt",
             "sha256": sha((self.payload / "net-owners.txt").read_bytes()),
-            "count": 16 + len(integrated_extra_paths) + len(v2_extra_paths) + len(v2_added_paths) + len(v4_extra_paths),
-            "modified": 13 + len(integrated_extra_paths) + len(v2_extra_paths) + len(v4_extra_paths),
+            "count": 16 + len(integrated_extra_paths) + len(v2_extra_paths) + len(v2_added_paths) + len(v4_extra_paths) + len(v6_extra_paths),
+            "modified": 13 + len(integrated_extra_paths) + len(v2_extra_paths) + len(v4_extra_paths) + len(v6_extra_paths),
             "new": 3 + len(v2_added_paths),
         }
         write(self.payload / "pins.json", json.dumps(self.expected, sort_keys=True, indent=2) + "\n")
@@ -808,6 +848,8 @@ class Fixture:
             "integrated_repair_v4_final": "integrated-repair-v4.sha256",
             "integrated_repair_v5_base": "integrated-repair-v5-base.sha256",
             "integrated_repair_v5_final": "integrated-repair-v5.sha256",
+            "integrated_repair_v6_base": "integrated-repair-v6-base.sha256",
+            "integrated_repair_v6_final": "integrated-repair-v6.sha256",
             "quickjs_runtime_base": "quickjs-runtime-compile-v1-base.sha256",
             "quickjs_runtime_final": "quickjs-runtime-compile-v1.sha256",
             "native_base": "native-base.sha256",
@@ -895,8 +937,8 @@ class VerificationRedGreenTests(unittest.TestCase):
             self.fixture.evidence,
         )
         self.assertEqual([x["count"] for x in mod.EXPECTED["stage_manifests"]], result["stage_counts"])
-        self.assertEqual(17, len(result["stages"]))
-        self.assertEqual("integrated-repair-v5", result["stages"][-1]["stage"])
+        self.assertEqual(18, len(result["stages"]))
+        self.assertEqual("integrated-repair-v6", result["stages"][-1]["stage"])
         self.assertEqual(mod.EXPECTED["quickjs_runtime_compile_base"]["count"], result["paired_quickjs_runtime_base"]["count"])
         self.assertEqual(mod.EXPECTED["quickjs_api_followup_base"]["count"], result["paired_quickjs_api_followup_base"]["count"])
         self.assertEqual(mod.EXPECTED["stage_manifests"][-1]["count"], result["stage_counts"][-1])
@@ -973,7 +1015,7 @@ class VerificationRedGreenTests(unittest.TestCase):
         self.assertEqual("next-hir-v1", pair["paired_after"])
         self.assertEqual("lexical", pair["path_order"])
         result = mod.verify_inputs(self.fixture.baseline, self.fixture.payload)
-        self.assertEqual(55, result["net_owner_count"])
+        self.assertEqual(61, result["net_owner_count"])
         self.assertEqual(2, len(pair["extra_owners"]))
         before = {rel: digest for digest, rel in mod._parse_sha_manifest(self.fixture.payload / pair["file"], "wire base", path_order="lexical")}
         previous = {rel: digest for digest, rel in mod._parse_sha_manifest(self.fixture.payload / "next-hir-v1.sha256", "next final", path_order="lexical")}
@@ -1060,7 +1102,7 @@ class VerificationRedGreenTests(unittest.TestCase):
         stage = next(item for item in mod.EXPECTED["stage_manifests"] if item["name"] == "dependency-compile-v1")
         predecessor = next(item for item in mod.EXPECTED["stage_manifests"] if item["name"] == "forced-root-wire-v1")
         self.assertEqual("forced-root-wire-v1", base["paired_after"])
-        self.assertEqual(17, len(mod.EXPECTED["stage_manifests"]))
+        self.assertEqual(18, len(mod.EXPECTED["stage_manifests"]))
         self.assertEqual(predecessor["count"], base["count"])
         self.assertEqual(base["count"], stage["count"])
         self.assertEqual(predecessor["extra_paths"], stage["extra_paths"])
@@ -1161,22 +1203,22 @@ class VerificationRedGreenTests(unittest.TestCase):
         self.assertEqual(expected_appended, [(item["package"], item["filter"]) for item in appended])
         self.assertTrue(all(set(item) == {"package", "filter"} for item in appended))
         self.assertEqual({name: [name] for _, name in expected_appended}, {key: expected["expected_full_test_names"][key] for _, key in expected_appended})
-        self.assertEqual(131, expected["net_owners"]["count"])
-        self.assertEqual((123, 8), (expected["net_owners"]["modified"], expected["net_owners"]["new"]))
+        self.assertEqual(148, expected["net_owners"]["count"])
+        self.assertEqual((140, 8), (expected["net_owners"]["modified"], expected["net_owners"]["new"]))
         net_path = MODULE_DIR / expected["net_owners"]["file"]
-        self.assertEqual("6450fe32290798d11f06714911aec386e30d5f735ecbd685e8e55fe22140a722", sha(net_path.read_bytes()))
+        self.assertEqual("121c67431ced70abcc37b8567cf49cee8b3c1aa4cbe976cb233ab33746e70fda", sha(net_path.read_bytes()))
         fixture_expected = mod.EXPECTED
         mod.EXPECTED = expected
         try:
             roster = mod._read_net_roster(MODULE_DIR)
         finally:
             mod.EXPECTED = fixture_expected
-        self.assertEqual(131, len(roster))
-        self.assertEqual((123, 8), (sum(value == "modified" for value in roster.values()), sum(value == "new" for value in roster.values())))
+        self.assertEqual(148, len(roster))
+        self.assertEqual((140, 8), (sum(value == "modified" for value in roster.values()), sum(value == "new" for value in roster.values())))
         self.assertEqual("modified", roster["crates/thaw-runtime/src/runtime/native_values/strings.rs"])
 
-        self.assertEqual(["original-native", "scope-v5", "discard-v2", "return-v1", "compile-repairs-v1", "cumulative-hir-v1", "next-hir-v1", "forced-root-wire-v1", "dependency-compile-v1", "std-compile-v1", "quickjs-runtime-compile-v1", "quickjs-api-followup-v1", "integrated-repair-v1", "integrated-repair-v2", "integrated-repair-v3", "integrated-repair-v4", "integrated-repair-v5"], expected["patch_order"])
-        self.assertEqual([175, 176, 179, 180, 181, 181, 181, 183, 183, 184, 185, 186, 218, 223, 223, 225, 225], [stage["count"] for stage in expected["stage_manifests"]])
+        self.assertEqual(["original-native", "scope-v5", "discard-v2", "return-v1", "compile-repairs-v1", "cumulative-hir-v1", "next-hir-v1", "forced-root-wire-v1", "dependency-compile-v1", "std-compile-v1", "quickjs-runtime-compile-v1", "quickjs-api-followup-v1", "integrated-repair-v1", "integrated-repair-v2", "integrated-repair-v3", "integrated-repair-v4", "integrated-repair-v5", "integrated-repair-v6"], expected["patch_order"])
+        self.assertEqual([175, 176, 179, 180, 181, 181, 181, 183, 183, 184, 185, 186, 218, 223, 223, 225, 225, 231], [stage["count"] for stage in expected["stage_manifests"]])
         self.assertEqual("83a99e4934c4108992f874ca75ff2ea366283fbc3c543afaf9fee6489cb95941", sha((MODULE_DIR / "forced-root-wire-v1.sha256").read_bytes()))
         self.assertEqual("d3b7c0e06ca053f4b342dcbc8ac1247a3460c946a35a2b22d2645c76251a2aa9", expected["artifacts"]["compile-repairs-v1.sha256"])
         self.assertEqual("0be3783d6241706ba2dd492704162aa9e0076dcc4a1de96e309eca9b512ba81c", expected["artifacts"]["cumulative-hir-v1.sha256"])
@@ -1209,8 +1251,8 @@ class VerificationRedGreenTests(unittest.TestCase):
         self.assertEqual(set(mod.DEPENDENCY_SOURCE_PATHS), changed)
         self.assertEqual(179, len(base_map) - len(changed))
         self.assertEqual(dependency_stage["sha256"], sha(final_path.read_bytes()))
-        self.assertEqual("std-compile-v1", expected["stage_manifests"][-8]["name"])
-        self.assertEqual(184, expected["stage_manifests"][-8]["count"])
+        self.assertEqual("std-compile-v1", expected["stage_manifests"][-9]["name"])
+        self.assertEqual(184, expected["stage_manifests"][-9]["count"])
         for rel, expected_hash in {**expected["payload_patches"], **expected["artifacts"]}.items():
             with self.subTest(path=rel):
                 self.assertEqual(expected_hash, sha((MODULE_DIR / rel).read_bytes()), rel)
@@ -1228,10 +1270,10 @@ class VerificationRedGreenTests(unittest.TestCase):
             expected["test_filters"][49],
         )
         self.assertEqual(
-            ["original-native", "scope-v5", "discard-v2", "return-v1", "compile-repairs-v1", "cumulative-hir-v1", "next-hir-v1", "forced-root-wire-v1", "dependency-compile-v1", "std-compile-v1", "quickjs-runtime-compile-v1", "quickjs-api-followup-v1", "integrated-repair-v1", "integrated-repair-v2", "integrated-repair-v3", "integrated-repair-v4", "integrated-repair-v5"],
+            ["original-native", "scope-v5", "discard-v2", "return-v1", "compile-repairs-v1", "cumulative-hir-v1", "next-hir-v1", "forced-root-wire-v1", "dependency-compile-v1", "std-compile-v1", "quickjs-runtime-compile-v1", "quickjs-api-followup-v1", "integrated-repair-v1", "integrated-repair-v2", "integrated-repair-v3", "integrated-repair-v4", "integrated-repair-v5", "integrated-repair-v6"],
             expected["patch_order"],
         )
-        stage = expected["stage_manifests"][-8]
+        stage = expected["stage_manifests"][-9]
         self.assertEqual(("std-compile-v1", 184, "lexical"), (stage["name"], stage["count"], stage["path_order"]))
         self.assertEqual(
             ["crates/thaw-std/src/json.rs", "crates/thaw-quickjs/src/quickjs/api.rs", "crates/thaw-quickjs/src/quickjs/platform_globals/runtime.js", "crates/thaw-std/src/http.rs"],
@@ -1263,8 +1305,8 @@ class VerificationRedGreenTests(unittest.TestCase):
     def test_eleventh_quickjs_runtime_stage_is_pinned_to_the_original_wasm_and_five_owners(self):
         self.require_implementation()
         expected = json.loads((MODULE_DIR / "pins.json").read_text(encoding="utf-8"))
-        self.assertEqual(17, len(expected["stage_manifests"]))
-        stage = expected["stage_manifests"][-7]
+        self.assertEqual(18, len(expected["stage_manifests"]))
+        stage = expected["stage_manifests"][-8]
         pair = expected["quickjs_runtime_compile_base"]
         self.assertEqual(("quickjs-runtime-compile-v1", 185, "lexical"), (stage["name"], stage["count"], stage["path_order"]))
         self.assertEqual(("std-compile-v1", 185, "lexical"), (pair["paired_after"], pair["count"], pair["path_order"]))
@@ -1287,13 +1329,13 @@ class VerificationRedGreenTests(unittest.TestCase):
             ],
             expected["quickjs_runtime_source_paths"],
         )
-        self.assertEqual((131, 123, 8), (expected["net_owners"]["count"], expected["net_owners"]["modified"], expected["net_owners"]["new"]))
+        self.assertEqual((148, 140, 8), (expected["net_owners"]["count"], expected["net_owners"]["modified"], expected["net_owners"]["new"]))
 
     def test_twelfth_quickjs_api_stage_pins_original_tests_and_three_changed_owners(self):
         self.require_implementation()
         expected = json.loads((MODULE_DIR / "pins.json").read_text(encoding="utf-8"))
-        self.assertEqual(17, len(expected["stage_manifests"]))
-        stage = expected["stage_manifests"][-6]
+        self.assertEqual(18, len(expected["stage_manifests"]))
+        stage = expected["stage_manifests"][-7]
         pair = expected["quickjs_api_followup_base"]
         self.assertEqual(("quickjs-api-followup-v1", 186, "lexical"), (stage["name"], stage["count"], stage["path_order"]))
         self.assertEqual(("quickjs-runtime-compile-v1", 186, "lexical"), (pair["paired_after"], pair["count"], pair["path_order"]))
@@ -1314,7 +1356,7 @@ class VerificationRedGreenTests(unittest.TestCase):
             ],
             expected["quickjs_api_followup_source_paths"],
         )
-        self.assertEqual((131, 123, 8), (expected["net_owners"]["count"], expected["net_owners"]["modified"], expected["net_owners"]["new"]))
+        self.assertEqual((148, 140, 8), (expected["net_owners"]["count"], expected["net_owners"]["modified"], expected["net_owners"]["new"]))
 
     def test_quickjs_api_followup_pair_rejects_changed_original_tests_identity(self):
         mod = self.require_implementation()
@@ -1335,8 +1377,8 @@ class VerificationRedGreenTests(unittest.TestCase):
     def test_thirteenth_integrated_repair_stage_pins_pair_and_source_paths(self):
         self.require_implementation()
         expected = json.loads((MODULE_DIR / "pins.json").read_text(encoding="utf-8"))
-        self.assertEqual(17, len(expected["stage_manifests"]))
-        stage = expected["stage_manifests"][-5]
+        self.assertEqual(18, len(expected["stage_manifests"]))
+        stage = expected["stage_manifests"][-6]
         pair = expected["integrated_repair_base"]
         self.assertEqual(("integrated-repair-v1", 218, "lexical"), (stage["name"], stage["count"], stage["path_order"]))
         self.assertEqual(("quickjs-api-followup-v1", 218, "lexical"), (pair["paired_after"], pair["count"], pair["path_order"]))
@@ -1352,12 +1394,13 @@ class VerificationRedGreenTests(unittest.TestCase):
         finally:
             verify.EXPECTED = fixture_expected
         self.assertTrue(all(roster.get(path) == "modified" for path in sources))
-        self.assertEqual("integrated-repair-v5", expected["patch_order"][-1])
-        self.assertEqual("integrated-repair-v4", expected["patch_order"][-2])
-        self.assertEqual("integrated-repair-v3", expected["patch_order"][-3])
-        self.assertEqual("integrated-repair-v2", expected["patch_order"][-4])
-        self.assertEqual("integrated-repair-v1", expected["patch_order"][-5])
-        self.assertEqual("quickjs-api-followup-v1", expected["patch_order"][-6])
+        self.assertEqual("integrated-repair-v6", expected["patch_order"][-1])
+        self.assertEqual("integrated-repair-v5", expected["patch_order"][-2])
+        self.assertEqual("integrated-repair-v4", expected["patch_order"][-3])
+        self.assertEqual("integrated-repair-v3", expected["patch_order"][-4])
+        self.assertEqual("integrated-repair-v2", expected["patch_order"][-5])
+        self.assertEqual("integrated-repair-v1", expected["patch_order"][-6])
+        self.assertEqual("quickjs-api-followup-v1", expected["patch_order"][-7])
 
     def test_integrated_repair_pair_rejects_changed_baseline_extra_owner(self):
         mod = self.require_implementation()
@@ -1394,8 +1437,8 @@ class VerificationRedGreenTests(unittest.TestCase):
     def test_fourteenth_integrated_repair_v2_stage_pins_pair_added_files_and_sources(self):
         self.require_implementation()
         expected = json.loads((MODULE_DIR / "pins.json").read_text(encoding="utf-8"))
-        self.assertEqual(17, len(expected["stage_manifests"]))
-        stage = expected["stage_manifests"][-4]
+        self.assertEqual(18, len(expected["stage_manifests"]))
+        stage = expected["stage_manifests"][-5]
         pair = expected["integrated_repair_v2_base"]
         self.assertEqual(("integrated-repair-v2", 223, "lexical"), (stage["name"], stage["count"], stage["path_order"]))
         self.assertEqual(("integrated-repair-v1", 220, "lexical"), (pair["paired_after"], pair["count"], pair["path_order"]))
@@ -1405,7 +1448,7 @@ class VerificationRedGreenTests(unittest.TestCase):
         sources = expected["integrated_repair_v2_source_paths"]
         self.assertEqual(26, len(sources))
         self.assertEqual(sorted(set(sources)), sources)
-        self.assertEqual(["integrated-repair-v2", "integrated-repair-v3"], expected["patch_order"][-4:-2])
+        self.assertEqual(["integrated-repair-v2", "integrated-repair-v3"], expected["patch_order"][-5:-3])
         fixture_expected = verify.EXPECTED
         verify.EXPECTED = expected
         try:
@@ -1459,15 +1502,15 @@ class VerificationRedGreenTests(unittest.TestCase):
 
     def test_fifteenth_integrated_repair_v3_stage_pins_exact_path_set_and_source_paths(self):
         expected = json.loads((MODULE_DIR / "pins.json").read_text(encoding="utf-8"))
-        stage = expected["stage_manifests"][-3]
+        stage = expected["stage_manifests"][-4]
         pair = expected["integrated_repair_v3_base"]
         self.assertEqual(("integrated-repair-v3", 223, "lexical"), (stage["name"], stage["count"], stage["path_order"]))
         self.assertEqual((223, "integrated-repair-v2"), (pair["count"], pair["paired_after"]))
-        self.assertEqual(expected["stage_manifests"][-4]["sha256"], pair["sha256"])
+        self.assertEqual(expected["stage_manifests"][-5]["sha256"], pair["sha256"])
         sources = expected["integrated_repair_v3_source_paths"]
         self.assertEqual(30, len(sources))
         self.assertEqual(sorted(set(sources)), sources)
-        self.assertEqual(["integrated-repair-v2", "integrated-repair-v3"], expected["patch_order"][-4:-2])
+        self.assertEqual(["integrated-repair-v2", "integrated-repair-v3"], expected["patch_order"][-5:-3])
 
     def test_integrated_repair_v3_accepts_the_fixture_and_pins_its_sources(self):
         mod = self.require_implementation()
@@ -1493,16 +1536,16 @@ class VerificationRedGreenTests(unittest.TestCase):
 
     def test_sixteenth_integrated_repair_v4_stage_pins_pair_extra_owners_and_source_paths(self):
         expected = json.loads((MODULE_DIR / "pins.json").read_text(encoding="utf-8"))
-        stage = expected["stage_manifests"][-2]
+        stage = expected["stage_manifests"][-3]
         pair = expected["integrated_repair_v4_base"]
         self.assertEqual(("integrated-repair-v4", 225, "lexical"), (stage["name"], stage["count"], stage["path_order"]))
         self.assertEqual((225, "integrated-repair-v3"), (pair["count"], pair["paired_after"]))
         self.assertEqual(2, len(pair["extra_owners"]))
-        self.assertEqual(expected["stage_manifests"][-2]["sha256"], expected["artifacts"]["integrated-repair-v4.sha256"])
+        self.assertEqual(expected["stage_manifests"][-3]["sha256"], expected["artifacts"]["integrated-repair-v4.sha256"])
         sources = expected["integrated_repair_v4_source_paths"]
         self.assertEqual(18, len(sources))
         self.assertEqual(sorted(set(sources)), sources)
-        self.assertEqual(["integrated-repair-v3", "integrated-repair-v4"], expected["patch_order"][-3:-1])
+        self.assertEqual(["integrated-repair-v3", "integrated-repair-v4"], expected["patch_order"][-4:-2])
 
     def test_integrated_repair_v4_accepts_the_fixture_and_pins_its_sources(self):
         mod = self.require_implementation()
@@ -1535,15 +1578,15 @@ class VerificationRedGreenTests(unittest.TestCase):
 
     def test_seventeenth_integrated_repair_v5_stage_pins_exact_path_set_and_source_paths(self):
         expected = json.loads((MODULE_DIR / "pins.json").read_text(encoding="utf-8"))
-        stage = expected["stage_manifests"][-1]
+        stage = expected["stage_manifests"][-2]
         pair = expected["integrated_repair_v5_base"]
         self.assertEqual(("integrated-repair-v5", 225, "lexical"), (stage["name"], stage["count"], stage["path_order"]))
         self.assertEqual((225, "integrated-repair-v4"), (pair["count"], pair["paired_after"]))
-        self.assertEqual(expected["stage_manifests"][-2]["sha256"], pair["sha256"])
+        self.assertEqual(expected["stage_manifests"][-3]["sha256"], pair["sha256"])
         sources = expected["integrated_repair_v5_source_paths"]
         self.assertEqual(13, len(sources))
         self.assertEqual(sorted(set(sources)), sources)
-        self.assertEqual(["integrated-repair-v4", "integrated-repair-v5"], expected["patch_order"][-2:])
+        self.assertEqual(["integrated-repair-v4", "integrated-repair-v5"], expected["patch_order"][-3:-1])
 
     def test_integrated_repair_v5_accepts_the_fixture_and_pins_its_sources(self):
         mod = self.require_implementation()
@@ -1563,6 +1606,48 @@ class VerificationRedGreenTests(unittest.TestCase):
     def test_integrated_repair_v5_rejects_a_tampered_patch(self):
         mod = self.require_implementation()
         patch = self.fixture.payload / "integrated-repair-v5.patch"
+        patch.write_bytes(patch.read_bytes() + b"\n# tampered\n")
+        with self.assertRaises(mod.VerificationError):
+            mod.verify_inputs(self.fixture.baseline, self.fixture.payload)
+
+    def test_eighteenth_integrated_repair_v6_stage_pins_pair_extra_owners_and_source_paths(self):
+        expected = json.loads((MODULE_DIR / "pins.json").read_text(encoding="utf-8"))
+        stage = expected["stage_manifests"][-1]
+        pair = expected["integrated_repair_v6_base"]
+        self.assertEqual(("integrated-repair-v6", 231, "lexical"), (stage["name"], stage["count"], stage["path_order"]))
+        self.assertEqual((231, "integrated-repair-v5"), (pair["count"], pair["paired_after"]))
+        self.assertEqual(6, len(pair["extra_owners"]))
+        self.assertEqual(stage["sha256"], expected["artifacts"]["integrated-repair-v6.sha256"])
+        sources = expected["integrated_repair_v6_source_paths"]
+        self.assertEqual(49, len(sources))
+        self.assertEqual(sorted(set(sources)), sources)
+        self.assertEqual(["integrated-repair-v5", "integrated-repair-v6"], expected["patch_order"][-2:])
+
+    def test_integrated_repair_v6_accepts_the_fixture_and_pins_its_sources(self):
+        mod = self.require_implementation()
+        stage_by_name = {stage["name"]: stage for stage in mod.EXPECTED["stage_manifests"]}
+        net = mod._read_net_roster(self.fixture.payload)
+        result = mod._verify_integrated_repair_v6_inputs(self.fixture.payload, self.fixture.baseline, stage_by_name, net)
+        self.assertEqual(stage_by_name["integrated-repair-v6"]["count"], result["final_count"])
+        self.assertEqual(sorted(mod.EXPECTED["integrated_repair_v6_source_paths"]), result["changed_source_owners"])
+
+    def test_integrated_repair_v6_final_must_change_exactly_the_pinned_sources(self):
+        mod = self.require_implementation()
+        stage_by_name = {stage["name"]: stage for stage in mod.EXPECTED["stage_manifests"]}
+        net = mod._read_net_roster(self.fixture.payload)
+        mod.EXPECTED["integrated_repair_v6_source_paths"] = []
+        self.assertVerifyError("must change exactly the pinned source owners", mod._verify_integrated_repair_v6_inputs, self.fixture.payload, self.fixture.baseline, stage_by_name, net)
+
+    def test_integrated_repair_v6_rejects_changed_baseline_extra_owner(self):
+        mod = self.require_implementation()
+        owner = self.fixture.baseline / mod.EXPECTED["integrated_repair_v6_base"]["extra_owners"][0]["path"]
+        owner.write_bytes(owner.read_bytes() + b"drift\n")
+        with self.assertRaises(mod.VerificationError):
+            mod.verify_inputs(self.fixture.baseline, self.fixture.payload)
+
+    def test_integrated_repair_v6_rejects_a_tampered_patch(self):
+        mod = self.require_implementation()
+        patch = self.fixture.payload / "integrated-repair-v6.patch"
         patch.write_bytes(patch.read_bytes() + b"\n# tampered\n")
         with self.assertRaises(mod.VerificationError):
             mod.verify_inputs(self.fixture.baseline, self.fixture.payload)
@@ -1639,7 +1724,7 @@ class VerificationRedGreenTests(unittest.TestCase):
         production_expected = self.fixture.expected_before
         roster_path = MODULE_DIR / "net-owners.txt"
         roster_digest = sha(roster_path.read_bytes())
-        self.assertEqual("6450fe32290798d11f06714911aec386e30d5f735ecbd685e8e55fe22140a722", roster_digest)
+        self.assertEqual("121c67431ced70abcc37b8567cf49cee8b3c1aa4cbe976cb233ab33746e70fda", roster_digest)
         self.assertEqual(roster_digest, production_expected["net_owners"]["sha256"])
         self.assertEqual(roster_digest, production_expected["artifacts"]["net-owners.txt"])
         shipped_pins = json.loads((MODULE_DIR / "pins.json").read_text(encoding="utf-8"))

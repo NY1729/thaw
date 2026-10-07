@@ -276,6 +276,66 @@ INTEGRATED_REPAIR_V5_SOURCE_PATHS = [
     "crates/thaw-llvm/src/hir_codegen/tests/core.rs",
     "crates/thaw-llvm/src/hir_codegen/tests/values/dynamic_and_json.rs",
 ]
+INTEGRATED_REPAIR_V6_EXTRA_OWNERS = [
+    {"path": "crates/thaw-cli/src/registry_integration/jit/expressions.rs", "sha256": "87590167c3efefecc83bb897341f2bafc3b23405287316f2e62e5fa517fcb8ed", "git_blob_sha1": "218f0894d84e6b43041276e1d82c334348bbdd42", "final_sha256": "d87ca2b856057abd477cc623aad22b81f30ce5e22138c3152b11f3d247ef1943"},
+    {"path": "crates/thaw-cli/src/registry_integration/jit/loop_expressions.rs", "sha256": "cffb3c24cb5ca51316dadb53f9274fac2554fe66df98590c66adb39a5fd96c3c", "git_blob_sha1": "4731862fc606314e2850bf180415fabea32fec2a", "final_sha256": "fc4d4ff84393ea345f237077d9136522a38653d45e9652d70a097017154920b4"},
+    {"path": "crates/thaw-cli/src/registry_integration/jit/returns.rs", "sha256": "0072d5951d2d92c2c968f5486e6213c58155f86b0402bd6f51b5004754df3369", "git_blob_sha1": "6e0e167ba462d85bb46678a293b0da693aa19ae2", "final_sha256": "2aaae9f68bafc40640db59d7ca294f372d0c7da51b1fe6fa3961605e33ddb98f"},
+    {"path": "crates/thaw-cli/src/registry_integration/shim_generation.rs", "sha256": "427e2dd11998057c4a255587c1ef3400446282d4f378970eda810a6eaa59f4da", "git_blob_sha1": "feba436fe1ed72591dacfd8b4215dd664e13e0a0", "final_sha256": "82ecf166b0e1592a747b19d567314e0c009415e21e4cb4b7286fc99d3a3f7888"},
+    {"path": "crates/thaw-cli/src/tests/module_graph.rs", "sha256": "01ea2debf213487f29e64a9b4753a0c06a1ca9481d027c41f6ac5bab65abed53", "git_blob_sha1": "bbb3cd1552df59ada1977b3cf27d02320226aee4", "final_sha256": "b5fc2662bc2206b6a4660ec56278b2c614b90eba7e6270cb1eb0ee10705cd7c9"},
+    {"path": "crates/thaw-napi/src/lib.rs", "sha256": "fbe17fd851d0770a9e483bfaa61959942bcbdcbb6deda512524b5b7c26b0d3c4", "git_blob_sha1": "e0c260b0e358653d79b177864893100902b6eb8e", "final_sha256": "c12ded3fbadafff6d13150c6d1799e67deca09f51a17e1416370431a99beef97"},
+]
+INTEGRATED_REPAIR_V6_BASE_EXTRA_PATHS = [*INTEGRATED_REPAIR_V4_BASE_EXTRA_PATHS, *[owner["path"] for owner in INTEGRATED_REPAIR_V6_EXTRA_OWNERS]]
+INTEGRATED_REPAIR_V6_SOURCE_PATHS = [
+    "crates/thaw-bridge/src/bridge/dts/exports.rs",
+    "crates/thaw-cli/src/registry_integration/jit/expressions.rs",
+    "crates/thaw-cli/src/registry_integration/jit/loop_expressions.rs",
+    "crates/thaw-cli/src/registry_integration/jit/returns.rs",
+    "crates/thaw-cli/src/registry_integration/shim_generation.rs",
+    "crates/thaw-cli/src/registry_integration/shim_support.rs",
+    "crates/thaw-cli/src/tests/module_graph.rs",
+    "crates/thaw-hir/src/lower/calls.rs",
+    "crates/thaw-hir/src/lower/expressions/coercions.rs",
+    "crates/thaw-hir/src/lower/expressions/functions.rs",
+    "crates/thaw-hir/src/lower/expressions/lowering.rs",
+    "crates/thaw-hir/src/lower/generators.rs",
+    "crates/thaw-hir/src/lower/generic_calls.rs",
+    "crates/thaw-hir/src/lower/inference/coercions.rs",
+    "crates/thaw-hir/src/lower/inference/types.rs",
+    "crates/thaw-hir/src/lower/invocations/arguments.rs",
+    "crates/thaw-hir/src/lower/invocations/calls.rs",
+    "crates/thaw-hir/src/lower/invocations/instance_builtins/array_mutation_methods.rs",
+    "crates/thaw-hir/src/lower/invocations/instance_builtins/collections.rs",
+    "crates/thaw-hir/src/lower/invocations/promises.rs",
+    "crates/thaw-hir/src/lower/module/globals.rs",
+    "crates/thaw-hir/src/lower/normalize.rs",
+    "crates/thaw-hir/src/lower/objects.rs",
+    "crates/thaw-hir/src/lower/promises.rs",
+    "crates/thaw-hir/src/lower/statements/narrowing.rs",
+    "crates/thaw-llvm/src/hir_codegen.rs",
+    "crates/thaw-llvm/src/hir_codegen/async_frames/planning/analysis.rs",
+    "crates/thaw-llvm/src/hir_codegen/console.rs",
+    "crates/thaw-llvm/src/hir_codegen/dynamic_host/callbacks.rs",
+    "crates/thaw-llvm/src/hir_codegen/dynamic_host/support.rs",
+    "crates/thaw-llvm/src/hir_codegen/entrypoints.rs",
+    "crates/thaw-llvm/src/hir_codegen/functions.rs",
+    "crates/thaw-llvm/src/hir_codegen/invocations/calls.rs",
+    "crates/thaw-llvm/src/hir_codegen/invocations/variable_calls.rs",
+    "crates/thaw-llvm/src/hir_codegen/json_bridge/decoding.rs",
+    "crates/thaw-llvm/src/hir_codegen/promises.rs",
+    "crates/thaw-llvm/src/hir_codegen/runtime_declarations.rs",
+    "crates/thaw-llvm/src/hir_codegen/tests.rs",
+    "crates/thaw-llvm/src/hir_codegen/tests/async/syntax.rs",
+    "crates/thaw-llvm/src/hir_codegen/tests/classes.rs",
+    "crates/thaw-llvm/src/hir_codegen/tests/control_flow.rs",
+    "crates/thaw-llvm/src/hir_codegen/tests/native_builtins.rs",
+    "crates/thaw-llvm/src/hir_codegen/values/closures.rs",
+    "crates/thaw-napi/src/lib.rs",
+    "crates/thaw-napi/src/napi/module_host.rs",
+    "crates/thaw-quickjs/src/quickjs/api.rs",
+    "crates/thaw-runtime/src/runtime/native_values/regex.rs",
+    "crates/thaw-std/src/inspect.rs",
+    "crates/thaw-std/src/json.rs",
+]
 EXPECTED: dict[str, Any] = {
     "schema_version": 1,
     "validation_branch": VALIDATION_BRANCH,
@@ -657,7 +717,7 @@ EXPECTED["payload_patches"]["quickjs-api-followup-v1.patch"] = "3e4daa17ed3234d3
 EXPECTED["artifacts"].update({
     "quickjs-api-followup-v1-base.sha256": "daf200a9aea71a2726db0c2754dbeb9da958bfafb53792a4d13adada892e4ae0",
     "quickjs-api-followup-v1.sha256": "2fc7c97c06059974628930e661751c3a4cf7603bb1c2e795fe6a56d7f862d06b",
-    "net-owners.txt": "6450fe32290798d11f06714911aec386e30d5f735ecbd685e8e55fe22140a722",
+    "net-owners.txt": "121c67431ced70abcc37b8567cf49cee8b3c1aa4cbe976cb233ab33746e70fda",
 })
 EXPECTED["stage_manifests"].append({
     "name": "quickjs-api-followup-v1",
@@ -683,9 +743,9 @@ EXPECTED["quickjs_api_followup_base"] = {
 EXPECTED["quickjs_api_followup_source_paths"] = QUICKJS_API_FOLLOWUP_SOURCE_PATHS
 EXPECTED["net_owners"] = {
     "file": "net-owners.txt",
-    "sha256": "6450fe32290798d11f06714911aec386e30d5f735ecbd685e8e55fe22140a722",
-    "count": 131,
-    "modified": 123,
+    "sha256": "121c67431ced70abcc37b8567cf49cee8b3c1aa4cbe976cb233ab33746e70fda",
+    "count": 148,
+    "modified": 140,
     "new": 8,
 }
 EXPECTED["patch_order"].append("quickjs-api-followup-v1")
@@ -803,6 +863,29 @@ EXPECTED["integrated_repair_v5_base"] = {
 }
 EXPECTED["integrated_repair_v5_source_paths"] = INTEGRATED_REPAIR_V5_SOURCE_PATHS
 EXPECTED["patch_order"].append("integrated-repair-v5")
+EXPECTED["payload_patches"]["integrated-repair-v6.patch"] = "f4454e20db2c9d001b83a3f90bef2df5c84b8ed33aad711570919217d65ec6bb"
+EXPECTED["artifacts"].update({
+    "integrated-repair-v6-base.sha256": "eb589ab58653bb5a80acbec8b9500f9fe662c7dd5b337133975031da85d71fdc",
+    "integrated-repair-v6.sha256": "2f613d15e718a8e53193d29a6a8968828f711d70cf51d0dc41117c7805007051",
+})
+EXPECTED["stage_manifests"].append({
+    "name": "integrated-repair-v6",
+    "file": "integrated-repair-v6.sha256",
+    "sha256": "2f613d15e718a8e53193d29a6a8968828f711d70cf51d0dc41117c7805007051",
+    "count": 231,
+    "extra_paths": INTEGRATED_REPAIR_V6_BASE_EXTRA_PATHS,
+    "path_order": "lexical",
+})
+EXPECTED["integrated_repair_v6_base"] = {
+    "file": "integrated-repair-v6-base.sha256",
+    "sha256": "eb589ab58653bb5a80acbec8b9500f9fe662c7dd5b337133975031da85d71fdc",
+    "count": 231,
+    "path_order": "lexical",
+    "paired_after": "integrated-repair-v5",
+    "extra_owners": INTEGRATED_REPAIR_V6_EXTRA_OWNERS,
+}
+EXPECTED["integrated_repair_v6_source_paths"] = INTEGRATED_REPAIR_V6_SOURCE_PATHS
+EXPECTED["patch_order"].append("integrated-repair-v6")
 EXPECTED["test_filters"].extend([
     {"package": "thaw-quickjs", "filter": "tests::terminal_pending_work_is_separate_from_failure_and_exit_code"},
     {"package": "thaw-quickjs", "filter": "tests::private_graph_arguments_do_not_revive_user_marker_shapes"},
@@ -1085,6 +1168,7 @@ def verify_stage(
         INTEGRATED_REPAIR_V2_BASE_EXTRA_PATHS,
         INTEGRATED_REPAIR_V2_FINAL_EXTRA_PATHS,
         INTEGRATED_REPAIR_V4_BASE_EXTRA_PATHS,
+        INTEGRATED_REPAIR_V6_BASE_EXTRA_PATHS,
     ]
     if extra_paths and extra_paths not in allowed_extra_sets:
         raise VerificationError(f"stage has an unapproved extra path scope: {extra_paths!r}")
@@ -1786,6 +1870,78 @@ def _verify_integrated_repair_v5_inputs(
     }
 
 
+def _verify_integrated_repair_v6_inputs(
+    payload: Path, baseline: Path, stage_by_name: dict[str, dict[str, Any]], net: dict[str, str]
+) -> dict[str, Any]:
+    """Pin stage eighteen to the stage-seventeen final plus baseline extra owners; the final changes only pinned sources."""
+    base = EXPECTED.get("integrated_repair_v6_base")
+    previous = stage_by_name.get("integrated-repair-v5")
+    stage = stage_by_name.get("integrated-repair-v6")
+    source_paths = EXPECTED.get("integrated_repair_v6_source_paths")
+    if not isinstance(base, dict) or previous is None or stage is None or not isinstance(source_paths, list):
+        raise VerificationError("integrated repair v6 paired base or stage is missing")
+    order = EXPECTED["patch_order"]
+    index = order.index("integrated-repair-v6")
+    if base.get("paired_after") != previous["name"] or index == 0 or order[index - 1] != "integrated-repair-v5":
+        raise VerificationError("integrated repair v6 paired base must immediately follow integrated-repair-v5")
+    if base.get("path_order") != "lexical" or previous.get("path_order") != "lexical" or stage.get("path_order") != "lexical":
+        raise VerificationError("integrated repair v6 base, predecessor and final must retain lexical path ordering")
+    owners = base.get("extra_owners")
+    if not isinstance(owners, list):
+        raise VerificationError("integrated repair v6 pins are malformed")
+    owner_paths = [owner.get("path") for owner in owners]
+    if previous.get("extra_paths") != INTEGRATED_REPAIR_V4_BASE_EXTRA_PATHS or stage.get("extra_paths") != [*INTEGRATED_REPAIR_V4_BASE_EXTRA_PATHS, *owner_paths]:
+        raise VerificationError("integrated repair v6 stage has an unexpected stage-scoped path set")
+    if sorted(set(source_paths)) != sorted(source_paths):
+        raise VerificationError("integrated repair v6 source path pin is not unique")
+    if base.get("count") != previous["count"] + len(owners) or stage.get("count") != base["count"]:
+        raise VerificationError("integrated repair v6 counts must be predecessor plus baseline extras for both base and final")
+    if base.get("file") != "integrated-repair-v6-base.sha256" or stage.get("file") != "integrated-repair-v6.sha256":
+        raise VerificationError("integrated repair v6 paired input filenames differ from the pinned contract")
+    for descriptor in (base, stage):
+        if descriptor.get("sha256") != EXPECTED["artifacts"].get(descriptor["file"]):
+            raise VerificationError(f"integrated repair v6 manifest pin is stale for {descriptor['file']}")
+    for owner in owners:
+        owner_path = _path_without_symlinks(baseline, owner["path"], "integrated repair v6 baseline extra owner")
+        if not owner_path.is_file() or owner_path.is_symlink():
+            raise VerificationError(f"integrated repair v6 baseline extra owner is missing or not a regular file: {owner['path']}")
+        owner_bytes = owner_path.read_bytes()
+        if _sha(owner_bytes) != owner["sha256"] or _git_blob_sha1(owner_bytes) != owner["git_blob_sha1"]:
+            raise VerificationError(f"baseline extra owner SHA-256 or Git blob identity mismatch: {owner['path']}")
+    base_path = _path_without_symlinks(payload, base["file"], "integrated repair v6 paired base")
+    previous_path = _path_without_symlinks(payload, previous["file"], "integrated repair v6 predecessor final")
+    final_path = _path_without_symlinks(payload, stage["file"], "integrated repair v6 final")
+    previous_map = {rel: digest for digest, rel in _parse_sha_manifest(previous_path, "integrated repair v6 predecessor final", path_order="lexical")}
+    base_rows = _parse_sha_manifest(base_path, "integrated repair v6 paired base", path_order="lexical")
+    final_rows = _parse_sha_manifest(final_path, "integrated repair v6 final", path_order="lexical")
+    base_map = {rel: digest for digest, rel in base_rows}
+    final_map = {rel: digest for digest, rel in final_rows}
+    expected_base = dict(previous_map)
+    for owner in owners:
+        if owner["path"] in expected_base:
+            raise VerificationError(f"integrated repair v6 extra owner is already in the preceding source set: {owner['path']}")
+        expected_base[owner["path"]] = owner["sha256"]
+    if base_map != expected_base or len(base_rows) != base["count"]:
+        raise VerificationError("integrated repair v6 paired base differs from the stage-seventeen final plus the baseline extra owners")
+    if set(final_map) != set(base_map) or len(final_rows) != stage["count"]:
+        raise VerificationError("integrated repair v6 final changed the paired base path set")
+    changed = {rel for rel in base_map if base_map[rel] != final_map[rel]}
+    if changed != set(source_paths):
+        raise VerificationError("integrated repair v6 final must change exactly the pinned source owners")
+    for owner in owners:
+        if final_map.get(owner["path"]) != owner["final_sha256"]:
+            raise VerificationError(f"integrated repair v6 final hash differs from the pinned extra owner: {owner['path']}")
+    if any(net.get(rel) not in ("modified", "new") for rel in source_paths):
+        raise VerificationError("integrated repair v6 source owners must all be net owners")
+    return {
+        "base_count": len(base_map),
+        "final_count": len(final_map),
+        "changed_source_owners": sorted(changed),
+        "paired_after": previous["name"],
+        "extra_owner_count": len(owners),
+    }
+
+
 def verify_inputs(baseline: Path, payload: Path) -> dict[str, Any]:
     """Validate descriptor, immutable bytes, clean baseline and roster preconditions."""
     if not payload.is_dir() or payload.is_symlink():
@@ -1889,6 +2045,12 @@ def verify_inputs(baseline: Path, payload: Path) -> dict[str, Any]:
         unexpected = sorted(actual_integrated_repair_v5_inputs - expected_integrated_repair_v5_inputs)
         raise VerificationError(f"unexpected integrated repair v5 input: {unexpected[0]}")
 
+    expected_integrated_repair_v6_inputs = {"integrated-repair-v6.patch", "integrated-repair-v6-base.sha256", "integrated-repair-v6.sha256"}
+    actual_integrated_repair_v6_inputs = {entry.name for entry in payload.iterdir() if entry.name.startswith("integrated-repair-v6")}
+    if actual_integrated_repair_v6_inputs - expected_integrated_repair_v6_inputs:
+        unexpected = sorted(actual_integrated_repair_v6_inputs - expected_integrated_repair_v6_inputs)
+        raise VerificationError(f"unexpected integrated repair v6 input: {unexpected[0]}")
+
     owner_map = _read_owner_map(payload)
     manifest = _json_no_duplicates(source_bytes["handoff_manifest"], "native handoff manifest")
     try:
@@ -1924,7 +2086,7 @@ def verify_inputs(baseline: Path, payload: Path) -> dict[str, Any]:
 
     # Each manifest file is parsed here, before any patch is applied, so malformed or
     # unsafe input cannot become a Cargo-time surprise.
-    lexical_stage_names = {"compile-repairs-v1", "cumulative-hir-v1", "next-hir-v1", "forced-root-wire-v1", "dependency-compile-v1", "std-compile-v1", "quickjs-runtime-compile-v1", "quickjs-api-followup-v1", "integrated-repair-v1", "integrated-repair-v2", "integrated-repair-v3", "integrated-repair-v4", "integrated-repair-v5"}
+    lexical_stage_names = {"compile-repairs-v1", "cumulative-hir-v1", "next-hir-v1", "forced-root-wire-v1", "dependency-compile-v1", "std-compile-v1", "quickjs-runtime-compile-v1", "quickjs-api-followup-v1", "integrated-repair-v1", "integrated-repair-v2", "integrated-repair-v3", "integrated-repair-v4", "integrated-repair-v5", "integrated-repair-v6"}
     extra_path = EXPECTED["repair_base"]["extra_owner"]["path"]
     extra_paths_by_stage = {
         "compile-repairs-v1": [extra_path],
@@ -1940,6 +2102,7 @@ def verify_inputs(baseline: Path, payload: Path) -> dict[str, Any]:
         "integrated-repair-v3": INTEGRATED_REPAIR_V2_FINAL_EXTRA_PATHS,
         "integrated-repair-v4": INTEGRATED_REPAIR_V4_BASE_EXTRA_PATHS,
         "integrated-repair-v5": INTEGRATED_REPAIR_V4_BASE_EXTRA_PATHS,
+        "integrated-repair-v6": INTEGRATED_REPAIR_V6_BASE_EXTRA_PATHS,
     }
     for stage in EXPECTED["stage_manifests"]:
         extra_paths = stage.get("extra_paths", [])
@@ -2129,6 +2292,7 @@ def verify_inputs(baseline: Path, payload: Path) -> dict[str, Any]:
     integrated_repair_v3_inputs = _verify_integrated_repair_v3_inputs(payload, stage_by_name, net)
     integrated_repair_v4_inputs = _verify_integrated_repair_v4_inputs(payload, baseline, stage_by_name, net)
     integrated_repair_v5_inputs = _verify_integrated_repair_v5_inputs(payload, stage_by_name, net)
+    integrated_repair_v6_inputs = _verify_integrated_repair_v6_inputs(payload, baseline, stage_by_name, net)
     return {
         "baseline": identity,
         "inputs": {**EXPECTED["payload_patches"], **EXPECTED["artifacts"]},
@@ -2143,6 +2307,7 @@ def verify_inputs(baseline: Path, payload: Path) -> dict[str, Any]:
         "integrated_repair_v3": integrated_repair_v3_inputs,
         "integrated_repair_v4": integrated_repair_v4_inputs,
         "integrated_repair_v5": integrated_repair_v5_inputs,
+        "integrated_repair_v6": integrated_repair_v6_inputs,
         "patch_order": list(EXPECTED["patch_order"]),
     }
 
@@ -2313,6 +2478,7 @@ def _patch_path(baseline: Path, payload: Path, name: str) -> Path:
         "integrated-repair-v3": "integrated-repair-v3.patch",
         "integrated-repair-v4": "integrated-repair-v4.patch",
         "integrated-repair-v5": "integrated-repair-v5.patch",
+        "integrated-repair-v6": "integrated-repair-v6.patch",
     }.get(name)
     if not payload_name:
         raise VerificationError(f"unknown patch stage: {name}")
@@ -2673,6 +2839,34 @@ def reconstruct(baseline: Path, candidate: Path, payload: Path, evidence: Path) 
                     "count": paired["count"],
                     "manifest_sha256": paired["manifest_sha256"],
                     "paired_after": paired_stage_name,
+                }
+            elif stage["name"] == "integrated-repair-v6":
+                v6_base = EXPECTED["integrated_repair_v6_base"]
+                paired_stage_name = v6_base["paired_after"]
+                if not state["stages"] or state["stages"][-1]["stage"] != paired_stage_name:
+                    raise VerificationError("integrated repair v6 paired base is not immediately after the integrated repair v5 final")
+                previous = stage_by_name[paired_stage_name]
+                previous_result = verify_stage(
+                    candidate,
+                    payload / previous["file"],
+                    previous["count"],
+                    previous.get("extra_paths", []),
+                    previous.get("path_order", "components"),
+                )
+                if previous_result["manifest_sha256"] != state["stages"][-1]["manifest_sha256"]:
+                    raise VerificationError("integrated repair v6 predecessor no longer matches the reconstructed integrated repair v5 final")
+                paired = verify_stage(
+                    candidate,
+                    payload / v6_base["file"],
+                    v6_base["count"],
+                    INTEGRATED_REPAIR_V6_BASE_EXTRA_PATHS,
+                    v6_base["path_order"],
+                )
+                state["paired_integrated_repair_v6_base"] = {
+                    "count": paired["count"],
+                    "manifest_sha256": paired["manifest_sha256"],
+                    "paired_after": paired_stage_name,
+                    "extra_owner_count": len(v6_base["extra_owners"]),
                 }
             applied = _apply_patch(candidate, patch)
             manifest = payload / stage["file"]

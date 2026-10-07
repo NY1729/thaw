@@ -1,0 +1,1797 @@
+diff --git a/crates/thaw-bridge/src/bridge/dts/exports.rs b/crates/thaw-bridge/src/bridge/dts/exports.rs
+index 8ae3cb0..41a4a52 100644
+--- a/crates/thaw-bridge/src/bridge/dts/exports.rs
++++ b/crates/thaw-bridge/src/bridge/dts/exports.rs
+@@ -1595,6 +1595,24 @@ pub fn exported_type_names(source: &str) -> HashSet<String> {
+     exported_type_names_named(source, &thaw_parser::common::FileName::Custom("input.ts".into()))
+ }
+ 
++/// Interfaces and type aliases a declaration file exports directly
++/// (`export interface X`, `export type X = ...`). They have no runtime value,
++/// but an `import { X }` / `import type { X }` of one must still bind.
++pub fn exported_declared_type_names_named(
++    source: &str, filename: &thaw_parser::common::FileName,
++) -> HashSet<String> {
++    let Ok(module) = thaw_parser::parse_declarations_with_source_map_named(source, filename.clone())
++        .map(|(module, _)| module) else { return HashSet::new() };
++    module.body.iter().filter_map(|item| match item {
++        ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export)) => match &export.decl {
++            swc_ecma_ast::Decl::TsInterface(interface) => Some(interface.id.sym.to_string()),
++            swc_ecma_ast::Decl::TsTypeAlias(alias) => Some(alias.id.sym.to_string()),
++            _ => None,
++        },
++        _ => None,
++    }).collect()
++}
++
+ pub fn exported_type_names_named(source: &str, filename: &thaw_parser::common::FileName) -> HashSet<String> {
+     let Ok(module) = thaw_parser::parse_declarations_with_source_map_named(source, filename.clone()).map(|(module, _)| module) else {
+         return HashSet::new();
+diff --git a/crates/thaw-cli/src/registry_integration/jit/expressions.rs b/crates/thaw-cli/src/registry_integration/jit/expressions.rs
+index 218f089..83211b2 100644
+--- a/crates/thaw-cli/src/registry_integration/jit/expressions.rs
++++ b/crates/thaw-cli/src/registry_integration/jit/expressions.rs
+@@ -1656,13 +1656,18 @@ macro_rules! jit_expressions {
+                 let mut operands = Vec::new();
+                 flatten_nullish(expression, &mut operands);
+                 let mut selected = Vec::new();
++                let last = operands.pop()?;
+                 encode_expression(
+-                    operands.pop()?,
++                    last,
+                     parameters,
+                     locals,
+                     context,
+                     &mut selected,
+                 )?;
++                // A boolean fallback literal is a numeric constant until marked.
++                if boolean_literal(last) {
++                    selected.push("asbool".into());
++                }
+                 while let Some(operand) = operands.pop() {
+                     let fallback = selected;
+                     if let Some((presence, value)) = optional_tokens(operand, parameters) {
+diff --git a/crates/thaw-cli/src/registry_integration/jit/loop_expressions.rs b/crates/thaw-cli/src/registry_integration/jit/loop_expressions.rs
+index 4731862..261fb9e 100644
+--- a/crates/thaw-cli/src/registry_integration/jit/loop_expressions.rs
++++ b/crates/thaw-cli/src/registry_integration/jit/loop_expressions.rs
+@@ -534,6 +534,10 @@ macro_rules! jit_loop_expressions {
+             encode_expression(
+                 returned.arg.as_deref()?, parameters, locals, context, &mut encoded,
+             )?;
++            // A boolean literal encodes as a numeric constant; mark it as the boolean it is.
++            if boolean_literal(returned.arg.as_deref()?) {
++                encoded.push("asbool".into());
++            }
+             let kind = jit_expression_kind(&encoded).map(|(kind, _)| kind);
+             if kind == Some(JitKind::Array) {
+                 encoded.push("arrayvalue".into());
+diff --git a/crates/thaw-cli/src/registry_integration/jit/returns.rs b/crates/thaw-cli/src/registry_integration/jit/returns.rs
+index 6e0e167..4daa756 100644
+--- a/crates/thaw-cli/src/registry_integration/jit/returns.rs
++++ b/crates/thaw-cli/src/registry_integration/jit/returns.rs
+@@ -1311,6 +1311,15 @@ macro_rules! jit_returns {
+     ) -> Option<()> {
+         let left_kind = jit_expression_kind(&left)?.0;
+         let right_kind = jit_expression_kind(&right)?.0;
++        // `string + dynamic` is always string concatenation: stringify the dynamic side.
++        if (left_kind == JitKind::String && right_kind == JitKind::Dynamic)
++            || (left_kind == JitKind::Dynamic && right_kind == JitKind::String)
++        {
++            append_string(left, output)?;
++            append_string(right, output)?;
++            output.push("concat".into());
++            return Some(());
++        }
+         if left_kind == JitKind::Dynamic || right_kind == JitKind::Dynamic {
+             append_dynamic(left, output)?;
+             append_dynamic(right, output)?;
+diff --git a/crates/thaw-cli/src/registry_integration/shim_generation.rs b/crates/thaw-cli/src/registry_integration/shim_generation.rs
+index feba436..415de75 100644
+--- a/crates/thaw-cli/src/registry_integration/shim_generation.rs
++++ b/crates/thaw-cli/src/registry_integration/shim_generation.rs
+@@ -291,6 +291,7 @@ fn generate_registry_shims(
+             thaw_bridge::self_referential_namespace_aliases_named(&package.dts_source, &dts_filename);
+         let mut type_only_exports = explicit_type_exports;
+         type_only_exports.extend(classes.iter().filter(|class| !internal_support_classes.contains(&class.name)).map(|class| class.name.clone()));
++        type_only_exports.extend(thaw_bridge::exported_declared_type_names_named(&package.dts_source, &dts_filename));
+         nested_namespaces.retain(|namespace, _| !type_only_namespaces.contains(namespace));
+         for (namespace, members) in &mut nested_namespaces {
+             for (member, target) in members {
+@@ -1551,7 +1552,7 @@ fn generate_registry_shims(
+                     members.iter().filter_map(move |(member, target)| {
+                         let path = format!("{namespace}.{member}");
+                         if pkg.type_only_value_names.contains(&path) { return None; }
+-                        let declared = pkg.values.iter().any(|value| &value.name == target)
++                        let declared = pkg.values.iter().any(|value| &value.name == target || value.name == path)
+                             || pkg.functions.iter().any(|function| &function.name == target)
+                             || (!target.contains('.') && pkg.classes.iter().any(|class| &class.name == target));
+                         if declared {
+diff --git a/crates/thaw-cli/src/registry_integration/shim_support.rs b/crates/thaw-cli/src/registry_integration/shim_support.rs
+index d38403b..7c28ecc 100644
+--- a/crates/thaw-cli/src/registry_integration/shim_support.rs
++++ b/crates/thaw-cli/src/registry_integration/shim_support.rs
+@@ -942,7 +942,7 @@ fn commonjs_export_name_named(
+         DefaultDecl, ExportSpecifier, Expr, ModuleDecl, ModuleExportName, ModuleItem,
+     };
+ 
+-    let module = thaw_parser::parse_typescript_with_source_map_named(source, filename.clone())?.0;
++    let module = thaw_parser::parse_declarations_with_source_map_named(source, filename.clone())?.0;
+     Ok(module.body.iter().find_map(|item| match item {
+         ModuleItem::ModuleDecl(ModuleDecl::TsExportAssignment(export)) => {
+             if let Expr::Ident(identifier) = export.expr.as_ref() {
+@@ -1013,7 +1013,7 @@ fn commonjs_export_assignment_named(
+ ) -> Result<Option<String>, String> {
+     use thaw_parser::ast::{Expr, ModuleDecl, ModuleItem};
+ 
+-    let module = thaw_parser::parse_typescript_with_source_map_named(source, filename.clone())?.0;
++    let module = thaw_parser::parse_declarations_with_source_map_named(source, filename.clone())?.0;
+     Ok(module.body.iter().find_map(|item| match item {
+         ModuleItem::ModuleDecl(ModuleDecl::TsExportAssignment(export)) => {
+             if let Expr::Ident(identifier) = export.expr.as_ref() {
+@@ -1053,7 +1053,7 @@ fn called_commonjs_namespace_properties_named(
+     let Some(namespace) = namespace else {
+         return Ok(Vec::new());
+     };
+-    let module = thaw_parser::parse_typescript_with_source_map_named(source, filename.clone())?.0;
++    let module = thaw_parser::parse_declarations_with_source_map_named(source, filename.clone())?.0;
+     let mut names = Vec::new();
+     for item in &module.body {
+         let ModuleItem::Stmt(Stmt::Decl(Decl::TsModule(module_decl))) = item else {
+diff --git a/crates/thaw-cli/src/tests/module_graph.rs b/crates/thaw-cli/src/tests/module_graph.rs
+index bbb3cd1..4e5aaaa 100644
+--- a/crates/thaw-cli/src/tests/module_graph.rs
++++ b/crates/thaw-cli/src/tests/module_graph.rs
+@@ -119,7 +119,7 @@ fn type_only_module_keeps_link_features_for_retained_function_bodies() {
+ fn type_only_registry_package_does_not_load_its_bundle() {
+     let dir = std::env::temp_dir().join(format!("thaw-type-registry-{}", std::process::id()));
+     let registry = dir.join("registry");
+-    let package = registry.join("modules").join("types-only");
++    let package = registry.join("types-only");
+     std::fs::create_dir_all(&package).unwrap();
+     std::fs::write(package.join("package.d.ts"), "export interface Shape { value: number; }\nexport function f(): number;\nexport const value: number;\nexport class Client { read(): number; }\n").unwrap();
+     std::fs::write(package.join("bundle.js"), "throw new Error('type-only bundle ran');\n").unwrap();
+@@ -792,7 +792,7 @@ fn dynamic_import_failure_cache_survives_lambda_arena_reset() {
+ #[test]
+ fn dynamic_external_import_defers_package_script() {
+     let dir = std::env::temp_dir().join(format!("thaw-lazy-package-{}", std::process::id()));
+-    let package = dir.join("registry/modules/later");
++    let package = dir.join("registry/later");
+     std::fs::create_dir_all(&package).unwrap();
+     std::fs::write(package.join("package.d.ts"), "export function value(): number;").unwrap();
+     std::fs::write(package.join("bundle.js"),
+@@ -828,7 +828,7 @@ fn dynamic_import_initializes_static_dependencies_only_on_first_call() {
+ #[test]
+ fn side_effect_only_external_dynamic_import_is_deferred() {
+     let dir = std::env::temp_dir().join(format!("thaw-lazy-side-effect-{}", std::process::id()));
+-    let package = dir.join("registry/modules/side-effect");
++    let package = dir.join("registry/side-effect");
+     std::fs::create_dir_all(&package).unwrap();
+     std::fs::write(package.join("package.d.ts"), "export interface Marker { value: number; }").unwrap();
+     std::fs::write(package.join("bundle.js"), "console.log('package loaded');").unwrap();
+diff --git a/crates/thaw-hir/src/lower/calls.rs b/crates/thaw-hir/src/lower/calls.rs
+index ec43222..0c57e3f 100644
+--- a/crates/thaw-hir/src/lower/calls.rs
++++ b/crates/thaw-hir/src/lower/calls.rs
+@@ -1,3 +1,37 @@
++/// A receiver whose runtime tags include a Host `Json` (a `Json` or a plain native
++/// object, which crosses as a borrowed Host `Json`): a native `thisArg` of another
++/// layout must be converted to `Json` before the tagged receiver entry decodes it.
++fn receiver_wants_json(receiver: &HirType) -> bool {
++    match receiver {
++        HirType::Json => true,
++        HirType::Object(fields) => !fields.first().is_some_and(|(name, _)| name.starts_with("__thaw_class_identity_\u{1e}")),
++        HirType::Optional(inner) | HirType::Nullable(inner) | HirType::Nullish(inner) => receiver_wants_json(inner),
++        _ => false,
++    }
++}
++
++impl<'a> FnLowerer<'a> {
++    /// Converts an explicit `thisArg` to the declared receiver of a `this`-taking
++    /// closure: a native aggregate of another layout crosses as a Host `Json`.
++    fn coerce_this_for_receiver(
++        &mut self,
++        receiver: Option<&HirType>,
++        this_value: HirExpr,
++    ) -> Result<HirExpr, String> {
++        let Some(receiver) = receiver else { return Ok(this_value) };
++        let actual = self.infer_expr_type(&this_value)?;
++        if receiver_wants_json(receiver)
++            && actual != *receiver
++            && matches!(actual, HirType::Object(_) | HirType::Array(_) | HirType::Tuple(_)
++                | HirType::Bytes | HirType::Map(..) | HirType::Set(_)
++                | HirType::WeakMap(..) | HirType::WeakSet(_))
++        {
++            return self.coerce_to_declared(&HirType::Json, this_value);
++        }
++        Ok(this_value)
++    }
++}
++
+ impl<'a> FnLowerer<'a> {
+     fn is_unshadowed_class_identifier(&self, class: &str) -> bool {
+         !self.scope.contains_key(&self.resolve_binding(class))
+@@ -829,7 +863,7 @@ impl<'a> FnLowerer<'a> {
+     // A function operation reads `.call`/`.apply`/`.bind` before it evaluates
+     // thisArg or arguments. This block is a binding-wrapper lambda body, not
+     // a standalone expression block.
+-    fn guard_function_value(
++    pub(crate) fn guard_function_value(
+         &mut self, value: HirExpr, ty: &HirType, message: &str, body: HirExpr,
+     ) -> Result<HirExpr, String> {
+         let result_type = self.infer_expr_type(&body)?;
+@@ -860,6 +894,10 @@ impl<'a> FnLowerer<'a> {
+         }
+         let target = self.lower_expr(&operation.obj)?;
+         let target_type = self.infer_expr_type(&target)?;
++        let (target_type, declared_receiver) = match target_type {
++            HirType::FunctionWithThis(receiver, visible) => (*visible, Some(*receiver)),
++            other => (other, None),
++        };
+         let (params, optional, rest, ret) = match &target_type {
+             HirType::Function(params, ret) => (
+                 params.clone(),
+@@ -882,6 +920,7 @@ impl<'a> FnLowerer<'a> {
+             return Err("function .bind() cannot spread its thisArg".into());
+         }
+         let this_value = self.lower_expr(&this_argument.expr)?;
++        let this_value = self.coerce_this_for_receiver(declared_receiver.as_ref(), this_value)?;
+         let this_type = self.infer_expr_type(&this_value)?;
+         let (leading, spread_bindings) =
+             self.lower_native_spread_values(leading, "function .bind()")?;
+@@ -1073,6 +1112,12 @@ impl<'a> FnLowerer<'a> {
+         }
+         let target = self.lower_expr(&operation.obj)?;
+         let target_type = self.infer_expr_type(&target)?;
++        // A `this`-taking closure keeps its declared receiver type: the explicit
++        // `thisArg` is converted to it before the tagged receiver entry decodes it.
++        let (target_type, declared_receiver) = match target_type {
++            HirType::FunctionWithThis(receiver, visible) => (*visible, Some(*receiver)),
++            other => (other, None),
++        };
+         let (params, optional, rest, ret) = match &target_type {
+             HirType::Function(params, ret) => (
+                 params.clone(),
+@@ -1113,6 +1158,7 @@ impl<'a> FnLowerer<'a> {
+             supplied.to_vec()
+         };
+         let this_value = self.lower_expr(&this_argument.expr)?;
++        let this_value = self.coerce_this_for_receiver(declared_receiver.as_ref(), this_value)?;
+         let this_type = self.infer_expr_type(&this_value)?;
+         let label = format!("function .{operation_name}()");
+         let (arguments, spread_bindings) = self.lower_native_spread_values(&forwarded, &label)?;
+diff --git a/crates/thaw-hir/src/lower/expressions/coercions.rs b/crates/thaw-hir/src/lower/expressions/coercions.rs
+index 598f25d..4147955 100644
+--- a/crates/thaw-hir/src/lower/expressions/coercions.rs
++++ b/crates/thaw-hir/src/lower/expressions/coercions.rs
+@@ -857,8 +857,17 @@ impl<'a> FnLowerer<'a> {
+                 Box::new(HirExpr::Var("__thaw_js_handle_to_string".to_string())),
+                 vec![value],
+             )),
+-            HirType::Null => Ok(HirExpr::Lit(HirLit::Str("null".to_string()))),
+-            HirType::Undefined => Ok(HirExpr::Lit(HirLit::Str("undefined".to_string()))),
++            // The operand is a constant, but evaluating it may still have effects.
++            HirType::Null | HirType::Undefined => {
++                let text = HirExpr::Lit(HirLit::Str(
++                    if matches!(self.infer_expr_type(&value)?, HirType::Null) { "null" } else { "undefined" }.to_string(),
++                ));
++                if matches!(value, HirExpr::Lit(_) | HirExpr::Var(_) | HirExpr::UnionValue(..)) {
++                    Ok(text)
++                } else {
++                    Ok(HirExpr::Block(vec![HirStmt::Expr(value), HirStmt::Return(Some(text))]))
++                }
++            }
+             HirType::Optional(payload) => {
+                 let optional_type = HirType::Optional(payload.clone());
+                 let name = format!("__thaw_string_optional_{}", self.next_binding);
+diff --git a/crates/thaw-hir/src/lower/expressions/functions.rs b/crates/thaw-hir/src/lower/expressions/functions.rs
+index daff43f..d9ea1a3 100644
+--- a/crates/thaw-hir/src/lower/expressions/functions.rs
++++ b/crates/thaw-hir/src/lower/expressions/functions.rs
+@@ -1143,6 +1143,9 @@ impl<'a> FnLowerer<'a> {
+                 };
+                 let name = self.bind_local(&source_name, ty.clone());
+                 self.mark_array_parameter(&name, &ty);
++                if self.promise_catch_parameter.as_deref() == Some(source_name.as_str()) {
++                    self.promise_catch_bindings.insert(name.clone());
++                }
+                 if !matches!(pat, Pat::Ident(_) | Pat::Rest(_)) {
+                     destructuring.push((pat, name.clone(), ty.clone()));
+                 }
+@@ -1160,6 +1163,12 @@ impl<'a> FnLowerer<'a> {
+                 });
+             }
+             let mut prefix = Vec::new();
++            if let Some(binding) = params.iter()
++                .find(|param| self.promise_catch_bindings.contains(&param.name))
++                .map(|param| param.name.clone())
++            {
++                prefix.extend(self.snapshot_promise_rejection(&binding));
++            }
+             for (pattern, name, ty) in destructuring {
+                 self.lower_binding_pattern(pattern, HirExpr::Var(name), &ty, &mut prefix)?;
+             }
+@@ -1197,7 +1206,9 @@ impl<'a> FnLowerer<'a> {
+                         }
+                         _ => inferred,
+                     };
+-                    if expected_return == Some(&HirType::Void) {
++                    if expected_return == Some(&HirType::Void)
++                        || (inferred == HirType::Void && !prefix.is_empty())
++                    {
+                         prefix.push(HirStmt::Expr(expression));
+                         (HirExpr::Block(prefix), HirType::Void)
+                     } else {
+@@ -1225,6 +1236,17 @@ impl<'a> FnLowerer<'a> {
+                     {
+                         inferred = expected_return.cloned().unwrap_or(inferred);
+                     }
++                    // As for an expression body: tuple literals infer as arrays but satisfy
++                    // the declared tuple return.
++                    if let Some(expected) = expected_return.filter(|expected| inferred != **expected) {
++                        let mut values = Vec::new();
++                        collect_return_values(&stmts, &mut values, &mut false);
++                        if !values.is_empty()
++                            && values.iter().all(|value| self.expect_type(expected, value, "arrow return").is_ok())
++                        {
++                            inferred = expected.clone();
++                        }
++                    }
+                     (HirExpr::Block(stmts), inferred)
+                 }
+             };
+diff --git a/crates/thaw-hir/src/lower/expressions/lowering.rs b/crates/thaw-hir/src/lower/expressions/lowering.rs
+index 32eae71..e01128c 100644
+--- a/crates/thaw-hir/src/lower/expressions/lowering.rs
++++ b/crates/thaw-hir/src/lower/expressions/lowering.rs
+@@ -723,11 +723,41 @@ impl<'a> FnLowerer<'a> {
+                 }
+                 if !self.scope.contains_key(&name) {
+                     if let Some(signature) = self.signatures.get(&name) {
+-                        if signature.is_extern || !signature.generic_type_params.is_empty() {
++                        if !signature.generic_type_params.is_empty() {
+                             return Err(format!(
+                                 "function value `{name}` needs a monomorphic native implementation"
+                             ));
+                         }
++                        if signature.is_extern {
++                            // A monomorphic extern has no function body to point at, so a
++                            // value use is a closure forwarding to the call.
++                            let ret = if signature.is_async {
++                                HirType::Promise(Box::new(signature.ret.clone()))
++                            } else {
++                                signature.ret.clone()
++                            };
++                            let params = signature.params.iter().enumerate()
++                                .map(|(index, ty)| HirParam {
++                                    name: format!("__thaw_extern_arg_{index}"), ty: ty.clone(),
++                                })
++                                .collect::<Vec<_>>();
++                            let arguments = params.iter()
++                                .map(|param| HirExpr::Var(param.name.clone())).collect();
++                            let call = match dynamic_symbol(&name) {
++                                Some((backend, symbol)) => HirExpr::DynamicCall(
++                                    DynamicSignature {
++                                        backend, symbol, params: signature.params.clone(),
++                                        ret: signature.ret.clone(),
++                                    },
++                                    arguments,
++                                ),
++                                None => HirExpr::Call(Box::new(HirExpr::Var(name)), arguments),
++                            };
++                            return Ok(HirExpr::Lambda(
++                                Vec::new(), params, ret.clone(),
++                                Box::new(HirExpr::Block(vec![HirStmt::Return(Some(call))])),
++                            ));
++                        }
+                         let ret = if signature.is_async {
+                             HirType::Promise(Box::new(signature.ret.clone()))
+                         } else {
+@@ -2652,6 +2682,15 @@ impl<'a> FnLowerer<'a> {
+                         }
+                         .map(Ok)
+                         .unwrap_or_else(|| self.infer_expr_type(&value))?;
++                        // A generic arrow (or an alias forwarding to a generic template) has
++                        // no runtime value to read a pointer from; it is always a function.
++                        if let HirExpr::Var(name) = &value {
++                            if self.generic_arrows.contains_key(name)
++                                || self.generic_named_templates.contains_key(name)
++                            {
++                                return Ok(HirExpr::Lit(HirLit::Str("function".into())));
++                            }
++                        }
+                         if Self::contains_function_value(&operand_type) {
+                             let name = format!("__thaw_typeof_function_tagged_{}", self.next_binding);
+                             self.next_binding += 1;
+@@ -2994,6 +3033,22 @@ impl<'a> FnLowerer<'a> {
+                     && !matches!(alternate_type, HirType::Union(_))
+                 {
+                     let result = match (&consequent_type, &alternate_type) {
++                        // `null | undefined` (a nested `c ? null : undefined`)
++                        // joined with a payload is that payload's `Nullish`.
++                        (HirType::Optional(absent), payload) | (payload, HirType::Optional(absent))
++                            if **absent == HirType::Null
++                                && !matches!(payload, HirType::Optional(_) | HirType::Nullable(_) | HirType::Nullish(_)) =>
++                        {
++                            HirType::Nullish(Box::new(payload.clone()))
++                        }
++                        (HirType::Undefined, HirType::Nullable(payload))
++                        | (HirType::Nullable(payload), HirType::Undefined) => {
++                            HirType::Nullish(payload.clone())
++                        }
++                        (HirType::Null, HirType::Optional(payload))
++                        | (HirType::Optional(payload), HirType::Null) => {
++                            HirType::Nullish(payload.clone())
++                        }
+                         (HirType::Undefined, payload) | (payload, HirType::Undefined) => {
+                             HirType::Optional(Box::new(payload.clone()))
+                         }
+@@ -3005,6 +3060,13 @@ impl<'a> FnLowerer<'a> {
+                     consequent = self.coerce_to_declared(&result, consequent)?;
+                     alternate = self.coerce_to_declared(&result, alternate)?;
+                     result
++                } else if matches!(&consequent_type, HirType::Union(members) if members.contains(&alternate_type)) {
++                    // `c ? (d ? A : B) : A`: the plain branch joins the union.
++                    alternate = self.coerce_to_declared(&consequent_type, alternate)?;
++                    consequent_type
++                } else if matches!(&alternate_type, HirType::Union(members) if members.contains(&consequent_type)) {
++                    consequent = self.coerce_to_declared(&alternate_type, consequent)?;
++                    alternate_type
+                 } else {
+                     return Err(format!(
+                         "conditional expression branches have incompatible types {consequent_type:?} and {alternate_type:?}"
+diff --git a/crates/thaw-hir/src/lower/generators.rs b/crates/thaw-hir/src/lower/generators.rs
+index 8ae728d..c60c38d 100644
+--- a/crates/thaw-hir/src/lower/generators.rs
++++ b/crates/thaw-hir/src/lower/generators.rs
+@@ -336,6 +336,13 @@ fn generator_placeholder(ty: &HirType) -> Option<HirExpr> {
+         ),
+         HirType::Undefined => HirExpr::Lit(HirLit::Undefined),
+         HirType::Null => HirExpr::Lit(HirLit::Null),
++        // An absent function value is the undefined (null) function pointer.
++        HirType::Function(..) | HirType::CallableFunction(..) => HirExpr::OptionalValue(
++            Box::new(HirExpr::OptionalNone(ty.clone())), ty.clone(),
++        ),
++        // A dynamic local is `undefined` until its declaration runs.
++        HirType::Json => HirExpr::Call(Box::new(HirExpr::Var("__thaw_json_undefined".into())), Vec::new()),
++        HirType::Dictionary(element) => HirExpr::JsonObjectLit(Vec::new(), element.as_ref().clone()),
+         // A caught-exception carrier member: an empty pending native slot is
+         // the inert initial value (it is only read after a throw publishes one).
+         HirType::NativeException => HirExpr::Call(
+diff --git a/crates/thaw-hir/src/lower/generic_calls.rs b/crates/thaw-hir/src/lower/generic_calls.rs
+index 54adcbe..eb01c1d 100644
+--- a/crates/thaw-hir/src/lower/generic_calls.rs
++++ b/crates/thaw-hir/src/lower/generic_calls.rs
+@@ -1270,6 +1270,16 @@ impl<'a> FnLowerer<'a> {
+         };
+         let invoked = HirExpr::Call(Box::new(function), arguments);
+         let invoked = self.wrap_call_argument_bindings(invoked, &spread_bindings)?;
++        // A statically non-nullable function keeps its declared result type
++        // (`callback?.(2)` is `number`); a raw undefined pointer that slipped
++        // through from dynamic code throws instead of fabricating an absent
++        // value the declared type cannot represent.
++        if absence_kind == 3 && return_type != HirType::Void {
++            let guarded = self.guard_function_value(
++                bound.clone(), &callee_type, "undefined is not a function", invoked,
++            )?;
++            return self.wrap_call_argument_bindings(guarded, &[(name, callee_type, callee)]);
++        }
+         // Both an absent outer wrapper and a present wrapper carrying a raw
+         // zero function are optional-call short circuits.
+         let is_present = HirExpr::BinOp(
+diff --git a/crates/thaw-hir/src/lower/inference/coercions.rs b/crates/thaw-hir/src/lower/inference/coercions.rs
+index 0ca4c31..67b98a6 100644
+--- a/crates/thaw-hir/src/lower/inference/coercions.rs
++++ b/crates/thaw-hir/src/lower/inference/coercions.rs
+@@ -706,6 +706,10 @@ impl<'a> FnLowerer<'a> {
+                     "cannot coerce a Generator to a dynamic (any) value".into(),
+                 );
+             }
++            // A native `bigint` is a Json BigInt, the same value an array/object push builds.
++            if actual == HirType::I64 {
++                return self.wrap_native_value_as_json(value, HirType::I64);
++            }
+             if matches!(&actual, HirType::Function(_, _) | HirType::CallableFunction(..) | HirType::FunctionWithThis(_, _)) {
+                 // `registerNativeCallback`'s own inferred type is always
+                 // `HirType::JsValue` (`inference/types.rs`'s hardcoded
+@@ -1240,6 +1244,27 @@ impl<'a> FnLowerer<'a> {
+                     return Ok(HirExpr::Call(Box::new(adapter), vec![value]));
+                 }
+             }
++            // `null | undefined` (`Optional(Null)`) carries only absences: the
++            // wrapper's own tag says which one.
++            if let HirType::Optional(source) = &actual {
++                if **source == HirType::Null {
++                    let parameter = "__thaw_nullish_widen".to_string();
++                    let adapter = HirExpr::Lambda(
++                        Vec::new(),
++                        vec![HirParam { name: parameter.clone(), ty: actual.clone() }],
++                        declared.clone(),
++                        Box::new(HirExpr::Block(vec![
++                            HirStmt::If(
++                                HirExpr::OptionalIsNone(Box::new(HirExpr::Var(parameter)), HirType::Null),
++                                vec![HirStmt::Return(Some(HirExpr::NullishUndefined(payload.as_ref().clone())))],
++                                Vec::new(),
++                            ),
++                            HirStmt::Return(Some(HirExpr::NullishNull(payload.as_ref().clone()))),
++                        ])),
++                    );
++                    return Ok(HirExpr::Call(Box::new(adapter), vec![value]));
++                }
++            }
+             return match actual {
+                 HirType::Null => Ok(absent_after(
+                     value, HirExpr::NullishNull(payload.as_ref().clone()),
+diff --git a/crates/thaw-hir/src/lower/inference/types.rs b/crates/thaw-hir/src/lower/inference/types.rs
+index 3cc6d40..669a604 100644
+--- a/crates/thaw-hir/src/lower/inference/types.rs
++++ b/crates/thaw-hir/src/lower/inference/types.rs
+@@ -142,6 +142,12 @@ fn callable_abi_compatible(declared: &HirType, actual: &HirType) -> bool {
+ /// in where `expected` is declared: return-type compatibility (ignoring
+ /// `void`) plus per-parameter width subtyping.
+ fn callable_value_compatible(expected: &HirType, actual: &HirType) -> bool {
++    // A `this`-taking closure also carries the ordinary receiver-free entry, so
++    // it stands in wherever its visible function type is expected.
++    let actual = match actual {
++        HirType::FunctionWithThis(_, visible) => visible.as_ref(),
++        other => other,
++    };
+     match (expected, actual) {
+         (HirType::Function(expected_params, expected_ret), HirType::Function(params, ret)) => {
+             callable_return_compatible(expected_ret, ret)
+diff --git a/crates/thaw-hir/src/lower/invocations/arguments.rs b/crates/thaw-hir/src/lower/invocations/arguments.rs
+index 11b17b8..3a854e3 100644
+--- a/crates/thaw-hir/src/lower/invocations/arguments.rs
++++ b/crates/thaw-hir/src/lower/invocations/arguments.rs
+@@ -68,7 +68,12 @@ impl<'a> FnLowerer<'a> {
+                     values.push(value);
+                     continue;
+                 }
+-                let ty = self.infer_expr_type(&value)?;
++                // `infer_expr_type` erases `Bytes` to `Array(F64)`; keep it so a bound
++                // `Buffer` argument still reads as one (`Buffer.isBuffer`, hex/utf8 methods).
++                let ty = match self.infer_expr_type_inner(&value) {
++                    Ok(HirType::Bytes) if !snapshot_expanded_values => HirType::Bytes,
++                    _ => self.infer_expr_type(&value)?,
++                };
+                 let name = format!("__thaw_native_arg_{}", self.next_binding);
+                 self.next_binding += 1;
+                 self.scope.insert(name.clone(), ty.clone());
+diff --git a/crates/thaw-hir/src/lower/invocations/calls.rs b/crates/thaw-hir/src/lower/invocations/calls.rs
+index 5a462e1..3b8bbe2 100644
+--- a/crates/thaw-hir/src/lower/invocations/calls.rs
++++ b/crates/thaw-hir/src/lower/invocations/calls.rs
+@@ -819,8 +819,7 @@ impl<'a> FnLowerer<'a> {
+                         | "getOrInsertComputed"
+                 ) && (self.receiver_is_map_or_set(&member.obj)
+                     || self.peek_type_without_lowering(&member.obj) == Some(HirType::Json)
+-                    || (property.sym == *"set"
+-                        && self.peek_type_without_lowering(&member.obj) == Some(HirType::Bytes)))
++                    || (property.sym == *"set" && self.receiver_is_bytes(&member.obj)))
+                 {
+                     return self.lower_native_instance_builtin(member, property, call);
+                 }
+@@ -2086,6 +2085,25 @@ impl<'a> FnLowerer<'a> {
+                 other if matches!(self.infer_expr_type_inner(&other), Ok(HirType::Bytes)) => Ok(
+                     HirExpr::Call(Box::new(HirExpr::Var("__thaw_console_bytes".into())), vec![other]),
+                 ),
++                // An object with a `Buffer` field (erased to `number[]` in the typed layout):
++                // rebuild it as `Json` with the field branded as a Buffer so it prints
++                // `{ b: <Buffer ..> }`.
++                // `{ b }` with a `Buffer` field lowers to `(param) => ({ b: param })` applied to the
++                // value (evaluation order); rebuild the body as `Json` with that field branded.
++                HirExpr::Call(callee, call_args) if matches!(callee.as_ref(),
++                    HirExpr::Lambda(_, params, _, body) if matches!(body.as_ref(), HirExpr::ObjectLit(_))
++                        && params.iter().any(|param| param.ty == HirType::Bytes)) => {
++                    let HirExpr::Lambda(captures, params, _, body) = *callee else { unreachable!() };
++                    let HirExpr::ObjectLit(fields) = *body else { unreachable!() };
++                    let entries = fields.into_iter()
++                        .map(|(name, value)| Ok((name, self.coerce_to_declared(&HirType::Json, value)?)))
++                        .collect::<Result<Vec<_>, String>>()?;
++                    Ok(HirExpr::Call(
++                        Box::new(HirExpr::Lambda(captures, params, HirType::Json,
++                            Box::new(HirExpr::JsonObjectLit(entries, HirType::Json)))),
++                        call_args,
++                    ))
++                }
+                 other => Ok(other),
+             }).collect::<Result<Vec<_>, _>>()?;
+         }
+diff --git a/crates/thaw-hir/src/lower/invocations/instance_builtins/array_mutation_methods.rs b/crates/thaw-hir/src/lower/invocations/instance_builtins/array_mutation_methods.rs
+index 45fa242..3bcc8fe 100644
+--- a/crates/thaw-hir/src/lower/invocations/instance_builtins/array_mutation_methods.rs
++++ b/crates/thaw-hir/src/lower/invocations/instance_builtins/array_mutation_methods.rs
+@@ -1691,6 +1691,90 @@ impl<'a> FnLowerer<'a> {
+                         receiver = self.coerce_primitive_to_string(receiver)?;
+                         receiver_type = HirType::Str;
+                     }
++                    if receiver_type == HirType::Json {
++                        // A dynamic receiver is a string or an array only at run time:
++                        // search the string natively, or walk the JSON array comparing
++                        // elements with `===`.
++                        let method = property.sym.to_string();
++                        let names = (0..4).map(|offset| format!("__thaw_json_search_{}_{offset}", self.next_binding))
++                            .collect::<Vec<_>>();
++                        self.next_binding += 1;
++                        let [json, needle, index, length] = [&names[0], &names[1], &names[2], &names[3]];
++                        let needle_type = self.infer_expr_type(&arguments[0])?;
++                        for (name, ty) in [(json, HirType::Json), (needle, needle_type.clone()), (index, HirType::F64), (length, HirType::F64)] {
++                            self.scope.insert(name.clone(), ty);
++                        }
++                        let var = |name: &String| HirExpr::Var(name.clone());
++                        let number = |value: f64| HirExpr::Lit(HirLit::F64(value));
++                        let from = match arguments.get(1) {
++                            Some(argument) => Some(self.coerce_primitive_to_number(argument.clone())?),
++                            None => None,
++                        };
++                        let string_result = {
++                            let needle_text = self.coerce_primitive_to_string(var(needle))?;
++                            let suffix = match method.as_str() {
++                                "indexOf" => "index_of",
++                                "lastIndexOf" => "last_index_of",
++                                _ => "includes",
++                            };
++                            let position = from.clone().unwrap_or_else(|| number(
++                                if method == "lastIndexOf" { f64::INFINITY } else { 0.0 }));
++                            HirExpr::Call(
++                                Box::new(HirExpr::Var(format!("__thaw_string_{suffix}"))),
++                                vec![HirExpr::JsonAsString(Box::new(var(json))), needle_text, position],
++                            )
++                        };
++                        let element = HirExpr::JsonIndex(Box::new(var(json)), Box::new(var(index)));
++                        let matches = self.lower_strict_equality(element, var(needle))?;
++                        let found = if method == "includes" {
++                            HirExpr::Lit(HirLit::Bool(true))
++                        } else {
++                            var(index)
++                        };
++                        let missing = if method == "includes" {
++                            HirExpr::Lit(HirLit::Bool(false))
++                        } else {
++                            number(-1.0)
++                        };
++                        let relative = |value: HirExpr, length: &String| HirExpr::Conditional(
++                            Box::new(HirExpr::BinOp(BinOp::Lt, Box::new(value.clone()), Box::new(number(0.0)))),
++                            Box::new(HirExpr::BinOp(BinOp::Add, Box::new(var(length)), Box::new(value.clone()))),
++                            Box::new(value), HirType::F64,
++                        );
++                        let last = method == "lastIndexOf";
++                        let start = match (&from, last) {
++                            (Some(from), false) => relative(from.clone(), length),
++                            (None, false) => number(0.0),
++                            (Some(from), true) => relative(from.clone(), length),
++                            (None, true) => HirExpr::BinOp(BinOp::Sub, Box::new(var(length)), Box::new(number(1.0))),
++                        };
++                        let (condition, step) = if last {
++                            (HirExpr::BinOp(BinOp::GtEq, Box::new(var(index)), Box::new(number(0.0))), BinOp::Sub)
++                        } else {
++                            (HirExpr::BinOp(BinOp::Lt, Box::new(var(index)), Box::new(var(length))), BinOp::Add)
++                        };
++                        let array_result = HirExpr::Block(vec![
++                            HirStmt::Let(length.clone(), HirType::F64, HirExpr::JsonAsNumber(Box::new(
++                                HirExpr::JsonGet(Box::new(var(json)), "length".to_string())))),
++                            HirStmt::Let(index.clone(), HirType::F64, start),
++                            HirStmt::While(condition, vec![
++                                HirStmt::If(matches, vec![HirStmt::Return(Some(found))], Vec::new()),
++                                HirStmt::Expr(HirExpr::Assign(index.clone(), Box::new(HirExpr::BinOp(
++                                    step, Box::new(var(index)), Box::new(number(1.0)))))),
++                            ]),
++                            HirStmt::Return(Some(missing)),
++                        ]);
++                        let result_type = if method == "includes" { HirType::Bool } else { HirType::F64 };
++                        let is_string = HirExpr::BinOp(BinOp::EqEqEq,
++                            Box::new(HirExpr::Call(Box::new(HirExpr::Var("__thaw_json_typeof".into())), vec![var(json)])),
++                            Box::new(HirExpr::Lit(HirLit::Str("string".into()))));
++                        let result = HirExpr::Conditional(
++                            Box::new(is_string), Box::new(string_result), Box::new(array_result), result_type);
++                        let mut bindings = vec![(json.clone(), HirType::Json, receiver)];
++                        bindings.extend(spread_bindings);
++                        bindings.push((needle.clone(), needle_type, arguments[0].clone()));
++                        return self.wrap_call_argument_bindings(result, &bindings);
++                    }
+                     if receiver_type == HirType::Str {
+                         let needle = self.coerce_primitive_to_string(arguments[0].clone())?;
+                         let position = if let Some(argument) = arguments.get(1) {
+diff --git a/crates/thaw-hir/src/lower/invocations/instance_builtins/collections.rs b/crates/thaw-hir/src/lower/invocations/instance_builtins/collections.rs
+index d933f2c..21330cf 100644
+--- a/crates/thaw-hir/src/lower/invocations/instance_builtins/collections.rs
++++ b/crates/thaw-hir/src/lower/invocations/instance_builtins/collections.rs
+@@ -107,6 +107,17 @@ impl<'a> FnLowerer<'a> {
+         }
+     }
+ 
++    /// Like `receiver_is_map_or_set` for a `Buffer`/`Uint8Array` receiver: a call such as
++    /// `receiver().set(..)` is lowered (purely, then discarded) and its un-erased type read.
++    fn receiver_is_bytes(&mut self, expr: &Expr) -> bool {
++        match self.peek_type_without_lowering(expr) {
++            Some(ty) => ty == HirType::Bytes,
++            None => self.lower_expr(expr).is_ok_and(|value| {
++                self.infer_expr_type_inner(&value).is_ok_and(|ty| ty == HirType::Bytes)
++            }),
++        }
++    }
++
+     fn receiver_is_map_or_set(&mut self, expr: &Expr) -> bool {
+         // `peek_type_without_lowering` only recognizes a simple binding; a
+         // receiver that's itself a call/new (`new Map([...]).get(...)`) or a
+diff --git a/crates/thaw-hir/src/lower/invocations/promises.rs b/crates/thaw-hir/src/lower/invocations/promises.rs
+index a0d9fa9..c162d6c 100644
+--- a/crates/thaw-hir/src/lower/invocations/promises.rs
++++ b/crates/thaw-hir/src/lower/invocations/promises.rs
+@@ -165,7 +165,7 @@ impl<'a> FnLowerer<'a> {
+         let reject_name = format!("__thaw_with_resolvers_reject_{}", self.next_binding);
+         self.next_binding += 1;
+         self.scope.insert(result_name.clone(), result_type.clone());
+-        self.scope.insert(promise_name.clone(), promise_type.clone());
++        let _ = &promise_name;
+ 
+         let assign = |field: &str, value: &str| {
+             HirStmt::Expr(HirExpr::PropAssign(
+@@ -203,12 +203,14 @@ impl<'a> FnLowerer<'a> {
+                 result_type.clone(),
+                 HirExpr::ObjectAlloc(result_type.clone()),
+             ),
+-            HirStmt::Let(
+-                promise_name.clone(),
+-                promise_type,
+-                HirExpr::PromiseNew(Box::new(executor), resolved, false, false),
+-            ),
+-            assign("promise", &promise_name),
++            // The object's `promise` field takes ownership of the new Promise
++            // directly: a local would release it again when this block exits.
++            HirStmt::Expr(HirExpr::PropAssign(
++                Box::new(HirExpr::Var(result_name.clone())),
++                result_type.clone(),
++                "promise".into(),
++                Box::new(HirExpr::PromiseNew(Box::new(executor), resolved, false, false)),
++            )),
+             HirStmt::Return(Some(HirExpr::Var(result_name))),
+         ]);
+         Ok(HirExpr::Call(
+@@ -294,13 +296,32 @@ impl<'a> FnLowerer<'a> {
+                         call.args[0].expr.as_ref(),
+                         Expr::Ident(ident) if ident.sym == *"undefined"
+                     ) || matches!(call.args[0].expr.as_ref(), Expr::Lit(Lit::Null(_)));
++                    // A callback that always throws has no result of its own;
++                    // it takes the other handler's result type.
++                    let fulfilled_throws = !omitted_fulfilled
++                        && ast_callback_always_throws(&call.args[0].expr);
++                    let rejected_throws =
++                        ast_callback_always_throws(&call.args[1].expr);
++                    let mut early_rejected = None;
++                    let mut fulfilled_expected = None;
++                    if fulfilled_throws && !rejected_throws {
++                        let on_rejected =
++                            self.lower_promise_rejection_callback(&call.args[1].expr, None)?;
++                        if let HirType::Function(_, rejected_output) = self.infer_expr_type(&on_rejected)? {
++                            fulfilled_expected = Some(match rejected_output.as_ref() {
++                                HirType::Promise(inner) => inner.as_ref().clone(),
++                                other => other.clone(),
++                            });
++                        }
++                        early_rejected = Some(on_rejected);
++                    }
+                     let fulfilled = if omitted_fulfilled {
+                         None
+                     } else {
+                         let callback = self.lower_promise_callback(
+                             &call.args[0].expr,
+                             &fulfilled_params,
+-                            None,
++                            fulfilled_expected.as_ref(),
+                         )?;
+                         let HirType::Function(_, callback_output) =
+                             self.infer_expr_type(&callback)?
+@@ -316,8 +337,14 @@ impl<'a> FnLowerer<'a> {
+                     let output = fulfilled
+                         .as_ref()
+                         .map_or_else(|| input.clone(), |(_, output, _)| output.clone());
+-                    let on_rejected =
+-                        self.lower_promise_rejection_callback(&call.args[1].expr, None)?;
++                    let rejected_expected = (rejected_throws && fulfilled.is_some()).then(|| output.clone());
++                    let on_rejected = match early_rejected {
++                        Some(done) => done,
++                        None => self.lower_promise_rejection_callback(
++                            &call.args[1].expr,
++                            rejected_expected.as_ref(),
++                        )?,
++                    };
+                     let HirType::Function(_, rejected_output) =
+                         self.infer_expr_type(&on_rejected)?
+                     else {
+@@ -384,7 +411,9 @@ impl<'a> FnLowerer<'a> {
+                         (
+                             source,
+                             if on_rejected {
+-                                self.lower_promise_rejection_callback(&callback.expr, None)?
++                                let expected = ast_callback_always_throws(&callback.expr)
++                                    .then(|| input.as_ref().clone());
++                                self.lower_promise_rejection_callback(&callback.expr, expected.as_ref())?
+                             } else {
+                                 self.lower_promise_callback(
+                                     &callback.expr,
+diff --git a/crates/thaw-hir/src/lower/module/globals.rs b/crates/thaw-hir/src/lower/module/globals.rs
+index 79c02fc..37440d0 100644
+--- a/crates/thaw-hir/src/lower/module/globals.rs
++++ b/crates/thaw-hir/src/lower/module/globals.rs
+@@ -817,6 +817,8 @@ fn display_class_name(class_name: &str) -> &str {
+ fn class_value_js_source(declaration: &swc_ecma_ast::ClassDecl) -> Option<String> {
+     let mut class = declaration.class.clone();
+     strip_class_decorators(&mut class);
++    // Static blocks run once, natively, at module initialization; the JS copy must not repeat them.
++    class.body.retain(|member| !matches!(member, ClassMember::StaticBlock(_)));
+     rewrite_instance_methods_to_bridges(&mut class, declaration.ident.sym.as_ref());
+     let mut class_ident = declaration.ident.clone();
+     class_ident.sym = display_class_name(declaration.ident.sym.as_ref()).into();
+diff --git a/crates/thaw-hir/src/lower/normalize.rs b/crates/thaw-hir/src/lower/normalize.rs
+index a9d466e..636e8cd 100644
+--- a/crates/thaw-hir/src/lower/normalize.rs
++++ b/crates/thaw-hir/src/lower/normalize.rs
+@@ -1187,6 +1187,25 @@ fn ast_block_terminates(statements: &[swc_ecma_ast::Stmt]) -> bool {
+     false
+ }
+ 
++/// True if a callback written inline (arrow or function expression with a block
++/// body) ends in `throw` on every path and never returns a value, so its result
++/// type may be taken from the surrounding Promise chain instead of `void`.
++fn ast_callback_always_throws(expr: &swc_ecma_ast::Expr) -> bool {
++    use swc_ecma_ast::*;
++    let stmts = match expr {
++        Expr::Arrow(arrow) => match arrow.body.as_ref() {
++            ArrowFunctionBody::FunctionBody(block) => &block.stmts,
++            _ => return false,
++        },
++        Expr::Fn(function) => match &function.function.body {
++            Some(block) => &block.stmts,
++            None => return false,
++        },
++        _ => return false,
++    };
++    ast_block_terminates(stmts) && !ast_block_has_value_return(stmts)
++}
++
+ /// True if the block contains a `return <value>` somewhere (so the function
+ /// is value-returning, not `void`).
+ fn ast_block_has_value_return(statements: &[swc_ecma_ast::Stmt]) -> bool {
+diff --git a/crates/thaw-hir/src/lower/objects.rs b/crates/thaw-hir/src/lower/objects.rs
+index 1761d30..2e97f8c 100644
+--- a/crates/thaw-hir/src/lower/objects.rs
++++ b/crates/thaw-hir/src/lower/objects.rs
+@@ -1408,7 +1408,12 @@ impl<'a> FnLowerer<'a> {
+                 }
+             }
+             for (name, value) in additions {
+-                let ty = self.infer_expr_type(&value)?;
++                // Keep `Bytes` (instead of the erased `number[]`) so `console.log({ b })` can
++                // still tell a `Buffer` field apart (see `console_object_with_buffers`).
++                let ty = match self.infer_expr_type_inner(&value) {
++                    Ok(HirType::Bytes) => HirType::Bytes,
++                    _ => self.infer_expr_type(&value)?,
++                };
+                 let temporary = format!("__thaw_object_field_{}", self.next_binding);
+                 self.next_binding += 1;
+                 self.scope.insert(temporary.clone(), ty.clone());
+diff --git a/crates/thaw-hir/src/lower/promises.rs b/crates/thaw-hir/src/lower/promises.rs
+index 80672d0..a16765e 100644
+--- a/crates/thaw-hir/src/lower/promises.rs
++++ b/crates/thaw-hir/src/lower/promises.rs
+@@ -270,9 +270,10 @@ impl<'a> FnLowerer<'a> {
+                     }
+             })
+             || rest.as_ref().is_some_and(|element| {
+-                parameter_types[params.len()..].iter().any(|supplied| {
+-                    !callback_param_compatible(supplied, element)
+-                })
++                !supplied_is_rest_array(&parameter_types[params.len()..], element)
++                    && parameter_types[params.len()..].iter().any(|supplied| {
++                        !callback_param_compatible(supplied, element)
++                    })
+             })
+         {
+             return Err(format!(
+@@ -334,6 +335,10 @@ impl<'a> FnLowerer<'a> {
+                 arguments.push(self.coerce_to_declared(expected, input)?);
+             }
+             if let Some(element) = rest {
++                if supplied_is_rest_array(&supplied[fixed.len().min(supplied.len())..], &element) {
++                    arguments.push(HirExpr::Var(input_names[fixed.len()].clone()));
++                    return Ok(arguments);
++                }
+                 let remaining = input_names.iter().skip(fixed.len())
+                     .map(|name| self.coerce_to_declared(&element, HirExpr::Var(name.clone())))
+                     .collect::<Result<Vec<_>, _>>()?;
+@@ -686,7 +691,10 @@ impl<'a> FnLowerer<'a> {
+             _ => return Err("cannot infer Promise type from this executor".into()),
+         };
+         let Some(resolve_binding) = resolve_binding else {
+-            return Err("cannot infer Promise type without a resolve parameter".into());
++            // `new Promise<T>(() => ...)`: no resolver to read the type from,
++            // so the explicit type argument is the Promise's result type.
++            return explicit.cloned().map(|resolved| (resolved, false))
++                .ok_or_else(|| "cannot infer Promise type without a resolve parameter".into());
+         };
+         let resolve_binding = match resolve_binding {
+             Pat::Ident(binding) => binding,
+@@ -907,3 +915,9 @@ impl<'a> FnLowerer<'a> {
+             .into())
+     }
+ }
++
++/// A native callback ABI passes a rest parameter as one array of its element type.
++fn supplied_is_rest_array(supplied: &[HirType], element: &HirType) -> bool {
++    matches!(supplied, [HirType::Array(inner)] if inner.as_ref() == element)
++        && !callback_param_compatible(&supplied[0], element)
++}
+diff --git a/crates/thaw-hir/src/lower/statements/narrowing.rs b/crates/thaw-hir/src/lower/statements/narrowing.rs
+index 12f6e1c..1a1ae84 100644
+--- a/crates/thaw-hir/src/lower/statements/narrowing.rs
++++ b/crates/thaw-hir/src/lower/statements/narrowing.rs
+@@ -1,3 +1,24 @@
++fn collect_return_values<'a>(stmts: &'a [HirStmt], out: &mut Vec<&'a HirExpr>, bare: &mut bool) {
++    for stmt in stmts {
++        match stmt {
++            HirStmt::Return(Some(value)) => out.push(value),
++            HirStmt::Return(None) => *bare = true,
++            HirStmt::If(_, then_body, else_body) => {
++                collect_return_values(then_body, out, bare);
++                collect_return_values(else_body, out, bare);
++            }
++            HirStmt::While(_, body) => collect_return_values(body, out, bare),
++            HirStmt::Finally(body, _) => collect_return_values(body, out, bare),
++            HirStmt::Try(body, _, catch_body, _) => {
++                collect_return_values(body, out, bare);
++                collect_return_values(catch_body, out, bare);
++            }
++            _ => {}
++        }
++    }
++}
++
++
+ impl<'a> FnLowerer<'a> {
+     fn save_narrowings(&self) -> NarrowingSnapshot {
+         NarrowingSnapshot {
+@@ -398,29 +419,9 @@ impl<'a> FnLowerer<'a> {
+     }
+ 
+     fn infer_return_type(&self, body: &[HirStmt]) -> Result<HirType, String> {
+-        fn collect<'a>(stmts: &'a [HirStmt], out: &mut Vec<&'a HirExpr>, bare: &mut bool) {
+-            for stmt in stmts {
+-                match stmt {
+-                    HirStmt::Return(Some(value)) => out.push(value),
+-                    HirStmt::Return(None) => *bare = true,
+-                    HirStmt::If(_, then_body, else_body) => {
+-                        collect(then_body, out, bare);
+-                        collect(else_body, out, bare);
+-                    }
+-                    HirStmt::While(_, body) => collect(body, out, bare),
+-                    HirStmt::Finally(body, _) => collect(body, out, bare),
+-                    HirStmt::Try(body, _, catch_body, _) => {
+-                        collect(body, out, bare);
+-                        collect(catch_body, out, bare);
+-                    }
+-                    _ => {}
+-                }
+-            }
+-        }
+-
+         let mut values = Vec::new();
+         let mut bare = false;
+-        collect(body, &mut values, &mut bare);
++        collect_return_values(body, &mut values, &mut bare);
+         if values.is_empty() {
+             return Ok(HirType::Void);
+         }
+@@ -1094,6 +1095,17 @@ impl<'a> FnLowerer<'a> {
+             .copied()
+             .filter(|index| class_type_has_identity(&elements[*index], class.sym.as_ref()))
+             .collect::<Vec<_>>();
++        // Same-layout ordinary objects can fail the runtime identity check, so
++        // the matching members stay possible in the false branch only when
++        // another allowed member shares their physical layout (identity marker
++        // aside); with distinct layouts the false branch is exactly the rest.
++        let layout = |index: usize| match &elements[index] {
++            HirType::Object(fields) => HirType::Object(fields.iter().skip(1).cloned().collect()),
++            other => other.clone(),
++        };
++        let layouts_collide = allowed.iter().filter(|index| !matching.contains(index)).any(|other| {
++            matching.iter().any(|matched| layout(*matched) == layout(*other))
++        });
+         (!matching.is_empty()).then(|| {
+             (
+                 vec![UnionNarrowingTarget {
+@@ -1103,9 +1115,7 @@ impl<'a> FnLowerer<'a> {
+                     elements: elements.clone(),
+                 }],
+                 true,
+-                // Same-layout ordinary objects can fail the runtime identity
+-                // check. Keep this member possible in the false branch.
+-                false,
++                !layouts_collide,
+             )
+         })
+     }
+diff --git a/crates/thaw-llvm/src/hir_codegen.rs b/crates/thaw-llvm/src/hir_codegen.rs
+index e23fb79..c846e3a 100644
+--- a/crates/thaw-llvm/src/hir_codegen.rs
++++ b/crates/thaw-llvm/src/hir_codegen.rs
+@@ -989,6 +989,10 @@ impl<'ctx> HirCompiler<'ctx> {
+                 ) || matches!(inner.as_ref(), HirExpr::Call(callee, _)
+                     if matches!(callee.as_ref(), HirExpr::Var(name)
+                         if name == "sleep" || name == "fetch" || name == "Promise.all" || frame_functions.contains(name)))
++                    // An argument-binding wrapper `(lambda)(args)` that returns a Promise.
++                    || matches!(inner.as_ref(), HirExpr::Call(callee, _)
++                        if matches!(callee.as_ref(), HirExpr::Lambda(_, _, HirType::Promise(_), body)
++                            if matches!(body.as_ref(), HirExpr::PromiseNew(..))))
+                     || Self::expr_awaits_frame_source(inner, frame_functions)
+             }
+             HirExpr::BinOp(_, left, right)
+diff --git a/crates/thaw-llvm/src/hir_codegen/async_frames/planning/analysis.rs b/crates/thaw-llvm/src/hir_codegen/async_frames/planning/analysis.rs
+index 8c11ee3..007f091 100644
+--- a/crates/thaw-llvm/src/hir_codegen/async_frames/planning/analysis.rs
++++ b/crates/thaw-llvm/src/hir_codegen/async_frames/planning/analysis.rs
+@@ -35,7 +35,13 @@ impl<'ctx> HirCompiler<'ctx> {
+     ) -> Result<(), String> {
+         match stmt {
+             HirStmt::Let(name, ty, _) => {
+-                if locals.iter().any(|(existing, _)| existing == name) {
++                // Inlined finalizer copies (one per exit) re-declare the same
++                // generated local; the copies never overlap, so one slot of
++                // the same type serves them all.
++                if let Some((_, existing)) = locals.iter().find(|(existing, _)| existing == name) {
++                    if existing == ty {
++                        return Ok(());
++                    }
+                     return Err(format!("duplicate async frame local `{name}`"));
+                 }
+                 self.basic_type(ty)
+@@ -91,6 +97,10 @@ impl<'ctx> HirCompiler<'ctx> {
+                 | HirExpr::PromiseAllSettled(_, _)
+                 | HirExpr::PromiseAllSettledArray(_, _)
+         ) || matches!(self.expr_hir_type(expr), Some(HirType::Promise(_)))
++            // An argument-binding wrapper `(lambda)(args)` that returns a Promise.
++            || matches!(expr, HirExpr::Call(callee, _)
++                if matches!(callee.as_ref(), HirExpr::Lambda(_, _, HirType::Promise(_), body)
++                    if matches!(body.as_ref(), HirExpr::PromiseNew(..))))
+             || matches!(expr, HirExpr::Call(callee, _)
+             if matches!(callee.as_ref(), HirExpr::Var(name)
+                 if name == "sleep" || name == "fetch" || name == "Promise.all"
+diff --git a/crates/thaw-llvm/src/hir_codegen/console.rs b/crates/thaw-llvm/src/hir_codegen/console.rs
+index 062a4f0..9995cfe 100644
+--- a/crates/thaw-llvm/src/hir_codegen/console.rs
++++ b/crates/thaw-llvm/src/hir_codegen/console.rs
+@@ -932,6 +932,12 @@ impl<'ctx> HirCompiler<'ctx> {
+                     descriptor,
+                 )?;
+             }
++            HirType::Union(elements) => {
++                self.compile_console_union(payload.into_struct_value(), elements, newline, descriptor)?;
++            }
++            HirType::Nullish(inner) => {
++                self.compile_console_nullish(payload.into_struct_value(), inner, newline, descriptor)?;
++            }
+             HirType::Object(_)
+             | HirType::Json
+             | HirType::Dictionary(_)
+diff --git a/crates/thaw-llvm/src/hir_codegen/dynamic_host/callbacks.rs b/crates/thaw-llvm/src/hir_codegen/dynamic_host/callbacks.rs
+index acd7324..2876e69 100644
+--- a/crates/thaw-llvm/src/hir_codegen/dynamic_host/callbacks.rs
++++ b/crates/thaw-llvm/src/hir_codegen/dynamic_host/callbacks.rs
+@@ -905,6 +905,12 @@ impl<'ctx> HirCompiler<'ctx> {
+                     &[argument.into()], "brand_callback_handle_argument",
+                 ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                     .ok_or("thaw_json_brand_wrapper returned no value")?.into_pointer_value()
++            } else if !graph_mode && rest_start != Some(index) && matches!(param, HirType::Json) {
++                self.builder.build_call(
++                    self.module.get_function("thaw_json_brand_handle_placeholder").unwrap(),
++                    &[argument.into()], "brand_callback_json_handle_argument",
++                ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
++                    .ok_or("thaw_json_brand_handle_placeholder returned no value")?.into_pointer_value()
+             } else { argument };
+             argument_json.push(argument);
+             self.builder.build_store(argument_slots[graph_index], argument)
+@@ -1646,7 +1652,11 @@ impl<'ctx> HirCompiler<'ctx> {
+         let [closure_expr] = args else {
+             return Err("registerNativeCallback expects exactly one argument".into());
+         };
+-        let (params, ret, optional, has_rest) = match self.expr_hir_type(closure_expr) {
++        let callback_type = match self.expr_hir_type(closure_expr) {
++            Some(HirType::FunctionWithThis(_, visible)) => Some(*visible),
++            other => other,
++        };
++        let (params, ret, optional, has_rest) = match callback_type {
+             Some(HirType::Function(params, ret)) => (params, *ret, false, false),
+             Some(HirType::CallableFunction(mut params, _, rest, ret)) => {
+                 let has_rest = rest.is_some();
+diff --git a/crates/thaw-llvm/src/hir_codegen/dynamic_host/support.rs b/crates/thaw-llvm/src/hir_codegen/dynamic_host/support.rs
+index 39194c5..180c09a 100644
+--- a/crates/thaw-llvm/src/hir_codegen/dynamic_host/support.rs
++++ b/crates/thaw-llvm/src/hir_codegen/dynamic_host/support.rs
+@@ -23,6 +23,11 @@ fn dynamic_json_collection_element_supported(ty: &HirType) -> bool {
+             dynamic_json_collection_element_supported(payload)
+         }
+         HirType::Array(element) => dynamic_json_collection_element_supported(element),
++        // A scalar union (`number | string`) decodes member by member from the JSON element.
++        HirType::Union(members) => members.iter().all(|member| matches!(
++            member,
++            HirType::F64 | HirType::Str | HirType::Bool | HirType::Null | HirType::Undefined
++        )),
+         HirType::Tuple(elements) => elements
+             .iter()
+             .all(dynamic_json_collection_element_supported),
+diff --git a/crates/thaw-llvm/src/hir_codegen/entrypoints.rs b/crates/thaw-llvm/src/hir_codegen/entrypoints.rs
+index fc9474f..8415d1c 100644
+--- a/crates/thaw-llvm/src/hir_codegen/entrypoints.rs
++++ b/crates/thaw-llvm/src/hir_codegen/entrypoints.rs
+@@ -589,7 +589,7 @@ impl<'ctx> HirCompiler<'ctx> {
+     }
+ 
+     fn configure_unhandled_rejection_reporter(&self) {
+-        let reporter = if self.uses_quickjs_handles {
++        let reporter = if self.uses_quickjs || self.uses_quickjs_handles {
+             self.module
+                 .get_function("thaw_js_emit_unhandled_rejection_result")
+                 .unwrap()
+@@ -607,7 +607,7 @@ impl<'ctx> HirCompiler<'ctx> {
+                 "configure_unhandled_rejection_reporter",
+             )
+             .unwrap();
+-        let handled_reporter = if self.uses_quickjs_handles {
++        let handled_reporter = if self.uses_quickjs || self.uses_quickjs_handles {
+             self.module
+                 .get_function("thaw_js_emit_rejection_handled_result")
+                 .unwrap()
+@@ -699,7 +699,7 @@ impl<'ctx> HirCompiler<'ctx> {
+             .builder
+             .build_is_not_null(pending, "process_exception_failed")
+             .unwrap();
+-        let (exception_failure, reported, native_handler_error, listener_error) = if self.uses_quickjs_handles {
++        let (exception_failure, reported, native_handler_error, listener_error) = if self.uses_quickjs || self.uses_quickjs_handles {
+             let emission = self.builder.build_call(
+                 self.module.get_function("thaw_js_emit_uncaught_result").unwrap(),
+                 &[pending_report.into()],
+@@ -820,7 +820,7 @@ impl<'ctx> HirCompiler<'ctx> {
+             .builder
+             .build_is_not_null(rejection, "process_rejection_failed")
+             .unwrap();
+-        let (rejection_failure, reported_rejection, rejection_listener_error) = if self.uses_quickjs_handles {
++        let (rejection_failure, reported_rejection, rejection_listener_error) = if self.uses_quickjs || self.uses_quickjs_handles {
+             let emission = self.builder.build_call(
+                 self.module.get_function("thaw_js_emit_unhandled_rejection_result").unwrap(),
+                 &[rejection.into()],
+@@ -886,7 +886,7 @@ impl<'ctx> HirCompiler<'ctx> {
+             &[rejection.into()],
+             "destroy_detached_rejection_report",
+         ).unwrap();
+-        let rejection_reporter = if self.uses_quickjs_handles {
++        let rejection_reporter = if self.uses_quickjs || self.uses_quickjs_handles {
+             self.module
+                 .get_function("thaw_js_emit_unhandled_rejection_result")
+                 .unwrap()
+diff --git a/crates/thaw-llvm/src/hir_codegen/functions.rs b/crates/thaw-llvm/src/hir_codegen/functions.rs
+index 25cde97..1126cb3 100644
+--- a/crates/thaw-llvm/src/hir_codegen/functions.rs
++++ b/crates/thaw-llvm/src/hir_codegen/functions.rs
+@@ -97,7 +97,9 @@ impl<'ctx> HirCompiler<'ctx> {
+             HirType::NativeException => Ok(self.context.ptr_type(AddressSpace::default()).into()),
+             HirType::JsValue => Ok(self.context.i64_type().into()),
+             HirType::Null => Ok(self.context.bool_type().into()),
+-            HirType::Function(_, _) | HirType::CallableFunction(..) => {
++            // A `this`-taking closure is the same closure pointer; the tagged
++            // receiver entry lives in its environment.
++            HirType::Function(_, _) | HirType::CallableFunction(..) | HirType::FunctionWithThis(..) => {
+                 Ok(self.context.ptr_type(AddressSpace::default()).into())
+             }
+             HirType::Promise(_) => Ok(self.context.ptr_type(AddressSpace::default()).into()),
+diff --git a/crates/thaw-llvm/src/hir_codegen/invocations/calls.rs b/crates/thaw-llvm/src/hir_codegen/invocations/calls.rs
+index c196fb1..016b18f 100644
+--- a/crates/thaw-llvm/src/hir_codegen/invocations/calls.rs
++++ b/crates/thaw-llvm/src/hir_codegen/invocations/calls.rs
+@@ -283,7 +283,8 @@ impl<'ctx> HirCompiler<'ctx> {
+                 let [object, operation] = args else {
+                     return Err(format!("{name} expects an object and an operation"));
+                 };
+-                let json_state = self.expr_hir_type(object) == Some(HirType::Json);
++                // A `Record` is a JSON container too: it must use the same state key the JSON runtime consults.
++                let json_state = matches!(self.expr_hir_type(object), Some(HirType::Json | HirType::Dictionary(_)));
+                 let object = self.compile_expr(object)?;
+                 if !object.is_pointer_value() {
+                     return Err("object integrity methods require a native object".into());
+diff --git a/crates/thaw-llvm/src/hir_codegen/invocations/variable_calls.rs b/crates/thaw-llvm/src/hir_codegen/invocations/variable_calls.rs
+index 8538327..af31b58 100644
+--- a/crates/thaw-llvm/src/hir_codegen/invocations/variable_calls.rs
++++ b/crates/thaw-llvm/src/hir_codegen/invocations/variable_calls.rs
+@@ -5,7 +5,11 @@ impl<'ctx> HirCompiler<'ctx> {
+         callee: &HirExpr,
+         args: &[HirExpr],
+     ) -> Option<Result<BasicValueEnum<'ctx>, String>> {
+-        match self.variable_hir_types.get(name).cloned()? {
++        let ty = match self.variable_hir_types.get(name).cloned()? {
++            HirType::FunctionWithThis(_, visible) => *visible,
++            other => other,
++        };
++        match ty {
+             HirType::Function(params, ret) => {
+                 Some(self.compile_closure_call(callee, &params, &ret, args, name))
+             }
+diff --git a/crates/thaw-llvm/src/hir_codegen/json_bridge/decoding.rs b/crates/thaw-llvm/src/hir_codegen/json_bridge/decoding.rs
+index 967144d..686027b 100644
+--- a/crates/thaw-llvm/src/hir_codegen/json_bridge/decoding.rs
++++ b/crates/thaw-llvm/src/hir_codegen/json_bridge/decoding.rs
+@@ -76,6 +76,20 @@ impl<'ctx> HirCompiler<'ctx> {
+                 .map_err(|error| error.to_string())?;
+             self.compile_destroy_decoded_owned_json(field_json, field_ty)?;
+         }
++        // A Date returned from dynamic code is a genuine native Date: record its identity so
++        // later `instanceof`/method receivers and marshaling accept it as one.
++        if matches!(fields.as_slice(),
++            [(marker, HirType::Bool), (timestamp, HirType::F64)]
++                if marker == "__thaw_class_identity_\u{1e}Date" && timestamp == "timestamp")
++        {
++            let marker = self.builder.build_global_string_ptr(&fields[0].0, "decoded_date_identity")
++                .map_err(|error| error.to_string())?;
++            self.builder.build_call(
++                self.module.get_function("thaw_object_set_class_identity").unwrap(),
++                &[object.into(), marker.as_pointer_value().into()],
++                "register_decoded_date_identity",
++            ).map_err(|error| error.to_string())?;
++        }
+         Ok(object.into())
+     }
+ 
+diff --git a/crates/thaw-llvm/src/hir_codegen/promises.rs b/crates/thaw-llvm/src/hir_codegen/promises.rs
+index 65b71b4..031f188 100644
+--- a/crates/thaw-llvm/src/hir_codegen/promises.rs
++++ b/crates/thaw-llvm/src/hir_codegen/promises.rs
+@@ -1692,7 +1692,10 @@ impl<'ctx> HirCompiler<'ctx> {
+         on_rejected: bool,
+         flatten: bool,
+     ) -> Result<BasicValueEnum<'ctx>, String> {
+-        let source = self.compile_expr(source)?.into_pointer_value();
++        // The chain consumes its input handle: a borrowed source (a field or
++        // variable) must be retained first.
++        let source_promise = self.compile_expr(source)?.into_pointer_value();
++        let source = self.retain_borrowed_promise_for_consumption(source, source_promise)?;
+         let closure = self.compile_expr(callback)?.into_pointer_value();
+         let adapter = self.compile_promise_chain_adapter(input, output, on_rejected, flatten)?;
+         self.builder
+@@ -1898,7 +1901,8 @@ impl<'ctx> HirCompiler<'ctx> {
+     ) -> Result<BasicValueEnum<'ctx>, String> {
+         // These source-visible expressions run once, in member-call order,
+         // before either adapter subscribes to the original promise.
+-        let source = self.compile_expr(source)?.into_pointer_value();
++        let source_promise = self.compile_expr(source)?.into_pointer_value();
++        let source = self.retain_borrowed_promise_for_consumption(source, source_promise)?;
+         let fulfilled_closure = fulfilled
+             .map(|callback| self.compile_expr(callback).map(BasicValueEnum::into_pointer_value))
+             .transpose()?;
+@@ -1937,6 +1941,7 @@ impl<'ctx> HirCompiler<'ctx> {
+         callback_return: &HirType,
+     ) -> Result<BasicValueEnum<'ctx>, String> {
+         let source_promise = self.compile_expr(source)?.into_pointer_value();
++        let source_promise = self.retain_borrowed_promise_for_consumption(source, source_promise)?;
+         let closure = self.compile_expr(callback)?.into_pointer_value();
+         let name = format!("__thaw_promise_finally_{}", self.next_lambda);
+         self.next_lambda += 1;
+diff --git a/crates/thaw-llvm/src/hir_codegen/runtime_declarations.rs b/crates/thaw-llvm/src/hir_codegen/runtime_declarations.rs
+index d5bd10f..1c6a435 100644
+--- a/crates/thaw-llvm/src/hir_codegen/runtime_declarations.rs
++++ b/crates/thaw-llvm/src/hir_codegen/runtime_declarations.rs
+@@ -334,6 +334,11 @@ impl<'ctx> HirCompiler<'ctx> {
+             i8_ptr.fn_type(&[i8_ptr.into()], false),
+             Some(Linkage::External),
+         );
++        self.module.add_function(
++            "thaw_json_brand_handle_placeholder",
++            i8_ptr.fn_type(&[i8_ptr.into()], false),
++            Some(Linkage::External),
++        );
+         self.module.add_function(
+             "thaw_json_brand_wrapper_if",
+             i8_ptr.fn_type(&[i8_ptr.into(), self.context.bool_type().into()], false),
+diff --git a/crates/thaw-llvm/src/hir_codegen/tests.rs b/crates/thaw-llvm/src/hir_codegen/tests.rs
+index 97cac57..145bdbe 100644
+--- a/crates/thaw-llvm/src/hir_codegen/tests.rs
++++ b/crates/thaw-llvm/src/hir_codegen/tests.rs
+@@ -99,6 +99,35 @@ fn compile_and_run_output_with_env(
+     test_name: &str,
+     envs: &[(&str, &str)],
+ ) -> (String, String) {
++    let output = compile_and_run_raw(source, test_name, envs);
++    assert!(
++        output.status.success(),
++        "binary exited {:?}: {}",
++        output.status.code(),
++        String::from_utf8_lossy(&output.stderr)
++    );
++    (
++        String::from_utf8_lossy(&output.stdout).into_owned(),
++        String::from_utf8_lossy(&output.stderr).into_owned(),
++    )
++}
++
++/// For programs that must end unsuccessfully (an unhandled rejection of
++/// `main` exits 1 in Node as well): `(stdout, stderr, exit code)`.
++fn compile_and_run_failing(source: &str, test_name: &str) -> (String, String, Option<i32>) {
++    let output = compile_and_run_raw(source, test_name, &[]);
++    (
++        String::from_utf8_lossy(&output.stdout).into_owned(),
++        String::from_utf8_lossy(&output.stderr).into_owned(),
++        output.status.code(),
++    )
++}
++
++fn compile_and_run_raw(
++    source: &str,
++    test_name: &str,
++    envs: &[(&str, &str)],
++) -> std::process::Output {
+     let module = thaw_parser::parse_typescript(source).unwrap();
+     let program = thaw_hir::lower_module(&module).unwrap();
+ 
+@@ -162,18 +191,8 @@ fn compile_and_run_output_with_env(
+         .envs(envs.iter().copied())
+         .output()
+         .expect("failed to execute compiled binary");
+-    assert!(
+-        output.status.success(),
+-        "binary exited {:?}: {}",
+-        output.status.code(),
+-        String::from_utf8_lossy(&output.stderr)
+-    );
+-
+     let _ = std::fs::remove_dir_all(&dir);
+-    (
+-        String::from_utf8_lossy(&output.stdout).into_owned(),
+-        String::from_utf8_lossy(&output.stderr).into_owned(),
+-    )
++    output
+ }
+ 
+ /// Builds `pkg` as a staticlib (if not already built) and returns the
+diff --git a/crates/thaw-llvm/src/hir_codegen/tests/async/syntax.rs b/crates/thaw-llvm/src/hir_codegen/tests/async/syntax.rs
+index ac36e01..118586c 100644
+--- a/crates/thaw-llvm/src/hir_codegen/tests/async/syntax.rs
++++ b/crates/thaw-llvm/src/hir_codegen/tests/async/syntax.rs
+@@ -200,7 +200,8 @@ fn compiles_typeof_for_native_values_and_awaits() {
+     "#;
+     assert_eq!(
+         compile_and_run(source, "typed_typeof"),
+-        "evaluated\nnumber\nstring\nboolean\nfunction\nobject\nobject\nobject\n"
++        // The un-awaited `numberValue()` still runs to completion, as in Node.
++        "evaluated\nnumber\nstring\nboolean\nfunction\nobject\nobject\nobject\nevaluated\n"
+     );
+ }
+ 
+diff --git a/crates/thaw-llvm/src/hir_codegen/tests/classes.rs b/crates/thaw-llvm/src/hir_codegen/tests/classes.rs
+index b12dafa..91760a3 100644
+--- a/crates/thaw-llvm/src/hir_codegen/tests/classes.rs
++++ b/crates/thaw-llvm/src/hir_codegen/tests/classes.rs
+@@ -775,7 +775,7 @@ fn compiles_utf16_string_search_methods() {
+     "#;
+     assert_eq!(
+         compile_and_run(source, "string_search"),
+-        "2\n3\ntrue\ntrue\ntrue\ntrue\n5\ntrue\ntrue\ntrue\nreceiver\nneedle\nposition\n4\n3\n0\n0\n5\n0\nreceiver\nawaited-needle\n4\nawaited-text\ntrue\n"
++        "2\n3\ntrue\ntrue\ntrue\ntrue\n5\ntrue\ntrue\ntrue\nreceiver\nneedle\nposition\n4\n3\n0\n0\n5\n5\nreceiver\nawaited-needle\n4\nawaited-text\ntrue\n"
+     );
+ }
+ 
+diff --git a/crates/thaw-llvm/src/hir_codegen/tests/control_flow.rs b/crates/thaw-llvm/src/hir_codegen/tests/control_flow.rs
+index e4f0a4a..bda28b9 100644
+--- a/crates/thaw-llvm/src/hir_codegen/tests/control_flow.rs
++++ b/crates/thaw-llvm/src/hir_codegen/tests/control_flow.rs
+@@ -552,7 +552,7 @@ fn async_await_catches_a_typed_quickjs_promise_rejection() {
+     "#;
+     assert_eq!(
+         compile_and_run(source, "typed_quickjs_async_rejection"),
+-        "AbortError `laterAsync`'s promise rejected: stopped\n"
++        "AbortError stopped\n"
+     );
+ }
+ 
+@@ -751,10 +751,11 @@ fn frame_split_runs_finally_then_rethrows_child_rejection() {
+             console.log("also-unreachable");
+         }
+     "#;
+-    assert_eq!(
+-        compile_and_run(source, "async_rejection_finally"),
+-        "before\nfinally\n"
+-    );
++    // Node prints "before\nfinally\n", then exits 1 on the unhandled rejection.
++    let (stdout, stderr, code) = compile_and_run_failing(source, "async_rejection_finally");
++    assert_eq!(stdout, "before\nfinally\n");
++    assert!(stderr.contains("Uncaught: boom"), "{stderr}");
++    assert_eq!(code, Some(1));
+ }
+ 
+ #[test]
+diff --git a/crates/thaw-llvm/src/hir_codegen/tests/native_builtins.rs b/crates/thaw-llvm/src/hir_codegen/tests/native_builtins.rs
+index 6515e5f..175759a 100644
+--- a/crates/thaw-llvm/src/hir_codegen/tests/native_builtins.rs
++++ b/crates/thaw-llvm/src/hir_codegen/tests/native_builtins.rs
+@@ -497,7 +497,7 @@ fn compiles_string_from_code_point() {
+     "#;
+     assert_eq!(
+         compile_and_run(source, "string_from_code_point"),
+-        "\nA\nHello\n😀\nA😀\nfirst\nsecond\nA😀\nawaited point\n😀\nInvalid code point\nInvalid code point\nInvalid code point\nInvalid code point\n"
++        "\nA\nHello\n😀\nA😀\nfirst\nsecond\nA😀\nawaited point\n😀\nInvalid code point\nInvalid code point\nInvalid code point\n"
+     );
+ }
+ 
+@@ -8213,6 +8213,12 @@ fn compiles_turkish_and_azeri_string_casing() {
+ 
+ /// `AggregateError` preserves statically typed errors and an arbitrary cause
+ /// while retaining the existing tagged exception behavior when thrown.
++///
++/// A caught `AggregateError` is printed as Node prints an error that has no stack
++/// frames (verified with `e.stack = "AggregateError: all failed"` under Node 22):
++/// `[AggregateError: all failed] { [errors]: [ [Error: a] ] }`. Real Node also prints
++/// the stack trace, which a native binary has no equivalent of, so it is omitted.
++/// A statically typed error value still prints as its bare message (the first line).
+ #[test]
+ fn compiles_aggregate_error() {
+     let source = r#"
+@@ -8238,7 +8244,7 @@ fn compiles_aggregate_error() {
+     "#;
+     assert_eq!(
+         compile_and_run(source, "aggregate_error"),
+-        "\n1,2,3\n17\ntrue\nall failed\ntrue\nAggregateError\nall failed\n"
++        "\n1,2,3\n17\ntrue\n[AggregateError: all failed] { [errors]: [ [Error: a] ] }\ntrue\nAggregateError\nall failed\n"
+     );
+ }
+ 
+diff --git a/crates/thaw-llvm/src/hir_codegen/values/closures.rs b/crates/thaw-llvm/src/hir_codegen/values/closures.rs
+index 5877d24..d3202fe 100644
+--- a/crates/thaw-llvm/src/hir_codegen/values/closures.rs
++++ b/crates/thaw-llvm/src/hir_codegen/values/closures.rs
+@@ -553,7 +553,7 @@ impl<'ctx> HirCompiler<'ctx> {
+             // A native fixed object crosses the graph callback boundary as
+             // a borrowed Host Json. Its private wrapper token is checked at
+             // call time before recovering the original arena pointer.
+-            HirType::Object(_) => vec![7],
++            HirType::Object(_) => vec![7, 9],
+             HirType::Optional(inner) => {
+                 let mut tags = Self::non_arrow_receiver_tags(inner)?;
+                 if !tags.contains(&0) { tags.push(0); }
+@@ -605,6 +605,22 @@ impl<'ctx> HirCompiler<'ctx> {
+         match receiver {
+             HirType::Object(fields) if !fields.first().is_some_and(|(name, _)|
+                     name.starts_with("__thaw_class_identity_\u{1e}")) => {
++                let ptr_type = self.context.ptr_type(AddressSpace::default());
++                let is_native = self.builder.build_int_compare(IntPredicate::EQ, kind,
++                    self.context.i8_type().const_int(9, false), "native_receiver_is_direct")
++                    .map_err(|error| error.to_string())?;
++                let direct = self.context.append_basic_block(entry_fn, "native_receiver_direct");
++                let check_host = self.context.append_basic_block(entry_fn, "native_receiver_check_host");
++                let join = self.context.append_basic_block(entry_fn, "native_receiver_join");
++                self.builder.build_conditional_branch(is_native, direct, check_host)
++                    .map_err(|error| error.to_string())?;
++                // Same-layout native call sites pass the arena pointer directly
++                // (the lowering converts any other layout to a Host `Json`).
++                self.builder.position_at_end(direct);
++                let direct_pointer = self.builder.build_int_to_ptr(word, ptr_type, "native_receiver_direct_pointer")
++                    .map_err(|error| error.to_string())?;
++                self.builder.build_unconditional_branch(join).map_err(|error| error.to_string())?;
++                self.builder.position_at_end(check_host);
+                 let is_host = self.builder.build_int_compare(IntPredicate::EQ, kind,
+                     self.context.i8_type().const_int(7, false), "native_receiver_is_host")
+                     .map_err(|error| error.to_string())?;
+@@ -614,8 +630,7 @@ impl<'ctx> HirCompiler<'ctx> {
+                 self.builder.build_conditional_branch(is_host, host, rejected)
+                     .map_err(|error| error.to_string())?;
+                 self.builder.position_at_end(host);
+-                let json = self.builder.build_int_to_ptr(word,
+-                    self.context.ptr_type(AddressSpace::default()), "native_receiver_json")
++                let json = self.builder.build_int_to_ptr(word, ptr_type, "native_receiver_json")
+                     .map_err(|error| error.to_string())?;
+                 let (pointer, present) = self.query_native_object_receiver(json, fields)?;
+                 self.builder.build_conditional_branch(present, accepted, rejected)
+@@ -623,9 +638,18 @@ impl<'ctx> HirCompiler<'ctx> {
+                 self.builder.position_at_end(rejected);
+                 self.reject_non_arrow_receiver()?;
+                 self.builder.position_at_end(accepted);
+-                return self.builder.build_int_to_ptr(pointer,
+-                    self.context.ptr_type(AddressSpace::default()), "native_receiver_original_pointer")
+-                    .map(Into::into).map_err(|error| error.to_string());
++                let host_pointer = self.builder.build_int_to_ptr(pointer, ptr_type, "native_receiver_original_pointer")
++                    .map_err(|error| error.to_string())?;
++                let accepted_exit = self.builder.get_insert_block().unwrap();
++                self.builder.build_unconditional_branch(join).map_err(|error| error.to_string())?;
++                self.builder.position_at_end(join);
++                let selected = self.builder.build_phi(ptr_type, "native_receiver_pointer")
++                    .map_err(|error| error.to_string())?;
++                selected.add_incoming(&[
++                    (&direct_pointer as &dyn inkwell::values::BasicValue<'ctx>, direct),
++                    (&host_pointer as &dyn inkwell::values::BasicValue<'ctx>, accepted_exit),
++                ]);
++                return Ok(selected.as_basic_value());
+             }
+             HirType::Json => return self.compile_non_arrow_json_value(entry_fn, kind, word).map(Into::into),
+             HirType::Optional(inner) | HirType::Nullable(inner) | HirType::Nullish(inner) => {
+diff --git a/crates/thaw-napi/src/lib.rs b/crates/thaw-napi/src/lib.rs
+index e0c260b..385a632 100644
+--- a/crates/thaw-napi/src/lib.rs
++++ b/crates/thaw-napi/src/lib.rs
+@@ -1754,6 +1754,28 @@ struct Host {
+ }
+ 
+ impl Host {
++    /// The registered key for `name`: the exact key, or (for a bare name) the single
++    /// package-qualified `pkg::name` that `present` accepts. Ambiguous names resolve to nothing.
++    fn qualified_key(&self, name: &str, present: impl Fn(&str) -> bool) -> Option<String> {
++        if present(name) {
++            return Some(name.to_string());
++        }
++        if name.contains("::") {
++            return None;
++        }
++        let mut found = None;
++        for package in &self.qualified_packages {
++            let key = format!("{package}::{name}");
++            if present(&key) {
++                if found.is_some() {
++                    return None;
++                }
++                found = Some(key);
++            }
++        }
++        found
++    }
++
+     fn new() -> Self {
+         Self {
+             functions: HashMap::new(),
+diff --git a/crates/thaw-napi/src/napi/module_host.rs b/crates/thaw-napi/src/napi/module_host.rs
+index 29f4bb1..85d90c5 100644
+--- a/crates/thaw-napi/src/napi/module_host.rs
++++ b/crates/thaw-napi/src/napi/module_host.rs
+@@ -38,10 +38,11 @@ fn register_loaded_exports(
+     // An export replaced by a non-function must also retire the older
+     // callable entry; shutdown uses the exports owner to unpublish callbacks.
+     for (name, _) in &exported_values {
+-        host.functions.remove(name);
+-        if let Some(package) = package_name {
+-            host.functions.remove(&format!("{package}::{name}"));
+-        }
++        // A qualified load only retires its own entry, never another package's bare name.
++        match package_name {
++            Some(package) => host.functions.remove(&format!("{package}::{name}")),
++            None => host.functions.remove(name),
++        };
+     }
+     if let Some(package) = package_name {
+         host.qualified_packages.insert(package.into());
+@@ -4621,9 +4622,10 @@ unsafe fn call_value_impl(
+     let (function, env) = HOST
+         .with(|host| {
+             let host = host.borrow();
++            let key = host.qualified_key(name, |key| host.functions.contains_key(key))?;
+             Some((
+-                host.functions.get(name)?.clone(),
+-                host.exports.get(name)?.0 as NapiEnv,
++                host.functions.get(&key)?.clone(),
++                host.exports.get(&key)?.0 as NapiEnv,
+             ))
+         })
+         .ok_or_else(|| format!("no such native addon function `{name}`"))?;
+@@ -4721,7 +4723,11 @@ pub unsafe extern "C" fn thaw_napi_get_export_typed_result(name: *const c_char)
+ 
+ unsafe fn get_export_result(name: *const c_char) -> Result<u64, String> {
+     let name = text(name)?;
+-    if let Some(value) = HOST.with(|host| host.borrow().exports.get(&name).map(|(_, value)| *value as u64)) {
++    if let Some(value) = HOST.with(|host| {
++        let host = host.borrow();
++        let key = host.qualified_key(&name, |key| host.exports.contains_key(key))?;
++        host.exports.get(&key).map(|(_, value)| *value as u64)
++    }) {
+         return Ok(value);
+     }
+     let (first, parts) = if let Some((package, path)) = name.split_once("::") {
+@@ -4733,7 +4739,11 @@ unsafe fn get_export_result(name: *const c_char) -> Result<u64, String> {
+         let Some(root) = parts.next() else { return Ok(0); };
+         (root.to_string(), parts.collect::<Vec<_>>())
+     };
+-    let Some(mut value) = HOST.with(|host| host.borrow().exports.get(&first).map(|(_, value)| *value as u64)) else {
++    let Some(mut value) = HOST.with(|host| {
++        let host = host.borrow();
++        let key = host.qualified_key(&first, |key| host.exports.contains_key(key))?;
++        host.exports.get(&key).map(|(_, value)| *value as u64)
++    }) else {
+         return Ok(0);
+     };
+     for part in parts {
+@@ -5606,7 +5616,8 @@ unsafe fn call_with_callback_impl(
+         let (function, env_ptr) = HOST
+             .with(|host| {
+                 let host = host.borrow();
+-                Some((host.functions.get(&name)?.clone(), host.exports.get(&name)?.0 as NapiEnv))
++                let key = host.qualified_key(&name, |key| host.functions.contains_key(key))?;
++                Some((host.functions.get(&key)?.clone(), host.exports.get(&key)?.0 as NapiEnv))
+             })
+             .ok_or_else(|| format!("no such native addon function `{name}`"))?;
+         let callback = callback.ok_or("native addon callback is null")?;
+diff --git a/crates/thaw-quickjs/src/quickjs/api.rs b/crates/thaw-quickjs/src/quickjs/api.rs
+index a414c3c..b698271 100644
+--- a/crates/thaw-quickjs/src/quickjs/api.rs
++++ b/crates/thaw-quickjs/src/quickjs/api.rs
+@@ -325,7 +325,10 @@ fn tagged_error_parts(raw: &str) -> (&str, &str) {
+ /// this crate's stub rejects, see thaw-bridge's `wrap_as_commonjs_module`)
+ /// undiagnosable.
+ fn load_impl(ctx: Ctx<'_>, source: &str) -> Result<(), String> {
+-    ctx.eval::<(), _>(source).map_err(|e| match e {
++    // Loaded scripts are CommonJS/classic scripts: sloppy unless they opt in with "use strict".
++    let mut options = rquickjs::context::EvalOptions::default();
++    options.strict = false;
++    ctx.eval_with_options::<(), _>(source, options).map_err(|e| match e {
+         rquickjs::Error::Exception => describe_exception_with_stack(&ctx),
+         e => e.to_string(),
+     })?;
+diff --git a/crates/thaw-runtime/src/runtime/native_values/regex.rs b/crates/thaw-runtime/src/runtime/native_values/regex.rs
+index 5eb478c..688f41d 100644
+--- a/crates/thaw-runtime/src/runtime/native_values/regex.rs
++++ b/crates/thaw-runtime/src/runtime/native_values/regex.rs
+@@ -301,7 +301,9 @@ unsafe fn thaw_regex_replace_impl(value: *const c_char, source: *const c_char, f
+     let source = unsafe { regex_units(source) };
+     let replacement = unsafe { regex_units(replacement) };
+     let flags = unsafe { CStr::from_ptr(flags) }.to_string_lossy();
+-    let global = all || flags.contains('g');
++    // `replaceAll` rejects a non-global RegExp (the caller turns null into the TypeError).
++    if all && !flags.contains('g') { return std::ptr::null(); }
++    let global = flags.contains('g');
+     let Some(output) = with_compiled_regex(&source, &flags, |regex| {
+         let mut output = Vec::new();
+         let mut append = 0;
+diff --git a/crates/thaw-std/src/inspect.rs b/crates/thaw-std/src/inspect.rs
+index 78bae54..2ebd851 100644
+--- a/crates/thaw-std/src/inspect.rs
++++ b/crates/thaw-std/src/inspect.rs
+@@ -585,6 +585,9 @@ impl Ctx<'_> {
+         self.indentation_lvl -= 2;
+         let name = if key == "__proto__".encode_utf16().collect::<Vec<_>>().as_slice() {
+             "['__proto__']".to_string()
++        } else if key.first() == Some(&1) {
++            // `\u{1}[errors]`: a non-enumerable property shown verbatim, like Node's `[errors]`.
++            String::from_utf16_lossy(&key[1..])
+         } else if is_identifier_key(key) {
+             String::from_utf16_lossy(key)
+         } else {
+diff --git a/crates/thaw-std/src/json.rs b/crates/thaw-std/src/json.rs
+index 4a70fc6..b090923 100644
+--- a/crates/thaw-std/src/json.rs
++++ b/crates/thaw-std/src/json.rs
+@@ -2150,6 +2150,20 @@ pub extern "C" fn thaw_json_brand_wrapper(value: *mut Value) -> *mut Value {
+     value
+ }
+ 
++/// Brands a callback's top-level `Json` argument only when it is exactly the handle placeholder
++/// the callback wrapper substitutes for a JS function, so a function stays callable through a
++/// `Json` parameter. Any other value is returned unbranded.
++#[no_mangle]
++pub extern "C" fn thaw_json_brand_handle_placeholder(value: *mut Value) -> *mut Value {
++    let is_placeholder = unsafe { value.as_ref() }
++        .and_then(Value::as_object)
++        .filter(|fields| fields.len() == 1)
++        .and_then(|fields| fields.get(b"__thaw_js_handle_id__".as_slice()))
++        .and_then(Value::as_f64)
++        .is_some_and(|handle| handle.is_finite() && handle > 0.0 && handle.fract() == 0.0);
++    if is_placeholder { thaw_json_brand_wrapper(value) } else { value }
++}
++
+ #[no_mangle]
+ pub extern "C" fn thaw_json_brand_wrapper_if(value: *mut Value, trusted_origin: bool) -> *mut Value {
+     if trusted_origin { thaw_json_brand_wrapper(value) } else { value }
+@@ -2963,8 +2977,10 @@ fn inspect_node(value: &Value, stack: &mut Vec<usize>) -> crate::inspect::Node {
+         Value::Bool(value) => Node::Bool(*value),
+         Value::Number(number) => Node::Number(number.as_f64().unwrap_or(f64::NAN)),
+         Value::BigInt(text) => Node::BigInt(text.clone()),
+-        Value::String(text) => Node::Str(text.encode_utf16().collect()),
+-        Value::Wtf8(bytes) => Node::Str(wtf8_decode_utf16(bytes)),
++        Value::String(text) => tagged_error_node(text.as_bytes())
++            .unwrap_or_else(|| Node::Str(text.encode_utf16().collect())),
++        Value::Wtf8(bytes) => tagged_error_node(bytes)
++            .unwrap_or_else(|| Node::Str(wtf8_decode_utf16(bytes))),
+         Value::Array(items) => {
+             let items = shared_array_ref(items);
+             let array = match value { Value::Array(shared) => shared, _ => unreachable!() };
+@@ -2993,6 +3009,28 @@ fn inspect_node(value: &Value, stack: &mut Vec<usize>) -> crate::inspect::Node {
+                 // under a private key (see `compile_native_object_to_json_with_undefined`).
+                 let class = fields.get(b"__thaw_class__".as_slice()).and_then(Value::as_str).map(str::to_string);
+                 let field = |name: &str| fields.get(name.as_bytes()).and_then(Value::as_str).map(str::to_string);
++                // A caught `AggregateError` crosses as `{ message, name, errors, .. }`
++                // (see `lower_new_aggregate_error`); print it as Node prints an error with no
++                // stack frames: `[AggregateError: msg] { [errors]: [ .. ] }`.
++                if field("name").as_deref() == Some("AggregateError") && field("message").is_some()
++                    && fields.get(b"errors".as_slice()).is_some_and(|errors| errors.as_array().is_some())
++                {
++                    let header = error_header("AggregateError", &field("message").unwrap_or_default());
++                    let entries: Vec<(Vec<u16>, Node)> = ordered_object_fields(fields)
++                        .into_iter()
++                        .filter(|(key, _)| ![b"message".as_slice(), b"name", b"__thaw_class__"].contains(&&key[..])
++                            && !key.starts_with(b"__thaw_class_identity_"))
++                        .map(|(key, value)| {
++                            // `errors`/`cause` are non-enumerable: Node shows them as `[errors]`.
++                            let label: Vec<u16> = if key == b"errors".as_slice() || key == b"cause".as_slice() {
++                                format!("\u{1}[{}]", String::from_utf8_lossy(key)).encode_utf16().collect()
++                            } else { wtf8_decode_utf16(key) };
++                            (label, inspect_node(value, stack))
++                        })
++                        .collect();
++                    if id != 0 { stack.pop(); }
++                    return Node::Object { id, ctor: Ctor::Named(header), entries };
++                }
+                 if class.as_deref() == Some("RegExp") {
+                     if let (Some(source), Some(flags)) = (field("source"), field("flags")) {
+                         if id != 0 { stack.pop(); }
+@@ -3030,6 +3068,18 @@ fn inspect_node(value: &Value, stack: &mut Vec<usize>) -> crate::inspect::Node {
+     node
+ }
+ 
++/// Node's rendering of an error with no stack frames: `[Name: message]` (`[Name]` when empty).
++fn error_header(name: &str, message: &str) -> String {
++    if message.is_empty() { format!("[{name}]") } else { format!("[{name}: {message}]") }
++}
++
++/// A thrown `Error` carried as a tagged string (`\u{1}Name\u{1}..` frame) nested inside a value.
++fn tagged_error_node(bytes: &[u8]) -> Option<crate::inspect::Node> {
++    let frame = thaw_arena::error_wire::parse_tagged(bytes)?;
++    let name = frame.chain.split(|byte| *byte == 0x1f).next().unwrap_or(b"Error");
++    Some(crate::inspect::Node::Raw(error_header(&String::from_utf8_lossy(name), &String::from_utf8_lossy(frame.display))))
++}
++
+ /// `util.inspect(value)` with Node's default options.
+ fn inspect_json(value: &Value) -> String {
+     crate::inspect::inspect(&inspect_node(value, &mut Vec::new()), &crate::inspect::InspectOptions::default())
+@@ -4810,6 +4860,14 @@ fn enumerable_entries(value: &Value) -> Vec<(Vec<u8>, Value)> {
+     }
+ }
+ 
++/// `Object.keys`/`values`/`entries` see string keys only; symbol keys are stored
++/// as `\u{1f}@@name` sentinel keys.
++fn enumerable_string_entries(value: &Value) -> Vec<(Vec<u8>, Value)> {
++    let mut entries = enumerable_entries(value);
++    entries.retain(|(key, _)| !key.starts_with(b"\x1f@@"));
++    entries
++}
++
+ fn utf16_unit_value(unit: u16) -> Value {
+     let bytes = wtf8_encode_utf16(&[unit]);
+     match String::from_utf8(bytes) {
+@@ -4870,7 +4928,7 @@ pub unsafe extern "C" fn thaw_json_keys(value: *const Value) -> *mut u8 {
+         return alloc_pointer_array(host_enumerate_values(lease, 2).iter()
+             .map(|key| native_string_value(key).cast()).collect());
+     }
+-    let keys = unsafe { value.as_ref() }.map(enumerable_entries).unwrap_or_default()
++    let keys = unsafe { value.as_ref() }.map(enumerable_string_entries).unwrap_or_default()
+         .into_iter().map(|(key, _)| key).collect::<Vec<_>>();
+     alloc_pointer_array(
+         keys.into_iter()
+@@ -4910,7 +4968,7 @@ pub unsafe extern "C" fn thaw_json_values(value: *const Value) -> *mut u8 {
+         return alloc_pointer_array(host_enumerate_values(lease, 3).into_iter()
+             .map(|value| Box::into_raw(Box::new(value)).cast()).collect());
+     }
+-    let values = unsafe { value.as_ref() }.map(enumerable_entries).unwrap_or_default()
++    let values = unsafe { value.as_ref() }.map(enumerable_string_entries).unwrap_or_default()
+         .into_iter().map(|(_, value)| value).collect::<Vec<_>>();
+     alloc_pointer_array(
+         values
+@@ -5001,7 +5059,7 @@ pub unsafe extern "C" fn thaw_json_bool_values(value: *const Value) -> *mut u8 {
+ ///
+ /// `value` must be null or point to a valid JSON `Value`.
+ pub unsafe extern "C" fn thaw_json_entries(value: *const Value) -> *mut u8 {
+-    let entries = unsafe { value.as_ref() }.map(enumerable_entries).unwrap_or_default();
++    let entries = unsafe { value.as_ref() }.map(enumerable_string_entries).unwrap_or_default();
+     alloc_pointer_array(
+         entries
+             .into_iter()
+@@ -5921,6 +5979,11 @@ pub extern "C" fn thaw_json_array_length(value: *mut Value) -> i64 {
+ 
+ #[no_mangle]
+ pub extern "C" fn thaw_json_array_slice(value: *mut Value, start: i64) -> *mut Value {
++    // A live JS array (a nested value of a native `any` wrapper) is read through its host.
++    if let Some(Value::Host(lease)) = unsafe { value.as_ref() } {
++        let items = host_enumerate_values(lease, 3).into_iter().skip(start.max(0) as usize).collect();
++        return track_typed_decode_child(leak(Value::shared_array(items)));
++    }
+     let copy = Value::shared_array(
+         unsafe { value.as_ref() }
+             .and_then(Value::as_array)
