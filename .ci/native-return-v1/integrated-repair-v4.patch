@@ -1,0 +1,546 @@
+diff --git a/crates/thaw-bridge/src/bridge/generation.rs b/crates/thaw-bridge/src/bridge/generation.rs
+index b165303..de01aed 100644
+--- a/crates/thaw-bridge/src/bridge/generation.rs
++++ b/crates/thaw-bridge/src/bridge/generation.rs
+@@ -590,6 +590,8 @@ fn wrap_as_commonjs_module(
+     let bind_bare_globals: String = fallback_names
+         .iter()
+         .chain(class_names)
++        // A reserved word (`default`, `in`) cannot be a bare identifier.
++        .filter(|name| !is_reserved_js_identifier(name))
+         .map(|name| format!("if (typeof {name} !== 'undefined') globalThis.{name} = {name};\n"))
+         .collect();
+     // Captured *here*, inside the same wrapped script that just set
+@@ -888,7 +890,8 @@ pub fn generate_module_init(bundles: &[ModuleBundle]) -> String {
+             // N-API module, whose export object is looked up by name
+             // through a different, already-working mechanism).
+             let bare_capture_js = format!(
+-                "if (typeof globalThis.{export_name} === 'undefined') {{ globalThis[\"{}\"] = globalThis.module.exports != null && Object.prototype.hasOwnProperty.call(globalThis.module.exports, \"{}\") ? globalThis.module.exports[\"{}\"] : globalThis.module.exports != null && Object.prototype.hasOwnProperty.call(globalThis.module.exports, \"default\") ? globalThis.module.exports.default : globalThis.module.exports; }}",
++                "if (typeof globalThis[\"{}\"] === 'undefined') {{ globalThis[\"{}\"] = globalThis.module.exports != null && Object.prototype.hasOwnProperty.call(globalThis.module.exports, \"{}\") ? globalThis.module.exports[\"{}\"] : globalThis.module.exports != null && Object.prototype.hasOwnProperty.call(globalThis.module.exports, \"default\") ? globalThis.module.exports.default : globalThis.module.exports; }}",
++                escape_ts_string_literal(export_name),
+                 escape_ts_string_literal(export_name),
+                 escape_ts_string_literal(export_name),
+                 escape_ts_string_literal(export_name),
+diff --git a/crates/thaw-cli/src/registry_integration/jit/callables.rs b/crates/thaw-cli/src/registry_integration/jit/callables.rs
+index 13af0c3..95760ac 100644
+--- a/crates/thaw-cli/src/registry_integration/jit/callables.rs
++++ b/crates/thaw-cli/src/registry_integration/jit/callables.rs
+@@ -476,6 +476,27 @@ macro_rules! jit_callables {
+             && matches!(argument.expr.as_ref(), Expr::Ident(identifier) if identifier.sym == value.id.sym)
+     }
+ 
++    /// A side-effect-free arithmetic/comparison expression over pure leaf values:
++    /// re-evaluating it at every use of the inlined parameter is harmless.
++    fn jit_pure_arithmetic(tokens: &[String]) -> bool {
++        !tokens.is_empty()
++            && tokens.iter().all(|token| {
++                jit_single_pure_value(std::slice::from_ref(token))
++                    || matches!(
++                        token.as_str(),
++                        "+" | "-" | "*" | "/" | "%" | "pow" | "rsub" | "rdiv" | "rrem" | "rpow"
++                            | "band" | "bor" | "bxor" | "shl" | "shr" | "ushr" | "neg"
++                            | "<" | "<=" | ">" | ">=" | "==" | "!="
++                            // Math.* (everything but `random`).
++                            | "abs" | "asin" | "asinh" | "atan" | "atan2" | "atanh" | "cbrt"
++                            | "ceil" | "clz32" | "cos" | "cosh" | "exp" | "expm1" | "floor"
++                            | "fround" | "hypot" | "imul" | "log" | "log1p" | "log2" | "log10"
++                            | "min" | "max" | "round" | "sign" | "sin" | "sinh" | "sqrt"
++                            | "tan" | "tanh" | "trunc"
++                    )
++            })
++    }
++
+     fn jit_single_pure_value(tokens: &[String]) -> bool {
+         let [token] = tokens else {
+             return false;
+@@ -1490,7 +1511,7 @@ macro_rules! jit_callables {
+             )?;
+             // Inlined parameter tokens may be referenced more than once or out of order.
+             // Only substitute values whose re-evaluation is harmless.
+-            if !jit_single_pure_value(&encoded) {
++            if !jit_pure_arithmetic(&encoded) {
+                 return None;
+             }
+             helper_locals.insert(parameter.id.sym.to_string(), encoded);
+diff --git a/crates/thaw-cli/src/tests/registry_jit_primitives.rs b/crates/thaw-cli/src/tests/registry_jit_primitives.rs
+index 9f6a815..b2c64d4 100644
+--- a/crates/thaw-cli/src/tests/registry_jit_primitives.rs
++++ b/crates/thaw-cli/src/tests/registry_jit_primitives.rs
+@@ -747,7 +747,7 @@ fn mixed_array_conversion_maps_use_jit_without_quickjs() {
+     assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+     assert_eq!(
+         String::from_utf8_lossy(&result.stdout),
+-        "[2,-1]\n[2,0]\n[1,0]\n[false,true]\n[false,true]\n[false,true]\n[\"2\",\"-1\"]\n[\"a\",\"\"]\n[\"true\",\"false\"]\n[2,-1]\n[\"a\",\"\"]\n[true,false]\n[11,12]\n[3,4]\n[2,1]\n[false,true]\n[false,true]\n[false,true]\n[\"2:0\",\"3:1\"]\n[3,5]\n[4,6]\n11\n11\n9\n13\n13\n9\n23\n7\n6\nabc\n2\ncba\n12\nempty\n"
++        "[ 2, -1 ]\n[ 2, 0 ]\n[ 1, 0 ]\n[ false, true ]\n[ false, true ]\n[ false, true ]\n[ '2', '-1' ]\n[ 'a', '' ]\n[ 'true', 'false' ]\n[ 2, -1 ]\n[ 'a', '' ]\n[ true, false ]\n[ 11, 12 ]\n[ 3, 4 ]\n[ 2, 1 ]\n[ false, true ]\n[ false, true ]\n[ false, true ]\n[ '2:0', '3:1' ]\n[ 3, 5 ]\n[ 4, 6 ]\n11\n11\n9\n13\n13\n9\n23\n7\n6\nabc\n2\ncba\n12\nempty\n"
+     );
+     let _ = std::fs::remove_dir_all(dir);
+ }
+diff --git a/crates/thaw-hir/src/lower/expressions/coercions.rs b/crates/thaw-hir/src/lower/expressions/coercions.rs
+index 7080097..598f25d 100644
+--- a/crates/thaw-hir/src/lower/expressions/coercions.rs
++++ b/crates/thaw-hir/src/lower/expressions/coercions.rs
+@@ -937,6 +937,11 @@ impl<'a> FnLowerer<'a> {
+                         index,
+                         members.clone(),
+                     ))?;
++                    // A caught `Error` travels as a framed string (carrier member 3);
++                    // its string form is `Name: message`, a plain string is unchanged.
++                    let part = if index == 3 && HirType::Union(members.clone()) == crate::caught_exception_carrier_type() {
++                        HirExpr::Call(Box::new(HirExpr::Var("__thaw_error_to_string".to_string())), vec![part])
++                    } else { part };
+                     if index + 1 == members.len() {
+                         statements.push(HirStmt::Return(Some(part)));
+                     } else {
+@@ -1151,6 +1156,45 @@ impl<'a> FnLowerer<'a> {
+                     None => Ok(result),
+                 }
+             }
++            // A caught native value (tags 20-29) carries no contents, only its
++            // category: Map/Set/WeakMap/WeakSet/Promise have a fixed
++            // `Object.prototype.toString` tag; Array/Bytes/Tuple would need a
++            // throw-time snapshot and fail explicitly when actually reached.
++            HirType::NativeException => {
++                let tag_name = "__thaw_string_native_tag".to_string();
++                let tag = HirExpr::Var(tag_name.clone());
++                let mut body = HirExpr::ThrowValue(
++                    Box::new(HirExpr::Lit(HirLit::Str(
++                        "caught native value cannot be converted to a string".into(),
++                    ))),
++                    Box::new(HirExpr::Lit(HirLit::Str(String::new()))),
++                );
++                for (tag_value, text) in [
++                    (29, "[object Promise]"), (26, "[object WeakSet]"), (25, "[object Set]"),
++                    (24, "[object WeakMap]"), (23, "[object Map]"), (28, "function () { [native code] }"),
++                ] {
++                    body = HirExpr::Conditional(
++                        Box::new(HirExpr::BinOp(
++                            BinOp::EqEqEq, Box::new(tag.clone()),
++                            Box::new(HirExpr::Lit(HirLit::I64(tag_value))),
++                        )),
++                        Box::new(HirExpr::Lit(HirLit::Str(text.into()))),
++                        Box::new(body),
++                        HirType::Str,
++                    );
++                }
++                Ok(HirExpr::Call(
++                    Box::new(HirExpr::Lambda(
++                        Vec::new(),
++                        vec![HirParam { name: tag_name, ty: HirType::I64 }],
++                        HirType::Str, Box::new(body),
++                    )),
++                    vec![HirExpr::Call(
++                        Box::new(HirExpr::Var("__thaw_native_exception_tag".to_string())),
++                        vec![value],
++                    )],
++                ))
++            }
+             other => Err(format!(
+                 "string concatenation cannot convert native type {other:?}"
+             )),
+diff --git a/crates/thaw-hir/src/lower/expressions/functions.rs b/crates/thaw-hir/src/lower/expressions/functions.rs
+index 97f9093..408e527 100644
+--- a/crates/thaw-hir/src/lower/expressions/functions.rs
++++ b/crates/thaw-hir/src/lower/expressions/functions.rs
+@@ -1206,7 +1206,15 @@ impl<'a> FnLowerer<'a> {
+                     if sparse_mapping_result && expected_return.is_none() {
+                         self.lower_sparse_mapping_returns(&mut stmts)?;
+                     }
+-                    let inferred = self.infer_return_type(&stmts)?;
++                    let mut inferred = self.infer_return_type(&stmts)?;
++                    // A body that always throws has no `return`, so it infers
++                    // `Void`, but it satisfies any declared return type.
++                    if inferred == HirType::Void
++                        && expected_return.is_some_and(|expected| *expected != HirType::Void)
++                        && ast_block_terminates(&block.stmts)
++                    {
++                        inferred = expected_return.cloned().unwrap_or(inferred);
++                    }
+                     (HirExpr::Block(stmts), inferred)
+                 }
+             };
+diff --git a/crates/thaw-hir/src/lower/expressions/lowering.rs b/crates/thaw-hir/src/lower/expressions/lowering.rs
+index b10f38e..32eae71 100644
+--- a/crates/thaw-hir/src/lower/expressions/lowering.rs
++++ b/crates/thaw-hir/src/lower/expressions/lowering.rs
+@@ -1078,7 +1078,11 @@ impl<'a> FnLowerer<'a> {
+                                 ));
+                                 let checked = HirExpr::Call(
+                                     Box::new(HirExpr::Var("__thaw_assert_class_identity".into())),
+-                                    vec![native, HirExpr::Lit(HirLit::Str(class.sym.to_string())),
++                                    vec![native, HirExpr::Lit(HirLit::Str(
++                                            // An interface/alias target has no nominal identity.
++                                            target_fields.first().and_then(|(name, _)| name.strip_prefix("__thaw_class_identity_\u{1e}"))
++                                                .filter(|ancestry| ancestry.split('\u{1f}').any(|name| name == class.sym.as_ref()))
++                                                .map(|_| class.sym.to_string()).unwrap_or_default())),
+                                         HirExpr::Lit(HirLit::Str(
+                                             crate::native_object_layout_token(target_fields))),
+                                     ],
+@@ -1090,7 +1094,7 @@ impl<'a> FnLowerer<'a> {
+                                     Box::new(checked),
+                                     Box::new(HirExpr::ThrowValue(
+                                         Box::new(HirExpr::Lit(HirLit::Str(
+-                                            "caught value is not a native object".into(),
++                                            "caught value is not an object".into(),
+                                         ))),
+                                         Box::new(Self::unreachable_value(&target)?),
+                                     )),
+@@ -1835,6 +1839,32 @@ impl<'a> FnLowerer<'a> {
+                                 result = self.lower_logical_expr(result, check, false)?;
+                             }
+                         }
++                        // A thrown `Error` travels as a framed string; its
++                        // ancestry is decoded from the frame (an unframed
++                        // string is never an instance).
++                        if extends_error_family && !all_arrays {
++                            for (index, element) in elements.iter().enumerate() {
++                                if *element != HirType::Str { continue; }
++                                let check = HirExpr::BinOp(
++                                    BinOp::EqEqEq,
++                                    Box::new(HirExpr::UnionTag(
++                                        Box::new(HirExpr::Var(name.clone())), elements.clone(),
++                                    )),
++                                    Box::new(HirExpr::Lit(HirLit::F64(index as f64))),
++                                );
++                                let framed = HirExpr::Call(
++                                    Box::new(HirExpr::Var("__thaw_error_is_instance".into())),
++                                    vec![
++                                        HirExpr::UnionValue(
++                                            Box::new(HirExpr::Var(name.clone())), index, elements.clone(),
++                                        ),
++                                        HirExpr::Lit(HirLit::Str(class.sym.to_string())),
++                                    ],
++                                );
++                                let check = self.lower_logical_expr(check, framed, true)?;
++                                result = self.lower_logical_expr(result, check, false)?;
++                            }
++                        }
+                         return self.wrap_call_argument_bindings(
+                             result,
+                             &[(name, value_type, value)],
+diff --git a/crates/thaw-hir/src/lower/inference/types.rs b/crates/thaw-hir/src/lower/inference/types.rs
+index 72a68d9..e53bc60 100644
+--- a/crates/thaw-hir/src/lower/inference/types.rs
++++ b/crates/thaw-hir/src/lower/inference/types.rs
+@@ -558,7 +558,10 @@ impl<'a> FnLowerer<'a> {
+                     }
+ 
+                     "__thaw_assert_class_identity" => {
+-                        let [object, HirExpr::Lit(HirLit::Str(_))] = args.as_slice() else {
++                        let (object, HirExpr::Lit(HirLit::Str(_))) = (match args.as_slice() {
++                            [object, name] | [object, name, HirExpr::Lit(HirLit::Str(_))] => (object, name),
++                            _ => return Err("class identity assertion expects an object and a literal class name".into()),
++                        }) else {
+                             return Err("class identity assertion expects an object and a literal class name".into());
+                         };
+                         let ty = self.infer_expr_type(object)?;
+diff --git a/crates/thaw-hir/src/lower/invocations/static_builtins.rs b/crates/thaw-hir/src/lower/invocations/static_builtins.rs
+index 8b80932..d43d2ac 100644
+--- a/crates/thaw-hir/src/lower/invocations/static_builtins.rs
++++ b/crates/thaw-hir/src/lower/invocations/static_builtins.rs
+@@ -1717,11 +1717,30 @@ impl<'a> FnLowerer<'a> {
+                         // A literal key resolves against a fixed object's
+                         // own fields at lowering time; a `Json` receiver
+                         // defers to the runtime.
++                        // Arguments arrive bound to `__thaw_native_arg_N`
++                        // temporaries, so look a literal up through them.
+                         let key_literal = match key {
+                             HirExpr::Lit(HirLit::Str(value)) => Some(value.clone()),
++                            HirExpr::Var(name) => bindings.iter().find_map(|(bound, _, value)| match value {
++                                HirExpr::Lit(HirLit::Str(text)) if bound == name => Some(text.clone()),
++                                _ => None,
++                            }),
+                             _ => None,
+                         };
+                         let target_type = self.infer_expr_type(target)?;
++                        // A primitive receiver (`1 as any`) must reach the runtime
++                        // object check, which throws the TypeError.
++                        if property.sym == *"deleteProperty"
++                            && matches!(target_type, HirType::F64 | HirType::Bool | HirType::Str)
++                        {
++                            let target = self.coerce_to_declared(&HirType::Json, target.clone())?;
++                            let key = self.coerce_primitive_to_string(key.clone())?;
++                            let result = HirExpr::Call(
++                                Box::new(HirExpr::Var("__thaw_json_object_delete_reflect".into())),
++                                vec![target, key],
++                            );
++                            return self.wrap_call_argument_bindings(result, &bindings);
++                        }
+                         match (property.sym.as_ref(), &target_type, key_literal) {
+                             ("get", HirType::Object(fields), Some(key)) => {
+                                 let result = if fields.iter().any(|(name, _)| name == &key) {
+@@ -1742,6 +1761,14 @@ impl<'a> FnLowerer<'a> {
+                                 );
+                                 return self.wrap_call_argument_bindings(result, &bindings);
+                             }
++                            ("deleteProperty", HirType::Json, None) => {
++                                let key = self.coerce_primitive_to_string(key.clone())?;
++                                let result = HirExpr::Call(
++                                    Box::new(HirExpr::Var("__thaw_json_object_delete_reflect".into())),
++                                    vec![target.clone(), key],
++                                );
++                                return self.wrap_call_argument_bindings(result, &bindings);
++                            }
+                             _ => {
+                                 return Err(format!(
+                                     "`{label}` currently requires a fixed object or JSON \
+diff --git a/crates/thaw-hir/src/lower/invocations/temporal.rs b/crates/thaw-hir/src/lower/invocations/temporal.rs
+index 391da3a..e695878 100644
+--- a/crates/thaw-hir/src/lower/invocations/temporal.rs
++++ b/crates/thaw-hir/src/lower/invocations/temporal.rs
+@@ -413,6 +413,26 @@ impl<'a> FnLowerer<'a> {
+                 HirExpr::Lit(HirLit::F64(0.0)),
+             ));
+         }
++        // A component object that is not a bare literal (wrapped for evaluation
++        // order, or bound to an argument temporary): read each field once.
++        if let HirType::Object(type_fields) = &ty {
++            let name = format!("__thaw_duration_components_{}", self.next_binding);
++            self.next_binding += 1;
++            self.scope.insert(name.clone(), ty.clone());
++            let reads = type_fields
++                .iter()
++                .map(|(field, _)| {
++                    (
++                        field.clone(),
++                        HirExpr::PropAccess(Box::new(HirExpr::Var(name.clone())), ty.clone(), field.to_string()),
++                    )
++                })
++                .collect::<Vec<_>>();
++            let milliseconds = Self::duration_fields_milliseconds(&reads)?;
++            let milliseconds =
++                self.wrap_call_argument_bindings(milliseconds, &[(name, ty.clone(), value)])?;
++            return Ok((milliseconds, HirExpr::Lit(HirLit::F64(0.0))));
++        }
+         Err(format!(
+             "expected a Duration, an ISO 8601 duration string, or an object of components, got {ty:?}"
+         ))
+diff --git a/crates/thaw-jit/src/runtime/arrays/transforms.rs b/crates/thaw-jit/src/runtime/arrays/transforms.rs
+index d25fb73..f6ebe8b 100644
+--- a/crates/thaw-jit/src/runtime/arrays/transforms.rs
++++ b/crates/thaw-jit/src/runtime/arrays/transforms.rs
+@@ -399,7 +399,7 @@ extern "C" fn array_length(value: f64) -> f64 {
+ #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
+ extern "C" fn array_value(value: f64) -> f64 {
+     match unsafe { array_data(value) } {
+-        Some((data, _)) => f64::from_bits(data as usize as u64),
++        Some((data, _)) => array_result(data as *mut u8),
+         None => {
+             CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
+             0.0
+diff --git a/crates/thaw-llvm/src/hir_codegen/console.rs b/crates/thaw-llvm/src/hir_codegen/console.rs
+index 1bf4b6e..6a22fdb 100644
+--- a/crates/thaw-llvm/src/hir_codegen/console.rs
++++ b/crates/thaw-llvm/src/hir_codegen/console.rs
+@@ -656,8 +656,21 @@ impl<'ctx> HirCompiler<'ctx> {
+                 )?;
+             }
+             HirType::Str => {
++                // A catch carrier's string member may be a tagged/framed Error text;
++                // strip the framing like the bare-pointer path does (plain strings pass through).
++                let message = self
++                    .builder
++                    .build_call(
++                        self.module.get_function("thaw_error_message").unwrap(),
++                        &[value.into_pointer_value().into()],
++                        "console_union_error_message",
++                    )
++                    .map_err(|error| error.to_string())?
++                    .try_as_basic_value()
++                    .basic()
++                    .ok_or("thaw_error_message returned no value")?;
+                 self.compile_console_text(
+-                    value.into_pointer_value(),
++                    message.into_pointer_value(),
+                     newline,
+                     "console_union_string",
+                     descriptor,
+diff --git a/crates/thaw-llvm/src/hir_codegen/invocations/calls.rs b/crates/thaw-llvm/src/hir_codegen/invocations/calls.rs
+index fc83378..c196fb1 100644
+--- a/crates/thaw-llvm/src/hir_codegen/invocations/calls.rs
++++ b/crates/thaw-llvm/src/hir_codegen/invocations/calls.rs
+@@ -77,18 +77,29 @@ impl<'ctx> HirCompiler<'ctx> {
+             }
+ 
+             "__thaw_assert_class_identity" => {
+-                let [object, HirExpr::Lit(HirLit::Str(class_name))] = args else {
++                let (object_expr, HirExpr::Lit(HirLit::Str(class_name)), layout_checked) = (match args {
++                    [object, name] => (object, name, false),
++                    [object, name, HirExpr::Lit(HirLit::Str(_))] => (object, name, true),
++                    _ => return Err("class identity assertion expects an object and a literal class name".into()),
++                }) else {
+                     return Err("class identity assertion expects an object and a literal class name".into());
+                 };
+-                let object = self.compile_expr(object)?.into_pointer_value();
+-                let expected = self.builder.build_global_string_ptr(class_name, "class_assert_name")
+-                    .map_err(|error| error.to_string())?;
+-                let trusted = self.builder.build_call(
+-                    self.module.get_function("thaw_object_has_class_identity").unwrap(),
+-                    &[object.into(), expected.as_pointer_value().into()],
+-                    "class_assert_identity",
+-                ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+-                    .ok_or("class identity assertion returned no value")?.into_int_value();
++                let object = self.compile_expr(object_expr)?.into_pointer_value();
++                // The three-operand form is a typed `as` of a caught value: an
++                // empty class name (interface target) skips the nominal check,
++                // and the target's field layout must fit the registered one.
++                let trusted = if class_name.is_empty() && layout_checked {
++                    self.context.bool_type().const_int(1, false)
++                } else {
++                    let expected = self.builder.build_global_string_ptr(class_name, "class_assert_name")
++                        .map_err(|error| error.to_string())?;
++                    self.builder.build_call(
++                        self.module.get_function("thaw_object_has_class_identity").unwrap(),
++                        &[object.into(), expected.as_pointer_value().into()],
++                        "class_assert_identity",
++                    ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
++                        .ok_or("class identity assertion returned no value")?.into_int_value()
++                };
+                 let function = self.current_function();
+                 let accepted = self.context.append_basic_block(function, "class_identity_accepted");
+                 let rejected = self.context.append_basic_block(function, "class_identity_rejected");
+@@ -97,6 +108,18 @@ impl<'ctx> HirCompiler<'ctx> {
+                 self.builder.position_at_end(rejected);
+                 self.compile_throw_type_error("Incompatible class accessor receiver")?;
+                 self.builder.position_at_end(accepted);
++                if layout_checked {
++                    let fits = self.compile_register_native_object_layout(&[
++                        object_expr.clone(), HirExpr::Lit(HirLit::Bool(false)),
++                    ])?.into_int_value();
++                    let incompatible = self.context.append_basic_block(function, "class_layout_incompatible");
++                    let compatible = self.context.append_basic_block(function, "class_layout_compatible");
++                    self.builder.build_conditional_branch(fits, compatible, incompatible)
++                        .map_err(|error| error.to_string())?;
++                    self.builder.position_at_end(incompatible);
++                    self.compile_throw_type_error("Incompatible native object field layout")?;
++                    self.builder.position_at_end(compatible);
++                }
+                 return Ok(object.into());
+             }
+             "__thaw_object_has_class_identity" => {
+diff --git a/crates/thaw-llvm/src/hir_codegen/invocations/dynamic_calls.rs b/crates/thaw-llvm/src/hir_codegen/invocations/dynamic_calls.rs
+index dc15261..c879450 100644
+--- a/crates/thaw-llvm/src/hir_codegen/invocations/dynamic_calls.rs
++++ b/crates/thaw-llvm/src/hir_codegen/invocations/dynamic_calls.rs
+@@ -499,7 +499,7 @@ impl<'ctx> HirCompiler<'ctx> {
+         Ok(self.context.i8_type().const_zero().into())
+     }
+ 
+-    fn compile_register_native_object_layout(
++    pub(super) fn compile_register_native_object_layout(
+         &mut self, args: &[HirExpr],
+     ) -> Result<BasicValueEnum<'ctx>, String> {
+         let [owner, HirExpr::Lit(HirLit::Bool(required))] = args else {
+diff --git a/crates/thaw-llvm/src/hir_codegen/json_bridge/encoding.rs b/crates/thaw-llvm/src/hir_codegen/json_bridge/encoding.rs
+index 4bcdb6a..1e281ba 100644
+--- a/crates/thaw-llvm/src/hir_codegen/json_bridge/encoding.rs
++++ b/crates/thaw-llvm/src/hir_codegen/json_bridge/encoding.rs
+@@ -759,10 +759,22 @@ impl<'ctx> HirCompiler<'ctx> {
+         handle: BasicValueEnum<'ctx>,
+     ) -> Result<BasicValueEnum<'ctx>, String> {
+         if !self.compiling_quickjs_dynamic_arguments {
+-            return Err(
+-                "a dynamic (JsValue) value can only be passed as an argument to another QuickJS-backed dynamic call"
+-                    .into(),
+-            );
++            // No QuickJS reviver downstream: embed the live value itself (a Json Host lease).
++            self.uses_quickjs = true;
++            self.uses_quickjs_handles = true;
++            self.tracks_owned_json_roots = true;
++            let json = self
++                .builder
++                .build_call(
++                    self.module.get_function("thaw_json_from_borrowed_handle").unwrap(),
++                    &[handle.into_int_value().into()],
++                    "dynamic_value_json_host",
++                )
++                .map_err(|error| error.to_string())?
++                .try_as_basic_value()
++                .basic()
++                .ok_or("live JSON host conversion returned no value")?;
++            return self.compile_check_json_host_error(json, Some("thaw_json_destroy"));
+         }
+         self.compile_dynamic_value_placeholder_unchecked(handle)
+     }
+diff --git a/crates/thaw-llvm/src/hir_codegen/tests/async/promises.rs b/crates/thaw-llvm/src/hir_codegen/tests/async/promises.rs
+index 325fc18..35446f7 100644
+--- a/crates/thaw-llvm/src/hir_codegen/tests/async/promises.rs
++++ b/crates/thaw-llvm/src/hir_codegen/tests/async/promises.rs
+@@ -1315,7 +1315,7 @@ fn absent_promise_executor_checks_before_allocation() {
+     compiler.compile_program(&program).unwrap();
+     let ir = compiler.print_to_string();
+     let main = ir.lines()
+-        .skip_while(|line| !(line.starts_with("define ") && line.contains("@main(")))
++        .skip_while(|line| !(line.starts_with("define ") && line.contains("@thaw_user_main(")))
+         .take_while(|line| *line != "}")
+         .collect::<Vec<_>>()
+         .join("\n");
+diff --git a/crates/thaw-llvm/src/hir_codegen/tests/core.rs b/crates/thaw-llvm/src/hir_codegen/tests/core.rs
+index 561c49b..847bfac 100644
+--- a/crates/thaw-llvm/src/hir_codegen/tests/core.rs
++++ b/crates/thaw-llvm/src/hir_codegen/tests/core.rs
+@@ -286,7 +286,7 @@ fn top_level_destructuring_supports_nested_defaults_rests_and_runtime_keys() {
+ 
+     assert_eq!(
+         compile_and_run(source, "top_level_destructuring"),
+-        "2 1 2 fallback 3\n4 6 [7] 1 8 {\"kept\":9}\n"
++        "2 1 2 fallback 3\n4 6 [ 7 ] 1 8 { kept: 9 }\n"
+     );
+ }
+ 
+@@ -320,7 +320,7 @@ fn local_dictionary_destructuring_supports_computed_keys_and_rest() {
+ 
+     assert_eq!(
+         compile_and_run(source, "local_dictionary_destructuring"),
+-        "1 1 1 2 4 {\"second\":3}\n{\"selected\":1,\"first\":2,\"second\":3}\n"
++        "1 1 1 2 4 { second: 3 }\n{ selected: 1, first: 2, second: 3 }\n"
+     );
+ }
+ 
+@@ -438,7 +438,7 @@ fn dictionary_destructuring_assignment_supports_computed_keys_defaults_and_rest(
+ 
+     assert_eq!(
+         compile_and_run(source, "dictionary_destructuring_assignment"),
+-        "1 1 1 4 {\"kept\":2}\n{\"selected\":1,\"kept\":2}\n"
++        "1 1 1 4 { kept: 2 }\n{ selected: 1, kept: 2 }\n"
+     );
+ }
+ 
+@@ -3387,7 +3387,7 @@ fn absent_function_pointer_checks_after_plain_call_arguments() {
+     compiler.compile_program(&program).unwrap();
+     let ir = compiler.print_to_string();
+     let main = ir.lines()
+-        .skip_while(|line| !(line.starts_with("define ") && line.contains("@main(")))
++        .skip_while(|line| !(line.starts_with("define ") && line.contains("@thaw_user_main(")))
+         .take_while(|line| *line != "}")
+         .collect::<Vec<_>>()
+         .join("\n");
+diff --git a/crates/thaw-llvm/src/hir_codegen/tests/native_builtins.rs b/crates/thaw-llvm/src/hir_codegen/tests/native_builtins.rs
+index 27fb8b6..6515e5f 100644
+--- a/crates/thaw-llvm/src/hir_codegen/tests/native_builtins.rs
++++ b/crates/thaw-llvm/src/hir_codegen/tests/native_builtins.rs
+@@ -10924,7 +10924,7 @@ fn console_native_object_getter_failure_keeps_exception_and_next_log() {
+             console.log(good);
+         }
+     "#;
+-    assert_eq!(compile_and_run(source, "console_native_getter_ownership"), "true 1\n{\"value\":4}\n");
++    assert_eq!(compile_and_run(source, "console_native_getter_ownership"), "true 1\n{ value: 4 }\n");
+ }
+ 
+ #[test]
+diff --git a/crates/thaw-std/src/json.rs b/crates/thaw-std/src/json.rs
+index 146d503..4a70fc6 100644
+--- a/crates/thaw-std/src/json.rs
++++ b/crates/thaw-std/src/json.rs
+@@ -2582,7 +2582,11 @@ fn decode_graph_value(graph: &Value) -> Option<Value> {
+         } else if let Some(entries) = graph_field(description, b"o").and_then(Value::as_array) {
+             let Value::Object(object) = node else { return None };
+             for entry in entries {
+-                let [key, token] = entry.as_array()?.as_slice() else { return None };
++                // The JS encoder appends the property's attribute flags as a third element.
++                let (key, token) = match entry.as_array()?.as_slice() {
++                    [key, token] | [key, token, _] => (key, token),
++                    _ => return None,
++                };
+                 let bytes = match key { Value::String(text) => text.as_bytes(), Value::Wtf8(bytes) => bytes, _ => return None };
+                 shared_object_ref_mut(object).insert(canonical_key(bytes), graph_token_value(token, &nodes)?);
+             }

@@ -7,6 +7,7 @@ modified  crates/thaw-bridge/src/tests/diagnostics_and_classes.rs
 modified  crates/thaw-bridge/src/tests/generic_types.rs
 modified  crates/thaw-bridge/src/tests/shims_and_bundles.rs
 modified  crates/thaw-cli/src/module_graph.rs
+modified  crates/thaw-cli/src/registry_integration/jit/callables.rs
 modified  crates/thaw-cli/src/registry_integration/jit/control_flow.rs
 modified  crates/thaw-cli/src/registry_integration/shim_support.rs
 modified  crates/thaw-cli/src/tests.rs
@@ -36,6 +37,7 @@ modified  crates/thaw-hir/src/lower/invocations/calls.rs
 modified  crates/thaw-hir/src/lower/invocations/instance_builtins/array_transform_methods.rs
 modified  crates/thaw-hir/src/lower/invocations/instance_builtins/regex_methods.rs
 modified  crates/thaw-hir/src/lower/invocations/static_builtins.rs
+modified  crates/thaw-hir/src/lower/invocations/temporal.rs
 modified  crates/thaw-hir/src/lower/module/helpers.rs
 modified  crates/thaw-hir/src/lower/module/pipeline.rs
 modified  crates/thaw-hir/src/lower/objects.rs
@@ -48,6 +50,7 @@ modified  crates/thaw-hir/src/lower/tests/control_flow.rs
 modified  crates/thaw-hir/src/lower/tests/types.rs
 modified  crates/thaw-hir/src/lower/tests/values.rs
 modified  crates/thaw-hir/src/lower/types.rs
+modified  crates/thaw-jit/src/runtime/arrays/transforms.rs
 modified  crates/thaw-llvm/src/hir_codegen.rs
 modified  crates/thaw-llvm/src/hir_codegen/async_frames/codegen.rs
 modified  crates/thaw-llvm/src/hir_codegen/async_frames/planning/analysis.rs
