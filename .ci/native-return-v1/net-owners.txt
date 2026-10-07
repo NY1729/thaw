@@ -11,6 +11,7 @@ modified  crates/thaw-cli/src/registry_integration/jit/control_flow.rs
 modified  crates/thaw-cli/src/registry_integration/shim_support.rs
 modified  crates/thaw-cli/src/tests.rs
 modified  crates/thaw-cli/src/tests/external_classes.rs
+modified  crates/thaw-cli/src/tests/registry_jit_primitives.rs
 modified  crates/thaw-hir/src/hir/closure_analysis.rs
 modified  crates/thaw-hir/src/hir/ir.rs
 modified  crates/thaw-hir/src/hir/program.rs
@@ -44,8 +45,10 @@ modified  crates/thaw-hir/src/lower/tests/values.rs
 modified  crates/thaw-hir/src/lower/types.rs
 modified  crates/thaw-llvm/src/hir_codegen.rs
 modified  crates/thaw-llvm/src/hir_codegen/async_frames/codegen.rs
+modified  crates/thaw-llvm/src/hir_codegen/async_frames/planning/analysis.rs
 modified  crates/thaw-llvm/src/hir_codegen/async_frames/planning/loops.rs
 modified  crates/thaw-llvm/src/hir_codegen/async_frames/planning/plan.rs
+modified  crates/thaw-llvm/src/hir_codegen/async_frames/planning/try.rs
 modified  crates/thaw-llvm/src/hir_codegen/collections.rs
 modified  crates/thaw-llvm/src/hir_codegen/console.rs
 modified  crates/thaw-llvm/src/hir_codegen/dynamic_host/callbacks.rs
@@ -56,6 +59,7 @@ modified  crates/thaw-llvm/src/hir_codegen/invocations/calls.rs
 modified  crates/thaw-llvm/src/hir_codegen/invocations/dynamic_calls.rs
 modified  crates/thaw-llvm/src/hir_codegen/invocations/json_calls.rs
 modified  crates/thaw-llvm/src/hir_codegen/json_bridge/decoding.rs
+modified  crates/thaw-llvm/src/hir_codegen/json_bridge/encoding.rs
 modified  crates/thaw-llvm/src/hir_codegen/json_values.rs
 modified  crates/thaw-llvm/src/hir_codegen/promises.rs
 modified  crates/thaw-llvm/src/hir_codegen/runtime_declarations.rs
@@ -68,6 +72,10 @@ added  crates/thaw-llvm/src/hir_codegen/tests/async/resolver_provenance.rs
 added  crates/thaw-llvm/src/hir_codegen/tests/async/union_discard.rs
 added  crates/thaw-llvm/src/hir_codegen/tests/async/union_discard_eval_then.rs
 added  crates/thaw-llvm/src/hir_codegen/tests/async/union_discard_jit.rs
+modified  crates/thaw-llvm/src/hir_codegen/tests/collections.rs
+modified  crates/thaw-llvm/src/hir_codegen/tests/core.rs
+modified  crates/thaw-llvm/src/hir_codegen/tests/native_builtins.rs
+modified  crates/thaw-llvm/src/hir_codegen/tests/types.rs
 modified  crates/thaw-llvm/src/hir_codegen/values/closures.rs
 modified  crates/thaw-llvm/src/hir_codegen/values/expressions.rs
 modified  crates/thaw-llvm/src/hir_codegen/values/unions.rs
@@ -102,4 +110,8 @@ modified  crates/thaw-runtime/src/runtime/native_values/template_strings.rs
 modified  crates/thaw-runtime/src/runtime/promises.rs
 modified  crates/thaw-runtime/src/tests.rs
 modified  crates/thaw-std/src/http.rs
+added  crates/thaw-std/src/inspect.rs
+added  crates/thaw-std/src/inspect_corpus.json
+added  crates/thaw-std/src/inspect_width.rs
 modified  crates/thaw-std/src/json.rs
+modified  crates/thaw-std/src/lib.rs

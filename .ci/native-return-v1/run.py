@@ -27,7 +27,8 @@ TIMEOUTS = {
     "check": 15 * 60,
     "no_run": 10 * 60,
     "list": 60,
-    "test": 2 * 60,
+    # A thaw-llvm filter such as `native_eval_then_return_` takes ~40 s on a 16-core host; a 2-core runner needs far more.
+    "test": 10 * 60,
 }
 TEST_FILTERS = tuple(item["filter"] for item in verify.EXPECTED["test_filters"])
 FILTER_PACKAGES = {item["filter"]: item["package"] for item in verify.EXPECTED["test_filters"]}

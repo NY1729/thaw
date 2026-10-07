@@ -11,8 +11,10 @@
     "forced-root-wire-v1.sha256": "83a99e4934c4108992f874ca75ff2ea366283fbc3c543afaf9fee6489cb95941",
     "integrated-repair-v1-base.sha256": "eb5bce4fc8202ef190456bd3336ce3f18f832a48024322ebcf80be6d82c39edb",
     "integrated-repair-v1.sha256": "9ea9050c4d053a4c620ae259025404042f9c30e0c63127fd87d892bd15239902",
+    "integrated-repair-v2-base.sha256": "6130408ab8e64219ec095bdeb9a4cf0df3cdd2cc5e3916057af2ec94bee2f2e3",
+    "integrated-repair-v2.sha256": "7ef304f8d7469d52d17080e7e380898cb79f5f8be349e1a96b4f4eea5dcfb78f",
     "native-base.sha256": "da86c2c16619de2e236cdd50b9d2572465fbdd4dc3b75b680cf91c6b0f6bdb72",
-    "net-owners.txt": "2a464d409e7673622ffce78a8864f69a5a19133bb13bdc37287d6b1189208e84",
+    "net-owners.txt": "8b4dbac6c20fa735d491b128510ec2cc9d7ee70578746555550a54a70809afad",
     "next-hir-v1-base.sha256": "0be3783d6241706ba2dd492704162aa9e0076dcc4a1de96e309eca9b512ba81c",
     "next-hir-v1.sha256": "f8915460efcaafc82a4392d9ca6b656dc150045d5cad4458b66755ef5705635b",
     "original-native.sha256": "4e219dde2129cf5876497edd6f9032cebdbee89eded9cce20e50ecda041053ce",
@@ -485,17 +487,71 @@
     "crates/thaw-registry/src/tests/stream_web.rs",
     "crates/thaw-std/src/json.rs"
   ],
+  "integrated_repair_v2_base": {
+    "added_paths": [
+      "crates/thaw-std/src/inspect.rs",
+      "crates/thaw-std/src/inspect_corpus.json",
+      "crates/thaw-std/src/inspect_width.rs"
+    ],
+    "count": 220,
+    "extra_owners": [
+      {
+        "final_sha256": "db3c62537e3460b46963512217ac9c2aeb86d5600bbdcabced4d21966da57941",
+        "git_blob_sha1": "064825f07bada1377e742e37a41c2d0bca109ee0",
+        "path": "crates/thaw-cli/src/tests/registry_jit_primitives.rs",
+        "sha256": "35aa62e61b5a708859438b43579355a7cc00922c9be4fc511d981fa6bedcc8a1"
+      },
+      {
+        "final_sha256": "39914a8fc68de17afa706dcb47ae8dfac92e354fddcaf76e3d199d16e6abfa22",
+        "git_blob_sha1": "9bbdb2f0706c5ea564e96c21a7c73be7859ac33c",
+        "path": "crates/thaw-std/src/lib.rs",
+        "sha256": "0b76a2239a2013d9f80820826df3054036f410caa4a7073109244fceaef0e040"
+      }
+    ],
+    "file": "integrated-repair-v2-base.sha256",
+    "paired_after": "integrated-repair-v1",
+    "path_order": "lexical",
+    "sha256": "6130408ab8e64219ec095bdeb9a4cf0df3cdd2cc5e3916057af2ec94bee2f2e3"
+  },
+  "integrated_repair_v2_source_paths": [
+    "crates/thaw-cli/src/tests/registry_jit_primitives.rs",
+    "crates/thaw-hir/src/hir/ir.rs",
+    "crates/thaw-hir/src/lower/expressions/coercions.rs",
+    "crates/thaw-hir/src/lower/objects.rs",
+    "crates/thaw-hir/src/lower/tests/control_flow.rs",
+    "crates/thaw-hir/src/lower/tests/values.rs",
+    "crates/thaw-llvm/src/hir_codegen.rs",
+    "crates/thaw-llvm/src/hir_codegen/async_frames/codegen.rs",
+    "crates/thaw-llvm/src/hir_codegen/async_frames/planning/analysis.rs",
+    "crates/thaw-llvm/src/hir_codegen/async_frames/planning/plan.rs",
+    "crates/thaw-llvm/src/hir_codegen/async_frames/planning/try.rs",
+    "crates/thaw-llvm/src/hir_codegen/console.rs",
+    "crates/thaw-llvm/src/hir_codegen/invocations/calls.rs",
+    "crates/thaw-llvm/src/hir_codegen/invocations/dynamic_calls.rs",
+    "crates/thaw-llvm/src/hir_codegen/json_bridge/encoding.rs",
+    "crates/thaw-llvm/src/hir_codegen/runtime_declarations.rs",
+    "crates/thaw-llvm/src/hir_codegen/statements.rs",
+    "crates/thaw-llvm/src/hir_codegen/tests/async/eval_then_returns.rs",
+    "crates/thaw-llvm/src/hir_codegen/tests/async/union_discard_eval_then.rs",
+    "crates/thaw-llvm/src/hir_codegen/tests/collections.rs",
+    "crates/thaw-llvm/src/hir_codegen/tests/core.rs",
+    "crates/thaw-llvm/src/hir_codegen/tests/native_builtins.rs",
+    "crates/thaw-llvm/src/hir_codegen/tests/types.rs",
+    "crates/thaw-llvm/src/hir_codegen/values/expressions.rs",
+    "crates/thaw-std/src/json.rs",
+    "crates/thaw-std/src/lib.rs"
+  ],
   "native_base": {
     "count": 24,
     "file": "native-base.sha256",
     "sha256": "da86c2c16619de2e236cdd50b9d2572465fbdd4dc3b75b680cf91c6b0f6bdb72"
   },
   "net_owners": {
-    "count": 105,
+    "count": 117,
     "file": "net-owners.txt",
-    "modified": 100,
-    "new": 5,
-    "sha256": "2a464d409e7673622ffce78a8864f69a5a19133bb13bdc37287d6b1189208e84"
+    "modified": 109,
+    "new": 8,
+    "sha256": "8b4dbac6c20fa735d491b128510ec2cc9d7ee70578746555550a54a70809afad"
   },
   "next_hir_base": {
     "count": 181,
@@ -517,7 +573,8 @@
     "std-compile-v1",
     "quickjs-runtime-compile-v1",
     "quickjs-api-followup-v1",
-    "integrated-repair-v1"
+    "integrated-repair-v1",
+    "integrated-repair-v2"
   ],
   "payload_patches": {
     "compile-repairs-v1.patch": "2994f62e98a4fb9cbd0b792b20da09bf505874d749447bf8f0e43776d25e0f05",
@@ -526,6 +583,7 @@
     "discard-v2.patch": "0ffe9fcec530feb12a2ca084399643861c240cc81906c9aab4677cc529aceb39",
     "forced-root-wire-v1.patch": "a7f04af1afa5b9d41d7a8dca984ccefba020cdd36f19175ef14a8f809a6e8683",
     "integrated-repair-v1.patch": "81cafd231902115b5c690717df23e0e8f62e04a3b2ca5558827223fe9b566bb8",
+    "integrated-repair-v2.patch": "9291b525f2443fdbedbac6a0d8b44147672e623315f63ef6c7e3ba5d577c72f4",
     "next-hir-v1.patch": "c0d4addaf22a7c7c26a133153b8298cc39013794f0263228468dddb8e0f3936b",
     "quickjs-api-followup-v1.patch": "3e4daa17ed3234d378d02ce34b19178a0bb3a6fae744d2a134b84c286d9fb1d0",
     "quickjs-runtime-compile-v1.patch": "ab6405f01b6d8377b7d9282edf90a14003ad762b5dfc0cc5a8d7252db98f9a50",
@@ -803,6 +861,58 @@
       "name": "integrated-repair-v1",
       "path_order": "lexical",
       "sha256": "9ea9050c4d053a4c620ae259025404042f9c30e0c63127fd87d892bd15239902"
+    },
+    {
+      "count": 223,
+      "extra_paths": [
+        "crates/thaw-std/src/json.rs",
+        "crates/thaw-quickjs/src/quickjs/api.rs",
+        "crates/thaw-quickjs/src/quickjs/platform_globals/runtime.js",
+        "crates/thaw-std/src/http.rs",
+        "crates/thaw-quickjs/src/quickjs/wasm.rs",
+        "crates/thaw-quickjs/src/tests.rs",
+        "crates/thaw-bridge/src/bridge/classification.rs",
+        "crates/thaw-bridge/src/bridge/dts/exports.rs",
+        "crates/thaw-bridge/src/bridge/dts/interfaces.rs",
+        "crates/thaw-bridge/src/bridge/generation.rs",
+        "crates/thaw-bridge/src/tests/diagnostics_and_classes.rs",
+        "crates/thaw-bridge/src/tests/generic_types.rs",
+        "crates/thaw-bridge/src/tests/shims_and_bundles.rs",
+        "crates/thaw-cli/src/module_graph.rs",
+        "crates/thaw-cli/src/registry_integration/jit/control_flow.rs",
+        "crates/thaw-cli/src/registry_integration/shim_support.rs",
+        "crates/thaw-cli/src/tests/external_classes.rs",
+        "crates/thaw-cli/src/tests.rs",
+        "crates/thaw-napi/src/napi/classes.rs",
+        "crates/thaw-napi/src/napi/module_host.rs",
+        "crates/thaw-napi/src/tests/async_runtime.rs",
+        "crates/thaw-napi/src/tests/handles.rs",
+        "crates/thaw-napi/src/tests/objects_classes.rs",
+        "crates/thaw-napi/src/tests.rs",
+        "crates/thaw-quickjs/src/lib.rs",
+        "crates/thaw-quickjs/src/quickjs/filesystem.rs",
+        "crates/thaw-quickjs/src/quickjs/platform_globals/webassembly.js",
+        "crates/thaw-registry/src/registry/builtins/filesystem.rs",
+        "crates/thaw-registry/src/registry/builtins/http/http1.rs",
+        "crates/thaw-registry/src/registry/bundle/render.rs",
+        "crates/thaw-registry/src/registry/bundle.rs",
+        "crates/thaw-registry/src/registry/install/declarations.rs",
+        "crates/thaw-registry/src/tests/filesystem.rs",
+        "crates/thaw-registry/src/tests/network.rs",
+        "crates/thaw-registry/src/tests/node_core.rs",
+        "crates/thaw-registry/src/tests/platform.rs",
+        "crates/thaw-registry/src/tests/stream_web.rs",
+        "crates/thaw-registry/src/tests.rs",
+        "crates/thaw-cli/src/tests/registry_jit_primitives.rs",
+        "crates/thaw-std/src/lib.rs",
+        "crates/thaw-std/src/inspect.rs",
+        "crates/thaw-std/src/inspect_corpus.json",
+        "crates/thaw-std/src/inspect_width.rs"
+      ],
+      "file": "integrated-repair-v2.sha256",
+      "name": "integrated-repair-v2",
+      "path_order": "lexical",
+      "sha256": "7ef304f8d7469d52d17080e7e380898cb79f5f8be349e1a96b4f4eea5dcfb78f"
     }
   ],
   "std_compile_base": {
