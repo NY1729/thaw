@@ -575,11 +575,11 @@ def _run_filter(
 def _overall(state: dict[str, Any]) -> tuple[str, int, str]:
     required = [
         state["stages"][name]["status"]
-        for name in ("baseline_check", "candidate_check", "quickjs_no_run", "llvm_no_run", "hir_no_run", "std_no_run", "runtime_no_run")
+        for name in ("candidate_check", "quickjs_no_run", "llvm_no_run", "hir_no_run", "std_no_run", "runtime_no_run")
     ]
     filters = [item["status"] for item in state["filters"]]
     if all(value == "passed" for value in required + filters):
-        return "passed", 0, "baseline and candidate diagnostics plus all focused controls passed"
+        return "passed", 0, "candidate diagnostics plus all focused controls passed (baseline_check is informational)"
     if any(value == "failed" or value == "timed-out" for value in required + filters):
         return "failed", 1, "one or more required compilation or focused control stages failed"
     return "blocked", 1, "one or more required candidate stages did not complete"

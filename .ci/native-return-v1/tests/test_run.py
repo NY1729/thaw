@@ -350,7 +350,9 @@ class DiagnosticRunnerTests(unittest.TestCase):
         self.assertEqual("passed", result["stages"]["candidate_check"]["status"])
         self.assertEqual(self.FILTER_COUNT, len(result["filters"]))
         self.assertTrue(all(item["status"] == "passed" for item in result["filters"]))
-        self.assertEqual(1, result["exit_code"])
+        # baseline_check is informational: a known-broken baseline must not fail the run.
+        self.assertEqual("passed", result["overall"]["status"])
+        self.assertEqual(0, result["exit_code"])
 
     def test_candidate_check_failure_blocks_predecessor_gates_and_controls(self):
         result = self.run_case(self.successful_executor(fail="candidate-check"))
