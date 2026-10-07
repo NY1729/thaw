@@ -1,0 +1,599 @@
+diff --git a/crates/thaw-hir/src/hir/ir.rs b/crates/thaw-hir/src/hir/ir.rs
+index d952ca5..5d11706 100644
+--- a/crates/thaw-hir/src/hir/ir.rs
++++ b/crates/thaw-hir/src/hir/ir.rs
+@@ -319,6 +319,80 @@ pub fn caught_exception_carrier_prelude(name: Symbol) -> HirStmt {
+     ))
+ }
+ 
++/// Json view of a caught native Object (carrier member 6): the registered
++/// describer, else the live projector. Fails when neither exists.
++pub fn caught_native_object_json(active: HirExpr) -> HirExpr {
++    let call = |name: &str, args: Vec<HirExpr>| HirExpr::Call(Box::new(HirExpr::Var(name.into())), args);
++    let projector_type = HirType::Function(Vec::new(), Box::new(HirType::JsValue));
++    let optional_projector = HirType::Optional(Box::new(projector_type.clone()));
++    let projector_name = "__thaw_caught_adapter_projector".to_string();
++    let projector = HirExpr::Var(projector_name.clone());
++    let body = HirExpr::Conditional(
++        Box::new(HirExpr::OptionalIsNone(
++            Box::new(projector.clone()), projector_type.clone(),
++        )),
++        Box::new(HirExpr::ThrowValue(
++            Box::new(HirExpr::Lit(HirLit::Str(
++                "caught native object has no live projection".into(),
++            ))),
++            Box::new(HirExpr::JsonObjectLit(Vec::new(), HirType::Json)),
++        )),
++        Box::new(call("__thaw_json_host_from_dynamic", vec![
++            HirExpr::Call(
++                Box::new(HirExpr::OptionalValue(
++                    Box::new(projector), projector_type,
++                )),
++                Vec::new(),
++            ),
++        ])),
++        HirType::Json,
++    );
++    // A thrown Error record registers a Json describer; prefer it.
++    let describer_type = HirType::Function(Vec::new(), Box::new(HirType::Json));
++    let describer_name = "__thaw_caught_adapter_describer".to_string();
++    let describer = HirExpr::Var(describer_name.clone());
++    let described = HirExpr::Conditional(
++        Box::new(HirExpr::OptionalIsNone(Box::new(describer.clone()), describer_type.clone())),
++        Box::new(body),
++        Box::new(HirExpr::Call(
++            Box::new(HirExpr::OptionalValue(Box::new(describer), describer_type.clone())),
++            Vec::new(),
++        )),
++        HirType::Json,
++    );
++    HirExpr::Call(Box::new(HirExpr::Lambda(
++        Vec::new(),
++        vec![
++            HirParam { name: describer_name, ty: HirType::Optional(Box::new(describer_type)) },
++            HirParam { name: projector_name, ty: optional_projector },
++        ],
++        HirType::Json, Box::new(described),
++    )), vec![
++        call("__thaw_lookup_native_exception_describer", vec![active.clone()]),
++        call("__thaw_lookup_native_projector", vec![
++            active, HirExpr::Lit(HirLit::Str(String::new())),
++        ]),
++    ])
++}
++
++/// Printing view of a caught native Object: the Json its throw registered
++/// (`__thaw_register_native_exception_describer`), else an empty object. It
++/// never touches the live-projection host, so a program that only prints a
++/// caught value does not become a QuickJS host program.
++pub fn caught_native_object_console_json(active: HirExpr) -> HirExpr {
++    let call = |name: &str, args: Vec<HirExpr>| HirExpr::Call(Box::new(HirExpr::Var(name.into())), args);
++    let describer_type = HirType::Function(Vec::new(), Box::new(HirType::Json));
++    let describer = || call("__thaw_lookup_native_exception_describer", vec![active.clone()]);
++    HirExpr::Conditional(
++        Box::new(HirExpr::OptionalIsNone(Box::new(describer()), describer_type.clone())),
++        Box::new(HirExpr::JsonObjectLit(Vec::new(), HirType::Json)),
++        Box::new(HirExpr::Call(
++            Box::new(HirExpr::OptionalValue(Box::new(describer()), describer_type)), Vec::new(),
++        )),
++        HirType::Json,
++    )
++}
++
+ /// One source of truth for converting an active caught value to live Json.
+ /// Compiler-generated consumers (including Promise.allSettled) can compile
+ /// this capture-free HIR closure and feed it the same carrier as lexical
+@@ -342,58 +416,7 @@ pub fn caught_exception_json_adapter() -> HirExpr {
+             3 => call("__thaw_json_receiver_string", vec![active]),
+             4 => call("__thaw_json_undefined", Vec::new()),
+             5 => call("__thaw_json_null", Vec::new()),
+-            6 => {
+-                let projector_type = HirType::Function(Vec::new(), Box::new(HirType::JsValue));
+-                let optional_projector = HirType::Optional(Box::new(projector_type.clone()));
+-                let projector_name = "__thaw_caught_adapter_projector".to_string();
+-                let projector = HirExpr::Var(projector_name.clone());
+-                let body = HirExpr::Conditional(
+-                    Box::new(HirExpr::OptionalIsNone(
+-                        Box::new(projector.clone()), projector_type.clone(),
+-                    )),
+-                    Box::new(HirExpr::ThrowValue(
+-                        Box::new(HirExpr::Lit(HirLit::Str(
+-                            "caught native object has no live projection".into(),
+-                        ))),
+-                        Box::new(HirExpr::JsonObjectLit(Vec::new(), HirType::Json)),
+-                    )),
+-                    Box::new(call("__thaw_json_host_from_dynamic", vec![
+-                        HirExpr::Call(
+-                            Box::new(HirExpr::OptionalValue(
+-                                Box::new(projector), projector_type,
+-                            )),
+-                            Vec::new(),
+-                        ),
+-                    ])),
+-                    HirType::Json,
+-                );
+-                // A thrown Error record registers a Json describer; prefer it.
+-                let describer_type = HirType::Function(Vec::new(), Box::new(HirType::Json));
+-                let describer_name = "__thaw_caught_adapter_describer".to_string();
+-                let describer = HirExpr::Var(describer_name.clone());
+-                let described = HirExpr::Conditional(
+-                    Box::new(HirExpr::OptionalIsNone(Box::new(describer.clone()), describer_type.clone())),
+-                    Box::new(body),
+-                    Box::new(HirExpr::Call(
+-                        Box::new(HirExpr::OptionalValue(Box::new(describer), describer_type.clone())),
+-                        Vec::new(),
+-                    )),
+-                    HirType::Json,
+-                );
+-                HirExpr::Call(Box::new(HirExpr::Lambda(
+-                    Vec::new(),
+-                    vec![
+-                        HirParam { name: describer_name, ty: HirType::Optional(Box::new(describer_type)) },
+-                        HirParam { name: projector_name, ty: optional_projector },
+-                    ],
+-                    HirType::Json, Box::new(described),
+-                )), vec![
+-                    call("__thaw_lookup_native_exception_describer", vec![active.clone()]),
+-                    call("__thaw_lookup_native_projector", vec![
+-                        active, HirExpr::Lit(HirLit::Str(String::new())),
+-                    ]),
+-                ])
+-            }
++            6 => caught_native_object_json(active),
+             7 => active,
+             8 => call("__thaw_json_host_from_borrowed_dynamic", vec![active]),
+             // A native value (tags 20-29) has no contents a Json projection could read, so
+diff --git a/crates/thaw-hir/src/lower/expressions/functions.rs b/crates/thaw-hir/src/lower/expressions/functions.rs
+index 408e527..daff43f 100644
+--- a/crates/thaw-hir/src/lower/expressions/functions.rs
++++ b/crates/thaw-hir/src/lower/expressions/functions.rs
+@@ -1187,6 +1187,16 @@ impl<'a> FnLowerer<'a> {
+                         expression
+                     };
+                     let inferred = self.infer_expr_type(&expression)?;
++                    // A tuple literal infers as an array; `expect_type` knows it satisfies the tuple.
++                    let inferred = match expected_return {
++                        Some(expected)
++                            if inferred != *expected
++                                && self.expect_type(expected, &expression, "arrow return").is_ok() =>
++                        {
++                            expected.clone()
++                        }
++                        _ => inferred,
++                    };
+                     if expected_return == Some(&HirType::Void) {
+                         prefix.push(HirStmt::Expr(expression));
+                         (HirExpr::Block(prefix), HirType::Void)
+diff --git a/crates/thaw-hir/src/lower/generators.rs b/crates/thaw-hir/src/lower/generators.rs
+index 7d62bc6..8ae728d 100644
+--- a/crates/thaw-hir/src/lower/generators.rs
++++ b/crates/thaw-hir/src/lower/generators.rs
+@@ -482,19 +482,25 @@ fn lower_generator_state_machine(
+         }
+         if let Some(handler) = block.handler {
+             let caught = format!("__thaw_generator_caught_{id}");
+-            selected = vec![HirStmt::Try(
+-                selected,
+-                caught.clone(),
+-                vec![
+-                    HirStmt::Expr(HirExpr::Assign(
+-                        handler.binding,
+-                        Box::new(HirExpr::Var(caught.clone())),
+-                    )),
+-                    generator_set_state(state, handler.entry),
+-                    HirStmt::Continue,
+-                ],
+-                Some(caught.clone()),
+-            )];
++            // Catch into a real carrier (like a lexical catch) so the user's
++            // binding, itself a carrier, receives the active value and not a
++            // raw string slot.
++            selected = vec![
++                crate::caught_exception_carrier_prelude(caught.clone()),
++                HirStmt::Try(
++                    selected,
++                    caught.clone(),
++                    vec![
++                        HirStmt::Expr(HirExpr::Assign(
++                            handler.binding,
++                            Box::new(HirExpr::Var(caught.clone())),
++                        )),
++                        generator_set_state(state, handler.entry),
++                        HirStmt::Continue,
++                    ],
++                    None,
++                ),
++            ];
+         }
+         dispatch.push(HirStmt::If(
+             HirExpr::BinOp(
+diff --git a/crates/thaw-hir/src/lower/inference/coercions.rs b/crates/thaw-hir/src/lower/inference/coercions.rs
+index d74f385..0ca4c31 100644
+--- a/crates/thaw-hir/src/lower/inference/coercions.rs
++++ b/crates/thaw-hir/src/lower/inference/coercions.rs
+@@ -60,6 +60,32 @@ impl<'a> FnLowerer<'a> {
+         }
+     }
+ 
++    /// Nested wrapper lambdas capture the outer field temporaries by type; keep them in step.
++    fn retype_wrapper_captures(body: &mut HirExpr, name: &str, ty: &HirType) {
++        if let HirExpr::Call(callee, _) = body {
++            if let HirExpr::Lambda(captures, _, _, inner) = callee.as_mut() {
++                for capture in captures.iter_mut().filter(|capture| capture.name == name) {
++                    capture.ty = ty.clone();
++                }
++                Self::retype_wrapper_captures(inner, name, ty);
++            }
++        }
++    }
++
++    /// The field of the innermost wrapped literal whose value is the temporary `param`.
++    fn wrapped_field_for_param(body: &HirExpr, param: &str) -> Option<Symbol> {
++        match body {
++            HirExpr::ObjectLit(fields) => fields.iter().find_map(|(name, value)| {
++                matches!(value, HirExpr::Var(var) if var == param).then(|| name.clone())
++            }),
++            HirExpr::Call(callee, _) => match callee.as_ref() {
++                HirExpr::Lambda(_, _, _, inner) => Self::wrapped_field_for_param(inner, param),
++                _ => None,
++            },
++            _ => None,
++        }
++    }
++
+     /// Coerce the innermost literal's fields to `declared`, retyping each wrapper.
+     fn coerce_wrapped_object_literal(
+         &mut self,
+@@ -68,7 +94,24 @@ impl<'a> FnLowerer<'a> {
+     ) -> Result<HirExpr, String> {
+         match value {
+             HirExpr::Call(callee, args) if matches!(callee.as_ref(), HirExpr::Lambda(..)) => {
+-                let HirExpr::Lambda(captures, params, _, body) = *callee else { unreachable!() };
++                let HirExpr::Lambda(captures, mut params, _, mut body) = *callee else { unreachable!() };
++                // Each field temporary takes its declared field type, so a literal argument
++                // (`["a", 1]` for a `(string | number)[]` field) is coerced at its source.
++                let mut args = args;
++                if let HirType::Object(declared_fields) = declared {
++                    for (param, arg) in params.iter_mut().zip(args.iter_mut()) {
++                        let Some(name) = Self::wrapped_field_for_param(&body, &param.name) else { continue };
++                        let Some((_, field_type)) = declared_fields.iter().find(|(field, _)| *field == name) else { continue };
++                        if param.ty != *field_type {
++                            if let Ok(coerced) = self.coerce_to_declared(field_type, arg.clone()) {
++                                *arg = coerced;
++                                param.ty = field_type.clone();
++                                self.scope.insert(param.name.clone(), field_type.clone());
++                                Self::retype_wrapper_captures(&mut body, &param.name, field_type);
++                            }
++                        }
++                    }
++                }
+                 let body = self.coerce_wrapped_object_literal(declared, *body)?;
+                 Ok(HirExpr::Call(
+                     Box::new(HirExpr::Lambda(captures, params, declared.clone(), Box::new(body))),
+@@ -96,7 +139,20 @@ impl<'a> FnLowerer<'a> {
+                 Ok(HirExpr::JsonObjectLit(fields, element.clone()))
+             }
+             HirExpr::Call(callee, args) if matches!(callee.as_ref(), HirExpr::Lambda(..)) => {
+-                let HirExpr::Lambda(captures, params, _, body) = *callee else { unreachable!() };
++                let HirExpr::Lambda(captures, mut params, _, mut body) = *callee else { unreachable!() };
++                // Every field temporary holds a dictionary value: coerce its argument at the source.
++                let mut args = args;
++                for (param, arg) in params.iter_mut().zip(args.iter_mut()) {
++                    if Self::wrapped_field_for_param(&body, &param.name).is_none() || param.ty == *element {
++                        continue;
++                    }
++                    if let Ok(coerced) = self.coerce_to_declared(element, arg.clone()) {
++                        *arg = coerced;
++                        param.ty = element.clone();
++                        self.scope.insert(param.name.clone(), element.clone());
++                        Self::retype_wrapper_captures(&mut body, &param.name, element);
++                    }
++                }
+                 let body = self.coerce_object_literal_to_dictionary(element, *body)?;
+                 Ok(HirExpr::Call(
+                     Box::new(HirExpr::Lambda(
+@@ -1096,7 +1152,7 @@ impl<'a> FnLowerer<'a> {
+             if let Some(retagged) = self.retag_nullish_into_union(&actual, elements, &value)? {
+                 return Ok(retagged);
+             }
+-            if matches!(value, HirExpr::ObjectLit(_)) {
++            if matches!(value, HirExpr::ObjectLit(_)) || Self::is_wrapped_object_literal(&value) {
+                 for (index, member) in elements.iter().enumerate() {
+                     if !matches!(member, HirType::Object(_)) {
+                         continue;
+diff --git a/crates/thaw-hir/src/lower/inference/types.rs b/crates/thaw-hir/src/lower/inference/types.rs
+index e53bc60..3cc6d40 100644
+--- a/crates/thaw-hir/src/lower/inference/types.rs
++++ b/crates/thaw-hir/src/lower/inference/types.rs
+@@ -200,6 +200,7 @@ impl<'a> FnLowerer<'a> {
+             || actual == *expected
+             || bytes_array_compatible(expected, &actual)
+             || callable_compatible
++            || (*expected == HirType::Str && matches!(actual, HirType::StrLiteral(_)))
+             || match (expected, value) {
+                 (HirType::Tuple(types), HirExpr::ArrayLit(values)) => {
+                     types.len() == values.len()
+@@ -208,6 +209,12 @@ impl<'a> FnLowerer<'a> {
+                             .zip(values)
+                             .all(|(ty, value)| self.expect_type(ty, value, context).is_ok())
+                 }
++                // `[[k, v], ...]` against `Array<Tuple>`: each literal element is the tuple.
++                (HirType::Array(element), HirExpr::ArrayLit(values)) if matches!(element.as_ref(), HirType::Tuple(_)) => {
++                    values
++                        .iter()
++                        .all(|value| self.expect_type(element, value, context).is_ok())
++                }
+                 (HirType::Object(types), HirExpr::ObjectLit(values)) => {
+                     types.len() == values.len()
+                         && types.iter().all(|(name, ty)| {
+diff --git a/crates/thaw-hir/src/lower/invocations/arguments.rs b/crates/thaw-hir/src/lower/invocations/arguments.rs
+index c484eaf..11b17b8 100644
+--- a/crates/thaw-hir/src/lower/invocations/arguments.rs
++++ b/crates/thaw-hir/src/lower/invocations/arguments.rs
+@@ -62,6 +62,12 @@ impl<'a> FnLowerer<'a> {
+                 value
+             };
+             if argument.spread.is_none() {
++                // A literal has no side effects or ordering, so wrappers that need a
++                // static literal (Temporal calendars/units, `.flat(2)`) can still see it.
++                if !snapshot_expanded_values && matches!(value, HirExpr::Lit(_)) {
++                    values.push(value);
++                    continue;
++                }
+                 let ty = self.infer_expr_type(&value)?;
+                 let name = format!("__thaw_native_arg_{}", self.next_binding);
+                 self.next_binding += 1;
+diff --git a/crates/thaw-hir/src/lower/invocations/temporal.rs b/crates/thaw-hir/src/lower/invocations/temporal.rs
+index e695878..f651cb4 100644
+--- a/crates/thaw-hir/src/lower/invocations/temporal.rs
++++ b/crates/thaw-hir/src/lower/invocations/temporal.rs
+@@ -139,10 +139,11 @@ impl<'a> FnLowerer<'a> {
+                         vec![value],
+                     )
+                 } else {
++                    // `0 - x`, not `x * -1`: negating a zero component must stay +0.
+                     HirExpr::BinOp(
+-                        BinOp::Mul,
++                        BinOp::Sub,
++                        Box::new(HirExpr::Lit(HirLit::F64(0.0))),
+                         Box::new(value),
+-                        Box::new(HirExpr::Lit(HirLit::F64(-1.0))),
+                     )
+                 };
+                 (*name, value)
+@@ -486,6 +487,62 @@ impl<'a> FnLowerer<'a> {
+     }
+ 
+     /// `Temporal.Now.<method>()` and `Temporal.<Namespace>.<method>(...)`.
++    /// Temporal wrappers read their option/field objects statically, so an
++    /// object-literal argument must stay visible instead of hiding behind its
++    /// `__thaw_native_arg_N` temporary and the `Call(Lambda(..))` that binds its
++    /// fields to temporaries for evaluation order.
++    fn lower_temporal_arguments(
++        &mut self,
++        arguments: &[swc_ecma_ast::ExprOrSpread],
++        label: &str,
++    ) -> Result<(Vec<HirExpr>, Vec<LoweredBinding>), String> {
++        let (mut values, mut bindings) = self.lower_native_spread_values(arguments, label)?;
++        for value in values.iter_mut() {
++            let HirExpr::Var(name) = value else { continue };
++            let Some(index) = bindings.iter().position(|(bound, _, _)| bound == name) else {
++                continue;
++            };
++            if let Some(fields) = Self::peel_object_literal(&bindings[index].2) {
++                bindings.remove(index);
++                *value = HirExpr::ObjectLit(fields);
++            }
++        }
++        Ok((values, bindings))
++    }
++
++    /// The fields of an object literal, looking through the evaluation-order
++    /// `Call(Lambda(params, body), args)` wrappers. A parameter is substituted
++    /// only where a field is exactly that parameter, so every argument is still
++    /// evaluated once and in field order; anything else is left alone.
++    fn peel_object_literal(value: &HirExpr) -> Option<Vec<(Symbol, HirExpr)>> {
++        match value {
++            HirExpr::ObjectLit(fields) => Some(fields.clone()),
++            HirExpr::Call(callee, args) => {
++                let HirExpr::Lambda(_, params, _, body) = callee.as_ref() else {
++                    return None;
++                };
++                if params.len() != args.len() {
++                    return None;
++                }
++                let mut fields = Self::peel_object_literal(body)?;
++                for (param, arg) in params.iter().zip(args) {
++                    let mut used = 0;
++                    for (_, field) in fields.iter_mut() {
++                        if matches!(field, HirExpr::Var(name) if *name == param.name) {
++                            *field = arg.clone();
++                            used += 1;
++                        }
++                    }
++                    if used != 1 {
++                        return None;
++                    }
++                }
++                Some(fields)
++            }
++            _ => None,
++        }
++    }
++
+     fn lower_temporal_namespace_call(
+         &mut self,
+         member: &MemberExpr,
+@@ -507,7 +564,7 @@ impl<'a> FnLowerer<'a> {
+             return Ok(None);
+         };
+         let label = format!("Temporal.{}.{}", namespace.sym, method.sym);
+-        let (arguments, bindings) = self.lower_native_spread_values(&call.args, &label)?;
++        let (arguments, bindings) = self.lower_temporal_arguments(&call.args, &label)?;
+ 
+         if namespace.sym == *"Now" {
+             if method.sym == *"zonedDateTimeISO" {
+@@ -871,7 +928,7 @@ impl<'a> FnLowerer<'a> {
+         let time_zone = (kind == "zonedDateTime")
+             .then(|| Self::temporal_zone(receiver.clone(), &receiver_type));
+         let label = format!("Temporal {kind}.{}", property.sym);
+-        let (arguments, bindings) = self.lower_native_spread_values(&call.args, &label)?;
++        let (arguments, bindings) = self.lower_temporal_arguments(&call.args, &label)?;
+         let result = match property.sym.as_ref() {
+             "toString" | "toJSON" => {
+                 if !arguments.is_empty() {
+@@ -901,17 +958,20 @@ impl<'a> FnLowerer<'a> {
+                     formatted
+                 } else {
+                     let calendar = Self::temporal_calendar(receiver.clone(), &receiver_type);
+-                    let annotation = HirExpr::BinOp(BinOp::Add,
+-                        Box::new(HirExpr::BinOp(BinOp::Add,
+-                            Box::new(HirExpr::Lit(HirLit::Str("[u-ca=".into()))),
+-                            Box::new(calendar.clone()))),
+-                        Box::new(HirExpr::Lit(HirLit::Str("]".into()))));
++                    let concat = |left, right| HirExpr::Call(
++                        Box::new(HirExpr::Var("__thaw_string_concat".into())),
++                        vec![left, right],
++                    );
++                    let annotation = concat(
++                        concat(HirExpr::Lit(HirLit::Str("[u-ca=".into())), calendar.clone()),
++                        HirExpr::Lit(HirLit::Str("]".into())),
++                    );
+                     HirExpr::Conditional(
+                         Box::new(HirExpr::BinOp(BinOp::EqEqEq,
+                             Box::new(calendar),
+                             Box::new(HirExpr::Lit(HirLit::Str("iso8601".into()))))),
+                         Box::new(formatted.clone()),
+-                        Box::new(HirExpr::BinOp(BinOp::Add, Box::new(formatted), Box::new(annotation))),
++                        Box::new(concat(formatted, annotation)),
+                         HirType::Str,
+                     )
+                 }
+diff --git a/crates/thaw-hir/src/lower/statements/lowering.rs b/crates/thaw-hir/src/lower/statements/lowering.rs
+index bca62b2..1b1bcc0 100644
+--- a/crates/thaw-hir/src/lower/statements/lowering.rs
++++ b/crates/thaw-hir/src/lower/statements/lowering.rs
+@@ -342,6 +342,17 @@ impl<'a> FnLowerer<'a> {
+                         value.clone(), fields, false,
+                     )?));
+                 }
++                // Like an Error record, let a catch read the object lazily as Json
++                // (printing, JSON.stringify); the object itself stays the carrier.
++                if let HirExpr::Var(owner) = &value {
++                    if let Ok(snapshot) = self.coerce_to_declared(&HirType::Json, value.clone()) {
++                        let describer = HirExpr::Lambda(
++                            vec![HirParam { name: owner.clone(), ty: ty.clone() }],
++                            Vec::new(), HirType::Json, Box::new(snapshot),
++                        );
++                        out.push(call("__thaw_register_native_exception_describer", vec![value.clone(), describer]));
++                    }
++                }
+                 out.push(call("__thaw_set_pending_exception_object", vec![value]));
+             }
+             HirType::Json | HirType::Dictionary(_) => out.push(call("__thaw_set_pending_exception_json", vec![value])),
+diff --git a/crates/thaw-llvm/src/hir_codegen/console.rs b/crates/thaw-llvm/src/hir_codegen/console.rs
+index 6a22fdb..062a4f0 100644
+--- a/crates/thaw-llvm/src/hir_codegen/console.rs
++++ b/crates/thaw-llvm/src/hir_codegen/console.rs
+@@ -702,6 +702,23 @@ impl<'ctx> HirCompiler<'ctx> {
+                     descriptor,
+                 )?;
+             }
++            // A caught native object (the carrier's layout-less `Object([])` member) has no
++            // fields to walk; print its describer/projection as Json like Node prints it.
++            HirType::Object(fields) if fields.is_empty() => {
++                let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
++                let slot = self.builder.build_alloca(ptr_ty, "console_caught_owner_slot")
++                    .map_err(|error| error.to_string())?;
++                self.builder.build_store(slot, value).map_err(|error| error.to_string())?;
++                let name = "__thaw_console_caught_owner".to_string();
++                self.variables.insert(name.clone(), (slot, ptr_ty.into()));
++                self.variable_hir_types.insert(name.clone(), member.clone());
++                let json = self.compile_expr(&thaw_hir::caught_native_object_console_json(
++                    thaw_hir::HirExpr::Var(name),
++                ))?;
++                self.compile_console_structured(
++                    json.into_pointer_value(), &HirType::Json, newline, descriptor,
++                )?;
++            }
+             HirType::Object(_)
+             | HirType::Json
+             | HirType::Dictionary(_)
+diff --git a/crates/thaw-llvm/src/hir_codegen/dynamic_host/callbacks.rs b/crates/thaw-llvm/src/hir_codegen/dynamic_host/callbacks.rs
+index 45e9007..acd7324 100644
+--- a/crates/thaw-llvm/src/hir_codegen/dynamic_host/callbacks.rs
++++ b/crates/thaw-llvm/src/hir_codegen/dynamic_host/callbacks.rs
+@@ -892,6 +892,20 @@ impl<'ctx> HirCompiler<'ctx> {
+                 .basic()
+                 .unwrap()
+                 .into_pointer_value();
++            // The JS wrapper replaced every non-graph argument at a
++            // `JsValue`/function position with its own handle placeholder
++            // (see `thaw_js_register_native_callback`'s mask), so the
++            // parsed marker at *this* position is trusted by position, not
++            // by content; the std readers only accept a branded marker.
++            let argument = if !graph_mode && rest_start != Some(index)
++                && matches!(param, HirType::JsValue | HirType::Function(..) | HirType::CallableFunction(..))
++            {
++                self.builder.build_call(
++                    self.module.get_function("thaw_json_brand_wrapper").unwrap(),
++                    &[argument.into()], "brand_callback_handle_argument",
++                ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
++                    .ok_or("thaw_json_brand_wrapper returned no value")?.into_pointer_value()
++            } else { argument };
+             argument_json.push(argument);
+             self.builder.build_store(argument_slots[graph_index], argument)
+                 .map_err(|error| error.to_string())?;
+diff --git a/crates/thaw-llvm/src/hir_codegen/tests/control_flow.rs b/crates/thaw-llvm/src/hir_codegen/tests/control_flow.rs
+index 8dead7b..e4f0a4a 100644
+--- a/crates/thaw-llvm/src/hir_codegen/tests/control_flow.rs
++++ b/crates/thaw-llvm/src/hir_codegen/tests/control_flow.rs
+@@ -950,7 +950,7 @@ fn throwing_a_non_string_value_coerces_it_to_a_string() {
+     "#;
+     assert_eq!(
+         compile_and_run(source, "throw_non_string_coerces"),
+-        "42\ntrue\n[object Object]\n"
++        "42\ntrue\n{ code: 42, reason: 'bad' }\n"
+     );
+ }
+ 
+diff --git a/crates/thaw-llvm/src/hir_codegen/tests/core.rs b/crates/thaw-llvm/src/hir_codegen/tests/core.rs
+index 847bfac..801eefc 100644
+--- a/crates/thaw-llvm/src/hir_codegen/tests/core.rs
++++ b/crates/thaw-llvm/src/hir_codegen/tests/core.rs
+@@ -669,7 +669,7 @@ fn structured_dictionary_values_support_reads_and_destructuring() {
+ 
+     assert_eq!(
+         compile_and_run(source, "structured_dictionary_destructuring"),
+-        "1 one 1 one {\"kept\":{\"value\":2,\"label\":\"two\"}}\n[3,4] {\"kept\":[5]}\n[\"a\",\"b\"] [true,false]\n6 seven [[9,10],[11]]\n[\"x\",\"y\"] [[13],[14,15]] 16\ntuple 17 eighteen\n19 null undefined\nundefined 20 null\n"
++        "1 one 1 one { kept: { value: 2, label: 'two' } }\n[ 3, 4 ] { kept: [ 5 ] }\n[ 'a', 'b' ] [ true, false ]\n6 seven [ [ 9, 10 ], [ 11 ] ]\n[ 'x', 'y' ] [ [ 13 ], [ 14, 15 ] ] 16\ntuple 17 eighteen\n19 null undefined\nundefined 20 null\n"
+     );
+ }
+ 
+diff --git a/crates/thaw-llvm/src/hir_codegen/tests/values/dynamic_and_json.rs b/crates/thaw-llvm/src/hir_codegen/tests/values/dynamic_and_json.rs
+index 1814e4e..8ee8871 100644
+--- a/crates/thaw-llvm/src/hir_codegen/tests/values/dynamic_and_json.rs
++++ b/crates/thaw-llvm/src/hir_codegen/tests/values/dynamic_and_json.rs
+@@ -912,14 +912,20 @@ fn compiles_nested_dynamic_value_assignment() {
+             deep.p.q.r *= 3;
+             console.log(JSON.stringify(deep));
+ 
++            // Node (v22): assigning through a missing intermediate throws a
++            // TypeError and leaves the object untouched -- no auto-vivification.
+             const fresh: any = {};
+-            fresh.a.b = 5;
++            try {
++                fresh.a.b = 5;
++            } catch (error) {
++                console.log(error instanceof TypeError);
++            }
+             console.log(JSON.stringify(fresh));
+         }
+     "#;
+     assert_eq!(
+         compile_and_run(source, "nested_dynamic_value_assignment"),
+-        "{\"c\":{\"d\":false}}\n{\"c\":[99,2,3]}\n{\"p\":{\"q\":{\"r\":15}}}\n{\"a\":{\"b\":5}}\n"
++        "{\"c\":{\"d\":false}}\n{\"c\":[99,2,3]}\n{\"p\":{\"q\":{\"r\":15}}}\ntrue\n{}\n"
+     );
+ }
+ 

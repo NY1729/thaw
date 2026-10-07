@@ -83,6 +83,7 @@ added  crates/thaw-llvm/src/hir_codegen/tests/async/union_discard.rs
 added  crates/thaw-llvm/src/hir_codegen/tests/async/union_discard_eval_then.rs
 added  crates/thaw-llvm/src/hir_codegen/tests/async/union_discard_jit.rs
 modified  crates/thaw-llvm/src/hir_codegen/tests/collections.rs
+modified  crates/thaw-llvm/src/hir_codegen/tests/control_flow.rs
 modified  crates/thaw-llvm/src/hir_codegen/tests/core.rs
 modified  crates/thaw-llvm/src/hir_codegen/tests/ffi.rs
 modified  crates/thaw-llvm/src/hir_codegen/tests/native_builtins.rs

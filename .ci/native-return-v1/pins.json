@@ -17,8 +17,10 @@
     "integrated-repair-v3.sha256": "690ac46276a2d42e39f98d5ad3fdb583c330fe122588673e13c62e0137bb20e3",
     "integrated-repair-v4-base.sha256": "fe6e9113cb292bf3d87270c3c39713c980c98815619813afffd06637832944cf",
     "integrated-repair-v4.sha256": "5a23646bcb48c1a0db9277b5aaeb6bc25a33adc5579c81dd1434412bb7b43883",
+    "integrated-repair-v5-base.sha256": "5a23646bcb48c1a0db9277b5aaeb6bc25a33adc5579c81dd1434412bb7b43883",
+    "integrated-repair-v5.sha256": "2ca396522da95958022d530b7cd6e0e3db0551e0e5e2105839b19231c04a21d9",
     "native-base.sha256": "da86c2c16619de2e236cdd50b9d2572465fbdd4dc3b75b680cf91c6b0f6bdb72",
-    "net-owners.txt": "dbd665521513d4a66e649c6fbc923d1b433647c17fa3eb1e5224ba3cd2ac07e6",
+    "net-owners.txt": "6450fe32290798d11f06714911aec386e30d5f735ecbd685e8e55fe22140a722",
     "next-hir-v1-base.sha256": "0be3783d6241706ba2dd492704162aa9e0076dcc4a1de96e309eca9b512ba81c",
     "next-hir-v1.sha256": "f8915460efcaafc82a4392d9ca6b656dc150045d5cad4458b66755ef5705635b",
     "original-native.sha256": "4e219dde2129cf5876497edd6f9032cebdbee89eded9cce20e50ecda041053ce",
@@ -625,17 +627,39 @@
     "crates/thaw-llvm/src/hir_codegen/tests/native_builtins.rs",
     "crates/thaw-std/src/json.rs"
   ],
+  "integrated_repair_v5_base": {
+    "count": 225,
+    "file": "integrated-repair-v5-base.sha256",
+    "paired_after": "integrated-repair-v4",
+    "path_order": "lexical",
+    "sha256": "5a23646bcb48c1a0db9277b5aaeb6bc25a33adc5579c81dd1434412bb7b43883"
+  },
+  "integrated_repair_v5_source_paths": [
+    "crates/thaw-hir/src/hir/ir.rs",
+    "crates/thaw-hir/src/lower/expressions/functions.rs",
+    "crates/thaw-hir/src/lower/generators.rs",
+    "crates/thaw-hir/src/lower/inference/coercions.rs",
+    "crates/thaw-hir/src/lower/inference/types.rs",
+    "crates/thaw-hir/src/lower/invocations/arguments.rs",
+    "crates/thaw-hir/src/lower/invocations/temporal.rs",
+    "crates/thaw-hir/src/lower/statements/lowering.rs",
+    "crates/thaw-llvm/src/hir_codegen/console.rs",
+    "crates/thaw-llvm/src/hir_codegen/dynamic_host/callbacks.rs",
+    "crates/thaw-llvm/src/hir_codegen/tests/control_flow.rs",
+    "crates/thaw-llvm/src/hir_codegen/tests/core.rs",
+    "crates/thaw-llvm/src/hir_codegen/tests/values/dynamic_and_json.rs"
+  ],
   "native_base": {
     "count": 24,
     "file": "native-base.sha256",
     "sha256": "da86c2c16619de2e236cdd50b9d2572465fbdd4dc3b75b680cf91c6b0f6bdb72"
   },
   "net_owners": {
-    "count": 130,
+    "count": 131,
     "file": "net-owners.txt",
-    "modified": 122,
+    "modified": 123,
     "new": 8,
-    "sha256": "dbd665521513d4a66e649c6fbc923d1b433647c17fa3eb1e5224ba3cd2ac07e6"
+    "sha256": "6450fe32290798d11f06714911aec386e30d5f735ecbd685e8e55fe22140a722"
   },
   "next_hir_base": {
     "count": 181,
@@ -660,7 +684,8 @@
     "integrated-repair-v1",
     "integrated-repair-v2",
     "integrated-repair-v3",
-    "integrated-repair-v4"
+    "integrated-repair-v4",
+    "integrated-repair-v5"
   ],
   "payload_patches": {
     "compile-repairs-v1.patch": "2994f62e98a4fb9cbd0b792b20da09bf505874d749447bf8f0e43776d25e0f05",
@@ -672,6 +697,7 @@
     "integrated-repair-v2.patch": "9291b525f2443fdbedbac6a0d8b44147672e623315f63ef6c7e3ba5d577c72f4",
     "integrated-repair-v3.patch": "4e78af3e5208f16d9c39cd616be8a9dc9ede9d6c7e8fcac53287729ad606126b",
     "integrated-repair-v4.patch": "bef61c564a10f6d618821de0a8e319dd7ce339398b40444785706eff7e2c1836",
+    "integrated-repair-v5.patch": "b363e30c24001856352989dcca4bf3035e6a1f49516104b3329c6ca65c37590d",
     "next-hir-v1.patch": "c0d4addaf22a7c7c26a133153b8298cc39013794f0263228468dddb8e0f3936b",
     "quickjs-api-followup-v1.patch": "3e4daa17ed3234d378d02ce34b19178a0bb3a6fae744d2a134b84c286d9fb1d0",
     "quickjs-runtime-compile-v1.patch": "ab6405f01b6d8377b7d9282edf90a14003ad762b5dfc0cc5a8d7252db98f9a50",
@@ -1107,6 +1133,60 @@
       "name": "integrated-repair-v4",
       "path_order": "lexical",
       "sha256": "5a23646bcb48c1a0db9277b5aaeb6bc25a33adc5579c81dd1434412bb7b43883"
+    },
+    {
+      "count": 225,
+      "extra_paths": [
+        "crates/thaw-std/src/json.rs",
+        "crates/thaw-quickjs/src/quickjs/api.rs",
+        "crates/thaw-quickjs/src/quickjs/platform_globals/runtime.js",
+        "crates/thaw-std/src/http.rs",
+        "crates/thaw-quickjs/src/quickjs/wasm.rs",
+        "crates/thaw-quickjs/src/tests.rs",
+        "crates/thaw-bridge/src/bridge/classification.rs",
+        "crates/thaw-bridge/src/bridge/dts/exports.rs",
+        "crates/thaw-bridge/src/bridge/dts/interfaces.rs",
+        "crates/thaw-bridge/src/bridge/generation.rs",
+        "crates/thaw-bridge/src/tests/diagnostics_and_classes.rs",
+        "crates/thaw-bridge/src/tests/generic_types.rs",
+        "crates/thaw-bridge/src/tests/shims_and_bundles.rs",
+        "crates/thaw-cli/src/module_graph.rs",
+        "crates/thaw-cli/src/registry_integration/jit/control_flow.rs",
+        "crates/thaw-cli/src/registry_integration/shim_support.rs",
+        "crates/thaw-cli/src/tests/external_classes.rs",
+        "crates/thaw-cli/src/tests.rs",
+        "crates/thaw-napi/src/napi/classes.rs",
+        "crates/thaw-napi/src/napi/module_host.rs",
+        "crates/thaw-napi/src/tests/async_runtime.rs",
+        "crates/thaw-napi/src/tests/handles.rs",
+        "crates/thaw-napi/src/tests/objects_classes.rs",
+        "crates/thaw-napi/src/tests.rs",
+        "crates/thaw-quickjs/src/lib.rs",
+        "crates/thaw-quickjs/src/quickjs/filesystem.rs",
+        "crates/thaw-quickjs/src/quickjs/platform_globals/webassembly.js",
+        "crates/thaw-registry/src/registry/builtins/filesystem.rs",
+        "crates/thaw-registry/src/registry/builtins/http/http1.rs",
+        "crates/thaw-registry/src/registry/bundle/render.rs",
+        "crates/thaw-registry/src/registry/bundle.rs",
+        "crates/thaw-registry/src/registry/install/declarations.rs",
+        "crates/thaw-registry/src/tests/filesystem.rs",
+        "crates/thaw-registry/src/tests/network.rs",
+        "crates/thaw-registry/src/tests/node_core.rs",
+        "crates/thaw-registry/src/tests/platform.rs",
+        "crates/thaw-registry/src/tests/stream_web.rs",
+        "crates/thaw-registry/src/tests.rs",
+        "crates/thaw-cli/src/tests/registry_jit_primitives.rs",
+        "crates/thaw-std/src/lib.rs",
+        "crates/thaw-std/src/inspect.rs",
+        "crates/thaw-std/src/inspect_corpus.json",
+        "crates/thaw-std/src/inspect_width.rs",
+        "crates/thaw-cli/src/registry_integration/jit/callables.rs",
+        "crates/thaw-jit/src/runtime/arrays/transforms.rs"
+      ],
+      "file": "integrated-repair-v5.sha256",
+      "name": "integrated-repair-v5",
+      "path_order": "lexical",
+      "sha256": "2ca396522da95958022d530b7cd6e0e3db0551e0e5e2105839b19231c04a21d9"
     }
   ],
   "std_compile_base": {
