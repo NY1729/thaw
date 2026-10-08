@@ -1618,7 +1618,7 @@ fn generated_declaration_labels_are_custom_and_keep_parse_fallbacks() {
 
     let origin = Path::new("/logical/package/index.d.ts");
     let source_name = FileName::Custom(
-        format!("{} (unwrapped declaration entry)", origin.display()).into(),
+        format!("{} (unwrapped declaration entry)", origin.display()),
     );
     let source = "import Core, { type Shape } from './core';\nexport class Child extends Core {}";
     let (module, source_map) =

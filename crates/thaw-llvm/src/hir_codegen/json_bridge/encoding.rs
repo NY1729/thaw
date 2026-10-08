@@ -170,6 +170,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .map_err(|error| error.to_string())
     }
 
+    #[allow(dead_code)]
     fn compile_native_object_to_json(
         &mut self,
         object: PointerValue<'ctx>,
@@ -1246,6 +1247,7 @@ impl<'ctx> HirCompiler<'ctx> {
         Ok(json)
     }
 
+    #[allow(dead_code)]
     fn compile_native_tuple_to_json(
         &mut self,
         tuple: PointerValue<'ctx>,

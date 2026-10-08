@@ -611,7 +611,7 @@ fn javascript_parse_int(text: &str, radix: f64) -> f64 {
     }
     if matches!(radix, 2 | 4 | 8 | 16 | 32) {
         let end = text.char_indices()
-            .take_while(|(_, character)| character.to_digit(radix).is_some())
+            .take_while(|(_, character)| character.is_digit(radix))
             .map(|(index, character)| index + character.len_utf8())
             .last().unwrap_or(0);
         let value = power_of_two_radix_number(&text[..end], radix.trailing_zeros() as usize);
@@ -1614,7 +1614,7 @@ impl PreciseSum {
 
     fn any_below(&self, bit: usize) -> bool {
         self.0[..bit / 64].iter().any(|limb| *limb != 0)
-            || (bit % 64 != 0 && self.0[bit / 64] & ((1u64 << (bit % 64)) - 1) != 0)
+            || (!bit.is_multiple_of(64) && self.0[bit / 64] & ((1u64 << (bit % 64)) - 1) != 0)
     }
 
     fn magnitude_difference(positive: &Self, negative: &Self) -> (Self, bool) {
@@ -1706,8 +1706,8 @@ pub unsafe extern "C" fn thaw_math_sum_precise(
                 State::PlusInfinity | State::NaN => State::NaN,
                 _ => State::MinusInfinity,
             };
-        } else if !matches!(state, State::NaN | State::PlusInfinity | State::MinusInfinity)
-            && !(value == 0.0 && value.is_sign_negative())
+        } else if !(matches!(state, State::NaN | State::PlusInfinity | State::MinusInfinity)
+            || value == 0.0 && value.is_sign_negative())
         {
             state = State::Finite;
             if value.is_sign_negative() {

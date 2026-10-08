@@ -190,10 +190,8 @@ impl ReadyEvent {
     // their creating Host thread may execute a JS-facing ready callback.
     unsafe fn owner(self) -> std::thread::ThreadId {
         match self {
-            Self::AsyncCompletion(address) => (*(address as *const AsyncWork)).owner.clone(),
-            Self::ThreadsafeFunction(address) => {
-                (*(address as *const ThreadsafeFunction)).creator.clone()
-            }
+            Self::AsyncCompletion(address) => (*(address as *const AsyncWork)).owner,
+            Self::ThreadsafeFunction(address) => (*(address as *const ThreadsafeFunction)).creator,
         }
     }
 }
@@ -981,6 +979,7 @@ thread_local! {
     // A raw napi_value is a pointer-shaped ABI token. Keep its tiny slot
     // reserved after scope retirement so a stale token can never alias a
     // later allocation; its owned payload is dropped immediately.
+    #[allow(clippy::vec_box)]
     static RETIRED_SCOPE_HANDLE_SLOTS: RefCell<Vec<Box<Value>>> = const { RefCell::new(Vec::new()) };
     static RETIRED_SCOPE_HANDLE_IDS: RefCell<HashSet<usize>> = RefCell::new(HashSet::new());
 }
@@ -2364,7 +2363,7 @@ unsafe fn value_ref<'a>(value: NapiValue) -> Result<&'a Value, NapiStatus> {
 }
 
 unsafe fn value_belongs_to_environment(env: NapiEnv, value: NapiValue) -> bool {
-    if value.is_null() || !env.as_ref().is_some_and(|env| !env.finalized) {
+    if value.is_null() || env.as_ref().is_none_or(|env| env.finalized) {
         record_status(env, NAPI_INVALID_ARG);
         return false;
     }

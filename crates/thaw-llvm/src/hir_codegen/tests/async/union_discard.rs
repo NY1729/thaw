@@ -139,7 +139,7 @@ fn compile_union_discard_program(program: &HirProgram, module_name: &str) -> Str
     compiler.print_to_string()
 }
 
-fn union_discard_function_body<'a>(ir: &'a str, function: &str) -> String {
+fn union_discard_function_body(ir: &str, function: &str) -> String {
     let signature = format!("@{function}(");
     let body = ir
         .lines()
@@ -504,7 +504,7 @@ fn assert_union_result_payload_reaches_destroy(
         .filter(|line| {
             let rhs = union_discard_ir_rhs(line);
             rhs.starts_with("call { i8, i64 } ")
-                && producer.map_or(true, |name| rhs.contains(&format!("@{name}(")))
+                && producer.is_none_or(|name| rhs.contains(&format!("@{name}(")))
         })
         .collect::<Vec<_>>();
     assert_eq!(calls.len(), 1, "one exact scoped native/adapter union result call {producer:?}:\n{body}");
@@ -551,7 +551,7 @@ fn union_discard_ir_pointer_parameters(body: &str) -> Vec<String> {
         .expect("fixture signature has a parameter list");
     arguments.split(',').filter_map(|argument| {
         let mut words = argument.split_whitespace();
-        (words.next()? == "ptr").then(|| words.filter(|word| word.starts_with('%')).last().map(str::to_string)).flatten()
+        (words.next()? == "ptr").then(|| words.rfind(|word| word.starts_with('%')).map(str::to_string)).flatten()
     }).collect()
 }
 
@@ -767,7 +767,7 @@ fn discarded_native_promise_union_owned_and_plain_arms() {
         HirType::Str,
         HirType::Promise(Box::new(HirType::I64)),
     ];
-    let flat = HirType::Union(flat_members.clone());
+    let _flat = HirType::Union(flat_members.clone());
     let three = HirType::Union(three_members.clone());
 
     let make_flat = union_discard_union_producer(
@@ -1059,7 +1059,7 @@ fn discarded_native_promise_union_selected_wrappers() {
         ("nullish", UnionDiscardValueFamily::Nullish, "nullish_value"),
     ];
 
-    for (family_name, family, value_name) in family_specs {
+    for (family_name, family, _value_name) in family_specs {
         functions.push(union_discard_expression_probe(
             &format!("discard_{family_name}_owned_promise_some"),
             vec![],

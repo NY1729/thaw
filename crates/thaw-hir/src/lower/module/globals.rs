@@ -986,7 +986,7 @@ fn capture_class_decorator_expression(
     lowerer.next_binding += 1;
     let name = lowerer.bind_local(&source_name, ty.clone());
     steps.push(HirInitStep::Statement(HirStmt::Let(name.clone(), ty, expression)));
-    decorator.expr = Box::new(Expr::Ident(swc_ecma_ast::Ident::new_no_ctxt(name.into(), decorator.span)));
+    *decorator.expr = Expr::Ident(swc_ecma_ast::Ident::new_no_ctxt(name.into(), decorator.span));
     Ok(())
 }
 

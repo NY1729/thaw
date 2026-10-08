@@ -76,7 +76,7 @@ impl<'ctx> HirCompiler<'ctx> {
         self.clear_pending_native_text()?;
         self.mark_pending_native_text(error)?;
         self.branch_on_pending_exception()?;
-        let json = self.compile_decode_quickjs_graph(value.into())?;
+        let json = self.compile_decode_quickjs_graph(value)?;
 
         self.compile_typed_dynamic_result(json, &signature.ret)
     }
@@ -520,7 +520,7 @@ impl<'ctx> HirCompiler<'ctx> {
         self.clear_pending_native_text()?;
         self.mark_pending_native_text(error)?;
         self.branch_on_pending_exception()?;
-        self.compile_decode_quickjs_graph(value.into())
+        self.compile_decode_quickjs_graph(value)
     }
 
     fn compile_release_dynamic_value(
@@ -785,7 +785,7 @@ impl<'ctx> HirCompiler<'ctx> {
         self.clear_pending_native_text()?;
         self.mark_pending_native_text(error)?;
         self.branch_on_pending_exception()?;
-        let parsed = self.compile_decode_quickjs_graph(value.into())?;
+        let parsed = self.compile_decode_quickjs_graph(value)?;
 
         Ok(parsed)
     }
@@ -857,7 +857,7 @@ impl<'ctx> HirCompiler<'ctx> {
         self.clear_pending_native_text()?;
         self.mark_pending_native_text(error)?;
         self.branch_on_pending_exception()?;
-        let parsed = self.compile_decode_quickjs_graph(value.into())?;
+        let parsed = self.compile_decode_quickjs_graph(value)?;
 
         Ok(parsed)
     }
@@ -1074,7 +1074,7 @@ impl<'ctx> HirCompiler<'ctx> {
         self.clear_pending_native_text()?;
         self.mark_pending_native_text(error)?;
         self.branch_on_pending_exception()?;
-        self.compile_decode_quickjs_graph(value.into())
+        self.compile_decode_quickjs_graph(value)
     }
 
     fn compile_call_dynamic_value_mixed_exact(
@@ -1273,7 +1273,7 @@ impl<'ctx> HirCompiler<'ctx> {
         self.clear_pending_native_text()?;
         self.mark_pending_native_text(error)?;
         self.branch_on_pending_exception()?;
-        self.compile_decode_quickjs_graph(value.into())
+        self.compile_decode_quickjs_graph(value)
     }
 
     fn compile_call_dynamic_value_mixed_native_json(
@@ -1326,7 +1326,7 @@ impl<'ctx> HirCompiler<'ctx> {
         self.clear_pending_native_text()?;
         self.mark_pending_native_text(error)?;
         self.branch_on_pending_exception()?;
-        let parsed = self.compile_decode_quickjs_graph(result_text.into())?;
+        let parsed = self.compile_decode_quickjs_graph(result_text)?;
 
         Ok(parsed)
     }

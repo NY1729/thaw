@@ -233,7 +233,7 @@ fn build_publication_rolls_back_executable_and_sidecar_together() {
     let scratch = BuildScratch::new(&output).unwrap();
     assert_ne!(scratch.path.join("input.o"), root.join("app.o"));
     let (staging, destination) = external_native_directories(&output, &scratch).unwrap();
-    std::fs::write(&staging.join("new.node"), "new addon").unwrap();
+    std::fs::write(staging.join("new.node"), "new addon").unwrap();
     std::fs::create_dir_all(&destination).unwrap();
     std::fs::write(destination.join("old.node"), "old addon").unwrap();
     // With no staged program, its final rename fails after native promotion.

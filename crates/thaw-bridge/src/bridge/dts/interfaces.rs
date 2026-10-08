@@ -1,7 +1,7 @@
 /// Visit declarations under their lexical namespace while keeping the
 /// original module order. Functions, callable constants, and aliases share
 /// this traversal so a member cannot silently lose its owner namespace.
-fn scoped_module_items<'a>(module: &'a Module) -> Vec<(String, &'a ModuleItem)> {
+fn scoped_module_items(module: &Module) -> Vec<(String, &ModuleItem)> {
     fn walk<'a>(item: &'a ModuleItem, scope: &str, found: &mut Vec<(String, &'a ModuleItem)>) {
         found.push((scope.to_string(), item));
         let decl = match item {
@@ -26,7 +26,7 @@ fn scoped_module_items<'a>(module: &'a Module) -> Vec<(String, &'a ModuleItem)> 
 /// Retains each declaration's full namespace path while returning its bare
 /// identifier separately. `parse_dts` keeps ordinary namespace identities
 /// distinct and preserves the bare CommonJS method ABI for `export = NS`.
-fn scoped_fn_decls<'a>(module: &'a Module) -> Vec<(String, String, &'a Function)> {
+fn scoped_fn_decls(module: &Module) -> Vec<(String, String, &Function)> {
     let mut found = Vec::new();
     for (scope, item) in scoped_module_items(module) {
         if let ModuleItem::ModuleDecl(ModuleDecl::ExportDefaultDecl(export)) = item {
@@ -272,11 +272,12 @@ fn scoped_type_context<'a>(
 
 /// Preserve the enclosing declaration namespace in resolver keys. Bare names
 /// are added separately only when they cannot identify a different scope.
-fn scoped_type_declarations<'a>(
-    module: &'a Module,
+#[allow(clippy::type_complexity)]
+fn scoped_type_declarations(
+    module: &Module,
 ) -> (
-    Vec<(String, &'a TsInterfaceDecl)>,
-    Vec<(String, &'a swc_ecma_ast::TsTypeAliasDecl)>,
+    Vec<(String, &TsInterfaceDecl)>,
+    Vec<(String, &swc_ecma_ast::TsTypeAliasDecl)>,
 ) {
     fn walk_item<'a>(
         item: &'a ModuleItem,

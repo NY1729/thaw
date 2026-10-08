@@ -650,6 +650,7 @@ unsafe extern "C" fn thaw_napi_handle_bridge(
                 // retained QuickJsHandle values instead. A same-Env positive
                 // Reference here would cycle with the descriptor table and
                 // prevent Env retirement.
+                #[allow(clippy::arc_with_non_send_sync)]
                 let mut roots = Arc::new(QuickJsAccessorRoots {
                     getter: 0, setter: 0, getter_native, setter_native,
                 });
@@ -2477,8 +2478,7 @@ impl NapiGraphInput {
                 };
                 let id = stable_id.unwrap_or_else(|| NEXT_SYMBOL_ID.fetch_add(1, Ordering::Relaxed));
                 owner.quickjs_symbol_ids.insert(handle, id);
-                let inserted_owner = if owner.symbols.contains_key(&id) { false }
-                    else { owner.symbols.insert(id, value); true };
+                let inserted_owner = if let std::collections::hash_map::Entry::Vacant(e) = owner.symbols.entry(id) { e.insert(value); true } else { false };
                 new_symbol_ids.push((handle, id, inserted_owner));
             }
             #[cfg(not(feature = "quickjs"))]
@@ -2976,6 +2976,7 @@ unsafe fn qjs_define_data_property(
 }
 
 #[cfg(feature = "quickjs")]
+#[allow(clippy::too_many_arguments)]
 unsafe fn qjs_define_callback_property(
     env: NapiEnv, handle: u64, key: NapiValue,
     getter: Option<NapiCallback>, setter: Option<NapiCallback>,
@@ -3336,6 +3337,7 @@ unsafe fn qjs_reflected_native_accessor_source(
     let mut snapshot = accessor.clone();
     snapshot.getter_reflection = None;
     snapshot.setter_reflection = None;
+    #[allow(clippy::arc_with_non_send_sync)]
     let snapshot = Arc::new(snapshot);
     let callback = if getter { reflected_native_getter }
         else { reflected_native_setter };
@@ -3587,7 +3589,7 @@ unsafe fn qjs_install_native_data_property(
         && env.as_ref().is_some_and(|owner| owner.frozen_objects.contains(&(object as usize))) {
         return record_status(env, NAPI_GENERIC_FAILURE);
     }
-    let length_status = if array_length && !(old_attributes & NAPI_WRITABLE == 0 && !value_present) {
+    let length_status = if array_length && (old_attributes & NAPI_WRITABLE != 0 || value_present) {
         set_array_length(env, object, value,
             attributes & NAPI_WRITABLE == 0)
     } else { NAPI_OK };
@@ -6400,7 +6402,7 @@ mod typed_native_graph_value_tests {
         let wire = unsafe { napi_result_graph_for_env(env_ptr, array, true) }.unwrap();
         let graph: JsonValue = serde_json::from_str(&wire).unwrap();
         let props = graph["nodes"][0]["p"].as_array().unwrap();
-        assert!(props.iter().any(|part| part[0]["nsy"] == (symbol as u64).to_string()
+        assert!(props.iter().any(|part| part[0]["nsy"] == (symbol as u64)
             && part[2] == NAPI_WRITABLE));
         assert!(props.iter().any(|part| part[0] == "0" && part[2] == NAPI_ENUMERABLE));
         let decoded = unsafe { NapiGraphInput::parse(&wire).decode(env_ptr) }.unwrap();
@@ -6477,14 +6479,14 @@ mod typed_native_graph_value_tests {
                     hint: ptr::null_mut(), backing: ptr::null_mut() });
         }
         let target = CString::new((value as u64).to_string()).unwrap();
-        for operation in [c"renew_handle".as_ref(), c"release_handle".as_ref()] {
+        for operation in [c"renew_handle", c"release_handle"] {
             let raw = unsafe { thaw_napi_handle_bridge(operation.as_ptr(), target.as_ptr(),
                 c"".as_ptr(), c"[]".as_ptr()) };
             assert!(!raw.is_null());
             let text = unsafe { std::ffi::CStr::from_ptr(raw) }.to_string_lossy().into_owned();
             unsafe { drop(CString::from_raw(raw.cast_mut())); }
             assert!(!text.contains("__thaw_error__"), "{text}");
-            if operation == c"renew_handle".as_ref() {
+            if operation == c"renew_handle" {
                 assert_eq!(unsafe { napi_close_handle_scope(env_ptr, scope) }, NAPI_OK);
             }
         }
@@ -6515,14 +6517,14 @@ mod typed_native_graph_value_tests {
                     hint: ptr::null_mut(), backing: ptr::null_mut() });
         }
         let target = CString::new((child as u64).to_string()).unwrap();
-        for operation in [c"renew_handle".as_ref(), c"release_handle".as_ref()] {
+        for operation in [c"renew_handle", c"release_handle"] {
             let raw = unsafe { thaw_napi_handle_bridge(operation.as_ptr(), target.as_ptr(),
                 c"".as_ptr(), c"[]".as_ptr()) };
             assert!(!raw.is_null());
             let text = unsafe { std::ffi::CStr::from_ptr(raw) }.to_string_lossy().into_owned();
             unsafe { drop(CString::from_raw(raw.cast_mut())); }
             assert!(!text.contains("__thaw_error__"), "{text}");
-            if operation == c"renew_handle".as_ref() {
+            if operation == c"renew_handle" {
                 assert_eq!(unsafe { napi_close_handle_scope(env_ptr, scope) }, NAPI_OK);
             }
         }
@@ -6551,14 +6553,14 @@ mod typed_native_graph_value_tests {
             bytes: vec![1, 2, 3], detached: false,
         }) };
         let target = CString::new((value as u64).to_string()).unwrap();
-        for operation in [c"renew_handle".as_ref(), c"release_handle".as_ref()] {
+        for operation in [c"renew_handle", c"release_handle"] {
             let raw = unsafe { thaw_napi_handle_bridge(operation.as_ptr(), target.as_ptr(),
                 c"".as_ptr(), c"[]".as_ptr()) };
             assert!(!raw.is_null());
             let text = unsafe { std::ffi::CStr::from_ptr(raw) }.to_string_lossy().into_owned();
             unsafe { drop(CString::from_raw(raw.cast_mut())); }
             assert!(!text.contains("__thaw_error__"), "{text}");
-            if operation == c"renew_handle".as_ref() {
+            if operation == c"renew_handle" {
                 assert_eq!(unsafe { napi_close_handle_scope(env_ptr, scope) }, NAPI_OK);
                 assert!(unsafe { (*env_ptr).values.contains(&value) });
             }

@@ -138,6 +138,7 @@ fn native_addon_path_component(name: &str) -> String {
 /// call). Returns the generated shim text, the native lib paths to
 /// link, and any cross-package name-collision rewrites the caller must
 /// also apply to the user's own source (`rewrite_qualified_calls`).
+#[allow(clippy::too_many_arguments)]
 fn generate_registry_shims(
     registry_dir: &Path,
     use_packages: &[String],
@@ -176,7 +177,7 @@ fn generate_registry_shims(
         };
         let dts_filename = package.dts_path.as_ref().map_or_else(
             || thaw_parser::common::FileName::Custom(
-                format!("{} generated declarations", package.name).into(),
+                format!("{} generated declarations", package.name),
             ),
             |path| thaw_parser::common::FileName::Real(path.clone()),
         );

@@ -165,8 +165,7 @@ pub unsafe extern "C" fn napi_get_all_property_names(
                         _ => unreachable!(),
                     })),
             };
-            keys[owner_start..].sort_by(|(left, _), (right, _)|
-                rank(left).cmp(&rank(right)));
+            keys[owner_start..].sort_by_key(|(left, _)| rank(left));
         }
         current = if key_mode == NAPI_KEY_INCLUDE_PROTOTYPES {
             prototype_for_owner(env_ptr, owner)

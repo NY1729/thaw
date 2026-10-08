@@ -472,7 +472,7 @@ fn build_with_native_mode(
         package_qualifier_identifiers(resolved_packages.iter().map(String::as_str));
     let transform = |source: &str, module_path: &Path, is_override: bool| {
         let input_name = if is_override && source != user_source.as_str() {
-            thaw_parser::common::FileName::Custom(format!("{} (in-memory entry override)", module_path.display()).into())
+            thaw_parser::common::FileName::Custom(format!("{} (in-memory entry override)", module_path.display()))
         } else {
             thaw_parser::common::FileName::Real(module_path.to_path_buf())
         };
@@ -487,7 +487,7 @@ fn build_with_native_mode(
             &input_name,
         )?;
         let qualified_name = if qualified != source {
-            thaw_parser::common::FileName::Custom(format!("{input_name} (registry rewrite stage 1)").into())
+            thaw_parser::common::FileName::Custom(format!("{input_name} (registry rewrite stage 1)"))
         } else {
             input_name
         };
@@ -507,7 +507,7 @@ fn build_with_native_mode(
             &qualified_name,
         )?;
         let methods_name = if methods != qualified {
-            thaw_parser::common::FileName::Custom(format!("{qualified_name} (registry rewrite stage 2)").into())
+            thaw_parser::common::FileName::Custom(format!("{qualified_name} (registry rewrite stage 2)"))
         } else {
             qualified_name
         };

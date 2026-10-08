@@ -159,13 +159,12 @@ impl<'ctx> HirCompiler<'ctx> {
                     }
                     Ok::<(), String>(())
                 })();
-                if split_result.is_err() {
-                    if preheader.get_terminator().is_none() {
+                if split_result.is_err()
+                    && preheader.get_terminator().is_none() {
                         let restore_builder = self.context.create_builder();
                         restore_builder.position_at_end(preheader);
                         restore_builder.insert_instruction(&terminator, None);
                     }
-                }
                 self.builder = original_builder;
                 self.replace_catch_context(original_catches);
                 self.stack_promise_slots = original_slots;
@@ -1072,7 +1071,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 return self.compile_async_lambda(captures, params, resolved, body);
             }
         }
-        let parent_block = self
+        let _parent_block = self
             .builder
             .get_insert_block()
             .ok_or("lambda must be emitted inside a function")?;

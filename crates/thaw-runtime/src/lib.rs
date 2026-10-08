@@ -15,6 +15,8 @@
 //!
 //! Known limitations, acceptable for what this talks to: no TLS and one
 //! request per TCP connection.
+#![allow(clippy::missing_safety_doc)]
+#![cfg_attr(test, allow(unused_unsafe))]
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};

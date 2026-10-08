@@ -185,6 +185,7 @@ impl<'ctx> HirCompiler<'ctx> {
         Ok(())
     }
 
+    #[allow(dead_code)]
     fn destroy_typed_host_result_string(
         &mut self,
         value: BasicValueEnum<'ctx>,

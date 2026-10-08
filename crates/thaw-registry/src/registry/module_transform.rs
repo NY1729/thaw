@@ -22,7 +22,7 @@ struct ModuleAnalysis {
 }
 
 fn rewritten_js_source_name(source_name: &thaw_parser::common::FileName, phase: &str) -> thaw_parser::common::FileName {
-    thaw_parser::common::FileName::Custom(format!("{source_name} ({phase})").into())
+    thaw_parser::common::FileName::Custom(format!("{source_name} ({phase})"))
 }
 
 #[cfg(test)]
@@ -1493,7 +1493,7 @@ fn rewrite_esm_to_commonjs_mode_named(source: &str, await_imports: bool, source_
         }
     }
 
-    let resolution_name = format!("__thaw_esm_resolution_{synthetic_offset}");
+    let _resolution_name = format!("__thaw_esm_resolution_{synthetic_offset}");
     for item in &module.body {
         match item {
             ModuleItem::Stmt(stmt) => {

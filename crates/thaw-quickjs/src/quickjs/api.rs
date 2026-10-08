@@ -554,11 +554,10 @@ fn owned_graph_wire(text: &str) -> *mut c_char {
 fn before_graph_decode<'js, T>(
     ctx: &Ctx<'js>, text: &str, graph: bool, lookup: impl FnOnce() -> Result<T, String>,
 ) -> Result<T, String> {
-    lookup().map_err(|error| {
+    lookup().inspect_err(|_error| {
         if graph {
             release_unconsumed_graph_leases(ctx, text);
         }
-        error
     })
 }
 
@@ -566,12 +565,11 @@ fn before_registered_graph_decode<T>(
     wire: *const c_char,
     lookup: impl FnOnce() -> Result<T, String>,
 ) -> Result<T, String> {
-    lookup().map_err(|error| {
+    lookup().inspect_err(|_error| {
         // Exact mixed graph wires are already registered by their native
         // producer. Consume that grant on lookup failures before dispatch.
         unsafe extern "C" { fn thaw_json_discard_graph_wire(source: *const c_char); }
         unsafe { thaw_json_discard_graph_wire(wire) };
-        error
     })
 }
 
@@ -791,7 +789,7 @@ fn finish_root_test_hooks_at_idle(ctx: &Ctx<'_>) -> rquickjs::Result<bool> {
     };
     let result: Value = finalize.call(())?;
     let Some(promise) = result.as_promise() else { return Ok(false); };
-    finish_with_platform_events(ctx, &promise)?;
+    finish_with_platform_events(ctx, promise)?;
     Ok(true)
 }
 
@@ -1732,7 +1730,7 @@ pub unsafe extern "C" fn thaw_js_call_handle_mixed_handle_graph_args_consuming_r
 #[no_mangle]
 pub unsafe extern "C" fn thaw_js_release_native_handle_array(handles: *const u8) {
     if let Ok(values) = unsafe { native_handle_slice(handles) } {
-        for value in values.to_vec() {
+        for value in values.iter().copied() {
             let _ = thaw_js_release_handle(value);
         }
     }
@@ -1928,9 +1926,7 @@ fn pin_native_graph_symbol(ctx: Ctx<'_>, id: String) -> rquickjs::Result<bool> {
     let mut redundant = Some(root);
     {
         let mut entries = roots.0.borrow_mut();
-        if !entries.contains_key(&id) {
-            entries.insert(id, redundant.take().expect("new Symbol root is present"));
-        }
+        entries.entry(id).or_insert_with(|| redundant.take().expect("new Symbol root is present"));
     }
     // Releasing an extra positive reference may reenter QuickJS. Never do it
     // while the userdata RefCell is borrowed.
@@ -2305,6 +2301,7 @@ pub extern "C" fn thaw_js_register_native_method_callback_graph(
     register_native_callback(adapter, closure, jsvalue_param_mask, param_count, void_result, finish, has_rest, true, true)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn register_native_callback(
     adapter: *const c_void,
     closure: *const c_void,
@@ -2641,7 +2638,7 @@ pub extern "C" fn thaw_js_call_handle_with_this_graph_result(
                 .map_err(|_| format!("JavaScript value handle {handle} is not callable"))
         })?;
         let args_array = decode_argument_array(&ctx, &args_json, true)?;
-        if args_array.len() == 0 { return Err("missing JavaScript call receiver".into()); }
+        if args_array.is_empty() { return Err("missing JavaScript call receiver".into()); }
         let this_value: Value = args_array.get(0).map_err(|error| error.to_string())?;
         let mut args = Args::new_unsized(ctx.clone());
         args.this(this_value).map_err(|error| error.to_string())?;
@@ -4148,7 +4145,7 @@ pub extern "C" fn thaw_js_call_handle_with_this_graph_wire_result(
                 .map_err(|_| format!("JavaScript value handle {handle} is not callable"))
         })?;
         let args_array = decode_argument_array(&ctx, &args_json, true)?;
-        if args_array.len() == 0 {
+        if args_array.is_empty() {
             return Err("JS callback receiver payload is empty".into());
         }
         let mut call_args = Args::new_unsized(ctx.clone());
@@ -5460,15 +5457,15 @@ mod forced_root_graph_wire_controls {
                 r#"{{"root":{{"r":0}},"nodes":[{{"a":[{{"r":1}}],"p":[["0",{{"r":1}},7],["length",{{"v":1}},1]]}},{{"hdl":{masked_handle}}}],"leases":[{masked_handle}],"napiLeases":[]}}"#
             ));
 
-            for index in 7..=10 {
-                let graph: serde_json::Value = serde_json::from_str(packets[index].as_str()).unwrap();
+            for packet in &packets[7..=10] {
+                let graph: serde_json::Value = serde_json::from_str(packet.as_str()).unwrap();
                 let root_handle = graph.get("root").and_then(|root| root.get("hdl"))
                     .and_then(serde_json::Value::as_u64).expect("matching root remains the baseline direct hdl token");
                 assert_eq!(graph.get("nodes").and_then(serde_json::Value::as_array).map(Vec::len), Some(0));
                 assert_eq!(graph.get("leases").and_then(serde_json::Value::as_array)
                     .map(|leases| leases.iter().filter_map(serde_json::Value::as_u64).collect::<Vec<_>>()),
                     Some(vec![root_handle]));
-                assert_eq!(packets[index].as_str(), format!(
+                assert_eq!(packet.as_str(), format!(
                     r#"{{"root":{{"hdl":{root_handle}}},"nodes":[],"leases":[{root_handle}],"napiLeases":[]}}"#
                 ));
             }

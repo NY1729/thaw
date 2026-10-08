@@ -1126,7 +1126,7 @@ fn ensure_context() {
                 })
                 .expect("failed to create JavaScript stderr writer");
                 let raw_process_write = Function::new(ctx.clone(), |fd: i32, encoded: String| -> rquickjs::Result<()> {
-                    if !matches!(fd, 1 | 2) || encoded.len() % 2 != 0 || !encoded.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                    if !matches!(fd, 1 | 2) || !encoded.len().is_multiple_of(2) || !encoded.bytes().all(|byte| byte.is_ascii_hexdigit()) {
                         return Err(rquickjs::Error::new_from_js_message("process stream", "fd 1/2 and valid hex bytes", "invalid raw process output"));
                     }
                     let bytes = hex_decode(&encoded);

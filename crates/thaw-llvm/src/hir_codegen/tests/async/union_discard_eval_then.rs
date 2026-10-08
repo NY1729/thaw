@@ -37,7 +37,7 @@ fn udeval_eval_then(first: HirExpr, second: HirExpr) -> HirExpr {
     HirExpr::EvalThen(Box::new(first), Box::new(second))
 }
 
-fn udeval_function_body<'a>(ir: &'a str, function: &str) -> String {
+fn udeval_function_body(ir: &str, function: &str) -> String {
     let signature = format!("@{function}(");
     let body = ir
         .lines()
@@ -79,9 +79,9 @@ fn udeval_blocks(function_body: &str) -> Vec<UdevalBlock> {
 }
 
 fn udeval_successors(block: &UdevalBlock) -> Vec<String> {
-    let terminator = block.text.lines().map(str::trim).filter(|line|
+    let terminator = block.text.lines().map(str::trim).rfind(|line|
         line.starts_with("br ") || line.starts_with("ret ") || line.starts_with("unreachable")
-    ).last().unwrap_or("");
+    ).unwrap_or("");
     terminator.split("label %").skip(1).map(|tail|
         tail.split(|ch: char| ch == ',' || ch == ']' || ch.is_whitespace())
             .next().unwrap_or("").trim_matches('"').to_string()
@@ -658,11 +658,11 @@ fn udeval_run_mapped_exception_effect_probe() {
     let engine = compiler.module.create_jit_execution_engine(OptimizationLevel::None).unwrap();
     engine.add_global_mapping(
         &compiler.module.get_function("thaw_promise_destroy").unwrap(),
-        udeval_non_dereferencing_destroy as usize,
+        udeval_non_dereferencing_destroy as *const () as usize,
     );
     engine.add_global_mapping(
         &compiler.module.get_function("udeval_mapped_after_throw").unwrap(),
-        udeval_mapped_exception_effect as usize,
+        udeval_mapped_exception_effect as *const () as usize,
     );
     type VoidProbe = unsafe extern "C" fn();
     unsafe {

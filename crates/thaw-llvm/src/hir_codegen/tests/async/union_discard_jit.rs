@@ -336,8 +336,8 @@ fn udjit_function_ir(ir: &str, name: &str) -> String {
     let start = ir.lines().position(|line| line.starts_with("define ") && line.contains(&marker))
         .unwrap_or_else(|| panic!("missing generated function {name}:\n{ir}"));
     let lines = ir.lines().skip(start);
-    let body = lines.take_while(|line| *line != "}").collect::<Vec<_>>().join("\n");
-    body
+    
+    lines.take_while(|line| *line != "}").collect::<Vec<_>>().join("\n")
 }
 
 fn udjit_ir_block(body: &str, label: &str) -> String {
@@ -863,26 +863,26 @@ fn discarded_native_promise_union_selected_tokens_are_exact_and_closed() {
     let retain_result = retain.get_type().get_return_type().unwrap();
     assert!(retain_result.is_int_type());
     assert_eq!(retain_result.into_int_type().get_bit_width(), 8);
-    engine.add_global_mapping(&retain, udjit_stub_retain as usize);
+    engine.add_global_mapping(&retain, udjit_stub_retain as *const () as usize);
     let destroy = compiler.module.get_function("thaw_promise_destroy").unwrap();
     let destroy_params = destroy.get_type().get_param_types();
     assert_eq!(destroy_params.len(), 1);
     assert!(destroy_params[0].is_pointer_type(), "destroy spy must receive the opaque token pointer");
     assert!(destroy.get_type().get_return_type().is_none());
-    engine.add_global_mapping(&destroy, udjit_stub_destroy as usize);
+    engine.add_global_mapping(&destroy, udjit_stub_destroy as *const () as usize);
     for (symbol, address) in [
-        ("udjit_test_token_flat_owned", udjit_stub_flat_token as usize),
-        ("udjit_test_token_three_tag0_owned", udjit_stub_three_tag0_token as usize),
-        ("udjit_test_token_three_tag2_owned", udjit_stub_three_tag2_token as usize),
-        ("udjit_test_token_nested_owned", udjit_stub_nested_token as usize),
-        ("udjit_test_token_optional_owned", udjit_stub_optional_token as usize),
-        ("udjit_test_token_nullable_owned", udjit_stub_nullable_token as usize),
-        ("udjit_test_token_nullish_owned", udjit_stub_nullish_token as usize),
-        ("udjit_test_token_union_value_owned", udjit_stub_union_value_token as usize),
-        ("udjit_test_pointer_looking_f64", udjit_stub_pointer_looking_f64 as usize),
-        ("udjit_test_pointer_looking_str", udjit_stub_pointer_looking_str as usize),
-        ("udjit_test_outer_mode", udjit_stub_outer_mode as usize),
-        ("udjit_test_inner_mode", udjit_stub_inner_mode as usize),
+        ("udjit_test_token_flat_owned", udjit_stub_flat_token as *const () as usize),
+        ("udjit_test_token_three_tag0_owned", udjit_stub_three_tag0_token as *const () as usize),
+        ("udjit_test_token_three_tag2_owned", udjit_stub_three_tag2_token as *const () as usize),
+        ("udjit_test_token_nested_owned", udjit_stub_nested_token as *const () as usize),
+        ("udjit_test_token_optional_owned", udjit_stub_optional_token as *const () as usize),
+        ("udjit_test_token_nullable_owned", udjit_stub_nullable_token as *const () as usize),
+        ("udjit_test_token_nullish_owned", udjit_stub_nullish_token as *const () as usize),
+        ("udjit_test_token_union_value_owned", udjit_stub_union_value_token as *const () as usize),
+        ("udjit_test_pointer_looking_f64", udjit_stub_pointer_looking_f64 as *const () as usize),
+        ("udjit_test_pointer_looking_str", udjit_stub_pointer_looking_str as *const () as usize),
+        ("udjit_test_outer_mode", udjit_stub_outer_mode as *const () as usize),
+        ("udjit_test_inner_mode", udjit_stub_inner_mode as *const () as usize),
     ] {
         let function = compiler.module.get_function(symbol).expect("closed external-call map entry");
         assert!(function.get_type().get_param_types().is_empty(), "unexpected ABI args for {symbol}");
