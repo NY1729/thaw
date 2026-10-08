@@ -81,7 +81,15 @@ pub enum HirExpr {
     /// Both callbacks attach to the same source and settle one output.
     /// The fulfillment callback may be omitted, in which case fulfillment
     /// is forwarded without converting its value or exception provenance.
-    PromiseThenBoth(Box<HirExpr>, Option<Box<HirExpr>>, Box<HirExpr>, HirType, HirType, bool, bool),
+    PromiseThenBoth(
+        Box<HirExpr>,
+        Option<Box<HirExpr>>,
+        Box<HirExpr>,
+        HirType,
+        HirType,
+        bool,
+        bool,
+    ),
     /// A `.finally` continuation. The callback return type records whether
     /// codegen must wait for a returned Promise before forwarding settlement.
     PromiseFinally(Box<HirExpr>, Box<HirExpr>, HirType, HirType),
@@ -314,22 +322,26 @@ pub fn caught_exception_carrier_prelude(name: Symbol) -> HirStmt {
         HirType::Union(members) => members.clone(),
         _ => unreachable!(),
     };
-    HirStmt::Let(name, carrier, HirExpr::UnionInject(
-        Box::new(HirExpr::Lit(HirLit::Undefined)), 4, members,
-    ))
+    HirStmt::Let(
+        name,
+        carrier,
+        HirExpr::UnionInject(Box::new(HirExpr::Lit(HirLit::Undefined)), 4, members),
+    )
 }
 
 /// Json view of a caught native Object (carrier member 6): the registered
 /// describer, else the live projector. Fails when neither exists.
 pub fn caught_native_object_json(active: HirExpr) -> HirExpr {
-    let call = |name: &str, args: Vec<HirExpr>| HirExpr::Call(Box::new(HirExpr::Var(name.into())), args);
+    let call =
+        |name: &str, args: Vec<HirExpr>| HirExpr::Call(Box::new(HirExpr::Var(name.into())), args);
     let projector_type = HirType::Function(Vec::new(), Box::new(HirType::JsValue));
     let optional_projector = HirType::Optional(Box::new(projector_type.clone()));
     let projector_name = "__thaw_caught_adapter_projector".to_string();
     let projector = HirExpr::Var(projector_name.clone());
     let body = HirExpr::Conditional(
         Box::new(HirExpr::OptionalIsNone(
-            Box::new(projector.clone()), projector_type.clone(),
+            Box::new(projector.clone()),
+            projector_type.clone(),
         )),
         Box::new(HirExpr::ThrowValue(
             Box::new(HirExpr::Lit(HirLit::Str(
@@ -337,14 +349,13 @@ pub fn caught_native_object_json(active: HirExpr) -> HirExpr {
             ))),
             Box::new(HirExpr::JsonObjectLit(Vec::new(), HirType::Json)),
         )),
-        Box::new(call("__thaw_json_host_from_dynamic", vec![
-            HirExpr::Call(
-                Box::new(HirExpr::OptionalValue(
-                    Box::new(projector), projector_type,
-                )),
+        Box::new(call(
+            "__thaw_json_host_from_dynamic",
+            vec![HirExpr::Call(
+                Box::new(HirExpr::OptionalValue(Box::new(projector), projector_type)),
                 Vec::new(),
-            ),
-        ])),
+            )],
+        )),
         HirType::Json,
     );
     // A thrown Error record registers a Json describer; prefer it.
@@ -352,27 +363,47 @@ pub fn caught_native_object_json(active: HirExpr) -> HirExpr {
     let describer_name = "__thaw_caught_adapter_describer".to_string();
     let describer = HirExpr::Var(describer_name.clone());
     let described = HirExpr::Conditional(
-        Box::new(HirExpr::OptionalIsNone(Box::new(describer.clone()), describer_type.clone())),
+        Box::new(HirExpr::OptionalIsNone(
+            Box::new(describer.clone()),
+            describer_type.clone(),
+        )),
         Box::new(body),
         Box::new(HirExpr::Call(
-            Box::new(HirExpr::OptionalValue(Box::new(describer), describer_type.clone())),
+            Box::new(HirExpr::OptionalValue(
+                Box::new(describer),
+                describer_type.clone(),
+            )),
             Vec::new(),
         )),
         HirType::Json,
     );
-    HirExpr::Call(Box::new(HirExpr::Lambda(
-        Vec::new(),
+    HirExpr::Call(
+        Box::new(HirExpr::Lambda(
+            Vec::new(),
+            vec![
+                HirParam {
+                    name: describer_name,
+                    ty: HirType::Optional(Box::new(describer_type)),
+                },
+                HirParam {
+                    name: projector_name,
+                    ty: optional_projector,
+                },
+            ],
+            HirType::Json,
+            Box::new(described),
+        )),
         vec![
-            HirParam { name: describer_name, ty: HirType::Optional(Box::new(describer_type)) },
-            HirParam { name: projector_name, ty: optional_projector },
+            call(
+                "__thaw_lookup_native_exception_describer",
+                vec![active.clone()],
+            ),
+            call(
+                "__thaw_lookup_native_projector",
+                vec![active, HirExpr::Lit(HirLit::Str(String::new()))],
+            ),
         ],
-        HirType::Json, Box::new(described),
-    )), vec![
-        call("__thaw_lookup_native_exception_describer", vec![active.clone()]),
-        call("__thaw_lookup_native_projector", vec![
-            active, HirExpr::Lit(HirLit::Str(String::new())),
-        ]),
-    ])
+    )
 }
 
 /// Printing view of a caught native Object: the Json its throw registered
@@ -380,14 +411,27 @@ pub fn caught_native_object_json(active: HirExpr) -> HirExpr {
 /// never touches the live-projection host, so a program that only prints a
 /// caught value does not become a QuickJS host program.
 pub fn caught_native_object_console_json(active: HirExpr) -> HirExpr {
-    let call = |name: &str, args: Vec<HirExpr>| HirExpr::Call(Box::new(HirExpr::Var(name.into())), args);
+    let call =
+        |name: &str, args: Vec<HirExpr>| HirExpr::Call(Box::new(HirExpr::Var(name.into())), args);
     let describer_type = HirType::Function(Vec::new(), Box::new(HirType::Json));
-    let describer = || call("__thaw_lookup_native_exception_describer", vec![active.clone()]);
+    let describer = || {
+        call(
+            "__thaw_lookup_native_exception_describer",
+            vec![active.clone()],
+        )
+    };
     HirExpr::Conditional(
-        Box::new(HirExpr::OptionalIsNone(Box::new(describer()), describer_type.clone())),
+        Box::new(HirExpr::OptionalIsNone(
+            Box::new(describer()),
+            describer_type.clone(),
+        )),
         Box::new(HirExpr::JsonObjectLit(Vec::new(), HirType::Json)),
         Box::new(HirExpr::Call(
-            Box::new(HirExpr::OptionalValue(Box::new(describer()), describer_type)), Vec::new(),
+            Box::new(HirExpr::OptionalValue(
+                Box::new(describer()),
+                describer_type,
+            )),
+            Vec::new(),
         )),
         HirType::Json,
     )
@@ -403,7 +447,9 @@ pub fn caught_exception_json_adapter() -> HirExpr {
         HirExpr::Call(Box::new(HirExpr::Var(name.into())), args)
     }
     let carrier = caught_exception_carrier_type();
-    let HirType::Union(members) = &carrier else { unreachable!() };
+    let HirType::Union(members) = &carrier else {
+        unreachable!()
+    };
     let value_name = "__thaw_caught_adapter_value".to_string();
     let value = HirExpr::Var(value_name.clone());
     let mut selected: Option<HirExpr> = None;
@@ -426,16 +472,27 @@ pub fn caught_exception_json_adapter() -> HirExpr {
             9 => {
                 let tag_name = "__thaw_caught_adapter_tag".to_string();
                 let tag = HirExpr::Var(tag_name.clone());
-                let by_tag = |tag_value: i64, then: HirExpr, other: HirExpr| HirExpr::Conditional(
-                    Box::new(HirExpr::BinOp(
-                        BinOp::EqEqEq, Box::new(tag.clone()), Box::new(HirExpr::Lit(HirLit::I64(tag_value))),
-                    )),
-                    Box::new(then), Box::new(other), HirType::Json,
-                );
-                let empty_object = || call("__thaw_json_object_from_json_entries", vec![HirExpr::ArrayAlloc(
-                    Box::new(HirExpr::Lit(HirLit::F64(0.0))),
-                    HirType::Tuple(vec![HirType::Str, HirType::Json]),
-                )]);
+                let by_tag = |tag_value: i64, then: HirExpr, other: HirExpr| {
+                    HirExpr::Conditional(
+                        Box::new(HirExpr::BinOp(
+                            BinOp::EqEqEq,
+                            Box::new(tag.clone()),
+                            Box::new(HirExpr::Lit(HirLit::I64(tag_value))),
+                        )),
+                        Box::new(then),
+                        Box::new(other),
+                        HirType::Json,
+                    )
+                };
+                let empty_object = || {
+                    call(
+                        "__thaw_json_object_from_json_entries",
+                        vec![HirExpr::ArrayAlloc(
+                            Box::new(HirExpr::Lit(HirLit::F64(0.0))),
+                            HirType::Tuple(vec![HirType::Str, HirType::Json]),
+                        )],
+                    )
+                };
                 let mut body = HirExpr::ThrowValue(
                     Box::new(HirExpr::Lit(HirLit::Str(
                         "caught native value has no Json projection".into(),
@@ -448,10 +505,18 @@ pub fn caught_exception_json_adapter() -> HirExpr {
                 for tag_value in [28, 20] {
                     body = by_tag(tag_value, call("__thaw_json_undefined", Vec::new()), body);
                 }
-                HirExpr::Call(Box::new(HirExpr::Lambda(
-                    Vec::new(), vec![HirParam { name: tag_name, ty: HirType::I64 }],
-                    HirType::Json, Box::new(body),
-                )), vec![call("__thaw_native_exception_tag", vec![active])])
+                HirExpr::Call(
+                    Box::new(HirExpr::Lambda(
+                        Vec::new(),
+                        vec![HirParam {
+                            name: tag_name,
+                            ty: HirType::I64,
+                        }],
+                        HirType::Json,
+                        Box::new(body),
+                    )),
+                    vec![call("__thaw_native_exception_tag", vec![active])],
+                )
             }
             _ => unreachable!("caught exception carrier has no member {index}"),
         };
@@ -463,14 +528,24 @@ pub fn caught_exception_json_adapter() -> HirExpr {
                     Box::new(HirExpr::UnionTag(Box::new(value.clone()), members.clone())),
                     Box::new(HirExpr::Lit(HirLit::F64(index as f64))),
                 )),
-                Box::new(arm), Box::new(other), HirType::Json,
+                Box::new(arm),
+                Box::new(other),
+                HirType::Json,
             ),
         });
     }
-    let body = call("__thaw_json_track_owned", vec![selected.expect("catch layout is nonempty")]);
+    let body = call(
+        "__thaw_json_track_owned",
+        vec![selected.expect("catch layout is nonempty")],
+    );
     HirExpr::Lambda(
-        Vec::new(), vec![HirParam { name: value_name, ty: carrier }],
-        HirType::Json, Box::new(body),
+        Vec::new(),
+        vec![HirParam {
+            name: value_name,
+            ty: carrier,
+        }],
+        HirType::Json,
+        Box::new(body),
     )
 }
 
@@ -515,7 +590,11 @@ pub enum HirInitStep {
 }
 
 pub fn promise_settled_result_type(value: HirType) -> HirType {
-    let value = if value == HirType::Void { HirType::Undefined } else { value };
+    let value = if value == HirType::Void {
+        HirType::Undefined
+    } else {
+        value
+    };
     HirType::Union(vec![
         HirType::Object(vec![
             ("status".into(), HirType::Str),

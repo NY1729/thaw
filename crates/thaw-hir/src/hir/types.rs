@@ -259,7 +259,8 @@ pub fn native_exception_tag(ty: &HirType) -> Option<u64> {
         HirType::Set(_) => 25,
         HirType::WeakSet(_) => 26,
         HirType::Tuple(_) => 27,
-        HirType::Function(_, _) | HirType::FunctionWithThis(_, _)
+        HirType::Function(_, _)
+        | HirType::FunctionWithThis(_, _)
         | HirType::CallableFunction(..) => 28,
         HirType::Promise(_) => 29,
         _ => return None,

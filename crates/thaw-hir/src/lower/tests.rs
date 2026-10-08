@@ -18,7 +18,8 @@ fn unstage_object_literal(expr: &HirExpr, subst: &[(String, HirExpr)]) -> HirExp
     match expr {
         HirExpr::Call(callee, args) => match callee.as_ref() {
             HirExpr::Lambda(_, params, _, body)
-                if params.len() == args.len() && params.iter().all(|param| is_staging(&param.name)) =>
+                if params.len() == args.len()
+                    && params.iter().all(|param| is_staging(&param.name)) =>
             {
                 let mut inner = subst.to_vec();
                 for (param, arg) in params.iter().zip(args) {
@@ -33,9 +34,15 @@ fn unstage_object_literal(expr: &HirExpr, subst: &[(String, HirExpr)]) -> HirExp
             unstage_object_literal(value, subst)
         }
         HirExpr::ObjectLit(fields) => HirExpr::ObjectLit(
-            fields.iter().map(|(name, value)| (name.clone(), unstage_object_literal(value, subst))).collect(),
+            fields
+                .iter()
+                .map(|(name, value)| (name.clone(), unstage_object_literal(value, subst)))
+                .collect(),
         ),
-        HirExpr::Var(name) => subst.iter().rev().find(|(bound, _)| bound == name)
+        HirExpr::Var(name) => subst
+            .iter()
+            .rev()
+            .find(|(bound, _)| bound == name)
             .map_or_else(|| expr.clone(), |(_, value)| value.clone()),
         other => other.clone(),
     }
@@ -43,7 +50,9 @@ fn unstage_object_literal(expr: &HirExpr, subst: &[(String, HirExpr)]) -> HirExp
 
 fn unstage_let(statement: &HirStmt) -> HirStmt {
     match statement {
-        HirStmt::Let(name, ty, init) => HirStmt::Let(name.clone(), ty.clone(), unstage_object_literal(init, &[])),
+        HirStmt::Let(name, ty, init) => {
+            HirStmt::Let(name.clone(), ty.clone(), unstage_object_literal(init, &[]))
+        }
         other => other.clone(),
     }
 }

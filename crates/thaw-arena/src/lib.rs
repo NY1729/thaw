@@ -122,10 +122,14 @@ pub fn was_reclaimed(pointer: usize) -> bool {
 /// prospective live-object owner still belongs to a tracked allocation
 /// before attaching a retained JS wrapper or callback to it.
 pub fn contains_allocation(pointer: usize) -> bool {
-    if pointer == 0 || !is_tracing() { return false; }
+    if pointer == 0 || !is_tracing() {
+        return false;
+    }
     ALLOCATIONS.with(|allocations| {
         let allocations = allocations.borrow();
-        allocations.range(..=pointer).next_back()
+        allocations
+            .range(..=pointer)
+            .next_back()
             .is_some_and(|(&start, &(size, _))| pointer - start < size)
     })
 }

@@ -26,10 +26,14 @@ fn graph_transfers() -> &'static Mutex<HashMap<usize, Vec<u8>>> {
 /// # Safety
 /// `pointer` must be a live owned string from a trusted graph producer.
 pub unsafe fn register_owned_graph_wire(pointer: *const c_char) -> bool {
-    if pointer.is_null() { return false; }
+    if pointer.is_null() {
+        return false;
+    }
     let bytes = unsafe { NativeStr::from_ptr(pointer) }.to_bytes().to_vec();
     let mut transfers = graph_transfers().lock().unwrap();
-    if transfers.contains_key(&(pointer as usize)) { return false; }
+    if transfers.contains_key(&(pointer as usize)) {
+        return false;
+    }
     transfers.insert(pointer as usize, bytes);
     true
 }
@@ -38,8 +42,7 @@ pub unsafe fn register_owned_graph_wire(pointer: *const c_char) -> bool {
 /// # Safety
 /// `pointer` must be a live native string for this call.
 pub unsafe fn take_owned_graph_wire(pointer: *const c_char) -> bool {
-    unsafe { take_owned_graph_wire_snapshot(pointer) }
-        .is_some_and(|(_, bytes_match)| bytes_match)
+    unsafe { take_owned_graph_wire_snapshot(pointer) }.is_some_and(|(_, bytes_match)| bytes_match)
 }
 
 /// Consumes a grant and returns its trusted producer snapshot together with
@@ -47,11 +50,14 @@ pub unsafe fn take_owned_graph_wire(pointer: *const c_char) -> bool {
 /// retiring only leases from the original snapshot.
 /// # Safety
 /// `pointer` must be a live native string for this call.
-pub unsafe fn take_owned_graph_wire_snapshot(
-    pointer: *const c_char,
-) -> Option<(Vec<u8>, bool)> {
-    if pointer.is_null() { return None; }
-    let expected = graph_transfers().lock().unwrap().remove(&(pointer as usize));
+pub unsafe fn take_owned_graph_wire_snapshot(pointer: *const c_char) -> Option<(Vec<u8>, bool)> {
+    if pointer.is_null() {
+        return None;
+    }
+    let expected = graph_transfers()
+        .lock()
+        .unwrap()
+        .remove(&(pointer as usize));
     expected.map(|bytes| {
         let bytes_match = bytes == unsafe { NativeStr::from_ptr(pointer) }.to_bytes();
         (bytes, bytes_match)
@@ -72,7 +78,13 @@ impl<'a> NativeStr<'a> {
                     .get(&(pointer as usize))
                     .map(|&(length, _)| length)
             })
-            .or_else(|| owned_lengths().lock().unwrap().get(&(pointer as usize)).copied());
+            .or_else(|| {
+                owned_lengths()
+                    .lock()
+                    .unwrap()
+                    .get(&(pointer as usize))
+                    .copied()
+            });
         Self(match length {
             Some(length) => unsafe { std::slice::from_raw_parts(pointer.cast(), length) },
             None => unsafe { CStr::from_ptr(pointer) }.to_bytes(),
@@ -157,7 +169,10 @@ pub fn owned_string(bytes: impl AsRef<[u8]>) -> *mut c_char {
     let mut buffer = bytes.to_vec();
     buffer.push(0);
     let pointer = Box::into_raw(buffer.into_boxed_slice()) as *mut u8;
-    owned_lengths().lock().unwrap().insert(pointer as usize, bytes.len());
+    owned_lengths()
+        .lock()
+        .unwrap()
+        .insert(pointer as usize, bytes.len());
     pointer.cast()
 }
 
@@ -169,7 +184,10 @@ pub unsafe fn destroy_string(pointer: *const c_char) {
     if pointer.is_null() {
         return;
     }
-    graph_transfers().lock().unwrap().remove(&(pointer as usize));
+    graph_transfers()
+        .lock()
+        .unwrap()
+        .remove(&(pointer as usize));
     if let Some(length) = owned_lengths().lock().unwrap().remove(&(pointer as usize)) {
         unsafe {
             drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(
@@ -204,15 +222,29 @@ mod tests {
     fn utf16_replacement_preserves_units_and_substitution_patterns() {
         let value = [0xd800, b'a' as u16, 0xdc00];
         let replacement = [b'$' as u16, b'&' as u16, b'$' as u16, b'$' as u16];
-        assert_eq!(utf16_replace(&value, &[b'a' as u16], &replacement, false), [0xd800, b'a' as u16, b'$' as u16, 0xdc00]);
-        assert_eq!(utf16_replace(&[0xd800, 0xdc00], &[], &[b'-' as u16], true), [b'-' as u16, 0xd800, b'-' as u16, 0xdc00, b'-' as u16]);
+        assert_eq!(
+            utf16_replace(&value, &[b'a' as u16], &replacement, false),
+            [0xd800, b'a' as u16, b'$' as u16, 0xdc00]
+        );
+        assert_eq!(
+            utf16_replace(&[0xd800, 0xdc00], &[], &[b'-' as u16], true),
+            [b'-' as u16, 0xd800, b'-' as u16, 0xdc00, b'-' as u16]
+        );
     }
 
     #[test]
     fn case_segments_keep_context_and_lone_surrogates() {
         let units = [0xd800, 0x039f, 0x03a3, 0xdc00, 0x00df];
-        assert_eq!(utf16_map_segments(&units, |text, output| output.extend(text.to_lowercase().encode_utf16())), [0xd800, 0x03bf, 0x03c2, 0xdc00, 0x00df]);
-        assert_eq!(utf16_map_segments(&units, |text, output| output.extend(text.to_uppercase().encode_utf16())), [0xd800, 0x039f, 0x03a3, 0xdc00, 0x0053, 0x0053]);
+        assert_eq!(
+            utf16_map_segments(&units, |text, output| output
+                .extend(text.to_lowercase().encode_utf16())),
+            [0xd800, 0x03bf, 0x03c2, 0xdc00, 0x00df]
+        );
+        assert_eq!(
+            utf16_map_segments(&units, |text, output| output
+                .extend(text.to_uppercase().encode_utf16())),
+            [0xd800, 0x039f, 0x03a3, 0xdc00, 0x0053, 0x0053]
+        );
     }
 
     #[test]
@@ -233,7 +265,9 @@ mod tests {
             let pointer = pointer as *mut c_char;
             assert_eq!(unsafe { NativeStr::from_ptr(pointer) }.to_bytes(), b"a\0b");
             unsafe { destroy_string(pointer) };
-        }).join().unwrap();
+        })
+        .join()
+        .unwrap();
     }
 }
 
@@ -262,8 +296,7 @@ pub fn wtf8_decode_utf16(bytes: &[u8]) -> Vec<u16> {
             index += 1;
         } else if (0xC2..=0xDF).contains(&first) {
             if index + 1 < bytes.len() && wtf8_continuation(bytes[index + 1]) {
-                let code =
-                    ((u32::from(first) & 0x1F) << 6) | (u32::from(bytes[index + 1]) & 0x3F);
+                let code = ((u32::from(first) & 0x1F) << 6) | (u32::from(bytes[index + 1]) & 0x3F);
                 units.push(code as u16);
                 index += 2;
             } else {
@@ -361,7 +394,6 @@ pub fn wtf8_encode_utf16(units: &[u16]) -> Vec<u8> {
     bytes
 }
 
-
 /// Replaces UTF-16 string matches with ECMAScript string substitution patterns.
 pub fn utf16_replace(value: &[u16], search: &[u16], replacement: &[u16], all: bool) -> Vec<u16> {
     let mut output = Vec::new();
@@ -370,7 +402,10 @@ pub fn utf16_replace(value: &[u16], search: &[u16], replacement: &[u16], all: bo
         let found = if search.is_empty() {
             Some(cursor)
         } else {
-            value[cursor..].windows(search.len()).position(|part| part == search).map(|offset| cursor + offset)
+            value[cursor..]
+                .windows(search.len())
+                .position(|part| part == search)
+                .map(|offset| cursor + offset)
         };
         let Some(start) = found else { break };
         let end = start + search.len();
@@ -395,9 +430,13 @@ pub fn utf16_replace(value: &[u16], search: &[u16], replacement: &[u16], all: bo
             index += 1;
         }
         cursor = end;
-        if !all { break; }
+        if !all {
+            break;
+        }
         if search.is_empty() {
-            if cursor == value.len() { break; }
+            if cursor == value.len() {
+                break;
+            }
             output.push(value[cursor]);
             cursor += 1;
         }
@@ -407,10 +446,7 @@ pub fn utf16_replace(value: &[u16], search: &[u16], replacement: &[u16], all: bo
 }
 
 /// Maps contiguous valid UTF-16 text while preserving lone surrogates unchanged.
-pub fn utf16_map_segments(
-    units: &[u16],
-    mut map: impl FnMut(&str, &mut Vec<u16>),
-) -> Vec<u16> {
+pub fn utf16_map_segments(units: &[u16], mut map: impl FnMut(&str, &mut Vec<u16>)) -> Vec<u16> {
     let mut output = Vec::with_capacity(units.len());
     let mut segment = String::new();
     for character in char::decode_utf16(units.iter().copied()) {
