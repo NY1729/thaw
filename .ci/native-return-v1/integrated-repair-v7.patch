@@ -1,0 +1,1049 @@
+diff --git a/crates/thaw-cli/src/tests/registry_jit_aggregates/basics.rs b/crates/thaw-cli/src/tests/registry_jit_aggregates/basics.rs
+index 986a062..e835bf8 100644
+--- a/crates/thaw-cli/src/tests/registry_jit_aggregates/basics.rs
++++ b/crates/thaw-cli/src/tests/registry_jit_aggregates/basics.rs
+@@ -191,10 +191,13 @@ fn bare_imports_automatically_resolve_registry_packages() {
+         "{}",
+         String::from_utf8_lossy(&result.stderr)
+     );
++    // The old "`math-kit::fail` threw:" prefix was a Thaw-only decoration; a caught
++    // error prints its bare message (Node prints a stack trace here, which a native
++    // binary has no equivalent of).
+     assert_eq!(
+             String::from_utf8_lossy(&result.stdout),
+             format!(
+-                "42\n32\n49\nhello thaw\ntrue\ntrue\n42\n3\n46\nfile://{}\nfile://{}?raw\n`math-kit::fail` threw: typed dynamic failed\n",
++                "42\n32\n49\nhello thaw\ntrue\ntrue\n42\n3\n46\nfile://{}\nfile://{}?raw\ntyped dynamic failed\n",
+                 registry.join("math-kit/bundle.js").display(),
+                 registry
+                     .join("math-kit/subpaths/advanced/bundle.js")
+diff --git a/crates/thaw-cli/src/tests/registry_runtime.rs b/crates/thaw-cli/src/tests/registry_runtime.rs
+index b87273f..2e5b696 100644
+--- a/crates/thaw-cli/src/tests/registry_runtime.rs
++++ b/crates/thaw-cli/src/tests/registry_runtime.rs
+@@ -121,7 +121,8 @@ fn imports_supported_node_builtin_modules() {
+                     console.log(os.arch() + ":" + os.platform() + ":" + os.type() + ":" + os.tmpdir());
+                     console.log(Boolean(isatty(1)));
+                     console.log(String(querystring.stringify({ a: [1, 2], space: "two words" })));
+-                    console.log(String(querystring.parse("a=1&a=2&space=two+words")));
++                    // Node: String() of these null-prototype objects throws, so print them as JSON.
++                    console.log(JSON.stringify(querystring.parse("a=1&a=2&space=two+words")));
+                     const emitter = new EventEmitter();
+                     let emitted: number = 0;
+                     emitter.once("value", (value): void => { emitted = Number(value); });
+@@ -130,7 +131,7 @@ fn imports_supported_node_builtin_modules() {
+                     console.log(emitted);
+                     console.log(String(readDynamicValue(pathToFileURL("/tmp/a b"))));
+                     console.log(fileURLToPath(pathToFileURL("/tmp/a b")));
+-                    console.log(String(urlToHttpOptions(pathToFileURL("/tmp/a b"))));
++                    console.log(JSON.stringify(urlToHttpOptions(pathToFileURL("/tmp/a b"))));
+                 }
+             "#,
+         )
+diff --git a/crates/thaw-hir/src/lower/assignments/targets.rs b/crates/thaw-hir/src/lower/assignments/targets.rs
+index 36bf0e1..bd71789 100644
+--- a/crates/thaw-hir/src/lower/assignments/targets.rs
++++ b/crates/thaw-hir/src/lower/assignments/targets.rs
+@@ -60,7 +60,9 @@ impl<'a> FnLowerer<'a> {
+             HirType::Json => {
+                 let key = self.lower_expr(&computed.expr)?;
+                 match self.infer_expr_type(&key)? {
+-                    HirType::Str => {
++                    // A symbol is stored under its private string token, like a
++                    // dictionary key.
++                    HirType::Str | HirType::Symbol => {
+                         Ok(Target::Dictionary(object, Box::new(key), HirType::Json))
+                     }
+                     HirType::F64 => Ok(Target::JsonIndex(object, Box::new(key))),
+diff --git a/crates/thaw-hir/src/lower/context.rs b/crates/thaw-hir/src/lower/context.rs
+index c6941ea..8d29b04 100644
+--- a/crates/thaw-hir/src/lower/context.rs
++++ b/crates/thaw-hir/src/lower/context.rs
+@@ -37,6 +37,8 @@ struct FnLowerer<'a> {
+     bindings: HashMap<Symbol, Vec<Symbol>>,
+     used_hir_bindings: HashSet<Symbol>,
+     sparse_arrays: HashSet<Symbol>,
++    /// `__thaw_native_arg_N` temporaries bound to a fresh object literal (not a native owner).
++    fresh_object_bindings: HashSet<Symbol>,
+     conservative_sparse_arrays: HashSet<Symbol>,
+     sparse_array_functions: HashSet<Symbol>,
+     next_binding: usize,
+diff --git a/crates/thaw-hir/src/lower/expressions/coercions.rs b/crates/thaw-hir/src/lower/expressions/coercions.rs
+index 4147955..81ca39b 100644
+--- a/crates/thaw-hir/src/lower/expressions/coercions.rs
++++ b/crates/thaw-hir/src/lower/expressions/coercions.rs
+@@ -940,7 +940,35 @@ impl<'a> FnLowerer<'a> {
+                 self.next_binding += 1;
+                 self.scope.insert(name.clone(), union_type.clone());
+                 let mut statements = Vec::with_capacity(members.len());
++                let is_carrier = HirType::Union(members.clone()) == crate::caught_exception_carrier_type();
+                 for index in 0..members.len() {
++                    // A caught object / Json / live JS value (carrier members 6..=9): read it through
++                    // the same live Json view `.message` uses, so `String(e)` / `e.toString()` of a
++                    // class extending `Error` is `Name: message` rather than `[object Object]`.
++                    if is_carrier && (6..=9).contains(&index) {
++                        let live = self.caught_carrier_as_json(HirExpr::Var(name.clone()))?;
++                        let part = HirExpr::Call(
++                            Box::new(HirExpr::Var("__thaw_json_error_to_string".to_string())),
++                            vec![live],
++                        );
++                        if index + 1 == members.len() {
++                            statements.push(HirStmt::Return(Some(part)));
++                        } else {
++                            statements.push(HirStmt::If(
++                                HirExpr::BinOp(
++                                    BinOp::EqEqEq,
++                                    Box::new(HirExpr::UnionTag(
++                                        Box::new(HirExpr::Var(name.clone())),
++                                        members.clone(),
++                                    )),
++                                    Box::new(HirExpr::Lit(HirLit::F64(index as f64))),
++                                ),
++                                vec![HirStmt::Return(Some(part))],
++                                Vec::new(),
++                            ));
++                        }
++                        continue;
++                    }
+                     let part = self.coerce_primitive_to_string(HirExpr::UnionValue(
+                         Box::new(HirExpr::Var(name.clone())),
+                         index,
+@@ -948,7 +976,7 @@ impl<'a> FnLowerer<'a> {
+                     ))?;
+                     // A caught `Error` travels as a framed string (carrier member 3);
+                     // its string form is `Name: message`, a plain string is unchanged.
+-                    let part = if index == 3 && HirType::Union(members.clone()) == crate::caught_exception_carrier_type() {
++                    let part = if index == 3 && is_carrier {
+                         HirExpr::Call(Box::new(HirExpr::Var("__thaw_error_to_string".to_string())), vec![part])
+                     } else { part };
+                     if index + 1 == members.len() {
+@@ -1417,6 +1445,10 @@ impl<'a> FnLowerer<'a> {
+         } else if matches!(&rhs_type, HirType::Function(_, _) | HirType::CallableFunction(..))
+             && lhs_type == HirType::Undefined {
+             Self::function_pointer_is_undefined(right, &rhs_type)
++        } else if let Some(identity) = Self::caught_object_identity(&left, &lhs_type, &right, &rhs_type)
++            .or_else(|| Self::caught_object_identity(&right, &rhs_type, &left, &lhs_type))
++        {
++            identity
+         } else if lhs_type == rhs_type {
+             HirExpr::BinOp(BinOp::EqEqEq, Box::new(left), Box::new(right))
+         } else if Self::strict_reference_type(&lhs_type) && Self::strict_reference_type(&rhs_type) {
+@@ -1455,6 +1487,29 @@ impl<'a> FnLowerer<'a> {
+         self.wrap_call_argument_bindings(result, &[(lhs_name, lhs_type, lhs), (rhs_name, rhs_type, rhs)])
+     }
+ 
++    /// `caught === original` for a thrown native object: the carrier keeps the owner pointer of the
++    /// original (member 6), so identity is the active tag plus pointer equality with that object.
++    fn caught_object_identity(
++        carrier: &HirExpr, carrier_type: &HirType, object: &HirExpr, object_type: &HirType,
++    ) -> Option<HirExpr> {
++        let carrier_members = match carrier_type {
++            HirType::Union(members) if *carrier_type == crate::caught_exception_carrier_type() => members,
++            _ => return None,
++        };
++        if !matches!(object_type, HirType::Object(fields) if !fields.is_empty()) {
++            return None;
++        }
++        Some(Self::strict_if(
++            HirExpr::BinOp(BinOp::EqEqEq,
++                Box::new(HirExpr::UnionTag(Box::new(carrier.clone()), carrier_members.clone())),
++                Box::new(HirExpr::Lit(HirLit::F64(6.0)))),
++            HirExpr::BinOp(BinOp::EqEqEq,
++                Box::new(HirExpr::UnionValue(Box::new(carrier.clone()), 6, carrier_members.clone())),
++                Box::new(object.clone())),
++            HirExpr::Lit(HirLit::Bool(false)),
++        ))
++    }
++
+     fn strict_if(condition: HirExpr, yes: HirExpr, no: HirExpr) -> HirExpr {
+         HirExpr::Conditional(Box::new(condition), Box::new(yes), Box::new(no), HirType::Bool)
+     }
+diff --git a/crates/thaw-hir/src/lower/inference/coercions.rs b/crates/thaw-hir/src/lower/inference/coercions.rs
+index 67b98a6..31858e7 100644
+--- a/crates/thaw-hir/src/lower/inference/coercions.rs
++++ b/crates/thaw-hir/src/lower/inference/coercions.rs
+@@ -175,7 +175,7 @@ impl<'a> FnLowerer<'a> {
+         self.next_binding += 1;
+         let previous = self.scope.insert(owner.clone(), full_type.clone());
+         let projection = self.lower_fixed_object_as_dynamic_accessor_object(
+-            HirExpr::Var(owner.clone()), fields, true,
++            HirExpr::Var(owner.clone()), fields, true, true,
+         );
+         let factory = HirExpr::Lambda(
+             vec![HirParam { name: owner.clone(), ty: full_type.clone() }],
+@@ -963,7 +963,13 @@ impl<'a> FnLowerer<'a> {
+                     || !fields.iter().any(|(name, _)|
+                         name.starts_with("__thaw_class_identity_\u{1e}")))
+                     && Self::fixed_object_supports_live_projection(&actual) {
+-                    let projected = self.lower_fixed_object_as_dynamic_accessor_object(value, fields, false)?;
++                    // A fresh `any` literal converts to a mutable native copy; a projection of an
++                    // existing native owner stays a live reference to it.
++                    let live = !(matches!(value, HirExpr::ObjectLit(_))
++                        || Self::is_wrapped_object_literal(&value)
++                        || matches!(&value, HirExpr::Var(name)
++                            if self.fresh_object_bindings.contains(name)));
++                    let projected = self.lower_fixed_object_as_dynamic_accessor_object(value, fields, false, live)?;
+                     return self.coerce_to_declared(&HirType::Json, projected);
+                 }
+             }
+diff --git a/crates/thaw-hir/src/lower/inference/properties.rs b/crates/thaw-hir/src/lower/inference/properties.rs
+index 3879635..c9e26fd 100644
+--- a/crates/thaw-hir/src/lower/inference/properties.rs
++++ b/crates/thaw-hir/src/lower/inference/properties.rs
+@@ -99,7 +99,16 @@ impl<'a> FnLowerer<'a> {
+                 )],
+             ));
+             let live = self.caught_carrier_as_json(bound.clone())?;
+-            let live_read = HirExpr::JsonGet(Box::new(live), property.into());
++            // `error.stack` of a live caught object without its own `stack`: the first line a real
++            // stack starts with (`Name: message`); a native binary has no frames to append.
++            let live_read = if property == "stack" {
++                HirExpr::Call(
++                    Box::new(HirExpr::Var("__thaw_json_error_stack".into())),
++                    vec![live],
++                )
++            } else {
++                HirExpr::JsonGet(Box::new(live), property.into())
++            };
+             let read = match framed_field {
+                 Some(field) => HirExpr::Conditional(
+                     Box::new(HirExpr::BinOp(BinOp::EqEqEq,
+diff --git a/crates/thaw-hir/src/lower/inference/types.rs b/crates/thaw-hir/src/lower/inference/types.rs
+index 669a604..d703c5b 100644
+--- a/crates/thaw-hir/src/lower/inference/types.rs
++++ b/crates/thaw-hir/src/lower/inference/types.rs
+@@ -1488,6 +1488,13 @@ impl<'a> FnLowerer<'a> {
+                         self.expect_type(&HirType::Str, class_name, "instanceof class name")?;
+                         return Ok(HirType::Bool);
+                     }
++                    "__thaw_native_wrapper_is_live" => {
++                        let [value] = args.as_slice() else {
++                            return Err("native wrapper check expects one operand".into());
++                        };
++                        self.expect_type(&HirType::Json, value, "native wrapper check receiver")?;
++                        return Ok(HirType::Bool);
++                    }
+                     "__thaw_error_is_error" => {
+                         let [value] = args.as_slice() else {
+                             return Err("Error.isError expects one operand".into());
+@@ -2322,6 +2329,13 @@ impl<'a> FnLowerer<'a> {
+                         self.expect_type(&HirType::Bool, value, "JSON bool")?;
+                         return Ok(HirType::Json);
+                     }
++                    "__thaw_json_error_to_string" | "__thaw_json_error_stack" => {
++                        let [value] = args.as_slice() else {
++                            return Err("caught JSON error helper expects one operand".into());
++                        };
++                        self.expect_type(&HirType::Json, value, "caught JSON error value")?;
++                        return Ok(if name == "__thaw_json_error_stack" { HirType::Json } else { HirType::Str });
++                    }
+                     "__thaw_json_receiver_string" => {
+                         let [value] = args.as_slice() else {
+                             return Err("JSON string expects one operand".into());
+diff --git a/crates/thaw-hir/src/lower/invocations/arguments.rs b/crates/thaw-hir/src/lower/invocations/arguments.rs
+index 3a854e3..edccef0 100644
+--- a/crates/thaw-hir/src/lower/invocations/arguments.rs
++++ b/crates/thaw-hir/src/lower/invocations/arguments.rs
+@@ -77,6 +77,9 @@ impl<'a> FnLowerer<'a> {
+                 let name = format!("__thaw_native_arg_{}", self.next_binding);
+                 self.next_binding += 1;
+                 self.scope.insert(name.clone(), ty.clone());
++                if matches!(value, HirExpr::ObjectLit(_)) || Self::is_wrapped_object_literal(&value) {
++                    self.fresh_object_bindings.insert(name.clone());
++                }
+                 bindings.push((name.clone(), ty, value));
+                 values.push(HirExpr::Var(name));
+                 continue;
+diff --git a/crates/thaw-hir/src/lower/invocations/calls.rs b/crates/thaw-hir/src/lower/invocations/calls.rs
+index 3b8bbe2..49e74f2 100644
+--- a/crates/thaw-hir/src/lower/invocations/calls.rs
++++ b/crates/thaw-hir/src/lower/invocations/calls.rs
+@@ -1750,7 +1750,17 @@ impl<'a> FnLowerer<'a> {
+                     {
+                         self.lower_expr_with_expected_type(&argument.expr, Some(&HirType::JsValue))?
+                     }
+-                    _ => self.lower_expr_with_expected_type(&argument.expr, expected)?,
++                    _ => {
++                        let console_read = if callee_name.starts_with("console.") {
++                            self.lower_console_dictionary_read(&argument.expr)?
++                        } else {
++                            None
++                        };
++                        match console_read {
++                            Some(read) => read,
++                            None => self.lower_expr_with_expected_type(&argument.expr, expected)?,
++                        }
++                    }
+                 }
+             };
+             if let Some(pattern) = signature
+diff --git a/crates/thaw-hir/src/lower/invocations/instance_builtins/conversion_methods.rs b/crates/thaw-hir/src/lower/invocations/instance_builtins/conversion_methods.rs
+index 6b8266c..c5ae1e3 100644
+--- a/crates/thaw-hir/src/lower/invocations/instance_builtins/conversion_methods.rs
++++ b/crates/thaw-hir/src/lower/invocations/instance_builtins/conversion_methods.rs
+@@ -709,6 +709,15 @@ impl<'a> FnLowerer<'a> {
+                 vec![receiver, key_value],
+             ));
+         }
++        // A string primitive owns enumerable index keys; the Json inspector
++        // already knows the string rules.
++        if matches!(&receiver_type, HirType::Str | HirType::StrLiteral(_)) {
++            let json = self.wrap_native_value_as_json(receiver, receiver_type)?;
++            return Ok(HirExpr::Call(
++                Box::new(HirExpr::Var("__thaw_json_property_is_enumerable".into())),
++                vec![json, key_value],
++            ));
++        }
+         if !matches!(&receiver_type, HirType::Object(_)) {
+             return Err(format!(
+                 "`propertyIsEnumerable` currently requires a fixed object or dictionary, got {receiver_type:?}"
+diff --git a/crates/thaw-hir/src/lower/invocations/static_builtins.rs b/crates/thaw-hir/src/lower/invocations/static_builtins.rs
+index d43d2ac..4a160a8 100644
+--- a/crates/thaw-hir/src/lower/invocations/static_builtins.rs
++++ b/crates/thaw-hir/src/lower/invocations/static_builtins.rs
+@@ -574,7 +574,10 @@ impl<'a> FnLowerer<'a> {
+                                     .into(),
+                             );
+                         };
+-                        if self.infer_expr_type(target)? == HirType::JsValue {
++                        // A `Json`/`any` receiver may hold a live native-owner wrapper;
++                        // route it through the same dynamic call so the wrapper's own
++                        // descriptor traps (owner attribute side tables) answer.
++                        if matches!(self.infer_expr_type(target)?, HirType::JsValue | HirType::Json) {
+                             let key = if self.infer_expr_type(key)? == HirType::JsValue {
+                                 key.clone()
+                             } else {
+@@ -944,6 +947,7 @@ impl<'a> FnLowerer<'a> {
+                         // object path (only `value` is modelled; accessor
+                         // descriptors are ignored).
+                         let dynamic_target = self.lower_expr(target.expr.as_ref())?;
++                        let dynamic_target_var = dynamic_target.clone();
+                         let dynamic_target_type = self.infer_expr_type(&dynamic_target)?;
+                         if matches!(
+                             dynamic_target_type,
+@@ -1002,15 +1006,73 @@ impl<'a> FnLowerer<'a> {
+                                             .map(|ty| HirParam { name: captured, ty })
+                                     })
+                                     .collect();
+-                                return Ok(HirExpr::Call(
++                                let existing = HirExpr::Call(
+                                     Box::new(HirExpr::Lambda(
+                                         captures,
+                                         Vec::new(),
+-                                        return_type,
++                                        return_type.clone(),
+                                         Box::new(body),
+                                     )),
+                                     Vec::new(),
+-                                ));
++                                );
++                                // A `Json` that is a live wrapper of a native owner must receive
++                                // the descriptor itself (attributes live on the owner), not a
++                                // detached `value` write.
++                                if dynamic_target_type == HirType::Json
++                                    && matches!(&dynamic_target_var, HirExpr::Var(_)) {
++                                    let label = format!("{}.defineProperty", object.sym);
++                                    let (arguments, bindings) =
++                                        self.lower_native_spread_values(&call.args, &label)?;
++                                    let json_arguments = arguments
++                                        .iter()
++                                        .map(|argument| {
++                                            if self.infer_expr_type(argument)? == HirType::JsValue {
++                                                Ok(argument.clone())
++                                            } else {
++                                                self.coerce_to_declared(&HirType::Json, argument.clone())
++                                            }
++                                        })
++                                        .collect::<Result<Vec<_>, String>>()?;
++                                    let json_arguments = self.coerce_to_declared(
++                                        &HirType::Json,
++                                        HirExpr::ArrayLit(json_arguments),
++                                    )?;
++                                    let holder = HirExpr::Call(
++                                        Box::new(HirExpr::Var("getDynamicValue".to_string())),
++                                        vec![HirExpr::Lit(HirLit::Str(object.sym.to_string()))],
++                                    );
++                                    let dynamic = HirExpr::Call(
++                                        Box::new(HirExpr::Var(
++                                            if object.sym == *"Reflect" {
++                                                "callDynamicMethod"
++                                            } else {
++                                                "callDynamicMethodHandle"
++                                            }
++                                            .to_string(),
++                                        )),
++                                        vec![
++                                            holder,
++                                            HirExpr::Lit(HirLit::Str("defineProperty".to_string())),
++                                            json_arguments,
++                                        ],
++                                    );
++                                    let dynamic = if object.sym == *"Reflect" {
++                                        HirExpr::JsonAsBool(Box::new(dynamic))
++                                    } else {
++                                        self.coerce_to_declared(&HirType::Json, dynamic)?
++                                    };
++                                    let dynamic = self.wrap_call_argument_bindings(dynamic, &bindings)?;
++                                    return Ok(HirExpr::Conditional(
++                                        Box::new(HirExpr::Call(
++                                            Box::new(HirExpr::Var("__thaw_native_wrapper_is_live".into())),
++                                            vec![dynamic_target_var],
++                                        )),
++                                        Box::new(dynamic),
++                                        Box::new(existing),
++                                        return_type,
++                                    ));
++                                }
++                                return Ok(existing);
+                             }
+                         }
+                         let Expr::Lit(Lit::Str(key)) = key.expr.as_ref() else {
+@@ -2465,7 +2527,7 @@ impl<'a> FnLowerer<'a> {
+                         };
+                         if let Some(fields) = live_function_fields.or(native_accessor_fields) {
+                             let live = self.lower_fixed_object_as_dynamic_accessor_object(
+-                                value, &fields, false,
++                                value, &fields, false, false,
+                             )?;
+                             let space = space
+                                 .map(|(value, _)| value)
+diff --git a/crates/thaw-hir/src/lower/module/pipeline.rs b/crates/thaw-hir/src/lower/module/pipeline.rs
+index 1d95851..81aeb1c 100644
+--- a/crates/thaw-hir/src/lower/module/pipeline.rs
++++ b/crates/thaw-hir/src/lower/module/pipeline.rs
+@@ -582,7 +582,13 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
+                     })
+                     .collect::<Result<Vec<_>, _>>()?;
+                 if name.ends_with(PROMISE_REJECTION_CALLBACK_SUFFIX) && !params.is_empty() {
+-                    params[0] = HirType::Str;
++                    // The rejection reason is a string; a leading rest parameter
++                    // receives it as a one-element array.
++                    params[0] = if matches!(func.params.first().map(|p| &p.pat), Some(Pat::Rest(_))) {
++                        HirType::Array(Box::new(HirType::Str))
++                    } else {
++                        HirType::Str
++                    };
+                 }
+                 let mut generic_this_pattern = None;
+                 if let Some(this) = &func.this_param {
+diff --git a/crates/thaw-hir/src/lower/objects.rs b/crates/thaw-hir/src/lower/objects.rs
+index 2e97f8c..c92d8f1 100644
+--- a/crates/thaw-hir/src/lower/objects.rs
++++ b/crates/thaw-hir/src/lower/objects.rs
+@@ -1868,6 +1868,35 @@ impl<'a> FnLowerer<'a> {
+         }
+     }
+ 
++    /// `console.log(record.missing)` must print `undefined` like Node, but a
++    /// `Record<string, number|string|boolean>` read is statically the bare
++    /// payload (a missing key would decode as NaN/""/false). For a console
++    /// argument only, read through the `Optional` form so absence stays visible.
++    pub(super) fn lower_console_dictionary_read(&mut self, expr: &Expr) -> Result<Option<HirExpr>, String> {
++        let Expr::Member(member) = expr else { return Ok(None) };
++        let Expr::Ident(object) = member.obj.as_ref() else { return Ok(None) };
++        let Some(HirType::Dictionary(element)) = self.scope.get(&self.resolve_binding(object.sym.as_ref())).cloned() else {
++            return Ok(None);
++        };
++        if !matches!(element.as_ref(), HirType::F64 | HirType::Str | HirType::Bool) {
++            return Ok(None);
++        }
++        let key = match &member.prop {
++            MemberProp::Ident(prop) => HirExpr::Lit(HirLit::Str(prop.sym.to_string())),
++            MemberProp::Computed(computed) => {
++                let key = self.lower_expr(&computed.expr)?;
++                if self.infer_expr_type(&key)? != HirType::Str {
++                    return Ok(None);
++                }
++                key
++            }
++            _ => return Ok(None),
++        };
++        let object = self.lower_expr(&member.obj)?;
++        let optional = HirType::Optional(element);
++        self.typed_dictionary_read(object, key, &optional).map(Some)
++    }
++
+     pub(super) fn typed_dictionary_read(
+         &mut self,
+         object: HirExpr,
+@@ -2706,7 +2735,8 @@ impl<'a> FnLowerer<'a> {
+                     HirType::Json => {
+                         let key = self.lower_expr(&computed.expr)?;
+                         match self.infer_expr_type(&key)? {
+-                            HirType::Str => {
++                            // A symbol is stored under its private string token.
++                            HirType::Str | HirType::Symbol => {
+                                 Ok(HirExpr::JsonKey(Box::new(obj), Box::new(key)))
+                             }
+                             HirType::F64 => {
+@@ -3782,6 +3812,7 @@ impl<'a> FnLowerer<'a> {
+         value: HirExpr,
+         fields: &[(Symbol, HirType)],
+         factory_body: bool,
++        live: bool,
+     ) -> Result<HirExpr, String> {
+         let source_type = HirType::Object(fields.to_vec());
+         let source_name = format!("__thaw_dynamic_accessor_object_{}", self.next_binding);
+@@ -3830,7 +3861,7 @@ impl<'a> FnLowerer<'a> {
+                     if Self::fixed_object_supports_live_projection(&read_type) {
+                         // Preserve nested native storage identity when its
+                         // receiver layout is safe to expose as a live host.
+-                        read = self.lower_fixed_object_as_dynamic_accessor_object(read, nested, false)?;
++                        read = self.lower_fixed_object_as_dynamic_accessor_object(read, nested, false, live)?;
+                         read_type = HirType::JsValue;
+                     }
+                 }
+@@ -3981,6 +4012,12 @@ impl<'a> FnLowerer<'a> {
+         body.extend(self.lower_ordered_fixed_field_statements(
+             HirExpr::Var(source_name.clone()), fields, metadata_actions,
+         )?);
++        // One entry past the last key: the wrapper is a live reference to a native owner
++        // (not the projection of a fresh `any` literal, which converts to a mutable copy).
++        body.push(HirStmt::Expr(HirExpr::Call(
++            Box::new(HirExpr::Var("__thaw_array_push".into())),
++            vec![HirExpr::Var(accessor_name.clone()), HirExpr::Lit(HirLit::Bool(live))],
++        )));
+         let keys = self.coerce_to_declared(
+             &HirType::Json,
+             HirExpr::Var(keys_name),
+@@ -4477,10 +4514,7 @@ impl<'a> FnLowerer<'a> {
+         let Some((_, method_ty)) = fields.iter().find(|(name, _)| *name == key) else {
+             return Ok(None);
+         };
+-        let HirType::Function(params, _) = method_ty.clone() else {
+-            return Ok(None);
+-        };
+-        let Some(HirType::Object(receiver_fields)) = params.into_iter().next() else {
++        let HirType::Function(params, ret) = method_ty.clone() else {
+             return Ok(None);
+         };
+         let object_type = HirType::Object(fields.to_vec());
+@@ -4489,6 +4523,18 @@ impl<'a> FnLowerer<'a> {
+         self.scope.insert(name.clone(), object_type.clone());
+         let bound = HirExpr::Var(name.clone());
+         let method = HirExpr::PropAccess(Box::new(bound.clone()), object_type.clone(), key);
++        // A method that never reads `this` has no receiver parameter: it takes
++        // only the hint.
++        let Some(HirType::Object(receiver_fields)) = params.into_iter().next() else {
++            let call = HirExpr::Call(
++                Box::new(method),
++                vec![HirExpr::Lit(HirLit::Str(hint.to_string()))],
++            );
++            // Callers expect the raw `Json` result; a typed return is widened.
++            let call = if *ret == HirType::Json { call } else { self.coerce_to_declared(&HirType::Json, call)? };
++            let result = self.wrap_call_argument_bindings(call, &[(name, object_type, value)])?;
++            return Ok(Some(result));
++        };
+         let (this_arg, view_binding) = self.native_object_method_receiver(
+             bound.clone(), &object_type, &receiver_fields,
+         );
+diff --git a/crates/thaw-hir/src/lower/statements/context.rs b/crates/thaw-hir/src/lower/statements/context.rs
+index 3ae5156..6eaceff 100644
+--- a/crates/thaw-hir/src/lower/statements/context.rs
++++ b/crates/thaw-hir/src/lower/statements/context.rs
+@@ -86,6 +86,7 @@ impl<'a> FnLowerer<'a> {
+             bindings: HashMap::new(),
+             used_hir_bindings: HashSet::new(),
+             sparse_arrays: HashSet::new(),
++            fresh_object_bindings: HashSet::new(),
+             conservative_sparse_arrays: HashSet::new(),
+             sparse_array_functions: HashSet::new(),
+             next_binding: 0,
+diff --git a/crates/thaw-llvm/src/hir_codegen/invocations/calls.rs b/crates/thaw-llvm/src/hir_codegen/invocations/calls.rs
+index 016b18f..6530a7b 100644
+--- a/crates/thaw-llvm/src/hir_codegen/invocations/calls.rs
++++ b/crates/thaw-llvm/src/hir_codegen/invocations/calls.rs
+@@ -1532,6 +1532,7 @@ impl<'ctx> HirCompiler<'ctx> {
+             | "__thaw_error_suppressed_error"
+             | "__thaw_error_suppressed"
+             | "__thaw_error_is_error"
++            | "__thaw_native_wrapper_is_live"
+             | "__thaw_error_to_string" => {
+                 let [value] = args else {
+                     return Err(format!("{name} expects one operand"));
+@@ -1588,7 +1589,46 @@ impl<'ctx> HirCompiler<'ctx> {
+                 let [receiver, key] = args else {
+                     return Err("__thaw_error_property expects a receiver and a property name".into());
+                 };
+-                let receiver = self.compile_expr(receiver)?;
++                let receiver_type = self.expr_hir_type(receiver);
++                let mut receiver = self.compile_expr(receiver)?;
++                // A union-typed catch value carries its text as the `Str` member's
++                // payload; read it only when that member is the active one.
++                if let (BasicValueEnum::StructValue(union), Some(HirType::Union(members))) =
++                    (receiver, receiver_type)
++                {
++                    let ptr_type = self.context.ptr_type(AddressSpace::default());
++                    receiver = match members.iter().position(|member| *member == HirType::Str) {
++                        Some(index) => {
++                            let tag = self
++                                .builder
++                                .build_extract_value(union, 0, "catch_tag")
++                                .map_err(|error| error.to_string())?
++                                .into_int_value();
++                            let payload = self
++                                .builder
++                                .build_extract_value(union, 1, "catch_payload")
++                                .map_err(|error| error.to_string())?
++                                .into_int_value();
++                            let text = self
++                                .builder
++                                .build_int_to_ptr(payload, ptr_type, "catch_text")
++                                .map_err(|error| error.to_string())?;
++                            let is_text = self
++                                .builder
++                                .build_int_compare(
++                                    inkwell::IntPredicate::EQ,
++                                    tag,
++                                    tag.get_type().const_int(index as u64, false),
++                                    "catch_is_text",
++                                )
++                                .map_err(|error| error.to_string())?;
++                            self.builder
++                                .build_select(is_text, text, ptr_type.const_null(), "catch_text_or_null")
++                                .map_err(|error| error.to_string())?
++                        }
++                        None => ptr_type.const_null().into(),
++                    };
++                }
+                 let key = self.compile_expr(key)?;
+                 return self
+                     .builder
+diff --git a/crates/thaw-llvm/src/hir_codegen/invocations/json_calls.rs b/crates/thaw-llvm/src/hir_codegen/invocations/json_calls.rs
+index 173cc3f..4d66fc1 100644
+--- a/crates/thaw-llvm/src/hir_codegen/invocations/json_calls.rs
++++ b/crates/thaw-llvm/src/hir_codegen/invocations/json_calls.rs
+@@ -92,6 +92,14 @@ impl<'ctx> HirCompiler<'ctx> {
+                 return self.compile_single_arg_call(
+                     "thaw_json_receiver_number", args, "JSON number");
+             }
++            "__thaw_json_error_to_string" => {
++                return self.compile_single_arg_call(
++                    "thaw_json_error_to_string", args, "caught JSON toString");
++            }
++            "__thaw_json_error_stack" => {
++                return self.compile_single_arg_call(
++                    "thaw_json_error_stack", args, "caught JSON stack");
++            }
+             "__thaw_json_receiver_string" => {
+                 return self.compile_single_arg_call(
+                     "thaw_json_receiver_string", args, "JSON string");
+diff --git a/crates/thaw-llvm/src/hir_codegen/json_bridge/decoding.rs b/crates/thaw-llvm/src/hir_codegen/json_bridge/decoding.rs
+index 686027b..b71d94a 100644
+--- a/crates/thaw-llvm/src/hir_codegen/json_bridge/decoding.rs
++++ b/crates/thaw-llvm/src/hir_codegen/json_bridge/decoding.rs
+@@ -193,6 +193,16 @@ impl<'ctx> HirCompiler<'ctx> {
+             HirType::CallableFunction(params, _, None, ret) => {
+                 self.compile_js_callback_from_json(json, params, ret)
+             }
++            // A native Promise resolver accepts `Promise<T> | undefined` (`Optional(Promise)`):
++            // `setTimeout(resolve, 5)` calls it with no argument and never reaches this arm.
++            // A JS promise handed to it has no native adoption path, so it is a TypeError.
++            HirType::Promise(_) => {
++                self.compile_throw_type_error("a JavaScript Promise cannot be adopted by a native Promise resolver")?;
++                let function = self.current_function();
++                let unreachable = self.context.append_basic_block(function, "promise_adoption_unreachable");
++                self.builder.position_at_end(unreachable);
++                self.compile_zero_value(ty)
++            }
+             other => Err(format!("unsupported dynamic result value {other:?}")),
+         }
+     }
+diff --git a/crates/thaw-llvm/src/hir_codegen/json_bridge/encoding.rs b/crates/thaw-llvm/src/hir_codegen/json_bridge/encoding.rs
+index 1e281ba..91c54e6 100644
+--- a/crates/thaw-llvm/src/hir_codegen/json_bridge/encoding.rs
++++ b/crates/thaw-llvm/src/hir_codegen/json_bridge/encoding.rs
+@@ -982,7 +982,10 @@ impl<'ctx> HirCompiler<'ctx> {
+                 .build_unconditional_branch(done)
+                 .map_err(|error| error.to_string())?;
+             self.builder.position_at_end(undefined_block);
+-            if preserve_undefined && !self.console_omit_absent_fields {
++            // `T | null | undefined` holds an explicit `undefined` value, which
++            // Node prints (`{ nullish: undefined }`); only a bare optional
++            // property is omitted when absent.
++            if preserve_undefined {
+                 let undefined = self.compile_napi_undefined_json()?;
+                 self.compile_json_object_set_native_with_undefined(
+                     json,
+diff --git a/crates/thaw-llvm/src/hir_codegen/operators.rs b/crates/thaw-llvm/src/hir_codegen/operators.rs
+index a349ab9..51266eb 100644
+--- a/crates/thaw-llvm/src/hir_codegen/operators.rs
++++ b/crates/thaw-llvm/src/hir_codegen/operators.rs
+@@ -332,6 +332,7 @@ impl<'ctx> HirCompiler<'ctx> {
+                         | "deleteDynamicProperty"
+                         | "hasDynamicProperty"
+                         | "__thaw_error_is_error"
++                        | "__thaw_native_wrapper_is_live"
+                         | "__thaw_error_is_instance" => {
+                             return Some(HirType::Bool)
+                         }
+diff --git a/crates/thaw-llvm/src/hir_codegen/runtime_declarations.rs b/crates/thaw-llvm/src/hir_codegen/runtime_declarations.rs
+index 1c6a435..9298221 100644
+--- a/crates/thaw-llvm/src/hir_codegen/runtime_declarations.rs
++++ b/crates/thaw-llvm/src/hir_codegen/runtime_declarations.rs
+@@ -1713,6 +1713,11 @@ impl<'ctx> HirCompiler<'ctx> {
+             self.context.bool_type().fn_type(&[i8_ptr.into()], false),
+             Some(Linkage::External),
+         );
++        self.module.add_function(
++            "thaw_native_wrapper_is_live",
++            self.context.bool_type().fn_type(&[i8_ptr.into()], false),
++            Some(Linkage::External),
++        );
+         for name in ["thaw_object_set_state", "thaw_object_state"] {
+             self.module.add_function(
+                 name,
+@@ -2272,6 +2277,16 @@ impl<'ctx> HirCompiler<'ctx> {
+             i8_ptr.fn_type(&[self.context.f64_type().into()], false),
+             Some(Linkage::External),
+         );
++        self.module.add_function(
++            "thaw_json_error_to_string",
++            i8_ptr.fn_type(&[i8_ptr.into()], false),
++            Some(Linkage::External),
++        );
++        self.module.add_function(
++            "thaw_json_error_stack",
++            i8_ptr.fn_type(&[i8_ptr.into()], false),
++            Some(Linkage::External),
++        );
+         self.module.add_function(
+             "thaw_json_receiver_string",
+             i8_ptr.fn_type(&[i8_ptr.into()], false),
+@@ -2574,7 +2589,8 @@ impl<'ctx> HirCompiler<'ctx> {
+         self.module.add_function(
+             "thaw_js_handle_typed_array_probe",
+             i8_ptr.fn_type(&[self.context.i64_type().into()], false),
+-            Some(Linkage::External),
++            // Weak: a pure-native program prints this union arm but never holds a JsValue.
++            Some(Linkage::ExternalWeak),
+         );
+         self.module.add_function(
+             "thaw_console_typed_or",
+@@ -2584,7 +2600,8 @@ impl<'ctx> HirCompiler<'ctx> {
+         self.module.add_function(
+             "thaw_js_handle_to_console_string",
+             i8_ptr.fn_type(&[self.context.i64_type().into()], false),
+-            Some(Linkage::External),
++            // Weak: a pure-native program prints this union arm but never holds a JsValue.
++            Some(Linkage::ExternalWeak),
+         );
+         self.module.add_function(
+             "thaw_js_call_handle_result",
+diff --git a/crates/thaw-llvm/src/hir_codegen/tests/control_flow.rs b/crates/thaw-llvm/src/hir_codegen/tests/control_flow.rs
+index bda28b9..be34b94 100644
+--- a/crates/thaw-llvm/src/hir_codegen/tests/control_flow.rs
++++ b/crates/thaw-llvm/src/hir_codegen/tests/control_flow.rs
+@@ -532,7 +532,10 @@ fn quickjs_errors_use_thaw_try_catch_and_finally() {
+     "#;
+     assert_eq!(
+         compile_and_run(source, "quickjs_result_abi"),
+-        "`boom` threw: kaboom\ncleanup\n`later`'s promise rejected: nope\n`badThen`'s promise rejected: bad then\n"
++        // The old "`label` threw:" / "`label`'s promise rejected:" prefixes were Thaw-only
++        // decorations; a caught error prints its bare message (Node prints a stack trace
++        // here, which a native binary has no equivalent of, so only the message remains).
++        "kaboom\ncleanup\nnope\nbad then\n"
+     );
+ }
+ 
+@@ -957,14 +960,18 @@ fn throwing_a_non_string_value_coerces_it_to_a_string() {
+ 
+ #[test]
+ fn throwing_an_unsupported_value_is_a_compile_error_not_a_crash() {
+-    let module = thaw_parser::parse_typescript(
++    // Any value is throwable. Node treats `throw Promise.resolve(1)` as an
++    // uncaught exception (exit status 1, `Promise { 1 }` on stderr); the
++    // native program must do the same instead of failing to compile or
++    // crashing.
++    let (stdout, stderr, status) = compile_and_run_failing(
+         r#"function main(): void {
+             throw Promise.resolve(1);
+         }"#,
+-    )
+-    .unwrap();
+-    let error = thaw_hir::lower_module(&module).unwrap_err();
+-    assert!(error.contains("string conversion") || error.contains("Promise"), "{error}");
++        "throw_unsupported_value",
++    );
++    assert_eq!((stdout.as_str(), status), ("", Some(1)), "{stderr}");
++    assert!(stderr.starts_with("Uncaught:"), "{stderr}");
+ }
+ 
+ /// `const g: any = gen();` (coercing a generator's own internal
+diff --git a/crates/thaw-llvm/src/hir_codegen/tests/core.rs b/crates/thaw-llvm/src/hir_codegen/tests/core.rs
+index 801eefc..762a61c 100644
+--- a/crates/thaw-llvm/src/hir_codegen/tests/core.rs
++++ b/crates/thaw-llvm/src/hir_codegen/tests/core.rs
+@@ -149,7 +149,10 @@ fn console_log_serializes_tagged_values_inside_collections() {
+ 
+     assert_eq!(
+         compile_and_run(source, "tagged_collection_console"),
+-        "[1,null,3]\n[\"a\",null,\"c\"]\n[true,null,null]\n[null,null,null]\n{\"nullable\":null}\n{\"optional\":2,\"nullable\":\"x\",\"nullish\":null}\n"
++        // Verified against Node 22: `console.log` prints `undefined` array
++        // elements and an explicit `undefined` property, but omits an absent
++        // optional property.
++        "[ 1, undefined, 3 ]\n[ 'a', null, 'c' ]\n[ true, null, undefined ]\n[ undefined, null, undefined ]\n{ nullable: null, nullish: undefined }\n{ optional: 2, nullable: 'x', nullish: null }\n"
+     );
+ }
+ 
+@@ -2604,7 +2607,10 @@ fn propagates_synchronous_native_callback_exceptions_to_quickjs() {
+     "#;
+     assert_eq!(
+         compile_and_run(source, "native_callback_exception"),
+-        "`invokeCallback` threw: callback failed\n"
++        // Node: `error.message` of an Error thrown inside a callback that crosses
++        // the JS boundary is the bare message; the old "`label` threw:" prefix was a
++        // Thaw-only decoration (checked with node 22: prints "callback failed").
++        "callback failed\n"
+     );
+ }
+ 
+diff --git a/crates/thaw-llvm/src/hir_codegen/tests/native_builtins.rs b/crates/thaw-llvm/src/hir_codegen/tests/native_builtins.rs
+index 175759a..c823028 100644
+--- a/crates/thaw-llvm/src/hir_codegen/tests/native_builtins.rs
++++ b/crates/thaw-llvm/src/hir_codegen/tests/native_builtins.rs
+@@ -4383,24 +4383,21 @@ fn compiles_map_or_set_mutating_methods_for_any_typed_receivers() {
+ }
+ 
+ /// `.set()` on a `Map` stored in `any` behind a property chain (not a
+-/// bare local variable) is a documented, narrower limitation, not a
+-/// silent no-op or a crash -- see the doc comment on
+-/// `compiles_map_or_set_mutating_methods_for_any_typed_receivers`.
++/// bare local variable) mutates the real map, as in Node; it used to be a
++/// documented limitation that failed to compile (see the doc comment on
++/// `compiles_map_or_set_mutating_methods_for_any_typed_receivers`).
+ #[test]
+ fn map_set_on_an_any_typed_property_chain_receiver_errors_clearly() {
++    // An `any` property holding a real native `Map` accepts `set`/`get` just
++    // like Node; it no longer needs a plain local variable receiver.
+     let source = r#"
+         function main(): void {
+             const holder: { m: any } = { m: new Map<string, number>([["a", 1]]) };
+             holder.m.set("b", 2);
++            console.log(holder.m.get("b"), holder.m.size);
+         }
+     "#;
+-    let module = thaw_parser::parse_typescript(source).unwrap();
+-    let error =
+-        thaw_hir::lower_module(&module).expect_err("property-chain receiver should error");
+-    assert!(
+-        error.contains("plain local variable"),
+-        "unexpected error: {error}"
+-    );
++    assert_eq!(compile_and_run(source, "map_set_any_property_chain"), "2 2\n");
+ }
+ 
+ #[test]
+diff --git a/crates/thaw-llvm/src/hir_codegen/tests/values/dynamic_and_json.rs b/crates/thaw-llvm/src/hir_codegen/tests/values/dynamic_and_json.rs
+index 8ee8871..788eec6 100644
+--- a/crates/thaw-llvm/src/hir_codegen/tests/values/dynamic_and_json.rs
++++ b/crates/thaw-llvm/src/hir_codegen/tests/values/dynamic_and_json.rs
+@@ -363,9 +363,10 @@ fn deletes_runtime_keyed_dictionary_properties() {
+             console.log(JSON.stringify(parsed));
+         }
+     "#;
++    // Node 22: reading a deleted/missing Record key prints `undefined`, not NaN.
+     assert_eq!(
+         compile_and_run(source, "delete_dictionary_properties"),
+-        "9\n5\ntrue\ntrue\nNaN\ntrue\nkey\ntrue\nNaN\nobject\ntrue\ntrue\n{}\n"
++        "9\n5\ntrue\ntrue\nundefined\ntrue\nkey\ntrue\nundefined\nobject\ntrue\ntrue\n{}\n"
+     );
+ }
+ 
+diff --git a/crates/thaw-quickjs/src/quickjs/api.rs b/crates/thaw-quickjs/src/quickjs/api.rs
+index b698271..40315a4 100644
+--- a/crates/thaw-quickjs/src/quickjs/api.rs
++++ b/crates/thaw-quickjs/src/quickjs/api.rs
+@@ -3228,6 +3228,15 @@ pub extern "C" fn thaw_js_host_query_result(handle: u64, operation: u8) -> ThawR
+         if operation == 14 {
+             return Ok(if value.is_function() { "1" } else { "0" }.to_string());
+         }
++        // 21: the native owner pointer (hex) behind a live native-object wrapper, or "".
++        // The private identity WeakMap answers; no user property can forge it.
++        if operation == 21 {
++            let bridge = ctx.userdata::<NativeCallbackIdentityBridge<'_>>()
++                .ok_or("native object identity bridge is unavailable")?;
++            let pointer_of = bridge.object_pointer.clone();
++            drop(bridge);
++            return pointer_of.call((value, String::new())).map_err(|error| error.to_string());
++        }
+         let query: Function = ctx.globals().get("__thaw_json_host_query")
+             .map_err(|error| error.to_string())?;
+         query.call((value, operation)).map_err(|error| match error {
+diff --git a/crates/thaw-quickjs/src/quickjs/platform_globals/runtime.js b/crates/thaw-quickjs/src/quickjs/platform_globals/runtime.js
+index 7f2ffb2..1fee739 100644
+--- a/crates/thaw-quickjs/src/quickjs/platform_globals/runtime.js
++++ b/crates/thaw-quickjs/src/quickjs/platform_globals/runtime.js
+@@ -412,6 +412,10 @@
+       case 15: return thawHostStringUnits(value);
+       // 17: a native fixed-layout owner wrapper (cannot grow, delete or hold `undefined`).
+       case 17: return thawGraphApply(thawNapiWeakSetHas, thawNativeWrapperSet, [value]) ? '1' : '0';
++      // 18/19/20: the wrapper's native integrity state (frozen / sealed / non-extensible).
++      case 18: return thawGraphObjectIsFrozen(value) ? '1' : '0';
++      case 19: return thawGraphObjectIsSealed(value) ? '1' : '0';
++      case 20: return thawNapiReflectIsExtensible(value) ? '0' : '1';
+       default: throw new thawGraphTypeError('Invalid native host query');
+     }
+   };
+@@ -1981,7 +1985,7 @@
+       });
+       let hasAccessor = false;
+       for (let i = 0; i < keys.length; i++) if (accessors[i]) hasAccessor = true;
+-      if (!hasAccessor) thawGraphApply(thawNapiWeakSetAdd, thawNativeWrapperSet, [wrapper]);
++      if (!hasAccessor && accessors[keys.length] !== true) thawGraphApply(thawNapiWeakSetAdd, thawNativeWrapperSet, [wrapper]);
+       return wrapper;
+     },
+     writable: false, configurable: false,
+@@ -2668,9 +2672,11 @@
+     };
+   }
+   const previousPlatformPoll = globalThis.__thaw_poll_platform_events;
++  // User code may replace `JSON.parse`; the event-loop poll must not depend on it.
++  const intrinsicJsonParse = JSON.parse;
+   globalThis.__thaw_poll_platform_events = () => {
+     if (previousPlatformPoll) previousPlatformPoll();
+-    stdinPending.push(...JSON.parse(globalThis.__thaw_process_poll_stdin()));
++    stdinPending.push(...intrinsicJsonParse(globalThis.__thaw_process_poll_stdin()));
+     drainStdin();
+   };
+   globalThis.__thaw_run_main_file = filename => {
+diff --git a/crates/thaw-std/src/http.rs b/crates/thaw-std/src/http.rs
+index 4df79be..e531604 100644
+--- a/crates/thaw-std/src/http.rs
++++ b/crates/thaw-std/src/http.rs
+@@ -1254,13 +1254,16 @@ fn normalize_status(status_code: f64) -> u16 {
+     }
+ }
+ 
+-/// EOF closes only the peer's sending half; response writes remain valid.
++/// EOF closes only the peer's sending half; response writes remain valid once a response has started.
+ fn client_hung_up(connection: &mut ConnectionState) -> bool {
+     if connection.peer_read_closed { return false; }
+     let mut probe = [0_u8; 1];
+     match &connection.stream {
+         Some(stream) => match stream.peek(&mut probe) {
+-            Ok(0) => { connection.peer_read_closed = true; false }
++            // Node (httpAllowHalfOpen=false) aborts a request whose client hung up before any
++            // response started and releases the socket; a response already streaming may still be
++            // read by a half-closed peer, so that case is preserved.
++            Ok(0) => { connection.peer_read_closed = true; connection.awaiting_handler && !connection.streaming }
+             Ok(_) => false,
+             Err(error) if matches!(error.kind(), std::io::ErrorKind::WouldBlock
+                 | std::io::ErrorKind::Interrupted) => false,
+diff --git a/crates/thaw-std/src/json.rs b/crates/thaw-std/src/json.rs
+index b090923..6effd05 100644
+--- a/crates/thaw-std/src/json.rs
++++ b/crates/thaw-std/src/json.rs
+@@ -692,6 +692,7 @@ impl<T> Drop for SharedValue<T> {
+ unsafe extern "C" {
+     fn thaw_object_clear_state(object: *const u8);
+     fn thaw_object_state(object: *const u8, query: u8) -> bool;
++    fn thaw_object_set_state(object: *const u8, operation: u8) -> bool;
+ }
+ 
+ /// Thaw's own dynamic (`Json`/`any`-typed) value representation --
+@@ -1007,6 +1008,14 @@ fn copy_array_holes(source: &SharedArray, target: &SharedArray, skip: usize) {
+     });
+ }
+ 
++/// True when `value` is a live Host wrapper of a native owner (a projection that must receive
++/// descriptor operations itself instead of a detached copy).
++#[no_mangle]
++pub unsafe extern "C" fn thaw_native_wrapper_is_live(value: *const Value) -> bool {
++    let Some(Value::Host(lease)) = (unsafe { value.as_ref() }) else { return false };
++    host_query(lease, 21).is_some_and(|text| usize::from_str_radix(text.trim(), 16).is_ok_and(|owner| owner != 0))
++}
++
+ /// Shared identity for Object.freeze/seal/preventExtensions. Drop removes
+ /// runtime state before the Rc allocation can be reused.
+ #[no_mangle]
+@@ -1014,6 +1023,15 @@ pub unsafe extern "C" fn thaw_json_state_key(value: *const Value) -> *const u8 {
+     let Some(value) = (unsafe { value.as_ref() }) else {
+         return std::ptr::null();
+     };
++    // A live wrapper of a native owner shares the owner's pointer-keyed integrity state.
++    if let Value::Host(lease) = value {
++        if let Some(owner) = host_query(lease, 21)
++            .and_then(|text| usize::from_str_radix(text.trim(), 16).ok())
++            .filter(|owner| *owner != 0)
++        {
++            return owner as *const u8;
++        }
++    }
+     let Some(identity) = object_identity_key(value) else {
+         return value as *const Value as *const u8;
+     };
+@@ -4000,6 +4018,54 @@ pub unsafe extern "C" fn thaw_json_array_join(
+     thaw_arena::owned_string(joined)
+ }
+ 
++/// The string-valued `key` of a caught (live) Json value, if it has one.
++fn caught_json_text(value: *mut Value, key: &str) -> Option<String> {
++    let key = std::ffi::CString::new(key).ok()?;
++    let found = thaw_json_get(value, key.as_ptr());
++    match unsafe { &*found } {
++        Value::String(text) => Some(text.clone()),
++        _ => None,
++    }
++}
++
++/// `String(error)` / `error.toString()` for a caught value that arrived as live Json:
++/// `Name: message` for an Error-like object (a `name` or `message` string), `[object Object]`
++/// otherwise. Mirrors `thaw_error_to_string` for the framed-string carrier member.
++#[no_mangle]
++pub extern "C" fn thaw_json_error_to_string(value: *mut Value) -> *const c_char {
++    let text = match unsafe { &*value } {
++        Value::String(text) => text.clone(),
++        Value::Object(_) | Value::Host(_) => {
++            let name = caught_json_text(value, "name");
++            let message = caught_json_text(value, "message");
++            if name.is_none() && message.is_none() {
++                "[object Object]".to_string()
++            } else {
++                let name = name.unwrap_or_else(|| "Error".to_string());
++                let message = message.unwrap_or_default();
++                if message.is_empty() { name } else if name.is_empty() { message } else { format!("{name}: {message}") }
++            }
++        }
++        _ => return thaw_json_as_string(value),
++    };
++    thaw_arena::owned_string(text.as_bytes())
++}
++
++/// `error.stack` for a caught live Json value: its own `stack` string if it has one, else the
++/// first line a real stack always starts with (`Name: message`; a native binary has no frames
++/// to append), else `undefined`.
++#[no_mangle]
++pub extern "C" fn thaw_json_error_stack(value: *mut Value) -> *mut Value {
++    if let Some(stack) = caught_json_text(value, "stack").filter(|stack| !stack.is_empty()) {
++        return leak(Value::String(stack));
++    }
++    if caught_json_text(value, "name").is_none() && caught_json_text(value, "message").is_none() {
++        return leak(napi_undefined_value());
++    }
++    let text = thaw_json_error_to_string(value);
++    leak(Value::String(unsafe { CStr::from_ptr(text) }.to_string_lossy().into_owned()))
++}
++
+ #[no_mangle]
+ pub extern "C" fn thaw_json_as_string(value: *mut Value) -> *const c_char {
+     let value = unsafe { &*value };
+@@ -6010,7 +6076,17 @@ fn materialize_native_wrapper(value: Value) -> Value {
+     if host_query(lease, 17).as_deref() != Some("1") { return value; }
+     let entries = host_enumerable_entries(lease);
+     if HOST_ERROR.with(|error| error.borrow().is_some()) { return value; }
+-    Value::shared_object(entries.into_iter().map(|(key, item)| (key, materialize_native_wrapper(item))).collect())
++    // The owner's integrity state (freeze/seal/preventExtensions) is keyed by pointer identity in
++    // thaw-runtime; carry it onto the copy so it survives crossing into `any`.
++    let operation = if host_query(lease, 18).as_deref() == Some("1") { 3 }
++        else if host_query(lease, 19).as_deref() == Some("1") { 2 }
++        else if host_query(lease, 20).as_deref() == Some("1") { 1 } else { 0 };
++    let copy = Value::shared_object(entries.into_iter().map(|(key, item)| (key, materialize_native_wrapper(item))).collect());
++    if operation != 0 {
++        // SAFETY: `copy` is a live Value; the key is its shared-container identity.
++        unsafe { thaw_object_set_state(thaw_json_state_key(&copy), operation) };
++    }
++    copy
+ }
+ 
+ fn object_insert(object: *mut Value, key: *const c_char, value: Value) {

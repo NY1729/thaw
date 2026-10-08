@@ -17,17 +17,21 @@ modified  crates/thaw-cli/src/registry_integration/shim_support.rs
 modified  crates/thaw-cli/src/tests.rs
 modified  crates/thaw-cli/src/tests/external_classes.rs
 modified  crates/thaw-cli/src/tests/module_graph.rs
+modified  crates/thaw-cli/src/tests/registry_jit_aggregates/basics.rs
 modified  crates/thaw-cli/src/tests/registry_jit_primitives.rs
+modified  crates/thaw-cli/src/tests/registry_runtime.rs
 modified  crates/thaw-hir/src/hir/closure_analysis.rs
 modified  crates/thaw-hir/src/hir/ir.rs
 modified  crates/thaw-hir/src/hir/program.rs
 modified  crates/thaw-hir/src/hir/types.rs
 modified  crates/thaw-hir/src/lower.rs
 modified  crates/thaw-hir/src/lower/arrays/transformations.rs
+modified  crates/thaw-hir/src/lower/assignments/targets.rs
 modified  crates/thaw-hir/src/lower/assignments/updates.rs
 modified  crates/thaw-hir/src/lower/bytes_erasure.rs
 modified  crates/thaw-hir/src/lower/calls.rs
 modified  crates/thaw-hir/src/lower/classes/normalization.rs
+modified  crates/thaw-hir/src/lower/context.rs
 modified  crates/thaw-hir/src/lower/control_flow.rs
 modified  crates/thaw-hir/src/lower/declarations.rs
 modified  crates/thaw-hir/src/lower/expressions/coercions.rs
@@ -43,6 +47,7 @@ modified  crates/thaw-hir/src/lower/invocations/calls.rs
 modified  crates/thaw-hir/src/lower/invocations/instance_builtins/array_mutation_methods.rs
 modified  crates/thaw-hir/src/lower/invocations/instance_builtins/array_transform_methods.rs
 modified  crates/thaw-hir/src/lower/invocations/instance_builtins/collections.rs
+modified  crates/thaw-hir/src/lower/invocations/instance_builtins/conversion_methods.rs
 modified  crates/thaw-hir/src/lower/invocations/instance_builtins/regex_methods.rs
 modified  crates/thaw-hir/src/lower/invocations/promises.rs
 modified  crates/thaw-hir/src/lower/invocations/static_builtins.rs
@@ -53,6 +58,7 @@ modified  crates/thaw-hir/src/lower/module/pipeline.rs
 modified  crates/thaw-hir/src/lower/normalize.rs
 modified  crates/thaw-hir/src/lower/objects.rs
 modified  crates/thaw-hir/src/lower/promises.rs
+modified  crates/thaw-hir/src/lower/statements/context.rs
 modified  crates/thaw-hir/src/lower/statements/lowering.rs
 modified  crates/thaw-hir/src/lower/statements/narrowing.rs
 modified  crates/thaw-hir/src/lower/tests.rs
@@ -83,6 +89,7 @@ modified  crates/thaw-llvm/src/hir_codegen/invocations/variable_calls.rs
 modified  crates/thaw-llvm/src/hir_codegen/json_bridge/decoding.rs
 modified  crates/thaw-llvm/src/hir_codegen/json_bridge/encoding.rs
 modified  crates/thaw-llvm/src/hir_codegen/json_values.rs
+modified  crates/thaw-llvm/src/hir_codegen/operators.rs
 modified  crates/thaw-llvm/src/hir_codegen/promises.rs
 modified  crates/thaw-llvm/src/hir_codegen/runtime_declarations.rs
 modified  crates/thaw-llvm/src/hir_codegen/statements.rs
