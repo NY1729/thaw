@@ -689,12 +689,12 @@ fn generic_class_method_shape(
         constraints: type_parameters
             .params
             .iter()
-            .map(|parameter| parameter.constraint.as_deref().map(&convert).transpose())
+            .map(|parameter| parameter.constraint.as_deref().map(convert).transpose())
             .collect::<Result<_, _>>()?,
         defaults: type_parameters
             .params
             .iter()
-            .map(|parameter| parameter.default.as_deref().map(&convert).transpose())
+            .map(|parameter| parameter.default.as_deref().map(convert).transpose())
             .collect::<Result<_, _>>()?,
         is_async: method.function.is_async,
     }))
