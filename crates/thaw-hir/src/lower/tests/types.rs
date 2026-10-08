@@ -2459,9 +2459,9 @@ fn dynamic_symbol_rejects_nonascii_hex_without_slicing_codepoints() {
 // Receiver-generic inference controls for the reviewed r1 prerequisite. These
 // tests deliberately stop at metadata and actual-call type inference; they do
 // not claim a receiver-aware specialization ABI or runtime function value.
-fn receiver_pattern_inference_function<'a>(
-    module: &'a swc_ecma_ast::Module,
-) -> &'a swc_ecma_ast::FnDecl {
+fn receiver_pattern_inference_function(
+    module: &swc_ecma_ast::Module,
+) -> &swc_ecma_ast::FnDecl {
     module
         .body
         .iter()
@@ -2486,6 +2486,7 @@ fn receiver_pattern_inference_this_type(source: &str) -> TsType {
         .clone()
 }
 
+#[allow(clippy::type_complexity)]
 fn receiver_pattern_inference_type_parameters(
     source: &str,
 ) -> Vec<(Option<Box<TsType>>, Option<Box<TsType>>)> {
@@ -3333,7 +3334,7 @@ fn receiver_pattern_inference_explicit_constraints_precede_actual_mismatch() {
     let actual_receiver = [HirType::Str];
     let error = resolve_explicit_generic_type_tuple(
         &constrained,
-        &[explicit_string.clone()],
+        std::slice::from_ref(&explicit_string),
         GenericMatchActuals::Physical(&actual_receiver),
         &interfaces,
         &generic_interfaces,

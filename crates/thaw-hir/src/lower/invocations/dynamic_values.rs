@@ -637,11 +637,11 @@ impl<'a> FnLowerer<'a> {
                     "`{callee_name}(...)` is only supported on a JSON value for now (got {ty:?})"
                 ));
             }
-            return Ok(match callee_name {
+            Ok(match callee_name {
                 "Number" => HirExpr::JsonAsNumber(Box::new(value)),
                 "String" => HirExpr::JsonAsString(Box::new(value)),
                 _ => HirExpr::JsonAsBool(Box::new(value)),
-            });
+            })
     }
 
 }

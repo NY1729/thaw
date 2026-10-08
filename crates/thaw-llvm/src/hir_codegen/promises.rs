@@ -610,6 +610,7 @@ impl<'ctx> HirCompiler<'ctx> {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub(super) fn compile_promise_union_for_escape(
         &mut self,
         expression: &HirExpr,
@@ -1785,7 +1786,7 @@ impl<'ctx> HirCompiler<'ctx> {
         let value = if !on_rejected && callback_input == &HirType::Void {
             None
         } else if on_rejected {
-            Some(rejected_text.expect("rejection text was captured").into())
+            Some(rejected_text.expect("rejection text was captured"))
         } else {
             Some(
                 self.builder
@@ -1889,6 +1890,7 @@ impl<'ctx> HirCompiler<'ctx> {
         Ok(adapter)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn compile_promise_then_both(
         &mut self,
         source: &HirExpr,

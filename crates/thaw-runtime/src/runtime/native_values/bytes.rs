@@ -415,7 +415,7 @@ pub unsafe extern "C" fn thaw_bytes_read(
         return 0.0;
     }
     let offset = offset as usize;
-    if !offset.checked_add(width).is_some_and(|end| end <= bytes.len()) {
+    if offset.checked_add(width).is_none_or(|end| end > bytes.len()) {
         return 0.0;
     }
     let mut le_bytes = vec![0u8; width];
@@ -500,7 +500,7 @@ pub unsafe extern "C" fn thaw_bytes_read_i64(buf: *const u8, offset: f64, le: f6
         return 0;
     }
     let offset = offset as usize;
-    if !offset.checked_add(8).is_some_and(|end| end <= bytes.len()) {
+    if offset.checked_add(8).is_none_or(|end| end > bytes.len()) {
         return 0;
     }
     let mut le_bytes = [0u8; 8];

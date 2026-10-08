@@ -59,7 +59,7 @@ fn boundary(bytes: &[u8], expected: usize) -> Option<usize> {
     Some(index)
 }
 
-fn decimal<'a>(bytes: &'a [u8]) -> Option<(usize, &'a [u8])> {
+fn decimal(bytes: &[u8]) -> Option<(usize, &[u8])> {
     let end = bytes.iter().position(|byte| *byte == b':')?;
     if end == 0 || !bytes[..end].iter().all(u8::is_ascii_digit) {
         return None;

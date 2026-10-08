@@ -208,69 +208,6 @@ pub(crate) fn reset_lengths(tracing: bool) {
     });
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn wtf8_preserves_lone_surrogates_and_embedded_nul() {
-        let units = [0xd800, 0, 0xdc00, 0xd83d, 0xde00];
-        assert_eq!(wtf8_decode_utf16(&wtf8_encode_utf16(&units)), units);
-        assert_eq!(wtf8_encode_utf16(&[0xd800]), [0xed, 0xa0, 0x80]);
-    }
-
-    #[test]
-    fn utf16_replacement_preserves_units_and_substitution_patterns() {
-        let value = [0xd800, b'a' as u16, 0xdc00];
-        let replacement = [b'$' as u16, b'&' as u16, b'$' as u16, b'$' as u16];
-        assert_eq!(
-            utf16_replace(&value, &[b'a' as u16], &replacement, false),
-            [0xd800, b'a' as u16, b'$' as u16, 0xdc00]
-        );
-        assert_eq!(
-            utf16_replace(&[0xd800, 0xdc00], &[], &[b'-' as u16], true),
-            [b'-' as u16, 0xd800, b'-' as u16, 0xdc00, b'-' as u16]
-        );
-    }
-
-    #[test]
-    fn case_segments_keep_context_and_lone_surrogates() {
-        let units = [0xd800, 0x039f, 0x03a3, 0xdc00, 0x00df];
-        assert_eq!(
-            utf16_map_segments(&units, |text, output| output
-                .extend(text.to_lowercase().encode_utf16())),
-            [0xd800, 0x03bf, 0x03c2, 0xdc00, 0x00df]
-        );
-        assert_eq!(
-            utf16_map_segments(&units, |text, output| output
-                .extend(text.to_uppercase().encode_utf16())),
-            [0xd800, 0x039f, 0x03a3, 0xdc00, 0x0053, 0x0053]
-        );
-    }
-
-    #[test]
-    fn native_and_c_strings_keep_distinct_lengths() {
-        let pointer = owned_string(b"a\0b");
-        assert_eq!(unsafe { NativeStr::from_ptr(pointer) }.to_bytes(), b"a\0b");
-        assert_eq!(
-            unsafe { NativeStr::from_ptr(c"abc".as_ptr()) }.to_bytes(),
-            b"abc"
-        );
-        unsafe { destroy_string(pointer) };
-    }
-
-    #[test]
-    fn owned_string_keeps_embedded_nul_across_threads() {
-        let pointer = owned_string(b"a\0b") as usize;
-        std::thread::spawn(move || {
-            let pointer = pointer as *mut c_char;
-            assert_eq!(unsafe { NativeStr::from_ptr(pointer) }.to_bytes(), b"a\0b");
-            unsafe { destroy_string(pointer) };
-        })
-        .join()
-        .unwrap();
-    }
-}
-
 // ---- WTF-8 <-> UTF-16 codec -------------------------------------------------
 //
 // Thaw native strings are WTF-8 with length metadata for embedded NULs:
@@ -461,4 +398,67 @@ pub fn utf16_map_segments(units: &[u16], mut map: impl FnMut(&str, &mut Vec<u16>
     }
     map(&segment, &mut output);
     output
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn wtf8_preserves_lone_surrogates_and_embedded_nul() {
+        let units = [0xd800, 0, 0xdc00, 0xd83d, 0xde00];
+        assert_eq!(wtf8_decode_utf16(&wtf8_encode_utf16(&units)), units);
+        assert_eq!(wtf8_encode_utf16(&[0xd800]), [0xed, 0xa0, 0x80]);
+    }
+
+    #[test]
+    fn utf16_replacement_preserves_units_and_substitution_patterns() {
+        let value = [0xd800, b'a' as u16, 0xdc00];
+        let replacement = [b'$' as u16, b'&' as u16, b'$' as u16, b'$' as u16];
+        assert_eq!(
+            utf16_replace(&value, &[b'a' as u16], &replacement, false),
+            [0xd800, b'a' as u16, b'$' as u16, 0xdc00]
+        );
+        assert_eq!(
+            utf16_replace(&[0xd800, 0xdc00], &[], &[b'-' as u16], true),
+            [b'-' as u16, 0xd800, b'-' as u16, 0xdc00, b'-' as u16]
+        );
+    }
+
+    #[test]
+    fn case_segments_keep_context_and_lone_surrogates() {
+        let units = [0xd800, 0x039f, 0x03a3, 0xdc00, 0x00df];
+        assert_eq!(
+            utf16_map_segments(&units, |text, output| output
+                .extend(text.to_lowercase().encode_utf16())),
+            [0xd800, 0x03bf, 0x03c2, 0xdc00, 0x00df]
+        );
+        assert_eq!(
+            utf16_map_segments(&units, |text, output| output
+                .extend(text.to_uppercase().encode_utf16())),
+            [0xd800, 0x039f, 0x03a3, 0xdc00, 0x0053, 0x0053]
+        );
+    }
+
+    #[test]
+    fn native_and_c_strings_keep_distinct_lengths() {
+        let pointer = owned_string(b"a\0b");
+        assert_eq!(unsafe { NativeStr::from_ptr(pointer) }.to_bytes(), b"a\0b");
+        assert_eq!(
+            unsafe { NativeStr::from_ptr(c"abc".as_ptr()) }.to_bytes(),
+            b"abc"
+        );
+        unsafe { destroy_string(pointer) };
+    }
+
+    #[test]
+    fn owned_string_keeps_embedded_nul_across_threads() {
+        let pointer = owned_string(b"a\0b") as usize;
+        std::thread::spawn(move || {
+            let pointer = pointer as *mut c_char;
+            assert_eq!(unsafe { NativeStr::from_ptr(pointer) }.to_bytes(), b"a\0b");
+            unsafe { destroy_string(pointer) };
+        })
+        .join()
+        .unwrap();
+    }
 }

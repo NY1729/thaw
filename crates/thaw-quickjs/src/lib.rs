@@ -21,6 +21,7 @@
 //! thrown JS exceptions, malformed arguments, and Promise rejections through
 //! Thaw's `try`/`catch`. The original `thaw_js_call` JSON-error-object API is
 //! retained for C ABI compatibility with older callers.
+#![allow(clippy::missing_safety_doc, clippy::not_unsafe_ptr_arg_deref)]
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;

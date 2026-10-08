@@ -874,6 +874,7 @@ impl<'ctx> HirCompiler<'ctx> {
 
     /// Pack the original exception tuple into the ordinary catch value.
     /// Used both by lexical try/catch and by split async catch frames.
+    #[allow(clippy::too_many_arguments)]
     fn build_caught_exception_carrier(
         &mut self,
         text: PointerValue<'ctx>,
@@ -928,6 +929,7 @@ impl<'ctx> HirCompiler<'ctx> {
 
     /// The part of `build_caught_exception_carrier` that needs no JSON sharing, so
     /// split async catch frames (which already own their JSON) can call it through `&self`.
+    #[allow(clippy::too_many_arguments)]
     fn pack_caught_exception_carrier(
         &self,
         text: PointerValue<'ctx>,

@@ -1007,17 +1007,15 @@ fn deliver_request_body_listeners(body_complete: bool, context_ptr: *mut Request
         context._delivered_offset = context._raw_body.len();
         (new_bytes, context.request_data_listeners.clone())
     };
-    if !new_bytes.is_empty() {
-        if !data_listeners.is_empty() {
-            let chunk = native_bytes_from_slice(&new_bytes);
-            for callback in data_listeners {
-                let callback = callback as *const c_void;
-                unsafe {
-                    type Callback = unsafe extern "C" fn(*const c_void, *mut u8);
-                    let code = *(callback as *const *const c_void);
-                    let callback_fn: Callback = std::mem::transmute(code);
-                    callback_fn(callback, chunk);
-                }
+    if !new_bytes.is_empty() && !data_listeners.is_empty() {
+        let chunk = native_bytes_from_slice(&new_bytes);
+        for callback in data_listeners {
+            let callback = callback as *const c_void;
+            unsafe {
+                type Callback = unsafe extern "C" fn(*const c_void, *mut u8);
+                let code = *(callback as *const *const c_void);
+                let callback_fn: Callback = std::mem::transmute(code);
+                callback_fn(callback, chunk);
             }
         }
     }

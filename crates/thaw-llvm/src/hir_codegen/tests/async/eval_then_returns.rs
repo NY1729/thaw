@@ -273,7 +273,7 @@ fn ner_assert_wrapped_pointer_identity(
                 && line.contains(&format!(" {some_aggregate}, ptr "))
         ).unwrap_or_else(|| panic!("matching UnionInject must store the Some aggregate for its struct payload:\n{body}"));
         let slot = store_line.rsplit_once(", ptr ").unwrap().1
-            .split(|character: char| character == ',' || character == ' ')
+            .split([',', ' '])
             .next().unwrap().to_string();
         let packed_line = body.lines().find(|line|
             line.contains("= ptrtoint ptr ")
@@ -992,7 +992,7 @@ fn native_eval_then_return_local_owner_is_retained_before_cleanup() {
         "the existing-owner and empty-slot assignment arms each install the factory-owned B token:\n{body}");
     let true_flag_stores = body.lines().filter_map(|line|
         line.split_once("store i1 true, ptr ").map(|(_, rest)|
-            rest.split(|character: char| character == ',' || character == ' ')
+            rest.split([',', ' '])
                 .next().unwrap_or(rest).to_string()
         )
     ).collect::<HashSet<_>>();
@@ -2137,12 +2137,12 @@ fn ner_jit_map_lifecycle_stubs<'ctx>(
     assert_eq!(retain.get_type().get_param_types().len(), 1);
     assert!(retain.get_type().get_param_types()[0].is_pointer_type());
     assert_eq!(retain.get_type().get_return_type().unwrap().into_int_type().get_bit_width(), 8);
-    engine.add_global_mapping(&retain, ner_jit_retain_stub as usize);
+    engine.add_global_mapping(&retain, ner_jit_retain_stub as *const () as usize);
     let destroy = compiler.module.get_function("thaw_promise_destroy").unwrap();
     assert_eq!(destroy.get_type().get_param_types().len(), 1);
     assert!(destroy.get_type().get_param_types()[0].is_pointer_type());
     assert!(destroy.get_type().get_return_type().is_none());
-    engine.add_global_mapping(&destroy, ner_jit_destroy_stub as usize);
+    engine.add_global_mapping(&destroy, ner_jit_destroy_stub as *const () as usize);
 }
 
 fn ner_jit_run_owned_case(result_type: HirType, second_token: usize, tag: Option<u8>) -> Vec<NerJitEvent> {
@@ -2483,14 +2483,14 @@ fn ner_jit_run_throw_bypass_case(first_throws: bool) -> (Vec<NerJitEvent>, Vec<&
     let first = compiler.module.get_function(first_name).unwrap();
     let second = compiler.module.get_function(second_name).unwrap();
     engine.add_global_mapping(&first, if first_throws {
-        ner_jit_throw_first_mapped as usize
+        ner_jit_throw_first_mapped as *const () as usize
     } else {
-        ner_jit_throw_first_effect as usize
+        ner_jit_throw_first_effect as *const () as usize
     });
     engine.add_global_mapping(&second, if first_throws {
-        ner_jit_throw_second_effect as usize
+        ner_jit_throw_second_effect as *const () as usize
     } else {
-        ner_jit_throw_second_mapped as usize
+        ner_jit_throw_second_mapped as *const () as usize
     });
     NER_JIT_RAISE_PENDING.store(
         engine.get_function_address("udjit_raise_pending").unwrap(),

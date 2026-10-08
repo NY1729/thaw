@@ -99,7 +99,7 @@ impl<'ctx> HirCompiler<'ctx> {
         self.clear_pending_native_text()?;
         self.mark_pending_native_text(error)?;
         self.branch_on_pending_exception()?;
-        let json = self.compile_decode_quickjs_graph(value.into())?;
+        let json = self.compile_decode_quickjs_graph(value)?;
         self.compile_typed_dynamic_result(json, &signature.ret)
     }
 
@@ -163,7 +163,7 @@ impl<'ctx> HirCompiler<'ctx> {
         self.clear_pending_native_text()?;
         self.mark_pending_native_text(error)?;
         self.branch_on_pending_exception()?;
-        let json = self.compile_decode_quickjs_graph(value.into())?;
+        let json = self.compile_decode_quickjs_graph(value)?;
         self.compile_typed_dynamic_result(json, &signature.ret)
     }
 
@@ -387,7 +387,7 @@ impl<'ctx> HirCompiler<'ctx> {
         self.clear_pending_native_text()?;
         self.mark_pending_native_text(error)?;
         self.branch_on_pending_exception()?;
-        let json = self.compile_decode_quickjs_graph(value.into())?;
+        let json = self.compile_decode_quickjs_graph(value)?;
 
         self.compile_typed_dynamic_result(json, &signature.ret)
     }

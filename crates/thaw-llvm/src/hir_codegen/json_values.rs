@@ -78,7 +78,7 @@ impl<'ctx> HirCompiler<'ctx> {
         // Decoding consumes all graph leases and destroys the owned
         // wire. The fresh Box then follows the same arena-owned
         // lifetime as caught aliases and Promise pending transfers.
-        let decoded = self.compile_decode_quickjs_graph(wire.into())?;
+        let decoded = self.compile_decode_quickjs_graph(wire)?;
         let rooted = self.builder.build_call(
             self.module.get_function("thaw_json_track_arena_owned_root").unwrap(),
             &[decoded.into()], "root_original_exception",

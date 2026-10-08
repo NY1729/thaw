@@ -1185,7 +1185,7 @@ fn registry_transform_receives_each_module_path_for_source_maps() {
     let observed = std::cell::RefCell::new(Vec::new());
     let transform = |source: &str, path: &Path, is_override: bool| {
         let name = if is_override && source != entry_source {
-            FileName::Custom(format!("{} (in-memory entry override)", path.display()).into())
+            FileName::Custom(format!("{} (in-memory entry override)", path.display()))
         } else {
             FileName::Real(path.to_path_buf())
         };
@@ -1207,7 +1207,7 @@ fn registry_transform_receives_each_module_path_for_source_maps() {
     let overrides = std::cell::RefCell::new(Vec::new());
     let override_transform = |source: &str, path: &Path, is_override: bool| {
         if is_override {
-            let name = FileName::Custom(format!("{} (in-memory entry override)", path.display()).into());
+            let name = FileName::Custom(format!("{} (in-memory entry override)", path.display()));
             let (module, map) = thaw_parser::parse_typescript_with_source_map_named(source, name.clone())?;
             assert_eq!(map.lookup_char_pos(module.body[0].span().lo).file.name.as_ref(), &name);
             overrides.borrow_mut().push(name);

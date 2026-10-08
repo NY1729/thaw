@@ -240,7 +240,7 @@ fn udp_send(handle: u32, value: &[u8], host: &str, port: u16) -> String {
         };
         (if socket.peer_addr().is_ok() { socket.send(value) } else { socket.send_to(value, (host, port)) })
             .map(|written| format!("ok|{written}"))
-            .unwrap_or_else(|error| udp_error(error))
+            .unwrap_or_else(udp_error)
     })
 }
 
@@ -274,7 +274,7 @@ fn udp_connect(handle: u32, host: &str, port: u16) -> String {
         let Some(socket) = sockets.1.get(&handle) else { return "err|EBADF|socket is closed".to_string(); };
         socket.connect((host, port))
             .map(|()| "ok".to_string())
-            .unwrap_or_else(|error| udp_error(error))
+            .unwrap_or_else(udp_error)
     })
 }
 

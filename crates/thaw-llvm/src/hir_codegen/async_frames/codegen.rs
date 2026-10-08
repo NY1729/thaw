@@ -690,7 +690,7 @@ impl<'ctx> HirCompiler<'ctx> {
             }
         } else {
             if let Some(state) = segment.await_next {
-                if !plan.segments.get(state).is_some_and(|next| next.resume_target.is_none()) {
+                if plan.segments.get(state).is_none_or(|next| next.resume_target.is_some()) {
                     return Err("synchronous frame transition needs a state without an await result".into());
                 }
                 // The resume entry treats a null waiting handle as a direct

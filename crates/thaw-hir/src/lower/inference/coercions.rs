@@ -1444,7 +1444,7 @@ impl<'a> FnLowerer<'a> {
                     if members.is_empty() {
                         return Err("cannot coerce an empty union".into());
                     }
-                    for (index, member) in members.iter().enumerate() {
+                    for (index, _member) in members.iter().enumerate() {
                         let inner = HirExpr::UnionValue(Box::new(current.clone()), index, members.clone());
                         let adapted = self.coerce_to_declared(declared, inner)?;
                         if index + 1 == members.len() {

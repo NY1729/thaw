@@ -964,6 +964,7 @@ pub unsafe extern "C" fn thaw_promise_finally_adopt_with_source(
 /// use unless existing arena roots retain them; non-nullness alone proves no
 /// lifetime. Null or equal handles return zero without frame registration or
 /// input-token transfer.
+#[allow(clippy::too_many_arguments)]
 unsafe fn finally_adopt_with_source(
     output: *mut ThawPromise,
     input: *mut ThawPromise,

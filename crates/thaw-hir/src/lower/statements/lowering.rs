@@ -699,6 +699,7 @@ impl<'a> FnLowerer<'a> {
         }
     }
 
+    #[allow(clippy::borrowed_box)]
     fn loop_closure_references(
         stmt: &Stmt,
         test: Option<&Box<Expr>>,
@@ -1100,6 +1101,7 @@ impl<'a> FnLowerer<'a> {
         Ok(HirExpr::Var(name))
     }
 
+    #[allow(clippy::type_complexity)]
     fn lower_generator_class_setter_assignment(
         &mut self,
         target: &AssignTarget,

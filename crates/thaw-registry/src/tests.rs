@@ -1402,15 +1402,15 @@ fn registry_bundle_javascript_source_maps_keep_exact_or_generated_names() {
         (&raw, FileName::Real(raw.clone())),
         (
             &shebang,
-            FileName::Custom(format!("{} (after shebang removal)", shebang.display()).into()),
+            FileName::Custom(format!("{} (after shebang removal)", shebang.display())),
         ),
         (
             &json,
-            FileName::Custom(format!("{} (generated JSON module)", json.display()).into()),
+            FileName::Custom(format!("{} (generated JSON module)", json.display())),
         ),
         (
             &worker_entry,
-            FileName::Custom(format!("{} (Worker URL rewrite)", worker_entry.display()).into()),
+            FileName::Custom(format!("{} (Worker URL rewrite)", worker_entry.display())),
         ),
     ] {
         let (source, _, name) = cache
@@ -1495,7 +1495,7 @@ fn resolved_declaration_origin_distinguishes_installed_file_and_builtin_text() {
 
     let builtin = resolve_builtin("node:path").unwrap();
     assert!(builtin.dts_path.is_none());
-    let generated = FileName::Custom(format!("{} generated declarations", builtin.name).into());
+    let generated = FileName::Custom(format!("{} generated declarations", builtin.name));
     let (module, map) = thaw_parser::parse_declarations_with_source_map_named(
         &builtin.dts_source,
         generated.clone(),

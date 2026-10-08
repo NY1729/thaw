@@ -323,6 +323,7 @@ pub unsafe extern "C" fn thaw_string_repeat(value: *const c_char, count: f64) ->
     arena_wtf8(&output).map_or(std::ptr::null(), |value| value.cast())
 }
 
+#[allow(dead_code)]
 fn expand_replacement(
     replacement: &str,
     matched: &str,

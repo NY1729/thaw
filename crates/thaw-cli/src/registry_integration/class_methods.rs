@@ -54,6 +54,7 @@ fn declared_array_of(declared: &str, parameter: &str) -> bool {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(dead_code)]
 fn rewrite_external_class_methods_with_static(
     source: &str,
     classes: &[ClassConstructorRewrite],
@@ -74,6 +75,7 @@ fn rewrite_external_class_methods_with_static(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(dead_code)]
 fn rewrite_external_class_methods_with_static_qualified(
     source: &str,
     classes: &[ClassConstructorRewrite],
@@ -3171,7 +3173,6 @@ fn rewrite_external_class_methods_with_static_qualified_named(
                         .map_or("default".to_string(), |qualifier| format!("{qualifier}::default"));
                     import_aliases.insert(default.local.sym.to_string(), identity);
                 }
-                _ => {}
             }
         }
     }
