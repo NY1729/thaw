@@ -17,6 +17,7 @@ modified  crates/thaw-cli/src/registry_integration/shim_support.rs
 modified  crates/thaw-cli/src/tests.rs
 modified  crates/thaw-cli/src/tests/external_classes.rs
 modified  crates/thaw-cli/src/tests/module_graph.rs
+modified  crates/thaw-cli/src/tests/registry_fallback/methods.rs
 modified  crates/thaw-cli/src/tests/registry_jit_aggregates/basics.rs
 modified  crates/thaw-cli/src/tests/registry_jit_primitives.rs
 modified  crates/thaw-cli/src/tests/registry_runtime.rs
@@ -44,6 +45,7 @@ modified  crates/thaw-hir/src/lower/inference/properties.rs
 modified  crates/thaw-hir/src/lower/inference/types.rs
 modified  crates/thaw-hir/src/lower/invocations/arguments.rs
 modified  crates/thaw-hir/src/lower/invocations/calls.rs
+modified  crates/thaw-hir/src/lower/invocations/dynamic_values.rs
 modified  crates/thaw-hir/src/lower/invocations/instance_builtins/array_mutation_methods.rs
 modified  crates/thaw-hir/src/lower/invocations/instance_builtins/array_transform_methods.rs
 modified  crates/thaw-hir/src/lower/invocations/instance_builtins/collections.rs
@@ -95,6 +97,7 @@ modified  crates/thaw-llvm/src/hir_codegen/runtime_declarations.rs
 modified  crates/thaw-llvm/src/hir_codegen/statements.rs
 modified  crates/thaw-llvm/src/hir_codegen/tests.rs
 modified  crates/thaw-llvm/src/hir_codegen/tests/async.rs
+modified  crates/thaw-llvm/src/hir_codegen/tests/async/control_flow.rs
 added  crates/thaw-llvm/src/hir_codegen/tests/async/eval_then_returns.rs
 modified  crates/thaw-llvm/src/hir_codegen/tests/async/expressions.rs
 modified  crates/thaw-llvm/src/hir_codegen/tests/async/promises.rs
