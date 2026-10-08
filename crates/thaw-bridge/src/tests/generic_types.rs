@@ -10,16 +10,16 @@ fn generates_native_addon_wrapper_and_module_initializer() {
         root_export: None,
     }]);
     assert!(init.contains("function __thaw_native_module_init(): void"));
-    assert!(init.contains(r#"loadNativeAddonEmbedded("deadbeef", "", "native-add");"#));
-    assert!(init.contains(r#"loadNativeSharedLibraryEmbedded("cafe");"#));
+    assert!(init.contains(r#"if (!loadNativeAddonEmbedded("deadbeef", "", "native-add")) throw"#));
+    assert!(init.contains(r#"if (!loadNativeSharedLibraryEmbedded("cafe")) throw"#));
     let init = generate_native_addon_path_init(&[NativeAddonPath {
         package_name: "native-add",
         path: "/registry/native-add/native.node",
         dependencies: vec!["/registry/native-add/libvalue.so"],
         root_export: Some("NativeAdd"),
     }]);
-    assert!(init.contains(r#"loadNativeSharedLibrary("/registry/native-add/libvalue.so");"#));
-    assert!(init.contains(r#"loadNativeAddon("/registry/native-add/native.node", "NativeAdd", "native-add");"#));
+    assert!(init.contains(r#"if (!loadNativeSharedLibrary("/registry/native-add/libvalue.so")) throw"#));
+    assert!(init.contains(r#"if (!loadNativeAddon("/registry/native-add/native.node", "NativeAdd", "native-add")) throw"#));
 }
 
 #[test]
@@ -154,9 +154,11 @@ fn expands_nested_generic_callback_aliases_inside_unions() {
 #[test]
 fn classifies_primitive_constrained_generic_function_as_fast_path() {
     let funcs =
-        parse_dts("export declare function nanoid<Type extends string>(size?: number): Type;")
+        parse_dts("export declare function nanoid<Type extends string>(size: number): Type;")
             .unwrap();
-    assert_eq!(funcs[0].required_params, 0);
+    // An optional parameter would classify as Fallback (see
+    // `optional_native_function_uses_fallback_arity`), so the fast path needs a required one.
+    assert_eq!(funcs[0].required_params, 1);
     assert!(matches!(
         classify(&funcs[0]),
         Classification::FastPath(signature)

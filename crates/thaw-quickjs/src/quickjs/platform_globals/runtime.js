@@ -376,6 +376,7 @@
   const nativeDateSetTime = thawGraphDateConstructor.prototype.setTime;
   globalThis.__thaw_json_host_date_set = (value, timestamp) =>
     thawGraphString(thawGraphApply(nativeDateSetTime, value, [timestamp]));
+  const thawNativeWrapperSet = new WeakSet();
   globalThis.__thaw_json_host_query = (value, operation) => {
     switch (operation) {
       case 0: return typeof value;
@@ -409,6 +410,12 @@
         return thawGraphObjectIs(number, -0) ? '-0' : thawGraphString(number);
       }
       case 15: return thawHostStringUnits(value);
+      // 17: a native fixed-layout owner wrapper (cannot grow, delete or hold `undefined`).
+      case 17: return thawGraphApply(thawNapiWeakSetHas, thawNativeWrapperSet, [value]) ? '1' : '0';
+      // 18/19/20: the wrapper's native integrity state (frozen / sealed / non-extensible).
+      case 18: return thawGraphObjectIsFrozen(value) ? '1' : '0';
+      case 19: return thawGraphObjectIsSealed(value) ? '1' : '0';
+      case 20: return thawNapiReflectIsExtensible(value) ? '0' : '1';
       default: throw new thawGraphTypeError('Invalid native host query');
     }
   };
@@ -682,8 +689,8 @@
   const thawGraphNapiFunctionHandles = thawNapiSafeWeakMap();
   const thawGraphForeignReceiver = value => value !== null
     && (typeof value === 'object' || typeof value === 'function')
-    && thawGraphApply(thawGraphWeakMapGet, thawGraphNapiHandles, [value]) === undefined
-    && thawGraphApply(thawGraphWeakMapGet, thawGraphNapiFunctionHandles, [value]) === undefined
+    && thawGraphNapiHandles.get(value) === undefined
+    && thawGraphNapiFunctionHandles.get(value) === undefined
     ? value : undefined;
   thawGraphDefineProperty(globalThis, '__thaw_json_graph_native_pair_matches', {
     value: (value, nativeHandle, kind) => {
@@ -1019,6 +1026,7 @@
     const symbolHandles = new thawGraphMapConstructor();
     const retained = [];
     const retainedNapi = [];
+    let forcedRootLease = 0;
     const retain = value => {
       const handle = thawGraphRetain(value);
       thawGraphApply(thawGraphArrayPush, retained, [handle]);
@@ -1038,6 +1046,18 @@
       return thawGraphString(handle);
     };
     try {
+    if (handleMask === 0 && live === true && plainResult === false
+      && forceHandle !== undefined && root === forceHandle
+      && root !== null && (typeof root === 'object' || typeof root === 'function'
+        || typeof root === 'symbol')) {
+      forcedRootLease = thawGraphRetain(root);
+      if (!thawGraphNumberIsFinite(forcedRootLease)
+        || !thawGraphNumberIsSafeInteger(forcedRootLease) || forcedRootLease <= 0)
+        throw new thawGraphTypeError('Cannot retain graph handle');
+      const handleText = thawGraphString(forcedRootLease);
+      return '{"root":{"r":0},"nodes":[{"hdl":' + handleText
+        + '}],"leases":[' + handleText + '],"napiLeases":[]}';
+    }
     if (thawGraphArrayIsArray(root) && handleMask && !live) {
       thawGraphApply(thawGraphArrayForEach, root, [(item, index) => {
         if ((handleMask & (1 << index)) !== 0) {
@@ -1066,7 +1086,9 @@
       // Compiled result calls return JSON data, not live function handles.
       // Preserve JSON's undefined-like treatment without creating a lease
       // that the ordinary result path has no registered Host owner for.
-      if (plainResult && (typeof value === 'function' || typeof value === 'symbol'))
+      if (plainResult && typeof value === 'function')
+        return { u: 1, fn: typeof value.name === 'string' ? value.name : '' };
+      if (plainResult && typeof value === 'symbol')
         return { u: 1 };
       if (plainResult && typeof value === 'bigint')
         throw new thawGraphTypeError('Do not know how to serialize a BigInt');
@@ -1124,13 +1146,12 @@
         thawGraphApply(thawGraphArrayPush, nodes, [{ hdl: retainSymbol(value) }]);
       } else if (thawGraphApply(thawGraphWeakMapHas, handleCarriers, [value])) {
         thawGraphApply(thawGraphArrayPush, nodes, [{ hdl: thawGraphApply(thawGraphWeakMapGet, handleCarriers, [value]) }]);
-      } else if (thawGraphApply(thawGraphWeakMapHas, thawGraphNapiFunctionHandles, [value])) {
+      } else if (thawGraphNapiFunctionHandles.has(value)) {
         thawGraphApply(thawGraphArrayPush, nodes,
-          [{ nfn: retainNative(thawGraphApply(thawGraphWeakMapGet,
-            thawGraphNapiFunctionHandles, [value])), hdl: retain(value) }]);
-      } else if (thawGraphApply(thawGraphWeakMapHas, thawGraphNapiHandles, [value])) {
+          [{ nfn: retainNative(thawGraphNapiFunctionHandles.get(value)), hdl: retain(value) }]);
+      } else if (thawGraphNapiHandles.has(value)) {
         thawGraphApply(thawGraphArrayPush, nodes,
-          [{ nh: retainNative(thawGraphApply(thawGraphWeakMapGet, thawGraphNapiHandles, [value])) }]);
+          [{ nh: retainNative(thawGraphNapiHandles.get(value)) }]);
       } else if (live && index !== 0) {
         // Only the wrapper-created argument array is copied. Replacer
         // holders and values stay live: a Proxy/getter must not be visited
@@ -1207,6 +1228,7 @@
     return thawGraphStringify({ root: rootToken, nodes, leases: retained,
       napiLeases: retainedNapi });
     } catch (error) {
+      if (forcedRootLease !== 0) thawGraphRelease(forcedRootLease);
       for (let index = 0; index < retained.length; index++)
         thawGraphRelease(retained[index]);
       for (let index = 0; index < retainedNapi.length; index++)
@@ -1596,7 +1618,7 @@
         return thawGraphPreventNativeExtensions(graphProperty, proxy, target);
       },
     });
-    thawGraphApply(thawGraphWeakMapSet, thawGraphNapiFunctionHandles, [proxy, handle]);
+    thawGraphNapiFunctionHandles.set(proxy, handle);
     const entry = thawNapiWeakRef ? new thawNapiWeakRef(proxy) : proxy;
     thawGraphApply(thawGraphMapSet, thawGraphNapiFunctions, [handle, entry]);
     if (thawGraphNapiFunctionFinalizer)
@@ -1675,6 +1697,11 @@
       if (own(token, 'v')) {
         if (token.v !== null && typeof token.v === 'object')
           throw new thawGraphTypeError('Invalid native JSON graph scalar');
+        // A well-known symbol crosses as its private `"\u001f@@name"` string
+        // token (the JSON reviver revives it the same way); re-key it here so
+        // a dynamic `defineProperty`/`fromEntries` key is the real symbol.
+        if (typeof token.v === 'string' && token.v.charCodeAt(0) === 0x1f
+            && token.v.startsWith('\u001f@@')) return globalThis.__thaw_property_key(token.v);
         return token.v;
       }
       if (own(token, 'u') && token.u === 1) return undefined;
@@ -1963,6 +1990,9 @@
           return true;
         },
       });
+      let hasAccessor = false;
+      for (let i = 0; i < keys.length; i++) if (accessors[i]) hasAccessor = true;
+      if (!hasAccessor && accessors[keys.length] !== true) thawGraphApply(thawNapiWeakSetAdd, thawNativeWrapperSet, [wrapper]);
       return wrapper;
     },
     writable: false, configurable: false,
@@ -2009,7 +2039,7 @@
     }
     return object;
   };
-  globalThis.__thaw_accessor_descriptor = (readable, writable, getter, setter, flags = 7) => ({
+  globalThis.__thaw_accessor_descriptor = (readable, writable, flags, getter, setter) => ({
     get: readable ? getter : undefined,
     set: writable ? setter : undefined,
     enumerable: !!(flags & 2),
@@ -2551,10 +2581,13 @@
     return [seconds, remainder];
   };
   hrtime.bigint = () => BigInt(Date.now() - processStart) * 1000000n;
-  const processApply = Reflect.apply, processBufferFrom = Buffer.from,
+  // Buffer is defined later (buffer_crypto.js); capture Buffer.from on first use.
+  let processBufferFrom;
+  const processApply = Reflect.apply,
     processIsView = ArrayBuffer.isView, processQueueMicrotask = queueMicrotask,
     processRawWrite = globalThis.__thaw_process_write_bytes, processHexDigits = '0123456789abcdef';
   const processToBytes = (value, encoding) => {
+    processBufferFrom ??= Buffer.from;
     if (typeof value === 'string') return processApply(processBufferFrom, Buffer, [value, encoding || 'utf8']);
     if (processIsView(value)) return processApply(processBufferFrom, Buffer, [value.buffer, value.byteOffset, value.byteLength]);
     throw new TypeError('The chunk argument must be a string, Buffer, TypedArray, or DataView');
@@ -2646,9 +2679,11 @@
     };
   }
   const previousPlatformPoll = globalThis.__thaw_poll_platform_events;
+  // User code may replace `JSON.parse`; the event-loop poll must not depend on it.
+  const intrinsicJsonParse = JSON.parse;
   globalThis.__thaw_poll_platform_events = () => {
     if (previousPlatformPoll) previousPlatformPoll();
-    stdinPending.push(...JSON.parse(globalThis.__thaw_process_poll_stdin()));
+    stdinPending.push(...intrinsicJsonParse(globalThis.__thaw_process_poll_stdin()));
     drainStdin();
   };
   globalThis.__thaw_run_main_file = filename => {

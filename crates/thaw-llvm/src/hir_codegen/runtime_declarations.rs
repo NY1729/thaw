@@ -284,6 +284,11 @@ impl<'ctx> HirCompiler<'ctx> {
             Some(Linkage::External),
         );
         self.module.add_function(
+            "thaw_json_from_borrowed_handle",
+            i8_ptr.fn_type(&[i64_type.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
             "thaw_json_host_from_borrowed_handle",
             i8_ptr.fn_type(&[i64_type.into()], false),
             Some(Linkage::External),
@@ -291,6 +296,26 @@ impl<'ctx> HirCompiler<'ctx> {
         self.module.add_function(
             "thaw_json_track_arena_owned_root",
             i8_ptr.fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_exception_native_provenance_new",
+            i8_ptr.fn_type(&[i64_type.into(), i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_exception_native_tag",
+            i64_type.fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_exception_native_owner",
+            i8_ptr.fn_type(&[i8_ptr.into(), i64_type.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_exception_native_same",
+            i8_type.fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
             Some(Linkage::External),
         );
         self.module.add_function(
@@ -306,6 +331,11 @@ impl<'ctx> HirCompiler<'ctx> {
         );
         self.module.add_function(
             "thaw_json_brand_wrapper",
+            i8_ptr.fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_brand_handle_placeholder",
             i8_ptr.fn_type(&[i8_ptr.into()], false),
             Some(Linkage::External),
         );
@@ -1683,6 +1713,11 @@ impl<'ctx> HirCompiler<'ctx> {
             self.context.bool_type().fn_type(&[i8_ptr.into()], false),
             Some(Linkage::External),
         );
+        self.module.add_function(
+            "thaw_native_wrapper_is_live",
+            self.context.bool_type().fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
         for name in ["thaw_object_set_state", "thaw_object_state"] {
             self.module.add_function(
                 name,
@@ -1736,6 +1771,16 @@ impl<'ctx> HirCompiler<'ctx> {
             self.context.bool_type().fn_type(
                 &[i8_ptr.into(), i8_ptr.into(), i8_ptr.into()], false,
             ),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_object_register_describer",
+            self.context.bool_type().fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_object_describer",
+            i8_ptr.fn_type(&[i8_ptr.into()], false),
             Some(Linkage::External),
         );
         self.module.add_function(
@@ -2110,6 +2155,16 @@ impl<'ctx> HirCompiler<'ctx> {
             Some(Linkage::External),
         );
         self.module.add_function(
+            "thaw_json_buffer_inspect",
+            json_as_string_type,
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_console_format",
+            json_as_string_type,
+            Some(Linkage::External),
+        );
+        self.module.add_function(
             "thaw_json_typeof",
             json_as_string_type,
             Some(Linkage::External),
@@ -2130,6 +2185,11 @@ impl<'ctx> HirCompiler<'ctx> {
         );
         self.module.add_function(
             "thaw_json_is_buffer_shape",
+            json_as_bool_type,
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_is_live_iterable",
             json_as_bool_type,
             Some(Linkage::External),
         );
@@ -2223,6 +2283,16 @@ impl<'ctx> HirCompiler<'ctx> {
             Some(Linkage::External),
         );
         self.module.add_function(
+            "thaw_json_error_to_string",
+            i8_ptr.fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_error_stack",
+            i8_ptr.fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
             "thaw_json_receiver_string",
             i8_ptr.fn_type(&[i8_ptr.into()], false),
             Some(Linkage::External),
@@ -2273,7 +2343,17 @@ impl<'ctx> HirCompiler<'ctx> {
             Some(Linkage::External),
         );
         self.module.add_function(
+            "thaw_json_structured_clone",
+            i8_ptr.fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
             "thaw_json_clone",
+            i8_ptr.fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_share",
             i8_ptr.fn_type(&[i8_ptr.into()], false),
             Some(Linkage::External),
         );
@@ -2431,6 +2511,11 @@ impl<'ctx> HirCompiler<'ctx> {
             Some(Linkage::External),
         );
         self.module.add_function(
+            "thaw_json_array_extend",
+            self.context.void_type().fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
             "thaw_json_array_slice",
             i8_ptr.fn_type(&[i8_ptr.into(), self.context.i64_type().into()], false),
             Some(Linkage::External),
@@ -2512,9 +2597,21 @@ impl<'ctx> HirCompiler<'ctx> {
             Some(Linkage::External),
         );
         self.module.add_function(
+            "thaw_js_handle_typed_array_probe",
+            i8_ptr.fn_type(&[self.context.i64_type().into()], false),
+            // Weak: a pure-native program prints this union arm but never holds a JsValue.
+            Some(Linkage::ExternalWeak),
+        );
+        self.module.add_function(
+            "thaw_console_typed_or",
+            i8_ptr.fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
             "thaw_js_handle_to_console_string",
             i8_ptr.fn_type(&[self.context.i64_type().into()], false),
-            Some(Linkage::External),
+            // Weak: a pure-native program prints this union arm but never holds a JsValue.
+            Some(Linkage::ExternalWeak),
         );
         self.module.add_function(
             "thaw_js_call_handle_result",
@@ -3164,6 +3261,16 @@ impl<'ctx> HirCompiler<'ctx> {
             Some(Linkage::External),
         );
         self.module.add_function(
+            "thaw_promise_retain",
+            i8_type.fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_promise_arena_slot_replace",
+            i8_type.fn_type(&[i8_ptr.into(), i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
             "thaw_promise_subscribe",
             self.context
                 .i8_type()
@@ -3226,6 +3333,15 @@ impl<'ctx> HirCompiler<'ctx> {
                 &[i8_ptr.into(), i8_ptr.into(), i64_type.into(), f64_type.into(),
                   i64_type.into(), self.context.bool_type().into(), i8_ptr.into(),
                   i8_ptr.into(), i8_ptr.into()], false,
+            ),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_promise_reject_typed_with_native_provenance",
+            self.context.i8_type().fn_type(
+                &[i8_ptr.into(), i8_ptr.into(), i64_type.into(), f64_type.into(),
+                  i64_type.into(), self.context.bool_type().into(), i8_ptr.into(),
+                  i8_ptr.into(), i8_ptr.into(), i8_ptr.into()], false,
             ),
             Some(Linkage::External),
         );
@@ -3369,6 +3485,11 @@ impl<'ctx> HirCompiler<'ctx> {
         );
         self.module.add_function(
             "thaw_promise_exception_native_text_copy",
+            i8_ptr.fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_promise_exception_native",
             i8_ptr.fn_type(&[i8_ptr.into()], false),
             Some(Linkage::External),
         );

@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use swc_ecma_visit::{Visit, VisitMut, VisitMutWith, VisitWith};
 use thaw_parser::ast::{
-    Callee, Decl, Expr, ImportSpecifier, MemberProp, Module, ModuleDecl, ModuleExportName,
+    Callee, Decl, Expr, Ident, ImportSpecifier, MemberProp, Module, ModuleDecl, ModuleExportName,
     ModuleItem, Pat, TsEntityName, TsInterfaceDecl, TsTypeRef, VarDeclarator,
 };
 
@@ -2116,6 +2116,24 @@ pub(crate) fn bundle_with_named_source_transform(
             }))),
         },
     )));
+    // A namespace object is only needed where something actually refers to it
+    // (today: a dynamic `import()` target). Generating one for every module made
+    // the external ones expose call-only typed externs as property values,
+    // which the HIR rejects as "needs a monomorphic native implementation".
+    struct NamespaceReferences(HashSet<usize>);
+    impl Visit for NamespaceReferences {
+        fn visit_ident(&mut self, ident: &Ident) {
+            if let Some(index) = ident.sym.strip_prefix("__thaw_namespace_")
+                .and_then(|index| index.parse::<usize>().ok()) {
+                self.0.insert(index);
+            }
+        }
+    }
+    let mut referenced = NamespaceReferences(HashSet::new());
+    for item in &bundled_items {
+        item.visit_with(&mut referenced);
+    }
+    let referenced_namespaces = referenced.0;
     // Each property reads the export's current binding, preserving live
     // namespace values across repeated imports.
     for index in 0..modules.len() {
@@ -2141,16 +2159,21 @@ pub(crate) fn bundle_with_named_source_transform(
             getters.push(format!("{key}: {{{}}}", member_getters.join(",")));
         }
         getters.sort();
-        let snippet = format!(
-            "function __thaw_lazy_module_{index}(): void {{}}\nconst __thaw_namespace_{index} = {{{}}};",
-            getters.join(",")
-        );
+        let snippet = if referenced_namespaces.contains(&index) {
+            format!(
+                "function __thaw_lazy_module_{index}(): void {{}}\nconst __thaw_namespace_{index} = {{{}}};",
+                getters.join(",")
+            )
+        } else {
+            format!("function __thaw_lazy_module_{index}(): void {{}}")
+        };
         let generated = thaw_parser::parse_typescript_with_source_map_named(
             &snippet, thaw_parser::common::FileName::Custom("generated namespace object.ts".into()),
         )?.0;
         bundled_items.extend(generated.body);
     }
     for (specifier, index) in external_module_indices {
+        if !referenced_namespaces.contains(index) { continue; }
         let Some(export_map) = external_exports.get(specifier) else { continue; };
         let mut getters = export_map.iter()
             .filter(|(_, target)| !target.starts_with("__thaw_type_"))

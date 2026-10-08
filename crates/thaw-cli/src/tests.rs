@@ -1495,12 +1495,12 @@ fn brotli_host_detection_only_enables_brotli_users() {
 fn intl_host_detection_only_enables_intl_users() {
     assert!(!source_uses_intl("module.exports = value => value + 1"));
     assert!(!source_uses_intl("value.localeCompare(other)"));
-    // DateTimeFormat/NumberFormat/ListFormat keep a pure-JS,
-    // English-only fast path that needs no icu4x data -- only the
-    // capabilities with no non-icu4x implementation should enable this.
+    // Every Intl constructor is backed by the icu4x data now (see
+    // `required_runtime_features` and quickjs `intl_list.rs`), so each one
+    // enables the feature.
     assert!(source_uses_intl("new Intl.DateTimeFormat('ja-JP')"));
     assert!(source_uses_intl("new Intl.NumberFormat('de-DE')"));
-    assert!(!source_uses_intl("new Intl.ListFormat('fr')"));
+    assert!(source_uses_intl("new Intl.ListFormat('fr')"));
     assert!(source_uses_intl("new Intl.Locale('ja-JP')"));
     assert!(source_uses_intl(
         "Intl.PluralRules.supportedLocalesOf(['en'])"

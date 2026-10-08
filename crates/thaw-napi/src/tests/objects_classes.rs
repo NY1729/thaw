@@ -173,7 +173,7 @@ fn symbols_have_unique_identity_and_property_namespace() {
             );
             assert!(present);
         }
-        let json = json_from_value(object).unwrap();
+        let json = json_from_value_with_undefined_for_env(env_ptr, object, false).unwrap();
         assert_eq!(json, serde_json::json!({"2": 3.0, "same": 1.0}));
     }
 }

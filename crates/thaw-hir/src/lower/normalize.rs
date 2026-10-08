@@ -1187,6 +1187,25 @@ fn ast_block_terminates(statements: &[swc_ecma_ast::Stmt]) -> bool {
     false
 }
 
+/// True if a callback written inline (arrow or function expression with a block
+/// body) ends in `throw` on every path and never returns a value, so its result
+/// type may be taken from the surrounding Promise chain instead of `void`.
+fn ast_callback_always_throws(expr: &swc_ecma_ast::Expr) -> bool {
+    use swc_ecma_ast::*;
+    let stmts = match expr {
+        Expr::Arrow(arrow) => match arrow.body.as_ref() {
+            ArrowFunctionBody::FunctionBody(block) => &block.stmts,
+            _ => return false,
+        },
+        Expr::Fn(function) => match &function.function.body {
+            Some(block) => &block.stmts,
+            None => return false,
+        },
+        _ => return false,
+    };
+    ast_block_terminates(stmts) && !ast_block_has_value_return(stmts)
+}
+
 /// True if the block contains a `return <value>` somewhere (so the function
 /// is value-returning, not `void`).
 fn ast_block_has_value_return(statements: &[swc_ecma_ast::Stmt]) -> bool {

@@ -169,6 +169,7 @@ fn collect_closure_captures_expr(expr: &HirExpr, names: &mut BTreeSet<Symbol>) {
         | HirExpr::ObjectAlloc(_)
         | HirExpr::ClassAlloc(_)
         | HirExpr::FunctionRef(..)
+        | HirExpr::FunctionRefThis(..)
         | HirExpr::MethodRef(..) => {}
     }
 }
@@ -211,5 +212,37 @@ fn collect_closure_captures_stmt(stmt: &HirStmt, names: &mut BTreeSet<Symbol>) {
         | HirStmt::Continue
         | HirStmt::BreakDepth(_)
         | HirStmt::ContinueDepth(_) => {}
+    }
+}
+
+#[cfg(test)]
+mod thaw_remaining_traversals_closure_controls {
+    use super::*;
+
+    #[test]
+    fn thaw_remaining_function_ref_this_contributes_no_captured_names() {
+        let callable = HirExpr::FunctionRefThis(
+            "callable_with_this".into(),
+            HirType::Bytes,
+            vec![HirType::Bytes],
+            HirType::Bytes,
+        );
+
+        assert!(closure_captured_names_in_while(&callable, &[]).is_empty());
+    }
+
+    #[test]
+    fn thaw_remaining_lambda_uses_declared_captures_without_scanning_its_body() {
+        let lambda = HirExpr::Lambda(
+            vec![HirParam { name: "declared_capture".into(), ty: HirType::F64 }],
+            Vec::new(),
+            HirType::Void,
+            Box::new(HirExpr::Var("body_only_name".into())),
+        );
+
+        assert_eq!(
+            closure_captured_names_in_while(&lambda, &[]),
+            ["declared_capture".to_string()].into_iter().collect()
+        );
     }
 }

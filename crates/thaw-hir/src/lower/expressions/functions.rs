@@ -668,7 +668,7 @@ impl<'a> FnLowerer<'a> {
         let types = resolve_explicit_generic_type_tuple(
             signature,
             &instantiation.type_args.params,
-            &[],
+            GenericMatchActuals::TypeOnly,
             self.interfaces,
             self.generic_interfaces,
         )?;
@@ -918,6 +918,7 @@ impl<'a> FnLowerer<'a> {
                 is_async: false,
                 returns_sparse_array: false,
                 uses_this: false,
+                generic_this_pattern: None,
                 is_extern: false,
                 source_range: (arrow.span.lo.0, arrow.span.hi.0),
                 accessor_owner: None,
@@ -1142,6 +1143,9 @@ impl<'a> FnLowerer<'a> {
                 };
                 let name = self.bind_local(&source_name, ty.clone());
                 self.mark_array_parameter(&name, &ty);
+                if self.promise_catch_parameter.as_deref() == Some(source_name.as_str()) {
+                    self.promise_catch_bindings.insert(name.clone());
+                }
                 if !matches!(pat, Pat::Ident(_) | Pat::Rest(_)) {
                     destructuring.push((pat, name.clone(), ty.clone()));
                 }
@@ -1159,6 +1163,12 @@ impl<'a> FnLowerer<'a> {
                 });
             }
             let mut prefix = Vec::new();
+            if let Some(binding) = params.iter()
+                .find(|param| self.promise_catch_bindings.contains(&param.name))
+                .map(|param| param.name.clone())
+            {
+                prefix.extend(self.snapshot_promise_rejection(&binding));
+            }
             for (pattern, name, ty) in destructuring {
                 self.lower_binding_pattern(pattern, HirExpr::Var(name), &ty, &mut prefix)?;
             }
@@ -1186,7 +1196,19 @@ impl<'a> FnLowerer<'a> {
                         expression
                     };
                     let inferred = self.infer_expr_type(&expression)?;
-                    if expected_return == Some(&HirType::Void) {
+                    // A tuple literal infers as an array; `expect_type` knows it satisfies the tuple.
+                    let inferred = match expected_return {
+                        Some(expected)
+                            if inferred != *expected
+                                && self.expect_type(expected, &expression, "arrow return").is_ok() =>
+                        {
+                            expected.clone()
+                        }
+                        _ => inferred,
+                    };
+                    if expected_return == Some(&HirType::Void)
+                        || (inferred == HirType::Void && !prefix.is_empty())
+                    {
                         prefix.push(HirStmt::Expr(expression));
                         (HirExpr::Block(prefix), HirType::Void)
                     } else {
@@ -1205,7 +1227,26 @@ impl<'a> FnLowerer<'a> {
                     if sparse_mapping_result && expected_return.is_none() {
                         self.lower_sparse_mapping_returns(&mut stmts)?;
                     }
-                    let inferred = self.infer_return_type(&stmts)?;
+                    let mut inferred = self.infer_return_type(&stmts)?;
+                    // A body that always throws has no `return`, so it infers
+                    // `Void`, but it satisfies any declared return type.
+                    if inferred == HirType::Void
+                        && expected_return.is_some_and(|expected| *expected != HirType::Void)
+                        && ast_block_terminates(&block.stmts)
+                    {
+                        inferred = expected_return.cloned().unwrap_or(inferred);
+                    }
+                    // As for an expression body: tuple literals infer as arrays but satisfy
+                    // the declared tuple return.
+                    if let Some(expected) = expected_return.filter(|expected| inferred != **expected) {
+                        let mut values = Vec::new();
+                        collect_return_values(&stmts, &mut values, &mut false);
+                        if !values.is_empty()
+                            && values.iter().all(|value| self.expect_type(expected, value, "arrow return").is_ok())
+                        {
+                            inferred = expected.clone();
+                        }
+                    }
                     (HirExpr::Block(stmts), inferred)
                 }
             };

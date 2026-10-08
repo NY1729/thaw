@@ -236,7 +236,7 @@ fn lowers_static_computed_object_literal_properties() {
     );
 
     assert_eq!(
-        program.functions[0].body[0],
+        unstage_let(&program.functions[0].body[0]),
         HirStmt::Let(
             "point".into(),
             HirType::Object(vec![

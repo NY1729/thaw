@@ -163,7 +163,9 @@ pub fn owned_string(bytes: impl AsRef<[u8]>) -> *mut c_char {
 
 /// # Safety
 /// `pointer` must be null or an owned native/C string, destroyed exactly once.
-pub unsafe fn destroy_string(pointer: *mut c_char) {
+pub unsafe fn destroy_string(pointer: *const c_char) {
+    // Takes ownership, so callers holding a `*const` (e.g. FFI result structs) need no cast.
+    let pointer = pointer.cast_mut();
     if pointer.is_null() {
         return;
     }

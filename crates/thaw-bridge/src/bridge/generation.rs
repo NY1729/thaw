@@ -205,7 +205,12 @@ pub fn generate_shim(
                     .map(|((name, _), ty)| format!("{name}: {}", render_ts_type(ty)))
                     .collect::<Vec<_>>();
                 if let (Some((name, _)), Some(variadic)) = (&func.rest_param, &sig.variadic) {
-                    params.push(format!("...{name}: ({})[]", render_ts_type(variadic)));
+                    // Only unions and function types need grouping before `[]`.
+                    let element = render_ts_type(variadic);
+                    let element = if element.contains('|') || element.contains("=>") {
+                        format!("({element})")
+                    } else { element };
+                    params.push(format!("...{name}: {element}[]"));
                 }
                 let params = params.join(", ");
                 out.push_str(&format!(
@@ -585,6 +590,8 @@ fn wrap_as_commonjs_module(
     let bind_bare_globals: String = fallback_names
         .iter()
         .chain(class_names)
+        // A reserved word (`default`, `in`) cannot be a bare identifier.
+        .filter(|name| !is_reserved_js_identifier(name))
         .map(|name| format!("if (typeof {name} !== 'undefined') globalThis.{name} = {name};\n"))
         .collect();
     // Captured *here*, inside the same wrapped script that just set
@@ -684,7 +691,7 @@ fn wrap_as_commonjs_module(
          \x20\x20var __thaw_napi_reference_value = function(id, active) {{ var stored = __thaw_napi_reference_values.get(id), value = stored && typeof stored.deref === 'function' ? stored.deref() : stored, properties = {{}}; if (!value) return properties; Object.keys(value).forEach(function(key) {{ properties[key] = __thaw_napi_argument(value[key], active); }}); return properties; }};\n\
          \x20\x20var __thaw_napi_argument = function(value, active) {{\n\
          \x20\x20\x20\x20if (value === null || (typeof value !== 'function' && typeof value !== 'object')) return value;\n\
-         \x20\x20\x20\x20var handle = __thaw_napi_handles.get(value); if (handle) {{ var owner = globalThis.__thaw_json_graph_owner_of_handle(String(handle)); if (__thaw_napi_owner_metadata && !__thaw_napi_owner_ids.has(owner)) throw new TypeError('native object belongs to another addon'); return {{ __thaw_napi_handle__: handle }}; }} if (__thaw_napi_proxy_owners.has(value)) throw new TypeError('native object belongs to another addon');\n\
+         \x20\x20\x20\x20var handle = __thaw_napi_handles.get(value); if (handle) {{ var owner = globalThis.__thaw_json_graph_owner_of_handle(String(handle)); if (__thaw_napi_owner_metadata ? !__thaw_napi_owner_ids.has(owner) : (__thaw_napi_proxy_owners.has(value) && __thaw_napi_proxy_owners.get(value) !== __thaw_addon)) throw new TypeError('native object belongs to another addon'); return {{ __thaw_napi_handle__: handle }}; }} if (__thaw_napi_proxy_owners.has(value)) throw new TypeError('native object belongs to another addon');\n\
          \x20\x20\x20\x20active = active || new WeakSet();\n\
          \x20\x20\x20\x20var id = __thaw_napi_reference_ids.get(value);\n\
          \x20\x20\x20\x20if (id && active.has(value)) return {{ __thaw_napi_ref__: id }};\n\
@@ -778,7 +785,7 @@ fn wrap_as_commonjs_module(
          \x20\x20\x20\x20\x20\x20dispatch.__thaw_addons = addons; return dispatch;\n\
          \x20\x20\x20\x20}})(globalThis.process.dlopen);\n\
          \x20\x20}}\n\
-         \x20\x20globalThis.process.dlopen.__thaw_addons["{native_package}"] = __thaw_addon;\n\
+         \x20\x20globalThis.process.dlopen.__thaw_addons[\"{native_package}\"] = __thaw_addon;\n\
          \x20\x20if (__thaw_addon.QueryEngine && !globalThis.process.env.PRISMA_QUERY_ENGINE_LIBRARY) globalThis.process.env.PRISMA_QUERY_ENGINE_LIBRARY = '/proc/self/exe';\n\
          \x20\x20return __thaw_addon;\n\
          \x20\x20}})();\n\
@@ -883,7 +890,8 @@ pub fn generate_module_init(bundles: &[ModuleBundle]) -> String {
             // N-API module, whose export object is looked up by name
             // through a different, already-working mechanism).
             let bare_capture_js = format!(
-                "if (typeof globalThis.{export_name} === 'undefined') {{ globalThis[\"{}\"] = globalThis.module.exports != null && Object.prototype.hasOwnProperty.call(globalThis.module.exports, \"{}\") ? globalThis.module.exports[\"{}\"] : globalThis.module.exports != null && Object.prototype.hasOwnProperty.call(globalThis.module.exports, \"default\") ? globalThis.module.exports.default : globalThis.module.exports; }}",
+                "if (typeof globalThis[\"{}\"] === 'undefined') {{ globalThis[\"{}\"] = globalThis.module.exports != null && Object.prototype.hasOwnProperty.call(globalThis.module.exports, \"{}\") ? globalThis.module.exports[\"{}\"] : globalThis.module.exports != null && Object.prototype.hasOwnProperty.call(globalThis.module.exports, \"default\") ? globalThis.module.exports.default : globalThis.module.exports; }}",
+                escape_ts_string_literal(export_name),
                 escape_ts_string_literal(export_name),
                 escape_ts_string_literal(export_name),
                 escape_ts_string_literal(export_name),

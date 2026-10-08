@@ -1445,7 +1445,7 @@ fn private_napi_result_graph_separates_value_kinds_from_user_fields() {
     let graph: serde_json::Value = serde_json::from_str(
         &unsafe { napi_result_graph_for_env(&mut env as NapiEnv, root, true) }.unwrap(),
     ).unwrap();
-    assert_eq!(graph["nodes"][1]["d"], 0);
+    assert_eq!(graph["nodes"][1]["d"], 0.0);
     assert!(graph["nodes"][2].get("o").is_some());
     assert_eq!(graph["nodes"][0]["a"][2]["u"], 1);
     assert!(graph["nodes"][3].get("o").is_some());
@@ -1477,13 +1477,13 @@ fn private_napi_event_graph_keeps_user_marker_objects_ordinary() {
             serde_json::from_str(CStr::from_ptr(result).to_str().unwrap()).unwrap(),
         ));
     }
-    let mut env = Env::new();
+    let env = registered_test_env();
     let zero = env.alloc(Value::Number(0.0));
     let ordinary_date = env.alloc(Value::Object(HashMap::from([
         (PropertyKey::String("timestamp".into()), zero),
     ])));
     let real_date = env.alloc(Value::Date(0.0));
-    let mut output = None;
+    let mut output: Option<(JsonValue, JsonValue)> = None;
     let bridge = Arc::new(ThawCallbackBridge {
         callback: ThawCallback::EventGraph(capture),
         context: (&mut output as *mut Option<(JsonValue, JsonValue)>) as usize,
@@ -1494,10 +1494,10 @@ fn private_napi_event_graph_keeps_user_marker_objects_ordinary() {
         new_target: ptr::null_mut(),
         data: Arc::as_ptr(&bridge) as *mut c_void,
     };
-    unsafe { thaw_compiled_callback(&mut env as NapiEnv, &mut info); }
+    unsafe { thaw_compiled_callback(&mut *env as NapiEnv, &mut info); }
     let (ordinary, date) = output.unwrap();
     assert!(ordinary["nodes"][0].get("o").is_some());
-    assert_eq!(date["nodes"][0]["d"], 0);
+    assert_eq!(date["nodes"][0]["d"], 0.0);
 }
 
 #[test]
@@ -1527,7 +1527,7 @@ fn private_napi_value_callback_graph_preserves_arguments_and_result() {
     let ordinary_date = env.alloc(Value::Object(HashMap::from([
         (PropertyKey::String("timestamp".into()), zero),
     ])));
-    let mut output = None;
+    let mut output: Option<JsonValue> = None;
     let bridge = Arc::new(ThawCallbackBridge {
         callback: ThawCallback::ValueGraph(callback),
         context: (&mut output as *mut Option<JsonValue>) as usize,
@@ -1677,7 +1677,7 @@ fn quickjs_private_wire_tracks_only_native_date_and_nonfinite_origins() {
         Some(numeric_key_object),
     ]));
     let wire = unsafe { quickjs_reference_wire(&mut env as NapiEnv, root, true) }.unwrap();
-    assert_eq!(wire.value[0]["timestamp"], 0);
+    assert_eq!(wire.value[0]["timestamp"], 0.0);
     assert_eq!(wire.value[2], JsonValue::Null);
     assert!(wire.origins.contains(&serde_json::json!([[0], "plain"])));
     assert!(wire.origins.contains(&serde_json::json!([[1], "plain"])));
@@ -1698,7 +1698,7 @@ fn quickjs_private_wire_tracks_only_native_date_and_nonfinite_origins() {
     // Public result walkers resolve the live owner before invoking accessors.
     let env = Box::new(env);
     HOST.with(|host| host.borrow_mut().module_envs.push(env));
-    assert_eq!(unsafe { json_from_value_with_undefined(literal_date, true) }.unwrap()["timestamp"], 0);
+    assert_eq!(unsafe { json_from_value_with_undefined(literal_date, true) }.unwrap()["timestamp"], 0.0);
     HOST.with(|host| { drop(host.borrow_mut().module_envs.pop()); });
 }
 
@@ -1738,7 +1738,7 @@ fn library_destructor_cannot_reenter_shutdown_or_load() {
         .arg(&addon_c).arg("-o").arg(&addon)
         .status().unwrap().success());
     let path = std::ffi::CString::new(addon.to_string_lossy().as_bytes()).unwrap();
-    assert_eq!(thaw_napi_load(path.as_ptr()), 1);
+    assert_eq!(unsafe { thaw_napi_load(path.as_ptr()) }, 1);
     assert_eq!(thaw_napi_begin_shutdown(), 1);
     assert_eq!(thaw_napi_poll_shutdown(), 1);
     assert_eq!(thaw_napi_finish_shutdown(), 1);
@@ -2290,7 +2290,7 @@ fn graph_defined_native_accessor_owns_callbacks_until_replaced() {
     let mut first = ptr::null_mut();
     assert_eq!(unsafe { napi_get_named_property(env_ptr, object,
         c"computed".as_ptr(), &mut first) }, NAPI_OK);
-    let first_handle = qjs_handle(first).expect("live getter result");
+    let first_handle = unsafe { qjs_handle(first) }.expect("live getter result");
     assert_eq!(unsafe { qjs_query(first_handle, 2) }.unwrap(), "8");
     let replacement = unsafe { env_mut(env_ptr) }.unwrap().alloc(Value::Number(12.0));
     assert_eq!(unsafe { napi_set_named_property(env_ptr, object,

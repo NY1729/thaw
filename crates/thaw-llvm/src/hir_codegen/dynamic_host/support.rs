@@ -23,6 +23,11 @@ fn dynamic_json_collection_element_supported(ty: &HirType) -> bool {
             dynamic_json_collection_element_supported(payload)
         }
         HirType::Array(element) => dynamic_json_collection_element_supported(element),
+        // A scalar union (`number | string`) decodes member by member from the JSON element.
+        HirType::Union(members) => members.iter().all(|member| matches!(
+            member,
+            HirType::F64 | HirType::Str | HirType::Bool | HirType::Null | HirType::Undefined
+        )),
         HirType::Tuple(elements) => elements
             .iter()
             .all(dynamic_json_collection_element_supported),

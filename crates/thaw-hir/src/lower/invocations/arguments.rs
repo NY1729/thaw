@@ -12,7 +12,15 @@ impl<'a> FnLowerer<'a> {
         arguments: &[swc_ecma_ast::ExprOrSpread],
         label: &str,
     ) -> Result<(Vec<HirExpr>, Vec<LoweredBinding>), String> {
-        self.lower_native_spread_values_impl(arguments, label, &[], None, true)
+        self.lower_native_spread_values_impl(arguments, label, &[], None, true, false)
+    }
+
+    fn lower_error_constructor_arguments(
+        &mut self,
+        arguments: &[swc_ecma_ast::ExprOrSpread],
+        label: &str,
+    ) -> Result<(Vec<HirExpr>, Vec<LoweredBinding>), String> {
+        self.lower_native_spread_values_impl(arguments, label, &[], None, false, true)
     }
 
     fn lower_native_spread_values_with_expected(
@@ -22,7 +30,7 @@ impl<'a> FnLowerer<'a> {
         expected: &[HirType],
         rest: Option<&HirType>,
     ) -> Result<(Vec<HirExpr>, Vec<LoweredBinding>), String> {
-        self.lower_native_spread_values_impl(arguments, label, expected, rest, false)
+        self.lower_native_spread_values_impl(arguments, label, expected, rest, false, false)
     }
 
     fn lower_native_spread_values_impl(
@@ -32,6 +40,7 @@ impl<'a> FnLowerer<'a> {
         expected: &[HirType],
         rest: Option<&HirType>,
         array_reads: bool,
+        snapshot_expanded_values: bool,
     ) -> Result<(Vec<HirExpr>, Vec<LoweredBinding>), String> {
         let lowered = arguments
             .iter()
@@ -53,10 +62,24 @@ impl<'a> FnLowerer<'a> {
                 value
             };
             if argument.spread.is_none() {
-                let ty = self.infer_expr_type(&value)?;
+                // A literal has no side effects or ordering, so wrappers that need a
+                // static literal (Temporal calendars/units, `.flat(2)`) can still see it.
+                if !snapshot_expanded_values && matches!(value, HirExpr::Lit(_)) {
+                    values.push(value);
+                    continue;
+                }
+                // `infer_expr_type` erases `Bytes` to `Array(F64)`; keep it so a bound
+                // `Buffer` argument still reads as one (`Buffer.isBuffer`, hex/utf8 methods).
+                let ty = match self.infer_expr_type_inner(&value) {
+                    Ok(HirType::Bytes) if !snapshot_expanded_values => HirType::Bytes,
+                    _ => self.infer_expr_type(&value)?,
+                };
                 let name = format!("__thaw_native_arg_{}", self.next_binding);
                 self.next_binding += 1;
                 self.scope.insert(name.clone(), ty.clone());
+                if matches!(value, HirExpr::ObjectLit(_)) || Self::is_wrapped_object_literal(&value) {
+                    self.fresh_object_bindings.insert(name.clone());
+                }
                 bindings.push((name.clone(), ty, value));
                 values.push(HirExpr::Var(name));
                 continue;
@@ -68,7 +91,7 @@ impl<'a> FnLowerer<'a> {
                     } else {
                         element
                     };
-                    if matches!(element, HirExpr::Lit(_)) {
+                    if !snapshot_expanded_values && matches!(element, HirExpr::Lit(_)) {
                         values.push(element);
                         continue;
                     }
@@ -92,13 +115,28 @@ impl<'a> FnLowerer<'a> {
             self.next_binding += 1;
             self.scope.insert(name.clone(), source_type.clone());
             bindings.push((name.clone(), source_type, value));
-            values.extend(elements.into_iter().enumerate().map(|(index, ty)| {
-                HirExpr::TypedIndex(
-                    Box::new(HirExpr::Var(name.clone())),
-                    Box::new(HirExpr::Lit(HirLit::F64(index as f64))),
-                    ty,
-                )
-            }));
+            if snapshot_expanded_values {
+                for (index, ty) in elements.into_iter().enumerate() {
+                    let element = HirExpr::TypedIndex(
+                        Box::new(HirExpr::Var(name.clone())),
+                        Box::new(HirExpr::Lit(HirLit::F64(index as f64))),
+                        ty.clone(),
+                    );
+                    let element_name = format!("__thaw_native_arg_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope.insert(element_name.clone(), ty.clone());
+                    bindings.push((element_name.clone(), ty, element));
+                    values.push(HirExpr::Var(element_name));
+                }
+            } else {
+                values.extend(elements.into_iter().enumerate().map(|(index, ty)| {
+                    HirExpr::TypedIndex(
+                        Box::new(HirExpr::Var(name.clone())),
+                        Box::new(HirExpr::Lit(HirLit::F64(index as f64))),
+                        ty,
+                    )
+                }));
+            }
         }
         Ok((values, bindings))
     }

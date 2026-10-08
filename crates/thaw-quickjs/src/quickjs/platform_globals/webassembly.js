@@ -111,7 +111,17 @@
     const key = instance + ':' + value.v;
     let cached = wasmCachedFuncref(key);
     if (!cached) {
-      const owner = wasmInstance(instance);
+      // A retained table function (instance 0) has no single owner instance;
+      // sync every live instance's memories/globals around the call.
+      // ponytail: O(live instances) per call, track owners from Rust if this gets hot.
+      const owner = instance === 0 ? { get __thawResources() {
+        const all = [];
+        for (const entry of wasmInstances.values()) {
+          const live = entry && typeof entry.deref === 'function' ? entry.deref() : entry;
+          if (live && live.__thawResources) all.push(...live.__thawResources);
+        }
+        return all;
+      } } : wasmInstance(instance);
       const callable = (...args) => {
         const encoded = JSON.stringify(wasmEncodeArguments(args, value.parameters || []));
         const called = wasmWithResources(owner, () => wasmResult(__thaw_wasm_call_funcref(instance, value.v, encoded), WebAssembly.RuntimeError));

@@ -704,18 +704,6 @@ impl<'a> FnLowerer<'a> {
             ])),
             Expr::Ident(ident) => {
                 let name = self.resolve_binding(ident.sym.as_ref());
-                if let Some((reserved, read)) = self.parameter_tdz_fallbacks.get(ident.sym.as_ref()) {
-                    // A nested arrow/function may bind the same spelling.
-                    // Its own parameter is initialized independently of the
-                    // enclosing method's still-uninitialized parameter.
-                    if reserved == &name { return Ok(read.clone()); }
-                }
-                if let Some((reserved, cell, payload)) = self.parameter_shared_cells.get(ident.sym.as_ref()) {
-                    if reserved == &name {
-                        return Ok(target_to_read_expr(&Target::ParameterCell(
-                            cell.clone(), payload.clone()))?);
-                    }
-                }
                 // A read of a `new Proxy(target, handler)`'s own `target`
                 // identifier, redirected to re-read the live QuickJS
                 // handle a `set` trap's mutation actually reaches (see
@@ -735,9 +723,39 @@ impl<'a> FnLowerer<'a> {
                 }
                 if !self.scope.contains_key(&name) {
                     if let Some(signature) = self.signatures.get(&name) {
-                        if signature.is_extern || !signature.generic_type_params.is_empty() {
+                        if !signature.generic_type_params.is_empty() {
                             return Err(format!(
                                 "function value `{name}` needs a monomorphic native implementation"
+                            ));
+                        }
+                        if signature.is_extern {
+                            // A monomorphic extern has no function body to point at, so a
+                            // value use is a closure forwarding to the call.
+                            let ret = if signature.is_async {
+                                HirType::Promise(Box::new(signature.ret.clone()))
+                            } else {
+                                signature.ret.clone()
+                            };
+                            let params = signature.params.iter().enumerate()
+                                .map(|(index, ty)| HirParam {
+                                    name: format!("__thaw_extern_arg_{index}"), ty: ty.clone(),
+                                })
+                                .collect::<Vec<_>>();
+                            let arguments = params.iter()
+                                .map(|param| HirExpr::Var(param.name.clone())).collect();
+                            let call = match dynamic_symbol(&name) {
+                                Some((backend, symbol)) => HirExpr::DynamicCall(
+                                    DynamicSignature {
+                                        backend, symbol, params: signature.params.clone(),
+                                        ret: signature.ret.clone(),
+                                    },
+                                    arguments,
+                                ),
+                                None => HirExpr::Call(Box::new(HirExpr::Var(name)), arguments),
+                            };
+                            return Ok(HirExpr::Lambda(
+                                Vec::new(), params, ret.clone(),
+                                Box::new(HirExpr::Block(vec![HirStmt::Return(Some(call))])),
                             ));
                         }
                         let ret = if signature.is_async {
@@ -745,7 +763,13 @@ impl<'a> FnLowerer<'a> {
                         } else {
                             signature.ret.clone()
                         };
-                        return self.function_ref_from_signature(name, signature, ret);
+                        // ponytail: a `this`-using function stays a plain FunctionRef;
+                        // FunctionRefThis needs `.bind` lowering and llvm support first.
+                        return Ok(HirExpr::FunctionRef(
+                            name,
+                            signature.params.clone(),
+                            ret,
+                        ));
                     }
                     // A bare class-name reference (not immediately
                     // `new`'d) -- real trigger: `class-transformer`'s
@@ -992,17 +1016,10 @@ impl<'a> FnLowerer<'a> {
                     return Ok(HirExpr::Lit(HirLit::Undefined));
                 }
                 if self.class_static_context {
-                    let bound = self.resolve_binding("this");
-                    if self.scope.contains_key(&bound) {
-                        return Ok(HirExpr::Var(bound));
-                    }
                     let class = self
                         .class_context
                         .as_deref()
                         .ok_or("static `this` is missing its class context")?;
-                    if let Some(token) = self.class_value_token(class) {
-                        return Ok(HirExpr::Var(token));
-                    }
                     let constructor = class_constructor_symbol(class);
                     let signature = self.signatures.get(&constructor).ok_or_else(|| {
                         format!("static `this` constructor `{constructor}` is not declared")
@@ -1051,6 +1068,36 @@ impl<'a> FnLowerer<'a> {
                             .or_else(|| lower_ts_type(&assertion.type_ann,
                                 self.interfaces, self.generic_interfaces).ok());
                         if self.scope.get(&resolved) == Some(&crate::caught_exception_carrier_type()) {
+                            if let Some(expected_tag) = crate::native_exception_tag(&target.clone().unwrap_or(HirType::Void)) {
+                                let target = target.clone().unwrap();
+                                let layout = crate::native_exception_layout_token(&target).unwrap();
+                                let HirType::Union(members) = crate::caught_exception_carrier_type()
+                                    else { unreachable!() };
+                                let carrier = HirExpr::Var(resolved.clone());
+                                let descriptor = HirExpr::UnionValue(
+                                    Box::new(carrier.clone()), 9, members,
+                                );
+                                let owner = HirExpr::Call(
+                                    Box::new(HirExpr::Var("__thaw_native_exception_owner".into())),
+                                    vec![descriptor, HirExpr::Lit(HirLit::I64(expected_tag as i64)),
+                                        HirExpr::Lit(HirLit::Str(layout))],
+                                );
+                                let present = HirExpr::Call(
+                                    Box::new(HirExpr::Var("__thaw_native_exception_owner_present".into())),
+                                    vec![owner.clone()],
+                                );
+                                return Ok(HirExpr::Conditional(
+                                    Box::new(present),
+                                    Box::new(HirExpr::TypedClosure(target.clone(), Box::new(owner))),
+                                    Box::new(HirExpr::ThrowValue(
+                                        Box::new(HirExpr::Lit(HirLit::Str(
+                                            "caught native value has an incompatible category or layout".into(),
+                                        ))),
+                                        Box::new(Self::unreachable_value(&target)?),
+                                    )),
+                                    target,
+                                ));
+                            }
                             if let Some(target @ HirType::Object(_)) = target.clone() {
                                 let HirType::Object(target_fields) = &target else { unreachable!() };
                                 let HirType::Union(members) = crate::caught_exception_carrier_type()
@@ -1061,7 +1108,11 @@ impl<'a> FnLowerer<'a> {
                                 ));
                                 let checked = HirExpr::Call(
                                     Box::new(HirExpr::Var("__thaw_assert_class_identity".into())),
-                                    vec![native, HirExpr::Lit(HirLit::Str(class.sym.to_string())),
+                                    vec![native, HirExpr::Lit(HirLit::Str(
+                                            // An interface/alias target has no nominal identity.
+                                            target_fields.first().and_then(|(name, _)| name.strip_prefix("__thaw_class_identity_\u{1e}"))
+                                                .filter(|ancestry| ancestry.split('\u{1f}').any(|name| name == class.sym.as_ref()))
+                                                .map(|_| class.sym.to_string()).unwrap_or_default())),
                                         HirExpr::Lit(HirLit::Str(
                                             crate::native_object_layout_token(target_fields))),
                                     ],
@@ -1073,7 +1124,7 @@ impl<'a> FnLowerer<'a> {
                                     Box::new(checked),
                                     Box::new(HirExpr::ThrowValue(
                                         Box::new(HirExpr::Lit(HirLit::Str(
-                                            "caught value is not a native object".into(),
+                                            "caught value is not an object".into(),
                                         ))),
                                         Box::new(Self::unreachable_value(&target)?),
                                     )),
@@ -1774,7 +1825,11 @@ impl<'a> FnLowerer<'a> {
                                     native_builtin_instanceof_static_match("Array", element)
                                         .unwrap_or(false)
                                 } else {
+                                    // The caught-exception carrier's `Object([])` member
+                                    // has an unknown layout; its identity is a runtime query.
                                     class_type_has_identity(element, class.sym.as_ref())
+                                        || (extends_error_family
+                                            && matches!(element, HirType::Object(fields) if fields.is_empty()))
                                 })
                                 .then_some(index)
                             })
@@ -1811,6 +1866,32 @@ impl<'a> FnLowerer<'a> {
                                     );
                                     self.lower_logical_expr(check, identity, true)?
                                 };
+                                result = self.lower_logical_expr(result, check, false)?;
+                            }
+                        }
+                        // A thrown `Error` travels as a framed string; its
+                        // ancestry is decoded from the frame (an unframed
+                        // string is never an instance).
+                        if extends_error_family && !all_arrays {
+                            for (index, element) in elements.iter().enumerate() {
+                                if *element != HirType::Str { continue; }
+                                let check = HirExpr::BinOp(
+                                    BinOp::EqEqEq,
+                                    Box::new(HirExpr::UnionTag(
+                                        Box::new(HirExpr::Var(name.clone())), elements.clone(),
+                                    )),
+                                    Box::new(HirExpr::Lit(HirLit::F64(index as f64))),
+                                );
+                                let framed = HirExpr::Call(
+                                    Box::new(HirExpr::Var("__thaw_error_is_instance".into())),
+                                    vec![
+                                        HirExpr::UnionValue(
+                                            Box::new(HirExpr::Var(name.clone())), index, elements.clone(),
+                                        ),
+                                        HirExpr::Lit(HirLit::Str(class.sym.to_string())),
+                                    ],
+                                );
+                                let check = self.lower_logical_expr(check, framed, true)?;
                                 result = self.lower_logical_expr(result, check, false)?;
                             }
                         }
@@ -2601,6 +2682,15 @@ impl<'a> FnLowerer<'a> {
                         }
                         .map(Ok)
                         .unwrap_or_else(|| self.infer_expr_type(&value))?;
+                        // A generic arrow (or an alias forwarding to a generic template) has
+                        // no runtime value to read a pointer from; it is always a function.
+                        if let HirExpr::Var(name) = &value {
+                            if self.generic_arrows.contains_key(name)
+                                || self.generic_named_templates.contains_key(name)
+                            {
+                                return Ok(HirExpr::Lit(HirLit::Str("function".into())));
+                            }
+                        }
                         if Self::contains_function_value(&operand_type) {
                             let name = format!("__thaw_typeof_function_tagged_{}", self.next_binding);
                             self.next_binding += 1;
@@ -2656,6 +2746,13 @@ impl<'a> FnLowerer<'a> {
                                             ],
                                         ),
                                     ))),
+                                    HirType::NativeException => Ok(HirExpr::Call(
+                                        Box::new(HirExpr::Var("__thaw_exception_typeof".into())),
+                                        vec![HirExpr::Call(
+                                            Box::new(HirExpr::Var("__thaw_native_exception_tag".into())),
+                                            vec![projected],
+                                        )],
+                                    )),
                                     _ => native_typeof_name(member)
                                         .map(|name| HirExpr::Lit(HirLit::Str(name.into())))
                                         .ok_or_else(|| format!(
@@ -2936,6 +3033,22 @@ impl<'a> FnLowerer<'a> {
                     && !matches!(alternate_type, HirType::Union(_))
                 {
                     let result = match (&consequent_type, &alternate_type) {
+                        // `null | undefined` (a nested `c ? null : undefined`)
+                        // joined with a payload is that payload's `Nullish`.
+                        (HirType::Optional(absent), payload) | (payload, HirType::Optional(absent))
+                            if **absent == HirType::Null
+                                && !matches!(payload, HirType::Optional(_) | HirType::Nullable(_) | HirType::Nullish(_)) =>
+                        {
+                            HirType::Nullish(Box::new(payload.clone()))
+                        }
+                        (HirType::Undefined, HirType::Nullable(payload))
+                        | (HirType::Nullable(payload), HirType::Undefined) => {
+                            HirType::Nullish(payload.clone())
+                        }
+                        (HirType::Null, HirType::Optional(payload))
+                        | (HirType::Optional(payload), HirType::Null) => {
+                            HirType::Nullish(payload.clone())
+                        }
                         (HirType::Undefined, payload) | (payload, HirType::Undefined) => {
                             HirType::Optional(Box::new(payload.clone()))
                         }
@@ -2947,6 +3060,13 @@ impl<'a> FnLowerer<'a> {
                     consequent = self.coerce_to_declared(&result, consequent)?;
                     alternate = self.coerce_to_declared(&result, alternate)?;
                     result
+                } else if matches!(&consequent_type, HirType::Union(members) if members.contains(&alternate_type)) {
+                    // `c ? (d ? A : B) : A`: the plain branch joins the union.
+                    alternate = self.coerce_to_declared(&consequent_type, alternate)?;
+                    consequent_type
+                } else if matches!(&alternate_type, HirType::Union(members) if members.contains(&consequent_type)) {
+                    consequent = self.coerce_to_declared(&alternate_type, consequent)?;
+                    alternate_type
                 } else {
                     return Err(format!(
                         "conditional expression branches have incompatible types {consequent_type:?} and {alternate_type:?}"
@@ -3104,7 +3224,7 @@ impl<'a> FnLowerer<'a> {
                             let name = format!("__thaw_iterator_{}", self.next_binding);
                             self.next_binding += 1;
                             if let Some((producer, producer_type)) =
-                                iterator_object_adapter(self, iterator, &iterator_type, name)
+                                iterator_object_adapter(self, iterator, &iterator_type, name, false)
                             {
                                 if let Some((collected, _)) = self
                                     .collect_generator_for_array_spread(producer, &producer_type)?
@@ -3290,31 +3410,6 @@ impl<'a> FnLowerer<'a> {
                     .ok_or("`super` property access is only valid in a derived class")?;
                 let property = super_property_name(&member.prop)?;
                 if self.class_static_context {
-                    if let Some(base_token) = self.static_super_base_handle() {
-                        if let Some(receiver) = self.static_this_token_expr() {
-                            let field = class_static_field_symbol(&base_name, &property);
-                            let ty = self.scope.get(&field).cloned().or_else(|| {
-                                self.signatures.get(&class_getter_symbol(&base_name, &property, true))
-                                    .map(|signature| signature.ret.clone())
-                            });
-                            let has_method = self.signatures.contains_key(
-                                &class_static_method_symbol(&base_name, &property));
-                            if ty.is_some() || has_method {
-                                let capture = format!("__thaw_super_read_base_{}", self.next_binding);
-                                self.next_binding += 1;
-                                let live = HirExpr::Call(
-                                    Box::new(HirExpr::Var("__thaw_get_super_static_property_json".into())),
-                                    vec![HirExpr::Var(capture.clone()), receiver,
-                                        HirExpr::Lit(HirLit::Str(property))],
-                                );
-                                let live = self.wrap_static_super_base_use(capture, base_token, live)?;
-                                return Ok(match ty {
-                                    Some(HirType::Function(..) | HirType::CallableFunction(..) | HirType::FunctionWithThis(..)) | None => live,
-                                    Some(ty) => HirExpr::JsonAsNative(Box::new(live), ty),
-                                });
-                            }
-                        }
-                    }
                     let storage = class_static_field_symbol(&base_name, &property);
                     if self.scope.contains_key(&storage) {
                         return Ok(HirExpr::Var(storage));

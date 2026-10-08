@@ -185,7 +185,13 @@ impl<'ctx> HirCompiler<'ctx> {
                         | "__thaw_json_map_or_set_set"
                         | "__thaw_json_map_or_set_add"
                         | "__thaw_json_map_or_set_delete"
-                        | "__thaw_json_map_or_set_clear" => return Some(HirType::Json),
+                        | "__thaw_json_map_or_set_clear"
+                        // Boxing a native scalar yields a Json value; `===` against
+                        // it must go through the Json comparison, not pointer equality.
+                        | "__thaw_json_receiver_number"
+                        | "__thaw_json_receiver_bool"
+                        | "__thaw_json_receiver_string"
+                        | "__thaw_json_receiver_bigint" => return Some(HirType::Json),
                         // `Object.keys`/`Object.getOwnPropertyNames`/
                         // `Reflect.ownKeys` on a `Json`/`Dictionary`/
                         // array receiver, and the array-receiver variant
@@ -332,6 +338,7 @@ impl<'ctx> HirCompiler<'ctx> {
                         | "deleteDynamicProperty"
                         | "hasDynamicProperty"
                         | "__thaw_error_is_error"
+                        | "__thaw_native_wrapper_is_live"
                         | "__thaw_error_is_instance" => {
                             return Some(HirType::Bool)
                         }

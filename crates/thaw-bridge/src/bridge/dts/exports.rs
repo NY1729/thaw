@@ -1248,7 +1248,7 @@ fn lower_dts_call_signature(
         .params
         .iter()
         .take(fixed_param_count)
-        .take_while(|param| matches!(param, TsFnParam::Ident(binding) if !binding.id.optional))
+        .take_while(|param| !matches!(param, TsFnParam::Ident(binding) if binding.id.optional))
         .count();
     let mut param_field_constraints = Vec::new();
     let params = call
@@ -1426,7 +1426,7 @@ fn lower_dts_fn_type(
         .params
         .iter()
         .take(fixed_param_count)
-        .take_while(|param| matches!(param, TsFnParam::Ident(binding) if !binding.id.optional))
+        .take_while(|param| !matches!(param, TsFnParam::Ident(binding) if binding.id.optional))
         .count();
     let mut param_field_constraints = Vec::new();
     let params = function
@@ -1529,7 +1529,7 @@ pub fn self_referential_namespace_aliases_named(source: &str, filename: &thaw_pa
             Some(import.specifiers.iter().filter_map(|specifier| {
                 match specifier {
                     swc_ecma_ast::ImportSpecifier::Namespace(namespace)
-                        if import.src.value.starts_with('.') => {
+                        if import.src.value.starts_with(".") => {
                         Some(namespace.local.sym.to_string())
                     }
                     _ => None,
@@ -1593,6 +1593,24 @@ pub fn self_referential_namespace_aliases_named(source: &str, filename: &thaw_pa
 /// these names are erased at runtime but still need a local type binding.
 pub fn exported_type_names(source: &str) -> HashSet<String> {
     exported_type_names_named(source, &thaw_parser::common::FileName::Custom("input.ts".into()))
+}
+
+/// Interfaces and type aliases a declaration file exports directly
+/// (`export interface X`, `export type X = ...`). They have no runtime value,
+/// but an `import { X }` / `import type { X }` of one must still bind.
+pub fn exported_declared_type_names_named(
+    source: &str, filename: &thaw_parser::common::FileName,
+) -> HashSet<String> {
+    let Ok(module) = thaw_parser::parse_declarations_with_source_map_named(source, filename.clone())
+        .map(|(module, _)| module) else { return HashSet::new() };
+    module.body.iter().filter_map(|item| match item {
+        ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export)) => match &export.decl {
+            swc_ecma_ast::Decl::TsInterface(interface) => Some(interface.id.sym.to_string()),
+            swc_ecma_ast::Decl::TsTypeAlias(alias) => Some(alias.id.sym.to_string()),
+            _ => None,
+        },
+        _ => None,
+    }).collect()
 }
 
 pub fn exported_type_names_named(source: &str, filename: &thaw_parser::common::FileName) -> HashSet<String> {

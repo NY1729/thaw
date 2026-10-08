@@ -801,7 +801,7 @@ mod radix_string_tests {
                 // A coarser lattice has no point in this rounding cell.
                 let coarser = exponent + 1;
                 let power = base.pow(coarser.unsigned_abs());
-                let binary_scale = BigUint::from(1u8) << 1074;
+                let binary_scale = BigUint::from(1u8) << 1074usize;
                 let exact_value = {
                     let bits = value.to_bits();
                     let biased = ((bits >> 52) & 0x7ff) as usize;
