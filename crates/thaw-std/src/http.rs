@@ -237,7 +237,9 @@ fn render_head(
 }
 
 fn render_response(mut response_spec: ResponseSpec, keep_alive: bool) -> Vec<u8> {
-    response_spec.headers.retain(|(name, _)| !name.eq_ignore_ascii_case("Content-Length"));
+    response_spec
+        .headers
+        .retain(|(name, _)| !name.eq_ignore_ascii_case("Content-Length"));
     let framing = format!("Content-Length: {}\r\n", response_spec.body.len());
     let mut response = render_head(
         response_spec.status,
@@ -1256,17 +1258,28 @@ fn normalize_status(status_code: f64) -> u16 {
 
 /// EOF closes only the peer's sending half; response writes remain valid once a response has started.
 fn client_hung_up(connection: &mut ConnectionState) -> bool {
-    if connection.peer_read_closed { return false; }
+    if connection.peer_read_closed {
+        return false;
+    }
     let mut probe = [0_u8; 1];
     match &connection.stream {
         Some(stream) => match stream.peek(&mut probe) {
             // Node (httpAllowHalfOpen=false) aborts a request whose client hung up before any
             // response started and releases the socket; a response already streaming may still be
             // read by a half-closed peer, so that case is preserved.
-            Ok(0) => { connection.peer_read_closed = true; connection.awaiting_handler && !connection.streaming }
+            Ok(0) => {
+                connection.peer_read_closed = true;
+                connection.awaiting_handler && !connection.streaming
+            }
             Ok(_) => false,
-            Err(error) if matches!(error.kind(), std::io::ErrorKind::WouldBlock
-                | std::io::ErrorKind::Interrupted) => false,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                ) =>
+            {
+                false
+            }
             Err(_) => true,
         },
         None => true,
@@ -1923,50 +1936,50 @@ enum ParkedBodyFeed {
 fn feed_parked_request_body(connection_ptr: *mut ConnectionState) -> ParkedBodyFeed {
     let (context, body_complete) = {
         let connection = unsafe { &mut *connection_ptr };
-    if connection.response_ctx.is_null() || connection.body_complete {
-        return ParkedBodyFeed::Nothing;
-    }
-    let mut chunk = [0_u8; 4096];
-    let mut read_any = false;
-    loop {
-        let Some(socket) = connection.socket() else {
-            finish_connection(connection);
-            return ParkedBodyFeed::ConnectionClosed;
-        };
-        match socket.read(&mut chunk) {
-            Ok(0) => {
-                connection.peer_read_closed = true;
-                break;
-            }
-            Ok(length) => {
-                connection.request.extend_from_slice(&chunk[..length]);
-                read_any = true;
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
-            Err(_) => {
+        if connection.response_ctx.is_null() || connection.body_complete {
+            return ParkedBodyFeed::Nothing;
+        }
+        let mut chunk = [0_u8; 4096];
+        let mut read_any = false;
+        loop {
+            let Some(socket) = connection.socket() else {
                 finish_connection(connection);
                 return ParkedBodyFeed::ConnectionClosed;
+            };
+            match socket.read(&mut chunk) {
+                Ok(0) => {
+                    connection.peer_read_closed = true;
+                    break;
+                }
+                Ok(length) => {
+                    connection.request.extend_from_slice(&chunk[..length]);
+                    read_any = true;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(_) => {
+                    finish_connection(connection);
+                    return ParkedBodyFeed::ConnectionClosed;
+                }
             }
         }
-    }
-    // Genuinely nothing new (the very first read already `WouldBlock`ed):
-    // must report `Nothing`, not `Fed` -- `connection_ready`'s caller
-    // loops on `Fed` expecting real progress each time, and a nonblocking
-    // socket with no new data never blocks on its own, so returning `Fed`
-    // here would spin forever with no actual I/O to wait on.
-    if !read_any && !connection.peer_read_closed {
-        return ParkedBodyFeed::Nothing;
-    }
-    // Nothing between here and the entry check above can have nulled
-    // `response_ctx` (only `finish_connection` does, and that already
-    // returned early above).
-    let context = connection.response_ctx;
-    sync_request_body_buffer(connection, unsafe { &mut *context });
-    if connection.peer_read_closed && !connection.body_complete {
-        finish_connection(connection);
-        return ParkedBodyFeed::ConnectionClosed;
-    }
-    refresh_body_deadline(connection);
+        // Genuinely nothing new (the very first read already `WouldBlock`ed):
+        // must report `Nothing`, not `Fed` -- `connection_ready`'s caller
+        // loops on `Fed` expecting real progress each time, and a nonblocking
+        // socket with no new data never blocks on its own, so returning `Fed`
+        // here would spin forever with no actual I/O to wait on.
+        if !read_any && !connection.peer_read_closed {
+            return ParkedBodyFeed::Nothing;
+        }
+        // Nothing between here and the entry check above can have nulled
+        // `response_ctx` (only `finish_connection` does, and that already
+        // returned early above).
+        let context = connection.response_ctx;
+        sync_request_body_buffer(connection, unsafe { &mut *context });
+        if connection.peer_read_closed && !connection.body_complete {
+            finish_connection(connection);
+            return ParkedBodyFeed::ConnectionClosed;
+        }
+        refresh_body_deadline(connection);
         (context, connection.body_complete)
     };
     // No mutable ConnectionState or RequestContext borrow spans user code.
@@ -2000,10 +2013,14 @@ impl Drop for ConnectionReadyLease {
 extern "C" fn connection_ready(context: *mut u8, _events: i16) {
     let connection_ptr = context.cast::<ConnectionState>();
     let _ready_lease = unsafe { ConnectionReadyLease::new(connection_ptr) };
-    if unsafe { (*connection_ptr).retired } { return; }
+    if unsafe { (*connection_ptr).retired } {
+        return;
+    }
     loop {
-        let parked = unsafe { (*connection_ptr).awaiting_handler
-            || ((*connection_ptr).streaming && !(*connection_ptr).response_ended) };
+        let parked = unsafe {
+            (*connection_ptr).awaiting_handler
+                || ((*connection_ptr).streaming && !(*connection_ptr).response_ended)
+        };
         if parked {
             match feed_parked_request_body(connection_ptr) {
                 ParkedBodyFeed::ConnectionClosed => return,
@@ -2031,7 +2048,9 @@ extern "C" fn connection_ready(context: *mut u8, _events: i16) {
         if unsafe { (*connection_ptr).response.is_empty() } && !read_request(connection_ptr) {
             return;
         }
-        if unsafe { (*connection_ptr).retired } { return; }
+        if unsafe { (*connection_ptr).retired } {
+            return;
+        }
         // `write_response`, on a fully-sent keep-alive response, drains
         // the request it just answered and leaves any pipelined bytes in
         // `connection.request`. If a whole next request is already
@@ -2164,48 +2183,48 @@ fn parse_head(head: &[u8]) -> (String, String, bool, BodyPlan, Vec<(String, Stri
 fn try_buffered_request(connection_ptr: *mut ConnectionState) -> Option<bool> {
     {
         let connection = unsafe { &mut *connection_ptr };
-    if connection.head_end == 0 {
-        let index = connection
-            .request
-            .windows(4)
-            .position(|bytes| bytes == b"\r\n\r\n")?;
-        connection.head_end = index + 4;
-        let (_, _, _, body_plan, _) = parse_head(&connection.request[..connection.head_end]);
-        connection.body_plan = body_plan;
-        // Deliberately *not* pre-marking `body_complete` here even for
-        // `BodyPlan::None` -- `deliver_request_body_listeners`'s first
-        // call (right after dispatch) is the one place that transitions
-        // it false -> true *and* sets `connection.consumed` at that same
-        // moment; pre-setting it here would make that function's own
-        // `if connection.body_complete { return; }` guard skip ever
-        // running, leaving `consumed` at 0 forever and the same request
-        // bytes stuck in the buffer to be re-parsed (and re-dispatched)
-        // indefinitely on every keep-alive reuse.
-    }
-    // A `Content-Length` past the cap, or a chunked body that grows past
-    // it, is refused -- and the connection can't be reused (unread body
-    // bytes would desync it), so it's closed outright.
-    let body_seen = connection.request.len() - connection.head_end;
-    let over_cap = match connection.body_plan {
-        BodyPlan::Fixed(length) => length > MAX_REQUEST_BODY,
-        BodyPlan::Chunked => body_seen > MAX_REQUEST_BODY,
-        BodyPlan::None => false,
-    };
-    if over_cap {
-        finish_connection(connection);
-        return Some(false);
-    }
-    if connection.dispatched {
-        // Already running (or finished) -- nothing new to do here; more
-        // body bytes for it are delivered by `connection_ready`'s own
-        // continuation path instead, not by re-entering this function.
-        // Shouldn't be reachable in practice (the surrounding guards
-        // already keep `read_request` from being called again once
-        // dispatched), but stays safe rather than re-invoking the
-        // handler a second time if it ever is.
-        return Some(true);
-    }
-    connection.dispatched = true;
+        if connection.head_end == 0 {
+            let index = connection
+                .request
+                .windows(4)
+                .position(|bytes| bytes == b"\r\n\r\n")?;
+            connection.head_end = index + 4;
+            let (_, _, _, body_plan, _) = parse_head(&connection.request[..connection.head_end]);
+            connection.body_plan = body_plan;
+            // Deliberately *not* pre-marking `body_complete` here even for
+            // `BodyPlan::None` -- `deliver_request_body_listeners`'s first
+            // call (right after dispatch) is the one place that transitions
+            // it false -> true *and* sets `connection.consumed` at that same
+            // moment; pre-setting it here would make that function's own
+            // `if connection.body_complete { return; }` guard skip ever
+            // running, leaving `consumed` at 0 forever and the same request
+            // bytes stuck in the buffer to be re-parsed (and re-dispatched)
+            // indefinitely on every keep-alive reuse.
+        }
+        // A `Content-Length` past the cap, or a chunked body that grows past
+        // it, is refused -- and the connection can't be reused (unread body
+        // bytes would desync it), so it's closed outright.
+        let body_seen = connection.request.len() - connection.head_end;
+        let over_cap = match connection.body_plan {
+            BodyPlan::Fixed(length) => length > MAX_REQUEST_BODY,
+            BodyPlan::Chunked => body_seen > MAX_REQUEST_BODY,
+            BodyPlan::None => false,
+        };
+        if over_cap {
+            finish_connection(connection);
+            return Some(false);
+        }
+        if connection.dispatched {
+            // Already running (or finished) -- nothing new to do here; more
+            // body bytes for it are delivered by `connection_ready`'s own
+            // continuation path instead, not by re-entering this function.
+            // Shouldn't be reachable in practice (the surrounding guards
+            // already keep `read_request` from being called again once
+            // dispatched), but stays safe rather than re-invoking the
+            // handler a second time if it ever is.
+            return Some(true);
+        }
+        connection.dispatched = true;
     }
     Some(dispatch_request(connection_ptr))
 }
@@ -2269,25 +2288,18 @@ fn dispatch_request(connection_ptr: *mut ConnectionState) -> bool {
         let (method, target, keep_alive, _, headers) =
             parse_head(&connection.request[..connection.head_end]);
         let callback = unsafe { &*connection.server }.callback as *const c_void;
-    // The head is in and the handler is about to run -- cleared
-    // unconditionally here; `run_server_callback` re-arms it as a
-    // body-arrival deadline right after, once `sync_request_body_buffer`
-    // has determined whether the body is actually complete yet.
+        // The head is in and the handler is about to run -- cleared
+        // unconditionally here; `run_server_callback` re-arms it as a
+        // body-arrival deadline right after, once `sync_request_body_buffer`
+        // has determined whether the body is actually complete yet.
         connection.head_deadline = None;
-    // Set before running the handler: an `async` handler that suspends
-    // won't return through here, and `finish_response` needs the
-    // negotiated value when it renders the response later.
+        // Set before running the handler: an `async` handler that suspends
+        // won't return through here, and `finish_response` needs the
+        // negotiated value when it renders the response later.
         connection.keep_alive = keep_alive;
         (method, target, keep_alive, headers, callback)
     };
-    let outcome = run_server_callback(
-        callback,
-        &method,
-        &target,
-        &[],
-        &headers,
-        connection_ptr,
-    );
+    let outcome = run_server_callback(callback, &method, &target, &[], &headers, connection_ptr);
     if unsafe { (*connection_ptr).retired } {
         if let CallbackOutcome::Pending(context) = outcome {
             unsafe {
@@ -2405,7 +2417,11 @@ fn write_response(connection: &mut ConnectionState) -> FlushResult {
         connection.body_complete = false;
         connection.dispatched = false;
         if connection.peer_read_closed
-            && !connection.request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+            && !connection
+                .request
+                .windows(4)
+                .any(|bytes| bytes == b"\r\n\r\n")
+        {
             finish_connection(connection);
             return FlushResult::Closed;
         }
@@ -2466,8 +2482,14 @@ fn drain_pending_context_frees() {
 fn rewatch_connection(connection: &mut ConnectionState, interests: u8) -> bool {
     unsafe { thaw_runtime_unwatch_fd(connection.watcher) };
     connection.watcher = 0;
-    let interests = if connection.peer_read_closed { interests & !THAW_FD_READABLE } else { interests };
-    if interests == 0 { return true; }
+    let interests = if connection.peer_read_closed {
+        interests & !THAW_FD_READABLE
+    } else {
+        interests
+    };
+    if interests == 0 {
+        return true;
+    }
     let Some(fd) = connection.stream.as_ref().map(TcpStream::as_raw_fd) else {
         finish_connection(connection);
         return false;
@@ -2488,7 +2510,9 @@ fn rewatch_connection(connection: &mut ConnectionState, interests: u8) -> bool {
 }
 
 fn finish_connection(connection: &mut ConnectionState) {
-    if connection.retired { return; }
+    if connection.retired {
+        return;
+    }
     connection.retired = true;
     untrack_connection(connection);
     // An `async` handler that hasn't finished still holds a
@@ -2759,7 +2783,10 @@ mod tests {
         unsafe {
             assert!(handle.add(8).cast::<*mut u8>().read().is_null());
             assert_eq!(native_bytes_to_vec(handle), vec![7, 9]);
-            assert_eq!(thaw_runtime::thaw_array_delete_property(handle, c"0".as_ptr()), 1);
+            assert_eq!(
+                thaw_runtime::thaw_array_delete_property(handle, c"0".as_ptr()),
+                1
+            );
             let presence = handle.add(8).cast::<*mut u8>().read();
             assert!(!presence.is_null());
             assert_eq!(presence.cast::<u64>().read(), 2);
@@ -2837,7 +2864,9 @@ mod tests {
             if error_event {
                 first.pending_listening.store(false, Ordering::Release);
                 first.pending_errors.lock().unwrap().push(ServerError {
-                    message: "probe".into(), code: "PROBE".into(), port: 0.0,
+                    message: "probe".into(),
+                    code: "PROBE".into(),
+                    port: 0.0,
                 });
                 first.error_listeners.lock().unwrap().push(listener);
             } else {
@@ -2868,9 +2897,15 @@ mod tests {
             probe.lock_was_free.set(unlocked);
             if unlocked {
                 (*probe.server).closed.store(false, Ordering::Release);
-                (*probe.server).pending_errors.lock().unwrap().push(ServerError {
-                    message: "reopened".into(), code: "REOPEN".into(), port: 0.0,
-                });
+                (*probe.server)
+                    .pending_errors
+                    .lock()
+                    .unwrap()
+                    .push(ServerError {
+                        message: "reopened".into(),
+                        code: "REOPEN".into(),
+                        port: 0.0,
+                    });
                 register_server_in(&*probe.servers, probe.server);
             }
         }
@@ -2894,10 +2929,12 @@ mod tests {
         });
         let context = (&*probe as *const Probe).cast_mut().cast();
         let close_callback = Box::new(NativeClosure {
-            code: on_close as *const c_void, context,
+            code: on_close as *const c_void,
+            context,
         });
         let error_callback = Box::new(NativeClosure {
-            code: on_error as *const c_void, context,
+            code: on_error as *const c_void,
+            context,
         });
         first.close_listeners.lock().unwrap().push(EventListener {
             callback: (&*close_callback as *const NativeClosure) as usize,
@@ -3019,19 +3056,42 @@ mod tests {
             let context = (*(environment as *const NativeClosure)).context as *mut RequestContext;
             if FIRST.with(|calls| calls.get()) == 1 {
                 let callback = SECOND_CALLBACK.with(|callback| callback.get());
-                assert!(request_add_listener((*context).request.on.cast(), c"data".as_ptr(), callback));
-                assert!(response_end((*context).response.end.cast(), c"done".as_ptr()));
+                assert!(request_add_listener(
+                    (*context).request.on.cast(),
+                    c"data".as_ptr(),
+                    callback
+                ));
+                assert!(response_end(
+                    (*context).response.end.cast(),
+                    c"done".as_ptr()
+                ));
                 PENDING_CONTEXT_FREE.with(|list| list.borrow_mut().push(context));
                 drain_pending_context_frees();
             }
         }
         FIRST.with(|calls| calls.set(0));
         SECOND.with(|calls| calls.set(0));
-        let context_ptr = Box::into_raw(RequestContext::new("POST", "/", b"a", &[], std::ptr::null_mut()));
-        let first_callback = NativeClosure { code: first as *const c_void, context: context_ptr.cast() };
-        let second_callback = NativeClosure { code: second as *const c_void, context: context_ptr.cast() };
+        let context_ptr = Box::into_raw(RequestContext::new(
+            "POST",
+            "/",
+            b"a",
+            &[],
+            std::ptr::null_mut(),
+        ));
+        let first_callback = NativeClosure {
+            code: first as *const c_void,
+            context: context_ptr.cast(),
+        };
+        let second_callback = NativeClosure {
+            code: second as *const c_void,
+            context: context_ptr.cast(),
+        };
         SECOND_CALLBACK.with(|slot| slot.set((&second_callback as *const NativeClosure).cast()));
-        unsafe { (*context_ptr).request_data_listeners.push((&first_callback as *const NativeClosure) as usize) };
+        unsafe {
+            (*context_ptr)
+                .request_data_listeners
+                .push((&first_callback as *const NativeClosure) as usize)
+        };
         deliver_request_body_listeners(false, context_ptr);
         assert_eq!(FIRST.with(|calls| calls.get()), 1);
         assert_eq!(SECOND.with(|calls| calls.get()), 0);
@@ -3051,7 +3111,10 @@ mod tests {
     fn connection_retirement_waits_for_ready_stack() {
         unsafe extern "C" fn end_in_data(environment: *const c_void, _chunk: *mut u8) {
             let context = (*(environment as *const NativeClosure)).context as *mut RequestContext;
-            assert!(response_end((*context).response.end.cast(), c"done".as_ptr()));
+            assert!(response_end(
+                (*context).response.end.cast(),
+                c"done".as_ptr()
+            ));
             drain_pending_context_frees();
         }
         let server = Box::new(ServerState {
@@ -3068,14 +3131,29 @@ mod tests {
             close_requested: AtomicBool::new(false),
         });
         let connection = Box::into_raw(Box::new(ConnectionState {
-            stream: None, peer_read_closed: false, server: &*server,
-            request: Vec::new(), response: Vec::new(), written: 0,
-            watcher: 0, keep_alive: false, awaiting_handler: false,
-            response_ctx: std::ptr::null_mut(), streaming: false,
-            response_ended: false, head_deadline: None, head_end: 0,
-            body_plan: BodyPlan::None, consumed: 0, body_scan_offset: 0,
-            body_complete: false, dispatched: false, client_gone: false,
-            ready_depth: 0, retired: false, deferred_box_free: false,
+            stream: None,
+            peer_read_closed: false,
+            server: &*server,
+            request: Vec::new(),
+            response: Vec::new(),
+            written: 0,
+            watcher: 0,
+            keep_alive: false,
+            awaiting_handler: false,
+            response_ctx: std::ptr::null_mut(),
+            streaming: false,
+            response_ended: false,
+            head_deadline: None,
+            head_end: 0,
+            body_plan: BodyPlan::None,
+            consumed: 0,
+            body_scan_offset: 0,
+            body_complete: false,
+            dispatched: false,
+            client_gone: false,
+            ready_depth: 0,
+            retired: false,
+            deferred_box_free: false,
         }));
         track_connection(connection);
         ACTIVE_CONNECTIONS.fetch_add(1, Ordering::AcqRel);
@@ -3084,8 +3162,15 @@ mod tests {
             (*context).resumable = true;
             (*connection).response_ctx = context;
         }
-        let callback = NativeClosure { code: end_in_data as *const c_void, context: context.cast() };
-        unsafe { (*context).request_data_listeners.push((&callback as *const NativeClosure) as usize) };
+        let callback = NativeClosure {
+            code: end_in_data as *const c_void,
+            context: context.cast(),
+        };
+        unsafe {
+            (*context)
+                .request_data_listeners
+                .push((&callback as *const NativeClosure) as usize)
+        };
         {
             let _ready = unsafe { ConnectionReadyLease::new(connection) };
             deliver_request_body_listeners(false, context);
@@ -3106,18 +3191,37 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
         let (stream, _) = listener.accept().unwrap();
-        stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
-        client.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
         client.shutdown(Shutdown::Write).unwrap();
         let mut connection = ConnectionState {
-            stream: Some(stream), peer_read_closed: false,
-            server: std::ptr::null(), request: Vec::new(), response: Vec::new(),
-            written: 0, watcher: 0, keep_alive: false, awaiting_handler: true,
-            response_ctx: std::ptr::null_mut(), streaming: true, response_ended: false,
-            head_deadline: None, head_end: 0, body_plan: BodyPlan::None,
-            consumed: 0, body_scan_offset: 0, body_complete: true,
-            dispatched: true, client_gone: false,
-            ready_depth: 0, retired: false, deferred_box_free: false,
+            stream: Some(stream),
+            peer_read_closed: false,
+            server: std::ptr::null(),
+            request: Vec::new(),
+            response: Vec::new(),
+            written: 0,
+            watcher: 0,
+            keep_alive: false,
+            awaiting_handler: true,
+            response_ctx: std::ptr::null_mut(),
+            streaming: true,
+            response_ended: false,
+            head_deadline: None,
+            head_end: 0,
+            body_plan: BodyPlan::None,
+            consumed: 0,
+            body_scan_offset: 0,
+            body_complete: true,
+            dispatched: true,
+            client_gone: false,
+            ready_depth: 0,
+            retired: false,
+            deferred_box_free: false,
         };
         assert!(!client_hung_up(&mut connection));
         assert!(connection.peer_read_closed);
@@ -3128,7 +3232,10 @@ mod tests {
         connection.request.extend_from_slice(b"abc");
         connection.body_plan = BodyPlan::Fixed(3);
         connection.body_complete = false;
-        assert!(matches!(feed_parked_request_body(&mut connection), ParkedBodyFeed::Fed));
+        assert!(matches!(
+            feed_parked_request_body(&mut connection),
+            ParkedBodyFeed::Fed
+        ));
         assert!(connection.body_complete);
         assert_eq!(context._raw_body, b"abc");
         connection.response_ctx = std::ptr::null_mut();
@@ -3136,7 +3243,10 @@ mod tests {
         // The parked async handler may resume and produce multiple chunks.
         for chunk in [b"first".as_slice(), b"second".as_slice()] {
             connection.response.extend_from_slice(chunk);
-            assert!(matches!(write_response(&mut connection), FlushResult::Pending));
+            assert!(matches!(
+                write_response(&mut connection),
+                FlushResult::Pending
+            ));
             assert!(connection.stream.is_some());
             assert_eq!(connection.watcher, 0);
             let mut received = vec![0; chunk.len()];
@@ -3146,32 +3256,46 @@ mod tests {
         // Already buffered pipeline requests survive peer send EOF too.
         connection.streaming = false;
         connection.keep_alive = true;
-        connection.request.extend_from_slice(b"GET /next HTTP/1.1\r\nHost: local\r\n\r\n");
+        connection
+            .request
+            .extend_from_slice(b"GET /next HTTP/1.1\r\nHost: local\r\n\r\n");
         connection.consumed = 0;
-        assert!(matches!(write_response(&mut connection), FlushResult::KeptAlive));
+        assert!(matches!(
+            write_response(&mut connection),
+            FlushResult::KeptAlive
+        ));
         assert!(connection.request.starts_with(b"GET /next"));
         assert_eq!(connection.watcher, 0);
     }
 
     #[test]
     fn buffered_response_uses_one_computed_content_length() {
-        let response = render_response(ResponseSpec {
-            status: 200,
-            headers: vec![
-                ("Content-Length".into(), "99".into()),
-                ("X-Trace".into(), "kept".into()),
-                ("cOnTeNt-LeNgTh".into(), "123".into()),
-            ],
-            body: "é".as_bytes().to_vec(),
-        }, true);
+        let response = render_response(
+            ResponseSpec {
+                status: 200,
+                headers: vec![
+                    ("Content-Length".into(), "99".into()),
+                    ("X-Trace".into(), "kept".into()),
+                    ("cOnTeNt-LeNgTh".into(), "123".into()),
+                ],
+                body: "é".as_bytes().to_vec(),
+            },
+            true,
+        );
         assert_eq!(response, "HTTP/1.1 200 OK\r\nX-Trace: kept\r\nContent-Length: 2\r\nConnection: keep-alive\r\n\r\né".as_bytes());
 
-        let response = render_response(ResponseSpec {
-            status: 200,
-            headers: vec![("X-Trace".into(), "kept".into())],
-            body: b"ok".to_vec(),
-        }, false);
-        assert_eq!(response, b"HTTP/1.1 200 OK\r\nX-Trace: kept\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok");
+        let response = render_response(
+            ResponseSpec {
+                status: 200,
+                headers: vec![("X-Trace".into(), "kept".into())],
+                body: b"ok".to_vec(),
+            },
+            false,
+        );
+        assert_eq!(
+            response,
+            b"HTTP/1.1 200 OK\r\nX-Trace: kept\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok"
+        );
     }
 
     #[test]
@@ -3188,13 +3312,19 @@ mod tests {
         assert!(set("x-tRaCe", "new"));
         assert_eq!(
             context.state.headers,
-            vec![("X-Keep".into(), "kept".into()), ("x-tRaCe".into(), "new".into())]
+            vec![
+                ("X-Keep".into(), "kept".into()),
+                ("x-tRaCe".into(), "new".into())
+            ]
         );
-        let buffered = render_response(ResponseSpec {
-            status: 200,
-            headers: context.state.headers.clone(),
-            body: Vec::new(),
-        }, false);
+        let buffered = render_response(
+            ResponseSpec {
+                status: 200,
+                headers: context.state.headers.clone(),
+                body: Vec::new(),
+            },
+            false,
+        );
         assert_eq!(buffered, b"HTTP/1.1 200 OK\r\nX-Keep: kept\r\nx-tRaCe: new\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
         let streamed = render_streaming_head(200, &context.state.headers, false);
         assert_eq!(streamed, b"HTTP/1.1 200 OK\r\nX-Keep: kept\r\nx-tRaCe: new\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n");
@@ -3616,8 +3746,13 @@ mod tests {
     fn request_get_header_return_survives_another_lookup_and_context_drop() {
         let (first, second, missing) = {
             let context = RequestContext::new(
-                "GET", "/", &[],
-                &[("x-first".into(), "alpha".into()), ("x-second".into(), "beta".into())],
+                "GET",
+                "/",
+                &[],
+                &[
+                    ("x-first".into(), "alpha".into()),
+                    ("x-second".into(), "beta".into()),
+                ],
                 std::ptr::null_mut(),
             );
             let closure = context.request.get_header;

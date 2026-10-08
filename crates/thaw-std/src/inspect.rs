@@ -25,7 +25,14 @@ pub(crate) struct InspectOptions {
 
 impl Default for InspectOptions {
     fn default() -> Self {
-        Self { depth: Some(2), break_length: 80, compact: 3, max_array_length: 100, max_string_length: 10000, show_hidden: false }
+        Self {
+            depth: Some(2),
+            break_length: 80,
+            compact: 3,
+            max_array_length: 100,
+            max_string_length: 10000,
+            show_hidden: false,
+        }
     }
 }
 
@@ -36,7 +43,9 @@ pub(crate) enum FnKind {
     Generator,
     AsyncGenerator,
     /// `[class A extends B]`
-    Class { extends: Option<String> },
+    Class {
+        extends: Option<String>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -62,18 +71,38 @@ pub(crate) enum Node {
     /// A JS string as UTF-16 code units (may hold lone surrogates).
     Str(Vec<u16>),
     /// `None` items are holes; `extra` are non-index own properties.
-    Array { id: usize, items: Vec<Option<Node>>, extra: Vec<(Vec<u16>, Node)> },
-    Object { id: usize, ctor: Ctor, entries: Vec<(Vec<u16>, Node)> },
-    Map { id: usize, entries: Vec<(Node, Node)> },
-    Set { id: usize, items: Vec<Node> },
+    Array {
+        id: usize,
+        items: Vec<Option<Node>>,
+        extra: Vec<(Vec<u16>, Node)>,
+    },
+    Object {
+        id: usize,
+        ctor: Ctor,
+        entries: Vec<(Vec<u16>, Node)>,
+    },
+    Map {
+        id: usize,
+        entries: Vec<(Node, Node)>,
+    },
+    Set {
+        id: usize,
+        items: Vec<Node>,
+    },
     /// ISO string, or `None` for an invalid date (`Invalid Date`).
     Date(Option<String>),
     /// The `/source/flags` text.
     RegExp(String),
     Buffer(Vec<u8>),
     /// A typed array (`Uint8Array(3) [ 1, 2, 3 ]`) other than `Buffer`.
-    Typed { name: String, items: Vec<Node> },
-    Function { name: String, kind: FnKind },
+    Typed {
+        name: String,
+        items: Vec<Node>,
+    },
+    Function {
+        name: String,
+        kind: FnKind,
+    },
     /// Text that something else already formatted (a live host value).
     Raw(String),
     Circular(usize),
@@ -85,12 +114,20 @@ fn len16(text: &str) -> usize {
 
 fn pad_start(text: &str, target: usize) -> String {
     let have = len16(text);
-    if have >= target { text.to_string() } else { format!("{}{}", " ".repeat(target - have), text) }
+    if have >= target {
+        text.to_string()
+    } else {
+        format!("{}{}", " ".repeat(target - have), text)
+    }
 }
 
 fn pad_end(text: &str, target: usize) -> String {
     let have = len16(text);
-    if have >= target { text.to_string() } else { format!("{}{}", text, " ".repeat(target - have)) }
+    if have >= target {
+        text.to_string()
+    } else {
+        format!("{}{}", text, " ".repeat(target - have))
+    }
 }
 
 /// `Number.prototype.toString()` for finite non-negative-zero values (sign handled here).
@@ -133,7 +170,11 @@ pub(crate) fn js_number_string(value: f64) -> String {
 }
 
 fn format_number(value: f64) -> String {
-    if value == 0.0 && value.is_sign_negative() { "-0".into() } else { js_number_string(value) }
+    if value == 0.0 && value.is_sign_negative() {
+        "-0".into()
+    } else {
+        js_number_string(value)
+    }
 }
 
 /// Node's `meta` table entry for a code unit below 160 that needs escaping.
@@ -154,7 +195,9 @@ fn meta(point: u16) -> String {
 /// chosen quote and lone surrogates.
 pub(crate) fn str_escape(text: &[u16]) -> String {
     let has = |unit: u16| text.contains(&unit);
-    let has_dollar_brace = text.windows(2).any(|pair| pair == [b'$' as u16, b'{' as u16]);
+    let has_dollar_brace = text
+        .windows(2)
+        .any(|pair| pair == [b'$' as u16, b'{' as u16]);
     // 39 = single quotes (escaped), -1 = double quotes, -2 = backticks.
     let mut quote: i32 = 39;
     if has(39) {
@@ -173,11 +216,15 @@ pub(crate) fn str_escape(text: &[u16]) -> String {
     let mut i = 0;
     while i < text.len() {
         let point = text[i];
-        if (point == 39 && quote == 39) || point == 92 || point < 32 || (point > 126 && point < 160) {
+        if (point == 39 && quote == 39) || point == 92 || point < 32 || (point > 126 && point < 160)
+        {
             out.push_str(&meta(point));
         } else if (0xd800..=0xdfff).contains(&point) {
             if point <= 0xdbff && i + 1 < text.len() && (0xdc00..=0xdfff).contains(&text[i + 1]) {
-                let pair = char::decode_utf16([point, text[i + 1]]).next().unwrap().unwrap();
+                let pair = char::decode_utf16([point, text[i + 1]])
+                    .next()
+                    .unwrap()
+                    .unwrap();
                 out.push(pair);
                 i += 2;
                 continue;
@@ -203,7 +250,11 @@ fn is_identifier_key(key: &[u16]) -> bool {
             byte == b'_' || byte.is_ascii_alphabetic() || (!first && byte.is_ascii_digit())
         }
     };
-    !key.is_empty() && key.iter().enumerate().all(|(index, &unit)| valid(unit, index == 0))
+    !key.is_empty()
+        && key
+            .iter()
+            .enumerate()
+            .all(|(index, &unit)| valid(unit, index == 0))
 }
 
 /// ICU's column width of one code point, from tables generated out of Node itself
@@ -246,13 +297,18 @@ fn compose_pairs(text: &str) -> Vec<u32> {
     for ch in text.chars().map(|c| c as u32) {
         if let Some(&prev) = out.last() {
             let hangul_lv = (0x1100..=0x1112).contains(&prev) && (0x1161..=0x1175).contains(&ch);
-            let hangul_lvt = (0xac00..=0xd7a3).contains(&prev) && (prev - 0xac00) % 28 == 0 && (0x11a8..=0x11c2).contains(&ch);
+            let hangul_lvt = (0xac00..=0xd7a3).contains(&prev)
+                && (prev - 0xac00) % 28 == 0
+                && (0x11a8..=0x11c2).contains(&ch);
             let composed = if hangul_lv {
                 Some(0xac00 + ((prev - 0x1100) * 21 + (ch - 0x1161)) * 28)
             } else if hangul_lvt {
                 Some(prev + (ch - 0x11a7))
             } else {
-                COMPOSE.binary_search_by_key(&(prev, ch), |&(a, b, _)| (a, b)).ok().map(|index| COMPOSE[index].2)
+                COMPOSE
+                    .binary_search_by_key(&(prev, ch), |&(a, b, _)| (a, b))
+                    .ok()
+                    .map(|index| COMPOSE[index].2)
             };
             if let Some(composed) = composed {
                 *out.last_mut().unwrap() = composed;
@@ -286,7 +342,13 @@ enum Extras {
 }
 
 pub(crate) fn inspect(node: &Node, opts: &InspectOptions) -> String {
-    let mut ctx = Ctx { opts, seen: Vec::new(), circular: Vec::new(), indentation_lvl: 0, current_depth: 0 };
+    let mut ctx = Ctx {
+        opts,
+        seen: Vec::new(),
+        circular: Vec::new(),
+        indentation_lvl: 0,
+        current_depth: 0,
+    };
     ctx.format_value(node, 0)
 }
 
@@ -297,9 +359,12 @@ impl Ctx<'_> {
 
     fn format_value(&mut self, node: &Node, recurse_times: usize) -> String {
         match node {
-            Node::Undefined | Node::Null | Node::Bool(_) | Node::Number(_) | Node::BigInt(_) | Node::Str(_) => {
-                self.format_primitive(node)
-            }
+            Node::Undefined
+            | Node::Null
+            | Node::Bool(_)
+            | Node::Number(_)
+            | Node::BigInt(_)
+            | Node::Str(_) => self.format_primitive(node),
             Node::Raw(text) => text.clone(),
             Node::Date(iso) => iso.clone().unwrap_or_else(|| "Invalid Date".into()),
             Node::RegExp(text) => text.clone(),
@@ -310,7 +375,10 @@ impl Ctx<'_> {
                 format!("[Circular *{index}]")
             }
             Node::Typed { .. } => self.format_raw(node, recurse_times),
-            Node::Array { id, .. } | Node::Object { id, .. } | Node::Map { id, .. } | Node::Set { id, .. } => {
+            Node::Array { id, .. }
+            | Node::Object { id, .. }
+            | Node::Map { id, .. }
+            | Node::Set { id, .. } => {
                 if *id != 0 && self.seen.contains(id) {
                     let index = self.circular_index(*id);
                     return format!("[Circular *{index}]");
@@ -337,10 +405,14 @@ impl Ctx<'_> {
                 if text.len() > self.opts.max_string_length {
                     let remaining = text.len() - self.opts.max_string_length;
                     text = &text[..self.opts.max_string_length];
-                    trailer = format!("... {remaining} more character{}", if remaining > 1 { "s" } else { "" });
+                    trailer = format!(
+                        "... {remaining} more character{}",
+                        if remaining > 1 { "s" } else { "" }
+                    );
                 }
                 // `kMinLineLength` is 16: long strings split after each newline.
-                if text.len() > 16 && text.len() + self.indentation_lvl + 4 > self.opts.break_length {
+                if text.len() > 16 && text.len() + self.indentation_lvl + 4 > self.opts.break_length
+                {
                     let mut pieces: Vec<&[u16]> = Vec::new();
                     let mut start = 0;
                     for (index, unit) in text.iter().enumerate() {
@@ -351,7 +423,11 @@ impl Ctx<'_> {
                     }
                     pieces.push(&text[start..]);
                     let separator = format!(" +\n{}", " ".repeat(self.indentation_lvl + 2));
-                    let joined = pieces.iter().map(|piece| str_escape(piece)).collect::<Vec<_>>().join(&separator);
+                    let joined = pieces
+                        .iter()
+                        .map(|piece| str_escape(piece))
+                        .collect::<Vec<_>>()
+                        .join(&separator);
                     return joined + &trailer;
                 }
                 str_escape(text) + &trailer
@@ -382,7 +458,11 @@ impl Ctx<'_> {
         let mut null_proto = false;
         let id;
         match node {
-            Node::Array { id: node_id, items, extra } => {
+            Node::Array {
+                id: node_id,
+                items,
+                extra,
+            } => {
                 if items.is_empty() && extra.is_empty() && !self.opts.show_hidden {
                     return "[]".into();
                 }
@@ -416,7 +496,10 @@ impl Ctx<'_> {
                 keys = &[];
                 ctx_style = "Set".into();
             }
-            Node::Map { id: node_id, entries } => {
+            Node::Map {
+                id: node_id,
+                entries,
+            } => {
                 if entries.is_empty() {
                     return "Map(0) {}".into();
                 }
@@ -427,7 +510,11 @@ impl Ctx<'_> {
                 keys = &[];
                 ctx_style = "Map".into();
             }
-            Node::Object { id: node_id, ctor, entries } => {
+            Node::Object {
+                id: node_id,
+                ctor,
+                entries,
+            } => {
                 let prefix = match ctor {
                     Ctor::Plain => String::new(),
                     Ctor::Named(name) => format!("{name} "),
@@ -453,7 +540,11 @@ impl Ctx<'_> {
             _ => unreachable!("not a container"),
         }
         if self.depth_exceeded(recurse_times) {
-            return if null_proto { ctx_style } else { format!("[{ctx_style}]") };
+            return if null_proto {
+                ctx_style
+            } else {
+                format!("[{ctx_style}]")
+            };
         }
         recurse_times += 1;
         self.seen.push(id);
@@ -476,7 +567,11 @@ impl Ctx<'_> {
         if id != 0 {
             if let Some((_, index)) = self.circular.iter().find(|(known, _)| *known == id) {
                 let reference = format!("<ref *{index}>");
-                base = if base.is_empty() { reference } else { format!("{reference} {base}") };
+                base = if base.is_empty() {
+                    reference
+                } else {
+                    format!("{reference} {base}")
+                };
             }
         }
         self.seen.pop();
@@ -516,7 +611,11 @@ impl Ctx<'_> {
         mut output: Vec<String>,
         start: usize,
     ) -> Vec<String> {
-        let defined: Vec<usize> = items.iter().enumerate().filter_map(|(index, item)| item.as_ref().map(|_| index)).collect();
+        let defined: Vec<usize> = items
+            .iter()
+            .enumerate()
+            .filter_map(|(index, item)| item.as_ref().map(|_| index))
+            .collect();
         // `start` entries were already pushed; they correspond to the first `start` defined keys.
         let mut index = start;
         let mut key_slot = start;
@@ -524,7 +623,10 @@ impl Ctx<'_> {
             let key = defined[key_slot];
             if index != key {
                 let empty = key - index;
-                output.push(format!("<{empty} empty item{}>", if empty > 1 { "s" } else { "" }));
+                output.push(format!(
+                    "<{empty} empty item{}>",
+                    if empty > 1 { "s" } else { "" }
+                ));
                 index = key;
                 if output.len() == max_length {
                     break;
@@ -539,7 +641,10 @@ impl Ctx<'_> {
         let remaining = items.len() - index;
         if output.len() != max_length {
             if remaining > 0 {
-                output.push(format!("<{remaining} empty item{}>", if remaining > 1 { "s" } else { "" }));
+                output.push(format!(
+                    "<{remaining} empty item{}>",
+                    if remaining > 1 { "s" } else { "" }
+                ));
             }
         } else if remaining > 0 {
             output.push(remaining_text(remaining));
@@ -628,17 +733,34 @@ impl Ctx<'_> {
             if self.is_below_break_length(&output, start, base) {
                 let joined = output.join(", ");
                 if !joined.contains('\n') {
-                    let prefix = if base.is_empty() { String::new() } else { format!("{base} ") };
+                    let prefix = if base.is_empty() {
+                        String::new()
+                    } else {
+                        format!("{base} ")
+                    };
                     return format!("{prefix}{} {joined} {}", braces[0], braces[1]);
                 }
             }
         }
         let indentation = format!("\n{}", " ".repeat(self.indentation_lvl));
-        let prefix = if base.is_empty() { String::new() } else { format!("{base} ") };
-        format!("{prefix}{}{indentation}  {}{indentation}{}", braces[0], output.join(&format!(",{indentation}  ")), braces[1])
+        let prefix = if base.is_empty() {
+            String::new()
+        } else {
+            format!("{base} ")
+        };
+        format!(
+            "{prefix}{}{indentation}  {}{indentation}{}",
+            braces[0],
+            output.join(&format!(",{indentation}  ")),
+            braces[1]
+        )
     }
 
-    fn group_array_elements(&self, output: Vec<String>, value: Option<&[Option<Node>]>) -> Vec<String> {
+    fn group_array_elements(
+        &self,
+        output: Vec<String>,
+        value: Option<&[Option<Node>]>,
+    ) -> Vec<String> {
         let mut total_length = 0usize;
         let mut max_length = 0usize;
         let mut output_length = output.len();
@@ -659,11 +781,14 @@ impl Ctx<'_> {
             && (total_length as f64 / actual_max as f64 > 5.0 || max_length <= 6)
         {
             let approx_char_heights = 2.5;
-            let average_bias = (actual_max as f64 - total_length as f64 / output.len() as f64).sqrt();
+            let average_bias =
+                (actual_max as f64 - total_length as f64 / output.len() as f64).sqrt();
             let biased_max = (actual_max as f64 - 3.0 - average_bias).max(1.0);
             let columns = [
-                ((approx_char_heights * biased_max * output_length as f64).sqrt() / biased_max).round(),
-                ((self.opts.break_length as f64 - self.indentation_lvl as f64) / actual_max as f64).floor(),
+                ((approx_char_heights * biased_max * output_length as f64).sqrt() / biased_max)
+                    .round(),
+                ((self.opts.break_length as f64 - self.indentation_lvl as f64) / actual_max as f64)
+                    .floor(),
                 (self.opts.compact * 4) as f64,
                 15.0,
             ]
@@ -688,7 +813,10 @@ impl Ctx<'_> {
             let mut pad_numbers = true;
             if let Some(items) = value {
                 for index in 0..output.len() {
-                    let numeric = matches!(items.get(index), Some(Some(Node::Number(_) | Node::BigInt(_))));
+                    let numeric = matches!(
+                        items.get(index),
+                        Some(Some(Node::Number(_) | Node::BigInt(_)))
+                    );
                     if !numeric {
                         pad_numbers = false;
                         break;
@@ -703,11 +831,16 @@ impl Ctx<'_> {
                 while j + 1 < max {
                     let padding = max_line_length[j - i] + len16(&output[j]) - data_len[j];
                     let cell = format!("{}, ", output[j]);
-                    line += &if pad_numbers { pad_start(&cell, padding) } else { pad_end(&cell, padding) };
+                    line += &if pad_numbers {
+                        pad_start(&cell, padding)
+                    } else {
+                        pad_end(&cell, padding)
+                    };
                     j += 1;
                 }
                 if pad_numbers {
-                    let padding = (max_line_length[j - i] + len16(&output[j])).saturating_sub(data_len[j] + SEPARATOR_SPACE);
+                    let padding = (max_line_length[j - i] + len16(&output[j]))
+                        .saturating_sub(data_len[j] + SEPARATOR_SPACE);
                     line += &pad_start(&output[j], padding);
                 } else {
                     line += &output[j];
@@ -725,17 +858,28 @@ impl Ctx<'_> {
 }
 
 fn remaining_text(remaining: usize) -> String {
-    format!("... {remaining} more item{}", if remaining > 1 { "s" } else { "" })
+    format!(
+        "... {remaining} more item{}",
+        if remaining > 1 { "s" } else { "" }
+    )
 }
 
 /// `Buffer.prototype[util.inspect.custom]` (up to `INSPECT_MAX_BYTES` = 50 bytes).
 fn format_buffer(bytes: &[u8]) -> String {
     const MAX: usize = 50;
     let shown = MAX.min(bytes.len());
-    let mut text = bytes[..shown].iter().map(|byte| format!("{byte:02x}")).collect::<Vec<_>>().join(" ");
+    let mut text = bytes[..shown]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<Vec<_>>()
+        .join(" ");
     if bytes.len() > MAX {
         let remaining = bytes.len() - MAX;
-        let _ = write!(text, " ... {remaining} more byte{}", if remaining > 1 { "s" } else { "" });
+        let _ = write!(
+            text,
+            " ... {remaining} more byte{}",
+            if remaining > 1 { "s" } else { "" }
+        );
     }
     format!("<Buffer {text}>")
 }
@@ -779,7 +923,12 @@ mod corpus_tests {
     }
 
     fn pairs(value: &J) -> Vec<(Vec<u16>, Node)> {
-        value.as_array().unwrap().iter().map(|pair| (units(pair[0].as_str().unwrap()), decode(&pair[1]))).collect()
+        value
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|pair| (units(pair[0].as_str().unwrap()), decode(&pair[1])))
+            .collect()
     }
 
     /// Decodes the corpus tree description (see `inspect-suite/gen.js`).
@@ -803,44 +952,89 @@ mod corpus_tests {
                 } else if let Some(big) = map.get("b") {
                     Node::BigInt(big.as_str().unwrap().into())
                 } else if let Some(raw) = map.get("s") {
-                    Node::Str(raw.as_array().unwrap().iter().map(|unit| unit.as_u64().unwrap() as u16).collect())
+                    Node::Str(
+                        raw.as_array()
+                            .unwrap()
+                            .iter()
+                            .map(|unit| unit.as_u64().unwrap() as u16)
+                            .collect(),
+                    )
                 } else if let Some(items) = map.get("a") {
-                    let holes: Vec<usize> = map["h"].as_array().unwrap().iter().map(|hole| hole.as_u64().unwrap() as usize).collect();
+                    let holes: Vec<usize> = map["h"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|hole| hole.as_u64().unwrap() as usize)
+                        .collect();
                     let items = items
                         .as_array()
                         .unwrap()
                         .iter()
                         .enumerate()
-                        .map(|(index, item)| if holes.contains(&index) { None } else { Some(decode(item)) })
+                        .map(|(index, item)| {
+                            if holes.contains(&index) {
+                                None
+                            } else {
+                                Some(decode(item))
+                            }
+                        })
                         .collect();
-                    Node::Array { id, items, extra: pairs(&map["x"]) }
+                    Node::Array {
+                        id,
+                        items,
+                        extra: pairs(&map["x"]),
+                    }
                 } else if let Some(entries) = map.get("o") {
                     let ctor = match map["c"].as_str() {
                         None => Ctor::Plain,
                         Some("null") => Ctor::NullProto,
                         Some(name) => Ctor::Named(name.into()),
                     };
-                    Node::Object { id, ctor, entries: pairs(entries) }
+                    Node::Object {
+                        id,
+                        ctor,
+                        entries: pairs(entries),
+                    }
                 } else if let Some(entries) = map.get("m") {
-                    let entries = entries.as_array().unwrap().iter().map(|pair| (decode(&pair[0]), decode(&pair[1]))).collect();
+                    let entries = entries
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|pair| (decode(&pair[0]), decode(&pair[1])))
+                        .collect();
                     Node::Map { id, entries }
                 } else if let Some(items) = map.get("e") {
-                    Node::Set { id, items: items.as_array().unwrap().iter().map(decode).collect() }
+                    Node::Set {
+                        id,
+                        items: items.as_array().unwrap().iter().map(decode).collect(),
+                    }
                 } else if let Some(iso) = map.get("d") {
                     Node::Date(iso.as_str().map(str::to_string))
                 } else if let Some(source) = map.get("r") {
                     Node::RegExp(source.as_str().unwrap().into())
                 } else if let Some(bytes) = map.get("bf") {
-                    Node::Buffer(bytes.as_array().unwrap().iter().map(|byte| byte.as_u64().unwrap() as u8).collect())
+                    Node::Buffer(
+                        bytes
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .map(|byte| byte.as_u64().unwrap() as u8)
+                            .collect(),
+                    )
                 } else if let Some(name) = map.get("f") {
                     let kind = match map["k"].as_str().unwrap() {
                         "async" => FnKind::Async,
                         "generator" => FnKind::Generator,
                         "asyncgenerator" => FnKind::AsyncGenerator,
-                        "class" => FnKind::Class { extends: map.get("x").and_then(J::as_str).map(str::to_string) },
+                        "class" => FnKind::Class {
+                            extends: map.get("x").and_then(J::as_str).map(str::to_string),
+                        },
                         _ => FnKind::Function,
                     };
-                    Node::Function { name: name.as_str().unwrap().into(), kind }
+                    Node::Function {
+                        name: name.as_str().unwrap().into(),
+                        kind,
+                    }
                 } else if let Some(target) = map.get("cir") {
                     Node::Circular(target.as_u64().unwrap() as usize)
                 } else {
@@ -854,13 +1048,34 @@ mod corpus_tests {
     /// Counts of corpus cases whose expected output exercises each hard feature, so the
     /// replay cannot pass vacuously if the generator regresses.
     fn assert_corpus_is_not_vacuous(corpus: &[J]) {
-        let count = |needle: &str| corpus.iter().filter(|case| case["e"].as_str().unwrap().contains(needle)).count();
+        let count = |needle: &str| {
+            corpus
+                .iter()
+                .filter(|case| case["e"].as_str().unwrap().contains(needle))
+                .count()
+        };
         for (needle, minimum) in [
-            ("\n", 1000), ("<ref *", 40), ("[Circular", 40), ("empty item", 80), ("more item", 100), ("Map(", 100),
-            ("Set(", 100), ("<Buffer", 60), ("[Object]", 30), ("[Array]", 30), (" +\n", 100), ("\\ud", 200), ("[class", 20),
-            ("null prototype", 50), ("Invalid Date", 20), ("e+21", 40),
+            ("\n", 1000),
+            ("<ref *", 40),
+            ("[Circular", 40),
+            ("empty item", 80),
+            ("more item", 100),
+            ("Map(", 100),
+            ("Set(", 100),
+            ("<Buffer", 60),
+            ("[Object]", 30),
+            ("[Array]", 30),
+            (" +\n", 100),
+            ("\\ud", 200),
+            ("[class", 20),
+            ("null prototype", 50),
+            ("Invalid Date", 20),
+            ("e+21", 40),
         ] {
-            assert!(count(needle) >= minimum, "corpus has too few cases containing {needle:?}");
+            assert!(
+                count(needle) >= minimum,
+                "corpus has too few cases containing {needle:?}"
+            );
         }
         assert!(corpus.len() >= 3000);
     }
@@ -878,7 +1093,8 @@ mod corpus_tests {
         }
         let options = InspectOptions::default();
         let mut mismatches = Vec::new();
-        let mut per_category: std::collections::BTreeMap<String, (usize, usize)> = Default::default();
+        let mut per_category: std::collections::BTreeMap<String, (usize, usize)> =
+            Default::default();
         for (index, case) in corpus.iter().enumerate() {
             let category = case["c"].as_str().unwrap().to_string();
             let actual = inspect(&decode(&case["v"]), &options);
@@ -915,14 +1131,21 @@ mod unit_tests {
     }
 
     fn arr(items: Vec<Node>) -> Node {
-        Node::Array { id: 0, items: items.into_iter().map(Some).collect(), extra: Vec::new() }
+        Node::Array {
+            id: 0,
+            items: items.into_iter().map(Some).collect(),
+            extra: Vec::new(),
+        }
     }
 
     fn obj(entries: Vec<(&str, Node)>) -> Node {
         Node::Object {
             id: 0,
             ctor: Ctor::Plain,
-            entries: entries.into_iter().map(|(key, value)| (key.encode_utf16().collect(), value)).collect(),
+            entries: entries
+                .into_iter()
+                .map(|(key, value)| (key.encode_utf16().collect(), value))
+                .collect(),
         }
     }
 
@@ -944,14 +1167,37 @@ mod unit_tests {
 
     #[test]
     fn keys_quote_unless_identifier_shaped() {
-        let node = obj(vec![("ok_1", num(1.0)), ("with-dash", num(2.0)), ("1", num(3.0)), ("$x", num(4.0)), ("", num(5.0)), ("__proto__", num(6.0))]);
+        let node = obj(vec![
+            ("ok_1", num(1.0)),
+            ("with-dash", num(2.0)),
+            ("1", num(3.0)),
+            ("$x", num(4.0)),
+            ("", num(5.0)),
+            ("__proto__", num(6.0)),
+        ]);
         // Entry order is the caller's (the Json converter sorts integer keys first, like JS).
-        assert_eq!(show(&node), "{ ok_1: 1, 'with-dash': 2, '1': 3, '$x': 4, '': 5, ['__proto__']: 6 }");
+        assert_eq!(
+            show(&node),
+            "{ ok_1: 1, 'with-dash': 2, '1': 3, '$x': 4, '': 5, ['__proto__']: 6 }"
+        );
     }
 
     #[test]
     fn numbers_follow_number_prototype_to_string() {
-        for (value, text) in [(0.0, "0"), (-0.0, "-0"), (1e21, "1e+21"), (1e20, "100000000000000000000"), (1.5e-7, "1.5e-7"), (1e-6, "0.000001"), (123456789.125, "123456789.125"), (-1e-7, "-1e-7"), (f64::NAN, "NaN"), (f64::NEG_INFINITY, "-Infinity"), (5e-324, "5e-324"), (0.1 + 0.2, "0.30000000000000004")] {
+        for (value, text) in [
+            (0.0, "0"),
+            (-0.0, "-0"),
+            (1e21, "1e+21"),
+            (1e20, "100000000000000000000"),
+            (1.5e-7, "1.5e-7"),
+            (1e-6, "0.000001"),
+            (123456789.125, "123456789.125"),
+            (-1e-7, "-1e-7"),
+            (f64::NAN, "NaN"),
+            (f64::NEG_INFINITY, "-Infinity"),
+            (5e-324, "5e-324"),
+            (0.1 + 0.2, "0.30000000000000004"),
+        ] {
             assert_eq!(show(&num(value)), text, "{value:?}");
         }
         assert_eq!(show(&Node::BigInt("-12".into())), "-12n");
@@ -959,24 +1205,37 @@ mod unit_tests {
 
     #[test]
     fn short_arrays_stay_on_one_line_and_long_ones_group_into_columns() {
-        assert_eq!(show(&arr((1..=3).map(|n| num(n as f64)).collect())), "[ 1, 2, 3 ]");
+        assert_eq!(
+            show(&arr((1..=3).map(|n| num(n as f64)).collect())),
+            "[ 1, 2, 3 ]"
+        );
         let seven = show(&arr((1..=7).map(|n| num(n as f64)).collect()));
         assert_eq!(seven, "[\n  1, 2, 3, 4,\n  5, 6, 7\n]");
         let twenty = show(&arr((0..30).map(|n| s(&format!("item{n}"))).collect()));
-        assert!(twenty.starts_with("[\n  'item0',  'item1',  'item2',\n"), "{twenty}");
+        assert!(
+            twenty.starts_with("[\n  'item0',  'item1',  'item2',\n"),
+            "{twenty}"
+        );
     }
 
     #[test]
     fn arrays_cap_at_one_hundred_and_report_holes() {
         let long = show(&arr((0..105).map(|n| num(n as f64)).collect()));
         assert!(long.ends_with("... 5 more items\n]"), "{long}");
-        let sparse = Node::Array { id: 0, items: vec![Some(num(1.0)), None, None, Some(num(2.0)), None], extra: Vec::new() };
+        let sparse = Node::Array {
+            id: 0,
+            items: vec![Some(num(1.0)), None, None, Some(num(2.0)), None],
+            extra: Vec::new(),
+        };
         assert_eq!(show(&sparse), "[ 1, <2 empty items>, 2, <1 empty item> ]");
     }
 
     #[test]
     fn depth_limit_and_empty_containers() {
-        let deep = obj(vec![("a", obj(vec![("b", obj(vec![("c", obj(vec![("d", num(1.0))]))]))]))]);
+        let deep = obj(vec![(
+            "a",
+            obj(vec![("b", obj(vec![("c", obj(vec![("d", num(1.0))]))]))]),
+        )]);
         assert_eq!(show(&deep), "{ a: { b: { c: [Object] } } }");
         let empty_deep = obj(vec![("a", obj(vec![("b", obj(vec![("c", obj(vec![]))]))]))]);
         assert_eq!(show(&empty_deep), "{ a: { b: { c: {} } } }");
@@ -984,10 +1243,18 @@ mod unit_tests {
 
     #[test]
     fn long_objects_break_lines_at_the_width_limit() {
-        let entries: Vec<(String, Node)> = (0..6).map(|n| (format!("key{n}"), s(&"v".repeat(12)))).collect();
-        let node = obj(entries.iter().map(|(key, value)| (key.as_str(), value.clone())).collect());
+        let entries: Vec<(String, Node)> = (0..6)
+            .map(|n| (format!("key{n}"), s(&"v".repeat(12))))
+            .collect();
+        let node = obj(entries
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.clone()))
+            .collect());
         let text = show(&node);
-        assert!(text.contains('\n') && text.lines().all(|line| len16(line) <= 80), "{text}");
+        assert!(
+            text.contains('\n') && text.lines().all(|line| len16(line) <= 80),
+            "{text}"
+        );
     }
 
     #[test]
@@ -1002,21 +1269,70 @@ mod unit_tests {
 
     #[test]
     fn maps_sets_buffers_and_functions() {
-        let map = Node::Map { id: 0, entries: vec![(s("a"), num(1.0))] };
+        let map = Node::Map {
+            id: 0,
+            entries: vec![(s("a"), num(1.0))],
+        };
         assert_eq!(show(&map), "Map(1) { 'a' => 1 }");
-        assert_eq!(show(&Node::Set { id: 0, items: vec![num(1.0), s("x")] }), "Set(2) { 1, 'x' }");
+        assert_eq!(
+            show(&Node::Set {
+                id: 0,
+                items: vec![num(1.0), s("x")]
+            }),
+            "Set(2) { 1, 'x' }"
+        );
         assert_eq!(show(&Node::Buffer(vec![1, 2, 255])), "<Buffer 01 02 ff>");
-        let typed = |name: &str, items: Vec<f64>| Node::Typed { name: name.into(), items: items.into_iter().map(Node::Number).collect() };
-        assert_eq!(show(&typed("Uint8Array", vec![1.0, 2.0, 3.0])), "Uint8Array(3) [ 1, 2, 3 ]");
+        let typed = |name: &str, items: Vec<f64>| Node::Typed {
+            name: name.into(),
+            items: items.into_iter().map(Node::Number).collect(),
+        };
+        assert_eq!(
+            show(&typed("Uint8Array", vec![1.0, 2.0, 3.0])),
+            "Uint8Array(3) [ 1, 2, 3 ]"
+        );
         assert_eq!(show(&typed("Int32Array", vec![])), "Int32Array(0) []");
-        assert_eq!(show(&typed("Float64Array", vec![1.5; 8])), "Float64Array(8) [\n  1.5, 1.5, 1.5,\n  1.5, 1.5, 1.5,\n  1.5, 1.5\n]");
-        let hidden = InspectOptions { show_hidden: true, ..InspectOptions::default() };
-        let pair = Node::Array { id: 0, items: vec![Some(Node::Number(1.0)), Some(Node::Number(2.0))], extra: Vec::new() };
+        assert_eq!(
+            show(&typed("Float64Array", vec![1.5; 8])),
+            "Float64Array(8) [\n  1.5, 1.5, 1.5,\n  1.5, 1.5, 1.5,\n  1.5, 1.5\n]"
+        );
+        let hidden = InspectOptions {
+            show_hidden: true,
+            ..InspectOptions::default()
+        };
+        let pair = Node::Array {
+            id: 0,
+            items: vec![Some(Node::Number(1.0)), Some(Node::Number(2.0))],
+            extra: Vec::new(),
+        };
         assert_eq!(inspect(&pair, &hidden), "[ 1, 2, [length]: 2 ]");
-        assert_eq!(inspect(&Node::Array { id: 0, items: vec![], extra: Vec::new() }, &hidden), "[ [length]: 0 ]");
+        assert_eq!(
+            inspect(
+                &Node::Array {
+                    id: 0,
+                    items: vec![],
+                    extra: Vec::new()
+                },
+                &hidden
+            ),
+            "[ [length]: 0 ]"
+        );
         assert!(show(&Node::Buffer(vec![0; 52])).ends_with("... 2 more bytes>"));
-        assert_eq!(show(&Node::Function { name: "".into(), kind: FnKind::Async }), "[AsyncFunction (anonymous)]");
-        assert_eq!(show(&Node::Function { name: "B".into(), kind: FnKind::Class { extends: Some("A".into()) } }), "[class B extends A]");
+        assert_eq!(
+            show(&Node::Function {
+                name: "".into(),
+                kind: FnKind::Async
+            }),
+            "[AsyncFunction (anonymous)]"
+        );
+        assert_eq!(
+            show(&Node::Function {
+                name: "B".into(),
+                kind: FnKind::Class {
+                    extends: Some("A".into())
+                }
+            }),
+            "[class B extends A]"
+        );
     }
 
     #[test]

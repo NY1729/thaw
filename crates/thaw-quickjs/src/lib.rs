@@ -168,24 +168,35 @@ fn install_napi_bridge(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
     // PLATFORM_GLOBALS captures these functions before the first addon may load.
     // Resolve the registered bridge when called, so an earlier Ctx stays usable.
     let owner = Function::new(ctx.clone(), move |handle: String| {
-        let Ok(handle) = handle.parse::<u64>() else { return String::new(); };
+        let Ok(handle) = handle.parse::<u64>() else {
+            return String::new();
+        };
         let owner = NAPI_BRIDGE.lock().unwrap().as_ref().map(|bridge| bridge.5);
-        let Some(owner) = owner else { return String::new(); };
+        let Some(owner) = owner else {
+            return String::new();
+        };
         let result = unsafe { owner(handle) };
-        if result.is_null() { return String::new(); }
-        let text = unsafe { CStr::from_ptr(result) }.to_string_lossy().into_owned();
+        if result.is_null() {
+            return String::new();
+        }
+        let text = unsafe { CStr::from_ptr(result) }
+            .to_string_lossy()
+            .into_owned();
         unsafe { thaw_arena::destroy_string(result) };
         text
     })?;
     ctx.globals().set("__thaw_napi_graph_owner", owner)?;
     let release = Function::new(ctx.clone(), move |token: String| {
-        let Ok(token) = token.parse::<u64>() else { return false; };
+        let Ok(token) = token.parse::<u64>() else {
+            return false;
+        };
         let release = NAPI_BRIDGE.lock().unwrap().as_ref().map(|bridge| bridge.6);
         release.is_some_and(|release| release(token) != 0)
     })?;
     ctx.globals().set("__thaw_napi_graph_release", release)?;
     let available = Function::new(ctx.clone(), || NAPI_BRIDGE.lock().unwrap().is_some())?;
-    ctx.globals().set("__thaw_napi_bridge_available", available)?;
+    ctx.globals()
+        .set("__thaw_napi_bridge_available", available)?;
     let exports = Function::new(ctx.clone(), move || {
         let exports = NAPI_BRIDGE.lock().unwrap().as_ref().map(|bridge| bridge.0);
         exports.map_or_else(String::new, |exports| unsafe { to_str(exports()) })
@@ -195,7 +206,9 @@ fn install_napi_bridge(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
         move |ctx: Ctx<'_>, name: String, args: String| unsafe {
             let _active = ActiveNapiContext::enter(&ctx);
             let call = NAPI_BRIDGE.lock().unwrap().as_ref().map(|bridge| bridge.1);
-            let Some(call) = call else { return String::new(); };
+            let Some(call) = call else {
+                return String::new();
+            };
             let name = CString::new(name).unwrap_or_default();
             let args = CString::new(args).unwrap_or_default();
             to_str(call(name.as_ptr(), args.as_ptr()))
@@ -208,7 +221,9 @@ fn install_napi_bridge(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
         move |ctx: Ctx<'_>, operation: String, target: String, name: String, args: String| unsafe {
             let _active = ActiveNapiContext::enter(&ctx);
             let handle = NAPI_BRIDGE.lock().unwrap().as_ref().map(|bridge| bridge.2);
-            let Some(handle) = handle else { return String::new(); };
+            let Some(handle) = handle else {
+                return String::new();
+            };
             let operation = CString::new(operation).unwrap_or_default();
             let target = CString::new(target).unwrap_or_default();
             let name = CString::new(name).unwrap_or_default();
@@ -410,7 +425,10 @@ enum HostWorkerCommand {
 
 enum HostWorkerEvent {
     Online,
-    Message { payload: String, ports: Vec<String> },
+    Message {
+        payload: String,
+        ports: Vec<String>,
+    },
     Stdout(String),
     Stderr(String),
     DirectRequest {
@@ -535,7 +553,11 @@ fn digest_bytes(algorithm: &str, value: &[u8]) -> Vec<u8> {
 }
 
 fn hmac_bytes(algorithm: &str, key: &[u8], value: &[u8]) -> Vec<u8> {
-    let block_size = if algorithm == "sha384" || algorithm == "sha512" { 128 } else { 64 };
+    let block_size = if algorithm == "sha384" || algorithm == "sha512" {
+        128
+    } else {
+        64
+    };
     let mut normalized = if key.len() > block_size {
         digest_bytes(algorithm, key)
     } else {
@@ -592,39 +614,59 @@ fn linux_cpu_times(stat: &str, ticks_per_second: u64) -> Vec<(usize, [u64; 5])> 
     if ticks_per_second == 0 {
         return Vec::new();
     }
-    stat.lines().filter_map(|line| {
-        let mut fields = line.split_whitespace();
-        let index = fields.next()?.strip_prefix("cpu")?.parse::<usize>().ok()?;
-        // Linux publishes user, nice, system, idle, iowait, irq in this
-        // order. The guest columns are already included in user/nice.
-        let raw = fields.take(6).map(str::parse::<u64>)
-            .collect::<Result<Vec<_>, _>>().ok()?;
-        if raw.len() != 6 { return None; }
-        let milliseconds = |ticks: u64| {
-            ((ticks as u128 * 1000) / ticks_per_second as u128)
-                .min(u64::MAX as u128) as u64
-        };
-        Some((index, [raw[0], raw[1], raw[2], raw[3], raw[5]].map(milliseconds)))
-    }).collect()
+    stat.lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let index = fields.next()?.strip_prefix("cpu")?.parse::<usize>().ok()?;
+            // Linux publishes user, nice, system, idle, iowait, irq in this
+            // order. The guest columns are already included in user/nice.
+            let raw = fields
+                .take(6)
+                .map(str::parse::<u64>)
+                .collect::<Result<Vec<_>, _>>()
+                .ok()?;
+            if raw.len() != 6 {
+                return None;
+            }
+            let milliseconds = |ticks: u64| {
+                ((ticks as u128 * 1000) / ticks_per_second as u128).min(u64::MAX as u128) as u64
+            };
+            Some((
+                index,
+                [raw[0], raw[1], raw[2], raw[3], raw[5]].map(milliseconds),
+            ))
+        })
+        .collect()
 }
 
 #[cfg(target_os = "linux")]
 fn linux_cpu_metadata(cpu_info: &str) -> std::collections::HashMap<usize, (String, u64)> {
-    cpu_info.split("\n\n").filter_map(|block| {
-        let mut index = None;
-        let mut model = None;
-        let mut speed = None;
-        for line in block.lines() {
-            let Some((key, value)) = line.split_once(':') else { continue; };
-            match key.trim() {
-                "processor" => index = value.trim().parse::<usize>().ok(),
-                "model name" => model = Some(value.trim().to_string()),
-                "cpu MHz" => speed = value.trim().parse::<f64>().ok().map(|mhz| mhz.round() as u64),
-                _ => {}
+    cpu_info
+        .split("\n\n")
+        .filter_map(|block| {
+            let mut index = None;
+            let mut model = None;
+            let mut speed = None;
+            for line in block.lines() {
+                let Some((key, value)) = line.split_once(':') else {
+                    continue;
+                };
+                match key.trim() {
+                    "processor" => index = value.trim().parse::<usize>().ok(),
+                    "model name" => model = Some(value.trim().to_string()),
+                    "cpu MHz" => {
+                        speed = value
+                            .trim()
+                            .parse::<f64>()
+                            .ok()
+                            .map(|mhz| mhz.round() as u64)
+                    }
+                    _ => {}
+                }
             }
-        }
-        Some((index?, (model.unwrap_or_default(), speed.unwrap_or(0))))
-    }).collect()
+            Some((index?, (model.unwrap_or_default(), speed.unwrap_or(0))))
+        })
+        .collect()
 }
 
 #[cfg(all(test, target_os = "linux"))]
@@ -636,12 +678,17 @@ mod linux_cpu_info_tests {
         let stat = "cpu 999 999 999 999 999 999 999 999 999 999\n\
                     cpu1 25 50 75 100 125 150 175 200 225 250\n\
                     cpu3 250 500 750 1000 1250 1500 1750 2000 2250 2500\n";
-        assert_eq!(linux_cpu_times(stat, 250), vec![
-            (1, [100, 200, 300, 400, 600]),
-            (3, [1000, 2000, 3000, 4000, 6000]),
-        ]);
-        assert_eq!(linux_cpu_times("cpu7 18446744073709551615 1 2 3 4 5 6 7 8 9\n", 100),
-            vec![(7, [u64::MAX, 10, 20, 30, 50])]);
+        assert_eq!(
+            linux_cpu_times(stat, 250),
+            vec![
+                (1, [100, 200, 300, 400, 600]),
+                (3, [1000, 2000, 3000, 4000, 6000]),
+            ]
+        );
+        assert_eq!(
+            linux_cpu_times("cpu7 18446744073709551615 1 2 3 4 5 6 7 8 9\n", 100),
+            vec![(7, [u64::MAX, 10, 20, 30, 50])]
+        );
         assert!(linux_cpu_times(stat, 0).is_empty());
     }
 
@@ -658,33 +705,66 @@ mod linux_cpu_info_tests {
 #[cfg(target_os = "macos")]
 fn macos_cpu_times(ticks: [u32; 4], hz: u64) -> [u64; 5] {
     let milliseconds = |state: usize| ((ticks[state] as u128 * 1000) / hz as u128) as u64;
-    [milliseconds(libc::CPU_STATE_USER as usize), milliseconds(libc::CPU_STATE_NICE as usize),
-        milliseconds(libc::CPU_STATE_SYSTEM as usize), milliseconds(libc::CPU_STATE_IDLE as usize), 0]
+    [
+        milliseconds(libc::CPU_STATE_USER as usize),
+        milliseconds(libc::CPU_STATE_NICE as usize),
+        milliseconds(libc::CPU_STATE_SYSTEM as usize),
+        milliseconds(libc::CPU_STATE_IDLE as usize),
+        0,
+    ]
 }
 
 #[cfg(all(test, target_os = "macos"))]
 #[test]
 fn macos_processor_ticks_map_to_node_milliseconds() {
-    assert_eq!(macos_cpu_times([25, 50, 75, 100], 250), [100, 400, 200, 300, 0]);
+    assert_eq!(
+        macos_cpu_times([25, 50, 75, 100], 250),
+        [100, 400, 200, 300, 0]
+    );
 }
 
 #[cfg(target_os = "macos")]
 extern "C" {
-    fn mach_port_deallocate(task: libc::mach_port_t, name: libc::mach_port_t) -> libc::kern_return_t;
+    fn mach_port_deallocate(
+        task: libc::mach_port_t,
+        name: libc::mach_port_t,
+    ) -> libc::kern_return_t;
 }
 
 #[cfg(target_os = "macos")]
 fn macos_sysctl_bytes(name: &std::ffi::CStr) -> Option<Vec<u8>> {
     let mut size = 0usize;
-    if unsafe { libc::sysctlbyname(name.as_ptr(), std::ptr::null_mut(), &mut size, std::ptr::null_mut(), 0) } != 0 {
+    if unsafe {
+        libc::sysctlbyname(
+            name.as_ptr(),
+            std::ptr::null_mut(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    } != 0
+    {
         return None;
     }
-    if size == 0 || size > 4096 { return None; }
+    if size == 0 || size > 4096 {
+        return None;
+    }
     let mut value = vec![0u8; size];
-    if unsafe { libc::sysctlbyname(name.as_ptr(), value.as_mut_ptr().cast(), &mut size, std::ptr::null_mut(), 0) } != 0 {
+    if unsafe {
+        libc::sysctlbyname(
+            name.as_ptr(),
+            value.as_mut_ptr().cast(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    } != 0
+    {
         return None;
     }
-    if size > value.len() { return None; }
+    if size > value.len() {
+        return None;
+    }
     value.truncate(size);
     Some(value)
 }
@@ -692,29 +772,48 @@ fn macos_sysctl_bytes(name: &std::ffi::CStr) -> Option<Vec<u8>> {
 #[cfg(target_os = "macos")]
 fn macos_cpus() -> Vec<serde_json::Value> {
     let hz = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
-    let Ok(hz) = u64::try_from(hz) else { return Vec::new(); };
-    if hz == 0 { return Vec::new(); }
+    let Ok(hz) = u64::try_from(hz) else {
+        return Vec::new();
+    };
+    if hz == 0 {
+        return Vec::new();
+    }
     let model = {
-        macos_sysctl_bytes(c"machdep.cpu.brand_string")
-            .or_else(|| macos_sysctl_bytes(c"hw.model"))
-    }.map(|bytes| String::from_utf8_lossy(bytes.split(|byte| *byte == 0).next().unwrap_or(&[])).into_owned())
-        .unwrap_or_else(|| std::env::consts::ARCH.to_string());
+        macos_sysctl_bytes(c"machdep.cpu.brand_string").or_else(|| macos_sysctl_bytes(c"hw.model"))
+    }
+    .map(|bytes| {
+        String::from_utf8_lossy(bytes.split(|byte| *byte == 0).next().unwrap_or(&[])).into_owned()
+    })
+    .unwrap_or_else(|| std::env::consts::ARCH.to_string());
     let speed = macos_sysctl_bytes(c"hw.cpufrequency")
         .and_then(|bytes| bytes.try_into().ok().map(u64::from_ne_bytes))
-        .unwrap_or(0) / 1_000_000;
+        .unwrap_or(0)
+        / 1_000_000;
     let mut count: libc::natural_t = 0;
     let mut raw: libc::processor_info_array_t = std::ptr::null_mut();
     let mut raw_count: libc::mach_msg_type_number_t = 0;
     let host = unsafe { libc::mach_host_self() };
-    let result = unsafe { libc::host_processor_info(host, libc::PROCESSOR_CPU_LOAD_INFO,
-        &mut count, &mut raw, &mut raw_count) };
+    let result = unsafe {
+        libc::host_processor_info(
+            host,
+            libc::PROCESSOR_CPU_LOAD_INFO,
+            &mut count,
+            &mut raw,
+            &mut raw_count,
+        )
+    };
     unsafe { mach_port_deallocate(libc::mach_task_self(), host) };
-    if result != 0 || raw.is_null() { return Vec::new(); }
-    let expected = (count as usize).checked_mul(std::mem::size_of::<libc::processor_cpu_load_info>());
+    if result != 0 || raw.is_null() {
+        return Vec::new();
+    }
+    let expected =
+        (count as usize).checked_mul(std::mem::size_of::<libc::processor_cpu_load_info>());
     let actual = (raw_count as usize).checked_mul(std::mem::size_of::<libc::integer_t>());
     let mut cpus = Vec::new();
     if matches!((actual, expected), (Some(actual), Some(expected)) if actual >= expected) {
-        let records = unsafe { std::slice::from_raw_parts(raw.cast::<libc::processor_cpu_load_info>(), count as usize) };
+        let records = unsafe {
+            std::slice::from_raw_parts(raw.cast::<libc::processor_cpu_load_info>(), count as usize)
+        };
         for record in records {
             let [user, nice, sys, idle, irq] = macos_cpu_times(record.cpu_ticks, hz);
             cpus.push(serde_json::json!({ "model": model, "speed": speed,
@@ -722,7 +821,13 @@ fn macos_cpus() -> Vec<serde_json::Value> {
         }
     }
     if let Some(actual) = actual {
-        unsafe { libc::vm_deallocate(libc::mach_task_self(), raw as libc::vm_address_t, actual as libc::vm_size_t) };
+        unsafe {
+            libc::vm_deallocate(
+                libc::mach_task_self(),
+                raw as libc::vm_address_t,
+                actual as libc::vm_size_t,
+            )
+        };
     }
     cpus
 }
@@ -730,13 +835,22 @@ fn macos_cpus() -> Vec<serde_json::Value> {
 #[cfg(target_os = "windows")]
 fn windows_cpu_times(user: i64, kernel: i64, idle: i64, interrupt: i64) -> [u64; 5] {
     let ms = |ticks: i64| ticks.max(0) as u64 / 10_000;
-    [ms(user), 0, ms(kernel.saturating_sub(idle)), ms(idle), ms(interrupt)]
+    [
+        ms(user),
+        0,
+        ms(kernel.saturating_sub(idle)),
+        ms(idle),
+        ms(interrupt),
+    ]
 }
 
 #[cfg(all(test, target_os = "windows"))]
 #[test]
 fn windows_processor_ticks_exclude_idle_from_system_time() {
-    assert_eq!(windows_cpu_times(50_000, 90_000, 40_000, 20_000), [5, 0, 5, 4, 2]);
+    assert_eq!(
+        windows_cpu_times(50_000, 90_000, 40_000, 20_000),
+        [5, 0, 5, 4, 2]
+    );
 }
 
 #[cfg(target_os = "windows")]
@@ -753,8 +867,12 @@ fn windows_cpus() -> Vec<serde_json::Value> {
     }
     #[link(name = "ntdll")]
     extern "system" {
-        fn NtQuerySystemInformation(class: u32, data: *mut std::ffi::c_void, length: u32,
-            returned: *mut u32) -> i32;
+        fn NtQuerySystemInformation(
+            class: u32,
+            data: *mut std::ffi::c_void,
+            length: u32,
+            returned: *mut u32,
+        ) -> i32;
     }
     #[link(name = "kernel32")]
     extern "system" {
@@ -762,15 +880,28 @@ fn windows_cpus() -> Vec<serde_json::Value> {
     }
     #[link(name = "advapi32")]
     extern "system" {
-        fn RegOpenKeyExW(parent: *mut std::ffi::c_void, path: *const u16, options: u32,
-            access: u32, key: *mut *mut std::ffi::c_void) -> i32;
-        fn RegQueryValueExW(key: *mut std::ffi::c_void, name: *const u16, reserved: *mut u32,
-            kind: *mut u32, data: *mut u8, bytes: *mut u32) -> i32;
+        fn RegOpenKeyExW(
+            parent: *mut std::ffi::c_void,
+            path: *const u16,
+            options: u32,
+            access: u32,
+            key: *mut *mut std::ffi::c_void,
+        ) -> i32;
+        fn RegQueryValueExW(
+            key: *mut std::ffi::c_void,
+            name: *const u16,
+            reserved: *mut u32,
+            kind: *mut u32,
+            data: *mut u8,
+            bytes: *mut u32,
+        ) -> i32;
         fn RegCloseKey(key: *mut std::ffi::c_void) -> i32;
     }
     let identity = |index: usize| {
         let path = format!("HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\{index}")
-            .encode_utf16().chain(std::iter::once(0)).collect::<Vec<_>>();
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect::<Vec<_>>();
         let name = "ProcessorNameString\0".encode_utf16().collect::<Vec<_>>();
         let frequency = "~MHz\0".encode_utf16().collect::<Vec<_>>();
         let mut key = std::ptr::null_mut();
@@ -781,35 +912,67 @@ fn windows_cpus() -> Vec<serde_json::Value> {
         let mut brand = [0u16; 256];
         let mut brand_bytes = std::mem::size_of_val(&brand) as u32;
         let mut brand_kind = 0u32;
-        let brand_ok = unsafe { RegQueryValueExW(key, name.as_ptr(), std::ptr::null_mut(),
-            &mut brand_kind, brand.as_mut_ptr().cast(), &mut brand_bytes) } == 0
-            && brand_kind == 1 && brand_bytes as usize <= std::mem::size_of_val(&brand)
+        let brand_ok = unsafe {
+            RegQueryValueExW(
+                key,
+                name.as_ptr(),
+                std::ptr::null_mut(),
+                &mut brand_kind,
+                brand.as_mut_ptr().cast(),
+                &mut brand_bytes,
+            )
+        } == 0
+            && brand_kind == 1
+            && brand_bytes as usize <= std::mem::size_of_val(&brand)
             && brand_bytes % 2 == 0;
         let mut mhz = 0u32;
         let mut mhz_bytes = std::mem::size_of_val(&mhz) as u32;
         let mut mhz_kind = 0u32;
-        let mhz_ok = unsafe { RegQueryValueExW(key, frequency.as_ptr(), std::ptr::null_mut(),
-            &mut mhz_kind, (&mut mhz as *mut u32).cast(), &mut mhz_bytes) } == 0
-            && mhz_kind == 4 && mhz_bytes as usize == std::mem::size_of_val(&mhz);
+        let mhz_ok = unsafe {
+            RegQueryValueExW(
+                key,
+                frequency.as_ptr(),
+                std::ptr::null_mut(),
+                &mut mhz_kind,
+                (&mut mhz as *mut u32).cast(),
+                &mut mhz_bytes,
+            )
+        } == 0
+            && mhz_kind == 4
+            && mhz_bytes as usize == std::mem::size_of_val(&mhz);
         unsafe {
             RegCloseKey(key);
         }
         let model = if brand_ok {
             let length = (brand_bytes as usize / 2).min(brand.len());
-            let end = brand[..length].iter().position(|unit| *unit == 0).unwrap_or(length);
+            let end = brand[..length]
+                .iter()
+                .position(|unit| *unit == 0)
+                .unwrap_or(length);
             String::from_utf16_lossy(&brand[..end])
-        } else { std::env::consts::ARCH.to_string() };
+        } else {
+            std::env::consts::ARCH.to_string()
+        };
         (model, if mhz_ok { mhz as u64 } else { 0 })
     };
     let mut capacity = unsafe { GetActiveProcessorCount(0xffff) }.max(1) as usize;
     let records = loop {
         let mut values = vec![ProcessorTimes::default(); capacity];
-        let Some(bytes) = capacity.checked_mul(std::mem::size_of::<ProcessorTimes>())
-            .and_then(|value| u32::try_from(value).ok()) else { return Vec::new(); };
+        let Some(bytes) = capacity
+            .checked_mul(std::mem::size_of::<ProcessorTimes>())
+            .and_then(|value| u32::try_from(value).ok())
+        else {
+            return Vec::new();
+        };
         let mut returned = 0u32;
-        let status = unsafe { NtQuerySystemInformation(8, values.as_mut_ptr().cast(), bytes, &mut returned) };
+        let status = unsafe {
+            NtQuerySystemInformation(8, values.as_mut_ptr().cast(), bytes, &mut returned)
+        };
         if status >= 0 {
-            if returned == 0 || returned > bytes || returned as usize % std::mem::size_of::<ProcessorTimes>() != 0 {
+            if returned == 0
+                || returned > bytes
+                || returned as usize % std::mem::size_of::<ProcessorTimes>() != 0
+            {
                 return Vec::new();
             }
             values.truncate(returned as usize / std::mem::size_of::<ProcessorTimes>());
@@ -821,16 +984,22 @@ fn windows_cpus() -> Vec<serde_json::Value> {
         // Some Windows versions do not populate ReturnLength on a short buffer.
         let required = (returned as usize).div_ceil(std::mem::size_of::<ProcessorTimes>());
         let next = required.max(capacity.saturating_mul(2));
-        if next <= capacity || next > 65_536 { return Vec::new(); }
+        if next <= capacity || next > 65_536 {
+            return Vec::new();
+        }
         capacity = next;
     };
-    records.into_iter().enumerate().map(|(index, record)| {
-        let [user, nice, sys, idle, irq] = windows_cpu_times(
-            record.user, record.kernel, record.idle, record.interrupt);
-        let (model, speed) = identity(index);
-        serde_json::json!({ "model": model, "speed": speed,
+    records
+        .into_iter()
+        .enumerate()
+        .map(|(index, record)| {
+            let [user, nice, sys, idle, irq] =
+                windows_cpu_times(record.user, record.kernel, record.idle, record.interrupt);
+            let (model, speed) = identity(index);
+            serde_json::json!({ "model": model, "speed": speed,
             "times": { "user": user, "nice": nice, "sys": sys, "idle": idle, "irq": irq } })
-    }).collect()
+        })
+        .collect()
 }
 
 #[cfg(target_os = "macos")]
@@ -858,13 +1027,20 @@ fn macos_dynamic_info() -> std::io::Result<(u64, u64, f64, Vec<f64>)> {
         .ok_or_else(|| std::io::Error::other("cannot read hw.memsize"))?;
     let pagesize = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
     let pagesize = u64::try_from(pagesize)
-        .ok().filter(|value| *value > 0)
+        .ok()
+        .filter(|value| *value > 0)
         .ok_or_else(|| std::io::Error::other("cannot read page size"))?;
     let mut info: libc::vm_statistics64 = unsafe { std::mem::zeroed() };
     let mut count = libc::HOST_VM_INFO64_COUNT;
     let host = unsafe { libc::mach_host_self() };
-    let status = unsafe { libc::host_statistics64(host, libc::HOST_VM_INFO64,
-        (&mut info as *mut libc::vm_statistics64).cast(), &mut count) };
+    let status = unsafe {
+        libc::host_statistics64(
+            host,
+            libc::HOST_VM_INFO64,
+            (&mut info as *mut libc::vm_statistics64).cast(),
+            &mut count,
+        )
+    };
     unsafe { mach_port_deallocate(libc::mach_task_self(), host) };
     if status != 0 || count < libc::HOST_VM_INFO64_COUNT {
         return Err(std::io::Error::other("cannot read host VM statistics"));
@@ -874,8 +1050,10 @@ fn macos_dynamic_info() -> std::io::Result<(u64, u64, f64, Vec<f64>)> {
         .filter(|bytes| bytes.len() == std::mem::size_of::<libc::timeval>())
         .ok_or_else(|| std::io::Error::other("cannot read kern.boottime"))?;
     let boot = unsafe { std::ptr::read_unaligned(boot.as_ptr().cast::<libc::timeval>()) };
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
-        .map_err(|error| std::io::Error::other(error.to_string()))?.as_secs_f64();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|error| std::io::Error::other(error.to_string()))?
+        .as_secs_f64();
     let uptime = macos_uptime_seconds(now, boot.tv_sec as f64 + boot.tv_usec as f64 / 1_000_000.0);
     let mut averages = [0.0f64; 3];
     if unsafe { libc::getloadavg(averages.as_mut_ptr(), 3) } != 3 {
@@ -931,8 +1109,12 @@ fn windows_dynamic_info() -> std::io::Result<(u64, u64, f64, Vec<f64>)> {
         return Err(std::io::Error::last_os_error());
     }
     // libuv reports no load averages on Windows.
-    Ok((status.total_physical, status.available_physical,
-        windows_uptime_seconds(unsafe { GetTickCount64() }), vec![0.0; 3]))
+    Ok((
+        status.total_physical,
+        status.available_physical,
+        windows_uptime_seconds(unsafe { GetTickCount64() }),
+        vec![0.0; 3],
+    ))
 }
 
 #[cfg(all(test, target_os = "windows"))]
@@ -947,7 +1129,9 @@ fn windows_dynamic_info_reads_memory_and_uptime_with_no_load_average() {
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 fn os_info_json() -> rquickjs::Result<String> {
     Err(rquickjs::Error::new_from_js_message(
-        "OS info", "supported host statistics", "unsupported operating system",
+        "OS info",
+        "supported host statistics",
+        "unsupported operating system",
     ))
 }
 
@@ -1022,18 +1206,33 @@ fn os_info_json() -> rquickjs::Result<String> {
         let hz = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
         let stat = std::fs::read_to_string("/proc/stat").unwrap_or_default();
         let metadata = linux_cpu_metadata(&cpu_info);
-        linux_cpu_times(&stat, u64::try_from(hz).unwrap_or(0)).into_iter()
+        linux_cpu_times(&stat, u64::try_from(hz).unwrap_or(0))
+            .into_iter()
             .map(|(index, [user, nice, sys, idle, irq])| {
-                let (core_model, core_speed) = metadata.get(&index)
-                    .map(|(name, mhz)| (if name.is_empty() { model.as_str() } else { name.as_str() }, *mhz))
+                let (core_model, core_speed) = metadata
+                    .get(&index)
+                    .map(|(name, mhz)| {
+                        (
+                            if name.is_empty() {
+                                model.as_str()
+                            } else {
+                                name.as_str()
+                            },
+                            *mhz,
+                        )
+                    })
                     .unwrap_or((model.as_str(), speed));
                 let frequency = std::fs::read_to_string(format!(
                     "/sys/devices/system/cpu/cpu{index}/cpufreq/scaling_max_freq"
-                )).ok().and_then(|value| value.trim().parse::<u64>().ok())
-                    .map(|khz| khz / 1000).unwrap_or(core_speed);
+                ))
+                .ok()
+                .and_then(|value| value.trim().parse::<u64>().ok())
+                .map(|khz| khz / 1000)
+                .unwrap_or(core_speed);
                 serde_json::json!({ "model": core_model, "speed": frequency,
                     "times": { "user": user, "nice": nice, "sys": sys, "idle": idle, "irq": irq } })
-            }).collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>()
     };
     #[cfg(target_os = "macos")]
     let cpus = macos_cpus();
@@ -1061,7 +1260,12 @@ fn os_info_json() -> rquickjs::Result<String> {
             .take(3)
             .filter_map(|value| value.parse::<f64>().ok())
             .collect::<Vec<_>>();
-        (memory_value("MemTotal:"), memory_value("MemAvailable:"), uptime, loadavg)
+        (
+            memory_value("MemTotal:"),
+            memory_value("MemAvailable:"),
+            uptime,
+            loadavg,
+        )
     };
     #[cfg(target_os = "macos")]
     let (totalmem, freemem, uptime, loadavg) = macos_dynamic_info().map_err(|error| {
@@ -1069,13 +1273,23 @@ fn os_info_json() -> rquickjs::Result<String> {
     })?;
     #[cfg(target_os = "windows")]
     let (totalmem, freemem, uptime, loadavg) = windows_dynamic_info().map_err(|error| {
-        rquickjs::Error::new_from_js_message("OS info", "Windows host statistics", error.to_string())
+        rquickjs::Error::new_from_js_message(
+            "OS info",
+            "Windows host statistics",
+            error.to_string(),
+        )
     })?;
     let mut info = os_static_info();
-    let fields = info.as_object_mut().expect("static OS identity is an object");
+    let fields = info
+        .as_object_mut()
+        .expect("static OS identity is an object");
     fields.insert("cpus".to_string(), serde_json::json!(cpus));
-    fields.insert("availableParallelism".to_string(),
-        serde_json::json!(std::thread::available_parallelism().map(usize::from).unwrap_or(1)));
+    fields.insert(
+        "availableParallelism".to_string(),
+        serde_json::json!(std::thread::available_parallelism()
+            .map(usize::from)
+            .unwrap_or(1)),
+    );
     fields.insert("totalmem".to_string(), serde_json::json!(totalmem));
     fields.insert("freemem".to_string(), serde_json::json!(freemem));
     fields.insert("uptime".to_string(), serde_json::json!(uptime));
@@ -1086,9 +1300,13 @@ fn os_info_json() -> rquickjs::Result<String> {
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn os_priority_errno() -> *mut libc::c_int {
     #[cfg(target_os = "linux")]
-    { unsafe { libc::__errno_location() } }
+    {
+        unsafe { libc::__errno_location() }
+    }
     #[cfg(target_os = "macos")]
-    { unsafe { libc::__error() } }
+    {
+        unsafe { libc::__error() }
+    }
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -1120,21 +1338,44 @@ fn native_set_priority(pid: i32, priority: i32) -> std::io::Result<()> {
 
 #[cfg(target_os = "windows")]
 fn windows_priority_class(priority: i32) -> u32 {
-    if priority < -14 { 0x100 }       // REALTIME_PRIORITY_CLASS
-    else if priority < -7 { 0x80 }    // HIGH_PRIORITY_CLASS
-    else if priority < 0 { 0x8000 }   // ABOVE_NORMAL_PRIORITY_CLASS
-    else if priority < 10 { 0x20 }    // NORMAL_PRIORITY_CLASS
-    else if priority < 19 { 0x4000 }  // BELOW_NORMAL_PRIORITY_CLASS
-    else { 0x40 }                     // IDLE_PRIORITY_CLASS
+    if priority < -14 {
+        0x100
+    }
+    // REALTIME_PRIORITY_CLASS
+    else if priority < -7 {
+        0x80
+    }
+    // HIGH_PRIORITY_CLASS
+    else if priority < 0 {
+        0x8000
+    }
+    // ABOVE_NORMAL_PRIORITY_CLASS
+    else if priority < 10 {
+        0x20
+    }
+    // NORMAL_PRIORITY_CLASS
+    else if priority < 19 {
+        0x4000
+    }
+    // BELOW_NORMAL_PRIORITY_CLASS
+    else {
+        0x40
+    } // IDLE_PRIORITY_CLASS
 }
 
 #[cfg(target_os = "windows")]
 fn windows_nice_value(priority_class: u32) -> std::io::Result<i32> {
     match priority_class {
-        0x100 => Ok(-20), 0x80 => Ok(-14), 0x8000 => Ok(-7),
-        0x20 => Ok(0), 0x4000 => Ok(10), 0x40 => Ok(19),
-        _ => Err(std::io::Error::new(std::io::ErrorKind::InvalidData,
-            "unrecognized Windows priority class")),
+        0x100 => Ok(-20),
+        0x80 => Ok(-14),
+        0x8000 => Ok(-7),
+        0x20 => Ok(0),
+        0x4000 => Ok(10),
+        0x40 => Ok(19),
+        _ => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "unrecognized Windows priority class",
+        )),
     }
 }
 
@@ -1145,16 +1386,25 @@ fn windows_priority_handle(pid: i32, access: u32) -> std::io::Result<*mut std::f
         fn GetCurrentProcess() -> *mut std::ffi::c_void;
         fn OpenProcess(access: u32, inherit: i32, pid: u32) -> *mut std::ffi::c_void;
     }
-    let handle = if pid == 0 { unsafe { GetCurrentProcess() } }
-        else { unsafe { OpenProcess(access, 0, pid as u32) } };
-    if handle.is_null() { Err(std::io::Error::last_os_error()) } else { Ok(handle) }
+    let handle = if pid == 0 {
+        unsafe { GetCurrentProcess() }
+    } else {
+        unsafe { OpenProcess(access, 0, pid as u32) }
+    };
+    if handle.is_null() {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(handle)
+    }
 }
 
 #[cfg(target_os = "windows")]
 fn windows_close_priority_handle(pid: i32, handle: *mut std::ffi::c_void) {
     if pid != 0 {
         #[link(name = "kernel32")]
-        extern "system" { fn CloseHandle(handle: *mut std::ffi::c_void) -> i32; }
+        extern "system" {
+            fn CloseHandle(handle: *mut std::ffi::c_void) -> i32;
+        }
         unsafe { CloseHandle(handle) };
     }
 }
@@ -1162,11 +1412,16 @@ fn windows_close_priority_handle(pid: i32, handle: *mut std::ffi::c_void) {
 #[cfg(target_os = "windows")]
 fn native_get_priority(pid: i32) -> std::io::Result<i32> {
     #[link(name = "kernel32")]
-    extern "system" { fn GetPriorityClass(handle: *mut std::ffi::c_void) -> u32; }
+    extern "system" {
+        fn GetPriorityClass(handle: *mut std::ffi::c_void) -> u32;
+    }
     let handle = windows_priority_handle(pid, 0x1000)?; // PROCESS_QUERY_LIMITED_INFORMATION
     let priority_class = unsafe { GetPriorityClass(handle) };
-    let result = if priority_class == 0 { Err(std::io::Error::last_os_error()) }
-        else { windows_nice_value(priority_class) };
+    let result = if priority_class == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        windows_nice_value(priority_class)
+    };
     windows_close_priority_handle(pid, handle);
     result
 }
@@ -1180,19 +1435,27 @@ fn native_set_priority(pid: i32, priority: i32) -> std::io::Result<()> {
     let handle = windows_priority_handle(pid, 0x0200)?; // PROCESS_SET_INFORMATION
     let result = if unsafe { SetPriorityClass(handle, windows_priority_class(priority)) } == 0 {
         Err(std::io::Error::last_os_error())
-    } else { Ok(()) };
+    } else {
+        Ok(())
+    };
     windows_close_priority_handle(pid, handle);
     result
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 fn native_get_priority(_pid: i32) -> std::io::Result<i32> {
-    Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "OS priority is unsupported"))
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "OS priority is unsupported",
+    ))
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 fn native_set_priority(_pid: i32, _priority: i32) -> std::io::Result<()> {
-    Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "OS priority is unsupported"))
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "OS priority is unsupported",
+    ))
 }
 
 fn os_priority_result(result: std::io::Result<i32>) -> String {
@@ -1209,28 +1472,40 @@ fn os_priority_result(result: std::io::Result<i32>) -> String {
             };
             #[cfg(target_os = "windows")]
             let code = match errno {
-                Some(87) => "ESRCH", Some(5) => "EACCES", _ => "UNKNOWN",
+                Some(87) => "ESRCH",
+                Some(5) => "EACCES",
+                _ => "UNKNOWN",
             };
             #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
             let code = "ENOSYS";
-            let code = if errno.is_none() { match error.kind() {
-                std::io::ErrorKind::Unsupported => "ENOSYS",
-                std::io::ErrorKind::InvalidInput => "EINVAL",
-                _ => code,
-            }} else { code };
+            let code = if errno.is_none() {
+                match error.kind() {
+                    std::io::ErrorKind::Unsupported => "ENOSYS",
+                    std::io::ErrorKind::InvalidInput => "EINVAL",
+                    _ => code,
+                }
+            } else {
+                code
+            };
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             let uv_errno = errno.map(|value| -value).unwrap_or(match code {
-                "EINVAL" => -libc::EINVAL, "ENOSYS" => -libc::ENOSYS, _ => -4094,
+                "EINVAL" => -libc::EINVAL,
+                "ENOSYS" => -libc::ENOSYS,
+                _ => -4094,
             });
             #[cfg(target_os = "windows")]
             let uv_errno = match code {
-                "ESRCH" => -4040, "EACCES" => -4092, "EINVAL" => -4071,
-                "ENOSYS" => -4054, _ => -4094,
+                "ESRCH" => -4040,
+                "EACCES" => -4092,
+                "EINVAL" => -4071,
+                "ENOSYS" => -4054,
+                _ => -4094,
             };
             #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
             let uv_errno = -4054;
             serde_json::json!({ "ok": false, "code": code, "errno": uv_errno,
-                "message": error.to_string() }).to_string()
+                "message": error.to_string() })
+            .to_string()
         }
     }
 }
@@ -1241,8 +1516,10 @@ fn os_get_priority_json(pid: i32) -> String {
 
 fn os_set_priority_json(pid: i32, priority: i32) -> String {
     if !(-20..=19).contains(&priority) {
-        return os_priority_result(Err(std::io::Error::new(std::io::ErrorKind::InvalidInput,
-            "priority must be between -20 and 19")));
+        return os_priority_result(Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "priority must be between -20 and 19",
+        )));
     }
     os_priority_result(native_set_priority(pid, priority).map(|()| 0))
 }
@@ -1250,10 +1527,19 @@ fn os_set_priority_json(pid: i32, priority: i32) -> String {
 #[cfg(all(test, target_os = "windows"))]
 #[test]
 fn windows_priority_classes_match_libuv_thresholds() {
-    for (input, class, output) in [(-20, 0x100, -20), (-15, 0x100, -20),
-        (-14, 0x80, -14), (-8, 0x80, -14), (-7, 0x8000, -7),
-        (-1, 0x8000, -7), (0, 0x20, 0), (9, 0x20, 0),
-        (10, 0x4000, 10), (18, 0x4000, 10), (19, 0x40, 19)] {
+    for (input, class, output) in [
+        (-20, 0x100, -20),
+        (-15, 0x100, -20),
+        (-14, 0x80, -14),
+        (-8, 0x80, -14),
+        (-7, 0x8000, -7),
+        (-1, 0x8000, -7),
+        (0, 0x20, 0),
+        (9, 0x20, 0),
+        (10, 0x4000, 10),
+        (18, 0x4000, 10),
+        (19, 0x40, 19),
+    ] {
         assert_eq!(windows_priority_class(input), class);
         assert_eq!(windows_nice_value(class).unwrap(), output);
     }
@@ -1263,7 +1549,12 @@ fn windows_priority_classes_match_libuv_thresholds() {
 #[test]
 fn unix_getpriority_accepts_valid_minus_one() {
     assert_eq!(posix_priority_result(-1, 0).unwrap(), -1);
-    assert_eq!(posix_priority_result(-1, libc::ESRCH).unwrap_err().raw_os_error(), Some(libc::ESRCH));
+    assert_eq!(
+        posix_priority_result(-1, libc::ESRCH)
+            .unwrap_err()
+            .raw_os_error(),
+        Some(libc::ESRCH)
+    );
     let current = native_get_priority(0).unwrap();
     assert!((-20..=19).contains(&current));
     let absent = native_get_priority(i32::MAX).unwrap_err();
