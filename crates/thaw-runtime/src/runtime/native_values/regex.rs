@@ -301,7 +301,9 @@ unsafe fn thaw_regex_replace_impl(value: *const c_char, source: *const c_char, f
     let source = unsafe { regex_units(source) };
     let replacement = unsafe { regex_units(replacement) };
     let flags = unsafe { CStr::from_ptr(flags) }.to_string_lossy();
-    let global = all || flags.contains('g');
+    // `replaceAll` rejects a non-global RegExp (the caller turns null into the TypeError).
+    if all && !flags.contains('g') { return std::ptr::null(); }
+    let global = flags.contains('g');
     let Some(output) = with_compiled_regex(&source, &flags, |regex| {
         let mut output = Vec::new();
         let mut append = 0;

@@ -491,7 +491,9 @@ impl<'a> FnLowerer<'a> {
             );
         }
         let current = self.lower_assignment_target_read(&target)?;
-        let current = if matches!(&target, Target::Prop(_, HirType::Object(fields), field)
+        // An array element read is `T | undefined`; `undefined++` is NaN, so coerce it.
+        let current = if matches!(&target, Target::Index(..))
+            || matches!(&target, Target::Prop(_, HirType::Object(fields), field)
             if fields.iter().any(|(name, _)| name == &format!("__thaw_setter_{field}")))
         {
             self.coerce_primitive_to_number(current)?

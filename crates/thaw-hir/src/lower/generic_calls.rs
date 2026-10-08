@@ -249,7 +249,7 @@ impl<'a> FnLowerer<'a> {
             .map(|argument| self.infer_expr_type(argument))
             .collect::<Result<Vec<_>, _>>()?;
         let mut inference_signature = signature.clone();
-        let mut inference_types = parameter_types.clone();
+        let inference_types = parameter_types.clone();
         if has_rest {
             let Some(GenericTypePattern::Array(element)) = signature.generic_param_patterns.last() else {
                 return Err("generic rest parameter needs an array type annotation".into());
@@ -258,22 +258,42 @@ impl<'a> FnLowerer<'a> {
             inference_signature.generic_param_patterns.extend(
                 parameter_types.iter().skip(fixed_count).map(|_| element.as_ref().clone()));
         }
-        if let (Some(template), Some((_, this_ty))) = (
-            self.generic_non_arrow_receiver_templates.get(name), this_argument.as_ref())
-        {
-            let variables = signature.generic_type_params.iter().cloned()
-                .map(|name| (name.clone(), GenericTypePattern::Variable(name)))
-                .collect::<HashMap<_, _>>();
-            let pattern = generic_type_pattern(template, &variables,
-                self.interfaces, self.generic_interfaces, &mut Vec::new())?;
-            inference_signature.generic_param_patterns.insert(0, pattern);
-            inference_types.insert(0, this_ty.clone());
-        }
+        let synthetic_receiver_pattern = match (
+            self.generic_non_arrow_receiver_templates.get(name),
+            this_argument.as_ref(),
+        ) {
+            (Some(template), Some(_)) => {
+                let variables = signature
+                    .generic_type_params
+                    .iter()
+                    .cloned()
+                    .map(|name| (name.clone(), GenericTypePattern::Variable(name)))
+                    .collect::<HashMap<_, _>>();
+                Some(generic_type_pattern(
+                    template,
+                    &variables,
+                    self.interfaces,
+                    self.generic_interfaces,
+                    &mut Vec::new(),
+                )?)
+            }
+            _ => None,
+        };
+        let actuals = match (synthetic_receiver_pattern.as_ref(), this_argument.as_ref()) {
+            (Some(pattern), Some((_, this_ty))) => {
+                GenericMatchActuals::SyntheticReceiverAndVisible {
+                    pattern,
+                    receiver: this_ty,
+                    visible: &inference_types,
+                }
+            }
+            _ => GenericMatchActuals::ContextualVisible(&inference_types),
+        };
         let concrete_types = if let Some(type_args) = &call.type_args {
             resolve_explicit_generic_type_tuple(
                 &inference_signature,
                 &type_args.params,
-                &inference_types,
+                actuals,
                 self.interfaces,
                 self.generic_interfaces,
             )
@@ -281,9 +301,9 @@ impl<'a> FnLowerer<'a> {
                 format!("cannot explicitly specialize generic arrow `{name}`: {error}")
             })?
         } else {
-            infer_generic_type_tuple(
+            infer_generic_type_tuple_for_call(
                 &inference_signature,
-                &inference_types,
+                actuals,
                 self.interfaces,
                 self.generic_interfaces,
                 None,
@@ -384,7 +404,11 @@ impl<'a> FnLowerer<'a> {
             lambda = HirExpr::RecursiveClosure(self_name, self_type, Box::new(lambda));
         }
         let result = if let Some(this_name) = this_name {
-            let result_type = self.infer_expr_type(&lambda)?;
+            // A non-arrow function infers as FunctionWithThis(this, visible signature).
+            let result_type = match self.infer_expr_type(&lambda)? {
+                HirType::FunctionWithThis(_, visible) => *visible,
+                other => other,
+            };
             let return_type = match &result_type {
                 HirType::Function(_, ret) | HirType::CallableFunction(_, _, _, ret) => ret.as_ref().clone(),
                 other => return Err(format!("generic function has non-callable type {other:?}")),
@@ -517,6 +541,7 @@ impl<'a> FnLowerer<'a> {
             is_async: false,
             returns_sparse_array: false,
             uses_this: false,
+            generic_this_pattern: None,
             is_extern: false,
             source_range: (arrow.span.lo.0, arrow.span.hi.0),
             accessor_owner: None,
@@ -684,6 +709,7 @@ impl<'a> FnLowerer<'a> {
             is_async: false,
             returns_sparse_array: false,
             uses_this: false,
+            generic_this_pattern: None,
             is_extern: false,
             source_range: (interface.span.lo.0, interface.span.hi.0),
             accessor_owner: None,
@@ -811,6 +837,7 @@ impl<'a> FnLowerer<'a> {
             is_async: false,
             returns_sparse_array: false,
             uses_this: false,
+            generic_this_pattern: None,
             is_extern: false,
             source_range,
             accessor_owner: None,
@@ -1243,6 +1270,16 @@ impl<'a> FnLowerer<'a> {
         };
         let invoked = HirExpr::Call(Box::new(function), arguments);
         let invoked = self.wrap_call_argument_bindings(invoked, &spread_bindings)?;
+        // A statically non-nullable function keeps its declared result type
+        // (`callback?.(2)` is `number`); a raw undefined pointer that slipped
+        // through from dynamic code throws instead of fabricating an absent
+        // value the declared type cannot represent.
+        if absence_kind == 3 && return_type != HirType::Void {
+            let guarded = self.guard_function_value(
+                bound.clone(), &callee_type, "undefined is not a function", invoked,
+            )?;
+            return self.wrap_call_argument_bindings(guarded, &[(name, callee_type, callee)]);
+        }
         // Both an absent outer wrapper and a present wrapper carrying a raw
         // zero function are optional-call short circuits.
         let is_present = HirExpr::BinOp(

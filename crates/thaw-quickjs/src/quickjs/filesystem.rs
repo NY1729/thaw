@@ -1078,7 +1078,7 @@ fn fs_timespec_normalizes_negative_fraction_and_bounds() {
     let subnanosecond = fs_timespec(Some("0.0000000006")).unwrap();
     assert_eq!((subnanosecond.tv_sec, subnanosecond.tv_nsec), (0, 0));
     let milliseconds = fs_timespec(Some("1.234")).unwrap();
-    assert_eq!((milliseconds.tv_sec, milliseconds.tv_nsec), (1, 233_999_999));
+    assert_eq!((milliseconds.tv_sec, milliseconds.tv_nsec), (1, 234_000_000));
     assert!(fs_timespec(Some("NaN")).is_err());
     assert!(fs_timespec(Some("9223372036854775808")).is_err());
     assert!(fs_timespec(Some("-1e300")).is_err());
@@ -1103,7 +1103,7 @@ fn fs_utimes_updates_permissionless_target_and_preserves_link_behavior() {
     fs_utimes(&target, "-0.000000001,1.234").unwrap();
     let target_stat = std::fs::metadata(&target).unwrap();
     assert_eq!((target_stat.atime(), target_stat.atime_nsec()), (-1, 999_999_999));
-    assert_eq!((target_stat.mtime(), target_stat.mtime_nsec()), (1, 233_999_999));
+    assert_eq!((target_stat.mtime(), target_stat.mtime_nsec()), (1, 234_000_000));
     fs_lutimes(&link, "2.5,3.5").unwrap();
     assert_eq!(std::fs::symlink_metadata(&link).unwrap().mtime(), 3);
     assert_eq!(std::fs::metadata(&target).unwrap().mtime(), 1);

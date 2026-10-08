@@ -1754,6 +1754,28 @@ struct Host {
 }
 
 impl Host {
+    /// The registered key for `name`: the exact key, or (for a bare name) the single
+    /// package-qualified `pkg::name` that `present` accepts. Ambiguous names resolve to nothing.
+    fn qualified_key(&self, name: &str, present: impl Fn(&str) -> bool) -> Option<String> {
+        if present(name) {
+            return Some(name.to_string());
+        }
+        if name.contains("::") {
+            return None;
+        }
+        let mut found = None;
+        for package in &self.qualified_packages {
+            let key = format!("{package}::{name}");
+            if present(&key) {
+                if found.is_some() {
+                    return None;
+                }
+                found = Some(key);
+            }
+        }
+        found
+    }
+
     fn new() -> Self {
         Self {
             functions: HashMap::new(),

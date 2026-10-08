@@ -305,7 +305,7 @@ fn normalize_static_computed_class_members(module: &Module) -> Module {
     let mut normalized = module.clone();
     let mut initialized = HashMap::new();
     for item in &mut normalized.body {
-        let variable = match item {
+        let variable = match &*item {
             ModuleItem::Stmt(Stmt::Decl(Decl::Var(variable))) => Some(variable.as_ref()),
             ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(export)) => match &export.decl {
                 Decl::Var(variable) => Some(variable.as_ref()),

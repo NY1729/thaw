@@ -219,9 +219,10 @@ fn triple_slash_reference_paths(source: &str) -> Vec<String> {
             }
             if rest.is_empty() { break; }
             if rest.starts_with("///") {
-                if let Some(start) = rest.find("path=\"").map(|index| index + "path=\"".len())
-                    && let Some(end) = rest[start..].find('"') {
-                    paths.push(rest[start..start + end].to_string());
+                if let Some(start) = rest.find("path=\"").map(|index| index + "path=\"".len()) {
+                    if let Some(end) = rest[start..].find('"') {
+                        paths.push(rest[start..start + end].to_string());
+                    }
                 }
                 break;
             }
@@ -2942,7 +2943,7 @@ fn directly_exported_namespace(
             };
             match declaration {
                 Some(Decl::TsModule(namespace)) if matches!(&namespace.id,
-                    TsModuleName::Ident(id) if id.sym == local) => Some(namespace),
+                    TsModuleName::Ident(id) if id.sym == local) => Some(namespace.as_ref()),
                 _ => None,
             }
         })
@@ -5996,7 +5997,7 @@ fn type_reference_sites(snippet: &str, original: &str, origin: &Path) -> Option<
             let mut left = name;
             while let TsEntityName::TsQualifiedName(qualified) = left {
                 names.push(qualified.right.sym.to_string());
-                left = qualified.left.as_ref();
+                left = &qualified.left;
             }
             let TsEntityName::Ident(root) = left else { return };
             names.push(root.sym.to_string());

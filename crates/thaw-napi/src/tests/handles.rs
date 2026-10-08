@@ -2,6 +2,7 @@
 fn quickjs_reference_graph_preserves_cycles_arrays_and_buffer_bytes() {
     unsafe {
         let mut env = Env::new();
+        let env_ptr: NapiEnv = &mut env;
         let root = value_from_json_with_undefined(&mut env, &serde_json::json!({
             "__thaw_napi_object__": 1,
             "value": {
@@ -19,11 +20,11 @@ fn quickjs_reference_graph_preserves_cycles_arrays_and_buffer_bytes() {
         let four = env.alloc(Value::Number(4.0));
         if let Some(Value::Array(items)) = array.as_mut() { items.push(Some(four)); }
         if let Some(Value::Buffer(bytes)) = buffer.as_mut() { bytes[0] = 9; }
-        let snapshot = quickjs_reference_json(&env, root, true, &mut HashSet::new()).unwrap();
+        let snapshot = quickjs_reference_wire(env_ptr, root, true).unwrap().value;
         assert_eq!(snapshot["self"], serde_json::json!({ "__thaw_napi_ref__": 1 }));
-        assert_eq!(quickjs_reference_json(&env, array, true, &mut HashSet::new()).unwrap(),
-            serde_json::json!([{ "__thaw_napi_ref__": 2 }, 4]));
-        assert_eq!(quickjs_reference_json(&env, buffer, true, &mut HashSet::new()).unwrap(),
+        assert_eq!(quickjs_reference_wire(env_ptr, array, true).unwrap().value,
+            serde_json::json!([{ "__thaw_napi_ref__": 2 }, 4.0]));
+        assert_eq!(quickjs_reference_wire(env_ptr, buffer, true).unwrap().value,
             serde_json::json!([9, 2]));
     }
 }
@@ -32,6 +33,7 @@ fn quickjs_reference_graph_preserves_cycles_arrays_and_buffer_bytes() {
 fn quickjs_typed_array_uses_the_original_arraybuffer_backing() {
     unsafe {
         let mut env = Env::new();
+        let env_ptr: NapiEnv = &mut env;
         let view = value_from_json_with_undefined(&mut env, &serde_json::json!({
             "__thaw_napi_view__": 12,
             "kind": 1,
@@ -45,7 +47,7 @@ fn quickjs_typed_array_uses_the_original_arraybuffer_backing() {
         };
         assert_eq!(*array_buffer, backing);
         if let Some(Value::ArrayBuffer { bytes, .. }) = backing.as_mut() { bytes[1] = 9; }
-        assert_eq!(quickjs_reference_json(&env, backing, true, &mut HashSet::new()).unwrap(),
+        assert_eq!(quickjs_reference_wire(env_ptr, backing, true).unwrap().value,
             serde_json::json!([1, 9, 3]));
         assert_eq!(value_from_json_with_undefined(&mut env,
             &serde_json::json!({ "__thaw_napi_ref__": 11 }), true).unwrap(), backing);
@@ -141,8 +143,8 @@ fn repeated_binary_references_keep_native_data_pointers_stable() {
 #[test]
 fn native_symbol_key_keeps_its_identity_in_own_keys() {
     unsafe {
-        let mut env = Env::new();
-        let env_ptr: NapiEnv = &mut env;
+        let mut env = Box::new(Env::new());
+        let env_ptr: NapiEnv = &mut *env;
         let object = env.alloc(Value::Object(HashMap::new()));
         let description = env.alloc(Value::String("key".into()));
         let mut symbol = ptr::null_mut();
@@ -154,9 +156,12 @@ fn native_symbol_key_keeps_its_identity_in_own_keys() {
             NAPI_KEY_ALL_PROPERTIES, NAPI_KEY_NUMBERS_TO_STRINGS, &mut keys), NAPI_OK);
         let Value::Array(keys) = value_ref(keys).unwrap() else { panic!("keys expected") };
         assert_eq!(keys.as_slice(), &[Some(symbol)]);
-        let marker = quickjs_bridge_value(symbol).unwrap();
+        // The wire encoder resolves the symbol's owner through the registered envs.
+        HOST.with(|host| host.borrow_mut().module_envs.push(env));
+        let marker = quickjs_bridge_value(symbol).unwrap().value;
         let Value::Symbol { id, .. } = value_ref(symbol).unwrap() else { panic!("symbol expected") };
         assert_eq!(marker["__thaw_napi_symbol__"], serde_json::json!(id.to_string()));
+        HOST.with(|host| host.borrow_mut().module_envs.clear());
     }
 }
 
@@ -1055,7 +1060,7 @@ fn array_holes_and_promise_detection_follow_node_api() {
         assert_eq!(napi_get_array_length(env_ptr, array, &mut length), NAPI_OK);
         assert_eq!(length, 3, "deleting an element must preserve array length");
         assert_eq!(
-            json_from_value(array).unwrap(),
+            json_from_value_with_undefined_for_env(env_ptr, array, false).unwrap(),
             serde_json::json!([null, null, null])
         );
 
@@ -1157,7 +1162,7 @@ fn run_script_evaluates_values_and_reports_exceptions() {
         let mut result = ptr::null_mut();
         assert_eq!(napi_run_script(env_ptr, script, &mut result), NAPI_OK);
         assert_eq!(
-            json_from_value(result).unwrap(),
+            json_from_value_with_undefined_for_env(env_ptr, result, false).unwrap(),
             serde_json::json!({"answer": 42.0})
         );
 
@@ -1172,7 +1177,7 @@ fn run_script_evaluates_values_and_reports_exceptions() {
         );
         assert_eq!(napi_run_script(env_ptr, script, &mut result), NAPI_OK);
         assert_eq!(
-            json_from_value(result).unwrap(),
+            json_from_value_with_undefined_for_env(env_ptr, result, false).unwrap(),
             serde_json::json!({"answer": 42.0})
         );
 

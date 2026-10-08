@@ -291,6 +291,7 @@ fn generate_registry_shims(
             thaw_bridge::self_referential_namespace_aliases_named(&package.dts_source, &dts_filename);
         let mut type_only_exports = explicit_type_exports;
         type_only_exports.extend(classes.iter().filter(|class| !internal_support_classes.contains(&class.name)).map(|class| class.name.clone()));
+        type_only_exports.extend(thaw_bridge::exported_declared_type_names_named(&package.dts_source, &dts_filename));
         nested_namespaces.retain(|namespace, _| !type_only_namespaces.contains(namespace));
         for (namespace, members) in &mut nested_namespaces {
             for (member, target) in members {
@@ -1551,7 +1552,7 @@ fn generate_registry_shims(
                     members.iter().filter_map(move |(member, target)| {
                         let path = format!("{namespace}.{member}");
                         if pkg.type_only_value_names.contains(&path) { return None; }
-                        let declared = pkg.values.iter().any(|value| &value.name == target)
+                        let declared = pkg.values.iter().any(|value| &value.name == target || value.name == path)
                             || pkg.functions.iter().any(|function| &function.name == target)
                             || (!target.contains('.') && pkg.classes.iter().any(|class| &class.name == target));
                         if declared {

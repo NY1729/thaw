@@ -47,6 +47,126 @@ impl<'a> FnLowerer<'a> {
     /// Preserve the allocation's full typed view before structural narrowing.
     /// Nonprefix views also record physical field offsets before type erasure;
     /// the QuickJS factory itself remains lazy in native-only programs.
+    /// `Call(Lambda(.., body), args)` wrappers (evaluation-order temporaries) around an `ObjectLit`.
+    fn is_wrapped_object_literal(value: &HirExpr) -> bool {
+        match value {
+            HirExpr::Call(callee, _) => match callee.as_ref() {
+                HirExpr::Lambda(_, _, _, body) => {
+                    matches!(body.as_ref(), HirExpr::ObjectLit(_)) || Self::is_wrapped_object_literal(body)
+                }
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+
+    /// Nested wrapper lambdas capture the outer field temporaries by type; keep them in step.
+    fn retype_wrapper_captures(body: &mut HirExpr, name: &str, ty: &HirType) {
+        if let HirExpr::Call(callee, _) = body {
+            if let HirExpr::Lambda(captures, _, _, inner) = callee.as_mut() {
+                for capture in captures.iter_mut().filter(|capture| capture.name == name) {
+                    capture.ty = ty.clone();
+                }
+                Self::retype_wrapper_captures(inner, name, ty);
+            }
+        }
+    }
+
+    /// The field of the innermost wrapped literal whose value is the temporary `param`.
+    fn wrapped_field_for_param(body: &HirExpr, param: &str) -> Option<Symbol> {
+        match body {
+            HirExpr::ObjectLit(fields) => fields.iter().find_map(|(name, value)| {
+                matches!(value, HirExpr::Var(var) if var == param).then(|| name.clone())
+            }),
+            HirExpr::Call(callee, _) => match callee.as_ref() {
+                HirExpr::Lambda(_, _, _, inner) => Self::wrapped_field_for_param(inner, param),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// Coerce the innermost literal's fields to `declared`, retyping each wrapper.
+    fn coerce_wrapped_object_literal(
+        &mut self,
+        declared: &HirType,
+        value: HirExpr,
+    ) -> Result<HirExpr, String> {
+        match value {
+            HirExpr::Call(callee, args) if matches!(callee.as_ref(), HirExpr::Lambda(..)) => {
+                let HirExpr::Lambda(captures, mut params, _, mut body) = *callee else { unreachable!() };
+                // Each field temporary takes its declared field type, so a literal argument
+                // (`["a", 1]` for a `(string | number)[]` field) is coerced at its source.
+                let mut args = args;
+                if let HirType::Object(declared_fields) = declared {
+                    for (param, arg) in params.iter_mut().zip(args.iter_mut()) {
+                        let Some(name) = Self::wrapped_field_for_param(&body, &param.name) else { continue };
+                        let Some((_, field_type)) = declared_fields.iter().find(|(field, _)| *field == name) else { continue };
+                        if param.ty != *field_type {
+                            if let Ok(coerced) = self.coerce_to_declared(field_type, arg.clone()) {
+                                *arg = coerced;
+                                param.ty = field_type.clone();
+                                self.scope.insert(param.name.clone(), field_type.clone());
+                                Self::retype_wrapper_captures(&mut body, &param.name, field_type);
+                            }
+                        }
+                    }
+                }
+                let body = self.coerce_wrapped_object_literal(declared, *body)?;
+                Ok(HirExpr::Call(
+                    Box::new(HirExpr::Lambda(captures, params, declared.clone(), Box::new(body))),
+                    args,
+                ))
+            }
+            other => self.coerce_to_declared(declared, other),
+        }
+    }
+
+    /// An object literal whose fields were bound to temporaries (to keep evaluation order)
+    /// arrives as nested `Call(Lambda(.., body), args)` wrappers around the `ObjectLit`;
+    /// retype each wrapper and coerce the literal's fields at the innermost body.
+    fn coerce_object_literal_to_dictionary(
+        &mut self,
+        element: &HirType,
+        value: HirExpr,
+    ) -> Result<HirExpr, String> {
+        match value {
+            HirExpr::ObjectLit(fields) => {
+                let fields = fields
+                    .into_iter()
+                    .map(|(name, value)| Ok((name, self.coerce_to_declared(element, value)?)))
+                    .collect::<Result<Vec<_>, String>>()?;
+                Ok(HirExpr::JsonObjectLit(fields, element.clone()))
+            }
+            HirExpr::Call(callee, args) if matches!(callee.as_ref(), HirExpr::Lambda(..)) => {
+                let HirExpr::Lambda(captures, mut params, _, mut body) = *callee else { unreachable!() };
+                // Every field temporary holds a dictionary value: coerce its argument at the source.
+                let mut args = args;
+                for (param, arg) in params.iter_mut().zip(args.iter_mut()) {
+                    if Self::wrapped_field_for_param(&body, &param.name).is_none() || param.ty == *element {
+                        continue;
+                    }
+                    if let Ok(coerced) = self.coerce_to_declared(element, arg.clone()) {
+                        *arg = coerced;
+                        param.ty = element.clone();
+                        self.scope.insert(param.name.clone(), element.clone());
+                        Self::retype_wrapper_captures(&mut body, &param.name, element);
+                    }
+                }
+                let body = self.coerce_object_literal_to_dictionary(element, *body)?;
+                Ok(HirExpr::Call(
+                    Box::new(HirExpr::Lambda(
+                        captures, params, HirType::Dictionary(Box::new(element.clone())), Box::new(body),
+                    )),
+                    args,
+                ))
+            }
+            _ => Err(format!(
+                "dictionary value must be an object literal with {element:?} values"
+            )),
+        }
+    }
+
     fn retain_full_native_object_projection(
         &mut self, value: HirExpr, fields: &[(Symbol, HirType)], nonprefix: bool,
     ) -> Result<HirExpr, String> {
@@ -55,7 +175,7 @@ impl<'a> FnLowerer<'a> {
         self.next_binding += 1;
         let previous = self.scope.insert(owner.clone(), full_type.clone());
         let projection = self.lower_fixed_object_as_dynamic_accessor_object(
-            HirExpr::Var(owner.clone()), fields, true,
+            HirExpr::Var(owner.clone()), fields, true, true,
         );
         let factory = HirExpr::Lambda(
             vec![HirParam { name: owner.clone(), ty: full_type.clone() }],
@@ -84,6 +204,48 @@ impl<'a> FnLowerer<'a> {
             None => { self.scope.remove(&owner); }
         }
         result
+    }
+
+    /// Permutes an (optionally evaluation-order-wrapped) accessor object
+    /// literal into declared field order with the hidden accessor fields
+    /// last. Only reorders already-bound fields, so effects keep their order.
+    fn reorder_wrapped_accessor_literal(
+        value: &HirExpr,
+        declared_fields: &[(Symbol, HirType)],
+    ) -> Option<HirExpr> {
+        fn order<T: Clone>(
+            fields: &[(Symbol, T)],
+            declared_fields: &[(Symbol, HirType)],
+        ) -> Option<Vec<(Symbol, T)>> {
+            let mut ordered = Vec::with_capacity(fields.len());
+            for (name, _) in declared_fields {
+                ordered.push(fields.iter().find(|(key, _)| key == name)?.clone());
+            }
+            for field in fields {
+                if is_hidden_accessor_field(&field.0) {
+                    ordered.push(field.clone());
+                }
+            }
+            (ordered.len() == fields.len()).then_some(ordered)
+        }
+        match value {
+            HirExpr::ObjectLit(fields) => Some(HirExpr::ObjectLit(order(fields, declared_fields)?)),
+            HirExpr::Call(callee, args) => {
+                let HirExpr::Lambda(captures, params, ret, body) = callee.as_ref() else {
+                    return None;
+                };
+                let body = Self::reorder_wrapped_accessor_literal(body, declared_fields)?;
+                let ret = match ret {
+                    HirType::Object(fields) => HirType::Object(order(fields, declared_fields)?),
+                    other => other.clone(),
+                };
+                Some(HirExpr::Call(
+                    Box::new(HirExpr::Lambda(captures.clone(), params.clone(), ret, Box::new(body))),
+                    args.clone(),
+                ))
+            }
+            _ => None,
+        }
     }
 
     /// Capture source fields before assembling the declared storage layout.
@@ -372,6 +534,13 @@ impl<'a> FnLowerer<'a> {
                         fields, declared_fields, true,
                     );
                 }
+                // The literal's evaluation-order temporaries wrap the object
+                // literal in a `Call(Lambda ..)`; its storage still interleaves
+                // the accessor closures with the data fields, so permute the
+                // inner literal into declared order (accessor closures last).
+                if let Some(reordered) = Self::reorder_wrapped_accessor_literal(&value, declared_fields) {
+                    return Ok(reordered);
+                }
                 let visible = actual_fields
                     .iter()
                     .filter(|(name, _)| !is_hidden_accessor_field(name))
@@ -585,6 +754,10 @@ impl<'a> FnLowerer<'a> {
                 return Err(
                     "cannot coerce a Generator to a dynamic (any) value".into(),
                 );
+            }
+            // A native `bigint` is a Json BigInt, the same value an array/object push builds.
+            if actual == HirType::I64 {
+                return self.wrap_native_value_as_json(value, HirType::I64);
             }
             if matches!(&actual, HirType::Function(_, _) | HirType::CallableFunction(..) | HirType::FunctionWithThis(_, _)) {
                 // `registerNativeCallback`'s own inferred type is always
@@ -839,7 +1012,13 @@ impl<'a> FnLowerer<'a> {
                     || !fields.iter().any(|(name, _)|
                         name.starts_with("__thaw_class_identity_\u{1e}")))
                     && Self::fixed_object_supports_live_projection(&actual) {
-                    let projected = self.lower_fixed_object_as_dynamic_accessor_object(value, fields, false)?;
+                    // A fresh `any` literal converts to a mutable native copy; a projection of an
+                    // existing native owner stays a live reference to it.
+                    let live = !(matches!(value, HirExpr::ObjectLit(_))
+                        || Self::is_wrapped_object_literal(&value)
+                        || matches!(&value, HirExpr::Var(name)
+                            if self.fresh_object_bindings.contains(name)));
+                    let projected = self.lower_fixed_object_as_dynamic_accessor_object(value, fields, false, live)?;
                     return self.coerce_to_declared(&HirType::Json, projected);
                 }
             }
@@ -887,16 +1066,7 @@ impl<'a> FnLowerer<'a> {
                     Ok(value)
                 };
             }
-            let HirExpr::ObjectLit(fields) = value else {
-                return Err(format!(
-                    "dictionary value must be an object literal with {element:?} values"
-                ));
-            };
-            let fields = fields
-                .into_iter()
-                .map(|(name, value)| Ok((name, self.coerce_to_declared(element.as_ref(), value)?)))
-                .collect::<Result<Vec<_>, String>>()?;
-            return Ok(HirExpr::JsonObjectLit(fields, element.as_ref().clone()));
+            return self.coerce_object_literal_to_dictionary(element, value);
         }
         // A referenced union alias can nest an absence wrapper inside
         // another wrapper or a union. Flatten those tags before assigning
@@ -1041,7 +1211,7 @@ impl<'a> FnLowerer<'a> {
             if let Some(retagged) = self.retag_nullish_into_union(&actual, elements, &value)? {
                 return Ok(retagged);
             }
-            if matches!(value, HirExpr::ObjectLit(_)) {
+            if matches!(value, HirExpr::ObjectLit(_)) || Self::is_wrapped_object_literal(&value) {
                 for (index, member) in elements.iter().enumerate() {
                     if !matches!(member, HirType::Object(_)) {
                         continue;
@@ -1129,6 +1299,27 @@ impl<'a> FnLowerer<'a> {
                     return Ok(HirExpr::Call(Box::new(adapter), vec![value]));
                 }
             }
+            // `null | undefined` (`Optional(Null)`) carries only absences: the
+            // wrapper's own tag says which one.
+            if let HirType::Optional(source) = &actual {
+                if **source == HirType::Null {
+                    let parameter = "__thaw_nullish_widen".to_string();
+                    let adapter = HirExpr::Lambda(
+                        Vec::new(),
+                        vec![HirParam { name: parameter.clone(), ty: actual.clone() }],
+                        declared.clone(),
+                        Box::new(HirExpr::Block(vec![
+                            HirStmt::If(
+                                HirExpr::OptionalIsNone(Box::new(HirExpr::Var(parameter)), HirType::Null),
+                                vec![HirStmt::Return(Some(HirExpr::NullishUndefined(payload.as_ref().clone())))],
+                                Vec::new(),
+                            ),
+                            HirStmt::Return(Some(HirExpr::NullishNull(payload.as_ref().clone()))),
+                        ])),
+                    );
+                    return Ok(HirExpr::Call(Box::new(adapter), vec![value]));
+                }
+            }
             return match actual {
                 HirType::Null => Ok(absent_after(
                     value, HirExpr::NullishNull(payload.as_ref().clone()),
@@ -1184,6 +1375,9 @@ impl<'a> FnLowerer<'a> {
                 })
                 .collect::<Result<Vec<_>, String>>()?;
             return Ok(HirExpr::ArrayLit(values));
+        }
+        if matches!(declared, HirType::Object(_)) && Self::is_wrapped_object_literal(&value) {
+            return self.coerce_wrapped_object_literal(declared, value);
         }
         let (HirType::Object(declared_fields), HirExpr::ObjectLit(lit_fields)) = (declared, &value)
         else {

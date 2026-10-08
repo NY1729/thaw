@@ -258,6 +258,9 @@ pub(crate) fn render_ts_type(ty: &HirType) -> String {
         }
         HirType::Set(element) => format!("Set<{}>", render_ts_type(element)),
         HirType::WeakSet(element) => format!("WeakSet<{}>", render_ts_type(element)),
+        // The `this` type is not part of the declared TS signature.
+        HirType::FunctionWithThis(_, visible) => render_ts_type(visible),
+        HirType::NativeException => "Error".to_string(),
         HirType::Union(_) | HirType::Dynamic => "any".to_string(),
     }
 }

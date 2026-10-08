@@ -26,6 +26,11 @@ struct FnLowerer<'a> {
     object_array_property_discriminants: HashMap<Symbol, ObjectArrayPropertyDiscriminants>,
     object_function_property_discriminants: HashMap<Symbol, ObjectFunctionPropertyDiscriminants>,
     destructured_union_correlations: HashMap<Symbol, DestructuredUnionCorrelation>,
+    /// `for...of` over a `Json` value is lowered twice (array loop / live-iterable protocol);
+    /// `Some(true)` selects the live-iterable lowering, `Some(false)` the array loop.
+    for_of_json_mode: Option<bool>,
+    /// The right-hand side already lowered by the `for...of` dispatch.
+    for_of_prelowered: Option<HirExpr>,
     destructuring_default_types: HashMap<Symbol, HirType>,
     function_value_discriminants: HashMap<Symbol, HashMap<Symbol, Vec<Option<HirLit>>>>,
     function_value_array_discriminants: HashMap<Symbol, HashMap<Symbol, Vec<Option<HirLit>>>>,
@@ -37,6 +42,8 @@ struct FnLowerer<'a> {
     bindings: HashMap<Symbol, Vec<Symbol>>,
     used_hir_bindings: HashSet<Symbol>,
     sparse_arrays: HashSet<Symbol>,
+    /// `__thaw_native_arg_N` temporaries bound to a fresh object literal (not a native owner).
+    fresh_object_bindings: HashSet<Symbol>,
     conservative_sparse_arrays: HashSet<Symbol>,
     sparse_array_functions: HashSet<Symbol>,
     next_binding: usize,

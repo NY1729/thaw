@@ -70,6 +70,50 @@ fn recursively_specializes_named_generic_local_function_values() {
 }
 
 #[test]
+fn console_log_prints_a_bigint_member_of_a_union() {
+    let source = r#"
+        function pick(flag: boolean): string | bigint { return flag ? "text" : 123n; }
+        function main(): void {
+            console.log(pick(true));
+            console.log(pick(false));
+            console.log(123n);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "console_union_bigint"), "text\n123n\n123n\n");
+}
+
+// A caught native value (not an Object/Json) is a private descriptor; console.log prints a fixed
+// label chosen by its category tag and never reads its contents.
+#[test]
+fn console_log_prints_a_fixed_label_for_each_caught_native_exception_tag() {
+    let source = r#"
+        function main(): void {
+            try { throw new Map<string, number>(); } catch (error) { console.log(error); }
+            try { throw new Set<number>(); } catch (error) { console.log(error); }
+            try { throw new WeakMap<object, number>(); } catch (error) { console.log(error); }
+            try { throw Symbol("s"); } catch (error) { console.log(error); }
+            try { throw Promise.resolve(1); } catch (error) { console.log(error); }
+            try { throw [1, 2]; } catch (error) { console.log(error); }
+        }
+    "#;
+    let parsed = thaw_parser::parse_typescript(source).unwrap();
+    let program = thaw_hir::lower_module(&parsed).unwrap();
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "console_native_exception");
+    compiler.compile_program(&program).unwrap();
+    let ir = compiler.print_to_string().to_string();
+    assert!(ir.contains("thaw_exception_native_tag"), "{ir}");
+    assert!(ir.contains("switch i64"), "{ir}");
+    for label in [
+        "Symbol()", "[ <items unknown> ]", "<Buffer>", "Map { <items unknown> }",
+        "WeakMap { <items unknown> }", "Set { <items unknown> }", "WeakSet { <items unknown> }",
+        "[Function]", "Promise { <pending> }", "[native exception]",
+    ] {
+        assert!(ir.contains(label), "missing label {label:?}:\n{ir}");
+    }
+}
+
+#[test]
 fn compiles_forward_type_aliases_across_native_layouts() {
     let source = r#"
         type RecordValue = Named & { count: number };

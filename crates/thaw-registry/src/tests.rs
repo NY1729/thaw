@@ -165,8 +165,8 @@ fn path_os_fs_polyfills_actually_run_through_quickjs() {
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(
-        file_count, 5,
-        "pkg's index.js + fs/path/os/stream polyfills"
+        file_count, 6,
+        "pkg's index.js + fs/path/os/stream/events polyfills"
     );
 
     let script = format!(

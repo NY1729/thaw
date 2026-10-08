@@ -19,7 +19,7 @@ impl std::fmt::Display for WasmJsException {
         f.write_str("JavaScript WebAssembly callback exception")
     }
 }
-impl wasmi::core::HostError for WasmJsException {}
+impl wasmi::errors::HostError for WasmJsException {}
 
 std::thread_local! {
     static WASM_JS_EXCEPTIONS: std::cell::RefCell<(u32, HashMap<u32, WasmJsValue>)> =
@@ -982,7 +982,7 @@ fn wasm_prepare_js_value(
             let mut converted = 0i64;
             // QuickJS applies ToBigInt and signed 64-bit wrapping directly.
             // No Caller borrow is held while user-defined coercion can reenter.
-            if unsafe { rquickjs::qjs::JS_ToBigInt64(ctx.as_ptr(), &mut converted, value.as_js_value()) } < 0 {
+            if unsafe { rquickjs::qjs::JS_ToBigInt64(ctx.as_raw().as_ptr(), &mut converted, value.as_raw()) } < 0 {
                 return Err(wasm_js_error(&ctx, rquickjs::Error::Exception));
             }
             Ok(WasmPreparedValue::Scalar(WasmVal::I64(converted)))
@@ -2508,7 +2508,7 @@ fn wasm_retained_table(name: &str, operation: &str, index: u64, encoded: Option<
                         } else if retained_function {
                             wasm_retain_table_function(*function, references.clone(), owners.clone(), &context)
                         } else if let Some(owner) = native_owner {
-                            let identity = context.as_context().data().identity.clone();
+                            let identity = context.data().identity.clone();
                             let active = WASM_ACTIVE_CALLERS.with(|stack| {
                                 stack.borrow().iter().rev().find_map(|entry| {
                                     if !std::rc::Rc::ptr_eq(&entry.store_identity, &identity) { return None; }

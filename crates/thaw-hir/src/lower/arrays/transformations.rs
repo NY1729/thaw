@@ -253,7 +253,11 @@ impl<'a> FnLowerer<'a> {
         let callback_name = format!("__thaw_array_from_callback_{}", self.next_binding);
         self.next_binding += 1;
         let callback_type = callback_type.expect("a non-undefined mapper type is present");
-        let HirType::Function(params, callback_return_type) = &callback_type else {
+        let signature = match &callback_type {
+            HirType::FunctionWithThis(_, inner) => inner.as_ref().clone(),
+            other => other.clone(),
+        };
+        let HirType::Function(params, callback_return_type) = &signature else {
             return Err("Array.from mapper needs a fixed function signature".into());
         };
         let returns_void = **callback_return_type == HirType::Void;
@@ -302,7 +306,7 @@ impl<'a> FnLowerer<'a> {
                 HirExpr::BinOp(
                     BinOp::Lt,
                     Box::new(HirExpr::Var(index_name.clone())),
-                    Box::new(HirExpr::Var(length_name)),
+                    Box::new(HirExpr::Var(length_name.clone())),
                 ),
                 vec![
                     HirStmt::Expr(HirExpr::IndexAssign(
@@ -328,6 +332,13 @@ impl<'a> FnLowerer<'a> {
         self.wrap_call_argument_bindings(body, &bindings)
     }
 
+    fn mapper_return(signature: &HirType) -> HirType {
+        match signature {
+            HirType::Function(_, ret) => ret.as_ref().clone(),
+            _ => HirType::Void,
+        }
+    }
+
     fn lower_array_map(
         &mut self,
         receiver: HirExpr,
@@ -342,7 +353,11 @@ impl<'a> FnLowerer<'a> {
         let callback_name = format!("__thaw_map_callback_{}", self.next_binding);
         self.next_binding += 1;
         let callback_type = self.infer_expr_type(&callback)?;
-        let HirType::Function(params, output_type) = &callback_type else {
+        let signature = match &callback_type {
+            HirType::FunctionWithThis(_, inner) => inner.as_ref().clone(),
+            other => other.clone(),
+        };
+        let HirType::Function(params, output_type) = &signature else {
             unreachable!("array mapper was validated as a function")
         };
         let returns_void = **output_type == HirType::Void;
@@ -395,8 +410,23 @@ impl<'a> FnLowerer<'a> {
             HirExpr::Var(index_name.clone()),
             HirExpr::Var(receiver_name.clone()),
         ];
-        let callback_call =
-            self.lower_array_callback_call(&callback_name, params, &available)?;
+        // `thisArg` becomes the `this` of a receiver-taking mapper.
+        let this_binding = if let (HirType::FunctionWithThis(..), Some(this_arg)) =
+            (&callback_type, this_arg.as_ref())
+        {
+            let ty = self.infer_expr_type(this_arg)?;
+            let name = format!("__thaw_map_this_{}", self.next_binding);
+            self.next_binding += 1;
+            self.scope.insert(name.clone(), ty.clone());
+            Some((name, ty, this_arg.clone()))
+        } else { None };
+        let callback_call = if let Some((name, _, _)) = &this_binding {
+            self.lower_array_from_mapper_call(
+                &callback_name, params, &Self::mapper_return(&signature), &available, Some(name),
+            )?
+        } else {
+            self.lower_array_callback_call(&callback_name, params, &available)?
+        };
         let callback_call = if returns_void {
             self.array_void_to_undefined(callback_call)?
         } else {
@@ -466,7 +496,9 @@ impl<'a> FnLowerer<'a> {
             (receiver_name, array_type, receiver),
             (callback_name, callback_type, callback),
         ];
-        if let Some(this_arg) = this_arg {
+        if let Some(binding) = this_binding {
+            bindings.push(binding);
+        } else if let Some(this_arg) = this_arg {
             let ty = self.infer_expr_type(&this_arg)?;
             let name = format!("__thaw_map_this_{}", self.next_binding);
             self.next_binding += 1;

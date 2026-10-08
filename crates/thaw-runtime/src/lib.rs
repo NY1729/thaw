@@ -715,10 +715,14 @@ pub struct ThawPromise {
     exception_i64: i64,
     exception_bool: bool,
     exception_object: *const u8,
+    exception_native: *const ExceptionProvenance,
     aggregate_errors: *const u8,
     handled: bool,
     reported_unhandled: bool,
     subscribers: Vec<PromiseSubscription>,
+    internal_references: usize,
+    references: usize,
+    external_root: Option<thaw_arena::ArenaRoot>,
 }
 
 include!("runtime/promises.rs");

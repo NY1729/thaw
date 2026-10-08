@@ -1691,6 +1691,90 @@ impl<'a> FnLowerer<'a> {
                         receiver = self.coerce_primitive_to_string(receiver)?;
                         receiver_type = HirType::Str;
                     }
+                    if receiver_type == HirType::Json {
+                        // A dynamic receiver is a string or an array only at run time:
+                        // search the string natively, or walk the JSON array comparing
+                        // elements with `===`.
+                        let method = property.sym.to_string();
+                        let names = (0..4).map(|offset| format!("__thaw_json_search_{}_{offset}", self.next_binding))
+                            .collect::<Vec<_>>();
+                        self.next_binding += 1;
+                        let [json, needle, index, length] = [&names[0], &names[1], &names[2], &names[3]];
+                        let needle_type = self.infer_expr_type(&arguments[0])?;
+                        for (name, ty) in [(json, HirType::Json), (needle, needle_type.clone()), (index, HirType::F64), (length, HirType::F64)] {
+                            self.scope.insert(name.clone(), ty);
+                        }
+                        let var = |name: &String| HirExpr::Var(name.clone());
+                        let number = |value: f64| HirExpr::Lit(HirLit::F64(value));
+                        let from = match arguments.get(1) {
+                            Some(argument) => Some(self.coerce_primitive_to_number(argument.clone())?),
+                            None => None,
+                        };
+                        let string_result = {
+                            let needle_text = self.coerce_primitive_to_string(var(needle))?;
+                            let suffix = match method.as_str() {
+                                "indexOf" => "index_of",
+                                "lastIndexOf" => "last_index_of",
+                                _ => "includes",
+                            };
+                            let position = from.clone().unwrap_or_else(|| number(
+                                if method == "lastIndexOf" { f64::INFINITY } else { 0.0 }));
+                            HirExpr::Call(
+                                Box::new(HirExpr::Var(format!("__thaw_string_{suffix}"))),
+                                vec![HirExpr::JsonAsString(Box::new(var(json))), needle_text, position],
+                            )
+                        };
+                        let element = HirExpr::JsonIndex(Box::new(var(json)), Box::new(var(index)));
+                        let matches = self.lower_strict_equality(element, var(needle))?;
+                        let found = if method == "includes" {
+                            HirExpr::Lit(HirLit::Bool(true))
+                        } else {
+                            var(index)
+                        };
+                        let missing = if method == "includes" {
+                            HirExpr::Lit(HirLit::Bool(false))
+                        } else {
+                            number(-1.0)
+                        };
+                        let relative = |value: HirExpr, length: &String| HirExpr::Conditional(
+                            Box::new(HirExpr::BinOp(BinOp::Lt, Box::new(value.clone()), Box::new(number(0.0)))),
+                            Box::new(HirExpr::BinOp(BinOp::Add, Box::new(var(length)), Box::new(value.clone()))),
+                            Box::new(value), HirType::F64,
+                        );
+                        let last = method == "lastIndexOf";
+                        let start = match (&from, last) {
+                            (Some(from), false) => relative(from.clone(), length),
+                            (None, false) => number(0.0),
+                            (Some(from), true) => relative(from.clone(), length),
+                            (None, true) => HirExpr::BinOp(BinOp::Sub, Box::new(var(length)), Box::new(number(1.0))),
+                        };
+                        let (condition, step) = if last {
+                            (HirExpr::BinOp(BinOp::GtEq, Box::new(var(index)), Box::new(number(0.0))), BinOp::Sub)
+                        } else {
+                            (HirExpr::BinOp(BinOp::Lt, Box::new(var(index)), Box::new(var(length))), BinOp::Add)
+                        };
+                        let array_result = HirExpr::Block(vec![
+                            HirStmt::Let(length.clone(), HirType::F64, HirExpr::JsonAsNumber(Box::new(
+                                HirExpr::JsonGet(Box::new(var(json)), "length".to_string())))),
+                            HirStmt::Let(index.clone(), HirType::F64, start),
+                            HirStmt::While(condition, vec![
+                                HirStmt::If(matches, vec![HirStmt::Return(Some(found))], Vec::new()),
+                                HirStmt::Expr(HirExpr::Assign(index.clone(), Box::new(HirExpr::BinOp(
+                                    step, Box::new(var(index)), Box::new(number(1.0)))))),
+                            ]),
+                            HirStmt::Return(Some(missing)),
+                        ]);
+                        let result_type = if method == "includes" { HirType::Bool } else { HirType::F64 };
+                        let is_string = HirExpr::BinOp(BinOp::EqEqEq,
+                            Box::new(HirExpr::Call(Box::new(HirExpr::Var("__thaw_json_typeof".into())), vec![var(json)])),
+                            Box::new(HirExpr::Lit(HirLit::Str("string".into()))));
+                        let result = HirExpr::Conditional(
+                            Box::new(is_string), Box::new(string_result), Box::new(array_result), result_type);
+                        let mut bindings = vec![(json.clone(), HirType::Json, receiver)];
+                        bindings.extend(spread_bindings);
+                        bindings.push((needle.clone(), needle_type, arguments[0].clone()));
+                        return self.wrap_call_argument_bindings(result, &bindings);
+                    }
                     if receiver_type == HirType::Str {
                         let needle = self.coerce_primitive_to_string(arguments[0].clone())?;
                         let position = if let Some(argument) = arguments.get(1) {

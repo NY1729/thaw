@@ -10,7 +10,7 @@ fn fs_read_and_write_streams_integrate_with_node_streams() {
     let empty_node_modules = temp_registry("builtin_fs_streams_node_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    assert_eq!(file_count, 3);
+    assert_eq!(file_count, 4);
     let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFsStreams = module.exports;");
     let source = CString::new(script).unwrap();
     assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
@@ -41,7 +41,7 @@ fn fs_streams_use_incremental_positioned_host_io() {
     let empty_node_modules = temp_registry("builtin_fs_incremental_streams_node_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    assert_eq!(file_count, 3);
+    assert_eq!(file_count, 4);
     let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseIncrementalFsStreams = module.exports;");
     let source = CString::new(script).unwrap();
     assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
@@ -74,7 +74,7 @@ fn fs_write_streams_apply_backpressure_and_serialize_callbacks() {
     let empty_node_modules = temp_registry("builtin_fs_stream_backpressure_node_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    assert_eq!(file_count, 3);
+    assert_eq!(file_count, 4);
     let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFsStreamBackpressure = module.exports;");
     let source = CString::new(script).unwrap();
     assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);

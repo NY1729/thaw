@@ -30,7 +30,7 @@ fn node_constants_are_shared_with_filesystem_constants() {
     let empty_node_modules = temp_registry("builtin_constants_node_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    assert_eq!(file_count, 4);
+    assert_eq!(file_count, 5);
     let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseConstants = module.exports;");
     let source = CString::new(script).unwrap();
     assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
@@ -1080,7 +1080,7 @@ fn global_fetch_sends_requests_follows_redirects_and_returns_responses() {
     let empty_node_modules = temp_registry("global_fetch_node_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    assert_eq!(file_count, 6);
+    assert_eq!(file_count, 7);
     let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFetch = module.exports;");
     let source = CString::new(script).unwrap();
     assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
@@ -1910,7 +1910,7 @@ fn https_client_verifies_a_custom_ca_and_parses_http() {
     assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
     let function = CString::new("exerciseHttpsClient").unwrap();
     let ca = fs::read_to_string(&cert_pem).unwrap();
-    let arguments = CString::new(serde_json::to_string(&(port, ca)).unwrap()).unwrap();
+    let arguments = CString::new(serde_json::to_string(&(port, &ca)).unwrap()).unwrap();
     let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
     let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
     assert_eq!(

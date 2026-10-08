@@ -58,17 +58,19 @@ impl<'ctx> HirCompiler<'ctx> {
             self.pending_exception_object().as_pointer_value(),
             self.context.ptr_type(AddressSpace::default()).const_null(),
         ).map_err(|error| error.to_string())?;
-        for (symbol, zero) in [
+        let zeros: [(&str, BasicValueEnum<'ctx>); 4] = [
             (PENDING_EXCEPTION_VALUE_TAG_SYMBOL, self.context.i64_type().const_zero().into()),
             (PENDING_EXCEPTION_F64_SYMBOL, self.context.f64_type().const_zero().into()),
             (PENDING_EXCEPTION_I64_SYMBOL, self.context.i64_type().const_zero().into()),
             (PENDING_EXCEPTION_BOOL_SYMBOL, self.context.bool_type().const_zero().into()),
-        ] {
+        ];
+        for (symbol, zero) in zeros {
             self.builder.build_store(self.pending_exception_value(symbol).as_pointer_value(), zero)
                 .map_err(|error| error.to_string())?;
         }
-        if let Some(catch_bb) = self.catch_stack.last().copied() {
-            self.builder.build_unconditional_branch(catch_bb)
+        if let Some(catch) = self.catch_stack.last().cloned() {
+            self.emit_stack_promise_cleanup_except(&catch.promise_boundary)?;
+            self.builder.build_unconditional_branch(catch.target)
                 .map_err(|error| error.to_string())?;
         } else if let Some(completion) = self.active_async_completion {
             self.reject_promise_with_pending_exception(completion, value, "reject_synthetic_error")?;
@@ -77,6 +79,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 self.context.ptr_type(AddressSpace::default()).const_null(),
             ).map_err(|error| error.to_string())?;
             self.clear_pending_native_text()?;
+            self.emit_stack_promise_cleanup()?;
             if self.current_function().get_type().get_return_type().is_some() {
                 self.builder.build_return(Some(&completion)).map_err(|error| error.to_string())?;
             } else {
@@ -128,15 +131,26 @@ impl<'ctx> HirCompiler<'ctx> {
             }
 
             HirExpr::Assign(name, value) => {
-                let val = self.compile_expr(value)?;
                 let (ptr, _ty) = *self
                     .variables
                     .get(name)
                     .ok_or_else(|| format!("assignment to undeclared variable `{name}`"))?;
-                self.builder
-                    .build_store(ptr, val)
-                    .map_err(|e| e.to_string())?;
-                if let Some((catch_slot, _, _, valid_slot)) = self.catch_native_text.get(name) {
+                let hir_ty = self.variable_hir_types.get(name).cloned();
+                if let Some(ty @ HirType::Promise(_)) = hir_ty {
+                    if let Some(owner) = self.async_frame_slot_owners.get(&ptr).copied() {
+                        let val = self.compile_and_store_arena_promise_expression(owner, ptr, &ty, value)?;
+                        return Ok(val);
+                    } else if self.arena_variables.contains(name) {
+                        let val = self.compile_and_store_arena_promise_expression(ptr, ptr, &ty, value)?;
+                        return Ok(val);
+                    } else if self.stack_promise_slots.contains_key(&ptr) {
+                        let val = self.compile_and_store_stack_promise_expression(ptr, value)?;
+                        return Ok(val);
+                    }
+                }
+                let val = self.compile_expr(value)?;
+                self.builder.build_store(ptr, val).map_err(|e| e.to_string())?;
+                if let Some((catch_slot, _, _, valid_slot, _)) = self.catch_native_text.get(name) {
                     if *catch_slot == ptr {
                         self.builder.build_store(*valid_slot,
                             self.context.bool_type().const_zero())
@@ -284,7 +298,11 @@ impl<'ctx> HirCompiler<'ctx> {
             }
 
             HirExpr::EvalThen(first, second) => {
-                self.compile_expr(first)?;
+                if self.promise_expression_needs_discard(first) {
+                    self.compile_and_discard_promise_expression(first)?;
+                } else {
+                    self.compile_expr(first)?;
+                }
                 self.compile_expr(second)
             }
             HirExpr::Call(callee, args) => self.compile_call(callee, args),
@@ -448,9 +466,9 @@ impl<'ctx> HirCompiler<'ctx> {
                     self.module.get_function("thaw_json_typed_decode_scope_begin").unwrap(),
                     &[], "begin_json_as_native_scope",
                 ).map_err(|error| error.to_string())?;
-                self.catch_stack.push(failed);
+                self.push_catch_target(failed);
                 let value = self.compile_json_to_native(json, ty);
-                self.catch_stack.pop();
+                self.pop_catch_target();
                 let value = value?;
                 self.builder.build_call(
                     self.module.get_function("thaw_json_typed_decode_scope_end").unwrap(),
@@ -496,8 +514,32 @@ impl<'ctx> HirCompiler<'ctx> {
                 self.compile_json_object_lit(fields, element)
             }
             HirExpr::JsValueAsJson(inner) => {
-                let handle = self.compile_expr(inner)?;
-                self.compile_dynamic_value_placeholder_unchecked(handle)
+                // A live Host lease (primitives as scalars), not the
+                // `__thaw_js_handle_id__` placeholder object: every Json
+                // consumer (console.log, spread, property reads) reads it live.
+                self.uses_quickjs = true;
+                self.uses_quickjs_handles = true;
+                self.tracks_owned_json_roots = true;
+                let handle = self.compile_expr(inner)?.into_int_value();
+                let json = self.builder.build_call(
+                    self.module.get_function("thaw_json_from_borrowed_handle").unwrap(),
+                    &[handle.into()], "js_value_as_json",
+                ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                    .ok_or("live JSON conversion returned no value")?;
+                self.compile_check_json_host_error(json, Some("thaw_json_destroy"))
+            }
+            // A statement block lowered in expression position (e.g. `new Date(0)`): run the
+            // leading statements, then the trailing `return` is the block's value.
+            HirExpr::Block(statements) => {
+                let Some((HirStmt::Return(Some(tail)), head)) = statements.split_last() else {
+                    return Err("a block expression must end in a returned value".into());
+                };
+                for statement in head {
+                    if self.compile_stmt(statement)? {
+                        return Err("a block expression terminated before its value".into());
+                    }
+                }
+                self.compile_expr(tail)
             }
             HirExpr::ObjectAlloc(object_type) => self.compile_object_alloc(object_type, false),
             HirExpr::ClassAlloc(object_type) => self.compile_object_alloc(object_type, true),
@@ -702,9 +744,10 @@ impl<'ctx> HirCompiler<'ctx> {
                     .build_store(self.pending_exception().as_pointer_value(), value)
                     .map_err(|error| error.to_string())?;
                 self.clear_pending_native_text()?;
-                if let Some(catch_block) = self.catch_stack.last().copied() {
+                if let Some(catch) = self.catch_stack.last().cloned() {
+                    self.emit_stack_promise_cleanup_except(&catch.promise_boundary)?;
                     self.builder
-                        .build_unconditional_branch(catch_block)
+                        .build_unconditional_branch(catch.target)
                         .map_err(|error| error.to_string())?;
                 } else {
                     self.build_default_return()?;

@@ -9,7 +9,7 @@ impl<'ctx> HirCompiler<'ctx> {
     /// Capture one already-retained QuickJS exception as an owned JSON value.
     /// The graph encoder preserves the original JS identity and never assimilates
     /// thrown promises or thenables.
-    fn compile_original_quickjs_exception_handle(
+    pub(super) fn compile_original_quickjs_exception_handle(
         &mut self,
         handle: BasicValueEnum<'ctx>,
         consume_handle: bool,
@@ -106,11 +106,12 @@ impl<'ctx> HirCompiler<'ctx> {
             self.pending_exception_value(PENDING_EXCEPTION_VALUE_TAG_SYMBOL).as_pointer_value(),
             self.context.i64_type().const_int(7, false),
         ).map_err(|error| error.to_string())?;
-        for (symbol, zero) in [
+        let zeros: [(&str, BasicValueEnum<'ctx>); 3] = [
             (PENDING_EXCEPTION_F64_SYMBOL, self.context.f64_type().const_zero().into()),
             (PENDING_EXCEPTION_I64_SYMBOL, self.context.i64_type().const_zero().into()),
             (PENDING_EXCEPTION_BOOL_SYMBOL, self.context.bool_type().const_zero().into()),
-        ] {
+        ];
+        for (symbol, zero) in zeros {
             self.builder.build_store(self.pending_exception_value(symbol).as_pointer_value(), zero)
                 .map_err(|error| error.to_string())?;
         }
@@ -188,6 +189,7 @@ impl<'ctx> HirCompiler<'ctx> {
         self.clear_pending_native_text()?;
         self.mark_pending_native_text(error)?;
         self.branch_on_pending_exception()?;
+        self.builder.build_unconditional_branch(succeeded).map_err(|error| error.to_string())?;
         self.builder.position_at_end(succeeded);
         Ok(result)
     }

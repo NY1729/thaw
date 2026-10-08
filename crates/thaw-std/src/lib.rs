@@ -8,4 +8,6 @@
 mod fetch;
 mod fs;
 mod http;
+mod inspect;
+mod inspect_width;
 mod json;

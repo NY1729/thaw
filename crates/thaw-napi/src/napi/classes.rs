@@ -370,6 +370,7 @@ pub unsafe extern "C" fn napi_add_finalizer(
     if finalize.is_none() {
         return record_status(env, NAPI_INVALID_ARG);
     }
+    let env_ptr = env;
     let Ok(env) = env_mut(env) else {
         return NAPI_INVALID_ARG;
     };

@@ -379,6 +379,23 @@ fn normalize_interface_merges(module: &Module) -> Result<Module, String> {
     Ok(merged)
 }
 
+fn generic_receiver_pattern_from_annotation(
+    ty: &TsType,
+    substitutions: &HashMap<Symbol, GenericTypePattern>,
+    interfaces: &HashMap<Symbol, HirType>,
+    generic_interfaces: &GenericInterfaces<'_>,
+) -> GenericReceiverPattern {
+    generic_type_pattern(
+        ty,
+        substitutions,
+        interfaces,
+        generic_interfaces,
+        &mut Vec::new(),
+    )
+    .map(GenericReceiverPattern::Pattern)
+    .unwrap_or(GenericReceiverPattern::LegacyUnmatched)
+}
+
 fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
     let (mut interfaces, generic_interfaces) = resolve_interfaces(module)?;
     let specialized = specialize_generic_classes(module, &interfaces, &generic_interfaces)
@@ -565,22 +582,35 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                     })
                     .collect::<Result<Vec<_>, _>>()?;
                 if name.ends_with(PROMISE_REJECTION_CALLBACK_SUFFIX) && !params.is_empty() {
-                    params[0] = HirType::Str;
+                    // The rejection reason is a string; a leading rest parameter
+                    // receives it as a one-element array.
+                    params[0] = if matches!(func.params.first().map(|p| &p.pat), Some(Pat::Rest(_))) {
+                        HirType::Array(Box::new(HirType::Str))
+                    } else {
+                        HirType::Str
+                    };
                 }
+                let mut generic_this_pattern = None;
                 if let Some(this) = &func.this_param {
                     let annotation = this.type_ann.as_ref().ok_or_else(|| {
                         format!("function `{name}` needs a type annotation for `this`")
                     })?;
-                    params.insert(
-                        0,
-                        resolve_ts_type_with_substitution(
+                    let receiver_type = resolve_ts_type_with_substitution(
+                        &annotation.type_ann,
+                        &type_substitution,
+                        &interfaces,
+                        &generic_interfaces,
+                        &mut Vec::new(),
+                    )?;
+                    params.insert(0, receiver_type);
+                    if let Some(substitutions) = &generic_substitutions {
+                        generic_this_pattern = Some(generic_receiver_pattern_from_annotation(
                             &annotation.type_ann,
-                            &type_substitution,
+                            substitutions,
                             &interfaces,
                             &generic_interfaces,
-                            &mut Vec::new(),
-                        )?,
-                    );
+                        ));
+                    }
                 }
                 let assertion_function = matches!(
                     func.return_type.as_deref().map(|ann| ann.type_ann.as_ref()),
@@ -693,6 +723,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                                 matches!(&parameter.pat, Pat::Ident(binding) if binding.id.optional)
                             })
                             .collect(),
+                        generic_this_pattern,
                         generic_return_type: func.return_type.as_ref().map(|ann| ann.type_ann.clone()),
                         generic_return_pattern,
                         type_predicate,
@@ -779,6 +810,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                         generic_type_defaults: Vec::new(),
                         generic_param_patterns: Vec::new(),
                         generic_param_optional: Vec::new(),
+                        generic_this_pattern: None,
                         generic_return_type: None,
                         generic_return_pattern: None,
                         type_predicate: None,
@@ -810,6 +842,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                         generic_type_defaults: Vec::new(),
                         generic_param_patterns: Vec::new(),
                         generic_param_optional: Vec::new(),
+                        generic_this_pattern: None,
                         generic_return_type: None,
                         generic_return_pattern: None,
                         type_predicate: None,
@@ -996,6 +1029,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                             generic_type_defaults: Vec::new(),
                             generic_param_patterns: Vec::new(),
                             generic_param_optional: Vec::new(),
+                            generic_this_pattern: None,
                             generic_return_type: None,
                             generic_return_pattern: None,
                             type_predicate: None,
@@ -1025,6 +1059,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                             unbound.params.remove(0);
                         }
                         unbound.uses_this = false;
+                        unbound.generic_this_pattern = None;
                         signatures.insert(unbound_symbol.clone(), unbound);
                     }
                     if let Some(default_start) = trailing_omittable_start(&patterns) {
@@ -1295,6 +1330,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                             unbound
                         });
                     unbound_signature.uses_this = false;
+                    unbound_signature.generic_this_pattern = None;
                     signatures.insert(derived_unbound, unbound_signature);
                 }
                 if !derived.class.is_abstract {
@@ -1551,6 +1587,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                         generic_type_defaults: Vec::new(),
                         generic_param_patterns: Vec::new(),
                         generic_param_optional: Vec::new(),
+                        generic_this_pattern: None,
                         generic_return_type: None,
                         generic_return_pattern: None,
                         type_predicate: None,
@@ -1584,6 +1621,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                             generic_type_defaults: Vec::new(),
                             generic_param_patterns: Vec::new(),
                             generic_param_optional: Vec::new(),
+                            generic_this_pattern: None,
                             generic_return_type: None,
                             generic_return_pattern: None,
                             type_predicate: None,

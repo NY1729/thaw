@@ -85,6 +85,7 @@ impl<'a> FnLowerer<'a> {
             ("i64", HirType::I64, Some("__thaw_pending_exception_i64")),
             ("bool", HirType::Bool, Some("__thaw_pending_exception_bool")),
             ("object", HirType::Object(Vec::new()), Some("__thaw_pending_exception_object")),
+            ("native", HirType::NativeException, Some("__thaw_pending_exception_native")),
         ];
         fields.into_iter().map(|(field, ty, getter)| {
             let name = Self::promise_rejection_snapshot_name(binding, field);
@@ -247,7 +248,13 @@ impl<'a> FnLowerer<'a> {
         parameter_types: &[HirType],
         expected_return: Option<&HirType>,
     ) -> Result<(), String> {
-        let (params, rest, ret) = match self.infer_expr_type(callback)? {
+        let callback_type = self.infer_expr_type(callback)?;
+        // A `this`-taking closure exposes the signature it wraps.
+        let callback_type = match callback_type {
+            HirType::FunctionWithThis(_, inner) => *inner,
+            other => other,
+        };
+        let (params, rest, ret) = match callback_type {
             HirType::Function(mut params, ret) => {
                 let rest = if let HirExpr::FunctionRef(symbol, _, _) = callback {
                     self.signatures.get(symbol).and_then(|signature| signature.native_rest.clone())
@@ -269,9 +276,10 @@ impl<'a> FnLowerer<'a> {
                     }
             })
             || rest.as_ref().is_some_and(|element| {
-                parameter_types[params.len()..].iter().any(|supplied| {
-                    !callback_param_compatible(supplied, element)
-                })
+                !supplied_is_rest_array(&parameter_types[params.len()..], element)
+                    && parameter_types[params.len()..].iter().any(|supplied| {
+                        !callback_param_compatible(supplied, element)
+                    })
             })
         {
             return Err(format!(
@@ -333,6 +341,10 @@ impl<'a> FnLowerer<'a> {
                 arguments.push(self.coerce_to_declared(expected, input)?);
             }
             if let Some(element) = rest {
+                if supplied_is_rest_array(&supplied[fixed.len().min(supplied.len())..], &element) {
+                    arguments.push(HirExpr::Var(input_names[fixed.len()].clone()));
+                    return Ok(arguments);
+                }
                 let remaining = input_names.iter().skip(fixed.len())
                     .map(|name| self.coerce_to_declared(&element, HirExpr::Var(name.clone())))
                     .collect::<Result<Vec<_>, _>>()?;
@@ -685,7 +697,10 @@ impl<'a> FnLowerer<'a> {
             _ => return Err("cannot infer Promise type from this executor".into()),
         };
         let Some(resolve_binding) = resolve_binding else {
-            return Err("cannot infer Promise type without a resolve parameter".into());
+            // `new Promise<T>(() => ...)`: no resolver to read the type from,
+            // so the explicit type argument is the Promise's result type.
+            return explicit.cloned().map(|resolved| (resolved, false))
+                .ok_or_else(|| "cannot infer Promise type without a resolve parameter".into());
         };
         let resolve_binding = match resolve_binding {
             Pat::Ident(binding) => binding,
@@ -905,4 +920,10 @@ impl<'a> FnLowerer<'a> {
         Err("cannot infer Promise type because the executor has no resolvable `resolve(value)` call"
             .into())
     }
+}
+
+/// A native callback ABI passes a rest parameter as one array of its element type.
+fn supplied_is_rest_array(supplied: &[HirType], element: &HirType) -> bool {
+    matches!(supplied, [HirType::Array(inner)] if inner.as_ref() == element)
+        && !callback_param_compatible(&supplied[0], element)
 }

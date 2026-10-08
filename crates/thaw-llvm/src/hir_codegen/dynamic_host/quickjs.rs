@@ -412,6 +412,8 @@ impl<'ctx> HirCompiler<'ctx> {
         let [handle, call_args] = args else {
             return Err("callDynamicValueHandle expects exactly two arguments".into());
         };
+        // Arguments may carry live handles; encoding/decoding them needs the host operations.
+        self.compile_register_js_callback_host_operations()?;
         let handle = self.compile_expr(handle)?;
         let outer_compiling_quickjs_dynamic_arguments = self.compiling_quickjs_dynamic_arguments;
         self.compiling_quickjs_dynamic_arguments = true;
@@ -667,7 +669,7 @@ impl<'ctx> HirCompiler<'ctx> {
         receiver: BasicValueEnum<'ctx>, label: &str,
     ) -> Result<(BasicValueEnum<'ctx>, BasicValueEnum<'ctx>), String> {
         let cleanup = self.context.append_basic_block(self.current_function(), "selected_method_arg_cleanup");
-        self.catch_stack.push(cleanup);
+        self.push_catch_target(cleanup);
         let outer = self.compiling_quickjs_dynamic_arguments;
         self.compiling_quickjs_dynamic_arguments = true;
         let compiled = (|| -> Result<_, String> {
@@ -679,7 +681,7 @@ impl<'ctx> HirCompiler<'ctx> {
             Ok((array, encoded))
         })();
         self.compiling_quickjs_dynamic_arguments = outer;
-        self.catch_stack.pop();
+        self.pop_catch_target();
         let success = self.builder.get_insert_block().unwrap();
         self.builder.position_at_end(cleanup);
         self.builder.build_call(self.module.get_function("thaw_js_release_handle").unwrap(),
@@ -689,6 +691,9 @@ impl<'ctx> HirCompiler<'ctx> {
             &[receiver.into()], "release_selected_receiver_on_argument_error")
             .map_err(|error| error.to_string())?;
         self.branch_on_pending_exception()?;
+        // Entered only with an exception pending, so `call_ok` is never reached;
+        // branching it into `success` would add an edge that breaks dominance.
+        self.builder.build_unreachable().map_err(|error| error.to_string())?;
         self.builder.position_at_end(success);
         compiled
     }
@@ -699,6 +704,10 @@ impl<'ctx> HirCompiler<'ctx> {
     ) -> Result<BasicValueEnum<'ctx>, String> {
         self.uses_quickjs = true;
         self.uses_quickjs_handles = true;
+        // May be the first QuickJS operation on the thread; Json arguments can
+        // carry Host leases, so install the retained-value callbacks first
+        // (same reasoning as compile_call_dynamic_value_mixed_exact).
+        self.compile_register_js_callback_host_operations()?;
         let [handle, name, call_args] = args else {
             return Err("callDynamicMethod expects exactly three arguments".into());
         };
@@ -787,6 +796,10 @@ impl<'ctx> HirCompiler<'ctx> {
     ) -> Result<BasicValueEnum<'ctx>, String> {
         self.uses_quickjs = true;
         self.uses_quickjs_handles = true;
+        // May be the first QuickJS operation on the thread; Json arguments can
+        // carry Host leases, so install the retained-value callbacks first
+        // (same reasoning as compile_call_dynamic_value_mixed_exact).
+        self.compile_register_js_callback_host_operations()?;
         let [handle, name, call_args] = args else {
             return Err("callDynamicMethod expects exactly three arguments".into());
         };
@@ -863,6 +876,10 @@ impl<'ctx> HirCompiler<'ctx> {
     ) -> Result<BasicValueEnum<'ctx>, String> {
         self.uses_quickjs = true;
         self.uses_quickjs_handles = true;
+        // May be the first QuickJS operation on the thread; Json arguments can
+        // carry Host leases, so install the retained-value callbacks first
+        // (same reasoning as compile_call_dynamic_value_mixed_exact).
+        self.compile_register_js_callback_host_operations()?;
         let [handle, name, call_args] = args else {
             return Err("callDynamicMethodHandle expects exactly three arguments".into());
         };
@@ -947,6 +964,10 @@ impl<'ctx> HirCompiler<'ctx> {
     ) -> Result<BasicValueEnum<'ctx>, String> {
         self.uses_quickjs = true;
         self.uses_quickjs_handles = true;
+        // May be the first QuickJS operation on the thread; Json arguments can
+        // carry Host leases, so install the retained-value callbacks first
+        // (same reasoning as compile_call_dynamic_value_mixed_exact).
+        self.compile_register_js_callback_host_operations()?;
         let [handle, name, call_args] = args else {
             return Err("callDynamicMethodHandle expects exactly three arguments".into());
         };
@@ -1096,7 +1117,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .map_err(|error| error.to_string())?;
         let cleanup = self.context.append_basic_block(self.current_function(),
             "exact_mixed_staging_failed");
-        self.catch_stack.push(cleanup);
+        self.push_catch_target(cleanup);
         let staged = (|| -> Result<_, String> {
             let callable = self.compile_expr(callable)?.into_int_value();
             self.builder.build_store(callable_cell, callable)
@@ -1111,7 +1132,7 @@ impl<'ctx> HirCompiler<'ctx> {
             }
             Ok((callable, json))
         })();
-        self.catch_stack.pop();
+        self.pop_catch_target();
         let success = self.builder.get_insert_block().unwrap();
         self.builder.position_at_end(cleanup);
         for cell in &direct_cells {
@@ -1144,6 +1165,8 @@ impl<'ctx> HirCompiler<'ctx> {
             .map_err(|error| error.to_string())?;
         self.builder.position_at_end(propagate);
         self.branch_on_pending_exception()?;
+        // Exception-only path (see compile_selected_dynamic_arguments).
+        self.builder.build_unreachable().map_err(|error| error.to_string())?;
         self.builder.position_at_end(success);
         let (callable, json_args) = staged?;
         let raw = self.builder.build_alloca(i64_type.array_type((direct.len() + 1) as u32),

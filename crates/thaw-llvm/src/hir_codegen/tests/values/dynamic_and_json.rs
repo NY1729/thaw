@@ -363,9 +363,10 @@ fn deletes_runtime_keyed_dictionary_properties() {
             console.log(JSON.stringify(parsed));
         }
     "#;
+    // Node 22: reading a deleted/missing Record key prints `undefined`, not NaN.
     assert_eq!(
         compile_and_run(source, "delete_dictionary_properties"),
-        "9\n5\ntrue\ntrue\nNaN\ntrue\nkey\ntrue\nNaN\nobject\ntrue\ntrue\n{}\n"
+        "9\n5\ntrue\ntrue\nundefined\ntrue\nkey\ntrue\nundefined\nobject\ntrue\ntrue\n{}\n"
     );
 }
 
@@ -912,14 +913,20 @@ fn compiles_nested_dynamic_value_assignment() {
             deep.p.q.r *= 3;
             console.log(JSON.stringify(deep));
 
+            // Node (v22): assigning through a missing intermediate throws a
+            // TypeError and leaves the object untouched -- no auto-vivification.
             const fresh: any = {};
-            fresh.a.b = 5;
+            try {
+                fresh.a.b = 5;
+            } catch (error) {
+                console.log(error instanceof TypeError);
+            }
             console.log(JSON.stringify(fresh));
         }
     "#;
     assert_eq!(
         compile_and_run(source, "nested_dynamic_value_assignment"),
-        "{\"c\":{\"d\":false}}\n{\"c\":[99,2,3]}\n{\"p\":{\"q\":{\"r\":15}}}\n{\"a\":{\"b\":5}}\n"
+        "{\"c\":{\"d\":false}}\n{\"c\":[99,2,3]}\n{\"p\":{\"q\":{\"r\":15}}}\ntrue\n{}\n"
     );
 }
 
@@ -1261,7 +1268,8 @@ fn compiles_dynamic_object_introspection_used_inline_in_console_log() {
     "#;
     assert_eq!(
         compile_and_run(source, "dynamic_object_introspection_inline_console_log"),
-        "[\"a\",\"b\"]\n[1,2]\n[[\"a\",1],[\"b\",2]]\n"
+        // Verified against `node -e` (util.inspect formatting).
+        "[ 'a', 'b' ]\n[ 1, 2 ]\n[ [ 'a', 1 ], [ 'b', 2 ] ]\n"
     );
 }
 
