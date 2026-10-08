@@ -467,7 +467,7 @@ fn full_object_field_names(owner: *const u8) -> Option<Vec<String>> {
         let length = segment[..colon].parse::<usize>().ok()?;
         let end = colon.checked_add(1)?.checked_add(length.checked_mul(2)?)?;
         let hex = segment.get(colon + 1..end)?;
-        let bytes = hex.as_bytes().chunks_exact(2).map(|pair| {
+        let bytes = hex.as_bytes().as_chunks::<2>().0.iter().map(|pair| {
             u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok()
         }).collect::<Option<Vec<_>>>()?;
         String::from_utf8(bytes).ok()

@@ -62,7 +62,7 @@ fn decode_string(text: &[u8], encoding: &str) -> Vec<u8> {
     match encoding {
         "hex" => {
             let mut bytes = Vec::with_capacity(text.len() / 2);
-            for pair in text.chunks_exact(2) {
+            for pair in text.as_chunks::<2>().0 {
                 let (Some(high), Some(low)) = ((pair[0] as char).to_digit(16), (pair[1] as char).to_digit(16)) else {
                     break;
                 };

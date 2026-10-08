@@ -2987,16 +2987,16 @@ unsafe fn qjs_define_callback_property(
         Ok(key) => key, Err(status) => return status,
     };
     let status = (|| {
-        let mut create = |callback| -> Result<u64, NapiStatus> {
+        let create = |callback| -> Result<u64, NapiStatus> {
             let mut value = ptr::null_mut();
             let status = napi_create_function(env, ptr::null(), NAPI_AUTO_LENGTH,
                 Some(callback), data, &mut value);
             if status != NAPI_OK { return Err(status); }
             Ok(value as u64)
         };
-        let getter_id = getter.map(&mut create).transpose()?.unwrap_or(0);
-        let setter_id = setter.map(&mut create).transpose()?.unwrap_or(0);
-        let method_id = method.map(&mut create).transpose()?.unwrap_or(0);
+        let getter_id = getter.map(create).transpose()?.unwrap_or(0);
+        let setter_id = setter.map(create).transpose()?.unwrap_or(0);
+        let method_id = method.map(create).transpose()?.unwrap_or(0);
         // A JS descriptor can outlive the addon call which installed it.
         // Retain each native Function before handing its identity to QuickJS;
         // the QuickJS closure owns these references after the FFI call.

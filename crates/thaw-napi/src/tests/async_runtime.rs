@@ -1325,7 +1325,7 @@ fn later_finalizer_cannot_dispatch_prior_env_callback_data() {
     });
     retire_owned_envs();
     assert_eq!(CALLED_AFTER_FINALIZATION.load(Ordering::Acquire), 0);
-    let retained = HOST.with(|host| host.borrow_mut().module_envs.drain(..).collect::<Vec<_>>());
+    let retained = HOST.with(|host| std::mem::take(&mut host.borrow_mut().module_envs));
     drop(retained);
 }
 
@@ -1395,7 +1395,7 @@ fn later_finalizer_cannot_read_prior_env_external_backing_store() {
     second.shutdown_requested = true;
     HOST.with(|host| host.borrow_mut().module_envs.extend([first, second]));
     retire_owned_envs();
-    let retained = HOST.with(|host| host.borrow_mut().module_envs.drain(..).collect::<Vec<_>>());
+    let retained = HOST.with(|host| std::mem::take(&mut host.borrow_mut().module_envs));
     drop(retained);
 }
 
@@ -1419,7 +1419,7 @@ fn finalizer_queued_work_keeps_other_env_owned_until_completion() {
     assert_eq!(thaw_napi_run_async_work(), 1);
     assert!(HOST.with(|host| host.borrow().module_envs.iter()
         .any(|env| (&**env as *const Env).cast_mut() == second_env && env.finalized)));
-    let retained = HOST.with(|host| host.borrow_mut().module_envs.drain(..).collect::<Vec<_>>());
+    let retained = HOST.with(|host| std::mem::take(&mut host.borrow_mut().module_envs));
     drop(retained);
 }
 
