@@ -221,6 +221,16 @@ fn array_index_key(name: &str) -> Option<u32> {
 /// Whether an object type's identity chain (see `module/classes.rs`) makes
 /// it an `Error`-family instance -- the built-ins themselves, or any user
 /// class transitively `extends`ing one of them.
+/// The shared physical prefix of every Error-family record: identity marker,
+/// then `message` and `name`.
+fn builtin_error_object_type() -> HirType {
+    HirType::Object(vec![
+        ("__thaw_class_identity_\u{1e}Error".to_string(), HirType::Bool),
+        ("message".to_string(), HirType::Json),
+        ("name".to_string(), HirType::Json),
+    ])
+}
+
 fn object_type_is_error_family(ty: &HirType) -> bool {
     let HirType::Object(fields) = ty else {
         return false;

@@ -4,6 +4,9 @@ fn cc_command() -> Command {
     let mut command = Command::new("cc");
     if cfg!(target_os = "linux") {
         command.arg("-no-pie");
+        // thaw-runtime's num-bigint pulls in libm (log/exp/log2); the real `thaw build` link adds -lm too.
+        // Listed first with --no-as-needed so the DSO is kept even though the archives come later.
+        command.args(["-Wl,--no-as-needed", "-lm"]);
     }
     command
 }
@@ -96,6 +99,35 @@ fn compile_and_run_output_with_env(
     test_name: &str,
     envs: &[(&str, &str)],
 ) -> (String, String) {
+    let output = compile_and_run_raw(source, test_name, envs);
+    assert!(
+        output.status.success(),
+        "binary exited {:?}: {}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    (
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+
+/// For programs that must end unsuccessfully (an unhandled rejection of
+/// `main` exits 1 in Node as well): `(stdout, stderr, exit code)`.
+fn compile_and_run_failing(source: &str, test_name: &str) -> (String, String, Option<i32>) {
+    let output = compile_and_run_raw(source, test_name, &[]);
+    (
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+        output.status.code(),
+    )
+}
+
+fn compile_and_run_raw(
+    source: &str,
+    test_name: &str,
+    envs: &[(&str, &str)],
+) -> std::process::Output {
     let module = thaw_parser::parse_typescript(source).unwrap();
     let program = thaw_hir::lower_module(&module).unwrap();
 
@@ -159,18 +191,8 @@ fn compile_and_run_output_with_env(
         .envs(envs.iter().copied())
         .output()
         .expect("failed to execute compiled binary");
-    assert!(
-        output.status.success(),
-        "binary exited {:?}: {}",
-        output.status.code(),
-        String::from_utf8_lossy(&output.stderr)
-    );
-
     let _ = std::fs::remove_dir_all(&dir);
-    (
-        String::from_utf8_lossy(&output.stdout).into_owned(),
-        String::from_utf8_lossy(&output.stderr).into_owned(),
-    )
+    output
 }
 
 /// Builds `pkg` as a staticlib (if not already built) and returns the

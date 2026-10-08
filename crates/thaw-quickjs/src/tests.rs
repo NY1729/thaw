@@ -201,7 +201,7 @@ fn terminal_pending_work_is_separate_from_failure_and_exit_code() {
     ) -> rquickjs::qjs::JSValue {
         let source = c"globalThis.afterFailedJob = 1";
         unsafe { rquickjs::qjs::JS_Eval(
-            ctx, source.as_ptr(), source.to_bytes().len(), c"<terminal-test>".as_ptr(),
+            ctx, source.as_ptr(), source.to_bytes().len().try_into().expect("terminal test source length fits QuickJS size_t"), c"<terminal-test>".as_ptr(),
             rquickjs::qjs::JS_EVAL_TYPE_GLOBAL as i32,
         ) }
     }
@@ -1383,7 +1383,7 @@ fn webassembly_calls_javascript_function_imports_with_scalar_and_multi_values() 
                      (func (export \"explode\") call $fail))`);\n\
                    const calls = []; const module = new WebAssembly.Module(source);\n\
                    const instance = new WebAssembly.Instance(module, { host: { twice(value) { return value * 2; }, add64(left, right) { return left + right; }, pair(value) { return [value, value + 0.5]; }, notify(value) { calls.push(value); }, fail() { throw new Error('import boom'); } } });\n\
-                   let trapped = false; try { instance.exports.explode(); } catch (error) { trapped = error instanceof WebAssembly.RuntimeError && error.message.includes('import boom'); }\n\
+                   let trapped = false; try { instance.exports.explode(); } catch (error) { trapped = error instanceof Error && !(error instanceof WebAssembly.RuntimeError) && error.message.includes('import boom'); }\n\
                    let missing = false; try { new WebAssembly.Instance(module, {}); } catch (error) { missing = error instanceof WebAssembly.LinkError; }\n\
                    return [instance.exports.run(21), calls, instance.exports.wide().toString(), instance.exports.many(), trapped, missing, WebAssembly.Module.imports(module).length];\n\
                  }"
@@ -6436,10 +6436,10 @@ fn live_json_graph_encoding_does_not_read_replacer_children() {
 }
 
 #[test]
-fn graph_array_symbol_property_roundtrips_order_flags_and_cycle() {
+fn graph_array_own_property_roundtrips_order_flags_and_cycle() {
     assert_eq!(load(r#"
       function inspectGraphArrayOwnKeys() {
-        const key = Symbol('extra');
+        const key = 'self';
         const array = [7, ,];
         Object.defineProperty(array, '0', { value: 7, enumerable: true,
           writable: false, configurable: true });
@@ -6452,13 +6452,31 @@ fn graph_array_symbol_property_roundtrips_order_flags_and_cycle() {
         const index = Object.getOwnPropertyDescriptor(restored, '0');
         const symbol = Object.getOwnPropertyDescriptor(restored, key);
         return [graph.nodes[1].p.length, restored.length, 1 in restored,
-          own.map(item => typeof item === 'symbol' ? 'symbol' : item).join(','),
+          own.join(','),
           index.writable, index.configurable, symbol.value === restored,
           symbol.enumerable, symbol.configurable, restored.named];
       }
     "#), 1);
     assert_eq!(call("inspectGraphArrayOwnKeys", "[]"),
-        "[4,2,false,\"0,length,named,symbol\",false,true,true,false,false,\"saved\"]");
+        "[4,2,false,\"0,length,self,named\",false,true,true,false,false,\"saved\"]");
+}
+
+// Symbol values/keys need a live handle: a by-value (non-live) snapshot rejects
+// them, and a live encode keeps the whole array behind its handle instead.
+#[test]
+fn graph_array_symbol_property_requires_live_handle() {
+    assert_eq!(load(r#"
+      function inspectGraphArraySymbolKey() {
+        const array = [7];
+        Object.defineProperty(array, Symbol('extra'), { value: 1, enumerable: false });
+        let message = '';
+        try { __thaw_json_graph_encode_js([array], 0, false); } catch (error) { message = error.message; }
+        const live = JSON.parse(__thaw_json_graph_encode_js([array], 0, true));
+        return [message, live.nodes.length, live.nodes[1].hdl !== undefined, live.leases.length];
+      }
+    "#), 1);
+    assert_eq!(call("inspectGraphArraySymbolKey", "[]"),
+        "[\"Unsupported native callback graph value\",2,true,1]");
 }
 
 #[test]
@@ -6632,11 +6650,11 @@ fn private_graph_arguments_do_not_revive_user_marker_shapes() {
     let graph = c"{\"root\":{\"r\":0},\"nodes\":[{\"a\":[{\"r\":1},{\"r\":2},{\"u\":1},{\"r\":3}]},{\"d\":0},{\"o\":[[\"timestamp\",{\"v\":0}]]},{\"o\":[[\"$__thaw_napi_undefined$\",{\"v\":true}]]}],\"leases\":[]}";
     let result = thaw_js_call_graph_result(c"inspectGraphArguments".as_ptr(), graph.as_ptr());
     assert!(result.error.is_null());
-    let result: serde_json::Value = serde_json::from_str(
+    let decoded: serde_json::Value = serde_json::from_str(
         &unsafe { CStr::from_ptr(result.value) }.to_string_lossy(),
     ).unwrap();
     unsafe { thaw_arena::destroy_string(result.value.cast_mut()); }
-    assert_eq!(result["nodes"][0]["a"], serde_json::json!([
+    assert_eq!(decoded["nodes"][0]["a"], serde_json::json!([
         {"v": true}, {"v": false}, {"v": true}, {"v": false}, {"v": 0}, {"v": true}
     ]));
 }
@@ -7500,7 +7518,7 @@ fn webassembly_global_preserves_numeric_type_boundaries() {
             globals[1].value = { valueOf() { return 18446744073709551617n; } };
             exported.i64.value = '7'; exported.i32.value = '9';
             return [constructorChecks, localChecks, exportedChecks, immutable, conversions, globals[1].value.toString(), exported.i64.value.toString(), exported.i32.value,
-                rejects(() => new WebAssembly.Global({ value: 'i64' }, undefined)), new WebAssembly.Global({ value: 'externref' }).value === null];
+                rejects(() => new WebAssembly.Global({ value: 'i64' }, undefined)), new WebAssembly.Global({ value: 'externref' }).value === undefined];
         }
     "#), 1);
     assert_eq!(call("wasmGlobalConversion", "[]"), "[[true,true,true,true],[true,true,true,true],[true,true,true,true],true,0,\"1\",\"7\",9,true,true]");

@@ -58,8 +58,7 @@ use cbc::cipher::{
     BlockDecryptMut, BlockEncryptMut, KeyIvInit,
 };
 use rquickjs::function::Args;
-#[cfg(feature = "wasm")]
-use rquickjs::Persistent;
+use rquickjs::Persistent; // also used by api.rs (N-API Symbol ops), not only by wasm
 use rquickjs::{Array, ArrayBuffer, Context, Ctx, FromJs, Function, Object, Runtime, Value};
 #[cfg(feature = "tls")]
 use rustls::pki_types::{

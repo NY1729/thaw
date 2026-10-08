@@ -1254,13 +1254,16 @@ fn normalize_status(status_code: f64) -> u16 {
     }
 }
 
-/// EOF closes only the peer's sending half; response writes remain valid.
+/// EOF closes only the peer's sending half; response writes remain valid once a response has started.
 fn client_hung_up(connection: &mut ConnectionState) -> bool {
     if connection.peer_read_closed { return false; }
     let mut probe = [0_u8; 1];
     match &connection.stream {
         Some(stream) => match stream.peek(&mut probe) {
-            Ok(0) => { connection.peer_read_closed = true; false }
+            // Node (httpAllowHalfOpen=false) aborts a request whose client hung up before any
+            // response started and releases the socket; a response already streaming may still be
+            // read by a half-closed peer, so that case is preserved.
+            Ok(0) => { connection.peer_read_closed = true; connection.awaiting_handler && !connection.streaming }
             Ok(_) => false,
             Err(error) if matches!(error.kind(), std::io::ErrorKind::WouldBlock
                 | std::io::ErrorKind::Interrupted) => false,
@@ -3121,7 +3124,7 @@ mod tests {
         assert!(!connection.client_gone);
         // EOF can follow the last body bytes already buffered by a prior read.
         let mut context = RequestContext::new("POST", "/", &[], &[], std::ptr::null_mut());
-        connection.response_ctx = &mut context;
+        connection.response_ctx = &mut *context;
         connection.request.extend_from_slice(b"abc");
         connection.body_plan = BodyPlan::Fixed(3);
         connection.body_complete = false;

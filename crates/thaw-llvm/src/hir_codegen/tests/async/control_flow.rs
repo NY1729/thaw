@@ -774,8 +774,21 @@ fn async_catch_rethrow_carries_owned_native_text_provenance() {
     let ir = compiler.print_to_string();
     assert!(ir.contains("@thaw_promise_exception_native_text_copy"), "{ir}");
     assert!(ir.contains("@thaw_promise_reject_typed_with_aggregate"), "{ir}");
-    assert!(ir.contains("caught_rethrow_native_text"), "{ir}");
+    // Current design: the catch copies the rejected Promise's native text into the
+    // frame slot `@@thaw_catch_native_text:error`, and the rethrow settles through the
+    // native-provenance variant of the typed reject ABI.
     assert!(ir.contains("@@thaw_catch_native_text:"), "{ir}");
+    assert!(ir.lines().any(|line| line.contains("call ")
+        && line.contains("@thaw_promise_reject_typed_with_native_provenance")), "{ir}");
+    assert!(ir.lines().any(|line| line.trim_start().starts_with("store ptr %caught_promise_native_text, ptr %\"frame_@@thaw_catch_native_text:error")), "{ir}");
+    // The source binding named like the old synthetic suffix must never become
+    // pending-exception provenance.
+    let spoof = ir.lines()
+        .find(|line| line.starts_with('@') && line.contains("c\"source-controlled spoof"))
+        .and_then(|line| line.split_whitespace().next())
+        .expect(&ir);
+    assert!(!ir.lines().any(|line| line.contains(&format!("store ptr {spoof},"))
+        && line.contains("@__thaw_pending_exception_native_text")), "{ir}");
 }
 
 // Compiler transport only: this asserts the companion is copied while the

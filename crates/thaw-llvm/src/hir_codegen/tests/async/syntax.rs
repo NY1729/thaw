@@ -200,7 +200,8 @@ fn compiles_typeof_for_native_values_and_awaits() {
     "#;
     assert_eq!(
         compile_and_run(source, "typed_typeof"),
-        "evaluated\nnumber\nstring\nboolean\nfunction\nobject\nobject\nobject\n"
+        // The un-awaited `numberValue()` still runs to completion, as in Node.
+        "evaluated\nnumber\nstring\nboolean\nfunction\nobject\nobject\nobject\nevaluated\n"
     );
 }
 

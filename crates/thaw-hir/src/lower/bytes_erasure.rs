@@ -143,6 +143,10 @@ fn erase_ty(ty: &mut HirType) {
             }
             erase_ty(ret);
         }
+        HirType::FunctionWithThis(receiver, signature) => {
+            erase_ty(receiver);
+            erase_ty(signature);
+        }
         HirType::CallableFunction(params, _, rest, ret) => {
             for param in params {
                 erase_ty(param);
@@ -163,6 +167,7 @@ fn erase_ty(ty: &mut HirType) {
         | HirType::StrLiteral(_)
         | HirType::Json
         | HirType::JsValue
+        | HirType::NativeException
         | HirType::Dynamic => {}
     }
 }
@@ -371,6 +376,11 @@ fn erase_expr(expr: &mut HirExpr) {
             erase_tys(types);
             erase_ty(ret);
         }
+        HirExpr::FunctionRefThis(_, receiver, types, ret) => {
+            erase_ty(receiver);
+            erase_tys(types);
+            erase_ty(ret);
+        }
         HirExpr::Block(stmts) => erase_stmts(stmts),
 
         HirExpr::FfiCall(sig, args) => {
@@ -443,5 +453,63 @@ fn erase_expr(expr: &mut HirExpr) {
         | HirExpr::JsonAsString(value)
         | HirExpr::JsonAsBool(value)
         | HirExpr::JsValueAsJson(value) => erase_expr(value),
+    }
+}
+
+#[cfg(test)]
+mod thaw_remaining_traversals_bytes_controls {
+    use super::*;
+
+    #[test]
+    fn thaw_remaining_bytes_erasure_visits_this_signature_and_callable_reference_types() {
+        let mut program = HirProgram {
+            globals: vec![crate::HirGlobal {
+                name: "callable".into(),
+                ty: HirType::FunctionWithThis(
+                    Box::new(HirType::Bytes),
+                    Box::new(HirType::Function(
+                        vec![HirType::Bytes],
+                        Box::new(HirType::Bytes),
+                    )),
+                ),
+                init: HirExpr::FunctionRefThis(
+                    "callable_with_this".into(),
+                    HirType::Bytes,
+                    vec![HirType::Bytes],
+                    HirType::Bytes,
+                ),
+                mutable: false,
+            }],
+            ..HirProgram::default()
+        };
+
+        erase_bytes(&mut program);
+
+        let bytes_array = || HirType::Array(Box::new(HirType::F64));
+        assert_eq!(
+            program.globals[0].ty,
+            HirType::FunctionWithThis(
+                Box::new(bytes_array()),
+                Box::new(HirType::Function(
+                    vec![bytes_array()],
+                    Box::new(bytes_array()),
+                )),
+            )
+        );
+        let HirExpr::FunctionRefThis(_, receiver, params, ret) = &program.globals[0].init else {
+            panic!("expected function reference with explicit receiver");
+        };
+        assert_eq!(receiver, &bytes_array());
+        assert_eq!(params, &vec![bytes_array()]);
+        assert_eq!(ret, &bytes_array());
+    }
+
+    #[test]
+    fn thaw_remaining_native_exception_is_preserved_as_an_opaque_type_leaf() {
+        let mut ty = HirType::NativeException;
+
+        erase_ty(&mut ty);
+
+        assert_eq!(ty, HirType::NativeException);
     }
 }

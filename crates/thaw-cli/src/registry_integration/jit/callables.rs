@@ -476,6 +476,27 @@ macro_rules! jit_callables {
             && matches!(argument.expr.as_ref(), Expr::Ident(identifier) if identifier.sym == value.id.sym)
     }
 
+    /// A side-effect-free arithmetic/comparison expression over pure leaf values:
+    /// re-evaluating it at every use of the inlined parameter is harmless.
+    fn jit_pure_arithmetic(tokens: &[String]) -> bool {
+        !tokens.is_empty()
+            && tokens.iter().all(|token| {
+                jit_single_pure_value(std::slice::from_ref(token))
+                    || matches!(
+                        token.as_str(),
+                        "+" | "-" | "*" | "/" | "%" | "pow" | "rsub" | "rdiv" | "rrem" | "rpow"
+                            | "band" | "bor" | "bxor" | "shl" | "shr" | "ushr" | "neg"
+                            | "<" | "<=" | ">" | ">=" | "==" | "!="
+                            // Math.* (everything but `random`).
+                            | "abs" | "asin" | "asinh" | "atan" | "atan2" | "atanh" | "cbrt"
+                            | "ceil" | "clz32" | "cos" | "cosh" | "exp" | "expm1" | "floor"
+                            | "fround" | "hypot" | "imul" | "log" | "log1p" | "log2" | "log10"
+                            | "min" | "max" | "round" | "sign" | "sin" | "sinh" | "sqrt"
+                            | "tan" | "tanh" | "trunc"
+                    )
+            })
+    }
+
     fn jit_single_pure_value(tokens: &[String]) -> bool {
         let [token] = tokens else {
             return false;
@@ -1490,7 +1511,7 @@ macro_rules! jit_callables {
             )?;
             // Inlined parameter tokens may be referenced more than once or out of order.
             // Only substitute values whose re-evaluation is harmless.
-            if !jit_single_pure_value(&encoded) {
+            if !jit_pure_arithmetic(&encoded) {
                 return None;
             }
             helper_locals.insert(parameter.id.sym.to_string(), encoded);

@@ -10,8 +10,9 @@ pub struct ExceptionProvenance {
     pub i64_value: i64,
     pub bool_value: u64,
     pub object: *const u8,
+    pub native_layout: *const std::ffi::c_char,
 }
-const _: [(); 64] = [(); std::mem::size_of::<ExceptionProvenance>()];
+const _: [(); 72] = [(); std::mem::size_of::<ExceptionProvenance>()];
 
 /// Allocates one immutable compiler-private tuple. Null means allocation
 /// failed, not a provenance-free value. The caller must handle that failure.
@@ -33,9 +34,112 @@ pub extern "C" fn thaw_exception_provenance_new(
     if allocation.is_null() { return std::ptr::null(); }
     unsafe { allocation.write(ExceptionProvenance {
         original, native_text, aggregate_errors, tag, f64_value, i64_value,
-        bool_value, object,
+        bool_value, object, native_layout: std::ptr::null(),
     }) };
     allocation
+}
+
+thread_local! {
+    static NATIVE_PROMISE_REASON_OWNERS: RefCell<HashMap<usize, *mut ThawPromise>> =
+        RefCell::new(HashMap::new());
+    static PROMISE_ARENA_SLOT_OWNERS: RefCell<HashMap<usize, (usize, *mut ThawPromise)>> =
+        RefCell::new(HashMap::new());
+}
+
+fn release_reclaimed_native_promise_internal_owners(tracing: bool) {
+    let released = NATIVE_PROMISE_REASON_OWNERS.with(|owners| {
+        let mut owners = owners.borrow_mut();
+        let released = owners.iter()
+            .filter_map(|(&record, &promise)|
+                (!tracing || thaw_arena::was_reclaimed(record)).then_some((record, promise)))
+            .collect::<Vec<_>>();
+        for &(record, _) in &released {
+            owners.remove(&record);
+        }
+        released
+    });
+    let released_slots = PROMISE_ARENA_SLOT_OWNERS.with(|owners| {
+        let mut owners = owners.borrow_mut();
+        let released = owners.iter()
+            .filter_map(|(&slot, &(_, promise))|
+                (!tracing || thaw_arena::was_reclaimed(slot)).then_some((slot, promise)))
+            .collect::<Vec<_>>();
+        for &(slot, _) in &released { owners.remove(&slot); }
+        released
+    });
+    for (_, promise) in released.into_iter().chain(released_slots) {
+        unsafe { release_native_promise_internal(promise) };
+    }
+}
+
+/// Build a private native exception descriptor. `owner` is the original
+/// native value pointer; `tag` preserves its actual JS typeof category and
+/// `layout` is a compiler-generated, static type token used for checked casts.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_exception_native_provenance_new(
+    tag: u64,
+    owner: *const u8,
+    layout: *const std::ffi::c_char,
+) -> *const ExceptionProvenance {
+    if owner.is_null() || layout.is_null() { return std::ptr::null(); }
+    let allocation = thaw_arena::thaw_arena_alloc(
+        std::mem::size_of::<ExceptionProvenance>(),
+        std::mem::align_of::<ExceptionProvenance>(),
+    ).cast::<ExceptionProvenance>();
+    if allocation.is_null() { return std::ptr::null(); }
+    unsafe { allocation.write(ExceptionProvenance {
+        original: std::ptr::null(), native_text: std::ptr::null(),
+        aggregate_errors: std::ptr::null(), tag, f64_value: 0.0,
+        i64_value: 0, bool_value: 0, object: owner, native_layout: layout,
+    }) };
+    if tag == 29 {
+        let promise = owner.cast_mut().cast::<ThawPromise>();
+        if unsafe { retain_native_promise_internal(promise) } == 0 {
+            return std::ptr::null();
+        }
+        thaw_arena::register_reset_hook(release_reclaimed_native_promise_internal_owners);
+        NATIVE_PROMISE_REASON_OWNERS.with(|owners| {
+            owners.borrow_mut().insert(allocation as usize, promise);
+        });
+    }
+    allocation
+}
+
+/// Return the original owner only when both native category and exact HIR
+/// token match. The returned pointer is never interpreted as an Object first.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_exception_native_owner(
+    provenance: *const ExceptionProvenance,
+    tag: u64,
+    layout: *const std::ffi::c_char,
+) -> *const u8 {
+    let Some(provenance) = (unsafe { provenance.as_ref() }) else { return std::ptr::null(); };
+    if layout.is_null() || provenance.native_layout.is_null() || provenance.tag != tag {
+        return std::ptr::null();
+    }
+    let expected = unsafe { std::ffi::CStr::from_ptr(layout) }.to_bytes();
+    let actual = unsafe { std::ffi::CStr::from_ptr(provenance.native_layout) }.to_bytes();
+    if expected == actual { provenance.object } else { std::ptr::null() }
+}
+
+/// Native strict equality is identity equality on the original owner, not on
+/// descriptor allocations which may be copied at catch/rethrow boundaries.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_exception_native_same(
+    left: *const ExceptionProvenance,
+    right: *const ExceptionProvenance,
+) -> u8 {
+    match (unsafe { left.as_ref() }, unsafe { right.as_ref() }) {
+        (Some(left), Some(right)) => u8::from(left.tag == right.tag && left.object == right.object),
+        _ => 0,
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn thaw_exception_native_tag(
+    provenance: *const ExceptionProvenance,
+) -> u64 {
+    unsafe { provenance.as_ref() }.map_or(0, |value| value.tag)
 }
 
 /// Allocates an unresolved promise. Pair every successful call with
@@ -52,11 +156,18 @@ pub extern "C" fn thaw_promise_new() -> *mut ThawPromise {
         exception_i64: 0,
         exception_bool: false,
         exception_object: std::ptr::null(),
+        exception_native: std::ptr::null(),
         aggregate_errors: std::ptr::null(),
         handled: false,
         reported_unhandled: false,
         subscribers: Vec::new(),
+        internal_references: 0,
+        references: 1,
+        external_root: None,
     }));
+    if thaw_arena::is_tracing() {
+        unsafe { (*promise).external_root = Some(thaw_arena::ArenaRoot::new(promise as usize)); }
+    }
     ACTIVE_PROMISES.with(|active| active.borrow_mut().push(promise));
     promise
 }
@@ -291,6 +402,29 @@ pub unsafe extern "C" fn thaw_promise_reject_typed_with_aggregate(
     settled
 }
 
+/// Typed rejection handoff that preserves the immutable native value
+/// descriptor alongside the legacy scalar/object channels.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_promise_reject_typed_with_native_provenance(
+    promise: *mut ThawPromise,
+    error: *const u8,
+    tag: u64,
+    f64_value: f64,
+    i64_value: i64,
+    bool_value: bool,
+    object: *const u8,
+    native_text: *const u8,
+    aggregate_errors: *const u8,
+    native: *const ExceptionProvenance,
+) -> u8 {
+    let settled = unsafe { thaw_promise_reject_typed_with_aggregate(
+        promise, error, tag, f64_value, i64_value, bool_value, object,
+        native_text, aggregate_errors,
+    ) };
+    if settled != 0 { unsafe { thaw_promise_set_exception_native(promise, native) }; }
+    settled
+}
+
 /// Tracks the Promise's aggregate handle beside its ordinary result edge.
 /// `replace_reference` takes the previous child pointer, not a slot number;
 /// retaining both children under the same boxed Promise owner lets a rooted
@@ -326,6 +460,12 @@ promise_exception_getter!(
     std::ptr::null()
 );
 promise_exception_getter!(
+    thaw_promise_exception_native,
+    exception_native,
+    *const ExceptionProvenance,
+    std::ptr::null()
+);
+promise_exception_getter!(
     thaw_promise_exception_aggregate_errors,
     aggregate_errors,
     *const u8,
@@ -353,6 +493,7 @@ fn forward_promise_rejection(
         return thaw_promise_reject(output, error);
     };
     let text = input.rejection_text.clone();
+    let native = input.exception_native;
     let settled = unsafe { thaw_promise_reject_typed(
         output,
         error,
@@ -366,6 +507,7 @@ fn forward_promise_rejection(
         unsafe {
             (*output).rejection_text = text;
             set_promise_aggregate_errors(output, input.aggregate_errors);
+            let _ = thaw_promise_set_exception_native(output, native);
         }
     }
     settled
@@ -686,6 +828,7 @@ struct PromiseFinallyAdoptState {
     original_i64: i64,
     original_bool: bool,
     original_object: *const u8,
+    original_native: *const ExceptionProvenance,
     original_aggregate_errors: *const u8,
     original_provenance: *const ExceptionProvenance,
     original_text: Option<Vec<u8>>,
@@ -718,6 +861,7 @@ extern "C" fn resume_promise_finally_adopt(frame: *mut u8, result: *const u8) {
             unsafe {
                 (*state.output).rejection_text = state.original_text.clone();
                 set_promise_aggregate_errors(state.output, state.original_aggregate_errors);
+                let _ = thaw_promise_set_exception_native(state.output, state.original_native);
             }
         }
     } else {
@@ -733,8 +877,15 @@ extern "C" fn resume_promise_finally_adopt(frame: *mut u8, result: *const u8) {
 ///
 /// # Safety
 ///
-/// `output` and `input` must be distinct live Promises. `original` must remain
-/// valid until `input` settles.
+/// If both handles are non-null and distinct, they must be live Promises with
+/// no competing destruction or mutation. The caller must have exclusive
+/// access to `input` on its owning event-loop thread during subscription and
+/// transfer exactly one live external `input` token to the deferred callback.
+/// `output` must remain live through callback settlement, unless the pending
+/// frame is cancelled first. `original` and `original_object` must remain
+/// valid through callback use unless existing arena roots retain them. Passing
+/// a null handle or equal handles returns zero without registering a frame or
+/// transferring the input token.
 #[no_mangle]
 pub unsafe extern "C" fn thaw_promise_finally_adopt(
     output: *mut ThawPromise,
@@ -747,11 +898,35 @@ pub unsafe extern "C" fn thaw_promise_finally_adopt(
     original_bool: bool,
     original_object: *const u8,
 ) -> u8 {
-    finally_adopt_with_source(output, input, original, original_rejected, original_tag,
-        original_f64, original_i64, original_bool, original_object, std::ptr::null())
+    // SAFETY: This wrapper forwards its caller's contract above; the null
+    // source needs no snapshot and the helper's null/equal guards are safe.
+    unsafe {
+        finally_adopt_with_source(
+            output, input, original, original_rejected, original_tag,
+            original_f64, original_i64, original_bool, original_object, std::ptr::null(),
+        )
+    }
 }
 
 #[no_mangle]
+/// Waits for a Promise returned by `.finally`, snapshots the original
+/// Promise's synchronous metadata, then forwards the original settlement
+/// unless the returned Promise rejects.
+///
+/// # Safety
+///
+/// If `output` and `input` are non-null and distinct, both must be live
+/// Promises with no competing destruction or mutation. The caller must have
+/// exclusive access to `input` on its owning event-loop thread during
+/// subscription and transfer exactly one live external `input` token to the
+/// deferred callback. `output` must remain live through callback settlement,
+/// unless the pending frame is cancelled first. `source` must be null or a
+/// live, exclusively readable Promise for the synchronous snapshot only.
+/// `original`, `original_object`, and any payload pointer used by the callback
+/// must remain valid for that use unless existing arena roots retain them.
+/// Non-nullness alone does not establish lifetime. Passing a null handle or
+/// equal handles returns zero without registering a frame or transferring the
+/// input token.
 pub unsafe extern "C" fn thaw_promise_finally_adopt_with_source(
     output: *mut ThawPromise,
     input: *mut ThawPromise,
@@ -764,11 +939,32 @@ pub unsafe extern "C" fn thaw_promise_finally_adopt_with_source(
     original_object: *const u8,
     source: *const ThawPromise,
 ) -> u8 {
-    finally_adopt_with_source(output, input, original, original_rejected, original_tag,
-        original_f64, original_i64, original_bool, original_object, source)
+    // SAFETY: This wrapper forwards its caller's handle, ownership, payload,
+    // and source-snapshot contract to the private helper.
+    unsafe {
+        finally_adopt_with_source(
+            output, input, original, original_rejected, original_tag,
+            original_f64, original_i64, original_bool, original_object, source,
+        )
+    }
 }
 
-fn finally_adopt_with_source(
+/// Registers the deferred forwarding frame after snapshotting `source`.
+///
+/// # Safety
+///
+/// For non-null, distinct `output` and `input`, both handles must be live with
+/// no competing destruction or mutation. `input` must be exclusively
+/// accessible on its owning event-loop thread through subscription, and one
+/// live external token is transferred to the deferred callback.
+/// `output` must remain live through callback settlement unless cancellation
+/// makes the frame inert first. `source` must be null or a live, exclusively
+/// readable Promise for this synchronous snapshot only. `original`,
+/// `original_object`, and callback payloads must remain valid through their
+/// use unless existing arena roots retain them; non-nullness alone proves no
+/// lifetime. Null or equal handles return zero without frame registration or
+/// input-token transfer.
+unsafe fn finally_adopt_with_source(
     output: *mut ThawPromise,
     input: *mut ThawPromise,
     original: *const u8,
@@ -785,11 +981,13 @@ fn finally_adopt_with_source(
     }
     let aggregate_errors = unsafe { source.as_ref() }
         .map_or(std::ptr::null(), |source| source.aggregate_errors);
+    let original_native = unsafe { source.as_ref() }
+        .map_or(std::ptr::null(), |source| source.exception_native);
     let original_provenance = if original_rejected == 0 {
         unsafe { thaw_promise_fulfilled_provenance(source) }
     } else { std::ptr::null() };
     let mut original_roots = Vec::new();
-    for pointer in [original, original_object, aggregate_errors, original_provenance.cast()] {
+    for pointer in [original, original_object, aggregate_errors, original_provenance.cast(), original_native.cast()] {
         pin_promise_pointer_once(&mut original_roots, pointer as usize);
     }
     let state = Box::into_raw(Box::new(PromiseFinallyAdoptState {
@@ -802,6 +1000,7 @@ fn finally_adopt_with_source(
         original_i64,
         original_bool,
         original_object,
+        original_native,
         original_aggregate_errors: aggregate_errors,
         original_provenance,
         original_text: unsafe { source.as_ref() }.and_then(|source| source.rejection_text.clone()),
@@ -809,7 +1008,10 @@ fn finally_adopt_with_source(
         cancelled: false,
     }));
     PROMISE_FINALLY_ADOPT_STATES.with(|states| states.borrow_mut().push(state));
-    thaw_promise_subscribe(input, resume_promise_finally_adopt, state.cast());
+    // SAFETY: The caller guarantees input is a live Promise and transfers one
+    // external token to this callback. subscribe queues settled inputs
+    // without invoking the callback inline, and the registered frame stays live.
+    unsafe { thaw_promise_subscribe(input, resume_promise_finally_adopt, state.cast()); }
     1
 }
 
@@ -1521,8 +1723,36 @@ fn settle_promise(
     1
 }
 
-/// Destroys a promise handle. Passing null is a no-op. The caller must not
-/// destroy a promise from inside one of its resume callbacks.
+fn destroy_promise_box(promise: *mut ThawPromise) {
+    ACTIVE_PROMISES.with(|active| active.borrow_mut().retain(|current| *current != promise));
+    TIMERS.with(|timers| timers.borrow_mut().retain(|timer| timer.promise != promise));
+    FD_WAITS.with(|waits| waits.borrow_mut().retain(|wait| wait.promise != promise));
+    thaw_arena::forget_references(promise as usize);
+    unsafe { drop(Box::from_raw(promise)); }
+}
+
+unsafe fn retain_native_promise_internal(promise: *mut ThawPromise) -> u8 {
+    let Some(promise) = (unsafe { promise.as_mut() }) else { return 0; };
+    let (Some(references), Some(internal_references)) = (
+        promise.references.checked_add(1),
+        promise.internal_references.checked_add(1),
+    ) else { return 0; };
+    promise.references = references;
+    promise.internal_references = internal_references;
+    1
+}
+
+unsafe fn release_native_promise_internal(promise: *mut ThawPromise) {
+    let Some(promise_ref) = (unsafe { promise.as_mut() }) else { return; };
+    if promise_ref.internal_references == 0 || promise_ref.references == 0 { return; }
+    promise_ref.internal_references -= 1;
+    promise_ref.references -= 1;
+    if promise_ref.references == 0 {
+        destroy_promise_box(promise);
+    }
+}
+
+/// Destroys an externally owned Promise handle. Passing null is a no-op.
 ///
 /// # Safety
 ///
@@ -1531,12 +1761,92 @@ fn settle_promise(
 #[no_mangle]
 pub unsafe extern "C" fn thaw_promise_destroy(promise: *mut ThawPromise) {
     if !promise.is_null() {
-        ACTIVE_PROMISES.with(|active| active.borrow_mut().retain(|current| *current != promise));
-        TIMERS.with(|timers| timers.borrow_mut().retain(|timer| timer.promise != promise));
-        FD_WAITS.with(|waits| waits.borrow_mut().retain(|wait| wait.promise != promise));
-        thaw_arena::forget_references(promise as usize);
-        drop(Box::from_raw(promise));
+        let Some(promise_ref) = (unsafe { promise.as_mut() }) else { return; };
+        if promise_ref.references <= promise_ref.internal_references { return; }
+        promise_ref.references -= 1;
+        if promise_ref.references == promise_ref.internal_references {
+            promise_ref.external_root.take();
+        }
+        if promise_ref.references == 0 { destroy_promise_box(promise); }
     }
+}
+
+/// Retain a Promise as an externally owned alias. This changes only ownership;
+/// it does not subscribe, inspect `then`, or mark it handled.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_promise_retain(promise: *mut ThawPromise) -> u8 {
+    let Some(promise) = (unsafe { promise.as_mut() }) else { return 0; };
+    let Some(references) = promise.references.checked_add(1) else { return 0; };
+    if promise.references == promise.internal_references && thaw_arena::is_tracing() {
+        promise.external_root = Some(thaw_arena::ArenaRoot::new(promise as *mut ThawPromise as usize));
+    }
+    promise.references = references;
+    1
+}
+
+/// Replace a Promise pointer stored in an arena-owned cell or frame slot.
+/// The owner allocation keeps the Promise as an internal tracing edge; the
+/// reset hook releases one internal token when that slot is reclaimed.
+///
+/// # Safety
+/// `owner` and `slot` must point into the same live arena allocation, and
+/// `slot` must already contain an initialized null or live Promise pointer.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_promise_arena_slot_replace(
+    owner: *mut u8,
+    slot: *mut *mut ThawPromise,
+    replacement: *mut ThawPromise,
+) -> u8 {
+    if owner.is_null() || slot.is_null() || (thaw_arena::is_tracing()
+        && (!thaw_arena::contains_allocation(owner as usize)
+            || !thaw_arena::contains_allocation(slot as usize)))
+    {
+        return 0;
+    }
+    let previous = unsafe { slot.read() };
+    let key = slot as usize;
+    let current = PROMISE_ARENA_SLOT_OWNERS.with(|owners| owners.borrow().get(&key).copied());
+    if current.is_some_and(|(current_owner, current_promise)|
+        current_owner != owner as usize || current_promise != previous)
+        || (previous.is_null() && current.is_some())
+        || (!previous.is_null() && current.is_none())
+    {
+        return 0;
+    }
+    if previous == replacement { return 1; }
+    if !replacement.is_null() && unsafe { retain_native_promise_internal(replacement) } == 0 {
+        return 0;
+    }
+    thaw_arena::replace_reference(owner as usize, previous as usize, replacement as usize);
+    PROMISE_ARENA_SLOT_OWNERS.with(|owners| {
+        let mut owners = owners.borrow_mut();
+        owners.remove(&key);
+        if !replacement.is_null() {
+            owners.insert(key, (owner as usize, replacement));
+        }
+    });
+    unsafe { slot.write(replacement) };
+    if !previous.is_null() { unsafe { release_native_promise_internal(previous) }; }
+    thaw_arena::register_reset_hook(release_reclaimed_native_promise_internal_owners);
+    1
+}
+
+/// Attach a native exception descriptor to a rejected Promise and keep its
+/// arena record reachable for the Promise's lifetime.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_promise_set_exception_native(
+    promise: *mut ThawPromise,
+    provenance: *const ExceptionProvenance,
+) -> u8 {
+    let Some(promise) = (unsafe { promise.as_mut() }) else { return 0; };
+    let previous = promise.exception_native;
+    thaw_arena::replace_reference(
+        promise as *mut ThawPromise as usize,
+        previous as usize,
+        provenance as usize,
+    );
+    promise.exception_native = provenance;
+    1
 }
 
 pub type PromiseUnhandledFn = extern "C" fn(*const u8) -> u8;

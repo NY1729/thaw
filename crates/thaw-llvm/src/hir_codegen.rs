@@ -72,6 +72,7 @@ const PENDING_REJECTION_SYMBOL: &str = "__thaw_pending_rejection";
 /// `Promise.reject`) only ever looks at the string channel and stays
 /// completely unaware this one exists.
 const PENDING_EXCEPTION_OBJECT_SYMBOL: &str = "__thaw_pending_exception_object";
+const PENDING_EXCEPTION_NATIVE_SYMBOL: &str = "__thaw_pending_exception_native";
 const PENDING_EXCEPTION_AGGREGATE_SYMBOL: &str = "__thaw_pending_exception_aggregate_errors";
 const PENDING_EXCEPTION_NATIVE_TEXT_SYMBOL: &str = "__thaw_pending_exception_native_text";
 const PENDING_EXCEPTION_VALUE_TAG_SYMBOL: &str = "__thaw_pending_exception_value_tag";
@@ -120,7 +121,8 @@ fn raw_value_layout(ty: &HirType) -> Result<(u64, u64), String> {
         | HirType::Bytes | HirType::Map(_, _) | HirType::WeakMap(_, _)
         | HirType::Set(_) | HirType::WeakSet(_) | HirType::Tuple(_)
         | HirType::Object(_) | HirType::Function(_, _)
-        | HirType::CallableFunction(..) => Ok((8, 8)),
+        | HirType::CallableFunction(..) | HirType::NativeException
+        | HirType::FunctionWithThis(_, _) => Ok((8, 8)),
         HirType::Union(members) if !members.is_empty() => Ok((16, 8)),
         HirType::Optional(payload) | HirType::Nullable(payload)
         | HirType::Nullish(payload) => {
@@ -257,6 +259,54 @@ enum AsyncBlockExit {
     Rejected,
 }
 
+/// A catch target and the physical Promise slots which remain live there.
+/// Keeping them in one private value prevents cleanup boundaries from
+/// drifting when a compiler context is isolated or suspended.
+#[derive(Clone)]
+struct CatchContext<'ctx> {
+    scopes: Vec<CatchScope<'ctx>>,
+}
+
+#[derive(Clone)]
+struct CatchScope<'ctx> {
+    target: BasicBlock<'ctx>,
+    promise_boundary: HashSet<PointerValue<'ctx>>,
+}
+
+#[derive(Clone)]
+struct LoopScope<'ctx> {
+    continue_target: BasicBlock<'ctx>,
+    break_target: BasicBlock<'ctx>,
+    promise_boundary: HashSet<PointerValue<'ctx>>,
+}
+
+#[derive(Clone)]
+struct LoopPromotionScope<'ctx> {
+    preheader: BasicBlock<'ctx>,
+    variables: HashSet<String>,
+    catches: CatchContext<'ctx>,
+    stack_promise_slots: HashMap<PointerValue<'ctx>, PointerValue<'ctx>>,
+    outer_loops: Vec<LoopScope<'ctx>>,
+}
+
+#[derive(Clone)]
+struct CodegenScopeContext<'ctx> {
+    catches: CatchContext<'ctx>,
+    stack_promise_slots: HashMap<PointerValue<'ctx>, PointerValue<'ctx>>,
+    loops: Vec<LoopScope<'ctx>>,
+    loop_promotions: Vec<LoopPromotionScope<'ctx>>,
+    active_async_completion: Option<PointerValue<'ctx>>,
+}
+
+macro_rules! isolated_codegen_scope {
+    ($compiler:expr, $body:block) => {{
+        let saved_scope_context = $compiler.take_codegen_scope_context();
+        let result: Result<_, String> = (|| $body)();
+        $compiler.replace_codegen_scope_context(saved_scope_context);
+        result
+    }};
+}
+
 pub struct HirCompiler<'ctx> {
     context: &'ctx Context,
     module: Module<'ctx>,
@@ -264,13 +314,21 @@ pub struct HirCompiler<'ctx> {
     variables: HashMap<String, (PointerValue<'ctx>, BasicTypeEnum<'ctx>)>,
     /// Only compiler-created catch cells enter this map; source-visible names
     /// (including a matching metadata suffix) never establish provenance.
-    catch_native_text: HashMap<String, (PointerValue<'ctx>, PointerValue<'ctx>, PointerValue<'ctx>, PointerValue<'ctx>)>,
+    catch_native_text: HashMap<String, (PointerValue<'ctx>, PointerValue<'ctx>, PointerValue<'ctx>, PointerValue<'ctx>, PointerValue<'ctx>)>,
+    /// Catch names of the async function being planned whose binding HIR already
+    /// declared as the caught-exception carrier (`caught_exception_carrier_prelude`).
+    async_carrier_catch_names: std::cell::RefCell<std::collections::HashSet<String>>,
     variable_hir_types: HashMap<String, HirType>,
+    /// Set while `console.log` converts a typed value for inspection: an `Optional` field with no
+    /// value is a property that was never set, so it is omitted instead of printed as `undefined`.
+    console_omit_absent_fields: bool,
     arena_variables: HashSet<String>,
     /// Only prepromoted JsValue cells have a pending first-capture retain.
     /// Key by the exact LLVM cell value so branch/function map swaps need no mirror.
     pending_js_capture_claims: HashMap<PointerValue<'ctx>, PointerValue<'ctx>>,
     async_frame_cells: HashSet<PointerValue<'ctx>>,
+    async_frame_slot_owners: HashMap<PointerValue<'ctx>, PointerValue<'ctx>>,
+    stack_promise_slots: HashMap<PointerValue<'ctx>, PointerValue<'ctx>>,
     /// Frame slots holding the current fresh cell of captured `for (let ...)`
     /// bindings. A resume reloads the pointer rather than sharing a value slot.
     for_iteration_frame_slots: HashMap<String, PointerValue<'ctx>>,
@@ -281,9 +339,9 @@ pub struct HirCompiler<'ctx> {
     /// Stack of enclosing `try` targets. `throw` and a failed nested Thaw
     /// call target the innermost entry; an empty stack propagates by returning
     /// from the current function with the pending exception left intact.
-    catch_stack: Vec<BasicBlock<'ctx>>,
-    loop_stack: Vec<(BasicBlock<'ctx>, BasicBlock<'ctx>)>,
-    loop_promotion_scopes: Vec<(BasicBlock<'ctx>, HashSet<String>)>,
+    catch_stack: Vec<CatchScope<'ctx>>,
+    loop_scopes: Vec<LoopScope<'ctx>>,
+    loop_promotion_scopes: Vec<LoopPromotionScope<'ctx>>,
     /// Functions whose async ABI is a Promise-returning ramp rather than the
     /// legacy synchronous V1 ABI. Seeded to a fixed point before declarations
     /// so callers and callees agree on the LLVM signature.
@@ -407,7 +465,7 @@ fn hir_contains_named_call(program: &HirProgram, name: &str) -> bool {
             | HirExpr::NullableNone(_) | HirExpr::NullishNull(_)
             | HirExpr::NullishUndefined(_) | HirExpr::EnvVar(_)
             | HirExpr::ObjectAlloc(_) | HirExpr::ClassAlloc(_)
-            | HirExpr::FunctionRef(..) | HirExpr::MethodRef(..)
+            | HirExpr::FunctionRef(..) | HirExpr::FunctionRefThis(..) | HirExpr::MethodRef(..)
             | HirExpr::PostfixUpdate(_, _) => false,
         }
     }
@@ -429,17 +487,21 @@ impl<'ctx> HirCompiler<'ctx> {
             builder: context.create_builder(),
             variables: HashMap::new(),
             catch_native_text: HashMap::new(),
+            async_carrier_catch_names: std::cell::RefCell::new(std::collections::HashSet::new()),
             variable_hir_types: HashMap::new(),
+            console_omit_absent_fields: false,
             arena_variables: HashSet::new(),
             pending_js_capture_claims: HashMap::new(),
             async_frame_cells: HashSet::new(),
+            async_frame_slot_owners: HashMap::new(),
+            stack_promise_slots: HashMap::new(),
             for_iteration_frame_slots: HashMap::new(),
             global_variables: HashMap::new(),
             module_exception_roots: Vec::new(),
             function_return_types: HashMap::new(),
             ffi_signatures: HashMap::new(),
             catch_stack: Vec::new(),
-            loop_stack: Vec::new(),
+            loop_scopes: Vec::new(),
             loop_promotion_scopes: Vec::new(),
             frame_async_functions: HashMap::new(),
             async_lambda_captures: HashMap::new(),
@@ -545,6 +607,9 @@ impl<'ctx> HirCompiler<'ctx> {
             .add_global(ptr_ty, None, PENDING_EXCEPTION_OBJECT_SYMBOL);
         pending_object.set_linkage(Linkage::Internal);
         pending_object.set_initializer(&ptr_ty.const_null());
+        let pending_native = self.module.add_global(ptr_ty, None, PENDING_EXCEPTION_NATIVE_SYMBOL);
+        pending_native.set_linkage(Linkage::Internal);
+        pending_native.set_initializer(&ptr_ty.const_null());
         let pending_aggregate = self.module.add_global(ptr_ty, None, PENDING_EXCEPTION_AGGREGATE_SYMBOL);
         pending_aggregate.set_linkage(Linkage::Internal);
         pending_aggregate.set_initializer(&ptr_ty.const_null());
@@ -646,11 +711,14 @@ impl<'ctx> HirCompiler<'ctx> {
             .build_store(guard.as_pointer_value(), bool_type.const_int(1, false))
             .map_err(|error| error.to_string())?;
         self.variables.clear();
+        self.stack_promise_slots.clear();
         self.for_iteration_frame_slots.clear();
         self.catch_native_text.clear();
         self.variable_hir_types.clear();
         self.arena_variables.clear();
-        self.catch_stack.clear();
+        self.clear_catch_context();
+        self.loop_scopes.clear();
+        self.loop_promotion_scopes.clear();
         self.seed_global_variables();
         let mut execute = true;
         for step in &common {
@@ -726,10 +794,11 @@ impl<'ctx> HirCompiler<'ctx> {
         let state = self.module.add_global(state_ty, None, &format!("{name}_state"));
         state.set_linkage(Linkage::Internal);
         state.set_initializer(&state_ty.const_zero());
-        let exception_slots = [
+        let exception_slots: [(&str, BasicTypeEnum<'ctx>); 9] = [
             (PENDING_EXCEPTION_SYMBOL, self.context.ptr_type(AddressSpace::default()).into()),
             (PENDING_EXCEPTION_NATIVE_TEXT_SYMBOL, self.context.ptr_type(AddressSpace::default()).into()),
             (PENDING_EXCEPTION_OBJECT_SYMBOL, self.context.ptr_type(AddressSpace::default()).into()),
+            (PENDING_EXCEPTION_NATIVE_SYMBOL, self.context.ptr_type(AddressSpace::default()).into()),
             (PENDING_EXCEPTION_AGGREGATE_SYMBOL, self.context.ptr_type(AddressSpace::default()).into()),
             (PENDING_EXCEPTION_VALUE_TAG_SYMBOL, self.context.i64_type().into()),
             (PENDING_EXCEPTION_F64_SYMBOL, self.context.f64_type().into()),
@@ -741,7 +810,8 @@ impl<'ctx> HirCompiler<'ctx> {
             let slot = self.module.add_global(ty, None, &format!("{name}_{symbol}"));
             slot.set_linkage(Linkage::Internal);
             slot.set_initializer(&ty.const_zero());
-            if symbol == PENDING_EXCEPTION_SYMBOL || symbol == PENDING_EXCEPTION_OBJECT_SYMBOL || symbol == PENDING_EXCEPTION_AGGREGATE_SYMBOL {
+            if symbol == PENDING_EXCEPTION_SYMBOL || symbol == PENDING_EXCEPTION_OBJECT_SYMBOL
+                || symbol == PENDING_EXCEPTION_NATIVE_SYMBOL || symbol == PENDING_EXCEPTION_AGGREGATE_SYMBOL {
                 self.module_exception_roots.push(slot.as_pointer_value());
             }
             cached.push((self.module.get_global(symbol).unwrap(), slot, ty));
@@ -781,9 +851,13 @@ impl<'ctx> HirCompiler<'ctx> {
         self.catch_native_text.clear();
         self.variable_hir_types.clear();
         self.arena_variables.clear();
-        self.catch_stack.clear();
+        self.stack_promise_slots.clear();
+        self.clear_catch_context();
+        self.loop_scopes.clear();
+        self.loop_promotion_scopes.clear();
         self.seed_global_variables();
-        self.catch_stack.push(failed);
+        self.push_catch_target(failed);
+        let initializer_result = (|| -> Result<(), String> {
         for dependency in dependencies {
             let initializer = self.module.get_function(&format!("__thaw_lazy_module_{dependency}"))
                 .ok_or_else(|| format!("missing static dependency initializer {dependency}"))?;
@@ -807,7 +881,10 @@ impl<'ctx> HirCompiler<'ctx> {
                 }
             }
         }
-        self.catch_stack.pop();
+        Ok(())
+        })();
+        self.pop_catch_target();
+        initializer_result?;
         if self.builder.get_insert_block().is_some_and(|block| block.get_terminator().is_none()) {
             self.builder.build_store(state.as_pointer_value(), state_ty.const_int(2, false))
                 .map_err(|error| error.to_string())?;
@@ -912,6 +989,10 @@ impl<'ctx> HirCompiler<'ctx> {
                 ) || matches!(inner.as_ref(), HirExpr::Call(callee, _)
                     if matches!(callee.as_ref(), HirExpr::Var(name)
                         if name == "sleep" || name == "fetch" || name == "Promise.all" || frame_functions.contains(name)))
+                    // An argument-binding wrapper `(lambda)(args)` that returns a Promise.
+                    || matches!(inner.as_ref(), HirExpr::Call(callee, _)
+                        if matches!(callee.as_ref(), HirExpr::Lambda(_, _, HirType::Promise(_), body)
+                            if matches!(body.as_ref(), HirExpr::PromiseNew(..))))
                     || Self::expr_awaits_frame_source(inner, frame_functions)
             }
             HirExpr::BinOp(_, left, right)
@@ -984,6 +1065,8 @@ impl<'ctx> HirCompiler<'ctx> {
 
     fn clear_pending_native_text(&self) -> Result<(), String> {
         let null = self.context.ptr_type(AddressSpace::default()).const_null();
+        self.builder.build_store(self.pending_exception_native().as_pointer_value(), null)
+            .map_err(|error| error.to_string())?;
         self.builder.build_store(self.pending_exception_native_text().as_pointer_value(), null)
             .map_err(|error| error.to_string())?;
         // Every fresh native/FFI/host error already clears text provenance.
@@ -1007,6 +1090,11 @@ impl<'ctx> HirCompiler<'ctx> {
         format!("@@thaw_catch_original_value:{name}")
     }
 
+    /// Frame cell for the caught text when `name` itself is the carrier local.
+    fn async_catch_text_name(name: &str) -> String {
+        format!("@@thaw_catch_text:{name}")
+    }
+
     fn async_catch_native_name(name: &str) -> String {
         // `@` is not valid in a TypeScript binding. The frame cell is reserved
         // for compiler-generated catch state and cannot be forged by a user Var.
@@ -1022,7 +1110,7 @@ impl<'ctx> HirCompiler<'ctx> {
         expression: &HirExpr,
     ) -> Result<bool, String> {
         let HirExpr::Var(binding) = expression else { return Ok(false) };
-        let Some((catch_slot, native_slot, original_slot, valid_slot)) = self.catch_native_text.get(binding) else {
+        let Some((catch_slot, native_slot, original_slot, valid_slot, exception_native_slot)) = self.catch_native_text.get(binding) else {
             return Ok(false);
         };
         if self.variables.get(binding).map(|(slot, _)| slot) != Some(catch_slot) {
@@ -1061,6 +1149,12 @@ impl<'ctx> HirCompiler<'ctx> {
         let native = self.builder.build_select(trusted, native, ptr.const_null(), "rethrow_native_text")
             .map_err(|error| error.to_string())?;
         self.builder.build_store(self.pending_exception_native_text().as_pointer_value(), native)
+            .map_err(|error| error.to_string())?;
+        let exception_native = self.builder.build_load(ptr, *exception_native_slot, "caught_native_exception_descriptor")
+            .map_err(|error| error.to_string())?.into_pointer_value();
+        let exception_native = self.builder.build_select(same, exception_native, ptr.const_null(), "rethrow_native_descriptor")
+            .map_err(|error| error.to_string())?;
+        self.builder.build_store(self.pending_exception_native().as_pointer_value(), exception_native)
             .map_err(|error| error.to_string())?;
         let metadata: [(&str, PointerValue<'ctx>, BasicTypeEnum<'ctx>, BasicValueEnum<'ctx>, bool); 6] = [
             ("aggregate", self.pending_exception_aggregate_errors().as_pointer_value(),
@@ -1128,6 +1222,11 @@ impl<'ctx> HirCompiler<'ctx> {
             .expect("exception state is declared before code generation")
     }
 
+    fn pending_exception_native(&self) -> inkwell::values::GlobalValue<'ctx> {
+        self.module.get_global(PENDING_EXCEPTION_NATIVE_SYMBOL)
+            .expect("native exception state is declared before code generation")
+    }
+
     fn pending_exception_value(&self, name: &str) -> inkwell::values::GlobalValue<'ctx> {
         self.module
             .get_global(name)
@@ -1180,6 +1279,11 @@ impl<'ctx> HirCompiler<'ctx> {
             self.pending_exception_aggregate_errors().as_pointer_value(),
             "pending_aggregate_errors",
         ).map_err(|error| error.to_string())?;
+        let native = self.builder.build_load(
+            self.context.ptr_type(AddressSpace::default()),
+            self.pending_exception_native().as_pointer_value(),
+            "pending_native_exception_descriptor",
+        ).map_err(|error| error.to_string())?;
         let ptr_int = self.context.i64_type();
         let error_bits = self.builder.build_ptr_to_int(error, ptr_int, "pending_error_bits")
             .map_err(|error| error.to_string())?;
@@ -1195,10 +1299,11 @@ impl<'ctx> HirCompiler<'ctx> {
             self.context.ptr_type(AddressSpace::default()).const_null(), "paired_aggregate_errors")
             .map_err(|error| error.to_string())?;
         args.push(aggregate_errors.into());
+        args.push(native.into());
         self.builder
             .build_call(
                 self.module
-                    .get_function("thaw_promise_reject_typed_with_aggregate")
+                    .get_function("thaw_promise_reject_typed_with_native_provenance")
                     .unwrap(),
                 &args,
                 name,
@@ -1224,7 +1329,10 @@ impl<'ctx> HirCompiler<'ctx> {
         Ok(())
     }
 
-    fn build_default_return(&self) -> Result<(), String> {
+    fn build_default_return(&mut self) -> Result<(), String> {
+        // This helper is the common escaping-exception/failed-adapter exit.
+        // Runtime ownership flags make it safe to use on every return path.
+        self.emit_stack_promise_cleanup()?;
         let function = self.current_function();
         let return_type = function.get_type().get_return_type();
         match return_type {
@@ -1261,10 +1369,14 @@ impl<'ctx> HirCompiler<'ctx> {
             .map_err(|e| e.to_string())?;
         let continue_bb = self.context.append_basic_block(function, "call_ok");
 
-        if let Some(catch_bb) = self.catch_stack.last().copied() {
+        if let Some(catch) = self.catch_stack.last().cloned() {
+            let propagate_bb = self.context.append_basic_block(function, "cleanup_before_catch");
             self.builder
-                .build_conditional_branch(has_exception, catch_bb, continue_bb)
+                .build_conditional_branch(has_exception, propagate_bb, continue_bb)
                 .map_err(|e| e.to_string())?;
+            self.builder.position_at_end(propagate_bb);
+            self.emit_stack_promise_cleanup_except(&catch.promise_boundary)?;
+            self.builder.build_unconditional_branch(catch.target).map_err(|e| e.to_string())?;
         } else {
             let propagate_bb = self
                 .context
@@ -1292,6 +1404,9 @@ impl<'ctx> HirCompiler<'ctx> {
                         self.context.i64_type().const_zero(),
                     )
                     .map_err(|e| e.to_string())?;
+                // The rejection helper has taken ownership of the reason;
+                // now local synchronous Promise tokens can be released.
+                self.emit_stack_promise_cleanup()?;
                 if function.get_type().get_return_type().is_some() {
                     self.builder.build_return(Some(&completion)).map_err(|e| e.to_string())?;
                 } else {
@@ -1328,11 +1443,14 @@ impl<'ctx> HirCompiler<'ctx> {
         self.builder.position_at_end(entry);
 
         self.variables.clear();
+        self.stack_promise_slots.clear();
         self.for_iteration_frame_slots.clear();
         self.catch_native_text.clear();
         self.variable_hir_types.clear();
         self.arena_variables.clear();
-        self.catch_stack.clear();
+        self.clear_catch_context();
+        self.loop_scopes.clear();
+        self.loop_promotion_scopes.clear();
         self.seed_global_variables();
         for (param_val, hir_param) in function.get_param_iter().zip(func.params.iter()) {
             let ty = self.basic_type(&hir_param.ty)?;
@@ -1343,12 +1461,16 @@ impl<'ctx> HirCompiler<'ctx> {
             self.variables.insert(hir_param.name.clone(), (slot, ty));
             self.variable_hir_types
                 .insert(hir_param.name.clone(), hir_param.ty.clone());
+            if matches!(hir_param.ty, HirType::Promise(_)) {
+                self.register_stack_promise_slot(slot, &hir_param.name)?;
+            }
         }
 
         let terminated = self.compile_block(&func.body)?;
 
         if !terminated {
             if func.ret == HirType::Void {
+                self.emit_stack_promise_cleanup()?;
                 self.builder.build_return(None).map_err(|e| e.to_string())?;
             } else {
                 return Err(format!(

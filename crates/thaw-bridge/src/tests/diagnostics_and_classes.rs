@@ -827,7 +827,7 @@ fn namespace_alias_construct_signature_uses_target_scope() {
             export { Maker as Public };
         }
     "#).unwrap();
-    let maker = classes.iter().find(|class| class.name == "Maker").unwrap();
+    let maker = classes.iter().find(|class| class.name == "API.Maker").unwrap();
     assert_eq!(maker.constructors[0].params[0].1,
         DtsType::Native(HirType::Object(vec![("x".into(), HirType::F64)])));
 }

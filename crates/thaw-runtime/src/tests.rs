@@ -144,6 +144,93 @@ fn native_string_operations_preserve_utf16_units() {
     assert_eq!(unsafe { wtf8_bytes(trimmed) }, b"a\0b");
 }
 
+#[test]
+fn dependency_compile_uri_byte_iteration() {
+    let unreserved = c"AZaz09-_.!~*'()";
+    let component = unsafe { thaw_encode_uri_component(unreserved.as_ptr()) };
+    assert!(!component.is_null());
+    assert_eq!(unsafe { CStr::from_ptr(component) }.to_bytes(), b"AZaz09-_.!~*'()");
+    let uri = unsafe { thaw_encode_uri(unreserved.as_ptr()) };
+    assert!(!uri.is_null());
+    assert_eq!(unsafe { CStr::from_ptr(uri) }.to_bytes(), b"AZaz09-_.!~*'()");
+
+    let reserved = c";/?:@&=+$,#";
+    let component = unsafe { thaw_encode_uri_component(reserved.as_ptr()) };
+    assert!(!component.is_null());
+    assert_eq!(unsafe { CStr::from_ptr(component) }.to_bytes(), b"%3B%2F%3F%3A%40%26%3D%2B%24%2C%23");
+    let uri = unsafe { thaw_encode_uri(reserved.as_ptr()) };
+    assert!(!uri.is_null());
+    assert_eq!(unsafe { CStr::from_ptr(uri) }.to_bytes(), b";/?:@&=+$,#");
+
+    let native = thaw_arena::arena_string("é😀\0".as_bytes());
+    let encoded = unsafe { thaw_encode_uri_component(native.cast()) };
+    assert!(!encoded.is_null());
+    assert_eq!(unsafe { CStr::from_ptr(encoded) }.to_bytes(), b"%C3%A9%F0%9F%98%80%00");
+    let encoded = unsafe { thaw_encode_uri(native.cast()) };
+    assert!(!encoded.is_null());
+    assert_eq!(unsafe { CStr::from_ptr(encoded) }.to_bytes(), b"%C3%A9%F0%9F%98%80%00");
+
+    let high = thaw_string_from_char_code(0xD83D as f64);
+    let low = thaw_string_from_char_code(0xDE00 as f64);
+    let mut pair_bytes = unsafe { wtf8_bytes(high) }.to_vec();
+    pair_bytes.extend_from_slice(unsafe { wtf8_bytes(low) });
+    let pair = arena_wtf8(&pair_bytes).unwrap().cast();
+    let encoded = unsafe { thaw_encode_uri_component(pair) };
+    assert!(!encoded.is_null());
+    assert_eq!(unsafe { CStr::from_ptr(encoded) }.to_bytes(), b"%F0%9F%98%80");
+    let encoded = unsafe { thaw_encode_uri(pair) };
+    assert!(!encoded.is_null());
+    assert_eq!(unsafe { CStr::from_ptr(encoded) }.to_bytes(), b"%F0%9F%98%80");
+
+    for lone in [thaw_string_from_char_code(0xD800 as f64), thaw_string_from_char_code(0xDC00 as f64)] {
+        assert!(unsafe { thaw_encode_uri_component(lone) }.is_null());
+        assert!(unsafe { thaw_encode_uri(lone) }.is_null());
+    }
+    assert!(unsafe { thaw_encode_uri_component(std::ptr::null()) }.is_null());
+    assert!(unsafe { thaw_encode_uri(std::ptr::null()) }.is_null());
+    assert!(unsafe { thaw_decode_uri_component(std::ptr::null()) }.is_null());
+    assert!(unsafe { thaw_decode_uri(std::ptr::null()) }.is_null());
+}
+
+#[test]
+fn dependency_compile_root_locale_case() {
+    let root_lower = unsafe { thaw_string_to_lower_case(c"Iİß".as_ptr()) };
+    assert!(!root_lower.is_null());
+    assert_eq!(unsafe { CStr::from_ptr(root_lower) }.to_str().unwrap(), "ii\u{0307}ß");
+    let root_upper = unsafe { thaw_string_to_upper_case(c"Iİß".as_ptr()) };
+    assert!(!root_upper.is_null());
+    assert_eq!(unsafe { CStr::from_ptr(root_upper) }.to_str().unwrap(), "IİSS");
+
+    let turkish_lower = unsafe { thaw_string_to_locale_lower_case(c"Iİiı".as_ptr(), c"tr-TR".as_ptr()) };
+    assert!(!turkish_lower.is_null());
+    assert_eq!(unsafe { CStr::from_ptr(turkish_lower) }.to_str().unwrap(), "ıiiı");
+    let turkish_upper = unsafe { thaw_string_to_locale_upper_case(c"Iİiı".as_ptr(), c"tr-TR".as_ptr()) };
+    assert!(!turkish_upper.is_null());
+    assert_eq!(unsafe { CStr::from_ptr(turkish_upper) }.to_str().unwrap(), "IİİI");
+
+    for locale in [c"!", c""] {
+        let lower = unsafe { thaw_string_to_locale_lower_case(c"Iİß".as_ptr(), locale.as_ptr()) };
+        assert!(!lower.is_null());
+        assert_eq!(unsafe { CStr::from_ptr(lower) }.to_str().unwrap(), "ii\u{0307}ß");
+        let upper = unsafe { thaw_string_to_locale_upper_case(c"Iİß".as_ptr(), locale.as_ptr()) };
+        assert!(!upper.is_null());
+        assert_eq!(unsafe { CStr::from_ptr(upper) }.to_str().unwrap(), "IİSS");
+    }
+
+    let units = [0xD800, b'I' as u16, 0xDC00];
+    let segmented = arena_wtf8(&wtf8_encode_utf16(&units)).unwrap().cast();
+    let mapped = unsafe { thaw_string_to_locale_lower_case(segmented, c"tr".as_ptr()) };
+    assert!(!mapped.is_null());
+    assert_eq!(wtf8_decode_utf16(unsafe { wtf8_bytes(mapped) }), [0xD800, 0x0131, 0xDC00]);
+
+    assert!(unsafe { thaw_string_to_lower_case(std::ptr::null()) }.is_null());
+    assert!(unsafe { thaw_string_to_upper_case(std::ptr::null()) }.is_null());
+    assert!(unsafe { thaw_string_to_locale_lower_case(std::ptr::null(), c"tr".as_ptr()) }.is_null());
+    assert!(unsafe { thaw_string_to_locale_upper_case(std::ptr::null(), c"tr".as_ptr()) }.is_null());
+    assert!(unsafe { thaw_string_to_locale_lower_case(c"I".as_ptr(), std::ptr::null()) }.is_null());
+    assert!(unsafe { thaw_string_to_locale_upper_case(c"I".as_ptr(), std::ptr::null()) }.is_null());
+}
+
 static TLS_TEST_DIR_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 static UNHANDLED_REJECTIONS: AtomicU64 = AtomicU64::new(0);
 
@@ -2550,6 +2637,75 @@ fn finally_adopt_snapshots_original_native_text_before_source_destruction() {
 }
 
 #[test]
+fn dependency_compile_finally_adopt_deferred_frame() {
+    let states_before = PROMISE_FINALLY_ADOPT_STATES.with(|states| states.borrow().len());
+    let ready_before = READY_CONTINUATIONS.with(|ready| ready.borrow().len());
+    let output = thaw_promise_new();
+    let input = thaw_promise_new();
+    let source = thaw_promise_new();
+    assert_ne!(output, input);
+    assert_ne!(output, source);
+    assert_ne!(input, source);
+
+    let original = thaw_arena::thaw_arena_alloc(size_of::<u64>(), align_of::<u64>()).cast::<u64>();
+    unsafe { original.write(0xCAFE_BABE_D00D_F00D) };
+    assert_eq!(thaw_promise_resolve(input, std::ptr::null()), 1);
+    assert_eq!(thaw_promise_resolve(source, original.cast()), 1);
+    assert_eq!(unsafe { (*input).references }, 1);
+    assert_eq!(thaw_promise_state(input), 1);
+
+    assert_eq!(unsafe { thaw_promise_finally_adopt_with_source(
+        output, input, original.cast(), 0, 0, 0.0, 0, false, std::ptr::null(), source,
+    ) }, 1);
+    assert_eq!(PROMISE_FINALLY_ADOPT_STATES.with(|states| states.borrow().len()), states_before + 1);
+    assert_eq!(READY_CONTINUATIONS.with(|ready| ready.borrow().len()), ready_before + 1);
+    assert_eq!(thaw_promise_state(output), 0);
+
+    // The source is read only while the helper snapshots its fields.
+    unsafe { thaw_promise_destroy(source) };
+    assert_eq!(thaw_promise_state(output), 0);
+    assert_eq!(thaw_runtime_poll_one(), 1);
+    assert_eq!(PROMISE_FINALLY_ADOPT_STATES.with(|states| states.borrow().len()), states_before);
+    assert_eq!(READY_CONTINUATIONS.with(|ready| ready.borrow().len()), ready_before);
+    assert_eq!(thaw_promise_state(output), 1);
+    assert_eq!(unsafe { (*output).result }, Some(original.cast::<u8>().cast_const()));
+    assert!(!ACTIVE_PROMISES.with(|active| active.borrow().contains(&input)));
+    assert!(ACTIVE_PROMISES.with(|active| active.borrow().contains(&output)));
+    unsafe { thaw_promise_destroy(output) };
+
+    let guard_input = thaw_promise_new();
+    assert_eq!(unsafe { thaw_promise_finally_adopt_with_source(
+        std::ptr::null_mut(), guard_input, std::ptr::null(), 0, 0, 0.0, 0, false,
+        std::ptr::null(), std::ptr::null(),
+    ) }, 0);
+    assert_eq!(PROMISE_FINALLY_ADOPT_STATES.with(|states| states.borrow().len()), states_before);
+    assert_eq!(unsafe { (*guard_input).references }, 1);
+    assert!(ACTIVE_PROMISES.with(|active| active.borrow().contains(&guard_input)));
+
+    let guard_output = thaw_promise_new();
+    assert_eq!(unsafe { thaw_promise_finally_adopt(
+        guard_output, std::ptr::null_mut(), std::ptr::null(), 0, 0, 0.0, 0, false,
+        std::ptr::null(),
+    ) }, 0);
+    assert_eq!(PROMISE_FINALLY_ADOPT_STATES.with(|states| states.borrow().len()), states_before);
+    assert_eq!(unsafe { (*guard_output).references }, 1);
+    assert!(ACTIVE_PROMISES.with(|active| active.borrow().contains(&guard_output)));
+
+    let equal = thaw_promise_new();
+    assert_eq!(unsafe { thaw_promise_finally_adopt_with_source(
+        equal, equal, std::ptr::null(), 0, 0, 0.0, 0, false, std::ptr::null(), std::ptr::null(),
+    ) }, 0);
+    assert_eq!(PROMISE_FINALLY_ADOPT_STATES.with(|states| states.borrow().len()), states_before);
+    assert_eq!(unsafe { (*equal).references }, 1);
+    assert!(ACTIVE_PROMISES.with(|active| active.borrow().contains(&equal)));
+    unsafe {
+        thaw_promise_destroy(guard_input);
+        thaw_promise_destroy(guard_output);
+        thaw_promise_destroy(equal);
+    }
+}
+
+#[test]
 fn terminal_reporting_activity_is_distinct_from_work_and_failure() {
     thaw_promise_take_report_activity();
     thaw_promise_take_unhandled_failure();
@@ -2974,8 +3130,8 @@ fn purged_aggregate_callbacks_ignore_late_child_results_and_release_roots() {
 }
 
 #[test]
-fn private_exception_provenance_has_stable_eight_word_layout() {
-    assert_eq!(std::mem::size_of::<ExceptionProvenance>(), 64);
+fn private_exception_provenance_has_stable_nine_word_layout() {
+    assert_eq!(std::mem::size_of::<ExceptionProvenance>(), 72);
     assert_eq!(std::mem::align_of::<ExceptionProvenance>(), 8);
     let original = thaw_arena::thaw_arena_alloc(8, 8);
     let text = thaw_arena::thaw_arena_alloc(8, 8);
@@ -2994,6 +3150,7 @@ fn private_exception_provenance_has_stable_eight_word_layout() {
     assert_eq!(record.i64_value, 19);
     assert_eq!(record.bool_value, 1);
     assert_eq!(record.object, object.cast_const());
+    assert!(record.native_layout.is_null());
 }
 
 #[test]
@@ -3215,4 +3372,147 @@ fn fd_poll_rounds_only_fractional_milliseconds_and_skips_removed_watchers() {
     assert!(thaw_runtime_unwatch_fd(first));
     assert!(!thaw_runtime_unwatch_fd(other_id));
     unsafe { libc::close(fds[0]); libc::close(fds[1]); }
+}
+
+#[test]
+fn native_promise_reason_cycle_releases_after_arena_reclaims_its_descriptor() {
+    thaw_arena::thaw_arena_enable_tracing();
+    let promise = thaw_promise_new();
+    let layout = b"Promise\0";
+    let descriptor = unsafe { thaw_exception_native_provenance_new(
+        29, promise.cast(), layout.as_ptr().cast(),
+    ) };
+    assert!(!descriptor.is_null());
+    assert_eq!(unsafe { thaw_promise_set_exception_native(promise, descriptor) }, 1);
+    assert_eq!(unsafe { (*promise).internal_references }, 1);
+    assert_eq!(unsafe { (*promise).references }, 2);
+
+    // The descriptor and Promise refer to each other. Dropping the sole
+    // external owner unpins the Box; arena sweep then releases the internal
+    // reason owner without retaining a cycle forever.
+    unsafe { thaw_promise_destroy(promise) };
+    assert_eq!(unsafe { (*promise).references }, 1);
+    thaw_arena::thaw_arena_reset();
+    ACTIVE_PROMISES.with(|active| assert!(!active.borrow().contains(&promise)));
+    NATIVE_PROMISE_REASON_OWNERS.with(|owners| assert!(owners.borrow().is_empty()));
+}
+
+#[test]
+fn external_native_promise_owner_keeps_its_exception_descriptor_live() {
+    thaw_arena::thaw_arena_enable_tracing();
+    let promise = thaw_promise_new();
+    let layout = b"Promise\0";
+    let descriptor = unsafe { thaw_exception_native_provenance_new(
+        29, promise.cast(), layout.as_ptr().cast(),
+    ) };
+    assert!(!descriptor.is_null());
+    assert_eq!(unsafe { thaw_promise_set_exception_native(promise, descriptor) }, 1);
+
+    thaw_arena::thaw_arena_reset();
+    assert!(!thaw_arena::was_reclaimed(descriptor as usize));
+    assert_eq!(unsafe { thaw_exception_native_owner(
+        descriptor, 29, layout.as_ptr().cast(),
+    ) }, promise.cast());
+
+    unsafe { thaw_promise_destroy(promise) };
+    thaw_arena::thaw_arena_reset();
+    assert!(thaw_arena::was_reclaimed(descriptor as usize));
+    ACTIVE_PROMISES.with(|active| assert!(!active.borrow().contains(&promise)));
+}
+
+#[test]
+fn native_exception_descriptor_preserves_category_identity_and_checked_layout() {
+    let mut owners = [0u8; 9];
+    for (owner_index, (name, tag)) in [
+        ("Symbol", 20),
+        ("Array", 21),
+        ("Bytes", 22),
+        ("Map", 23),
+        ("WeakMap", 24),
+        ("Set", 25),
+        ("WeakSet", 26),
+        ("Tuple", 27),
+        ("FunctionWithThis", 28),
+    ].into_iter().enumerate() {
+        let owner = (&mut owners[owner_index]) as *mut u8;
+        let layout = format!("{name}\0");
+        let same_layout = format!("{name}\0");
+        let other_layout = format!("Other{name}\0");
+        let first = unsafe {
+            thaw_exception_native_provenance_new(tag, owner, layout.as_ptr().cast())
+        };
+        let duplicate = unsafe {
+            thaw_exception_native_provenance_new(tag, owner, same_layout.as_ptr().cast())
+        };
+        assert!(!first.is_null());
+        assert!(!duplicate.is_null());
+        assert_eq!(unsafe { thaw_exception_native_tag(first) }, tag);
+        assert_eq!(unsafe { thaw_exception_native_owner(
+            first, tag, layout.as_ptr().cast(),
+        ) }, owner);
+        assert!(unsafe { thaw_exception_native_owner(
+            first, tag + 1, layout.as_ptr().cast(),
+        ) }.is_null());
+        assert!(unsafe { thaw_exception_native_owner(
+            first, tag, other_layout.as_ptr().cast(),
+        ) }.is_null());
+        assert_eq!(unsafe { thaw_exception_native_same(first, duplicate) }, 1);
+    }
+}
+
+#[test]
+fn arena_promise_slot_replacement_is_balanced_and_reclaimed_with_its_owner() {
+    thaw_arena::thaw_arena_enable_tracing();
+    let owner = unsafe { thaw_arena::thaw_arena_alloc(32, std::mem::align_of::<usize>()) };
+    assert!(!owner.is_null());
+    let first_slot = owner.cast::<*mut ThawPromise>();
+    let second_slot = unsafe { owner.add(std::mem::size_of::<usize>()) }.cast::<*mut ThawPromise>();
+    unsafe {
+        first_slot.write(std::ptr::null_mut());
+        second_slot.write(std::ptr::null_mut());
+    }
+    let promise = thaw_promise_new();
+
+    assert_eq!(unsafe { thaw_promise_arena_slot_replace(owner, first_slot, promise) }, 1);
+    assert_eq!(unsafe { thaw_promise_arena_slot_replace(owner, second_slot, promise) }, 1);
+    assert_eq!(unsafe { (*promise).internal_references }, 2);
+    assert_eq!(unsafe { (*promise).references }, 3);
+    assert_eq!(unsafe { thaw_promise_arena_slot_replace(owner, first_slot, promise) }, 1);
+    assert_eq!(unsafe { (*promise).internal_references }, 2);
+
+    let replacement = thaw_promise_new();
+    assert_eq!(unsafe { thaw_promise_arena_slot_replace(owner, first_slot, replacement) }, 1);
+    assert_eq!(unsafe { (*promise).internal_references }, 1);
+    assert_eq!(unsafe { (*replacement).internal_references }, 1);
+    unsafe { thaw_promise_destroy(promise) };
+    assert_eq!(unsafe { thaw_promise_arena_slot_replace(owner, second_slot, std::ptr::null_mut()) }, 1);
+    ACTIVE_PROMISES.with(|active| assert!(!active.borrow().contains(&promise)));
+    unsafe { thaw_promise_destroy(replacement) };
+    let owner_root = thaw_arena::ArenaRoot::new(owner as usize);
+    thaw_arena::thaw_arena_reset();
+    ACTIVE_PROMISES.with(|active| assert!(active.borrow().contains(&replacement)));
+    assert_eq!(unsafe { (*replacement).internal_references }, 1);
+    drop(owner_root);
+    thaw_arena::thaw_arena_reset();
+    ACTIVE_PROMISES.with(|active| assert!(!active.borrow().contains(&replacement)));
+    PROMISE_ARENA_SLOT_OWNERS.with(|owners| assert!(owners.borrow().is_empty()));
+}
+
+#[test]
+fn arena_promise_slot_rejects_untracked_same_pointer_as_a_noop() {
+    thaw_arena::thaw_arena_enable_tracing();
+    let owner = unsafe { thaw_arena::thaw_arena_alloc(32, std::mem::align_of::<usize>()) };
+    assert!(!owner.is_null());
+    let slot = owner.cast::<*mut ThawPromise>();
+    let promise = thaw_promise_new();
+    unsafe { slot.write(promise) };
+
+    assert_eq!(unsafe { thaw_promise_arena_slot_replace(owner, slot, promise) }, 0);
+    assert_eq!(unsafe { (*promise).internal_references }, 0);
+    assert_eq!(unsafe { (*promise).references }, 1);
+    unsafe {
+        slot.write(std::ptr::null_mut());
+        thaw_promise_destroy(promise);
+    }
+    thaw_arena::thaw_arena_reset();
 }

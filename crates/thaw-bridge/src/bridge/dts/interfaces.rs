@@ -33,7 +33,7 @@ fn scoped_fn_decls<'a>(module: &'a Module) -> Vec<(String, String, &'a Function)
             if let DefaultDecl::Fn(function) = &export.decl {
                 if let Some(name) = &function.ident {
                     let name = name.sym.to_string();
-                    found.push((name.clone(), name, &function.function));
+                    found.push((name.clone(), name, &*function.function));
                 }
             }
             continue;
@@ -46,7 +46,7 @@ fn scoped_fn_decls<'a>(module: &'a Module) -> Vec<(String, String, &'a Function)
         if let Decl::Fn(function) = decl {
             let bare = function.ident.sym.to_string();
             let full = if scope.is_empty() { bare.clone() } else { format!("{scope}.{bare}") };
-            found.push((full, bare, &function.function));
+            found.push((full, bare, &*function.function));
         }
     }
     found
@@ -822,7 +822,7 @@ fn lower_dts_function(
         .params
         .iter()
         .take(fixed_param_count)
-        .take_while(|param| matches!(&param.pat, Pat::Ident(binding) if !binding.optional))
+        .take_while(|param| !matches!(&param.pat, Pat::Ident(binding) if binding.optional))
         .count();
     let params = func
         .params
@@ -981,7 +981,7 @@ fn lower_dts_method_signature(
         .params
         .iter()
         .take(fixed_param_count)
-        .take_while(|param| matches!(param, TsFnParam::Ident(binding) if !binding.optional))
+        .take_while(|param| !matches!(param, TsFnParam::Ident(binding) if binding.optional))
         .count();
     let params = method
         .params

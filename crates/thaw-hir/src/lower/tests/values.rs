@@ -838,7 +838,7 @@ fn lowers_object_literal_field_access_and_mutation() {
     let obj_ty = HirType::Object(vec![("x".into(), HirType::F64), ("y".into(), HirType::F64)]);
 
     assert_eq!(
-        f.body[0],
+        unstage_let(&f.body[0]),
         HirStmt::Let(
             "p".into(),
             obj_ty.clone(),
@@ -890,7 +890,7 @@ fn lowers_object_literal_shorthand_properties() {
     );
 
     assert_eq!(
-        program.functions[0].body[2],
+        unstage_let(&program.functions[0].body[2]),
         HirStmt::Let(
             "point".into(),
             HirType::Object(vec![
@@ -920,7 +920,7 @@ fn lowers_local_object_spread_and_later_property_overrides() {
     ]);
 
     assert_eq!(
-        program.functions[0].body[1],
+        unstage_let(&program.functions[0].body[1]),
         HirStmt::Let(
             "point".into(),
             base_type.clone(),
@@ -952,7 +952,7 @@ fn lowers_nested_object_literal_spread_without_reloading_fields() {
     );
 
     assert_eq!(
-        program.functions[0].body[0],
+        unstage_let(&program.functions[0].body[0]),
         HirStmt::Let(
             "point".into(),
             HirType::Object(vec![
@@ -1545,4 +1545,21 @@ fn optional_method_and_plain_field_calls_contextually_type_callbacks() {
     assert!(lowered.contains("__thaw_object_method_receiver"), "{lowered}");
     assert!(lowered.matches("__thaw_optional_callee_").count() >= 2, "{lowered}");
     assert!(lowered.contains("F64"), "{lowered}");
+}
+
+#[test]
+fn logical_operators_over_different_types_yield_the_union_of_the_operands() {
+    for src in [
+        "function main(): void { const b: boolean = true; const v: number = 3; console.log(b && v); }",
+        "function main(): void { const b: boolean = true; const v: number = 3; console.log(b || v); }",
+        "function main(): void { const v: number = 3; const s: string = \"x\"; const r: number | string = v && s; console.log(r); }",
+        "async function main(): Promise<void> { console.log(true && (await Promise.reject<number>(41))); }",
+    ] {
+        let module = thaw_parser::parse_typescript(src).unwrap();
+        assert!(lower_module(&module).is_ok(), "{src}");
+    }
+    let module = thaw_parser::parse_typescript(
+        "function main(): void { const v: number = 3; const s: string = v && \"x\"; }",
+    ).unwrap();
+    assert!(lower_module(&module).is_err(), "the union result must not silently narrow to one operand type");
 }

@@ -1452,7 +1452,7 @@ fn lower_function_statements(
                     Box::new(HirExpr::Lit(HirLit::Bool(true))),
                 )),
                 HirStmt::Try(
-                    self.inject_finally_before_exits(
+                    lowerer.inject_finally_before_exits(
                         generator_body,
                         std::slice::from_ref(&clear_running),
                         false,

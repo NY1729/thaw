@@ -1,6 +1,12 @@
 impl<'ctx> HirCompiler<'ctx> {
-    fn push_async_catch_locals(locals: &mut Vec<(String, HirType)>, name: &str) {
-        locals.push((name.to_string(), HirType::Str));
+    fn push_async_catch_locals(&self, locals: &mut Vec<(String, HirType)>, name: &str) {
+        // When HIR declared `name` as the carrier, the caught text lives in its own cell and
+        // `name` is filled with the carrier after the exception metadata is captured.
+        if self.async_carrier_catch_names.borrow().contains(name) {
+            locals.push((Self::async_catch_text_name(name), HirType::Str));
+        } else {
+            locals.push((name.to_string(), HirType::Str));
+        }
         locals.push((Self::async_catch_native_name(name), HirType::Str));
         locals.push((Self::async_catch_original_name(name), HirType::Str));
         locals.push((Self::async_catch_valid_name(name), HirType::Bool));
@@ -11,18 +17,21 @@ impl<'ctx> HirCompiler<'ctx> {
             ("f64", HirType::F64),
             ("i64", HirType::I64),
             ("bool", HirType::Bool),
+            ("native", HirType::NativeException),
         ] {
             locals.push((format!("{name}__thaw_exception_{suffix}"), ty));
         }
     }
 
-    fn async_catch_assignments(name: &str, error: HirExpr) -> Vec<HirStmt> {
+    fn async_catch_assignments(&self, name: &str, error: HirExpr) -> Vec<HirStmt> {
+        let carrier = self.async_carrier_catch_names.borrow().contains(name);
+        let text = if carrier { Self::async_catch_text_name(name) } else { name.to_string() };
         // The split-frame try catches a direct throw without emitting a
         // Throw statement. Run the same compiler throw conversion first so
         // trusted-text markers and typed pending metadata are evaluated once
         // before the catch frame snapshots them.
         let mut assignments = vec![HirStmt::Expr(HirExpr::Assign(
-            name.to_string(),
+            text.clone(),
             Box::new(HirExpr::Call(
                 Box::new(HirExpr::Var("@@thaw_capture_throw_text".into())),
                 vec![error],
@@ -30,13 +39,13 @@ impl<'ctx> HirCompiler<'ctx> {
         ))];
         assignments.push(HirStmt::Expr(HirExpr::Assign(
             Self::async_catch_original_name(name),
-            Box::new(HirExpr::Var(name.to_string())),
+            Box::new(HirExpr::Var(text.clone())),
         )));
         assignments.push(HirStmt::Expr(HirExpr::Assign(
             Self::async_catch_valid_name(name),
             Box::new(HirExpr::Lit(HirLit::Bool(true))),
         )));
-        for suffix in ["native_text", "object", "aggregate", "tag", "f64", "i64", "bool"] {
+        for suffix in ["native_text", "object", "aggregate", "tag", "f64", "i64", "bool", "native"] {
             assignments.push(HirStmt::Expr(HirExpr::Assign(
                 if suffix == "native_text" { Self::async_catch_native_name(name) }
                 else { format!("{name}__thaw_exception_{suffix}") },
@@ -45,6 +54,19 @@ impl<'ctx> HirCompiler<'ctx> {
                         "__thaw_pending_exception_{suffix}"
                     ))),
                     Vec::new(),
+                )),
+            )));
+        }
+        if carrier {
+            let local = |suffix: &str| HirExpr::Var(format!("{name}__thaw_exception_{suffix}"));
+            assignments.push(HirStmt::Expr(HirExpr::Assign(
+                name.to_string(),
+                Box::new(HirExpr::Call(
+                    Box::new(HirExpr::Var("@@thaw_async_caught_carrier".into())),
+                    vec![
+                        HirExpr::Var(text), local("object"), local("native"), local("tag"),
+                        local("f64"), local("i64"), local("bool"),
+                    ],
                 )),
             )));
         }
@@ -89,6 +111,11 @@ impl<'ctx> HirCompiler<'ctx> {
             return Ok(None);
         }
         let normalized_body = self.flatten_async_finally_only_tries(&func.body)?;
+        {
+            let mut names = self.async_carrier_catch_names.borrow_mut();
+            names.clear();
+            Self::collect_async_carrier_catch_names(&normalized_body, &mut names);
+        }
         let returns_on_all_paths = Self::async_block_returns_on_all_paths(&normalized_body);
         let frame_names = self
             .frame_async_functions
@@ -130,7 +157,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     let try_guard = format!("__thaw_try_{next_guard}");
                     let catch_guard = format!("__thaw_catch_{next_guard}");
                     next_guard += 1;
-                    Self::push_async_catch_locals(&mut extra_locals, catch_name);
+                    self.push_async_catch_locals(&mut extra_locals, catch_name);
                     let current = segments.last_mut().unwrap();
                     current.stmts.push(HirStmt::Let(
                         try_guard.clone(),
@@ -155,7 +182,7 @@ impl<'ctx> HirCompiler<'ctx> {
                             let inner_try_guard = format!("__thaw_try_{next_guard}");
                             let inner_catch_guard = format!("__thaw_catch_{next_guard}");
                             next_guard += 1;
-                            Self::push_async_catch_locals(&mut extra_locals, inner_catch_name);
+                            self.push_async_catch_locals(&mut extra_locals, inner_catch_name);
                             let current = segments.last_mut().unwrap();
                             current.stmts.push(HirStmt::Let(
                                 inner_try_guard.clone(),
@@ -207,7 +234,7 @@ impl<'ctx> HirCompiler<'ctx> {
                                     continue;
                                 }
                                 if let HirStmt::Throw(error) = inner_stmt {
-                                    let mut caught = Self::async_catch_assignments(
+                                    let mut caught = self.async_catch_assignments(
                                         inner_catch_name,
                                         error.clone(),
                                     );
@@ -320,7 +347,7 @@ impl<'ctx> HirCompiler<'ctx> {
                         }
                         if let HirStmt::Throw(error) = nested {
                             let mut caught =
-                                Self::async_catch_assignments(catch_name, error.clone());
+                                self.async_catch_assignments(catch_name, error.clone());
                             caught.extend([
                                 HirStmt::Expr(HirExpr::Assign(
                                     try_guard.clone(),

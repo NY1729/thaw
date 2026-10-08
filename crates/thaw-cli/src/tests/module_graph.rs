@@ -119,7 +119,7 @@ fn type_only_module_keeps_link_features_for_retained_function_bodies() {
 fn type_only_registry_package_does_not_load_its_bundle() {
     let dir = std::env::temp_dir().join(format!("thaw-type-registry-{}", std::process::id()));
     let registry = dir.join("registry");
-    let package = registry.join("modules").join("types-only");
+    let package = registry.join("types-only");
     std::fs::create_dir_all(&package).unwrap();
     std::fs::write(package.join("package.d.ts"), "export interface Shape { value: number; }\nexport function f(): number;\nexport const value: number;\nexport class Client { read(): number; }\n").unwrap();
     std::fs::write(package.join("bundle.js"), "throw new Error('type-only bundle ran');\n").unwrap();
@@ -792,7 +792,7 @@ fn dynamic_import_failure_cache_survives_lambda_arena_reset() {
 #[test]
 fn dynamic_external_import_defers_package_script() {
     let dir = std::env::temp_dir().join(format!("thaw-lazy-package-{}", std::process::id()));
-    let package = dir.join("registry/modules/later");
+    let package = dir.join("registry/later");
     std::fs::create_dir_all(&package).unwrap();
     std::fs::write(package.join("package.d.ts"), "export function value(): number;").unwrap();
     std::fs::write(package.join("bundle.js"),
@@ -828,7 +828,7 @@ fn dynamic_import_initializes_static_dependencies_only_on_first_call() {
 #[test]
 fn side_effect_only_external_dynamic_import_is_deferred() {
     let dir = std::env::temp_dir().join(format!("thaw-lazy-side-effect-{}", std::process::id()));
-    let package = dir.join("registry/modules/side-effect");
+    let package = dir.join("registry/side-effect");
     std::fs::create_dir_all(&package).unwrap();
     std::fs::write(package.join("package.d.ts"), "export interface Marker { value: number; }").unwrap();
     std::fs::write(package.join("bundle.js"), "console.log('package loaded');").unwrap();

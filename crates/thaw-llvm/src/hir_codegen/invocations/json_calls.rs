@@ -92,6 +92,14 @@ impl<'ctx> HirCompiler<'ctx> {
                 return self.compile_single_arg_call(
                     "thaw_json_receiver_number", args, "JSON number");
             }
+            "__thaw_json_error_to_string" => {
+                return self.compile_single_arg_call(
+                    "thaw_json_error_to_string", args, "caught JSON toString");
+            }
+            "__thaw_json_error_stack" => {
+                return self.compile_single_arg_call(
+                    "thaw_json_error_stack", args, "caught JSON stack");
+            }
             "__thaw_json_receiver_string" => {
                 return self.compile_single_arg_call(
                     "thaw_json_receiver_string", args, "JSON string");
@@ -179,6 +187,28 @@ impl<'ctx> HirCompiler<'ctx> {
                         zero,
                         "json_is_buffer_shape",
                     )
+                    .map(Into::into)
+                    .map_err(|error| error.to_string());
+            }
+            "__thaw_json_is_live_iterable" => {
+                let [value] = args else {
+                    return Err("__thaw_json_is_live_iterable expects one argument".into());
+                };
+                let value = self.compile_expr(value)?;
+                let function = self.module.get_function("thaw_json_is_live_iterable").unwrap();
+                let call = self
+                    .builder
+                    .build_call(function, &[value.into()], "json_is_live_iterable_u8")
+                    .map_err(|error| error.to_string())?;
+                let u8_val = call
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("thaw_json_is_live_iterable did not return a value")?
+                    .into_int_value();
+                let zero = self.context.i8_type().const_int(0, false);
+                return self
+                    .builder
+                    .build_int_compare(inkwell::IntPredicate::NE, u8_val, zero, "json_is_live_iterable")
                     .map(Into::into)
                     .map_err(|error| error.to_string());
             }
@@ -372,7 +402,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     .map_err(|error| error.to_string())?
                     .try_as_basic_value()
                     .basic()
-                    .ok_or("JSON.stringify returned no value".into())?;
+                    .ok_or_else(|| String::from("JSON.stringify returned no value"))?;
                 return self.compile_check_json_stringify_error(result);
             }
             "__thaw_json_stringify_string_space" => {
@@ -393,7 +423,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     .map_err(|error| error.to_string())?
                     .try_as_basic_value()
                     .basic()
-                    .ok_or("JSON.stringify returned no value".into())?;
+                    .ok_or_else(|| String::from("JSON.stringify returned no value"))?;
                 return self.compile_check_json_stringify_error(result);
             }
             "__thaw_json_stringify_keys" => {
@@ -414,7 +444,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     .map_err(|error| error.to_string())?
                     .try_as_basic_value()
                     .basic()
-                    .ok_or("JSON.stringify returned no value".into())?;
+                    .ok_or_else(|| String::from("JSON.stringify returned no value"))?;
                 return self.compile_check_json_stringify_error(result);
             }
             "__thaw_json_stringify_keys_number_space"
@@ -439,7 +469,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     .map_err(|error| error.to_string())?
                     .try_as_basic_value()
                     .basic()
-                    .ok_or("JSON.stringify returned no value".into())?;
+                    .ok_or_else(|| String::from("JSON.stringify returned no value"))?;
                 return self.compile_check_json_stringify_error(result);
             }
             "__thaw_json_array_join" => {
@@ -523,7 +553,7 @@ impl<'ctx> HirCompiler<'ctx> {
             }
             "__thaw_json_clone" => {
                 return self.compile_single_arg_call(
-                    name.trim_start_matches("__"),
+                    "thaw_json_structured_clone",
                     args,
                     "structuredClone",
                 );
@@ -984,6 +1014,7 @@ impl<'ctx> HirCompiler<'ctx> {
         self.clear_pending_native_text()?;
         self.mark_pending_native_text(host_error)?;
         self.branch_on_pending_exception()?;
+        self.builder.build_unconditional_branch(host_valid).map_err(|error| error.to_string())?;
         self.builder.position_at_end(host_valid);
         Ok(result)
     }

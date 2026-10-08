@@ -1,3 +1,37 @@
+/// A receiver whose runtime tags include a Host `Json` (a `Json` or a plain native
+/// object, which crosses as a borrowed Host `Json`): a native `thisArg` of another
+/// layout must be converted to `Json` before the tagged receiver entry decodes it.
+fn receiver_wants_json(receiver: &HirType) -> bool {
+    match receiver {
+        HirType::Json => true,
+        HirType::Object(fields) => !fields.first().is_some_and(|(name, _)| name.starts_with("__thaw_class_identity_\u{1e}")),
+        HirType::Optional(inner) | HirType::Nullable(inner) | HirType::Nullish(inner) => receiver_wants_json(inner),
+        _ => false,
+    }
+}
+
+impl<'a> FnLowerer<'a> {
+    /// Converts an explicit `thisArg` to the declared receiver of a `this`-taking
+    /// closure: a native aggregate of another layout crosses as a Host `Json`.
+    fn coerce_this_for_receiver(
+        &mut self,
+        receiver: Option<&HirType>,
+        this_value: HirExpr,
+    ) -> Result<HirExpr, String> {
+        let Some(receiver) = receiver else { return Ok(this_value) };
+        let actual = self.infer_expr_type(&this_value)?;
+        if receiver_wants_json(receiver)
+            && actual != *receiver
+            && matches!(actual, HirType::Object(_) | HirType::Array(_) | HirType::Tuple(_)
+                | HirType::Bytes | HirType::Map(..) | HirType::Set(_)
+                | HirType::WeakMap(..) | HirType::WeakSet(_))
+        {
+            return self.coerce_to_declared(&HirType::Json, this_value);
+        }
+        Ok(this_value)
+    }
+}
+
 impl<'a> FnLowerer<'a> {
     fn is_unshadowed_class_identifier(&self, class: &str) -> bool {
         !self.scope.contains_key(&self.resolve_binding(class))
@@ -829,7 +863,7 @@ impl<'a> FnLowerer<'a> {
     // A function operation reads `.call`/`.apply`/`.bind` before it evaluates
     // thisArg or arguments. This block is a binding-wrapper lambda body, not
     // a standalone expression block.
-    fn guard_function_value(
+    pub(crate) fn guard_function_value(
         &mut self, value: HirExpr, ty: &HirType, message: &str, body: HirExpr,
     ) -> Result<HirExpr, String> {
         let result_type = self.infer_expr_type(&body)?;
@@ -860,6 +894,10 @@ impl<'a> FnLowerer<'a> {
         }
         let target = self.lower_expr(&operation.obj)?;
         let target_type = self.infer_expr_type(&target)?;
+        let (target_type, declared_receiver) = match target_type {
+            HirType::FunctionWithThis(receiver, visible) => (*visible, Some(*receiver)),
+            other => (other, None),
+        };
         let (params, optional, rest, ret) = match &target_type {
             HirType::Function(params, ret) => (
                 params.clone(),
@@ -882,6 +920,7 @@ impl<'a> FnLowerer<'a> {
             return Err("function .bind() cannot spread its thisArg".into());
         }
         let this_value = self.lower_expr(&this_argument.expr)?;
+        let this_value = self.coerce_this_for_receiver(declared_receiver.as_ref(), this_value)?;
         let this_type = self.infer_expr_type(&this_value)?;
         let (leading, spread_bindings) =
             self.lower_native_spread_values(leading, "function .bind()")?;
@@ -1073,6 +1112,12 @@ impl<'a> FnLowerer<'a> {
         }
         let target = self.lower_expr(&operation.obj)?;
         let target_type = self.infer_expr_type(&target)?;
+        // A `this`-taking closure keeps its declared receiver type: the explicit
+        // `thisArg` is converted to it before the tagged receiver entry decodes it.
+        let (target_type, declared_receiver) = match target_type {
+            HirType::FunctionWithThis(receiver, visible) => (*visible, Some(*receiver)),
+            other => (other, None),
+        };
         let (params, optional, rest, ret) = match &target_type {
             HirType::Function(params, ret) => (
                 params.clone(),
@@ -1113,6 +1158,7 @@ impl<'a> FnLowerer<'a> {
             supplied.to_vec()
         };
         let this_value = self.lower_expr(&this_argument.expr)?;
+        let this_value = self.coerce_this_for_receiver(declared_receiver.as_ref(), this_value)?;
         let this_type = self.infer_expr_type(&this_value)?;
         let label = format!("function .{operation_name}()");
         let (arguments, spread_bindings) = self.lower_native_spread_values(&forwarded, &label)?;

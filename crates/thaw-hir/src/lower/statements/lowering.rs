@@ -268,9 +268,10 @@ fn iterator_object_adapter(
 }
 
 impl<'a> FnLowerer<'a> {
-    /// Publish a value's active exception member, then throw only its trusted
-    /// display text through the legacy pointer ABI. Generated cleanup catches
-    /// use this as well as source `throw`, so their rethrow keeps identity.
+    /// Publish a value's active exception member, then throw its trusted
+    /// display text through the legacy pointer ABI with a marker that also
+    /// identifies the fresh tuple. Generated cleanup catches use this as
+    /// well as source `throw`, so their rethrow keeps identity.
     pub(crate) fn lower_throw_value_statements(
         &mut self, value: HirExpr, value_type: HirType,
     ) -> Result<Vec<HirStmt>, String> {
@@ -278,31 +279,236 @@ impl<'a> FnLowerer<'a> {
         self.next_binding += 1;
         self.scope.insert(name.clone(), value_type.clone());
         let original = HirExpr::Var(name.clone());
-        let setters = Self::rejection_provenance_statements(original.clone(), &value_type);
-        let display = self.rejection_display_without_user_coercion(original, &value_type)?;
+        let setters = self.rejection_provenance_statements(original.clone(), &value_type)?;
+        let display = self.rejection_display_without_user_coercion(original.clone(), &value_type)?;
         let mut statements = vec![
             HirStmt::Let(name, value_type.clone(), value),
         ];
-        // A thrown fixed object may never have crossed a typed narrowing
-        // site.  Register the full physical view while its source type is
-        // still known; the catch tuple carries only the allocation pointer.
-        if let HirType::Object(fields) = &value_type {
-            if Self::fixed_object_supports_live_projection(&value_type) {
-                statements.push(HirStmt::Expr(self.retain_full_native_object_projection(
-                    original.clone(), fields, false,
-                )?));
-            }
-        }
         statements.push(HirStmt::Expr(HirExpr::Call(
-                Box::new(HirExpr::Var("__thaw_clear_pending_exception_object".into())),
-                Vec::new(),
-            )));
+            Box::new(HirExpr::Var("__thaw_clear_pending_exception_provenance".into())),
+            Vec::new(),
+        )));
         statements.extend(setters);
         statements.push(HirStmt::Throw(HirExpr::Call(
-            Box::new(HirExpr::Var("@@thaw_trusted_exception_text".into())),
+            Box::new(HirExpr::Var("@@thaw_published_exception_text".into())),
             vec![display],
         )));
         Ok(statements)
+    }
+
+    /// Build the tagged, owned provenance tuple for a source throw or
+    /// Promise rejection. Union payload reads stay inside their matching arm.
+    pub(crate) fn rejection_provenance_statements(
+        &mut self,
+        value: HirExpr,
+        ty: &HirType,
+    ) -> Result<Vec<HirStmt>, String> {
+        let call = |name: &str, args: Vec<HirExpr>| HirStmt::Expr(HirExpr::Call(
+            Box::new(HirExpr::Var(name.into())), args));
+        let tag = |value| call("__thaw_set_pending_exception_tag", vec![HirExpr::Lit(HirLit::I64(value))]);
+        let mut out = Vec::new();
+        match ty {
+            HirType::F64 => out.push(call("__thaw_set_pending_exception_f64", vec![value])),
+            HirType::I64 => out.push(call("__thaw_set_pending_exception_i64", vec![value])),
+            HirType::Bool => out.push(call("__thaw_set_pending_exception_bool", vec![value])),
+            HirType::Str | HirType::StrLiteral(_) => out.push(tag(4)),
+            HirType::Undefined | HirType::Void => out.push(tag(5)),
+            HirType::Null => out.push(tag(6)),
+            // An Error-family record has no live projection (class instances
+            // are excluded), so a catch could not read it. Register a
+            // `() -> Json` describer on the record; the catch reads through it
+            // lazily, and the record itself (identity) stays the carrier.
+            HirType::Object(fields) if matches!(&value, HirExpr::Var(_))
+                && fields.iter().any(|(name, _)|
+                    name.starts_with("__thaw_class_identity_\u{1e}")
+                        && name.rsplit('\u{1f}').next().is_some_and(|ancestor| ancestor.ends_with("Error"))) => {
+                let HirExpr::Var(owner) = &value else { unreachable!() };
+                let snapshot = self.coerce_to_declared(&HirType::Json, value.clone())?;
+                let describer = HirExpr::Lambda(
+                    vec![HirParam { name: owner.clone(), ty: ty.clone() }],
+                    Vec::new(), HirType::Json, Box::new(snapshot),
+                );
+                // The first registered view is the physical layout; a later
+                // rethrow through the carrier's empty layout must not become it.
+                out.push(call("__thaw_register_native_object_layout", vec![
+                    value.clone(), HirExpr::Lit(HirLit::Bool(false)),
+                ]));
+                out.push(call("__thaw_register_native_exception_describer", vec![value.clone(), describer]));
+                out.push(call("__thaw_set_pending_exception_object", vec![value]));
+            }
+            HirType::Object(fields) => {
+                if Self::fixed_object_supports_live_projection(ty) {
+                    out.push(HirStmt::Expr(self.retain_full_native_object_projection(
+                        value.clone(), fields, false,
+                    )?));
+                }
+                // Like an Error record, let a catch read the object lazily as Json
+                // (printing, JSON.stringify); the object itself stays the carrier.
+                if let HirExpr::Var(owner) = &value {
+                    if let Ok(snapshot) = self.coerce_to_declared(&HirType::Json, value.clone()) {
+                        let describer = HirExpr::Lambda(
+                            vec![HirParam { name: owner.clone(), ty: ty.clone() }],
+                            Vec::new(), HirType::Json, Box::new(snapshot),
+                        );
+                        out.push(call("__thaw_register_native_exception_describer", vec![value.clone(), describer]));
+                    }
+                }
+                out.push(call("__thaw_set_pending_exception_object", vec![value]));
+            }
+            HirType::Json | HirType::Dictionary(_) => out.push(call("__thaw_set_pending_exception_json", vec![value])),
+            HirType::JsValue => {
+                let captured = HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_capture_exception_js_value".into())),
+                    vec![value],
+                );
+                out.push(call("__thaw_set_pending_exception_json", vec![captured]));
+            }
+            HirType::NativeException => {
+                out.push(call("__thaw_set_pending_exception_native_value", vec![value]));
+            }
+            native if crate::native_exception_tag(native).is_some() => {
+                let tag = crate::native_exception_tag(native).unwrap();
+                let layout = crate::native_exception_layout_token(native).unwrap();
+                out.push(call("__thaw_set_pending_exception_native", vec![
+                    value,
+                    HirExpr::Lit(HirLit::I64(tag as i64)),
+                    HirExpr::Lit(HirLit::Str(layout)),
+                ]));
+            }
+            HirType::Union(members) => {
+                if members.is_empty() {
+                    return Err("cannot publish provenance for an empty union".into());
+                }
+                for (index, member) in members.iter().enumerate() {
+                    let active = HirExpr::BinOp(
+                        BinOp::EqEqEq,
+                        Box::new(HirExpr::UnionTag(Box::new(value.clone()), members.clone())),
+                        Box::new(HirExpr::Lit(HirLit::F64(index as f64))),
+                    );
+                    let member_value = HirExpr::UnionValue(
+                        Box::new(value.clone()), index, members.clone(),
+                    );
+                    let arm = self.rejection_provenance_statements(member_value, member)?;
+                    out.push(HirStmt::If(active, arm, Vec::new()));
+                }
+            }
+            HirType::Optional(payload) => {
+                let none = HirExpr::OptionalIsNone(Box::new(value.clone()), payload.as_ref().clone());
+                let present = self.rejection_provenance_statements(
+                    HirExpr::OptionalValue(Box::new(value.clone()), payload.as_ref().clone()), payload,
+                )?;
+                out.push(HirStmt::If(none, vec![tag(5)], present));
+            }
+            HirType::Nullable(payload) => {
+                let none = HirExpr::NullableIsNone(Box::new(value.clone()), payload.as_ref().clone());
+                let present = self.rejection_provenance_statements(
+                    HirExpr::NullableValue(Box::new(value.clone()), payload.as_ref().clone()), payload,
+                )?;
+                out.push(HirStmt::If(none, vec![tag(6)], present));
+            }
+            HirType::Nullish(payload) => {
+                let is_null = HirExpr::NullishIsNull(Box::new(value.clone()), payload.as_ref().clone());
+                let is_undefined = HirExpr::NullishIsUndefined(Box::new(value.clone()), payload.as_ref().clone());
+                let present = self.rejection_provenance_statements(
+                    HirExpr::NullishValue(Box::new(value.clone()), payload.as_ref().clone()), payload,
+                )?;
+                out.push(HirStmt::If(is_null, vec![tag(6)], vec![HirStmt::If(
+                    is_undefined, vec![tag(5)], present,
+                )]));
+            }
+            // The current caught carrier has no member for these distinct
+            // native layouts. Do not reinterpret their pointer bits as Object.
+            _ => return Err(format!("exception provenance is unavailable for {ty:?}")),
+        }
+        Ok(out)
+    }
+
+    /// Exception transport must not invoke an opaque value's valueOf or
+    /// toString. Keep scalar diagnostics useful and use a fixed description
+    /// for payloads whose formatting could execute user code.
+    pub(crate) fn rejection_display_without_user_coercion(
+        &mut self,
+        value: HirExpr,
+        ty: &HirType,
+    ) -> Result<HirExpr, String> {
+        match ty {
+            HirType::F64 | HirType::I64 | HirType::Bool | HirType::Str
+            | HirType::StrLiteral(_) | HirType::Null | HirType::Undefined => {
+                self.coerce_primitive_to_string(value)
+            }
+            HirType::Void => Ok(HirExpr::Lit(HirLit::Str("undefined".into()))),
+            HirType::Json | HirType::Dictionary(_) => Ok(HirExpr::Lit(HirLit::Str("[exception value]".into()))),
+            HirType::Union(members) => {
+                let mut result = HirExpr::Lit(HirLit::Str("[exception value]".into()));
+                for (index, member) in members.iter().enumerate().rev() {
+                    let condition = HirExpr::BinOp(
+                        BinOp::EqEqEq,
+                        Box::new(HirExpr::UnionTag(Box::new(value.clone()), members.clone())),
+                        Box::new(HirExpr::Lit(HirLit::F64(index as f64))),
+                    );
+                    let member_value = HirExpr::UnionValue(
+                        Box::new(value.clone()), index, members.clone(),
+                    );
+                    let display = self.rejection_display_without_user_coercion(member_value, member)?;
+                    result = HirExpr::Conditional(
+                        Box::new(condition), Box::new(display), Box::new(result), HirType::Str,
+                    );
+                }
+                Ok(result)
+            }
+            HirType::Optional(payload) => {
+                let is_none = HirExpr::OptionalIsNone(Box::new(value.clone()), payload.as_ref().clone());
+                let present = self.rejection_display_without_user_coercion(
+                    HirExpr::OptionalValue(Box::new(value), payload.as_ref().clone()), payload,
+                )?;
+                Ok(HirExpr::Conditional(
+                    Box::new(is_none),
+                    Box::new(HirExpr::Lit(HirLit::Str("undefined".into()))),
+                    Box::new(present), HirType::Str,
+                ))
+            }
+            HirType::Nullable(payload) => {
+                let is_none = HirExpr::NullableIsNone(Box::new(value.clone()), payload.as_ref().clone());
+                let present = self.rejection_display_without_user_coercion(
+                    HirExpr::NullableValue(Box::new(value), payload.as_ref().clone()), payload,
+                )?;
+                Ok(HirExpr::Conditional(
+                    Box::new(is_none),
+                    Box::new(HirExpr::Lit(HirLit::Str("null".into()))),
+                    Box::new(present), HirType::Str,
+                ))
+            }
+            HirType::Nullish(payload) => {
+                let is_null = HirExpr::NullishIsNull(Box::new(value.clone()), payload.as_ref().clone());
+                let is_undefined = HirExpr::NullishIsUndefined(Box::new(value.clone()), payload.as_ref().clone());
+                let present = self.rejection_display_without_user_coercion(
+                    HirExpr::NullishValue(Box::new(value), payload.as_ref().clone()), payload,
+                )?;
+                Ok(HirExpr::Conditional(
+                    Box::new(is_null),
+                    Box::new(HirExpr::Lit(HirLit::Str("null".into()))),
+                    Box::new(HirExpr::Conditional(
+                        Box::new(is_undefined),
+                        Box::new(HirExpr::Lit(HirLit::Str("undefined".into()))),
+                        Box::new(present), HirType::Str,
+                    )), HirType::Str,
+                ))
+            }
+            // An uncaught Error record reports `name: message` (own fields,
+            // no user code runs).
+            HirType::Object(fields) if fields.iter().any(|(name, _)|
+                name.starts_with("__thaw_class_identity_\u{1e}")
+                    && name.rsplit('\u{1f}').next().is_some_and(|ancestor| ancestor.ends_with("Error")))
+                && fields.iter().any(|(name, ty)| name == "message" && *ty == HirType::Str)
+                && fields.iter().any(|(name, ty)| name == "name" && *ty == HirType::Str) => {
+                let field = |name: &str| HirExpr::PropAccess(
+                    Box::new(value.clone()), ty.clone(), name.to_string());
+                let concat = |left, right| HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_string_concat".into())), vec![left, right]);
+                Ok(concat(concat(field("name"), HirExpr::Lit(HirLit::Str(": ".into()))), field("message")))
+            }
+            _ => Ok(HirExpr::Lit(HirLit::Str("[exception value]".into()))),
+        }
     }
     /// The `HirType::JsValue` sibling of `iterator_object_adapter` above --
     /// same job (adapt something following the JS iterator protocol into
@@ -903,41 +1109,6 @@ impl<'a> FnLowerer<'a> {
             let (_, base_type, base_name) = self.super_initializer.clone()
                 .ok_or("`super` property assignment is only valid in a derived class")?;
             let property = super_property_name(&member.prop)?;
-            if self.class_static_context {
-                if let (Some(selected_base), Some(receiver)) = (
-                    self.static_super_base_handle(), self.static_this_token_expr(),
-                ) {
-                    // `super.x = yield value` writes with the live derived
-                    // constructor as receiver. Select HomeObject's current
-                    // prototype before suspending; resume must not reselect.
-                    let mut before_yield = Vec::new();
-                    let base = self.bind_generator_assignment_reference(
-                        &mut before_yield, selected_base,
-                    )?;
-                    let HirExpr::Var(base_owner) = &base else {
-                        return Err("generator static-super base has no owner cell".into());
-                    };
-                    let Some(HirStmt::Let(_, _, selected)) = before_yield.last_mut() else {
-                        return Err("generator static-super selection is missing".into());
-                    };
-                    let selected = std::mem::replace(selected, HirExpr::Lit(HirLit::I64(0)));
-                    before_yield.push(HirStmt::Expr(HirExpr::Assign(
-                        base_owner.clone(), Box::new(HirExpr::Call(
-                        Box::new(HirExpr::Var("__thaw_track_generator_super_base".into())),
-                        vec![selected, HirExpr::Var(base_owner.clone())],
-                    )))));
-                    let receiver = self.bind_generator_assignment_reference(
-                        &mut before_yield, receiver,
-                    )?;
-                    let encoded = self.coerce_to_declared(&HirType::Json, value)?;
-                    let write = HirExpr::Call(
-                        Box::new(HirExpr::Var("__thaw_set_super_static_property_json".into())),
-                        vec![base, receiver,
-                            HirExpr::Lit(HirLit::Str(property)), encoded],
-                    );
-                    return Ok(Some((before_yield, vec![HirStmt::Expr(write)])));
-                }
-            }
             let owner = if self.class_static_context {
                 base_name
             } else {
@@ -976,10 +1147,6 @@ impl<'a> FnLowerer<'a> {
             let static_symbol = class_setter_symbol(receiver.sym.as_ref(), &property, true);
             if self.is_unshadowed_class_identifier(receiver.sym.as_ref()) {
                 if self.signatures.contains_key(&static_symbol) {
-                    if self.class_value_token(receiver.sym.as_ref()).is_some() {
-                        let target = self.lower_assign_target(target)?;
-                        return Ok(Some(self.lower_generator_resume_target(target, value)?));
-                    }
                     let write = self.call_class_static_setter(static_symbol, value)?;
                     return Ok(Some((Vec::new(), vec![HirStmt::Expr(write)])));
                 }
@@ -993,10 +1160,6 @@ impl<'a> FnLowerer<'a> {
                 .expect("static setter retains its class context");
             let symbol = class_setter_symbol(class, &property, true);
             if self.signatures.contains_key(&symbol) {
-                if self.class_value_token(class).is_some() {
-                    let target = self.lower_assign_target(target)?;
-                    return Ok(Some(self.lower_generator_resume_target(target, value)?));
-                }
                 let write = self.call_class_static_setter(symbol, value)?;
                 return Ok(Some((Vec::new(), vec![HirStmt::Expr(write)])));
             }
@@ -1078,11 +1241,6 @@ impl<'a> FnLowerer<'a> {
         let mut before_yield = Vec::new();
         let target = match target {
             Target::Var(name) => Target::Var(name),
-            Target::ParameterCell(cell, payload) => Target::ParameterCell(cell, payload),
-            Target::StaticProperty(token, property, ty) => Target::StaticProperty(
-                self.bind_generator_assignment_reference(&mut before_yield, token)?,
-                property, ty,
-            ),
             Target::Prop(object, ty, field) => Target::Prop(
                 self.bind_generator_assignment_reference(&mut before_yield, object)?,
                 ty,
@@ -1119,7 +1277,6 @@ impl<'a> FnLowerer<'a> {
             }
         }
         let value = match &target {
-            Target::ParameterCell(_, payload) => self.coerce_to_declared(payload, value)?,
             Target::Var(name) => match self.scope.get(name).cloned() {
                 Some(ty) => self.coerce_to_declared(&ty, value)?,
                 None => value,
@@ -1143,11 +1300,6 @@ impl<'a> FnLowerer<'a> {
             Target::JsonIndex(_, index) => {
                 self.expect_type(&HirType::F64, index, "JSON array index")?;
                 self.coerce_to_declared(&HirType::Json, value)?
-            }
-            Target::StaticProperty(token, property, _) => {
-                return Ok((before_yield, vec![HirStmt::Expr(self.lower_static_property_write(
-                    token.clone(), property, value,
-                )?)]));
             }
             Target::DynamicProperty(object, key) => {
                 let value = self.coerce_to_declared(&HirType::Json, value)?;
@@ -1378,7 +1530,7 @@ impl<'a> FnLowerer<'a> {
                     function: fn_decl.function.clone(),
                 };
                 if let Some((hir_name, ty, value)) =
-                    self.lower_recursive_function_expression(&name, &expression, None)?
+                    self.lower_recursive_function_expression(&name, &expression, None, false)?
                 {
                     return Ok(vec![HirStmt::Let(hir_name, ty, value)]);
                 }
@@ -1655,6 +1807,54 @@ impl<'a> FnLowerer<'a> {
             }
 
             Stmt::ForOf(for_of) => {
+                // A `Json` iterable may be a plain array or a live JS object that
+                // implements `[Symbol.iterator]()`; only the runtime knows which.
+                // Evaluate the iterable once and lower the loop for both cases, picking
+                // the live-iterable protocol (`__thaw_to_iterator_exact`, which keeps
+                // thrown JS values intact) when the value is a non-array host object.
+                // ponytail: the body is lowered twice per `Json` loop, so nested
+                // `Json` loops grow 2^depth; hoist the body into a closure if that bites.
+                if !for_of.is_await
+                    && self.for_of_json_mode.is_none()
+                    && self.for_of_prelowered.is_none()
+                {
+                    let expected = (self.infer_member_receiver_type(&for_of.right)
+                        == Some(HirType::JsValue))
+                    .then_some(HirType::JsValue);
+                    let right = self
+                        .lower_expr_with_expected_type(&for_of.right, expected.as_ref())?;
+                    if self.infer_expr_type(&right)? == HirType::Json {
+                        let source = format!("__thaw_for_of_source_{}", self.next_binding);
+                        self.next_binding += 1;
+                        let saved_scope = self.scope.clone();
+                        self.scope.insert(source.clone(), HirType::Json);
+                        let mut branches = Vec::new();
+                        for dynamic in [true, false] {
+                            self.for_of_json_mode = Some(dynamic);
+                            self.for_of_prelowered = Some(HirExpr::Var(source.clone()));
+                            let lowered = self.lower_stmt_seq(stmt);
+                            self.for_of_json_mode = None;
+                            self.for_of_prelowered = None;
+                            branches.push(lowered?);
+                        }
+                        self.scope = saved_scope;
+                        let array_loop = branches.pop().unwrap();
+                        let live_loop = branches.pop().unwrap();
+                        return Ok(vec![
+                            HirStmt::Let(source.clone(), HirType::Json, right),
+                            HirStmt::If(
+                                HirExpr::Call(
+                                    Box::new(HirExpr::Var("__thaw_json_is_live_iterable".into())),
+                                    vec![HirExpr::Var(source)],
+                                ),
+                                live_loop,
+                                array_loop,
+                            ),
+                        ]);
+                    }
+                    self.for_of_prelowered = Some(right);
+                }
+                let json_mode = self.for_of_json_mode;
                 let saved = self.bindings.clone();
                 let saved_scope = self.scope.clone();
                 let saved_correlations = self.destructured_union_correlations.clone();
@@ -1664,8 +1864,11 @@ impl<'a> FnLowerer<'a> {
                     let expected = (self.infer_member_receiver_type(&for_of.right)
                         == Some(HirType::JsValue))
                     .then_some(HirType::JsValue);
-                    let mut values = self
-                        .lower_expr_with_expected_type(&for_of.right, expected.as_ref())?;
+                    let mut values = match self.for_of_prelowered.take() {
+                        Some(values) => values,
+                        None => self
+                            .lower_expr_with_expected_type(&for_of.right, expected.as_ref())?,
+                    };
                     let mut values_type = self.infer_expr_type(&values)?;
                     let array_holes_possible =
                         self.expression_may_be_sparse_array(&for_of.right);
@@ -1720,6 +1923,10 @@ impl<'a> FnLowerer<'a> {
                             values = producer;
                             values_type = producer_type;
                         }
+                    }
+                    if json_mode == Some(true) && values_type == HirType::Json {
+                        values = HirExpr::JsonAsNative(Box::new(values), HirType::JsValue);
+                        values_type = HirType::JsValue;
                     }
                     if values_type == HirType::JsValue {
                         values = HirExpr::Call(
@@ -2235,6 +2442,7 @@ impl<'a> FnLowerer<'a> {
                         vec![init],
                     ))])
                 })();
+                self.for_of_prelowered = None;
                 self.bindings = saved;
                 self.scope = saved_scope;
                 self.destructured_union_correlations = saved_correlations;
@@ -2610,18 +2818,8 @@ impl<'a> FnLowerer<'a> {
                             .as_deref()
                             .is_some_and(|parameter| self.resolve_binding(parameter) == name)
                 });
-                // The exception channel is a single tagged string end to
-                // end (see `new Error(...)`'s lowering and
-                // `thaw_runtime::split_error_tag`); a thrown non-string
-                // value used to be stored into that `i8*` slot as whatever
-                // raw bit pattern it happened to have (an f64's bits
-                // reinterpreted as a pointer for `throw 42`, say), which
-                // every reader then dereferenced as a C string --
-                // undefined behavior, not merely a wrong answer. Coercing
-                // every thrown value to its string form here keeps that
-                // one representation honest; unsupported types (a thrown
-                // `Promise`, function, `Map`/`Set`, etc.) are a compile
-                // error instead of memory corruption.
+                // Publish provenance for the current typed value separately from
+                // display text; Promise callback rethrows retain their snapshot route.
                 let value = self.lower_expr(&throw_stmt.arg)?;
                 let value_type = self.infer_expr_type(&value)?;
                 if promise_rethrow {
@@ -2629,34 +2827,13 @@ impl<'a> FnLowerer<'a> {
                         .map(|ident| self.resolve_binding(ident.sym.as_ref()))
                         .ok_or("Promise rejection rethrow needs a binding")?;
                     let mut args = vec![value];
-                    for field in ["original", "native_text", "aggregate", "tag", "f64", "i64", "bool", "object"] {
+                    for field in ["original", "native_text", "aggregate", "tag", "f64", "i64", "bool", "object", "native"] {
                         args.push(HirExpr::Var(Self::promise_rejection_snapshot_name(&binding, field)));
                     }
                     return Ok(vec![HirStmt::Throw(HirExpr::Call(
                         Box::new(HirExpr::Var("@@thaw_rethrow_pending_exception".to_string())),
                         args,
                     ))]);
-                }
-                if let Some(object_name) = rethrow_object {
-                    let tag_name = object_name.replace("_object", "_tag");
-                    self.scope
-                        .insert(object_name.clone(), HirType::Object(Vec::new()));
-                    self.scope.insert(tag_name.clone(), HirType::I64);
-                    return Ok(vec![
-                        HirStmt::Expr(HirExpr::Call(
-                            Box::new(HirExpr::Var(
-                                "__thaw_set_pending_exception_object".to_string(),
-                            )),
-                            vec![HirExpr::Var(object_name)],
-                        )),
-                        HirStmt::Expr(HirExpr::Call(
-                            Box::new(HirExpr::Var(
-                                "__thaw_set_pending_exception_tag".to_string(),
-                            )),
-                            vec![HirExpr::Var(tag_name)],
-                        )),
-                        HirStmt::Throw(value),
-                    ]);
                 }
                 // One ordinary carrier path handles direct throws and throws
                 // of caught aliases.  The pending tuple remains the ABI to

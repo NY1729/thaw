@@ -1315,7 +1315,7 @@ fn absent_promise_executor_checks_before_allocation() {
     compiler.compile_program(&program).unwrap();
     let ir = compiler.print_to_string();
     let main = ir.lines()
-        .skip_while(|line| !(line.starts_with("define ") && line.contains("@main(")))
+        .skip_while(|line| !(line.starts_with("define ") && line.contains("@thaw_user_main(")))
         .take_while(|line| *line != "}")
         .collect::<Vec<_>>()
         .join("\n");
@@ -1344,9 +1344,9 @@ fn promise_input_allocation_failure_reaches_catch_and_empty_input_skips_allocato
         let entry = context.append_basic_block(probe, "entry");
         let caught = context.append_basic_block(probe, "caught");
         compiler.builder.position_at_end(entry);
-        compiler.catch_stack.push(caught);
+        compiler.push_catch_target(caught);
         compiler.compile_promise_input_words(words, "input").unwrap();
-        compiler.catch_stack.pop();
+        compiler.pop_catch_target();
         compiler.builder.build_return(Some(&context.i8_type().const_int(1, false))).unwrap();
         compiler.builder.position_at_end(caught);
         compiler.builder.build_return(Some(&context.i8_type().const_zero())).unwrap();
@@ -1393,8 +1393,10 @@ fn reject_resolvers_record_their_native_string_before_settlement() {
         let lines = body.lines().collect::<Vec<_>>();
         let marked = lines.iter().position(|line| line.contains("store ptr %")
             && line.contains("@__thaw_pending_exception_native_text")).expect(&ir);
-        let settled = lines.iter().position(|line|
-            line.contains("@thaw_promise_reject_typed_with_aggregate")).expect(&ir);
+        // The settle call is now the native-provenance variant of the typed reject
+        // ABI; the ordering requirement (mark the native text first) is unchanged.
+        let settled = lines.iter().position(|line| line.contains("call ")
+            && line.contains("@thaw_promise_reject_typed_with_native_provenance")).expect(&ir);
         assert!(marked < settled, "{ir}");
     }
 }
@@ -1466,4 +1468,1079 @@ fn async_arrow_try_returns_use_the_general_frame_path() {
         }
     "#;
     assert_eq!(compile_and_run(source, "async_arrow_try_tail_returns"), "1 4 2\n");
+}
+
+#[test]
+fn native_promise_scope_boundaries_codegen_regression_control() {
+    // Source-only control for generic pending errors, an outer Promise that
+    // remains live through a local catch, one-arm capture promotion and its
+    // sibling/merge, nested function compilation under a loop/catch, and a
+    // finally block which replaces a pending return. This control is authored
+    // for later user-run validation and was not executed during this change.
+    let source = r#"
+        function fail(): void { throw new Error("inner"); }
+        function main(): void {
+            let outer: Promise<number> = Promise.resolve(1);
+            try {
+                let inner: Promise<number> = Promise.resolve(2);
+                fail();
+            } catch (error) {
+                const keepOuter = (): Promise<number> => outer;
+            }
+            outer.then((value: number): void => { console.log(value); });
+
+            let captured: Promise<number> = Promise.resolve(3);
+            const choose: boolean = true;
+            if (choose) {
+                const firstArmOnly = (): Promise<number> => captured;
+            } else {
+                captured = Promise.resolve(4);
+            }
+            captured.then((value: number): void => { console.log(value); });
+
+            let looped: Promise<number> = Promise.resolve(5);
+            while (choose) {
+                try {
+                    const loopCapture = (): Promise<number> => looped;
+                    break;
+                } catch (error) {
+                    console.log(error);
+                }
+            }
+
+            try { return; } finally { throw new Error("finally"); }
+        }
+    "#;
+    let parsed = thaw_parser::parse_typescript(source).unwrap();
+    let program = thaw_hir::lower_module(&parsed).unwrap();
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "native_promise_scope_boundaries");
+    compiler.compile_program(&program).unwrap();
+    let ir = compiler.print_to_string();
+    assert!(ir.contains("cleanup_before_catch"), "{ir}");
+    assert!(ir.contains("release_stack_promise"), "{ir}");
+    assert!(ir.contains("arena_promise_slot_error"), "{ir}");
+    assert!(ir.contains("whilecond"), "{ir}");
+
+    // A top-level explicit throw exercises module-evaluation catch state,
+    // and a throwing module initializer also exercises function-local owner
+    // cleanup immediately before the module's own explicit throw.
+    let module_source = r#"
+        function failModule(): void {
+            const moduleOwner: Promise<number> = Promise.resolve(9);
+            throw new Error("function");
+        }
+        failModule();
+        throw new Error("module");
+        function main(): void {}
+    "#;
+    let parsed = thaw_parser::parse_typescript(module_source).unwrap();
+    let program = thaw_hir::lower_module(&parsed).unwrap();
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "module_scope_boundary");
+    compiler.compile_program(&program).unwrap();
+    assert!(compiler.print_to_string().contains("__thaw_top_level_init"));
+
+    // Resume-entry reset control for the paired catch/loop context state.
+    let async_source = r#"
+        async function main(): Promise<void> {
+            let owned: Promise<number> = Promise.resolve(7);
+            try { await Promise.reject(new Error("reject")); }
+            catch (error) { console.log(error); }
+            await Promise.resolve(8);
+        }
+    "#;
+    let parsed = thaw_parser::parse_typescript(async_source).unwrap();
+    let program = thaw_hir::lower_module(&parsed).unwrap();
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "async_scope_boundary");
+    compiler.compile_program(&program).unwrap();
+    let ir = compiler.print_to_string();
+    assert!(ir.contains("thaw_user_main.resume"), "{ir}");
+}
+
+#[test]
+fn native_promise_scope_tables_restore_after_codegen_errors() {
+    // These direct HIR controls intentionally produce codegen errors after a
+    // Promise owner and (for try/while) a boundary have been installed. They
+    // check Rust-error restoration without running generated native code.
+    for (name, kind) in [("try", 0), ("if", 1), ("while", 2)] {
+        let context = Context::create();
+        let mut compiler = HirCompiler::new(&context, &format!("scope_error_{name}"));
+        compiler.declare_exception_state();
+        let probe = compiler.module.add_function(
+            "probe",
+            context.void_type().fn_type(&[], false),
+            None,
+        );
+        let entry = context.append_basic_block(probe, "entry");
+        compiler.builder.position_at_end(entry);
+        let pointer = context.ptr_type(AddressSpace::default());
+        let existing = compiler.builder.build_alloca(pointer, "existing_promise").unwrap();
+        compiler.register_stack_promise_slot(existing, "existing").unwrap();
+        let slots_before = compiler.stack_promise_slots.clone();
+
+        let invalid_local = HirStmt::Let(
+            "temporary".into(),
+            HirType::Promise(Box::new(HirType::F64)),
+            HirExpr::Var("missing_codegen_binding".into()),
+        );
+        let result = match kind {
+            0 => compiler.compile_block(&[HirStmt::Try(
+                vec![invalid_local],
+                "error".into(),
+                vec![],
+                None,
+            )]),
+            1 => compiler.compile_if(
+                &HirExpr::Lit(HirLit::Bool(true)),
+                &[invalid_local],
+                &[],
+            ),
+            _ => compiler.compile_while(
+                &HirExpr::Lit(HirLit::Bool(true)),
+                &[invalid_local],
+            ),
+        };
+        assert!(result.is_err(), "{name} control must reach its codegen error");
+        assert!(compiler.catch_stack.is_empty(), "{name} catch context leaked");
+        assert!(compiler.loop_scopes.is_empty(), "{name} loop cleanup context leaked");
+        assert!(compiler.loop_promotion_scopes.is_empty(), "{name} preheader context leaked");
+        assert_eq!(compiler.stack_promise_slots, slots_before, "{name} owner map changed");
+    }
+}
+
+struct ReactivePromotionProbe<'ctx> {
+    preheader: inkwell::basic_block::BasicBlock<'ctx>,
+    loop_header: inkwell::basic_block::BasicBlock<'ctx>,
+    discovery: inkwell::basic_block::BasicBlock<'ctx>,
+    outer_catch: inkwell::basic_block::BasicBlock<'ctx>,
+    inner_catch: inkwell::basic_block::BasicBlock<'ctx>,
+    owner_slots: [PointerValue<'ctx>; 2],
+    body_only_slot: PointerValue<'ctx>,
+    body_only_flag: PointerValue<'ctx>,
+    promise_type: HirType,
+    original_terminator: String,
+}
+
+fn build_reactive_promotion_probe<'ctx>(
+    compiler: &mut HirCompiler<'ctx>,
+    malformed_replace_signature: bool,
+) -> ReactivePromotionProbe<'ctx> {
+    compiler.declare_exception_state();
+    let pointer = compiler.context.ptr_type(AddressSpace::default());
+    let i64_type = compiler.context.i64_type();
+    let slot_replace_type = if malformed_replace_signature {
+        compiler.context.void_type().fn_type(
+            &[pointer.into(), pointer.into(), pointer.into()],
+            false,
+        )
+    } else {
+        compiler.context.i8_type().fn_type(
+            &[pointer.into(), pointer.into(), pointer.into()],
+            false,
+        )
+    };
+    compiler.module.add_function(
+        "thaw_arena_alloc",
+        pointer.fn_type(&[i64_type.into(), i64_type.into()], false),
+        Some(inkwell::module::Linkage::External),
+    );
+    compiler.module.add_function(
+        "thaw_promise_arena_slot_replace",
+        slot_replace_type,
+        Some(inkwell::module::Linkage::External),
+    );
+    compiler.module.add_function(
+        "thaw_promise_destroy",
+        compiler.context.void_type().fn_type(&[pointer.into()], false),
+        Some(inkwell::module::Linkage::External),
+    );
+
+    let probe = compiler.module.add_function(
+        "reactive_scope_probe",
+        compiler.context.void_type().fn_type(&[], false),
+        None,
+    );
+    let preheader = compiler.context.append_basic_block(probe, "preheader");
+    let loop_header = compiler.context.append_basic_block(probe, "loop_header");
+    let outer_header = compiler.context.append_basic_block(probe, "outer_loop_header");
+    let outer_after = compiler.context.append_basic_block(probe, "outer_loop_after");
+    let inner_after = compiler.context.append_basic_block(probe, "inner_loop_after");
+    let discovery = compiler.context.append_basic_block(probe, "inner_try_body");
+    let outer_catch = compiler.context.append_basic_block(probe, "outer_catch");
+    let inner_catch = compiler.context.append_basic_block(probe, "inner_catch");
+
+    compiler.builder.position_at_end(preheader);
+    let owner_a = compiler.builder.build_alloca(pointer, "capture_a_stack_slot").unwrap();
+    compiler.builder.build_store(owner_a, pointer.const_null()).unwrap();
+    compiler.register_stack_promise_slot(owner_a, "capture_a").unwrap();
+    let owner_a_flag = compiler.stack_promise_slots[&owner_a];
+    let owner_b = compiler.builder.build_alloca(pointer, "capture_b_stack_slot").unwrap();
+    compiler.builder.build_store(owner_b, pointer.const_null()).unwrap();
+    compiler.register_stack_promise_slot(owner_b, "capture_b").unwrap();
+    let owner_b_flag = compiler.stack_promise_slots[&owner_b];
+    let mut preheader_slots = std::collections::HashMap::new();
+    preheader_slots.insert(owner_a, owner_a_flag);
+    preheader_slots.insert(owner_b, owner_b_flag);
+    let original_terminator = compiler.builder.build_unconditional_branch(loop_header)
+        .unwrap().to_string();
+
+    let promise_type = HirType::Promise(Box::new(HirType::F64));
+    compiler.variables.insert(
+        "capture_a".into(),
+        (owner_a, pointer.into()),
+    );
+    compiler.variables.insert(
+        "capture_b".into(),
+        (owner_b, pointer.into()),
+    );
+    compiler.variable_hir_types.insert("capture_a".into(), promise_type.clone());
+    compiler.variable_hir_types.insert("capture_b".into(), promise_type.clone());
+
+    // The outer catch and loop exist at the preheader. The body-only slot is
+    // allocated later in the discovery block, so it must not enter the saved
+    // preheader owner map or boundary.
+    compiler.push_catch_target(outer_catch);
+    let outer_catch_scope = compiler.catch_stack[0].clone();
+    let mut outer_loop_boundary = std::collections::HashSet::new();
+    outer_loop_boundary.insert(owner_a);
+    outer_loop_boundary.insert(owner_b);
+    let outer_loop = LoopScope {
+        continue_target: outer_header,
+        break_target: outer_after,
+        promise_boundary: outer_loop_boundary,
+    };
+
+    compiler.builder.position_at_end(discovery);
+    let body_only_slot = compiler.builder.build_alloca(pointer, "body_only_stack_slot").unwrap();
+    compiler.builder.build_store(body_only_slot, pointer.const_null()).unwrap();
+    compiler.register_stack_promise_slot(body_only_slot, "body_only").unwrap();
+    let body_only_flag = compiler.stack_promise_slots[&body_only_slot];
+    compiler.push_catch_target(inner_catch);
+    let inner_loop = LoopScope {
+        continue_target: loop_header,
+        break_target: inner_after,
+        promise_boundary: outer_loop.promise_boundary.clone(),
+    };
+    compiler.loop_scopes = vec![outer_loop.clone(), inner_loop];
+    let mut captured_names = std::collections::HashSet::new();
+    captured_names.insert("capture_a".to_string());
+    captured_names.insert("capture_b".to_string());
+    compiler.loop_promotion_scopes.push(LoopPromotionScope {
+        preheader,
+        variables: captured_names,
+        catches: CatchContext { scopes: vec![outer_catch_scope] },
+        stack_promise_slots: preheader_slots,
+        outer_loops: vec![outer_loop],
+    });
+    compiler.active_async_completion = Some(pointer.const_null());
+
+    ReactivePromotionProbe {
+        preheader,
+        loop_header,
+        discovery,
+        outer_catch,
+        inner_catch,
+        owner_slots: [owner_a, owner_b],
+        body_only_slot,
+        body_only_flag,
+        promise_type,
+        original_terminator,
+    }
+}
+
+fn llvm_blocks_with_prefix(ir: &str, prefix: &str) -> Vec<(String, String)> {
+    let lines = ir.lines().collect::<Vec<_>>();
+    let is_label = |line: &str| line.split(';').next().unwrap().trim_end().ends_with(':');
+    let mut blocks = Vec::new();
+    for (index, line) in lines.iter().enumerate() {
+        let label = line.split(';').next().unwrap().trim_end();
+        let Some(name) = label.strip_suffix(':') else { continue };
+        if !name.starts_with(prefix) { continue; }
+        let body = lines.iter().skip(index + 1).take_while(|line| !is_label(line))
+            .copied().collect::<Vec<_>>().join("\n");
+        blocks.push((name.to_string(), body));
+    }
+    blocks
+}
+
+fn llvm_function_body(ir: &str, symbol: &str) -> String {
+    let lines = ir.lines().collect::<Vec<_>>();
+    let start = lines.iter().position(|line|
+        line.starts_with("define ") && line.contains(symbol)
+    ).unwrap_or_else(|| panic!("missing definition for {symbol}\n{ir}"));
+    let end = lines.iter().enumerate().skip(start + 1)
+        .find_map(|(index, line)| (*line == "}").then_some(index))
+        .unwrap_or_else(|| panic!("unterminated definition for {symbol}\n{ir}"));
+    lines[start..=end].join("\n")
+}
+
+fn llvm_named_block_body(function_body: &str, name: &str) -> String {
+    let lines = function_body.lines().collect::<Vec<_>>();
+    let is_label = |line: &str| line.split(';').next().unwrap().trim_end().ends_with(':');
+    let label = format!("{name}:");
+    let start = lines.iter().position(|line|
+        line.split(';').next().unwrap().trim_end() == label
+    ).unwrap_or_else(|| panic!("missing block {name}\n{function_body}"));
+    lines.iter().skip(start + 1).take_while(|line| !is_label(line))
+        .copied().collect::<Vec<_>>().join("\n")
+}
+
+fn stores_to_global<'a>(body: &'a str, global: &str) -> Vec<&'a str> {
+    let destination = format!(", ptr @{global},");
+    body.lines().filter(|line| line.contains("store ") && line.contains(&destination))
+        .collect()
+}
+
+fn pointer_store_source_operand<'a>(line: &'a str, destination: &str) -> &'a str {
+    let store = line.trim().strip_prefix("store ptr ").expect("pointer store instruction");
+    store.split_once(&format!(", ptr @{destination},"))
+        .expect("exact pointer destination").0
+}
+
+type ScopeCatchSnapshot<'ctx> = (inkwell::basic_block::BasicBlock<'ctx>,
+    std::collections::HashSet<PointerValue<'ctx>>);
+type ScopeLoopSnapshot<'ctx> = (inkwell::basic_block::BasicBlock<'ctx>,
+    inkwell::basic_block::BasicBlock<'ctx>, std::collections::HashSet<PointerValue<'ctx>>);
+type ScopePromotionSnapshot<'ctx> = (
+    inkwell::basic_block::BasicBlock<'ctx>,
+    std::collections::HashSet<String>,
+    Vec<ScopeCatchSnapshot<'ctx>>,
+    std::collections::HashMap<PointerValue<'ctx>, PointerValue<'ctx>>,
+    Vec<ScopeLoopSnapshot<'ctx>>,
+);
+
+struct CodegenScopeSnapshot<'ctx> {
+    variables: std::collections::HashMap<String, (PointerValue<'ctx>, String)>,
+    catch_native_text: std::collections::HashMap<String, (
+        PointerValue<'ctx>, PointerValue<'ctx>, PointerValue<'ctx>,
+        PointerValue<'ctx>, PointerValue<'ctx>,
+    )>,
+    variable_hir_types: std::collections::HashMap<String, HirType>,
+    arena_variables: std::collections::HashSet<String>,
+    stack_promise_slots: std::collections::HashMap<PointerValue<'ctx>, PointerValue<'ctx>>,
+    for_iteration_frame_slots: std::collections::HashMap<String, PointerValue<'ctx>>,
+    catch_stack: Vec<ScopeCatchSnapshot<'ctx>>,
+    loop_scopes: Vec<ScopeLoopSnapshot<'ctx>>,
+    loop_promotion_scopes: Vec<ScopePromotionSnapshot<'ctx>>,
+    active_async_completion: Option<PointerValue<'ctx>>,
+    insertion_block: Option<inkwell::basic_block::BasicBlock<'ctx>>,
+}
+
+fn snapshot_codegen_scope<'ctx>(compiler: &HirCompiler<'ctx>) -> CodegenScopeSnapshot<'ctx> {
+    CodegenScopeSnapshot {
+        variables: compiler.variables.iter().map(|(name, (cell, ty))|
+            (name.clone(), (*cell, ty.print_to_string().to_string()))).collect(),
+        catch_native_text: compiler.catch_native_text.clone(),
+        variable_hir_types: compiler.variable_hir_types.clone(),
+        arena_variables: compiler.arena_variables.clone(),
+        stack_promise_slots: compiler.stack_promise_slots.clone(),
+        for_iteration_frame_slots: compiler.for_iteration_frame_slots.clone(),
+        catch_stack: compiler.catch_stack.iter().map(|scope|
+            (scope.target, scope.promise_boundary.clone())).collect(),
+        loop_scopes: compiler.loop_scopes.iter().map(|scope|
+            (scope.continue_target, scope.break_target, scope.promise_boundary.clone())).collect(),
+        loop_promotion_scopes: compiler.loop_promotion_scopes.iter().map(|scope| (
+            scope.preheader,
+            scope.variables.clone(),
+            scope.catches.scopes.iter().map(|catch|
+                (catch.target, catch.promise_boundary.clone())).collect(),
+            scope.stack_promise_slots.clone(),
+            scope.outer_loops.iter().map(|loop_scope|
+                (loop_scope.continue_target, loop_scope.break_target,
+                    loop_scope.promise_boundary.clone())).collect(),
+        )).collect(),
+        active_async_completion: compiler.active_async_completion,
+        insertion_block: compiler.builder.get_insert_block(),
+    }
+}
+
+fn assert_codegen_scope_unchanged<'ctx>(
+    compiler: &HirCompiler<'ctx>,
+    before: &CodegenScopeSnapshot<'ctx>,
+) {
+    let after = snapshot_codegen_scope(compiler);
+    assert_eq!(after.variables, before.variables, "variable cells/types changed");
+    assert_eq!(after.catch_native_text, before.catch_native_text);
+    assert_eq!(after.variable_hir_types, before.variable_hir_types);
+    assert_eq!(after.arena_variables, before.arena_variables);
+    assert_eq!(after.stack_promise_slots, before.stack_promise_slots,
+        "physical Promise slot-to-flag mapping changed");
+    assert_eq!(after.for_iteration_frame_slots, before.for_iteration_frame_slots);
+    assert_eq!(after.catch_stack, before.catch_stack);
+    assert_eq!(after.loop_scopes, before.loop_scopes);
+    assert_eq!(after.loop_promotion_scopes, before.loop_promotion_scopes);
+    assert_eq!(after.active_async_completion, before.active_async_completion);
+    assert_eq!(after.insertion_block, before.insertion_block);
+}
+
+fn seed_nonempty_lambda_scope<'ctx>(
+    compiler: &mut HirCompiler<'ctx>,
+    function_name: &str,
+) -> inkwell::basic_block::BasicBlock<'ctx> {
+    compiler.declare_runtime_builtins();
+    compiler.declare_exception_state();
+    let function = compiler.module.add_function(
+        function_name,
+        compiler.context.void_type().fn_type(&[], false),
+        None,
+    );
+    let entry = compiler.context.append_basic_block(function, "entry");
+    compiler.builder.position_at_end(entry);
+    let pointer = compiler.context.ptr_type(AddressSpace::default());
+    let owner_slot = compiler.builder.build_alloca(pointer, "seeded_outer_promise_slot").unwrap();
+    compiler.builder.build_store(owner_slot, pointer.const_null()).unwrap();
+    compiler.register_stack_promise_slot(owner_slot, "seeded_outer_promise").unwrap();
+    let promise_type = HirType::Promise(Box::new(HirType::F64));
+    compiler.variables.insert("seeded_outer_promise".into(), (owner_slot, pointer.into()));
+    compiler.variable_hir_types.insert("seeded_outer_promise".into(), promise_type.clone());
+    compiler.push_catch_target(compiler.context.append_basic_block(function, "seeded_catch"));
+
+    let loop_continue = compiler.context.append_basic_block(function, "seeded_loop_continue");
+    let loop_break = compiler.context.append_basic_block(function, "seeded_loop_break");
+    let promise_boundary: std::collections::HashSet<PointerValue<'ctx>> =
+        [owner_slot].into_iter().collect();
+    let loop_scope = LoopScope {
+        continue_target: loop_continue,
+        break_target: loop_break,
+        promise_boundary: promise_boundary.clone(),
+    };
+    compiler.loop_scopes.push(loop_scope.clone());
+    compiler.loop_promotion_scopes.push(LoopPromotionScope {
+        preheader: entry,
+        variables: ["seeded_outer_promise".to_string()].into_iter().collect(),
+        catches: CatchContext { scopes: compiler.catch_stack.clone() },
+        stack_promise_slots: compiler.stack_promise_slots.clone(),
+        outer_loops: vec![loop_scope],
+    });
+
+    let catch_slots = (0..5).map(|index|
+        compiler.builder.build_alloca(pointer, &format!("seeded_catch_metadata_{index}"))
+            .unwrap()).collect::<Vec<_>>();
+    compiler.catch_native_text.insert("seeded_catch".into(), (
+        catch_slots[0], catch_slots[1], catch_slots[2], catch_slots[3], catch_slots[4],
+    ));
+    let arena_cell = compiler.builder.build_alloca(pointer, "seeded_arena_cell").unwrap();
+    compiler.variables.insert("seeded_arena_capture".into(), (arena_cell, pointer.into()));
+    compiler.variable_hir_types.insert("seeded_arena_capture".into(), HirType::JsValue);
+    compiler.arena_variables.insert("seeded_arena_capture".into());
+    let frame_slot = compiler.builder.build_alloca(pointer, "seeded_for_iteration_frame_slot").unwrap();
+    compiler.for_iteration_frame_slots.insert("seeded_for_iteration".into(), frame_slot);
+    compiler.active_async_completion = Some(pointer.const_null());
+    compiler.builder.position_at_end(entry);
+    entry
+}
+
+fn assert_promise_owner_flag_guards_release(ir: &str, flag_name: &str) {
+    let flag = format!("%{flag_name}");
+    let load = ir.lines().find(|line|
+        line.contains("= load i1") && line.contains(&format!("ptr {flag}"))
+    ).unwrap_or_else(|| panic!("missing runtime owner-flag load for {flag_name}\n{ir}"));
+    let loaded_value = load.split_once('=').unwrap().0.trim();
+    assert!(ir.lines().any(|line|
+        line.contains("br i1") && line.contains(loaded_value)
+    ), "owner flag {flag_name} does not guard a conditional release:\n{ir}");
+}
+
+#[test]
+fn reactive_preheader_promotions_preserve_exact_scope_and_successor_context() {
+    // Direct helper control: the closures are discovered reactively while an
+    // inner catch/loop is active, after a body-only owner exists. Two captures
+    // must split the same preheader in succession while failures still target
+    // the outer handler and leave the body-only token in the live body map.
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "reactive_preheader_success");
+    let probe = build_reactive_promotion_probe(&mut compiler, false);
+
+    compiler.promote_variable_to_arena_cell_with_mode(
+        "capture_a", &probe.promise_type, false,
+    ).unwrap();
+    let first_ready = compiler.loop_promotion_scopes[0].preheader;
+    assert_ne!(first_ready, probe.preheader);
+    assert_eq!(first_ready.get_terminator().unwrap().to_string(), probe.original_terminator);
+    assert!(compiler.stack_promise_slots.contains_key(&probe.owner_slots[1]));
+    assert!(compiler.stack_promise_slots.contains_key(&probe.body_only_slot));
+    assert!(!compiler.stack_promise_slots.contains_key(&probe.owner_slots[0]));
+
+    compiler.promote_variable_to_arena_cell_with_mode(
+        "capture_b", &probe.promise_type, false,
+    ).unwrap();
+    let second_ready = compiler.loop_promotion_scopes[0].preheader;
+    assert_ne!(second_ready, first_ready);
+    assert_eq!(second_ready.get_terminator().unwrap().to_string(), probe.original_terminator);
+    assert!(second_ready.get_terminator().unwrap().to_string().contains("loop_header"));
+    assert_eq!(compiler.builder.get_insert_block(), Some(probe.discovery));
+    assert_eq!(compiler.loop_promotion_scopes[0].stack_promise_slots.len(), 0);
+    assert_eq!(compiler.stack_promise_slots.len(), 1);
+    assert_eq!(compiler.stack_promise_slots.get(&probe.body_only_slot), Some(&probe.body_only_flag));
+    assert_eq!(compiler.catch_stack.len(), 2);
+    assert_eq!(compiler.catch_stack[0].target, probe.outer_catch);
+    assert_eq!(compiler.catch_stack[1].target, probe.inner_catch);
+    assert!(compiler.catch_stack[0].promise_boundary.is_empty());
+    assert_eq!(compiler.catch_stack[1].promise_boundary,
+        [probe.body_only_slot].into_iter().collect());
+    assert_eq!(compiler.loop_scopes.len(), 2);
+    assert!(compiler.loop_scopes[0].promise_boundary.is_empty());
+    assert!(compiler.loop_scopes[1].promise_boundary.is_empty());
+    assert_eq!(compiler.loop_promotion_scopes[0].catches.scopes[0].promise_boundary.len(), 0);
+    assert_eq!(compiler.loop_promotion_scopes[0].outer_loops[0].promise_boundary.len(), 0);
+    assert!(compiler.arena_variables.contains("capture_a"));
+    assert!(compiler.arena_variables.contains("capture_b"));
+    assert_eq!(compiler.active_async_completion, Some(compiler.context.ptr_type(AddressSpace::default()).const_null()));
+
+    // Error blocks must use the saved outer catch and omit the body-only slot;
+    // normal body cleanup must still release the body-only owner by its flag.
+    let body_boundary = compiler.loop_scopes[1].promise_boundary.clone();
+    compiler.emit_stack_promise_cleanup_except(&body_boundary).unwrap();
+    let ir = compiler.print_to_string();
+    let failed_blocks = llvm_blocks_with_prefix(&ir, "arena_promise_slot_error");
+    assert_eq!(failed_blocks.len(), 2, "{ir}");
+    for (name, body) in failed_blocks {
+        assert!(body.contains("br label %outer_catch"), "{name}: {body}\n{ir}");
+        assert!(!body.contains("body_only_stack_slot"), "{name}: {body}\n{ir}");
+        assert!(!body.contains("br label %inner_catch"), "{name}: {body}\n{ir}");
+    }
+    assert!(ir.contains("body_only_promise_owned"), "{ir}");
+    assert!(ir.contains("@thaw_promise_destroy("), "{ir}");
+    assert_promise_owner_flag_guards_release(&ir, "capture_a_promise_owned");
+    assert_promise_owner_flag_guards_release(&ir, "capture_b_promise_owned");
+    assert_promise_owner_flag_guards_release(&ir, "body_only_promise_owned");
+}
+
+#[test]
+fn reactive_preheader_codegen_error_restores_nonempty_scope_exactly() {
+    // A test-only void arena-slot declaration makes the checked status
+    // extraction return a Rust codegen error after the preheader terminator
+    // has been detached and the saved outer context installed.
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "reactive_preheader_codegen_error");
+    let probe = build_reactive_promotion_probe(&mut compiler, true);
+    let slots_before = compiler.stack_promise_slots.clone();
+    let catches_before = compiler.catch_stack.clone();
+    let loops_before = compiler.loop_scopes.clone();
+    let saved_scope = compiler.loop_promotion_scopes[0].clone();
+
+    let result = compiler.promote_variable_to_arena_cell_with_mode(
+        "capture_a", &probe.promise_type, false,
+    );
+    assert!(result.is_err());
+    assert_eq!(probe.preheader.get_terminator().unwrap().to_string(), probe.original_terminator);
+    assert_eq!(compiler.builder.get_insert_block(), Some(probe.discovery));
+    assert_eq!(compiler.stack_promise_slots, slots_before);
+    assert_eq!(compiler.catch_stack.len(), catches_before.len());
+    for (actual, expected) in compiler.catch_stack.iter().zip(&catches_before) {
+        assert_eq!(actual.target, expected.target);
+        assert_eq!(actual.promise_boundary, expected.promise_boundary);
+    }
+    assert_eq!(compiler.loop_scopes.len(), loops_before.len());
+    for (actual, expected) in compiler.loop_scopes.iter().zip(&loops_before) {
+        assert_eq!(actual.continue_target, expected.continue_target);
+        assert_eq!(actual.break_target, expected.break_target);
+        assert_eq!(actual.promise_boundary, expected.promise_boundary);
+    }
+    let restored_scope = &compiler.loop_promotion_scopes[0];
+    assert_eq!(restored_scope.preheader, saved_scope.preheader);
+    assert_eq!(restored_scope.variables, saved_scope.variables);
+    assert_eq!(restored_scope.stack_promise_slots, saved_scope.stack_promise_slots);
+    assert_eq!(restored_scope.outer_loops.len(), saved_scope.outer_loops.len());
+    assert_eq!(restored_scope.catches.scopes.len(), saved_scope.catches.scopes.len());
+    for (actual, expected) in restored_scope.catches.scopes.iter().zip(&saved_scope.catches.scopes) {
+        assert_eq!(actual.target, expected.target);
+        assert_eq!(actual.promise_boundary, expected.promise_boundary);
+    }
+    for (actual, expected) in restored_scope.outer_loops.iter().zip(&saved_scope.outer_loops) {
+        assert_eq!(actual.continue_target, expected.continue_target);
+        assert_eq!(actual.break_target, expected.break_target);
+        assert_eq!(actual.promise_boundary, expected.promise_boundary);
+    }
+    assert!(compiler.variables.get("capture_a").is_some_and(|(slot, _)| *slot == probe.owner_slots[0]));
+    assert!(!compiler.arena_variables.contains("capture_a"));
+    assert_eq!(compiler.active_async_completion,
+        Some(compiler.context.ptr_type(AddressSpace::default()).const_null()));
+}
+
+#[test]
+fn stack_owner_live_merge_preserves_exact_branch_bindings() {
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "stack_owner_live_merge");
+    compiler.declare_runtime_builtins();
+    let function = compiler.module.add_function(
+        "merge_probe",
+        context.void_type().fn_type(&[], false),
+        None,
+    );
+    let entry = context.append_basic_block(function, "entry");
+    compiler.builder.position_at_end(entry);
+    let pointer = context.ptr_type(AddressSpace::default());
+    let base = compiler.builder.build_alloca(pointer, "base_slot").unwrap();
+    let base_flag = compiler.builder.build_alloca(context.bool_type(), "base_flag").unwrap();
+    let then_only = compiler.builder.build_alloca(pointer, "then_slot").unwrap();
+    let then_flag = compiler.builder.build_alloca(context.bool_type(), "then_flag").unwrap();
+    let else_only = compiler.builder.build_alloca(pointer, "else_slot").unwrap();
+    let else_flag = compiler.builder.build_alloca(context.bool_type(), "else_flag").unwrap();
+    let mut then_slots = std::collections::HashMap::new();
+    then_slots.insert(base, base_flag);
+    then_slots.insert(then_only, then_flag);
+    let mut else_slots = std::collections::HashMap::new();
+    else_slots.insert(base, base_flag);
+    else_slots.insert(else_only, else_flag);
+
+    let both_live = HirCompiler::merge_live_stack_promise_slots(true, &then_slots, true, &else_slots);
+    assert_eq!(both_live.len(), 3);
+    assert_eq!(both_live.get(&base), Some(&base_flag));
+    assert_eq!(both_live.get(&then_only), Some(&then_flag));
+    assert_eq!(both_live.get(&else_only), Some(&else_flag));
+    let then_terminated = HirCompiler::merge_live_stack_promise_slots(false, &then_slots, true, &else_slots);
+    assert_eq!(then_terminated.len(), 2);
+    assert!(!then_terminated.contains_key(&then_only));
+    assert_eq!(then_terminated.get(&else_only), Some(&else_flag));
+    let both_terminated = HirCompiler::merge_live_stack_promise_slots(false, &then_slots, false, &else_slots);
+    assert!(both_terminated.is_empty());
+
+    // The physical slot->flag bindings survive the live-arm union, and every
+    // release remains conditional on the actual runtime owner flag.
+    compiler.stack_promise_slots = both_live;
+    compiler.emit_stack_promise_cleanup().unwrap();
+    let ir = compiler.print_to_string();
+    for flag in ["base_flag", "then_flag", "else_flag"] {
+        assert_promise_owner_flag_guards_release(&ir, flag);
+    }
+}
+
+#[test]
+fn hir_if_live_arm_keeps_sibling_stack_binding_and_runtime_flag() {
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "hir_if_live_stack_owner");
+    compiler.declare_runtime_builtins();
+    compiler.declare_exception_state();
+    let function = compiler.module.add_function(
+        "merge_probe",
+        context.void_type().fn_type(&[], false),
+        None,
+    );
+    let entry = context.append_basic_block(function, "entry");
+    compiler.builder.position_at_end(entry);
+    let pointer = context.ptr_type(AddressSpace::default());
+    let slot = compiler.builder.build_alloca(pointer, "outer_promise_slot").unwrap();
+    let flag = compiler.builder.build_alloca(context.bool_type(), "outer_promise_owned").unwrap();
+    compiler.builder.build_store(slot, pointer.const_null()).unwrap();
+    compiler.builder.build_store(flag, context.bool_type().const_zero()).unwrap();
+    compiler.stack_promise_slots.insert(slot, flag);
+    compiler.variables.insert("outer_promise".into(), (slot, pointer.into()));
+    compiler.variable_hir_types.insert(
+        "outer_promise".into(),
+        HirType::Promise(Box::new(HirType::F64)),
+    );
+    let slots_before = compiler.stack_promise_slots.clone();
+
+    // This real first-arm Let registers a new physical Promise owner before
+    // the abrupt exit. The sibling must start from the original outer owner
+    // map, not the then-only binding left behind by the terminated arm.
+    let terminated = compiler.compile_if(
+        &HirExpr::Lit(HirLit::Bool(true)),
+        &[
+            HirStmt::Let(
+                "then_only".into(),
+                HirType::Promise(Box::new(HirType::F64)),
+                HirExpr::Var("outer_promise".into()),
+            ),
+            HirStmt::Return(None),
+        ],
+        &[],
+    ).unwrap();
+    assert!(!terminated);
+    assert_eq!(compiler.stack_promise_slots, slots_before,
+        "else arm inherited a Promise slot introduced only in the returned then arm");
+    assert_eq!(compiler.stack_promise_slots.get(&slot), Some(&flag));
+    assert_eq!(compiler.variables.get("outer_promise").map(|(cell, _)| *cell), Some(slot));
+    compiler.emit_stack_promise_cleanup().unwrap();
+    let ir = compiler.print_to_string();
+    assert_promise_owner_flag_guards_release(&ir, "outer_promise_owned");
+    assert_promise_owner_flag_guards_release(&ir, "then_only_promise_owned");
+    assert!(ir.contains("outer_promise_slot"), "{ir}");
+    assert!(ir.contains("then_only"), "{ir}");
+}
+
+#[test]
+fn native_promise_exception_descriptor_survives_all_cleanup_handoffs() {
+    // Codegen-only source control for a Promise-valued explicit throw, the
+    // blocking-await rejection transfer, async completion rejection, and a
+    // host callback compiled while an enclosing async scope is active.
+    let source = r#"
+        declare function __thaw_typed_js_696e766f6b65566f6964(
+            callback: () => Promise<void>,
+        ): void;
+        function syncThrow(reason: Promise<number>): void { throw reason; }
+        async function asyncThrow(reason: Promise<number>): Promise<void> {
+            throw reason;
+        }
+        async function main(): Promise<void> {
+            const reason: Promise<number> = Promise.resolve(23);
+            try { syncThrow(reason); }
+            catch (error) {
+                const preserved = error as Promise<number>;
+                console.log(preserved === reason);
+            }
+            try { console.log(true && (await Promise.reject<number>(reason))); }
+            catch (error) {
+                const preserved = error as Promise<number>;
+                console.log(preserved === reason);
+            }
+            try { await asyncThrow(reason); }
+            catch (error) {
+                const preserved = error as Promise<number>;
+                console.log(preserved === reason);
+            }
+            loadScript("globalThis.invokeVoid = callback => { callback(); };");
+            __thaw_typed_js_696e766f6b65566f6964(
+                (): Promise<void> => Promise.reject<void>(reason),
+            );
+        }
+    "#;
+    let parsed = thaw_parser::parse_typescript(source).unwrap();
+    let program = thaw_hir::lower_module(&parsed).unwrap();
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "native_reason_cleanup_handoffs");
+    compiler.compile_program(&program).unwrap();
+    let ir = compiler.print_to_string();
+    let sync_throw = llvm_function_body(&ir, "@syncThrow(");
+    assert!(sync_throw.lines().any(|line|
+        line.contains("call ptr @thaw_exception_native_provenance_new(")
+    ), "sync Promise throw did not emit its native provenance producer:\n{ir}");
+    let main_resume = llvm_function_body(&ir, "@thaw_user_main.resume(");
+    assert!(main_resume.lines().any(|line|
+        line.contains("call ptr @thaw_promise_exception_native(")
+    ), "blocking/resume rejection path did not read the Promise native descriptor:\n{ir}");
+    // The source async function has no await, so this throw is compiled in
+    // its first-segment ramp; the generated resume function only dispatches
+    // waiting/state machinery.
+    let async_throw_ramp = llvm_function_body(&ir, "@asyncThrow(");
+    assert!(async_throw_ramp.lines().any(|line|
+        line.contains("call i8 @thaw_promise_reject_typed_with_native_provenance(")
+    ), "active async ramp did not forward the pending descriptor:\n{ir}");
+
+    // This fixture lowers through QuickJS. Its native closure reaches the JS
+    // callback registrar through the pending-guard wrapper; that wrapper then
+    // directly invokes the raw native-value adapter. Follow those exact calls.
+    let quickjs_registration = main_resume.lines().find(|line|
+        line.contains("call ") && line.contains("@thaw_js_register_native_callback(")
+            && line.contains("@__thaw_callback_pending_guard_")
+    ).unwrap_or_else(|| panic!("QuickJS native callback registration did not receive the pending-guard wrapper:\n{main_resume}"));
+    let registration_args = quickjs_registration
+        .split_once("@thaw_js_register_native_callback(").unwrap().1
+        .split(')').next().unwrap();
+    let registration_args = registration_args.split(',').map(str::trim).collect::<Vec<_>>();
+    assert_eq!(registration_args.len(), 7, "{quickjs_registration}");
+    let callback_guard_arg = registration_args[0];
+    assert!(callback_guard_arg.starts_with("ptr @__thaw_callback_pending_guard_"),
+        "registration argument 0 must be the callback guard, separate from the finisher at argument 5:\n{quickjs_registration}");
+    let finisher_guard_arg = registration_args[5];
+    assert!(finisher_guard_arg.starts_with("ptr @__thaw_callback_pending_guard_"),
+        "registration argument 5 must be the separate guarded finisher:\n{quickjs_registration}");
+    assert_ne!(callback_guard_arg, finisher_guard_arg,
+        "callback and finisher must select distinct pending guards:\n{quickjs_registration}");
+    let guard_suffix = callback_guard_arg
+        .split("@__thaw_callback_pending_guard_").nth(1).unwrap()
+        .split(|character: char| !character.is_ascii_digit()).next().unwrap();
+    let guard_name = format!("__thaw_callback_pending_guard_{guard_suffix}");
+    let registration = main_resume.lines().position(|line| line == quickjs_registration).unwrap();
+    let quickjs_call = main_resume.lines().position(|line|
+        line.contains("call ") && line.contains("@thaw_js_call_graph_result(")
+    ).unwrap_or_else(|| panic!("QuickJS dynamic call using the callback was not emitted:\n{main_resume}"));
+    assert!(registration < quickjs_call,
+        "guarded native callback must be registered before the QuickJS call:\n{main_resume}");
+
+    let guard_body = llvm_function_body(&ir, &format!("@{guard_name}("));
+    let raw_adapter_call = guard_body.lines().find(|line|
+        line.contains("call ptr @__thaw_napi_value_callback_")
+    ).unwrap_or_else(|| panic!("pending-guard wrapper did not invoke its raw N-API value adapter:\n{guard_body}"));
+    let raw_suffix = raw_adapter_call
+        .split("@__thaw_napi_value_callback_").nth(1).unwrap()
+        .split(|character: char| !character.is_ascii_digit()).next().unwrap();
+    let raw_adapter_name = format!("__thaw_napi_value_callback_{raw_suffix}");
+    let raw_adapter_body = llvm_function_body(&ir, &format!("@{raw_adapter_name}("));
+    assert!(raw_adapter_body.contains("entry:"), "raw N-API callback body missing:\n{raw_adapter_body}");
+}
+
+#[test]
+fn nested_codegen_scope_contexts_restore_exact_nonempty_state() {
+    // The host-adapter macro remains a narrow direct control for its own
+    // isolation. Lambda restoration is covered below through each production
+    // compiler method and a real missing-variable error in its inner body.
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "nested_scope_context_restore");
+    let probe = build_reactive_promotion_probe(&mut compiler, false);
+    let before = snapshot_codegen_scope(&compiler);
+
+    let host_adapter: Result<(), String> = isolated_codegen_scope!(&mut compiler, {
+        assert!(compiler.catch_stack.is_empty());
+        assert!(compiler.loop_scopes.is_empty());
+        assert!(compiler.loop_promotion_scopes.is_empty());
+        assert!(compiler.stack_promise_slots.is_empty());
+        assert!(compiler.active_async_completion.is_none());
+        Err("controlled host adapter codegen error".to_string())
+    });
+    assert!(host_adapter.is_err());
+    assert_codegen_scope_unchanged(&compiler, &before);
+    assert_eq!(compiler.builder.get_insert_block(), Some(probe.discovery));
+}
+
+#[test]
+fn compile_lambda_restores_scope_after_real_inner_body_error() {
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "sync_lambda_scope_error");
+    seed_nonempty_lambda_scope(&mut compiler, "sync_parent");
+    let before = snapshot_codegen_scope(&compiler);
+    let missing = HirExpr::Var("missing_codegen_binding".into());
+
+    let error = compiler.compile_lambda(&[], &[], &HirType::F64, &missing)
+        .err().expect("compile_lambda must reach its missing Var in the generated body");
+    assert_eq!(error, "unknown variable `missing_codegen_binding`");
+    let ir = compiler.print_to_string();
+    let inner = llvm_function_body(&ir, "@__thaw_lambda_0(");
+    assert!(inner.contains("entry:"), "inner lambda body was not emitted:\n{ir}");
+    assert_eq!(compiler.module.get_function("__thaw_lambda_0").unwrap().get_basic_blocks().len(), 1,
+        "error must come from compiling the emitted inner lambda body");
+    assert_codegen_scope_unchanged(&compiler, &before);
+}
+
+#[test]
+fn compile_async_lambda_restores_scope_after_real_inner_body_error() {
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "async_lambda_scope_error");
+    seed_nonempty_lambda_scope(&mut compiler, "async_parent");
+    let before = snapshot_codegen_scope(&compiler);
+    let missing = HirExpr::Var("missing_codegen_binding".into());
+
+    let error = compiler.compile_async_lambda(&[], &[], &HirType::F64, &missing)
+        .err().expect("compile_async_lambda must reach its missing Var in the generated body");
+    assert_eq!(
+        error,
+        "async lambda `__thaw_async_lambda_0`: unknown variable `missing_codegen_binding`",
+    );
+    let ir = compiler.print_to_string();
+    let inner = llvm_function_body(&ir, "@__thaw_async_lambda_0(");
+    assert!(inner.contains("entry:"), "async ramp body was not emitted:\n{ir}");
+    assert!(inner.contains("@thaw_arena_alloc("), "async frame planning/codegen was not reached:\n{ir}");
+    assert!(inner.contains("@thaw_promise_new("), "async completion setup was not reached:\n{ir}");
+    assert_codegen_scope_unchanged(&compiler, &before);
+}
+
+#[test]
+fn published_throw_keeps_fresh_native_exception_descriptor() {
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "published_native_throw_descriptor");
+    compiler.declare_exception_state();
+    let function = compiler.module.add_function(
+        "probe",
+        context.void_type().fn_type(&[], false),
+        None,
+    );
+    let entry = context.append_basic_block(function, "entry");
+    compiler.builder.position_at_end(entry);
+    let fresh_descriptor = compiler.builder.build_global_string_ptr("fresh descriptor", "descriptor")
+        .unwrap().as_pointer_value();
+    compiler.builder.build_store(compiler.pending_exception_native().as_pointer_value(), fresh_descriptor)
+        .unwrap();
+    let published_display = HirExpr::Call(
+        Box::new(HirExpr::Var("@@thaw_published_exception_text".into())),
+        vec![HirExpr::Lit(HirLit::Str("[exception value]".into()))],
+    );
+
+    compiler.compile_throw_text(&published_display).unwrap();
+    let ir = compiler.print_to_string();
+    let probe_body = llvm_function_body(&ir, "@probe(");
+    let descriptor_stores = stores_to_global(&probe_body, "__thaw_pending_exception_native");
+    assert_eq!(descriptor_stores.len(), 1, "{ir}");
+    let descriptor_operand = pointer_store_source_operand(
+        descriptor_stores[0], "__thaw_pending_exception_native",
+    );
+    assert_eq!(descriptor_operand.matches('@').count(), 1, "{ir}");
+    assert!(descriptor_operand.contains("@descriptor"), "{ir}");
+    assert!(ir.lines().any(|line|
+        line.starts_with("@descriptor =") && line.contains("c\"fresh descriptor\\00\"")
+    ), "the saved pointer must identify the fresh descriptor bytes:\n{ir}");
+    let text_stores = stores_to_global(&probe_body, "__thaw_pending_exception_native_text");
+    assert!(!text_stores.is_empty(), "trusted display text was not published:\n{ir}");
+    assert!(!text_stores.last().unwrap().contains("store ptr null"), "{ir}");
+}
+
+#[test]
+fn text_only_throw_clears_stale_native_exception_descriptor() {
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "text_only_stale_native_throw");
+    compiler.declare_exception_state();
+    let function = compiler.module.add_function(
+        "probe",
+        context.void_type().fn_type(&[], false),
+        None,
+    );
+    let entry = context.append_basic_block(function, "entry");
+    compiler.builder.position_at_end(entry);
+    let stale_descriptor = compiler.builder.build_global_string_ptr("stale descriptor", "stale_descriptor")
+        .unwrap().as_pointer_value();
+    let stale_text = compiler.builder.build_global_string_ptr("stale native text", "stale_native_text")
+        .unwrap().as_pointer_value();
+    let stale_aggregate = compiler.builder.build_global_string_ptr("stale aggregate", "stale_aggregate")
+        .unwrap().as_pointer_value();
+    let stale_object = compiler.builder.build_global_string_ptr("stale object", "stale_object")
+        .unwrap().as_pointer_value();
+    compiler.builder.build_store(compiler.pending_exception_native().as_pointer_value(), stale_descriptor)
+        .unwrap();
+    compiler.builder.build_store(compiler.pending_exception_native_text().as_pointer_value(), stale_text)
+        .unwrap();
+    compiler.builder.build_store(compiler.pending_exception_aggregate_errors().as_pointer_value(), stale_aggregate)
+        .unwrap();
+    compiler.builder.build_store(compiler.pending_exception_object().as_pointer_value(), stale_object)
+        .unwrap();
+    compiler.builder.build_store(
+        compiler.pending_exception_value(PENDING_EXCEPTION_VALUE_TAG_SYMBOL).as_pointer_value(),
+        context.i64_type().const_int(99, false),
+    ).unwrap();
+    compiler.builder.build_store(
+        compiler.pending_exception_value(PENDING_EXCEPTION_F64_SYMBOL).as_pointer_value(),
+        context.f64_type().const_float(8.5),
+    ).unwrap();
+    compiler.builder.build_store(
+        compiler.pending_exception_value(PENDING_EXCEPTION_I64_SYMBOL).as_pointer_value(),
+        context.i64_type().const_int(77, false),
+    ).unwrap();
+    compiler.builder.build_store(
+        compiler.pending_exception_value(PENDING_EXCEPTION_BOOL_SYMBOL).as_pointer_value(),
+        context.bool_type().const_all_ones(),
+    ).unwrap();
+    let text_only = HirExpr::Call(
+        Box::new(HirExpr::Var("@@thaw_trusted_exception_text".into())),
+        vec![HirExpr::Lit(HirLit::Str("plain finalizer text".into()))],
+    );
+
+    compiler.compile_throw_text(&text_only).unwrap();
+    let ir = compiler.print_to_string();
+    let probe_body = llvm_function_body(&ir, "@probe(");
+    let descriptor_stores = stores_to_global(&probe_body, "__thaw_pending_exception_native");
+    assert_eq!(descriptor_stores.len(), 2, "{ir}");
+    let stale_descriptor_operand = pointer_store_source_operand(
+        descriptor_stores[0], "__thaw_pending_exception_native",
+    );
+    assert_eq!(stale_descriptor_operand.matches('@').count(), 1, "{ir}");
+    assert!(stale_descriptor_operand.contains("@stale_descriptor"), "{ir}");
+    assert!(descriptor_stores[1].contains("store ptr null, ptr @__thaw_pending_exception_native,"), "{ir}");
+    for global in ["__thaw_pending_exception_object", "__thaw_pending_exception_aggregate_errors"] {
+        let stores = stores_to_global(&probe_body, global);
+        assert!(stores.first().is_some_and(|line| line.contains("@stale_")), "{global}: {ir}");
+        assert!(stores.last().is_some_and(|line| line.contains("store ptr null")), "{global}: {ir}");
+    }
+    let tag_stores = stores_to_global(&probe_body, "__thaw_pending_exception_value_tag");
+    assert!(tag_stores.first().is_some_and(|line| line.contains("store i64 99")), "{ir}");
+    assert!(tag_stores.last().is_some_and(|line|
+        line.contains("store i64 4, ptr @__thaw_pending_exception_value_tag,")
+    ), "text-only throw must become the active String packet:\n{ir}");
+    let f64_stores = stores_to_global(&probe_body, "__thaw_pending_exception_f64");
+    assert!(f64_stores.first().is_some_and(|line| line.contains("8.5")), "{ir}");
+    assert!(f64_stores.last().is_some_and(|line|
+        line.contains("store double 0.000000e+00, ptr @__thaw_pending_exception_f64,")
+    ), "String packet retained stale f64 payload:\n{ir}");
+    let i64_stores = stores_to_global(&probe_body, "__thaw_pending_exception_i64");
+    assert!(i64_stores.first().is_some_and(|line| line.contains("store i64 77")), "{ir}");
+    assert!(i64_stores.last().is_some_and(|line|
+        line.contains("store i64 0, ptr @__thaw_pending_exception_i64,")
+    ), "String packet retained stale i64 payload:\n{ir}");
+    let bool_stores = stores_to_global(&probe_body, "__thaw_pending_exception_bool");
+    assert!(bool_stores.first().is_some_and(|line| line.contains("store i1 true")), "{ir}");
+    assert!(bool_stores.last().is_some_and(|line|
+        line.contains("ptr @__thaw_pending_exception_bool,") &&
+            (line.contains("store i1 false") || line.contains("store i1 0"))
+    ), "String packet retained stale boolean payload:\n{ir}");
+    let text_stores = stores_to_global(&probe_body, "__thaw_pending_exception_native_text");
+    assert!(text_stores.first().is_some_and(|line| line.contains("@stale_native_text")), "{ir}");
+    assert!(text_stores.last().is_some_and(|line|
+        !line.contains("store ptr null") && !line.contains("@stale_native_text")
+    ), "trusted finalizer string was not republished:\n{ir}");
+}
+
+#[test]
+fn blocking_and_async_exception_handoffs_copy_native_descriptor_before_release() {
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "native_promise_reason_handoffs");
+    compiler.declare_runtime_builtins();
+    compiler.declare_exception_state();
+    let function = compiler.module.add_function(
+        "probe",
+        context.void_type().fn_type(&[], false),
+        None,
+    );
+    let entry = context.append_basic_block(function, "entry");
+    compiler.builder.position_at_end(entry);
+    let pointer = context.ptr_type(AddressSpace::default());
+    let promise = compiler.builder.build_global_string_ptr("rejected Promise", "promise")
+        .unwrap().as_pointer_value();
+    let error = compiler.builder.build_global_string_ptr("pending reason", "reason")
+        .unwrap().as_pointer_value();
+    compiler.builder.build_store(compiler.pending_exception().as_pointer_value(), error).unwrap();
+    compiler.copy_blocking_promise_exception_metadata(promise).unwrap();
+    compiler.builder.build_call(
+        compiler.module.get_function("thaw_promise_destroy").unwrap(),
+        &[promise.into()], "destroy_after_metadata_copy",
+    ).unwrap();
+
+    // Give the shared active-async exception trampoline one tracked stack
+    // owner. Its rejection call must attach the descriptor before the pending
+    // state is cleared and before the runtime cleanup block can release it.
+    let stack_owner = compiler.builder.build_alloca(pointer, "async_stack_owner").unwrap();
+    compiler.builder.build_store(stack_owner, pointer.const_null()).unwrap();
+    compiler.register_stack_promise_slot(stack_owner, "async_stack_owner").unwrap();
+    let slot_flag = compiler.stack_promise_slots[&stack_owner];
+    compiler.builder.build_store(slot_flag, context.bool_type().const_int(1, false)).unwrap();
+    compiler.builder.build_store(compiler.pending_exception_native().as_pointer_value(), error).unwrap();
+    compiler.active_async_completion = Some(promise);
+    compiler.branch_on_pending_exception().unwrap();
+
+    let ir = compiler.print_to_string();
+    let probe_body = llvm_function_body(&ir, "@probe(");
+
+    // Blocking-await metadata is copied in one call block before its explicit
+    // destroy call. Restrict matching to the generated probe's `entry` block
+    // so runtime declarations cannot satisfy either side of the ordering.
+    let entry_body = llvm_named_block_body(&probe_body, "entry");
+    let getter_line = entry_body.lines().find(|line|
+        line.contains("call ptr @thaw_promise_exception_native(") && line.contains("@promise")
+    ).unwrap_or_else(|| panic!("blocking descriptor getter call missing:\n{entry_body}"));
+    let getter = entry_body.lines().position(|line| line == getter_line).unwrap();
+    let getter_value = getter_line.split_once('=').unwrap().0.trim();
+    let copied_descriptor = format!(
+        "store ptr {getter_value}, ptr @__thaw_pending_exception_native,",
+    );
+    let copy = entry_body.lines().position(|line|
+        line.contains(&copied_descriptor)
+    ).unwrap_or_else(|| panic!("blocking descriptor was not copied into pending state:\n{entry_body}"));
+    let destroy = entry_body.lines().position(|line|
+        line.contains("call void @thaw_promise_destroy(") && line.contains("@promise")
+    ).unwrap_or_else(|| panic!("explicit blocking Promise destroy call missing:\n{entry_body}"));
+    assert!(getter < copy && copy < destroy, "blocking descriptor copy must precede release:\n{entry_body}");
+
+    // Active-async rejection is issued only inside `propagate_exception`;
+    // after that call the pending globals are cleared and control reaches a
+    // release block. Compare instructions and the actual local CFG edge, not
+    // declarations or text from unrelated functions/basic blocks.
+    let propagate = llvm_named_block_body(&probe_body, "propagate_exception");
+    let reject = propagate.lines().position(|line|
+        line.contains("call i8 @thaw_promise_reject_typed_with_native_provenance(")
+            && line.contains("%pending_native_exception_descriptor")
+    ).unwrap_or_else(|| panic!("active-async provenance reject call missing:\n{propagate}"));
+    let pending_clear = propagate.lines().position(|line|
+        line.contains("store ptr null, ptr @__thaw_pending_exception,")
+    ).unwrap_or_else(|| panic!("pending exception was not cleared after handoff:\n{propagate}"));
+    let native_clear = propagate.lines().position(|line|
+        line.contains("store ptr null, ptr @__thaw_pending_exception_native,")
+    )
+        .unwrap_or_else(|| panic!("native descriptor was not cleared after handoff:\n{propagate}"));
+    assert!(reject < pending_clear, "reject must own the reason before pending state clears:\n{propagate}");
+    assert!(reject < native_clear, "reject must attach the descriptor before it is cleared:\n{propagate}");
+    assert!(propagate.contains("label %release_stack_promise"),
+        "cleanup release block is not reachable from the rejection path:\n{propagate}");
+    let release = llvm_named_block_body(&probe_body, "release_stack_promise");
+    assert!(release.lines().any(|line|
+        line.contains("call void @thaw_promise_destroy(")
+    ), "reachable cleanup release block must contain the Promise destroy call:\n{release}");
 }

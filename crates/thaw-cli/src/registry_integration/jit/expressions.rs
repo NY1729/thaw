@@ -1656,13 +1656,18 @@ macro_rules! jit_expressions {
                 let mut operands = Vec::new();
                 flatten_nullish(expression, &mut operands);
                 let mut selected = Vec::new();
+                let last = operands.pop()?;
                 encode_expression(
-                    operands.pop()?,
+                    last,
                     parameters,
                     locals,
                     context,
                     &mut selected,
                 )?;
+                // A boolean fallback literal is a numeric constant until marked.
+                if boolean_literal(last) {
+                    selected.push("asbool".into());
+                }
                 while let Some(operand) = operands.pop() {
                     let fallback = selected;
                     if let Some((presence, value)) = optional_tokens(operand, parameters) {

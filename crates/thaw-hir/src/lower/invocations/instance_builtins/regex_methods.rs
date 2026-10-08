@@ -96,9 +96,12 @@ impl<'a> FnLowerer<'a> {
             HirExpr::Var(receiver_name.to_string()),
             regex_type.clone(),
         )?;
-        let sentinel = HirExpr::JsonObjectLit(
-            vec![("__thaw_regexp__".to_string(), wrapped)],
-            HirType::Json,
+        let sentinel = HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_json_brand_wrapper".into())),
+            vec![HirExpr::JsonObjectLit(
+                vec![("__thaw_regexp__".to_string(), wrapped)],
+                HirType::Json,
+            )],
         );
         Ok(HirExpr::Block(vec![
             HirStmt::Let(result_name.clone(), result_type.clone(), method_result),

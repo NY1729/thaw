@@ -775,7 +775,7 @@ fn compiles_utf16_string_search_methods() {
     "#;
     assert_eq!(
         compile_and_run(source, "string_search"),
-        "2\n3\ntrue\ntrue\ntrue\ntrue\n5\ntrue\ntrue\ntrue\nreceiver\nneedle\nposition\n4\n3\n0\n0\n5\n0\nreceiver\nawaited-needle\n4\nawaited-text\ntrue\n"
+        "2\n3\ntrue\ntrue\ntrue\ntrue\n5\ntrue\ntrue\ntrue\nreceiver\nneedle\nposition\n4\n3\n0\n0\n5\n5\nreceiver\nawaited-needle\n4\nawaited-text\ntrue\n"
     );
 }
 
@@ -3689,7 +3689,9 @@ fn non_arrow_json_receiver_enables_arena_tracing_before_module_init() {
     let source = r#"
         function __thaw_module_init(): void {}
         function main(): void {
-            const read = function(this: Json): number { return 1; };
+            // The receiver must be read: a `this: Json` parameter the body
+            // never touches is dropped and no owned Json receiver exists.
+            const read = function(this: Json): number { return typeof this === "number" ? 1 : 0; };
             console.log(read.call(3));
         }
     "#;

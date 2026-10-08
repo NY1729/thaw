@@ -487,7 +487,7 @@ fn compiles_native_array_find_and_find_last() {
     "#;
     assert_eq!(
         compile_and_run(source, "array_find"),
-        "2\nundefined\nb\nfalse\n{\"value\":2}\nreceiver\nthisArg\n2\n3\n2\nundefined\nundefined\nawaited\na\ntrue\ntrue\nundefined\n42\nundefined\n"
+        "2\nundefined\nb\nfalse\n{ value: 2 }\nreceiver\nthisArg\n2\n3\n2\nundefined\nundefined\nawaited\na\ntrue\ntrue\nundefined\n42\nundefined\n"
     );
 }
 
@@ -535,7 +535,7 @@ fn compiles_native_array_at() {
     "#;
     assert_eq!(
         compile_and_run(source, "array_at"),
-        "1\n3\n2\n1\nundefined\nundefined\nundefined\nb\nfalse\n{\"value\":1}\nundefined\nreceiver\nindex\n3\nawaited receiver\nawaited index\na\nundefined undefined 3\n"
+        "1\n3\n2\n1\nundefined\nundefined\nundefined\nb\nfalse\n{ value: 1 }\nundefined\nreceiver\nindex\n3\nawaited receiver\nawaited index\na\nundefined undefined 3\n"
     );
 }
 

@@ -1,3 +1,24 @@
+fn collect_return_values<'a>(stmts: &'a [HirStmt], out: &mut Vec<&'a HirExpr>, bare: &mut bool) {
+    for stmt in stmts {
+        match stmt {
+            HirStmt::Return(Some(value)) => out.push(value),
+            HirStmt::Return(None) => *bare = true,
+            HirStmt::If(_, then_body, else_body) => {
+                collect_return_values(then_body, out, bare);
+                collect_return_values(else_body, out, bare);
+            }
+            HirStmt::While(_, body) => collect_return_values(body, out, bare),
+            HirStmt::Finally(body, _) => collect_return_values(body, out, bare),
+            HirStmt::Try(body, _, catch_body, _) => {
+                collect_return_values(body, out, bare);
+                collect_return_values(catch_body, out, bare);
+            }
+            _ => {}
+        }
+    }
+}
+
+
 impl<'a> FnLowerer<'a> {
     fn save_narrowings(&self) -> NarrowingSnapshot {
         NarrowingSnapshot {
@@ -60,9 +81,19 @@ impl<'a> FnLowerer<'a> {
         hir_name
     }
 
+    fn bind_decl_local(&mut self, source_name: &str, ty: HirType, immutable: bool) -> Symbol {
+        let hir_name = self.bind_local(source_name, ty);
+        if immutable {
+            self.immutable_bindings.insert(hir_name.clone());
+        }
+        hir_name
+    }
+
     // The name marks a binding whose cell must be replaced on every for-loop
     // iteration, including when an async function resumes in a new frame call.
     fn bind_for_iteration_local(&mut self, source_name: &str, ty: HirType) -> Symbol {
+        let outer_name = self.resolve_binding(source_name);
+        let immutable = self.immutable_bindings.contains(&outer_name);
         let hir_name = format!("@@thaw_for_iteration_{}", self.next_binding);
         self.next_binding += 1;
         self.scope.insert(hir_name.clone(), ty);
@@ -71,6 +102,9 @@ impl<'a> FnLowerer<'a> {
             .entry(source_name.to_string())
             .or_default()
             .push(hir_name.clone());
+        if immutable {
+            self.immutable_bindings.insert(hir_name.clone());
+        }
         hir_name
     }
 
@@ -385,29 +419,9 @@ impl<'a> FnLowerer<'a> {
     }
 
     fn infer_return_type(&self, body: &[HirStmt]) -> Result<HirType, String> {
-        fn collect<'a>(stmts: &'a [HirStmt], out: &mut Vec<&'a HirExpr>, bare: &mut bool) {
-            for stmt in stmts {
-                match stmt {
-                    HirStmt::Return(Some(value)) => out.push(value),
-                    HirStmt::Return(None) => *bare = true,
-                    HirStmt::If(_, then_body, else_body) => {
-                        collect(then_body, out, bare);
-                        collect(else_body, out, bare);
-                    }
-                    HirStmt::While(_, body) => collect(body, out, bare),
-                    HirStmt::Finally(body, _) => collect(body, out, bare),
-                    HirStmt::Try(body, _, catch_body, _) => {
-                        collect(body, out, bare);
-                        collect(catch_body, out, bare);
-                    }
-                    _ => {}
-                }
-            }
-        }
-
         let mut values = Vec::new();
         let mut bare = false;
-        collect(body, &mut values, &mut bare);
+        collect_return_values(body, &mut values, &mut bare);
         if values.is_empty() {
             return Ok(HirType::Void);
         }
@@ -1081,6 +1095,17 @@ impl<'a> FnLowerer<'a> {
             .copied()
             .filter(|index| class_type_has_identity(&elements[*index], class.sym.as_ref()))
             .collect::<Vec<_>>();
+        // Same-layout ordinary objects can fail the runtime identity check, so
+        // the matching members stay possible in the false branch only when
+        // another allowed member shares their physical layout (identity marker
+        // aside); with distinct layouts the false branch is exactly the rest.
+        let layout = |index: usize| match &elements[index] {
+            HirType::Object(fields) => HirType::Object(fields.iter().skip(1).cloned().collect()),
+            other => other.clone(),
+        };
+        let layouts_collide = allowed.iter().filter(|index| !matching.contains(index)).any(|other| {
+            matching.iter().any(|matched| layout(*matched) == layout(*other))
+        });
         (!matching.is_empty()).then(|| {
             (
                 vec![UnionNarrowingTarget {
@@ -1090,9 +1115,7 @@ impl<'a> FnLowerer<'a> {
                     elements: elements.clone(),
                 }],
                 true,
-                // Same-layout ordinary objects can fail the runtime identity
-                // check. Keep this member possible in the false branch.
-                false,
+                !layouts_collide,
             )
         })
     }
@@ -1410,4 +1433,109 @@ impl<'a> FnLowerer<'a> {
         lowered
     }
 
+}
+
+#[cfg(test)]
+mod thaw_binding_helper_controls {
+    use super::*;
+
+    #[test]
+    fn thaw_binding_helper_declaration_flags_follow_resolved_symbols() {
+        let signatures = HashMap::<Symbol, FnSignature>::new();
+        let interfaces = HashMap::<Symbol, HirType>::new();
+        let generic_interfaces = GenericInterfaces::new();
+        let enum_values = EnumValues::new();
+        let enum_reverse_values = EnumReverseValues::new();
+        let mut lowerer = FnLowerer::new(
+            &signatures,
+            &interfaces,
+            &generic_interfaces,
+            &enum_values,
+            &enum_reverse_values,
+            HirType::Void,
+            None,
+        );
+
+        let outer_const = lowerer.bind_decl_local("value", HirType::F64, true);
+        assert_eq!(lowerer.resolve_binding("value"), outer_const);
+        assert!(lowerer.immutable_bindings.contains(&outer_const));
+
+        let mutable_shadow = lowerer.bind_decl_local("value", HirType::F64, false);
+        assert_ne!(mutable_shadow, outer_const);
+        assert_eq!(lowerer.resolve_binding("value"), mutable_shadow);
+        assert!(lowerer.immutable_bindings.contains(&outer_const));
+        assert!(!lowerer.immutable_bindings.contains(&mutable_shadow));
+
+        let const_shadow = lowerer.bind_decl_local("value", HirType::F64, true);
+        assert_ne!(const_shadow, mutable_shadow);
+        assert_eq!(lowerer.resolve_binding("value"), const_shadow);
+        assert!(lowerer.immutable_bindings.contains(&outer_const));
+        assert!(!lowerer.immutable_bindings.contains(&mutable_shadow));
+        assert!(lowerer.immutable_bindings.contains(&const_shadow));
+
+        // `using` is intentionally routed through a synthetic `const` declaration.
+        let using_binding = lowerer.bind_decl_local("resource", HirType::Json, true);
+        assert!(lowerer.immutable_bindings.contains(&using_binding));
+
+        let temporary = lowerer.bind_local("temporary", HirType::Bool);
+        assert_eq!(lowerer.resolve_binding("temporary"), temporary);
+        assert!(!lowerer.immutable_bindings.contains(&temporary));
+    }
+
+    #[test]
+    fn thaw_binding_helper_iteration_cell_inherits_only_current_outer_immutability() {
+        let signatures = HashMap::<Symbol, FnSignature>::new();
+        let interfaces = HashMap::<Symbol, HirType>::new();
+        let generic_interfaces = GenericInterfaces::new();
+        let enum_values = EnumValues::new();
+        let enum_reverse_values = EnumReverseValues::new();
+        let mut lowerer = FnLowerer::new(
+            &signatures,
+            &interfaces,
+            &generic_interfaces,
+            &enum_values,
+            &enum_reverse_values,
+            HirType::Void,
+            None,
+        );
+
+        let const_outer = lowerer.bind_decl_local("const_index", HirType::F64, true);
+        let const_inner = lowerer.bind_for_iteration_local("const_index", HirType::F64);
+        assert_ne!(const_inner, const_outer);
+        assert!(const_inner.starts_with("@@thaw_for_iteration_"));
+        assert_eq!(lowerer.resolve_binding("const_index"), const_inner);
+        assert!(lowerer.immutable_bindings.contains(&const_outer));
+        assert!(lowerer.immutable_bindings.contains(&const_inner));
+
+        let shadowed_const = lowerer.bind_decl_local("shadowed_index", HirType::F64, true);
+        let current_mutable_shadow =
+            lowerer.bind_decl_local("shadowed_index", HirType::F64, false);
+        assert_ne!(shadowed_const, current_mutable_shadow);
+        let mutable_shadow_inner =
+            lowerer.bind_for_iteration_local("shadowed_index", HirType::F64);
+        assert_eq!(lowerer.resolve_binding("shadowed_index"), mutable_shadow_inner);
+        assert!(lowerer.immutable_bindings.contains(&shadowed_const));
+        assert!(!lowerer.immutable_bindings.contains(&current_mutable_shadow));
+        assert!(!lowerer.immutable_bindings.contains(&mutable_shadow_inner));
+
+        let mutable_source =
+            lowerer.bind_decl_local("renamed_const_index", HirType::F64, false);
+        let renamed_const =
+            lowerer.bind_decl_local("renamed_const_index", HirType::F64, true);
+        assert_ne!(renamed_const, "renamed_const_index");
+        assert_ne!(renamed_const, mutable_source);
+        let renamed_const_inner =
+            lowerer.bind_for_iteration_local("renamed_const_index", HirType::F64);
+        assert_eq!(lowerer.resolve_binding("renamed_const_index"), renamed_const_inner);
+        assert!(lowerer.immutable_bindings.contains(&renamed_const));
+        assert!(lowerer.immutable_bindings.contains(&renamed_const_inner));
+        assert!(!lowerer.immutable_bindings.contains(&mutable_source));
+
+        let let_outer = lowerer.bind_decl_local("let_index", HirType::F64, false);
+        let let_inner = lowerer.bind_for_iteration_local("let_index", HirType::F64);
+        assert_ne!(let_inner, let_outer);
+        assert_eq!(lowerer.resolve_binding("let_index"), let_inner);
+        assert!(!lowerer.immutable_bindings.contains(&let_outer));
+        assert!(!lowerer.immutable_bindings.contains(&let_inner));
+    }
 }

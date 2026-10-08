@@ -191,10 +191,13 @@ fn bare_imports_automatically_resolve_registry_packages() {
         "{}",
         String::from_utf8_lossy(&result.stderr)
     );
+    // The old "`math-kit::fail` threw:" prefix was a Thaw-only decoration; a caught
+    // error prints its bare message (Node prints a stack trace here, which a native
+    // binary has no equivalent of).
     assert_eq!(
             String::from_utf8_lossy(&result.stdout),
             format!(
-                "42\n32\n49\nhello thaw\ntrue\ntrue\n42\n3\n46\nfile://{}\nfile://{}?raw\n`math-kit::fail` threw: typed dynamic failed\n",
+                "42\n32\n49\nhello thaw\ntrue\ntrue\n42\n3\n46\nfile://{}\nfile://{}?raw\ntyped dynamic failed\n",
                 registry.join("math-kit/bundle.js").display(),
                 registry
                     .join("math-kit/subpaths/advanced/bundle.js")

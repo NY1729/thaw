@@ -49,7 +49,7 @@ pub unsafe extern "C" fn thaw_template_strings_raw(cooked: *const u8) -> *mut u8
 }
 
 #[cfg(test)]
-mod reset_tests {
+mod template_strings_reset_tests {
     use super::*;
 
     #[test]

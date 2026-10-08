@@ -11,9 +11,11 @@ impl<'ctx> HirCompiler<'ctx> {
         self.variables.insert(name.to_string(), (cell, llvm_ty));
         self.variable_hir_types.insert(name.to_string(), ty.clone());
         let value = self.compile_expr(closure)?;
-        self.builder
-            .build_store(cell, value)
-            .map_err(|error| error.to_string())?;
+        if matches!(ty, HirType::Promise(_)) {
+            self.builder.build_store(cell, self.context.ptr_type(AddressSpace::default()).const_null())
+                .map_err(|error| error.to_string())?;
+        }
+        self.store_arena_promise_slot(cell, cell, ty, value)?;
         Ok(value)
     }
 
@@ -50,6 +52,7 @@ impl<'ctx> HirCompiler<'ctx> {
         let Some((variable_cell, ty)) = self.variables.get(name).copied() else {
             return Ok(());
         };
+        let stack_promise_flag = self.stack_promise_slots.get(&variable_cell).copied();
         let frame_backed = self.async_frame_cells.contains(&variable_cell);
         if self.arena_variables.contains(name)
             || self.global_variables.contains_key(name)
@@ -57,17 +60,21 @@ impl<'ctx> HirCompiler<'ctx> {
         {
             return Ok(());
         }
-        let promotion_scope = self
-            .loop_promotion_scopes
-            .iter()
-            .find(|(_, variables)| variables.contains(name))
-            .map(|(preheader, _)| *preheader);
+        let promotion_scope = self.loop_promotion_scopes.iter().enumerate()
+            .find(|(_, scope)| scope.variables.contains(name))
+            .map(|(index, scope)| (
+                index,
+                scope.preheader,
+                scope.catches.clone(),
+                scope.stack_promise_slots.clone(),
+                scope.outer_loops.clone(),
+            ));
         let cell = if promotion_scope.is_none() && !self.loop_promotion_scopes.is_empty() {
             self.build_arena_cell(&self.builder, ty, name)?
         } else {
             self.allocate_arena_cell(ty, name)?
         };
-        let promotion_builder = promotion_scope.map(|preheader| {
+        let promotion_builder = promotion_scope.as_ref().map(|(_, preheader, _, _, _)| {
             let builder = self.context.create_builder();
             builder.position_before(&preheader.get_terminator().unwrap());
             builder
@@ -110,9 +117,94 @@ impl<'ctx> HirCompiler<'ctx> {
         } else {
             None
         };
-        builder
-            .build_store(cell, value)
-            .map_err(|error| error.to_string())?;
+        if matches!(hir_ty, HirType::Promise(_)) {
+            builder.build_store(cell, self.context.ptr_type(AddressSpace::default()).const_null())
+                .map_err(|error| error.to_string())?;
+            if let (Some((scope_index, preheader, saved_catches, saved_slots, saved_loops)), Some(promotion_builder)) =
+                (promotion_scope, promotion_builder)
+            {
+                // Split the exact loop-entry edge so the checked retain runs once
+                // before the loop. The selected successor is compile_while's
+                // memory-variable header, which currently has no PHIs.
+                let terminator = preheader.get_terminator()
+                    .ok_or("loop promotion preheader has no terminator")?;
+                terminator.remove_from_basic_block();
+                let original_builder = std::mem::replace(&mut self.builder, promotion_builder);
+                let original_catches = self.replace_catch_context(saved_catches);
+                let original_slots = std::mem::replace(&mut self.stack_promise_slots, saved_slots);
+                let original_loops = std::mem::replace(&mut self.loop_scopes, saved_loops);
+                self.builder.position_at_end(preheader);
+                let split_result = (|| {
+                    self.store_arena_promise_slot(cell, cell, hir_ty, value)?;
+                    if let Some(flag) = stack_promise_flag {
+                        self.release_stack_promise_after_promotion(variable_cell, flag)?;
+                    }
+                    let ready = self.builder.get_insert_block()
+                        .ok_or("checked Promise promotion has no ready block")?;
+                    self.builder.insert_instruction(&terminator, None);
+                    for scope in &mut self.loop_promotion_scopes {
+                        // Every saved preheader must reflect the consumed
+                        // stack owner. Only scopes sharing this predecessor
+                        // follow the new success edge.
+                        scope.stack_promise_slots.remove(&variable_cell);
+                        for catch in &mut scope.catches.scopes {
+                            catch.promise_boundary.remove(&variable_cell);
+                        }
+                        for loop_scope in &mut scope.outer_loops {
+                            loop_scope.promise_boundary.remove(&variable_cell);
+                        }
+                        if scope.preheader == preheader {
+                            scope.preheader = ready;
+                        }
+                    }
+                    Ok::<(), String>(())
+                })();
+                if split_result.is_err() {
+                    if preheader.get_terminator().is_none() {
+                        let restore_builder = self.context.create_builder();
+                        restore_builder.position_at_end(preheader);
+                        restore_builder.insert_instruction(&terminator, None);
+                    }
+                }
+                self.builder = original_builder;
+                self.replace_catch_context(original_catches);
+                self.stack_promise_slots = original_slots;
+                self.loop_scopes = original_loops;
+                if split_result.is_ok() {
+                    self.stack_promise_slots.remove(&variable_cell);
+                    for catch in &mut self.catch_stack {
+                        catch.promise_boundary.remove(&variable_cell);
+                    }
+                    for loop_scope in &mut self.loop_scopes {
+                        loop_scope.promise_boundary.remove(&variable_cell);
+                    }
+                    // A preheader promotion runs before every active nested
+                    // loop; no later cleanup context may claim the consumed
+                    // physical owner.
+                    for scope in &mut self.loop_promotion_scopes {
+                        scope.stack_promise_slots.remove(&variable_cell);
+                    }
+                } else {
+                    // Restore the scope being emitted exactly on codegen
+                    // failure. Its partially emitted blocks are abandoned
+                    // with the enclosing compilation error.
+                    if let (Some(flag), Some(scope)) = (
+                        stack_promise_flag,
+                        self.loop_promotion_scopes.get_mut(scope_index),
+                    ) {
+                        scope.stack_promise_slots.insert(variable_cell, flag);
+                    }
+                }
+                split_result?;
+            } else {
+                self.store_arena_promise_slot(cell, cell, hir_ty, value)?;
+                if let Some(flag) = stack_promise_flag {
+                    self.release_stack_promise_after_promotion(variable_cell, flag)?;
+                }
+            }
+        } else {
+            builder.build_store(cell, value).map_err(|error| error.to_string())?;
+        }
         if let Some(claim) = pending_claim {
             self.pending_js_capture_claims.insert(cell, claim);
         }
@@ -252,22 +344,18 @@ impl<'ctx> HirCompiler<'ctx> {
             .map_err(|error| format!("async lambda `{name}`: {error}"))?;
 
         let saved_variables = std::mem::take(&mut self.variables);
+        let saved_scope_context = self.take_codegen_scope_context();
         let saved_for_iteration_frame_slots = std::mem::take(&mut self.for_iteration_frame_slots);
         let saved_catch_native_text = std::mem::take(&mut self.catch_native_text);
         let saved_variable_hir_types = std::mem::take(&mut self.variable_hir_types);
         let saved_arena_variables = std::mem::take(&mut self.arena_variables);
-        let saved_catch_stack = std::mem::take(&mut self.catch_stack);
-        let saved_loop_stack = std::mem::take(&mut self.loop_stack);
-        let saved_async_completion = self.active_async_completion.take();
         let compiled = self.compile_function_body(&lifted);
         self.variables = saved_variables;
+        self.replace_codegen_scope_context(saved_scope_context);
         self.for_iteration_frame_slots = saved_for_iteration_frame_slots;
         self.catch_native_text = saved_catch_native_text;
         self.variable_hir_types = saved_variable_hir_types;
         self.arena_variables = saved_arena_variables;
-        self.catch_stack = saved_catch_stack;
-        self.loop_stack = saved_loop_stack;
-        self.active_async_completion = saved_async_completion;
         self.builder.position_at_end(parent_block);
         compiled.map_err(|error| format!("async lambda `{name}`: {error}"))?;
 
@@ -386,10 +474,9 @@ impl<'ctx> HirCompiler<'ctx> {
         name: &str,
     ) -> Result<FunctionValue<'ctx>, String> {
         let parent = self.builder.get_insert_block().ok_or("this entry needs a parent block")?;
-        let outer_catch_stack = std::mem::take(&mut self.catch_stack);
-        let outer_async_completion = self.active_async_completion.take();
         let entry_fn = self.module.add_function(&format!("{name}__thaw_this_adapter"),
             self.this_entry_function_type(visible, ret)?, Some(Linkage::Internal));
+        let adapter_result = isolated_codegen_scope!(self, {
         let entry = self.context.append_basic_block(entry_fn, "entry");
         self.builder.position_at_end(entry);
         let tagged = entry_fn.get_nth_param(1).unwrap().into_struct_value();
@@ -405,10 +492,10 @@ impl<'ctx> HirCompiler<'ctx> {
         if *ret == HirType::Void { self.builder.build_return(None).map_err(|error| error.to_string())?; }
         else { self.builder.build_return(Some(&call.try_as_basic_value().basic()
             .ok_or("non-arrow this entry returned no value")?)).map_err(|error| error.to_string())?; }
-        self.catch_stack = outer_catch_stack;
-        self.active_async_completion = outer_async_completion;
-        self.builder.position_at_end(parent);
         Ok(entry_fn)
+        });
+        self.builder.position_at_end(parent);
+        adapter_result
     }
 
     /// Query only the private native-object wrapper metadata. The returned
@@ -466,7 +553,7 @@ impl<'ctx> HirCompiler<'ctx> {
             // A native fixed object crosses the graph callback boundary as
             // a borrowed Host Json. Its private wrapper token is checked at
             // call time before recovering the original arena pointer.
-            HirType::Object(_) => vec![7],
+            HirType::Object(_) => vec![7, 9],
             HirType::Optional(inner) => {
                 let mut tags = Self::non_arrow_receiver_tags(inner)?;
                 if !tags.contains(&0) { tags.push(0); }
@@ -500,12 +587,12 @@ impl<'ctx> HirCompiler<'ctx> {
     }
 
     fn reject_non_arrow_receiver(&mut self) -> Result<(), String> {
-        let saved_catch_stack = std::mem::take(&mut self.catch_stack);
+        let saved_catch_context = self.take_catch_context();
         let saved_async_completion = self.active_async_completion.take();
-        self.compile_throw_type_error("Incompatible function receiver")?;
-        self.catch_stack = saved_catch_stack;
+        let thrown = self.compile_throw_type_error("Incompatible function receiver");
+        self.replace_catch_context(saved_catch_context);
         self.active_async_completion = saved_async_completion;
-        Ok(())
+        thrown
     }
 
     fn compile_non_arrow_receiver_value(
@@ -518,6 +605,22 @@ impl<'ctx> HirCompiler<'ctx> {
         match receiver {
             HirType::Object(fields) if !fields.first().is_some_and(|(name, _)|
                     name.starts_with("__thaw_class_identity_\u{1e}")) => {
+                let ptr_type = self.context.ptr_type(AddressSpace::default());
+                let is_native = self.builder.build_int_compare(IntPredicate::EQ, kind,
+                    self.context.i8_type().const_int(9, false), "native_receiver_is_direct")
+                    .map_err(|error| error.to_string())?;
+                let direct = self.context.append_basic_block(entry_fn, "native_receiver_direct");
+                let check_host = self.context.append_basic_block(entry_fn, "native_receiver_check_host");
+                let join = self.context.append_basic_block(entry_fn, "native_receiver_join");
+                self.builder.build_conditional_branch(is_native, direct, check_host)
+                    .map_err(|error| error.to_string())?;
+                // Same-layout native call sites pass the arena pointer directly
+                // (the lowering converts any other layout to a Host `Json`).
+                self.builder.position_at_end(direct);
+                let direct_pointer = self.builder.build_int_to_ptr(word, ptr_type, "native_receiver_direct_pointer")
+                    .map_err(|error| error.to_string())?;
+                self.builder.build_unconditional_branch(join).map_err(|error| error.to_string())?;
+                self.builder.position_at_end(check_host);
                 let is_host = self.builder.build_int_compare(IntPredicate::EQ, kind,
                     self.context.i8_type().const_int(7, false), "native_receiver_is_host")
                     .map_err(|error| error.to_string())?;
@@ -527,8 +630,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 self.builder.build_conditional_branch(is_host, host, rejected)
                     .map_err(|error| error.to_string())?;
                 self.builder.position_at_end(host);
-                let json = self.builder.build_int_to_ptr(word,
-                    self.context.ptr_type(AddressSpace::default()), "native_receiver_json")
+                let json = self.builder.build_int_to_ptr(word, ptr_type, "native_receiver_json")
                     .map_err(|error| error.to_string())?;
                 let (pointer, present) = self.query_native_object_receiver(json, fields)?;
                 self.builder.build_conditional_branch(present, accepted, rejected)
@@ -536,9 +638,18 @@ impl<'ctx> HirCompiler<'ctx> {
                 self.builder.position_at_end(rejected);
                 self.reject_non_arrow_receiver()?;
                 self.builder.position_at_end(accepted);
-                return self.builder.build_int_to_ptr(pointer,
-                    self.context.ptr_type(AddressSpace::default()), "native_receiver_original_pointer")
-                    .map(Into::into).map_err(|error| error.to_string());
+                let host_pointer = self.builder.build_int_to_ptr(pointer, ptr_type, "native_receiver_original_pointer")
+                    .map_err(|error| error.to_string())?;
+                let accepted_exit = self.builder.get_insert_block().unwrap();
+                self.builder.build_unconditional_branch(join).map_err(|error| error.to_string())?;
+                self.builder.position_at_end(join);
+                let selected = self.builder.build_phi(ptr_type, "native_receiver_pointer")
+                    .map_err(|error| error.to_string())?;
+                selected.add_incoming(&[
+                    (&direct_pointer as &dyn inkwell::values::BasicValue<'ctx>, direct),
+                    (&host_pointer as &dyn inkwell::values::BasicValue<'ctx>, accepted_exit),
+                ]);
+                return Ok(selected.as_basic_value());
             }
             HirType::Json => return self.compile_non_arrow_json_value(entry_fn, kind, word).map(Into::into),
             HirType::Optional(inner) | HirType::Nullable(inner) | HirType::Nullish(inner) => {
@@ -924,11 +1035,12 @@ impl<'ctx> HirCompiler<'ctx> {
             incoming.push((value, exit));
         }
         self.builder.position_at_end(rejected);
-        let saved_catch_stack = std::mem::take(&mut self.catch_stack);
+        let saved_catch_context = self.take_catch_context();
         let saved_async_completion = self.active_async_completion.take();
-        self.compile_throw_type_error("Incompatible function receiver")?;
-        self.catch_stack = saved_catch_stack;
+        let thrown = self.compile_throw_type_error("Incompatible function receiver");
+        self.replace_catch_context(saved_catch_context);
         self.active_async_completion = saved_async_completion;
+        thrown?;
         self.builder.position_at_end(join);
         let selected = self.builder.build_phi(pointer, "receiver_json_value")
             .map_err(|error| error.to_string())?;
@@ -994,6 +1106,12 @@ impl<'ctx> HirCompiler<'ctx> {
         // Closure captures retain their variable cells so mutations remain
         // visible when the function value is invoked later.
         let closure = self.allocate_lambda_environment(entry, this_adapter, captures)?;
+        // Promoting a Promise capture splits the block, so the builder is no
+        // longer in the block it started in: resume after the body there.
+        let parent_block = self
+            .builder
+            .get_insert_block()
+            .ok_or("lambda must be emitted inside a function")?;
         let arena_captures = captures
             .iter()
             .filter(|capture| self.arena_variables.contains(&capture.name))
@@ -1001,13 +1119,11 @@ impl<'ctx> HirCompiler<'ctx> {
             .collect::<HashSet<_>>();
 
         let saved_variables = std::mem::take(&mut self.variables);
+        let saved_scope_context = self.take_codegen_scope_context();
         let saved_for_iteration_frame_slots = std::mem::take(&mut self.for_iteration_frame_slots);
         let saved_catch_native_text = std::mem::take(&mut self.catch_native_text);
         let saved_variable_hir_types = std::mem::take(&mut self.variable_hir_types);
         let saved_arena_variables = std::mem::replace(&mut self.arena_variables, arena_captures);
-        let saved_catch_stack = std::mem::take(&mut self.catch_stack);
-        let saved_loop_stack = std::mem::take(&mut self.loop_stack);
-        let saved_async_completion = self.active_async_completion.take();
         let result = (|| -> Result<(), String> {
             let entry = self.context.append_basic_block(function, "entry");
             self.builder.position_at_end(entry);
@@ -1056,6 +1172,9 @@ impl<'ctx> HirCompiler<'ctx> {
                 self.variables.insert(param.name.clone(), (slot, ty));
                 self.variable_hir_types
                     .insert(param.name.clone(), param.ty.clone());
+                if matches!(param.ty, HirType::Promise(_)) {
+                    self.register_stack_promise_slot(slot, &param.name)?;
+                }
             }
 
             match body {
@@ -1063,6 +1182,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     let terminated = self.compile_block(stmts)?;
                     if !terminated {
                         if *ret == HirType::Void {
+                            self.emit_stack_promise_cleanup()?;
                             self.builder
                                 .build_return(None)
                                 .map_err(|error| error.to_string())?;
@@ -1075,12 +1195,28 @@ impl<'ctx> HirCompiler<'ctx> {
                 }
                 expr => {
                     if *ret == HirType::Void {
-                        self.compile_expr(expr)?;
+                        if self.promise_expression_needs_discard(expr) {
+                            self.compile_and_discard_promise_expression(expr)?;
+                        } else {
+                            self.compile_expr(expr)?;
+                        }
+                        self.emit_stack_promise_cleanup()?;
                         self.builder
                             .build_return(None)
                             .map_err(|error| error.to_string())?;
                     } else {
-                        let value = self.compile_expr(expr)?;
+                        let value = match ret {
+                            HirType::Promise(_) => {
+                                self.compile_native_promise_result_for_return(expr, ret)?
+                            }
+                            HirType::Union(members)
+                                if members.iter().any(|member| matches!(member, HirType::Promise(_))) =>
+                            {
+                                self.compile_native_promise_result_for_return(expr, ret)?
+                            }
+                            _ => self.compile_expr(expr)?,
+                        };
+                        self.emit_stack_promise_cleanup()?;
                         self.builder
                             .build_return(Some(&value))
                             .map_err(|error| error.to_string())?;
@@ -1090,13 +1226,11 @@ impl<'ctx> HirCompiler<'ctx> {
             Ok(())
         })();
         self.variables = saved_variables;
+        self.replace_codegen_scope_context(saved_scope_context);
         self.for_iteration_frame_slots = saved_for_iteration_frame_slots;
         self.catch_native_text = saved_catch_native_text;
         self.variable_hir_types = saved_variable_hir_types;
         self.arena_variables = saved_arena_variables;
-        self.catch_stack = saved_catch_stack;
-        self.loop_stack = saved_loop_stack;
-        self.active_async_completion = saved_async_completion;
         self.builder.position_at_end(parent_block);
         result?;
         Ok(closure.into())
@@ -1285,11 +1419,12 @@ impl<'ctx> HirCompiler<'ctx> {
             self.builder.build_conditional_branch(valid, accepted, rejected)
                 .map_err(|error| error.to_string())?;
             self.builder.position_at_end(rejected);
-            let saved_catch_stack = std::mem::take(&mut self.catch_stack);
+            let saved_catch_context = self.take_catch_context();
             let saved_async_completion = self.active_async_completion.take();
-            self.compile_throw_type_error("Incompatible method receiver")?;
-            self.catch_stack = saved_catch_stack;
+            let thrown = self.compile_throw_type_error("Incompatible method receiver");
+            self.replace_catch_context(saved_catch_context);
             self.active_async_completion = saved_async_completion;
+            thrown?;
             self.builder.position_at_end(accepted);
             arguments.push(BasicMetadataValueEnum::from(receiver));
         }

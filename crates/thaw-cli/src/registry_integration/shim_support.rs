@@ -709,7 +709,7 @@ fn is_native_builtin(package: &str) -> bool {
 /// name used by constructor helpers. Unresolved imports still reserve their
 /// local name, so they cannot fall through to a different package's bare class.
 fn constructor_imports(
-    module: &swc_ecma_ast::Module,
+    module: &thaw_parser::ast::Module,
     package_qualifiers: &std::collections::HashMap<String, String>,
 ) -> (
     std::collections::HashMap<String, (String, String)>,
@@ -942,7 +942,7 @@ fn commonjs_export_name_named(
         DefaultDecl, ExportSpecifier, Expr, ModuleDecl, ModuleExportName, ModuleItem,
     };
 
-    let module = thaw_parser::parse_typescript_with_source_map_named(source, filename.clone())?.0;
+    let module = thaw_parser::parse_declarations_with_source_map_named(source, filename.clone())?.0;
     Ok(module.body.iter().find_map(|item| match item {
         ModuleItem::ModuleDecl(ModuleDecl::TsExportAssignment(export)) => {
             if let Expr::Ident(identifier) = export.expr.as_ref() {
@@ -1013,7 +1013,7 @@ fn commonjs_export_assignment_named(
 ) -> Result<Option<String>, String> {
     use thaw_parser::ast::{Expr, ModuleDecl, ModuleItem};
 
-    let module = thaw_parser::parse_typescript_with_source_map_named(source, filename.clone())?.0;
+    let module = thaw_parser::parse_declarations_with_source_map_named(source, filename.clone())?.0;
     Ok(module.body.iter().find_map(|item| match item {
         ModuleItem::ModuleDecl(ModuleDecl::TsExportAssignment(export)) => {
             if let Expr::Ident(identifier) = export.expr.as_ref() {
@@ -1053,7 +1053,7 @@ fn called_commonjs_namespace_properties_named(
     let Some(namespace) = namespace else {
         return Ok(Vec::new());
     };
-    let module = thaw_parser::parse_typescript_with_source_map_named(source, filename.clone())?.0;
+    let module = thaw_parser::parse_declarations_with_source_map_named(source, filename.clone())?.0;
     let mut names = Vec::new();
     for item in &module.body {
         let ModuleItem::Stmt(Stmt::Decl(Decl::TsModule(module_decl))) = item else {

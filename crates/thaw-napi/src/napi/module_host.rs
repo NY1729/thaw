@@ -38,10 +38,11 @@ fn register_loaded_exports(
     // An export replaced by a non-function must also retire the older
     // callable entry; shutdown uses the exports owner to unpublish callbacks.
     for (name, _) in &exported_values {
-        host.functions.remove(name);
-        if let Some(package) = package_name {
-            host.functions.remove(&format!("{package}::{name}"));
-        }
+        // A qualified load only retires its own entry, never another package's bare name.
+        match package_name {
+            Some(package) => host.functions.remove(&format!("{package}::{name}")),
+            None => host.functions.remove(name),
+        };
     }
     if let Some(package) = package_name {
         host.qualified_packages.insert(package.into());
@@ -60,6 +61,18 @@ fn register_loaded_exports(
 
 thread_local! {
     static NEXT_GRAPH_OWNER_ID: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Test helper: an `Env` with a graph owner ID, registered with `HOST` so the
+/// QuickJS Symbol/graph owner lookups can find it. The Box stays owned by
+/// `HOST.module_envs` (cleared when the test thread exits).
+#[cfg(test)]
+pub(crate) fn registered_test_env() -> &'static mut Env {
+    let mut env = Box::new(Env::new());
+    env.graph_owner_id = next_graph_owner_id().unwrap();
+    let ptr: *mut Env = &mut *env;
+    HOST.with(|host| host.borrow_mut().module_envs.push(env));
+    unsafe { &mut *ptr }
 }
 
 fn next_graph_owner_id() -> Result<u64, String> {
@@ -1833,7 +1846,7 @@ fn napi_graph_token(env: &mut Env, token: &JsonValue, nodes: &[NapiValue]) -> Re
         let source = fields.get("hdl").and_then(JsonValue::as_u64)
             .ok_or("foreign native Symbol has no JavaScript wrapper")?;
         return env.quickjs_live_values.get(&source).copied()
-            .ok_or("unretained native Symbol wrapper");
+            .ok_or_else(|| "unretained native Symbol wrapper".to_string());
     }
     if let Some(decimal) = fields.get("bi").and_then(JsonValue::as_str) {
         let (negative, words) = decimal_bigint_words(decimal)
@@ -4609,9 +4622,10 @@ unsafe fn call_value_impl(
     let (function, env) = HOST
         .with(|host| {
             let host = host.borrow();
+            let key = host.qualified_key(name, |key| host.functions.contains_key(key))?;
             Some((
-                host.functions.get(name)?.clone(),
-                host.exports.get(name)?.0 as NapiEnv,
+                host.functions.get(&key)?.clone(),
+                host.exports.get(&key)?.0 as NapiEnv,
             ))
         })
         .ok_or_else(|| format!("no such native addon function `{name}`"))?;
@@ -4709,7 +4723,11 @@ pub unsafe extern "C" fn thaw_napi_get_export_typed_result(name: *const c_char) 
 
 unsafe fn get_export_result(name: *const c_char) -> Result<u64, String> {
     let name = text(name)?;
-    if let Some(value) = HOST.with(|host| host.borrow().exports.get(&name).map(|(_, value)| *value as u64)) {
+    if let Some(value) = HOST.with(|host| {
+        let host = host.borrow();
+        let key = host.qualified_key(&name, |key| host.exports.contains_key(key))?;
+        host.exports.get(&key).map(|(_, value)| *value as u64)
+    }) {
         return Ok(value);
     }
     let (first, parts) = if let Some((package, path)) = name.split_once("::") {
@@ -4721,7 +4739,11 @@ unsafe fn get_export_result(name: *const c_char) -> Result<u64, String> {
         let Some(root) = parts.next() else { return Ok(0); };
         (root.to_string(), parts.collect::<Vec<_>>())
     };
-    let Some(mut value) = HOST.with(|host| host.borrow().exports.get(&first).map(|(_, value)| *value as u64)) else {
+    let Some(mut value) = HOST.with(|host| {
+        let host = host.borrow();
+        let key = host.qualified_key(&first, |key| host.exports.contains_key(key))?;
+        host.exports.get(&key).map(|(_, value)| *value as u64)
+    }) else {
         return Ok(0);
     };
     for part in parts {
@@ -4767,6 +4789,7 @@ fn returned_handle(value: u64) -> ThawNapiHandleResult {
         // A previous JS proxy may have queued finalization while a graph
         // transfer pinned this same instance. The compiled raw handle is now
         // an independent Env-owned root, with no graph pin at shutdown.
+        #[cfg(feature = "quickjs")]
         unsafe { (*env).released_handles.remove(&(value as usize)) };
     }
     ThawNapiHandleResult { value, error: ptr::null_mut() }
@@ -5593,7 +5616,8 @@ unsafe fn call_with_callback_impl(
         let (function, env_ptr) = HOST
             .with(|host| {
                 let host = host.borrow();
-                Some((host.functions.get(&name)?.clone(), host.exports.get(&name)?.0 as NapiEnv))
+                let key = host.qualified_key(&name, |key| host.functions.contains_key(key))?;
+                Some((host.functions.get(&key)?.clone(), host.exports.get(&key)?.0 as NapiEnv))
             })
             .ok_or_else(|| format!("no such native addon function `{name}`"))?;
         let callback = callback.ok_or("native addon callback is null")?;
@@ -6044,6 +6068,10 @@ mod native_graph_pin_tests {
 #[cfg(all(test, feature = "quickjs"))]
 mod typed_native_graph_value_tests {
     use super::*;
+
+    thread_local! {
+        static FINALIZATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
 
     // Unrun: duplicate retained QuickJS objects are independently returned
     // or thrown after their creator scope has closed. The recipient scope or

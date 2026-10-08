@@ -107,6 +107,17 @@ impl<'a> FnLowerer<'a> {
         }
     }
 
+    /// Like `receiver_is_map_or_set` for a `Buffer`/`Uint8Array` receiver: a call such as
+    /// `receiver().set(..)` is lowered (purely, then discarded) and its un-erased type read.
+    fn receiver_is_bytes(&mut self, expr: &Expr) -> bool {
+        match self.peek_type_without_lowering(expr) {
+            Some(ty) => ty == HirType::Bytes,
+            None => self.lower_expr(expr).is_ok_and(|value| {
+                self.infer_expr_type_inner(&value).is_ok_and(|ty| ty == HirType::Bytes)
+            }),
+        }
+    }
+
     fn receiver_is_map_or_set(&mut self, expr: &Expr) -> bool {
         // `peek_type_without_lowering` only recognizes a simple binding; a
         // receiver that's itself a call/new (`new Map([...]).get(...)`) or a

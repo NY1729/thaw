@@ -76,6 +76,20 @@ impl<'ctx> HirCompiler<'ctx> {
                 .map_err(|error| error.to_string())?;
             self.compile_destroy_decoded_owned_json(field_json, field_ty)?;
         }
+        // A Date returned from dynamic code is a genuine native Date: record its identity so
+        // later `instanceof`/method receivers and marshaling accept it as one.
+        if matches!(fields.as_slice(),
+            [(marker, HirType::Bool), (timestamp, HirType::F64)]
+                if marker == "__thaw_class_identity_\u{1e}Date" && timestamp == "timestamp")
+        {
+            let marker = self.builder.build_global_string_ptr(&fields[0].0, "decoded_date_identity")
+                .map_err(|error| error.to_string())?;
+            self.builder.build_call(
+                self.module.get_function("thaw_object_set_class_identity").unwrap(),
+                &[object.into(), marker.as_pointer_value().into()],
+                "register_decoded_date_identity",
+            ).map_err(|error| error.to_string())?;
+        }
         Ok(object.into())
     }
 
@@ -178,6 +192,23 @@ impl<'ctx> HirCompiler<'ctx> {
             HirType::Function(params, ret) => self.compile_js_callback_from_json(json, params, ret),
             HirType::CallableFunction(params, _, None, ret) => {
                 self.compile_js_callback_from_json(json, params, ret)
+            }
+            // A rest callable's physical ABI is its fixed prefix plus one packed `Array` of the
+            // rest element; the adapter spreads that array back into individual JS arguments.
+            HirType::CallableFunction(params, _, Some(rest), ret) => {
+                let mut physical = params.clone();
+                physical.push(HirType::Array(rest.clone()));
+                self.compile_js_callback_from_json_spreading(json, &physical, ret, true)
+            }
+            // A native Promise resolver accepts `Promise<T> | undefined` (`Optional(Promise)`):
+            // `setTimeout(resolve, 5)` calls it with no argument and never reaches this arm.
+            // A JS promise handed to it has no native adoption path, so it is a TypeError.
+            HirType::Promise(_) => {
+                self.compile_throw_type_error("a JavaScript Promise cannot be adopted by a native Promise resolver")?;
+                let function = self.current_function();
+                let unreachable = self.context.append_basic_block(function, "promise_adoption_unreachable");
+                self.builder.position_at_end(unreachable);
+                self.compile_zero_value(ty)
             }
             other => Err(format!("unsupported dynamic result value {other:?}")),
         }
@@ -585,7 +616,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .builder
             .build_int_mul(
                 index.as_basic_value().into_int_value(),
-                element_bytes,
+                self.context.i64_type().const_int(element_bytes, false),
                 "json_array_element_offset",
             )
             .map_err(|error| error.to_string())?;
