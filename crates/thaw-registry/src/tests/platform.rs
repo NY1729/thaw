@@ -921,14 +921,14 @@ fn process_default_stdio_preserves_raw_buffer_bytes() {
         "child test failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(output.stdout.windows(7).any(|bytes| bytes == &[250, 0, 255, 128, 195, 40, 251]));
-    assert!(output.stderr.windows(5).any(|bytes| bytes == &[5, 255, 128, 195, 40]));
-    assert!(output.stdout.windows(5).any(|bytes| bytes == &[16, 255, 128, 195, 40]));
-    assert!(output.stdout.windows(5).any(|bytes| bytes == &[32, 255, 128, 195, 40]));
-    assert!(output.stderr.windows(5).any(|bytes| bytes == &[21, 255, 128, 195, 40]));
-    assert!(output.stderr.windows(5).any(|bytes| bytes == &[37, 255, 128, 195, 40]));
-    assert!(output.stdout.windows(5).any(|bytes| bytes == &[48, 255, 128, 195, 40]));
-    assert!(output.stderr.windows(5).any(|bytes| bytes == &[53, 255, 128, 195, 40]));
+    assert!(output.stdout.windows(7).any(|bytes| bytes == [250, 0, 255, 128, 195, 40, 251]));
+    assert!(output.stderr.windows(5).any(|bytes| bytes == [5, 255, 128, 195, 40]));
+    assert!(output.stdout.windows(5).any(|bytes| bytes == [16, 255, 128, 195, 40]));
+    assert!(output.stdout.windows(5).any(|bytes| bytes == [32, 255, 128, 195, 40]));
+    assert!(output.stderr.windows(5).any(|bytes| bytes == [21, 255, 128, 195, 40]));
+    assert!(output.stderr.windows(5).any(|bytes| bytes == [37, 255, 128, 195, 40]));
+    assert!(output.stdout.windows(5).any(|bytes| bytes == [48, 255, 128, 195, 40]));
+    assert!(output.stderr.windows(5).any(|bytes| bytes == [53, 255, 128, 195, 40]));
 }
 
 #[test]

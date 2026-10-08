@@ -2741,6 +2741,7 @@ fn graph_defined_native_accessor_owns_callbacks_until_replaced() {
     let key = PropertyKey::String("computed".into());
     assert_ne!(thaw_quickjs::thaw_js_retain_handle(getter), 0);
     assert_ne!(thaw_quickjs::thaw_js_retain_handle(setter), 0);
+    #[allow(clippy::arc_with_non_send_sync)]
     let callbacks = Arc::new(QuickJsAccessorRoots {
         getter,
         setter,

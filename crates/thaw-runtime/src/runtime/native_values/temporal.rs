@@ -102,7 +102,7 @@ pub unsafe extern "C" fn thaw_temporal_plain_to_zoned(
         return f64::NAN;
     };
     let Some(zone) = (unsafe { temporal_input(zone) }) else { return f64::NAN; };
-    let Some(zone) = jiff_time_zone(&zone) else {
+    let Some(zone) = jiff_time_zone(zone) else {
         return f64::NAN;
     };
     let subsecond = fields.milliseconds as i32 * 1_000_000 + nanoseconds.round() as i32;
@@ -246,7 +246,7 @@ pub unsafe extern "C" fn thaw_temporal_zone_valid(zone: *const c_char) -> bool {
         return false;
     }
     let Some(zone) = (unsafe { temporal_input(zone) }) else { return false; };
-    jiff_time_zone(&zone).is_some()
+    jiff_time_zone(zone).is_some()
 }
 
 /// Maps a Temporal calendar identifier to an ICU4X calendar.
@@ -299,7 +299,7 @@ pub unsafe extern "C" fn thaw_temporal_calendar_valid(calendar: *const c_char) -
         return false;
     }
     let Some(calendar) = (unsafe { temporal_input(calendar) }) else { return false; };
-    temporal_calendar_kind(&calendar).is_some()
+    temporal_calendar_kind(calendar).is_some()
 }
 
 #[no_mangle]
@@ -319,7 +319,7 @@ pub unsafe extern "C" fn thaw_temporal_calendar_field(
         return f64::NAN;
     }
     let Some(calendar) = (unsafe { temporal_input(calendar) }) else { return f64::NAN; };
-    let Some(date) = temporal_calendar_date(milliseconds, &calendar) else {
+    let Some(date) = temporal_calendar_date(milliseconds, calendar) else {
         return f64::NAN;
     };
     match field as i64 {
@@ -356,7 +356,7 @@ pub unsafe extern "C" fn thaw_temporal_calendar_month_code(
         return std::ptr::null();
     }
     let Some(calendar) = (unsafe { temporal_input(calendar) }) else { return std::ptr::null(); };
-    let Some(date) = temporal_calendar_date(milliseconds, &calendar) else {
+    let Some(date) = temporal_calendar_date(milliseconds, calendar) else {
         return std::ptr::null();
     };
     let leap = if date.month().to_input().is_leap() {
@@ -382,7 +382,7 @@ pub unsafe extern "C" fn thaw_temporal_calendar_era(
         return std::ptr::null();
     }
     let Some(calendar) = (unsafe { temporal_input(calendar) }) else { return std::ptr::null(); };
-    let Some(date) = temporal_calendar_date(milliseconds, &calendar) else {
+    let Some(date) = temporal_calendar_date(milliseconds, calendar) else {
         return std::ptr::null();
     };
     let text = date
@@ -490,7 +490,7 @@ pub unsafe extern "C" fn thaw_temporal_zoned_start_of_day(
         return f64::NAN;
     }
     let Some(zone) = (unsafe { temporal_input(zone) }) else { return f64::NAN; };
-    let Some(zoned) = zoned_for(milliseconds, nanoseconds, &zone) else {
+    let Some(zoned) = zoned_for(milliseconds, nanoseconds, zone) else {
         return f64::NAN;
     };
     let Ok(start) = zoned.start_of_day() else {
@@ -514,7 +514,7 @@ pub unsafe extern "C" fn thaw_temporal_zoned_hours_in_day(
         return f64::NAN;
     }
     let Some(zone) = (unsafe { temporal_input(zone) }) else { return f64::NAN; };
-    let Some(zoned) = zoned_for(milliseconds, nanoseconds, &zone) else {
+    let Some(zoned) = zoned_for(milliseconds, nanoseconds, zone) else {
         return f64::NAN;
     };
     let Ok(start) = zoned.start_of_day() else {
@@ -545,7 +545,7 @@ pub unsafe extern "C" fn thaw_temporal_zoned_transition(
         return f64::NAN;
     }
     let Some(zone) = (unsafe { temporal_input(zone) }) else { return f64::NAN; };
-    let Some(zoned) = zoned_for(milliseconds, nanoseconds, &zone) else {
+    let Some(zoned) = zoned_for(milliseconds, nanoseconds, zone) else {
         return f64::NAN;
     };
     let transition = if direction > 0.0 {
@@ -589,7 +589,7 @@ pub unsafe extern "C" fn thaw_temporal_zoned_to_string(
         return std::ptr::null();
     }
     let Some(zone) = (unsafe { temporal_input(zone) }) else { return std::ptr::null(); };
-    let Some(zoned) = zoned_for(milliseconds, nanoseconds, &zone) else {
+    let Some(zoned) = zoned_for(milliseconds, nanoseconds, zone) else {
         return std::ptr::null();
     };
     arena_c_string(&zoned.to_string()).map_or(std::ptr::null(), |value| value.cast())
@@ -609,7 +609,7 @@ pub unsafe extern "C" fn thaw_temporal_zoned_offset(
         return std::ptr::null();
     }
     let Some(zone) = (unsafe { temporal_input(zone) }) else { return std::ptr::null(); };
-    let Some(zoned) = zoned_for(milliseconds, nanoseconds, &zone) else {
+    let Some(zoned) = zoned_for(milliseconds, nanoseconds, zone) else {
         return std::ptr::null();
     };
     let text = temporal_offset_string(zoned.offset().seconds());
@@ -715,7 +715,7 @@ pub unsafe extern "C" fn thaw_temporal_zoned_field(
         return f64::NAN;
     }
     let Some(zone) = (unsafe { temporal_input(zone) }) else { return f64::NAN; };
-    let Some(zoned) = zoned_for(milliseconds, nanoseconds, &zone) else {
+    let Some(zoned) = zoned_for(milliseconds, nanoseconds, zone) else {
         return f64::NAN;
     };
     match field as i64 {
@@ -747,7 +747,7 @@ pub unsafe extern "C" fn thaw_temporal_zoned_plain_timestamp(
         return f64::NAN;
     }
     let Some(zone) = (unsafe { temporal_input(zone) }) else { return f64::NAN; };
-    let Some(zoned) = zoned_for(milliseconds, nanoseconds, &zone) else {
+    let Some(zoned) = zoned_for(milliseconds, nanoseconds, zone) else {
         return f64::NAN;
     };
     let time_of_day = zoned.hour() as f64 * 3_600_000.0
@@ -871,7 +871,7 @@ pub unsafe extern "C" fn thaw_temporal_instant_from_string(text: *const c_char) 
         return f64::NAN;
     }
     let Some(text) = (unsafe { temporal_input(text) }) else { return f64::NAN; };
-    parse_temporal_date_time(&text, true)
+    parse_temporal_date_time(text, true)
         .map(|(milliseconds, _)| milliseconds)
         .unwrap_or(f64::NAN)
 }
@@ -887,7 +887,7 @@ pub unsafe extern "C" fn thaw_temporal_instant_nanos_from_string(text: *const c_
         return f64::NAN;
     }
     let Some(text) = (unsafe { temporal_input(text) }) else { return f64::NAN; };
-    parse_temporal_date_time(&text, true)
+    parse_temporal_date_time(text, true)
         .map(|(_, nanoseconds)| nanoseconds)
         .unwrap_or(f64::NAN)
 }
@@ -900,7 +900,7 @@ pub unsafe extern "C" fn thaw_temporal_instant_nanos_from_string(text: *const c_
 pub unsafe extern "C" fn thaw_temporal_plain_date_time_from_string(text: *const c_char) -> f64 {
     if text.is_null() { return f64::NAN; }
     let Some(text) = (unsafe { temporal_input(text) }) else { return f64::NAN; };
-    parse_temporal_date_time(&text, false).map(|(ms, _)| ms).unwrap_or(f64::NAN)
+    parse_temporal_date_time(text, false).map(|(ms, _)| ms).unwrap_or(f64::NAN)
 }
 
 #[no_mangle]
@@ -911,7 +911,7 @@ pub unsafe extern "C" fn thaw_temporal_plain_date_time_from_string(text: *const 
 pub unsafe extern "C" fn thaw_temporal_plain_date_time_nanos_from_string(text: *const c_char) -> f64 {
     if text.is_null() { return f64::NAN; }
     let Some(text) = (unsafe { temporal_input(text) }) else { return f64::NAN; };
-    parse_temporal_date_time(&text, false).map(|(_, ns)| ns).unwrap_or(f64::NAN)
+    parse_temporal_date_time(text, false).map(|(_, ns)| ns).unwrap_or(f64::NAN)
 }
 
 #[no_mangle]
@@ -1014,7 +1014,7 @@ pub unsafe extern "C" fn thaw_temporal_plain_time_from_string(text: *const c_cha
         return f64::NAN;
     }
     let Some(text) = (unsafe { temporal_input(text) }) else { return f64::NAN; };
-    parse_time_of_day(&text)
+    parse_time_of_day(text)
         .map(|(milliseconds, _)| milliseconds)
         .unwrap_or(f64::NAN)
 }
@@ -1031,7 +1031,7 @@ pub unsafe extern "C" fn thaw_temporal_plain_time_nanos_from_string(
         return f64::NAN;
     }
     let Some(text) = (unsafe { temporal_input(text) }) else { return f64::NAN; };
-    parse_time_of_day(&text)
+    parse_time_of_day(text)
         .map(|(_, nanoseconds)| nanoseconds)
         .unwrap_or(f64::NAN)
 }
@@ -1568,7 +1568,7 @@ pub unsafe extern "C" fn thaw_temporal_duration_from_string(text: *const c_char)
         return f64::NAN;
     }
     let Some(text) = (unsafe { temporal_input(text) }) else { return f64::NAN; };
-    duration_string_to_milliseconds(&text)
+    duration_string_to_milliseconds(text)
         .map(|milliseconds| split_duration_nanoseconds(milliseconds).0)
         .unwrap_or(f64::NAN)
 }
@@ -1585,7 +1585,7 @@ pub unsafe extern "C" fn thaw_temporal_duration_nanos_from_string(
         return f64::NAN;
     }
     let Some(text) = (unsafe { temporal_input(text) }) else { return f64::NAN; };
-    duration_string_to_milliseconds(&text)
+    duration_string_to_milliseconds(text)
         .map(|milliseconds| split_duration_nanoseconds(milliseconds).1)
         .unwrap_or(f64::NAN)
 }

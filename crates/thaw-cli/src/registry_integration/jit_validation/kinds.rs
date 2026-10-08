@@ -43,6 +43,7 @@ fn jit_numeric_export(
     Some(format!("expr:{}", tokens(export)?.join(",")))
 }
 
+#[allow(dead_code)]
 fn jit_rejection_reason(
     source: &str,
     function: &thaw_bridge::DtsFunction,
@@ -176,9 +177,7 @@ fn merge_jit_kinds(left: JitKind, right: JitKind) -> Option<JitKind> {
         Some(left)
     } else if matches!(left, JitKind::Number | JitKind::Boolean)
         && matches!(right, JitKind::Number | JitKind::Boolean)
-    {
-        Some(JitKind::Dynamic)
-    } else if matches!(
+        || matches!(
         (left, right),
         (JitKind::Number, JitKind::String)
             | (JitKind::String, JitKind::Number)

@@ -1069,7 +1069,7 @@ fn package_imports_external_targets_use_nested_dependency_and_selected_pattern()
     assert!(bundle.contains("owner/node_modules/dependency/public/feature.js"));
     assert_eq!(versions.get("dependency").map(String::as_str), Some("2.0.0"));
     assert!(!bundle.contains("module.exports = 9"), "external imports target must resolve from the defining package root");
-    assert!(matches!(resolve_package_import(&modules, &package.join("lib/entry.js"), "#dep/private/hidden", &["require", "node", "default"]), None));
+    assert!(resolve_package_import(&modules, &package.join("lib/entry.js"), "#dep/private/hidden", &["require", "node", "default"]).is_none());
     assert!(matches!(resolve_package_import(&modules, &package.join("lib/entry.js"), "#builtin", &["require", "node", "default"]), Some(PackageImportResolution::Builtin(name)) if name == "fs"));
     let _ = fs::remove_dir_all(root);
 }

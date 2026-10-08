@@ -3057,7 +3057,7 @@ fn catch_rethrow_retains_native_text_after_nested_lambda_compilation() {
     assert!(ir.contains("define internal ptr @__thaw_lambda_"), "{ir}");
     // Behavioural form of "the rethrow keeps the native text after the nested
     // lambdas were compiled": the uncaught report still names the original error.
-    let (stdout, stderr, code) = compile_and_run_failing(source, "catch_lambda_native_text_run");
+    let (_stdout, stderr, code) = compile_and_run_failing(source, "catch_lambda_native_text_run");
     assert_eq!(code, Some(1), "{stderr}");
     assert!(stderr.contains("TypeError: native failure"), "{stderr}");
 }
@@ -3084,7 +3084,7 @@ fn main_cleanup_keeps_process_reporting_and_addons_live_on_init_failure() {
     // The owned report texts are produced and released through
     // `thaw_cstring_destroy` (the earlier named destroy_* blocks no longer exist).
     for owned in ["%original_exception_owned_report_text", "%listener_exception_owned_report_text"] {
-        assert!(ir.lines().any(|line| line.contains(&format!("= call ptr @thaw_runtime_exception_report_text("))
+        assert!(ir.lines().any(|line| line.contains(&"= call ptr @thaw_runtime_exception_report_text(".to_string())
             && line.trim_start().starts_with(owned)), "{owned}: {ir}");
         assert!(ir.lines().any(|line| line.contains("call void @thaw_cstring_destroy(ptr ")
             && line.trim_end().ends_with(&format!("{owned})"))), "{owned}: {ir}");

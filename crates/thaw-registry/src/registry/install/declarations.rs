@@ -60,6 +60,7 @@ fn append_referenced_owned_declaration(
     });
 }
 
+#[allow(clippy::too_many_arguments)]
 fn inline_triple_slash_references_inner(
     current_path: &Path,
     source: &str,
@@ -246,7 +247,7 @@ fn export_as_namespace_name(entry_path: &Path, source: &str) -> Result<Option<St
     use thaw_parser::ast::{ModuleDecl, ModuleItem};
 
     let module = thaw_parser::parse_declarations_with_source_map_named(
-        source, thaw_parser::common::FileName::Custom(format!("{} (declaration transform input)", entry_path.display()).into()),
+        source, thaw_parser::common::FileName::Custom(format!("{} (declaration transform input)", entry_path.display())),
     )?.0;
     Ok(module.body.iter().find_map(|item| match item {
         ModuleItem::ModuleDecl(ModuleDecl::TsNamespaceExport(export)) => {
@@ -293,7 +294,7 @@ fn hoisted_export_equals_namespace_members(
     use thaw_parser::common::{SourceMapper, Spanned};
 
     let (module, source_map) = thaw_parser::parse_declarations_with_source_map_named(
-        entry_source, thaw_parser::common::FileName::Custom(format!("{} (declaration transform input)", entry_path.display()).into()),
+        entry_source, thaw_parser::common::FileName::Custom(format!("{} (declaration transform input)", entry_path.display())),
     )?;
     let Some(exported_name) = module.body.iter().find_map(|item| match item {
         ModuleItem::ModuleDecl(ModuleDecl::TsExportAssignment(export)) => match export.expr.as_ref()
@@ -388,6 +389,7 @@ fn hoisted_export_equals_namespace_members(
 /// too when `BASE` can't be resolved at all -- e.g. it refers to something
 /// declared in the same file rather than an import, a case not observed in
 /// any real package yet).
+#[allow(clippy::too_many_arguments)]
 fn resolve_namespace_hoisted_import_equals(
     import: &thaw_parser::ast::TsImportEqualsDecl,
     named_import_targets: &std::collections::HashMap<String, (PathBuf, String)>,
@@ -492,8 +494,8 @@ fn resolve_namespace_hoisted_import_equals(
             if members.is_empty() {
                 let selected_records = selected.iter().flat_map(|binding|
                     binding.fragments.iter().filter(move |declaration|
-                        !(!binding.value_export
-                            && is_type_only_namespace_binding(declaration, &binding.public)))
+                        binding.value_export
+                            || !is_type_only_namespace_binding(declaration, &binding.public))
                         .cloned()).map(|declaration|
                     EmittedOwnedDeclaration {
                         declaration, scope: None, public_names: Vec::new(),
@@ -643,7 +645,7 @@ fn resolve_namespace_hoisted_import_equals(
 
 fn parse_labeled_declarations(source: &str, label: String) -> Result<thaw_parser::ast::Module, String> {
     thaw_parser::parse_declarations_with_source_map_named(
-        source, thaw_parser::common::FileName::Custom(label.into()),
+        source, thaw_parser::common::FileName::Custom(label),
     ).map(|(module, _)| module)
 }
 
@@ -750,7 +752,7 @@ fn exported_const_object_properties(
         let (parsed, snippet_map) = thaw_parser::parse_declarations_with_source_map_named(
             &fragment.snippet,
             thaw_parser::common::FileName::Custom(
-                format!("{} (owned object type)", fragment.origin.display()).into(),
+                format!("{} (owned object type)", fragment.origin.display()),
             ),
         )?;
         for item in &parsed.body {
@@ -941,7 +943,7 @@ fn unwrap_self_ambient_module(entry_path: &Path, entry_source: &str) -> Result<S
     use thaw_parser::common::{SourceMapper, Spanned};
 
     let (module, source_map) = thaw_parser::parse_declarations_with_source_map_named(
-        entry_source, thaw_parser::common::FileName::Custom(format!("{} (declaration transform input)", entry_path.display()).into()),
+        entry_source, thaw_parser::common::FileName::Custom(format!("{} (declaration transform input)", entry_path.display())),
     )?;
     let canonical_entry = entry_path
         .canonicalize()
@@ -1556,7 +1558,7 @@ fn dts_source_with_reexported_functions_inner_with_metadata(
     }
     let retained_entry = without_materialized_class_imports_named(
         entry_source, &materialized_class_imports,
-        thaw_parser::common::FileName::Custom(format!("{} (unwrapped declaration entry)", entry_path.display()).into()),
+        thaw_parser::common::FileName::Custom(format!("{} (unwrapped declaration entry)", entry_path.display())),
     )?;
     output.replace_range(..entry_source.len(), &retained_entry);
     for record in &mut emitted_owned {
@@ -1601,7 +1603,7 @@ fn builtin_class_and_ancestor_declarations(
     }
     let (module, source_map) = thaw_parser::parse_declarations_with_source_map_named(
         dts_source, thaw_parser::common::FileName::Custom(
-            format!("node:{} (generated builtin declarations)", specifier.strip_prefix("node:").unwrap_or(specifier)).into(),
+            format!("node:{} (generated builtin declarations)", specifier.strip_prefix("node:").unwrap_or(specifier)),
         ),
     )?;
     let mut declarations = Vec::new();
@@ -1706,7 +1708,7 @@ fn source_namespace_children(origin: &Path, snippet: &str) -> Vec<OwnedDeclarati
     let Ok((module, source_map)) = thaw_parser::parse_declarations_with_source_map_named(
         snippet,
         thaw_parser::common::FileName::Custom(
-            format!("{} (owned namespace)", origin.display()).into(),
+            format!("{} (owned namespace)", origin.display()),
         ),
     ) else { return Vec::new() };
     let namespace = module.body.iter().find_map(|item| match item {
@@ -2050,7 +2052,7 @@ fn owned_type_parameter_forwarding(
     let (module, source_map) = thaw_parser::parse_declarations_with_source_map_named(
         &declaration.snippet,
         thaw_parser::common::FileName::Custom(
-            format!("{} (selected generic alias)", declaration.origin.display()).into(),
+            format!("{} (selected generic alias)", declaration.origin.display()),
         ),
     )?;
     let parameters = module.body.iter().find_map(|item| {
@@ -2174,6 +2176,7 @@ struct SourceSupportBindings {
     values: SourceValueBindings,
 }
 
+#[allow(dead_code)]
 fn source_type_bindings(path: &Path) -> Result<SourceTypeBindings, String> {
     source_type_bindings_with_views(path, &OwnedSourceViews::default())
 }
@@ -2232,6 +2235,7 @@ fn source_type_bindings_with_views(
     Ok(table)
 }
 
+#[allow(dead_code)]
 fn source_value_bindings(path: &Path) -> Result<SourceValueBindings, String> {
     source_value_bindings_with_views(path, &OwnedSourceViews::default())
 }
@@ -2344,6 +2348,7 @@ fn resolve_lexical_source_value<'a>(
         table.get(&(origin.clone(), scope[..depth].to_vec(), name.to_string())).map(Vec::as_slice))
 }
 
+#[allow(dead_code)]
 fn exported_owned_value_declarations(
     path: &Path,
     name: &str,
@@ -2481,6 +2486,7 @@ fn exported_owned_value_declarations_with_views(
     ))
 }
 
+#[allow(dead_code)]
 fn resolve_owned_source_value_reference(
     origin: &Path,
     scope: &[String],
@@ -2833,6 +2839,7 @@ fn namespace_reexport_target(
     )?.into_iter().find(|(name, _)| name == alias).map(|(_, target)| target))
 }
 
+#[allow(clippy::type_complexity)]
 fn named_namespace_reexport_target(
     path: &Path,
     public: &str,
@@ -2881,6 +2888,7 @@ fn named_namespace_reexport_target(
     Ok((false, None))
 }
 
+#[allow(clippy::type_complexity)]
 fn directly_exported_namespace(
     path: &Path,
     segments: &[String],
@@ -2971,6 +2979,7 @@ fn directly_exported_namespace(
     Ok(Some((source_scope, exported_local_name(items, member, kind))))
 }
 
+#[allow(dead_code)]
 fn resolve_imported_namespace_member(
     target: &Path,
     segments: &[String],
@@ -3037,6 +3046,7 @@ fn resolve_imported_namespace_member_inner(
     resolve_imported_namespace_member_inner(&next, &segments[1..], kind, visited, views)
 }
 
+#[allow(dead_code)]
 fn resolve_owned_qualified_source_value_reference(
     origin: &Path,
     scope: &[String],
@@ -3112,6 +3122,7 @@ fn resolve_owned_qualified_source_value_reference_with_views(
     )
 }
 
+#[allow(dead_code)]
 fn resolve_owned_source_type_reference(
     origin: &Path,
     scope: &[String],
@@ -3155,6 +3166,7 @@ fn resolve_owned_source_type_reference_with_views(
     exported_owned_type_declarations(target, imported, views)
 }
 
+#[allow(dead_code)]
 fn resolve_owned_qualified_source_type_reference(
     origin: &Path,
     scope: &[String],
@@ -3236,11 +3248,13 @@ struct OwnedTypeReference {
     range: (usize, usize),
     full_range: (usize, usize),
     kind: TypeReferenceKind,
+    #[allow(dead_code)]
     local_spelling: String,
     terminal: SourceTypeKey,
     fragments: Vec<OwnedDeclaration>,
 }
 
+#[allow(dead_code)]
 fn owned_type_reference_edges(declaration: &OwnedDeclaration) -> Result<Vec<OwnedTypeReference>, String> {
     owned_type_reference_edges_with_views(declaration, &OwnedSourceViews::default())
 }
@@ -3303,6 +3317,7 @@ fn owned_type_reference_edges_with_views(
     Ok(edges)
 }
 
+#[allow(dead_code)]
 fn referenced_private_type_closure(
     emitted: &[EmittedOwnedDeclaration],
     public: &std::collections::BTreeMap<SourceTypeKey, Vec<PublicTypeOccurrence>>,
@@ -3652,7 +3667,7 @@ fn record_owned_entry_declarations(
     let (module, source_map) = thaw_parser::parse_declarations_with_source_map_named(
         retained_entry,
         thaw_parser::common::FileName::Custom(
-            format!("{} (retained declaration entry)", entry_path.display()).into(),
+            format!("{} (retained declaration entry)", entry_path.display()),
         ),
     )?;
     let mut aliases = std::collections::BTreeMap::<String, Vec<String>>::new();
@@ -3818,6 +3833,7 @@ fn reexported_owned_declarations_as(
         declaration.with_snippet(snippet)).collect()
 }
 
+#[allow(dead_code)]
 fn all_reexported_type_declarations(
     path: &Path,
     visited: &mut std::collections::BTreeSet<PathBuf>,
@@ -3967,11 +3983,7 @@ fn type_only_declaration(snippet: String, exported: Option<&str>) -> String {
             .and_then(|suffix| suffix.strip_suffix(" };")) {
             aliases.push(alias.to_string());
             false
-        } else if *line == own_type_marker.as_str() {
-            false
-        } else {
-            true
-        }
+        } else { *line != own_type_marker.as_str() }
     }).collect::<Vec<_>>().join("\n");
     let mut result = format!("{body}\nexport type {{ {name} }};");
     if name != public {
@@ -4879,6 +4891,7 @@ fn reexported_default_declaration(
     ))
 }
 
+#[allow(dead_code)]
 fn all_reexported_function_declarations(
     path: &Path,
     visited: &mut std::collections::BTreeSet<PathBuf>,
@@ -5102,6 +5115,7 @@ fn all_reexported_function_declarations_owned(
     Ok(declarations)
 }
 
+#[allow(dead_code)]
 fn reexported_function_declarations(
     path: &Path,
     name: &str,
@@ -5786,6 +5800,7 @@ fn merge_type_only_status(current: Option<bool>, next: Option<bool>) -> Option<b
 
 /// Follow a class or interface binding through named and wildcard declaration
 /// re-exports, retaining imported superclass declarations as type support.
+#[allow(dead_code)]
 fn reexported_class_or_interface_declarations(
     path: &Path,
     name: &str,
@@ -5837,7 +5852,7 @@ fn type_reference_sites(snippet: &str, original: &str, origin: &Path) -> Option<
         TsExprWithTypeArgs, TsFnParam, TsMappedType, TsMethodSignature,
         TsTypeAliasDecl, TsTypeParamDecl, TsTypeQuery, TsTypeQueryExpr,
     };
-    use thaw_parser::common::{SourceMapper, Spanned};
+    use thaw_parser::common::Spanned;
 
     struct SelfReferences<'a> {
         original: &'a str,
@@ -6012,7 +6027,7 @@ fn type_reference_sites(snippet: &str, original: &str, origin: &Path) -> Option<
 
     let (module, source_map) = thaw_parser::parse_declarations_with_source_map_named(
         snippet, thaw_parser::common::FileName::Custom(
-            format!("{} (type reference snippet)", origin.display()).into(),
+            format!("{} (type reference snippet)", origin.display()),
         ),
     ).ok()?;
     let mut references = SelfReferences { original, spans: Vec::new(),
@@ -6080,6 +6095,7 @@ fn imported_class_as_local_binding(declarations: Vec<String>, local: &str, type_
 /// A materialized local class replaces its declaration import binding.
 /// Retain other specifiers from the same import, including their original
 /// `type` modifiers and any import attributes after the source literal.
+#[allow(dead_code)]
 fn without_materialized_class_imports(source: &str, locals: &std::collections::BTreeSet<String>) -> Result<String, String> {
     without_materialized_class_imports_named(
         source, locals, thaw_parser::common::FileName::Custom("input.ts".into()),

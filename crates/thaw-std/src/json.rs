@@ -68,7 +68,7 @@ type SharedObject = Rc<SharedValue<indexmap::IndexMap<Vec<u8>, Value>>>;
 /// operation before decoding a callback graph; cloning a Json value shares
 /// this lease, so only its final owner releases the handle. The handle ID is
 /// canonical in the QuickJS registry (Object.is) and is stable for aliases.
-struct HostLease {
+pub(crate) struct HostLease {
     handle: u64,
     release: extern "C" fn(u64) -> u8,
 }
@@ -107,13 +107,13 @@ pub extern "C" fn thaw_json_register_napi_handle_operations(
 }
 
 #[repr(C)]
-struct HostHandleResult {
+pub(crate) struct HostHandleResult {
     value: u64,
     error: *const c_char,
 }
 
 #[repr(C)]
-struct HostTextResult {
+pub(crate) struct HostTextResult {
     value: *const c_char,
     error: *const c_char,
 }
@@ -364,11 +364,11 @@ pub extern "C" fn thaw_json_register_callback_origin(closure: *const u8, handle:
     };
     let inserted = CALLBACK_ORIGINS.with(|origins| {
         let mut origins = origins.borrow_mut();
-        if origins.contains_key(&(closure as usize)) {
-            false
-        } else {
-            origins.insert(closure as usize, (handle, serial));
+        if let std::collections::hash_map::Entry::Vacant(e) = origins.entry(closure as usize) {
+            e.insert((handle, serial));
             true
+        } else {
+            false
         }
     });
     if !inserted {
@@ -445,9 +445,9 @@ pub extern "C" fn thaw_json_take_host_error() -> *const c_char {
 
 fn canonical_bigint_decimal(value: &str) -> bool {
     let digits = value.strip_prefix('-').unwrap_or(value);
-    !digits.is_empty()
-        && (digits == "0" || !digits.starts_with('0'))
-        && !(value.starts_with('-') && digits == "0")
+    !(digits.is_empty()
+        || digits != "0" && digits.starts_with('0')
+        || digits == "0" && value.starts_with('-'))
         && digits.bytes().all(|byte| byte.is_ascii_digit())
 }
 
@@ -739,7 +739,7 @@ fn host_query_handle(handle: u64, operation: u8) -> Option<String> {
     Some(value)
 }
 
-struct SharedValue<T> {
+pub(crate) struct SharedValue<T> {
     data: UnsafeCell<T>,
     napi_lease: RefCell<Option<Rc<NapiLease>>>,
 }
@@ -2532,7 +2532,7 @@ pub extern "C" fn thaw_json_graph_encode(value: *const Value) -> *const c_char {
                         .filter(|bytes| {
                             bytes.iter().all(|byte| {
                                 byte.as_f64().is_some_and(|number| {
-                                    number >= 0.0 && number <= 255.0 && number.fract() == 0.0
+                                    (0.0..=255.0).contains(&number) && number.fract() == 0.0
                                 })
                             })
                         })
@@ -2894,7 +2894,7 @@ fn decode_graph_value(graph: &Value) -> Option<Value> {
         } else if let Some(bytes) = fields.get(b"b".as_slice()).and_then(Value::as_array) {
             if !bytes.iter().all(|byte| {
                 byte.as_f64()
-                    .is_some_and(|number| number >= 0.0 && number <= 255.0 && number.fract() == 0.0)
+                    .is_some_and(|number| (0.0..=255.0).contains(&number) && number.fract() == 0.0)
             }) {
                 return None;
             }
@@ -3336,10 +3336,10 @@ fn non_finite_display(value: f64) -> &'static str {
     }
 }
 
-/// Converts a `Json` value into the tree `crate::inspect` formats, recognising the same
-/// wrapper shapes (`undefined`, non-finite numbers, RegExp, Date, Map, Set, Buffer) the
-/// old console formatter did. `stack` holds the containers being converted, so a cycle
-/// becomes a `Circular` back reference instead of an infinite walk.
+// Converts a `Json` value into the tree `crate::inspect` formats, recognising the same
+// wrapper shapes (`undefined`, non-finite numbers, RegExp, Date, Map, Set, Buffer) the
+// old console formatter did. `stack` holds the containers being converted, so a cycle
+// becomes a `Circular` back reference instead of an infinite walk.
 thread_local! { static HOST_INSPECT_DEPTH: Cell<usize> = const { Cell::new(0) }; }
 
 /// A live host value for `util.inspect`: arrays, Dates and plain objects are read live
@@ -4262,7 +4262,6 @@ pub extern "C" fn thaw_json_has(value: *mut Value, key: *const c_char) -> u8 {
             return 0;
         }
     }
-    0
 }
 
 /// Own-key check for one link of a prototype chain: object fields, plus an
@@ -5047,13 +5046,13 @@ pub extern "C" fn thaw_json_date_timestamp(value: *const Value) -> f64 {
     field.as_f64().unwrap_or(f64::NAN)
 }
 
-/// The same `$__thaw_napi_undefined$`-tagged sentinel object
-/// `is_napi_undefined` recognizes, freshly constructed. Historically only
-/// produced by native-callback-argument marshaling
-/// (`compile_napi_undefined_json`, thaw-llvm); `thaw_json_get`/
-/// `thaw_json_index` also reach for it now for a genuinely *missing*
-/// key/index -- distinguishing that case from an explicit `null`, which
-/// stays real `Value::Null` (untouched by this function).
+// The same `$__thaw_napi_undefined$`-tagged sentinel object
+// `is_napi_undefined` recognizes, freshly constructed. Historically only
+// produced by native-callback-argument marshaling
+// (`compile_napi_undefined_json`, thaw-llvm); `thaw_json_get`/
+// `thaw_json_index` also reach for it now for a genuinely *missing*
+// key/index -- distinguishing that case from an explicit `null`, which
+// stays real `Value::Null` (untouched by this function).
 thread_local! {
     /// Names of functions that crossed a compiled-result boundary as the undefined sentinel
     /// (JSON data has no function values); only `console.log` consults it to print

@@ -774,9 +774,9 @@ fn nested_exit_finalizer_suspends_both_exited_catches() {
     assert!(contains_skip(&value.body, 2), "{:#?}", value.body);
 }
 
-fn thaw_rethrow_cleanup_match_source_catch_pair<'a>(
-    pair: &'a [HirStmt],
-) -> Option<(&'a str, &'a [HirStmt])> {
+fn thaw_rethrow_cleanup_match_source_catch_pair(
+    pair: &[HirStmt],
+) -> Option<(&str, &[HirStmt])> {
     let [
         HirStmt::Let(
             prelude_name,
@@ -798,9 +798,9 @@ fn thaw_rethrow_cleanup_match_source_catch_pair<'a>(
         .then_some((catch_name.as_str(), catch_body))
 }
 
-fn thaw_rethrow_cleanup_collect_source_catches<'a>(
-    statements: &'a [HirStmt],
-) -> Vec<(&'a str, &'a [HirStmt])> {
+fn thaw_rethrow_cleanup_collect_source_catches(
+    statements: &[HirStmt],
+) -> Vec<(&str, &[HirStmt])> {
     fn visit<'a>(
         statements: &'a [HirStmt],
         catches: &mut Vec<(&'a str, &'a [HirStmt])>,
@@ -831,9 +831,9 @@ fn thaw_rethrow_cleanup_collect_source_catches<'a>(
     catches
 }
 
-fn thaw_rethrow_cleanup_find_direct_source_catch<'a>(
-    statements: &'a [HirStmt],
-) -> (&'a str, &'a [HirStmt]) {
+fn thaw_rethrow_cleanup_find_direct_source_catch(
+    statements: &[HirStmt],
+) -> (&str, &[HirStmt]) {
     let catches = statements
         .windows(2)
         .filter_map(thaw_rethrow_cleanup_match_source_catch_pair)

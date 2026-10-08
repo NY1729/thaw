@@ -975,7 +975,7 @@ fn detached_rejection_report_owns_text_and_never_reads_opaque_results() {
         unsafe { thaw_promise_detach_for_report(opaque, &mut pending) },
         1
     );
-    assert_eq!(thaw_promise_reject(opaque, 1usize as *const u8), 1);
+    assert_eq!(thaw_promise_reject(opaque, std::ptr::dangling::<u8>()), 1);
     thaw_runtime_run_until_idle();
     assert_eq!(
         unsafe { CStr::from_ptr(pending.cast()) }.to_bytes(),
@@ -991,7 +991,7 @@ fn detached_rejection_report_owns_text_and_never_reads_opaque_results() {
         unsafe {
             thaw_promise_reject_typed(
                 later,
-                1usize as *const u8,
+                std::ptr::dangling::<u8>(),
                 2,
                 0.0,
                 42,
@@ -1018,7 +1018,7 @@ fn detached_rejection_report_owns_text_and_never_reads_opaque_results() {
         unsafe {
             thaw_promise_reject_typed(
                 typed,
-                1usize as *const u8,
+                std::ptr::dangling::<u8>(),
                 2,
                 0.0,
                 42,
@@ -1068,13 +1068,13 @@ fn compiler_text_reporter_snapshots_opaque_and_typed_rejections() {
     SEEN.with(|seen| seen.borrow_mut().clear());
     thaw_promise_set_unhandled_reporter_text_result(Some(reporter));
     let opaque = thaw_promise_new();
-    assert_eq!(thaw_promise_reject(opaque, 1usize as *const u8), 1);
+    assert_eq!(thaw_promise_reject(opaque, std::ptr::dangling::<u8>()), 1);
     let typed = thaw_promise_new();
     assert_eq!(
         unsafe {
             thaw_promise_reject_typed(
                 typed,
-                1usize as *const u8,
+                std::ptr::dangling::<u8>(),
                 2,
                 0.0,
                 42,
@@ -3232,7 +3232,7 @@ fn future_native_timer_remains_pending_after_an_idle_drain() {
 
 #[test]
 fn terminal_exception_report_uses_provenance_or_typed_scalar_without_reading_opaque_pointer() {
-    let opaque = 1usize as *const std::os::raw::c_char;
+    let opaque = std::ptr::dangling::<std::os::raw::c_char>();
     let scalar =
         unsafe { thaw_runtime_exception_report_text(opaque, std::ptr::null(), 2, 0.0, 42, false) };
     assert_eq!(
@@ -3265,7 +3265,7 @@ fn terminal_and_detached_f64_reports_use_javascript_number_spelling() {
         (1e-7, "1e-7"),
     ];
     for (value, expected) in cases {
-        let opaque = 1usize as *const u8;
+        let opaque = std::ptr::dangling::<u8>();
         let terminal = unsafe {
             thaw_runtime_exception_report_text(opaque.cast(), std::ptr::null(), 1, value, 0, false)
         };
@@ -3382,7 +3382,7 @@ fn promise_any_reason_slots_keep_input_order_duplicate_positions_and_empty_array
         unsafe {
             thaw_promise_reject_typed(
                 second,
-                1usize as *const u8,
+                std::ptr::dangling::<u8>(),
                 3,
                 0.0,
                 0,
@@ -3398,7 +3398,7 @@ fn promise_any_reason_slots_keep_input_order_duplicate_positions_and_empty_array
         unsafe {
             thaw_promise_reject_typed(
                 first,
-                1usize as *const u8,
+                std::ptr::dangling::<u8>(),
                 1,
                 42.5,
                 0,
@@ -3449,7 +3449,7 @@ fn promise_any_nested_reason_and_native_text_outlive_child_handles() {
         unsafe {
             thaw_promise_reject_typed(
                 leaf,
-                1usize as *const u8,
+                std::ptr::dangling::<u8>(),
                 2,
                 0.0,
                 77,
@@ -3493,7 +3493,7 @@ fn promise_any_forwarding_and_finally_keep_only_successfully_settled_metadata() 
         unsafe {
             thaw_promise_reject_typed(
                 child,
-                1usize as *const u8,
+                std::ptr::dangling::<u8>(),
                 5,
                 0.0,
                 0,
@@ -3621,7 +3621,15 @@ fn promise_any_reason_slots_keep_object_pointer_null_and_opaque_separate() {
     let any = unsafe { thaw_promise_any(children.as_ptr(), children.len()) };
     assert_eq!(
         unsafe {
-            thaw_promise_reject_typed(object_child, 1usize as *const u8, 0, 0.0, 0, false, &object)
+            thaw_promise_reject_typed(
+                object_child,
+                std::ptr::dangling::<u8>(),
+                0,
+                0.0,
+                0,
+                false,
+                &object,
+            )
         },
         1
     );
@@ -3629,7 +3637,7 @@ fn promise_any_reason_slots_keep_object_pointer_null_and_opaque_separate() {
         unsafe {
             thaw_promise_reject_typed(
                 null_child,
-                1usize as *const u8,
+                std::ptr::dangling::<u8>(),
                 6,
                 0.0,
                 0,
@@ -3639,7 +3647,10 @@ fn promise_any_reason_slots_keep_object_pointer_null_and_opaque_separate() {
         },
         1
     );
-    assert_eq!(thaw_promise_reject(opaque_child, 1usize as *const u8), 1);
+    assert_eq!(
+        thaw_promise_reject(opaque_child, std::ptr::dangling::<u8>()),
+        1
+    );
     thaw_runtime_run_until_idle();
     let errors = unsafe { thaw_promise_exception_aggregate_errors(any) };
     assert_eq!(
@@ -3653,7 +3664,7 @@ fn promise_any_reason_slots_keep_object_pointer_null_and_opaque_separate() {
 
 #[test]
 fn explicit_null_exception_tag_reports_null_without_reading_an_opaque_pointer() {
-    let opaque = 1usize as *const u8;
+    let opaque = std::ptr::dangling::<u8>();
     let terminal = unsafe {
         thaw_runtime_exception_report_text(opaque.cast(), std::ptr::null(), 6, 0.0, 0, false)
     };

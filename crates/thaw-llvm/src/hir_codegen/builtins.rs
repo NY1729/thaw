@@ -25,6 +25,7 @@ impl<'ctx> HirCompiler<'ctx> {
     /// Like `compile_single_arg_call`, but for a function whose one
     /// argument is an array/tuple *handle* that the callee itself expects
     /// as a raw `[length][elem...]` buffer -- unwraps it first.
+    #[allow(dead_code)]
     fn compile_single_array_arg_call(
         &mut self,
         fn_name: &str,

@@ -708,6 +708,7 @@ fn is_native_builtin(package: &str) -> bool {
 /// Resolve local import spellings to the package qualifier and exported class
 /// name used by constructor helpers. Unresolved imports still reserve their
 /// local name, so they cannot fall through to a different package's bare class.
+#[allow(clippy::type_complexity)]
 fn constructor_imports(
     module: &thaw_parser::ast::Module,
     package_qualifiers: &std::collections::HashMap<String, String>,
@@ -931,6 +932,7 @@ fn observed_bare_member_object_identifiers_named(
 /// leven from "leven"` actually means: the only other source for
 /// `external_exports`'s `"default"` key is a package with *exactly one*
 /// function total, a fallback this bypasses entirely once it names one.
+#[allow(dead_code)]
 fn commonjs_export_name(source: &str) -> Result<Option<String>, String> {
     commonjs_export_name_named(source, &thaw_parser::common::FileName::Custom("input.ts".into()))
 }
@@ -1004,6 +1006,7 @@ fn commonjs_export_name_named(
 /// `export = Application` makes `new Koa()` valid), whereas a real ESM
 /// default export's namespace object is not constructible. Real example:
 /// koa's own `@types` barrel.
+#[allow(dead_code)]
 fn commonjs_export_assignment(source: &str) -> Result<Option<String>, String> {
     commonjs_export_assignment_named(source, &thaw_parser::common::FileName::Custom("input.ts".into()))
 }
@@ -1032,6 +1035,7 @@ fn commonjs_export_assignment_named(
 /// `parse_dts` cannot recover their imported signature from this file.
 /// Only return properties the program actually calls; the dynamic host
 /// already handles their values and argument packing.
+#[allow(dead_code)]
 fn called_commonjs_namespace_properties(
     source: &str,
     namespace: Option<&str>,

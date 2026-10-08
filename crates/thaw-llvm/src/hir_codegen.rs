@@ -158,7 +158,7 @@ fn raw_value_layout(ty: &HirType) -> Result<(u64, u64), String> {
 fn compiled_value_layout(ty: BasicTypeEnum<'_>) -> Result<(u64, u64), String> {
     match ty {
         BasicTypeEnum::IntType(integer) => {
-            let bytes = ((integer.get_bit_width() as u64 + 7) / 8).max(1);
+            let bytes = (integer.get_bit_width() as u64).div_ceil(8).max(1);
             Ok((bytes, bytes.min(8)))
         }
         BasicTypeEnum::FloatType(_) | BasicTypeEnum::PointerType(_) => Ok((8, 8)),
@@ -326,6 +326,7 @@ struct CodegenScopeContext<'ctx> {
 macro_rules! isolated_codegen_scope {
     ($compiler:expr, $body:block) => {{
         let saved_scope_context = $compiler.take_codegen_scope_context();
+        #[allow(clippy::redundant_closure_call)]
         let result: Result<_, String> = (|| $body)();
         $compiler.replace_codegen_scope_context(saved_scope_context);
         result
@@ -770,6 +771,7 @@ impl<'ctx> HirCompiler<'ctx> {
             return Ok(());
         }
         let mut common = Vec::new();
+        #[allow(clippy::type_complexity)]
         let mut groups: Vec<(usize, bool, bool, Vec<usize>, Vec<HirInitStep>)> = Vec::new();
         for step in &program.initializers {
             if let HirInitStep::ModuleBoundary {

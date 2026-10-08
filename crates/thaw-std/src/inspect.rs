@@ -36,6 +36,8 @@ impl Default for InspectOptions {
     }
 }
 
+// Variants mirror Node's inspect kinds; not every one is produced by the converters yet.
+#[allow(dead_code)]
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum FnKind {
     Function,
@@ -48,6 +50,7 @@ pub(crate) enum FnKind {
     },
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Ctor {
     /// `Object` (no prefix).

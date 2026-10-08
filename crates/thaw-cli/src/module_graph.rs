@@ -368,9 +368,10 @@ fn load_module(
         None => source,
     };
     let source_name = if source_override.is_some() || transform.is_some() {
-        thaw_parser::common::FileName::Custom(
-            format!("{} (in-memory module source)", path.display()).into(),
-        )
+        thaw_parser::common::FileName::Custom(format!(
+            "{} (in-memory module source)",
+            path.display()
+        ))
     } else {
         thaw_parser::common::FileName::Real(path.clone())
     };
@@ -1182,7 +1183,7 @@ pub fn external_specifiers(
             if !specifier.starts_with('.')
                 && !result.iter().any(|(existing, _)| existing == &specifier)
             {
-                result.push((specifier.clone(), module_location(&module, &specifier)));
+                result.push((specifier.clone(), module_location(module, &specifier)));
             }
         }
     }
@@ -1356,6 +1357,7 @@ pub fn bundle(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(dead_code)]
 pub fn bundle_with_source_transform(
     entry: &Path,
     entry_source: &str,

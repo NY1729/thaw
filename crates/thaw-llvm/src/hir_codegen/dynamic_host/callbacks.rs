@@ -192,7 +192,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 .build_return(None)
                 .map_err(|error| error.to_string())?;
         } else {
-            let result_json = self.compile_decode_quickjs_graph(value.into())?;
+            let result_json = self.compile_decode_quickjs_graph(value)?;
 
             let decoded = self.compile_typed_dynamic_result(result_json, ret)?;
             self.builder
@@ -459,7 +459,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 .map_err(|error| error.to_string())?;
             self.builder.build_return(None).map_err(|error| error.to_string())?;
         } else {
-            let result_json = self.compile_decode_quickjs_graph(value.into())?;
+            let result_json = self.compile_decode_quickjs_graph(value)?;
             let decoded = self.compile_typed_dynamic_result(result_json, ret)?;
             self.builder.build_return(Some(&decoded)).map_err(|error| error.to_string())?;
         }
@@ -736,6 +736,7 @@ impl<'ctx> HirCompiler<'ctx> {
         Ok(descriptors)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn compile_value_callback_from_closure(
         &mut self,
         closure: PointerValue<'ctx>,

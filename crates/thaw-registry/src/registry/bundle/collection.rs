@@ -137,7 +137,7 @@ fn add_builtin_module(
         return;
     };
     visited.push(key.clone());
-    let source_name = thaw_parser::common::FileName::Custom(format!("node:{name} (generated builtin module)").into());
+    let source_name = thaw_parser::common::FileName::Custom(format!("node:{name} (generated builtin module)"));
     let mut requires = Vec::new();
     for specifier in analyze_module_named(source, &source_name).specs {
         let (resolution, suffix) = split_module_suffix(&specifier);
@@ -420,9 +420,9 @@ fn bundle_commonjs_package_cached(
                 source
             };
             let source_name = if is_json {
-                thaw_parser::common::FileName::Custom(format!("{} (generated JSON module)", abs_path.display()).into())
+                thaw_parser::common::FileName::Custom(format!("{} (generated JSON module)", abs_path.display()))
             } else if had_shebang {
-                thaw_parser::common::FileName::Custom(format!("{} (after shebang removal)", abs_path.display()).into())
+                thaw_parser::common::FileName::Custom(format!("{} (after shebang removal)", abs_path.display()))
             } else {
                 thaw_parser::common::FileName::Real(abs_path.clone())
             };
@@ -631,14 +631,13 @@ fn bundle_commonjs_package_cached(
                     && !spec.starts_with("./")
                     && !spec.starts_with("../")
             })
-            .cloned()
         {
-            let (resolution_spec, suffix) = split_module_suffix(&spec);
+            let (resolution_spec, suffix) = split_module_suffix(spec);
             for import_condition in [false, true] {
                 if !(if import_condition {
-                    analysis.import_condition_specs.contains(&spec)
+                    analysis.import_condition_specs.contains(spec)
                 } else {
-                    analysis.require_condition_specs.contains(&spec)
+                    analysis.require_condition_specs.contains(spec)
                 }) {
                     continue;
                 }

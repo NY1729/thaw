@@ -513,7 +513,7 @@ fn fs_created_directory_record(created: Option<std::path::PathBuf>) -> serde_jso
 }
 
 fn fs_decode_raw_path(encoded: &str) -> io::Result<Vec<u8>> {
-    if encoded.len() % 2 != 0 || !encoded.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+    if !encoded.len().is_multiple_of(2) || !encoded.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid encoded path"));
     }
     let bytes = hex_decode(encoded);
@@ -661,7 +661,7 @@ fn fs_open_fd(path: &std::path::Path, value: &str, table: &mut FsHandleTable) ->
     let (flag, mode) = value.split_once(',').ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "missing open mode"))?;
     let mode = fs_parse_mode(mode)?;
     let fd = table.next;
-    if fd == u32::MAX { return Err(io::Error::new(io::ErrorKind::Other, "too many file handles")); }
+    if fd == u32::MAX { return Err(io::Error::other("too many file handles")); }
     let file = if let Some(bits) = flag.strip_prefix('#') {
         let bits = bits.parse::<i32>().map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid open flags"))?;
         #[cfg(unix)] {
@@ -916,8 +916,8 @@ fn host_fs(operation: String, path: String, value: String, recursive: bool, tabl
             Ok(serde_json::json!({ "ok": true, "length": bytes.len() }))
         })(),
         "append" => std::fs::OpenOptions::new().create(true).append(true).open(path_ref).and_then(|mut file| file.write_all(&hex_decode(&value))).map(|_| serde_json::json!({ "ok": true })),
-        "mkdir" => fs_mkdir_with_mode(path_ref, "511", recursive).map(|created| fs_created_directory_record(created)),
-        "mkdir_mode" => fs_mkdir_with_mode(path_ref, &value, recursive).map(|created| fs_created_directory_record(created)),
+        "mkdir" => fs_mkdir_with_mode(path_ref, "511", recursive).map(fs_created_directory_record),
+        "mkdir_mode" => fs_mkdir_with_mode(path_ref, &value, recursive).map(fs_created_directory_record),
         "readdir" => fs_readdir_entries(path_ref, value == "typed", recursive),
         "stat" => std::fs::metadata(path_ref).map(fs_metadata_record),
         "lstat" => std::fs::symlink_metadata(path_ref).map(fs_metadata_record),

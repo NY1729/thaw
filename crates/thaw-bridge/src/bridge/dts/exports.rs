@@ -748,6 +748,7 @@ fn all_type_alias_decls_by_name(module: &Module) -> HashMap<String, &TsType> {
 /// A callable const inside a namespace resolves local type names before
 /// equally named declarations in an outer scope. Keep the old top-level
 /// maps untouched; only nested declarations need this lexical view.
+#[allow(clippy::type_complexity)]
 fn scoped_callable_type_tables<'a>(
     module: &'a Module,
     scope: &str,

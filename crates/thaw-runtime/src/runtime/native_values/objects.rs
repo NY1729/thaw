@@ -22,6 +22,7 @@ thread_local! {
     // A structural alias can enumerate fields in a different order from the
     // physical allocation. Record its original byte offsets at the first
     // type-erasure boundary, without copying or changing the object ABI.
+    #[allow(clippy::type_complexity)]
     static OBJECT_FIELD_OFFSETS: RefCell<HashMap<usize, (String, HashMap<String, u64>)>> =
         RefCell::new(HashMap::new());
     // The source HIR type carries class ancestry in the marker field name;

@@ -9,7 +9,7 @@ mod tests {
         for (depth, accepted) in [(6, true), (7, false)] {
             let mut values = vec![NumericValue::Constant(1.0); depth];
             values.push(NumericValue::DynamicArgument(0));
-            values.extend(std::iter::repeat(NumericValue::Operation(NumericOp::Add)).take(depth));
+            values.extend(std::iter::repeat_n(NumericValue::Operation(NumericOp::Add), depth));
             assert_eq!(NumericProgram(values).machine_code().is_some(), accepted);
         }
     }

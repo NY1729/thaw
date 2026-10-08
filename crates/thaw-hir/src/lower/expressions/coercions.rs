@@ -1463,9 +1463,9 @@ impl<'a> FnLowerer<'a> {
             .or_else(|| Self::caught_object_identity(&right, &rhs_type, &left, &lhs_type))
         {
             identity
-        } else if lhs_type == rhs_type {
-            HirExpr::BinOp(BinOp::EqEqEq, Box::new(left), Box::new(right))
-        } else if Self::strict_reference_type(&lhs_type) && Self::strict_reference_type(&rhs_type) {
+        } else if lhs_type == rhs_type
+            || Self::strict_reference_type(&lhs_type) && Self::strict_reference_type(&rhs_type)
+        {
             HirExpr::BinOp(BinOp::EqEqEq, Box::new(left), Box::new(right))
         } else {
             HirExpr::Lit(HirLit::Bool(false))
@@ -2739,6 +2739,7 @@ impl<'a> FnLowerer<'a> {
     /// (a live handle), which `coerce_strict_equality_operands` would
     /// reject as incompatible: equal exactly when their decimal digits
     /// agree.
+    #[allow(dead_code)]
     fn lower_mixed_bigint_equality(
         &mut self,
         lhs: HirExpr,

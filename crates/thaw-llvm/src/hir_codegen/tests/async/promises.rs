@@ -1353,7 +1353,7 @@ fn promise_input_allocation_failure_reaches_catch_and_empty_input_skips_allocato
     }
     compiler.module.verify().unwrap();
     let engine = compiler.module.create_jit_execution_engine(inkwell::OptimizationLevel::None).unwrap();
-    engine.add_global_mapping(&allocator, fail_allocation as usize);
+    engine.add_global_mapping(&allocator, fail_allocation as *const () as usize);
     CALLS.store(0, std::sync::atomic::Ordering::SeqCst);
     type Probe = unsafe extern "C" fn() -> u8;
     unsafe {
@@ -1612,6 +1612,7 @@ fn native_promise_scope_tables_restore_after_codegen_errors() {
 
 struct ReactivePromotionProbe<'ctx> {
     preheader: inkwell::basic_block::BasicBlock<'ctx>,
+    #[allow(dead_code)]
     loop_header: inkwell::basic_block::BasicBlock<'ctx>,
     discovery: inkwell::basic_block::BasicBlock<'ctx>,
     outer_catch: inkwell::basic_block::BasicBlock<'ctx>,
@@ -2295,7 +2296,7 @@ fn compile_lambda_restores_scope_after_real_inner_body_error() {
     let missing = HirExpr::Var("missing_codegen_binding".into());
 
     let error = compiler.compile_lambda(&[], &[], &HirType::F64, &missing)
-        .err().expect("compile_lambda must reach its missing Var in the generated body");
+        .expect_err("compile_lambda must reach its missing Var in the generated body");
     assert_eq!(error, "unknown variable `missing_codegen_binding`");
     let ir = compiler.print_to_string();
     let inner = llvm_function_body(&ir, "@__thaw_lambda_0(");
@@ -2314,7 +2315,7 @@ fn compile_async_lambda_restores_scope_after_real_inner_body_error() {
     let missing = HirExpr::Var("missing_codegen_binding".into());
 
     let error = compiler.compile_async_lambda(&[], &[], &HirType::F64, &missing)
-        .err().expect("compile_async_lambda must reach its missing Var in the generated body");
+        .expect_err("compile_async_lambda must reach its missing Var in the generated body");
     assert_eq!(
         error,
         "async lambda `__thaw_async_lambda_0`: unknown variable `missing_codegen_binding`",
