@@ -752,7 +752,7 @@ fn rewrite_live_import_references_named(
                             let imported = named
                                 .imported
                                 .as_ref()
-                                .map(&export_name)
+                                .map(export_name)
                                 .unwrap_or_else(|| local.clone());
                             bindings.insert(local, if opaque {
                                 format!("{origin_name}.readImport({}, {})",
@@ -1060,7 +1060,7 @@ fn native_opaque_link_checks_named(
                     match binding {
                         ImportSpecifier::Named(named) if !named.is_type_only => {
                             checks.push((spec.clone(), named.imported.as_ref()
-                                .map(&export_name).unwrap_or_else(|| named.local.sym.to_string())));
+                                .map(export_name).unwrap_or_else(|| named.local.sym.to_string())));
                         }
                         ImportSpecifier::Default(_) => checks.push((spec.clone(), "default".to_owned())),
                         _ => {}
@@ -1465,7 +1465,7 @@ fn rewrite_esm_to_commonjs_mode_named(source: &str, await_imports: bool, source_
                             let imported = named
                                 .imported
                                 .as_ref()
-                                .map(&export_name)
+                                .map(export_name)
                                 .unwrap_or_else(|| local.clone());
                             imported_bindings.insert(
                                 local,
@@ -1585,7 +1585,7 @@ fn rewrite_esm_to_commonjs_mode_named(source: &str, await_imports: bool, source_
                             let exported = n
                                 .exported
                                 .as_ref()
-                                .map(&export_name)
+                                .map(export_name)
                                 .unwrap_or_else(|| orig.clone());
                             local_export_prologue.push_str(&format!(
                                 "Object.defineProperty(exports, {}, {{ enumerable: true, get: function() {{ if (typeof {var_name} === 'undefined') throw new ReferenceError('Export is not initialized'); return {var_name}[{}]; }} }});\n",
@@ -1608,7 +1608,7 @@ fn rewrite_esm_to_commonjs_mode_named(source: &str, await_imports: bool, source_
                             let exported = n
                                 .exported
                                 .as_ref()
-                                .map(&export_name)
+                                .map(export_name)
                                 .unwrap_or_else(|| orig.clone());
                             let value = imported_bindings
                                 .get(&orig)
@@ -1697,7 +1697,7 @@ fn esm_export_graph_named(source: &str, source_name: &thaw_parser::common::FileN
             match specifier {
                 ImportSpecifier::Named(named) if !named.is_type_only => {
                     let local = named.local.sym.to_string();
-                    let remote = named.imported.as_ref().map(&name).unwrap_or_else(|| local.clone());
+                    let remote = named.imported.as_ref().map(name).unwrap_or_else(|| local.clone());
                     requests.push((source.clone(), remote.clone()));
                     imported.insert(local, (source.clone(), Some(remote), false));
                 }
@@ -1750,7 +1750,7 @@ fn esm_export_graph_named(source: &str, source_name: &thaw_parser::common::FileN
                         ExportSpecifier::Named(named) if !named.is_type_only => {
                             let original = name(&named.orig);
                             if let Some(source) = &export.src { requests.push((source.value.to_string_lossy().into_owned(), original.clone())); }
-                            let exported = named.exported.as_ref().map(&name).unwrap_or_else(|| original.clone());
+                            let exported = named.exported.as_ref().map(name).unwrap_or_else(|| original.clone());
                             let target = export.src.as_ref().map(|source| (source.value.to_string_lossy().into_owned(), Some(original.clone()), original == "default"))
                                 .or_else(|| imported.get(&original).cloned());
                             if let Some((source, remote, default_interop)) = target {
