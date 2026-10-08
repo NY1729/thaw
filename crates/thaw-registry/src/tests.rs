@@ -73,11 +73,19 @@ fn os_priority_validates_arguments_and_reports_native_pid_errors() {
     let (bundle, _, _, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
     let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseOsPriority = module.exports;");
-    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
+    assert_eq!(
+        thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()),
+        1
+    );
     let result_ptr = thaw_quickjs::thaw_js_call(
-        CString::new("exerciseOsPriority").unwrap().as_ptr(), CString::new("[]").unwrap().as_ptr());
+        CString::new("exerciseOsPriority").unwrap().as_ptr(),
+        CString::new("[]").unwrap().as_ptr(),
+    );
     let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
-    assert_eq!(result, "[true,true,true,true,true,true,true,true,true,true]");
+    assert_eq!(
+        result,
+        "[true,true,true,true,true,true,true,true,true,true]"
+    );
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
 }
@@ -227,15 +235,23 @@ fn named_default_declarations_remain_local_bindings() {
     ];
     for (source, expected, expression) in cases {
         let rewritten = rewrite_esm_to_commonjs(source).unwrap();
-        let script = format!("globalThis.__thaw_named_default = (function() {{ \
+        let script = format!(
+            "globalThis.__thaw_named_default = (function() {{ \
             var module = {{ exports: {{}} }}, exports = module.exports; \
-            {rewritten} return function() {{ return {expression}; }}; }})();");
-        assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
+            {rewritten} return function() {{ return {expression}; }}; }})();"
+        );
+        assert_eq!(
+            thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()),
+            1
+        );
         let result = thaw_quickjs::thaw_js_call(
             CString::new("__thaw_named_default").unwrap().as_ptr(),
             CString::new("[]").unwrap().as_ptr(),
         );
-        assert_eq!(unsafe { CStr::from_ptr(result) }.to_str().unwrap(), expected);
+        assert_eq!(
+            unsafe { CStr::from_ptr(result) }.to_str().unwrap(),
+            expected
+        );
     }
 }
 
@@ -256,20 +272,30 @@ fn export_star_does_not_redefine_explicit_local_or_reexported_names() {
     let dir = temp_registry("star_explicit_priority");
     let node_modules = temp_registry("star_explicit_priority_modules");
     fs::write(dir.join("index.js"), source).unwrap();
-    fs::write(dir.join("a.js"), "module.exports = { local: 1, chosen: 2, destructured: 3, starOnly: 4 };").unwrap();
+    fs::write(
+        dir.join("a.js"),
+        "module.exports = { local: 1, chosen: 2, destructured: 3, starOnly: 4 };",
+    )
+    .unwrap();
     fs::write(dir.join("c.js"), "module.exports = { remote: 10 };").unwrap();
-    let (bundle, _, _, _) = bundle_commonjs_package(&node_modules, "pkg", &dir, "index.js").unwrap();
+    let (bundle, _, _, _) =
+        bundle_commonjs_package(&node_modules, "pkg", &dir, "index.js").unwrap();
     let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.__thaw_star_explicit_case = function() {{ return [module.exports.local, module.exports.destructured, module.exports.chosen, module.exports.starOnly]; }};");
-    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
+    assert_eq!(
+        thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()),
+        1
+    );
     let result = thaw_quickjs::thaw_js_call(
         CString::new("__thaw_star_explicit_case").unwrap().as_ptr(),
         CString::new("[]").unwrap().as_ptr(),
     );
-    assert_eq!(unsafe { CStr::from_ptr(result) }.to_str().unwrap(), "[7,11,10,4]");
+    assert_eq!(
+        unsafe { CStr::from_ptr(result) }.to_str().unwrap(),
+        "[7,11,10,4]"
+    );
     let _ = fs::remove_dir_all(dir);
     let _ = fs::remove_dir_all(node_modules);
 }
-
 
 #[test]
 fn star_rewrite_uses_the_bundle_origin_graph() {
@@ -282,9 +308,13 @@ fn star_rewrite_uses_the_bundle_origin_graph() {
     let node_modules = temp_registry("star_import_origin_modules");
     fs::write(dir.join("index.js"), source).unwrap();
     fs::write(dir.join("dep.js"), "export const x = 4;").unwrap();
-    let (bundle, _, _, _) = bundle_commonjs_package(&node_modules, "pkg", &dir, "index.js").unwrap();
+    let (bundle, _, _, _) =
+        bundle_commonjs_package(&node_modules, "pkg", &dir, "index.js").unwrap();
     let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.__thaw_star_import = function() {{ return [module.exports.x, module.exports.y]; }};");
-    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
+    assert_eq!(
+        thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()),
+        1
+    );
     let result = thaw_quickjs::thaw_js_call(c"__thaw_star_import".as_ptr(), c"[]".as_ptr());
     assert_eq!(unsafe { CStr::from_ptr(result) }.to_str().unwrap(), "[4,5]");
     let _ = fs::remove_dir_all(dir);
@@ -318,13 +348,34 @@ fn named_import_calls_and_tags_detach_the_module_receiver() {
          function shadow(fn) { return fn(); }",
     )
     .unwrap();
-    assert!(rewritten.contains("(0, __thaw_esm_import_0[\"fn\"])()"), "{rewritten}");
-    assert!(rewritten.contains("(0, __thaw_esm_import_0[\"fn\"])?.()"), "{rewritten}");
-    assert!(rewritten.contains("((0, __thaw_esm_import_0[\"fn\"]))()"), "{rewritten}");
-    assert!(rewritten.contains("(0, __thaw_esm_import_0[\"tag\"])`ok`"), "{rewritten}");
-    assert!(rewritten.contains("const read = __thaw_esm_import_0[\"fn\"]"), "{rewritten}");
-    assert!(rewritten.contains("const props = { fn: __thaw_esm_import_0[\"fn\"] }"), "{rewritten}");
-    assert!(rewritten.contains("function shadow(fn) { return fn(); }"), "{rewritten}");
+    assert!(
+        rewritten.contains("(0, __thaw_esm_import_0[\"fn\"])()"),
+        "{rewritten}"
+    );
+    assert!(
+        rewritten.contains("(0, __thaw_esm_import_0[\"fn\"])?.()"),
+        "{rewritten}"
+    );
+    assert!(
+        rewritten.contains("((0, __thaw_esm_import_0[\"fn\"]))()"),
+        "{rewritten}"
+    );
+    assert!(
+        rewritten.contains("(0, __thaw_esm_import_0[\"tag\"])`ok`"),
+        "{rewritten}"
+    );
+    assert!(
+        rewritten.contains("const read = __thaw_esm_import_0[\"fn\"]"),
+        "{rewritten}"
+    );
+    assert!(
+        rewritten.contains("const props = { fn: __thaw_esm_import_0[\"fn\"] }"),
+        "{rewritten}"
+    );
+    assert!(
+        rewritten.contains("function shadow(fn) { return fn(); }"),
+        "{rewritten}"
+    );
 }
 
 #[test]
@@ -358,12 +409,20 @@ fn named_import_calls_keep_unbound_this_and_live_export_values() {
          globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} \
          globalThis.__thaw_named_import_receiver = module.exports.run;"
     );
-    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
+    assert_eq!(
+        thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()),
+        1
+    );
     let result = thaw_quickjs::thaw_js_call(
-        CString::new("__thaw_named_import_receiver").unwrap().as_ptr(),
+        CString::new("__thaw_named_import_receiver")
+            .unwrap()
+            .as_ptr(),
         CString::new("[]").unwrap().as_ptr(),
     );
-    assert_eq!(unsafe { CStr::from_ptr(result) }.to_str().unwrap(), "[1,\"ok\",1,2,2,3]");
+    assert_eq!(
+        unsafe { CStr::from_ptr(result) }.to_str().unwrap(),
+        "[1,\"ok\",1,2,2,3]"
+    );
     let _ = fs::remove_dir_all(dir);
     let _ = fs::remove_dir_all(node_modules);
 }
@@ -381,13 +440,35 @@ fn esm_synthetic_names_avoid_source_bindings_in_sync_and_async_rewrites() {
         export const answer = value + __thaw_esm_import_0 + __thaw_esm_import_\\u0031;";
     for await_imports in [false, true] {
         let rewritten = rewrite_esm_to_commonjs_mode(source, await_imports).unwrap();
-        assert!(rewritten.contains("var __thaw_esm_import_2 = "), "{rewritten}");
-        assert!(rewritten.contains("__thaw_esm_import_2[\"value\"]"), "{rewritten}");
-        assert!(rewritten.contains("var __thaw_esm_reexport_3 = "), "{rewritten}");
-        assert!(rewritten.contains("var __thaw_esm_reexport_all_4 = "), "{rewritten}");
-        assert!(rewritten.contains("__thaw_esm_origin_2.track(exports)"), "{rewritten}");
-        assert!(rewritten.contains("const __thaw_esm_import_0 = 7"), "{rewritten}");
-        assert_eq!(rewritten.contains("await requireAsync"), await_imports, "{rewritten}");
+        assert!(
+            rewritten.contains("var __thaw_esm_import_2 = "),
+            "{rewritten}"
+        );
+        assert!(
+            rewritten.contains("__thaw_esm_import_2[\"value\"]"),
+            "{rewritten}"
+        );
+        assert!(
+            rewritten.contains("var __thaw_esm_reexport_3 = "),
+            "{rewritten}"
+        );
+        assert!(
+            rewritten.contains("var __thaw_esm_reexport_all_4 = "),
+            "{rewritten}"
+        );
+        assert!(
+            rewritten.contains("__thaw_esm_origin_2.track(exports)"),
+            "{rewritten}"
+        );
+        assert!(
+            rewritten.contains("const __thaw_esm_import_0 = 7"),
+            "{rewritten}"
+        );
+        assert_eq!(
+            rewritten.contains("await requireAsync"),
+            await_imports,
+            "{rewritten}"
+        );
     }
 }
 
@@ -453,7 +534,10 @@ fn rewrites_import_meta_resolve_so_the_bundle_still_parses() {
         "{rewritten}"
     );
     assert!(rewritten.contains("resolve: function()"), "{rewritten}");
-    assert!(thaw_parser::parse_javascript(&rewritten).is_ok(), "{rewritten}");
+    assert!(
+        thaw_parser::parse_javascript(&rewritten).is_ok(),
+        "{rewritten}"
+    );
 }
 
 #[test]
@@ -465,10 +549,16 @@ fn rewrites_import_meta_as_an_expression_in_every_position() {
          export const resolved = import.meta.resolve('x'); import.meta.url;",
     )
     .unwrap();
-    assert!(rewritten.contains("const meta = () => (__thaw_import_meta_0 ||"), "{rewritten}");
+    assert!(
+        rewritten.contains("const meta = () => (__thaw_import_meta_0 ||"),
+        "{rewritten}"
+    );
     assert!(rewritten.contains("})).url"), "{rewritten}");
     assert!(rewritten.contains("})).resolve('x')"), "{rewritten}");
-    assert!(thaw_parser::parse_javascript(&rewritten).is_ok(), "{rewritten}");
+    assert!(
+        thaw_parser::parse_javascript(&rewritten).is_ok(),
+        "{rewritten}"
+    );
 }
 
 #[test]
@@ -476,10 +566,19 @@ fn rewrites_bare_import_meta_expression_statement_without_export_syntax() {
     // Unrun regression: ESM can use import.meta without an import/export
     // declaration, and the CJS wrapper still evaluates it as script code.
     let rewritten = rewrite_esm_to_commonjs("import.meta.url;").unwrap();
-    assert!(rewritten.starts_with("(__thaw_import_meta_0 ||"), "{rewritten}");
+    assert!(
+        rewritten.starts_with("(__thaw_import_meta_0 ||"),
+        "{rewritten}"
+    );
     assert!(rewritten.contains("})).url;"), "{rewritten}");
-    assert!(rewritten.ends_with("var __thaw_import_meta_0;"), "{rewritten}");
-    assert!(thaw_parser::parse_javascript(&rewritten).is_ok(), "{rewritten}");
+    assert!(
+        rewritten.ends_with("var __thaw_import_meta_0;"),
+        "{rewritten}"
+    );
+    assert!(
+        thaw_parser::parse_javascript(&rewritten).is_ok(),
+        "{rewritten}"
+    );
 }
 
 #[test]
@@ -494,18 +593,29 @@ fn import_meta_is_one_mutable_object_without_a_generated_name_collision() {
          return [first === import.meta, import.meta.extra, __thaw_import_meta_0, __thaw_import_meta_\\u0031]; }",
     )
     .unwrap();
-    assert!(rewritten.contains("var __thaw_import_meta_2;"), "{rewritten}");
+    assert!(
+        rewritten.contains("var __thaw_import_meta_2;"),
+        "{rewritten}"
+    );
     let script = format!(
         "globalThis.__thaw_import_meta_identity_case = (function() {{ \
          var module = {{ exports: {{}} }}, __filename = '/module.js'; \
          {rewritten} return module.exports.check; }})();"
     );
-    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
+    assert_eq!(
+        thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()),
+        1
+    );
     let result = thaw_quickjs::thaw_js_call(
-        CString::new("__thaw_import_meta_identity_case").unwrap().as_ptr(),
+        CString::new("__thaw_import_meta_identity_case")
+            .unwrap()
+            .as_ptr(),
         CString::new("[]").unwrap().as_ptr(),
     );
-    assert_eq!(unsafe { CStr::from_ptr(result) }.to_str().unwrap(), "[true,1,17,19]");
+    assert_eq!(
+        unsafe { CStr::from_ptr(result) }.to_str().unwrap(),
+        "[true,1,17,19]"
+    );
 }
 
 #[test]
@@ -550,8 +660,14 @@ fn live_import_rewrite_keeps_named_function_expression_self_binding() {
          export const outside = x;",
     )
     .unwrap();
-    assert!(rewritten.contains("function x(value = x) { return value === x; }"), "{rewritten}");
-    assert!(rewritten.contains("const outside = __thaw_esm_import_0[\"x\"]"), "{rewritten}");
+    assert!(
+        rewritten.contains("function x(value = x) { return value === x; }"),
+        "{rewritten}"
+    );
+    assert!(
+        rewritten.contains("const outside = __thaw_esm_import_0[\"x\"]"),
+        "{rewritten}"
+    );
 }
 
 #[test]
@@ -566,11 +682,26 @@ fn live_import_rewrite_respects_hoisted_var_across_nested_statements() {
          function outer() { function inner() { var x; return x; } return x; }",
     )
     .unwrap();
-    assert!(rewritten.contains("const before = x; if (false) { var x; }"), "{rewritten}");
-    assert!(rewritten.contains("const before = x; for (var x of [])"), "{rewritten}");
-    assert!(rewritten.contains("const before = x; let x = 1;"), "{rewritten}");
-    assert!(rewritten.contains("function inner() { var x; return x; }"), "{rewritten}");
-    assert!(rewritten.contains("return __thaw_esm_import_0[\"x\"]; }"), "{rewritten}");
+    assert!(
+        rewritten.contains("const before = x; if (false) { var x; }"),
+        "{rewritten}"
+    );
+    assert!(
+        rewritten.contains("const before = x; for (var x of [])"),
+        "{rewritten}"
+    );
+    assert!(
+        rewritten.contains("const before = x; let x = 1;"),
+        "{rewritten}"
+    );
+    assert!(
+        rewritten.contains("function inner() { var x; return x; }"),
+        "{rewritten}"
+    );
+    assert!(
+        rewritten.contains("return __thaw_esm_import_0[\"x\"]; }"),
+        "{rewritten}"
+    );
 }
 
 #[test]
@@ -583,9 +714,18 @@ fn live_import_rewrite_respects_later_parameter_bindings() {
          const outside = x;",
     )
     .unwrap();
-    assert!(rewritten.contains("function regular(before = x, x = 1)"), "{rewritten}");
-    assert!(rewritten.contains("(before = x, x = 1) => before"), "{rewritten}");
-    assert!(rewritten.contains("const outside = __thaw_esm_import_0[\"x\"]"), "{rewritten}");
+    assert!(
+        rewritten.contains("function regular(before = x, x = 1)"),
+        "{rewritten}"
+    );
+    assert!(
+        rewritten.contains("(before = x, x = 1) => before"),
+        "{rewritten}"
+    );
+    assert!(
+        rewritten.contains("const outside = __thaw_esm_import_0[\"x\"]"),
+        "{rewritten}"
+    );
 }
 
 #[test]
@@ -600,9 +740,18 @@ fn live_import_rewrite_respects_loop_header_lexical_bindings() {
     )
     .unwrap();
     assert!(rewritten.contains("let x = 0; x < 1; x++"), "{rewritten}");
-    assert!(rewritten.contains("for (const x of [1]) console.log(x)"), "{rewritten}");
-    assert!(rewritten.contains("for (const x in { a: 1 }) console.log(x)"), "{rewritten}");
-    assert!(rewritten.contains("console.log(__thaw_esm_import_0[\"x\"]);"), "{rewritten}");
+    assert!(
+        rewritten.contains("for (const x of [1]) console.log(x)"),
+        "{rewritten}"
+    );
+    assert!(
+        rewritten.contains("for (const x in { a: 1 }) console.log(x)"),
+        "{rewritten}"
+    );
+    assert!(
+        rewritten.contains("console.log(__thaw_esm_import_0[\"x\"]);"),
+        "{rewritten}"
+    );
 }
 
 #[test]
@@ -616,10 +765,22 @@ fn live_import_rewrite_respects_switch_and_static_block_scopes() {
          console.log(x);",
     )
     .unwrap();
-    assert!(rewritten.contains("switch (__thaw_esm_import_0[\"x\"])"), "{rewritten}");
-    assert!(rewritten.contains("let x = 2; console.log(x)"), "{rewritten}");
-    assert!(rewritten.contains("const before = x; if (false) { var x; }"), "{rewritten}");
-    assert!(rewritten.contains("console.log(__thaw_esm_import_0[\"x\"]);"), "{rewritten}");
+    assert!(
+        rewritten.contains("switch (__thaw_esm_import_0[\"x\"])"),
+        "{rewritten}"
+    );
+    assert!(
+        rewritten.contains("let x = 2; console.log(x)"),
+        "{rewritten}"
+    );
+    assert!(
+        rewritten.contains("const before = x; if (false) { var x; }"),
+        "{rewritten}"
+    );
+    assert!(
+        rewritten.contains("console.log(__thaw_esm_import_0[\"x\"]);"),
+        "{rewritten}"
+    );
 }
 
 #[test]
@@ -792,25 +953,35 @@ fn top_level_for_await_initializes_dependencies_before_export_binding() {
 
     // Unrun regression: the loop has no AwaitExpr node, but its module
     // and a static importer still require async initialization.
-    assert!(!analyze_module(
-        "export async function later() { for await (const item of values) {} }"
-    ).has_top_level_await);
-    assert!(!analyze_module(
-        "export const later = async () => { for await (const item of values) {} };"
-    ).has_top_level_await);
-    assert!(analyze_module(
-        "export const values = []; for (const item of await source()) {}"
-    ).has_top_level_await);
-    assert!(analyze_module(
-        "export let value = 0; for await (const item of values) { value = item; }"
-    ).has_top_level_await);
+    assert!(
+        !analyze_module("export async function later() { for await (const item of values) {} }")
+            .has_top_level_await
+    );
+    assert!(
+        !analyze_module(
+            "export const later = async () => { for await (const item of values) {} };"
+        )
+        .has_top_level_await
+    );
+    assert!(
+        analyze_module("export const values = []; for (const item of await source()) {}")
+            .has_top_level_await
+    );
+    assert!(
+        analyze_module("export let value = 0; for await (const item of values) { value = item; }")
+            .has_top_level_await
+    );
     let dir = temp_registry("top_level_for_await_graph");
-    fs::write(dir.join("index.js"),
-        "import { value } from './value.js'; export default function run() { return value + 2; }"
-    ).unwrap();
-    fs::write(dir.join("value.js"),
-        "export let value = 0; for await (const item of [Promise.resolve(40)]) { value = item; }"
-    ).unwrap();
+    fs::write(
+        dir.join("index.js"),
+        "import { value } from './value.js'; export default function run() { return value + 2; }",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("value.js"),
+        "export let value = 0; for await (const item of [Promise.resolve(40)]) { value = item; }",
+    )
+    .unwrap();
     let empty_node_modules = temp_registry("top_level_for_await_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
@@ -821,7 +992,10 @@ fn top_level_for_await_initializes_dependencies_before_export_binding() {
          globalThis.require = function(name) {{ throw new Error(name); }}; \
          {bundle} globalThis.runTopLevelForAwait = function() {{ return module.exports.default(); }};"
     );
-    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
+    assert_eq!(
+        thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()),
+        1
+    );
     let result = thaw_quickjs::thaw_js_call(
         CString::new("runTopLevelForAwait").unwrap().as_ptr(),
         CString::new("[]").unwrap().as_ptr(),
@@ -951,7 +1125,10 @@ fn dynamic_import_coerces_specifier_once_outside_local_string_scope() {
          globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} \
          globalThis.runDynamicSpecifier = module.exports;"
     );
-    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
+    assert_eq!(
+        thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()),
+        1
+    );
     let result = thaw_quickjs::thaw_js_call(c"runDynamicSpecifier".as_ptr(), c"[]".as_ptr());
     assert_eq!(
         unsafe { CStr::from_ptr(result) }.to_string_lossy(),
@@ -978,16 +1155,31 @@ fn dynamic_import_uses_final_exports_after_async_factory_and_keeps_rejections() 
     use std::ffi::{CStr, CString};
     let dir = temp_registry("dynamic_import_final_exports");
     fs::write(dir.join("index.js"), "module.exports = async function() { var results = await Promise.all([import('./late.js'), globalThis.__thaw_bundle_create_import_async('pkg/index.js')('./late.js')]); var direct = results[0], created = results[1]; var directThrow, createdThrow, directReject, createdReject, threwSynchronously = false; try { directThrow = import('./throw.js'); createdThrow = globalThis.__thaw_bundle_create_import_async('pkg/index.js')('./throw.js'); directReject = import('./reject.js'); createdReject = globalThis.__thaw_bundle_create_import_async('pkg/index.js')('./reject.js'); } catch (error) { threwSynchronously = true; } if (threwSynchronously) return [false]; var failures = await Promise.all([directThrow, createdThrow, directReject, createdReject].map(function(promise) { return promise.then(function() { return 'resolved'; }, function(error) { return error.message; }); })); return [direct.value, created.value, direct === created].concat(failures); };").unwrap();
-    fs::write(dir.join("late.js"), "await Promise.resolve(); module.exports = { value: 42 };").unwrap();
+    fs::write(
+        dir.join("late.js"),
+        "await Promise.resolve(); module.exports = { value: 42 };",
+    )
+    .unwrap();
     fs::write(dir.join("throw.js"), "throw new Error('sync-fail');").unwrap();
-    fs::write(dir.join("reject.js"), "await Promise.reject(new Error('async-fail'));").unwrap();
+    fs::write(
+        dir.join("reject.js"),
+        "await Promise.reject(new Error('async-fail'));",
+    )
+    .unwrap();
     let modules = temp_registry("dynamic_import_final_exports_modules");
-    let (bundle, _, file_count, _) = bundle_commonjs_package(&modules, "pkg", &dir, "index.js").unwrap();
+    let (bundle, _, file_count, _) =
+        bundle_commonjs_package(&modules, "pkg", &dir, "index.js").unwrap();
     assert_eq!(file_count, 4);
     let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.runFinalExports = module.exports;");
-    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
+    assert_eq!(
+        thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()),
+        1
+    );
     let result = thaw_quickjs::thaw_js_call(c"runFinalExports".as_ptr(), c"[]".as_ptr());
-    assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[42,42,true,\"sync-fail\",\"sync-fail\",\"async-fail\",\"async-fail\"]");
+    assert_eq!(
+        unsafe { CStr::from_ptr(result) }.to_string_lossy(),
+        "[42,42,true,\"sync-fail\",\"sync-fail\",\"async-fail\",\"async-fail\"]"
+    );
     let _ = fs::remove_dir_all(dir);
     let _ = fs::remove_dir_all(modules);
 }
@@ -1208,27 +1400,71 @@ fn registry_bundle_javascript_source_maps_keep_exact_or_generated_names() {
     }
     for (path, expected) in [
         (&raw, FileName::Real(raw.clone())),
-        (&shebang, FileName::Custom(format!("{} (after shebang removal)", shebang.display()).into())),
-        (&json, FileName::Custom(format!("{} (generated JSON module)", json.display()).into())),
-        (&worker_entry, FileName::Custom(format!("{} (Worker URL rewrite)", worker_entry.display()).into())),
+        (
+            &shebang,
+            FileName::Custom(format!("{} (after shebang removal)", shebang.display()).into()),
+        ),
+        (
+            &json,
+            FileName::Custom(format!("{} (generated JSON module)", json.display()).into()),
+        ),
+        (
+            &worker_entry,
+            FileName::Custom(format!("{} (Worker URL rewrite)", worker_entry.display()).into()),
+        ),
     ] {
-        let (source, _, name) = cache.modules.get(&(path.clone(), "pkg".to_string())).unwrap();
+        let (source, _, name) = cache
+            .modules
+            .get(&(path.clone(), "pkg".to_string()))
+            .unwrap();
         assert_eq!(name, &expected);
-        let (module, map) = thaw_parser::parse_javascript_with_source_map_named(source, name.clone()).unwrap();
-        assert_eq!(map.lookup_char_pos(module.body[0].span().lo).file.name.as_ref(), &expected);
+        let (module, map) =
+            thaw_parser::parse_javascript_with_source_map_named(source, name.clone()).unwrap();
+        assert_eq!(
+            map.lookup_char_pos(module.body[0].span().lo)
+                .file
+                .name
+                .as_ref(),
+            &expected
+        );
     }
     let worker_name = FileName::Real(worker.clone());
-    assert!(esm_origin_parameter_named(&fs::read_to_string(&worker).unwrap(), &worker_name).is_some());
-    let (module, map) = thaw_parser::parse_javascript_with_source_map_named(&fs::read_to_string(&worker).unwrap(), worker_name.clone()).unwrap();
-    assert_eq!(map.lookup_char_pos(module.body[0].span().lo).file.name.as_ref(), &worker_name);
+    assert!(
+        esm_origin_parameter_named(&fs::read_to_string(&worker).unwrap(), &worker_name).is_some()
+    );
+    let (module, map) = thaw_parser::parse_javascript_with_source_map_named(
+        &fs::read_to_string(&worker).unwrap(),
+        worker_name.clone(),
+    )
+    .unwrap();
+    assert_eq!(
+        map.lookup_char_pos(module.body[0].span().lo)
+            .file
+            .name
+            .as_ref(),
+        &worker_name
+    );
     let malformed = "export const =;";
     let malformed_name = FileName::Real(raw.clone());
-    assert!(analyze_module_named(malformed, &malformed_name).specs.is_empty());
+    assert!(analyze_module_named(malformed, &malformed_name)
+        .specs
+        .is_empty());
     assert!(rewrite_esm_to_commonjs_mode_named(malformed, false, &malformed_name).is_none());
     let mut builtins = Vec::new();
-    add_builtin_module("path", "node:path".to_string(), &mut Vec::new(), &mut builtins);
-    let path_builtin = builtins.iter().find(|module| module.key == "node:path").unwrap();
-    assert_eq!(path_builtin.source_name, FileName::Custom("node:path (generated builtin module)".into()));
+    add_builtin_module(
+        "path",
+        "node:path".to_string(),
+        &mut Vec::new(),
+        &mut builtins,
+    );
+    let path_builtin = builtins
+        .iter()
+        .find(|module| module.key == "node:path")
+        .unwrap();
+    assert_eq!(
+        path_builtin.source_name,
+        FileName::Custom("node:path (generated builtin module)".into())
+    );
     let _ = fs::remove_dir_all(node_modules);
 }
 
@@ -1245,14 +1481,32 @@ fn resolved_declaration_origin_distinguishes_installed_file_and_builtin_text() {
     assert_eq!(installed.dts_path.as_deref(), Some(dts_path.as_path()));
     let file_name = FileName::Real(installed.dts_path.clone().unwrap());
     let (module, map) = thaw_parser::parse_declarations_with_source_map_named(
-        &installed.dts_source, file_name.clone()).unwrap();
-    assert_eq!(map.lookup_char_pos(module.body[0].span().lo).file.name.as_ref(), &file_name);
+        &installed.dts_source,
+        file_name.clone(),
+    )
+    .unwrap();
+    assert_eq!(
+        map.lookup_char_pos(module.body[0].span().lo)
+            .file
+            .name
+            .as_ref(),
+        &file_name
+    );
 
     let builtin = resolve_builtin("node:path").unwrap();
     assert!(builtin.dts_path.is_none());
     let generated = FileName::Custom(format!("{} generated declarations", builtin.name).into());
     let (module, map) = thaw_parser::parse_declarations_with_source_map_named(
-        &builtin.dts_source, generated.clone()).unwrap();
-    assert_eq!(map.lookup_char_pos(module.body[0].span().lo).file.name.as_ref(), &generated);
+        &builtin.dts_source,
+        generated.clone(),
+    )
+    .unwrap();
+    assert_eq!(
+        map.lookup_char_pos(module.body[0].span().lo)
+            .file
+            .name
+            .as_ref(),
+        &generated
+    );
     let _ = fs::remove_dir_all(registry);
 }

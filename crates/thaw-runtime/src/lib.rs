@@ -252,7 +252,10 @@ static PROMISE_SETTLED_EMPTY_REASON: &[u8] = b"\0";
 
 fn fd_poll_timeout_ms(timeout: Option<Duration>) -> i32 {
     match timeout {
-        Some(duration) => duration.as_nanos().div_ceil(1_000_000).min(i32::MAX as u128) as i32,
+        Some(duration) => duration
+            .as_nanos()
+            .div_ceil(1_000_000)
+            .min(i32::MAX as u128) as i32,
         None => -1,
     }
 }
@@ -354,7 +357,10 @@ fn poll_fd_waits(timeout: Option<Duration>) -> usize {
     let mut watcher_count = 0;
     for (watcher, events) in ready_watchers {
         let registered = FD_WATCHERS.with(|watchers| {
-            watchers.borrow().iter().any(|current| current.id == watcher.id)
+            watchers
+                .borrow()
+                .iter()
+                .any(|current| current.id == watcher.id)
         });
         if registered {
             (watcher.callback)(watcher.context, events);
@@ -500,9 +506,11 @@ pub extern "C" fn thaw_runtime_poll_one() -> u8 {
                     promise.rejected && !promise.handled && !promise.reported_unhandled
                 })
             });
-        return u8::from(io_events != 0
-            || READY_CONTINUATIONS.with(|ready| !ready.borrow().is_empty())
-            || reporting_work);
+        return u8::from(
+            io_events != 0
+                || READY_CONTINUATIONS.with(|ready| !ready.borrow().is_empty())
+                || reporting_work,
+        );
     };
     (subscription.resume)(subscription.frame, result);
     1

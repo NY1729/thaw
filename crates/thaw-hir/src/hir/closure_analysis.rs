@@ -105,7 +105,9 @@ fn collect_closure_captures_expr(expr: &HirExpr, names: &mut BTreeSet<Symbol>) {
         | HirExpr::NullishIsNone(value, _)
         | HirExpr::NullishValue(value, _) => collect_closure_captures_expr(value, names),
         HirExpr::RecursiveClosure(_, _, closure) => collect_closure_captures_expr(closure, names),
-        HirExpr::TypedClosure(_, closure) | HirExpr::NonArrowFunction(closure) => collect_closure_captures_expr(closure, names),
+        HirExpr::TypedClosure(_, closure) | HirExpr::NonArrowFunction(closure) => {
+            collect_closure_captures_expr(closure, names)
+        }
         HirExpr::PromiseThen(source, callback, _, _, _, _) => {
             collect_closure_captures_expr(source, names);
             collect_closure_captures_expr(callback, names);
@@ -234,7 +236,10 @@ mod thaw_remaining_traversals_closure_controls {
     #[test]
     fn thaw_remaining_lambda_uses_declared_captures_without_scanning_its_body() {
         let lambda = HirExpr::Lambda(
-            vec![HirParam { name: "declared_capture".into(), ty: HirType::F64 }],
+            vec![HirParam {
+                name: "declared_capture".into(),
+                ty: HirType::F64,
+            }],
             Vec::new(),
             HirType::Void,
             Box::new(HirExpr::Var("body_only_name".into())),
