@@ -408,7 +408,10 @@ fn async_worker(pool: Arc<AsyncPool>) {
             work.state.store(ASYNC_EXECUTING, Ordering::Release);
             work_address
         };
-        let work = unsafe { &*(work_address as *const AsyncWork) };
+        // The queue entry owns one strong reference (see napi_queue_async_work);
+        // keep it until this worker is completely done with the item.
+        let work_ref = unsafe { Arc::from_raw(work_address as *const AsyncWork) };
+        let work = &*work_ref;
         unsafe {
             (work.execute)(work.env as NapiEnv, work.data as *mut c_void);
         }
@@ -418,6 +421,7 @@ fn async_worker(pool: Arc<AsyncPool>) {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .push_back(ReadyEvent::AsyncCompletion(work_address));
+        drop(work_ref);
     }
 }
 
@@ -719,7 +723,9 @@ pub struct Env {
     deferreds: Vec<Box<Deferred>>,
     // Box keeps async-work addresses stable for worker and completion queues.
     #[allow(clippy::vec_box)]
-    async_works: Vec<Box<AsyncWork>>,
+    // Shared with the worker pool: a queued or executing work item stays
+    // allocated until the worker drops its reference, even if the Env is gone.
+    async_works: Vec<Arc<AsyncWork>>,
     // Box keeps reference handles stable so deleted handles can be rejected safely.
     #[allow(clippy::vec_box)]
     references: Vec<Box<Reference>>,
@@ -966,8 +972,8 @@ unsafe fn async_work_ref<'a>(
     let work = env_ref
         .async_works
         .iter()
-        .find(|candidate| std::ptr::eq(candidate.as_ref(), work))
-        .map(Box::as_ref)
+        .find(|candidate| std::ptr::eq(Arc::as_ptr(candidate), work))
+        .map(|candidate| &**candidate)
         .ok_or(NAPI_INVALID_ARG);
     if work.is_err() {
         record_status(env, NAPI_INVALID_ARG);
@@ -2141,28 +2147,22 @@ fn host_has_unfinalized_threadsafe() -> bool {
 
 impl Drop for Host {
     fn drop(&mut self) {
-        if self.has_active_async_work()
-            || host_threadsafe_state(false)
-            || self.has_active_cleanup()
-            || self.owned_uv_loop.is_some()
-            || self.main_default_uv_loop.is_some()
-            || self
-                .module_envs
-                .iter()
-                .chain(&self.pending_call_envs)
-                .any(|env| {
-                    env.native_graph_pins != 0
-                        || !env.async_cleanup_hooks.is_empty()
-                        || env.async_cleanup_dispatching
-                        || env.shutdown_requested
-                })
+        // Host lives in a thread-local slot, so this runs from the TLS
+        // destructor: addon finalizers and cleanup hooks re-enter HOST through
+        // N-API calls and `LocalKey::with` panics once the slot is destroyed
+        // (a panic inside an extern "C" finalizer aborts the process). Running
+        // user code here is therefore never valid; anything not yet finalized
+        // is left for the OS to reclaim at process exit.
+        // ponytail: leaked, not finalized; an explicit pre-TLS-teardown pass
+        // (run on thread exit before the slot dies) would also run finalizers.
+        for env in self
+            .module_envs
+            .drain(..)
+            .chain(self.pending_call_envs.drain(..))
         {
-            // ponytail: At process exit the OS reclaims these environments; running
-            // addon finalizers after thread-local HOST destruction is invalid.
-            for env in self.module_envs.drain(..) {
-                Box::leak(env);
-            }
-            for env in self.pending_call_envs.drain(..) {
+            if env.finalized {
+                drop(env);
+            } else {
                 Box::leak(env);
             }
         }
