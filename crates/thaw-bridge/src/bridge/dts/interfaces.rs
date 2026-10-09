@@ -800,7 +800,7 @@ fn lower_dts_function(
             return None;
         };
         let name = match rest.arg.as_ref() {
-            Pat::Ident(binding) => binding.id.sym.to_string(),
+            Pat::Ident(binding) => safe_param_name(binding.id.sym.as_ref()),
             _ => "rest".to_string(),
         };
         let ty = match rest.type_ann.as_ref() {
@@ -836,7 +836,7 @@ fn lower_dts_function(
                         .to_string();
                 return (format!("arg{i}"), DtsType::Unsupported(reason));
             };
-            let param_name = binding.id.sym.to_string();
+            let param_name = safe_param_name(binding.id.sym.as_ref());
             let ty = match &binding.type_ann {
                 Some(ann) => classify(&ann.type_ann),
                 None => DtsType::Unsupported("missing type annotation".to_string()),
@@ -961,7 +961,7 @@ fn lower_dts_method_signature(
             return None;
         };
         let name = match rest.arg.as_ref() {
-            Pat::Ident(binding) => binding.id.sym.to_string(),
+            Pat::Ident(binding) => safe_param_name(binding.id.sym.as_ref()),
             _ => "rest".to_string(),
         };
         let ty = match rest.type_ann.as_ref() {
@@ -995,7 +995,7 @@ fn lower_dts_method_signature(
                         .to_string();
                 return (format!("arg{i}"), DtsType::Unsupported(reason));
             };
-            let param_name = binding.id.sym.to_string();
+            let param_name = safe_param_name(binding.id.sym.as_ref());
             let ty = match &binding.type_ann {
                 Some(ann) => classify(&ann.type_ann),
                 None => DtsType::Unsupported("missing type annotation".to_string()),
@@ -1018,4 +1018,10 @@ fn lower_dts_method_signature(
         rest_param,
         ret,
     }
+}
+
+/// `eval` / `arguments` are legal parameter names in a `.d.ts` but cannot be binding names in the
+/// strict-mode TypeScript the generated shims are parsed as, so rename them.
+fn safe_param_name(name: &str) -> String {
+    if matches!(name, "eval" | "arguments") { format!("{name}_") } else { name.to_string() }
 }

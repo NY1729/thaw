@@ -472,6 +472,29 @@ fn generated_public_alias_internals(module: &Module) -> HashSet<String> {
 
 /// Extracts typed, non-callable top-level value declarations. Callable
 /// `const`s are already returned by [`parse_dts`] and are excluded here.
+/// Whether a callable `const`'s annotation names (or intersects with) an object type that also has
+/// members: `KyInstance`, `debug.Debug & { debug: Debug }`, `{ (x): R; get: ... }`.
+fn type_is_callable_object(ty: &TsType, callable_objects: &HashSet<String>) -> bool {
+    match ty {
+        TsType::TsTypeRef(reference) => {
+            let name = match &reference.type_name {
+                TsEntityName::Ident(ident) => ident.sym.as_str(),
+                TsEntityName::TsQualifiedName(qualified) => qualified.right.sym.as_str(),
+            };
+            callable_objects.contains(name)
+        }
+        TsType::TsParenthesizedType(inner) => type_is_callable_object(&inner.type_ann, callable_objects),
+        TsType::TsUnionOrIntersectionType(TsUnionOrIntersectionType::TsIntersectionType(intersection)) => {
+            intersection.types.iter().any(|member| type_is_callable_object(member, callable_objects))
+        }
+        TsType::TsTypeLit(literal) => literal.members.iter().any(|member| matches!(
+            member,
+            TsTypeElement::TsPropertySignature(_) | TsTypeElement::TsMethodSignature(_)
+        )),
+        _ => false,
+    }
+}
+
 pub fn parse_dts_values(source: &str) -> Result<Vec<DtsValue>, String> {
     parse_dts_values_named(source, &thaw_parser::common::FileName::Custom("input.ts".into()))
 }
@@ -494,6 +517,15 @@ pub fn parse_dts_values_named(source: &str, filename: &thaw_parser::common::File
             })
         })
         .map(|interface| interface.id.sym.to_string())
+        // `type KyInstance = { (url): R; get: ...; }` is the same callable object as the
+        // interface spelling.
+        .chain(module.body.iter().flat_map(extract_type_alias_decls).filter_map(|alias| {
+            let TsType::TsTypeLit(literal) = alias.type_ann.as_ref() else { return None };
+            literal.members.iter().any(|member| matches!(
+                member,
+                TsTypeElement::TsPropertySignature(_) | TsTypeElement::TsMethodSignature(_)
+            )).then(|| alias.id.sym.to_string())
+        }))
         .collect::<HashSet<_>>();
     let callable = parse_dts_named(source, filename.clone())?
         .into_iter()
@@ -605,12 +637,7 @@ pub fn parse_dts_values_named(source: &str, filename: &thaw_parser::common::File
                 continue;
             }
             if callable.contains(&name) {
-                let callable_object = matches!(
-                    annotation.type_ann.as_ref(),
-                    TsType::TsTypeRef(reference)
-                        if matches!(&reference.type_name, TsEntityName::Ident(interface)
-                            if callable_objects.contains(interface.sym.as_str()))
-                );
+                let callable_object = type_is_callable_object(annotation.type_ann.as_ref(), &callable_objects);
                 if callable_object {
                     values.push(DtsValue {
                         name,
@@ -1228,7 +1255,7 @@ fn lower_dts_call_signature(
             return None;
         };
         let name = match rest.arg.as_ref() {
-            Pat::Ident(binding) => binding.id.sym.to_string(),
+            Pat::Ident(binding) => safe_param_name(binding.id.sym.as_ref()),
             _ => "rest".to_string(),
         };
         let ty = match rest.type_ann.as_ref() {
@@ -1264,7 +1291,7 @@ fn lower_dts_call_signature(
                 param_field_constraints.push(None);
                 return (format!("arg{i}"), DtsType::Unsupported(reason));
             };
-            let param_name = binding.id.sym.to_string();
+            let param_name = safe_param_name(binding.id.sym.as_ref());
             let ty = match &binding.type_ann {
                 Some(ann) => {
                     param_field_constraints.push(field_constraints(
@@ -1406,7 +1433,7 @@ fn lower_dts_fn_type(
             return None;
         };
         let name = match rest.arg.as_ref() {
-            Pat::Ident(binding) => binding.id.sym.to_string(),
+            Pat::Ident(binding) => safe_param_name(binding.id.sym.as_ref()),
             _ => "rest".to_string(),
         };
         let ty = match rest.type_ann.as_ref() {
@@ -1442,7 +1469,7 @@ fn lower_dts_fn_type(
                 param_field_constraints.push(None);
                 return (format!("arg{i}"), DtsType::Unsupported(reason));
             };
-            let param_name = binding.id.sym.to_string();
+            let param_name = safe_param_name(binding.id.sym.as_ref());
             let ty = match &binding.type_ann {
                 Some(ann) => {
                     param_field_constraints.push(field_constraints(

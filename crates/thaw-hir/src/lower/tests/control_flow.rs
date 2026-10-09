@@ -144,6 +144,8 @@ fn mutual_recursion_between_unannotated_class_methods_reports_an_error() {
 
 #[test]
 fn lowers_boolean_logical_operators_to_short_circuit_closures() {
+    // Operands that are plain bindings have no side effects to sequence, so `&&`/`||`
+    // lower straight to a short-circuiting conditional (`a && b` => `a ? b : a`).
     let program = lower(
         r#"function main(): void {
             const a = true;
@@ -153,6 +155,26 @@ fn lowers_boolean_logical_operators_to_short_circuit_closures() {
         }"#,
     );
     for statement in &program.functions[0].body[2..] {
+        let HirStmt::Expr(HirExpr::Call(_, arguments)) = statement else {
+            panic!("expected console call");
+        };
+        assert!(
+            matches!(&arguments[0], HirExpr::Conditional(_, _, _, HirType::Bool)),
+            "expected a direct short-circuit conditional: {:?}", arguments[0]
+        );
+    }
+
+    // A left operand with side effects is evaluated once through an immediately invoked
+    // closure (original assertion: one captured argument, Bool result).
+    let program = lower(
+        r#"function f(): boolean { return true; }
+        function main(): void {
+            console.log(f() && f());
+            console.log(f() || f());
+        }"#,
+    );
+    let main = program.functions.iter().find(|function| function.name == "main").unwrap();
+    for statement in &main.body {
         let HirStmt::Expr(HirExpr::Call(_, arguments)) = statement else {
             panic!("expected console call");
         };
@@ -291,10 +313,12 @@ fn desugars_do_while_and_checks_condition_before_continue() {
     let HirStmt::If(_, continue_body, _) = &body[1] else {
         panic!("expected source if statement");
     };
+    // The guard before `continue` leaves the loop with a depth-0 break (the innermost loop,
+    // i.e. the same exit as a plain `Break`).
     assert!(matches!(
         continue_body.as_slice(),
         [HirStmt::If(_, _, else_body), HirStmt::Continue]
-            if else_body == &[HirStmt::Break]
+            if else_body == &[HirStmt::Break] || else_body == &[HirStmt::BreakDepth(0)]
     ));
 }
 
@@ -1784,7 +1808,10 @@ fn anonymous_catch_preserves_outer_underscore_binding() {
     let body = &program.functions[0].body;
     let HirStmt::Let(outer, _, _) = &body[0] else { panic!("expected outer binding"); };
     let mut catch_names = Vec::new();
-    for statement in &body[1..3] {
+    // Each catch is now preceded by its carrier `Let`, so select the `Try` statements.
+    let tries = body.iter().filter(|statement| matches!(statement, HirStmt::Try(..))).collect::<Vec<_>>();
+    assert_eq!(tries.len(), 2, "{body:?}");
+    for statement in tries {
         let HirStmt::Try(_, name, catch_body, _) = statement else { panic!("expected catch"); };
         assert!(name.starts_with("@@thaw_anonymous_catch"), "{name}");
         assert_ne!(name, outer);
@@ -1878,3 +1905,4 @@ fn unreachable_placeholders_exist_for_every_native_value_type() {
     }
     assert!(problems.is_empty(), "{problems:#?}");
 }
+

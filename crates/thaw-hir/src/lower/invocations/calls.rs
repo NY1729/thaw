@@ -1649,7 +1649,11 @@ impl<'a> FnLowerer<'a> {
             .as_ref()
             .is_some_and(|signature| !signature.generic_type_params.is_empty());
         let mut generic_inferred = HashMap::new();
-        for (index, argument) in call.args.iter().enumerate() {
+        // A statically sized `...tuple` spread fills several parameter positions, so the
+        // contextual parameter of a later argument is looked up at the shifted position.
+        let mut spread_shift = 0usize;
+        for (arg_index, argument) in call.args.iter().enumerate() {
+            let index = arg_index + spread_shift;
             let generic_context = signature
                 .as_ref()
                 .filter(|_| argument.spread.is_none())
@@ -1790,6 +1794,18 @@ impl<'a> FnLowerer<'a> {
                 let actual = self.infer_expr_type(&value)?;
                 let _ = match_generic_pattern(pattern, &actual, &mut generic_inferred);
             }
+            if argument.spread.is_some() {
+                let width = match &value {
+                    HirExpr::ArrayLit(elements) => Some(elements.len()),
+                    other => match self.infer_expr_type(other) {
+                        Ok(HirType::Tuple(elements)) => Some(elements.len()),
+                        _ => None,
+                    },
+                };
+                if let Some(width) = width {
+                    spread_shift += width.saturating_sub(1);
+                }
+            }
             lowered.push(value);
         }
         let preserve_argument_order = class_method_guard.is_some()
@@ -1805,6 +1821,15 @@ impl<'a> FnLowerer<'a> {
                 let name = format!("__thaw_call_arg_{}", self.next_binding);
                 self.next_binding += 1;
                 self.scope.insert(name.clone(), ty.clone());
+                // The temporary stands for the same physical value, so a class
+                // instance viewed through an interface keeps its class alias
+                // (`const n: Named = new C(); n.method()` passes `n` as the
+                // class receiver).
+                if let HirExpr::Var(source) = &value {
+                    if let Some(alias) = self.native_class_aliases.get(source).cloned() {
+                        self.native_class_aliases.insert(name.clone(), alias);
+                    }
+                }
                 argument_bindings.push((name.clone(), ty, value));
                 lowered_arguments.push(HirExpr::Var(name));
                 continue;

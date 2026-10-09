@@ -1621,6 +1621,12 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&HirType::I64, tag, "exception tag")?;
                         return Ok(HirType::Void);
                     }
+                    "__thaw_closure_alias" => {
+                        let [adapter, _original] = args.as_slice() else {
+                            return Err("closure alias expects an adapter and the original closure".into());
+                        };
+                        return self.infer_expr_type(adapter);
+                    }
                     "__thaw_detach_promise" | "__thaw_detach_rejection" => {
                         let [promise] = args.as_slice() else {
                             return Err("detach Promise expects one operand".into());

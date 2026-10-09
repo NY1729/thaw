@@ -755,7 +755,22 @@ fn finish_with_platform_events<'js>(
                 std::thread::sleep(Duration::from_millis(1));
                 continue;
             }
-            return Err(rquickjs::Error::WouldBlock);
+            // Only unref'd timers are left: this wait still blocks on `promise`, so they may yet resolve it.
+            let any_delay = ctx
+                .globals()
+                .get::<_, Function>("__thaw_next_any_timer_delay")
+                .ok()
+                .and_then(|probe| probe.call::<_, i64>(()).ok())
+                .unwrap_or(-1);
+            if any_delay < 0 {
+                return Err(rquickjs::Error::WouldBlock);
+            }
+            if any_delay > 0 {
+                std::thread::sleep(Duration::from_millis(any_delay as u64));
+            }
+            let run_due: Function = ctx.globals().get("__thaw_run_due_timers")?;
+            run_due.call::<_, usize>(())?;
+            continue;
         }
         if delay > 0 {
             std::thread::sleep(Duration::from_millis(delay as u64));
@@ -1594,6 +1609,14 @@ unsafe fn invoke_mixed<'js>(
     })
 }
 
+/// "JavaScript value handle N is not callable", plus what the handle actually holds.
+fn not_callable_message(ctx: &Ctx<'_>, handle: u64) -> String {
+    let held = value_for_handle(ctx, handle)
+        .map(|value| format!("{:?}", value.type_of()))
+        .unwrap_or_else(|_| "unknown".to_string());
+    format!("JavaScript value handle {handle} is not callable (holds {held})")
+}
+
 /// Calls a retained function with JSON arguments followed by retained values.
 ///
 /// # Safety
@@ -1610,7 +1633,7 @@ unsafe fn thaw_js_call_handle_mixed_result_impl(
     let result = with_active_or_context(|ctx| {
         let target = before_graph_decode(&ctx, &args_json, graph_result, || {
             Function::from_value(value_for_handle(&ctx, handle)?)
-                .map_err(|_| format!("JavaScript value handle {handle} is not callable"))
+                .map_err(|_| not_callable_message(&ctx, handle))
         })?;
         let value = unsafe { invoke_mixed(ctx.clone(), target, &args_json, handles, graph_result)? };
         resolve_value_wire_impl(ctx, value, &format!("JavaScript value #{handle}"), true, graph_result)
@@ -1645,7 +1668,7 @@ unsafe fn thaw_js_call_handle_mixed_native_json_result_impl(
     let result = with_active_or_context(|ctx| {
         let (target, parse, decode) = before_graph_decode(&ctx, &graph_json, true, || {
             let target = Function::from_value(value_for_handle(&ctx, handle)?)
-                .map_err(|_| format!("JavaScript value handle {handle} is not callable"))?;
+                .map_err(|_| not_callable_message(&ctx, handle))?;
             let json: Object = ctx.globals().get("JSON").map_err(|error| error.to_string())?;
             let parse: Function = json.get("parse").map_err(|error| error.to_string())?;
             let decode: Function = ctx.globals().get("__thaw_json_graph_decode_owned")
@@ -1745,7 +1768,7 @@ unsafe fn thaw_js_call_handle_mixed_handle_impl(
     match with_active_or_context(|ctx| {
         let target = before_graph_decode(&ctx, &args_json, graph_args, || {
             Function::from_value(value_for_handle(&ctx, handle)?)
-                .map_err(|_| format!("JavaScript value handle {handle} is not callable"))
+                .map_err(|_| not_callable_message(&ctx, handle))
         })?;
         let value = unsafe { invoke_mixed(ctx.clone(), target, &args_json, handles, graph_args)? };
         retain_value(&ctx, value)
@@ -2320,7 +2343,14 @@ fn register_native_callback(
     let closure = closure as usize;
     let finish = finish as usize;
     let result: Result<u64, String> = with_active_or_context(|ctx| {
-        let identity = if closure == 0 { adapter } else { closure };
+        unsafe extern "C" {
+            fn thaw_closure_alias_resolve(closure: *const u8) -> *const u8;
+        }
+        let identity = if closure == 0 {
+            adapter
+        } else {
+            unsafe { thaw_closure_alias_resolve(closure as *const u8) as usize }
+        };
         let cache_key = (
             identity,
             jsvalue_param_mask,
@@ -2638,7 +2668,7 @@ pub extern "C" fn thaw_js_call_handle_with_this_graph_result(
     let result: Result<Outcome, String> = with_active_or_context(|ctx| {
         let target = before_graph_decode(&ctx, &args_json, true, || {
             Function::from_value(value_for_handle(&ctx, handle)?)
-                .map_err(|_| format!("JavaScript value handle {handle} is not callable"))
+                .map_err(|_| not_callable_message(&ctx, handle))
         })?;
         let args_array = decode_argument_array(&ctx, &args_json, true)?;
         if args_array.len() == 0 { return Err("missing JavaScript call receiver".into()); }
@@ -2684,7 +2714,7 @@ fn thaw_js_call_handle_handle_impl(
     let result: Result<u64, String> = with_active_or_context(|ctx| {
         let target = before_graph_decode(&ctx, &args_json, graph_args, || {
             Function::from_value(value_for_handle(&ctx, handle)?)
-                .map_err(|_| format!("JavaScript value handle {handle} is not callable"))
+                .map_err(|_| not_callable_message(&ctx, handle))
         })?;
         let result = invoke_raw(ctx.clone(), target, &args_json, graph_args)?;
         let result = if defer_resolution {
@@ -2709,7 +2739,7 @@ fn thaw_js_call_handle_handle_impl(
 fn thaw_js_call_handle_value_result_impl(handle: u64, argument: u64, graph_result: bool) -> ThawResult {
     let result = with_active_or_context(|ctx| {
         let target = Function::from_value(value_for_handle(&ctx, handle)?)
-            .map_err(|_| format!("JavaScript value handle {handle} is not callable"))?;
+            .map_err(|_| not_callable_message(&ctx, handle))?;
         let argument = value_for_handle(&ctx, argument)?;
         // See `invoke_raw`'s doc comment -- same call convention, same fix.
         let value: Value = target.call((argument,)).map_err(|error| match error {
@@ -2747,6 +2777,12 @@ pub extern "C" fn thaw_js_retain_handle(handle: u64) -> u8 {
 
 #[no_mangle]
 pub extern "C" fn thaw_js_release_handle(handle: u64) -> u8 {
+    // A handle released from a thread-local destructor (e.g. an `Env` dropped at thread exit)
+    // runs after the QuickJS thread-locals are gone; the realm died with them, so there is
+    // nothing left to release.
+    if JS.try_with(|_| ()).is_err() || ACTIVE_NAPI_CONTEXT.try_with(|_| ()).is_err() {
+        return 0;
+    }
     with_active_or_context(|ctx| release_handle_in_context(&ctx, handle))
 }
 
@@ -4102,7 +4138,7 @@ fn call_handle_result_impl(handle: u64, args_json: *const c_char, graph_result: 
     let result = with_active_or_context(|ctx| {
         let target = before_graph_decode(&ctx, &args_json, graph_result, || {
             Function::from_value(value_for_handle(&ctx, handle)?)
-                .map_err(|_| format!("JavaScript value handle {handle} is not callable"))
+                .map_err(|_| not_callable_message(&ctx, handle))
         })?;
         invoke_impl(
             ctx,
@@ -4145,7 +4181,7 @@ pub extern "C" fn thaw_js_call_handle_with_this_graph_wire_result(
     let result = with_active_or_context(|ctx| {
         let target = before_graph_decode(&ctx, &args_json, true, || {
             Function::from_value(value_for_handle(&ctx, handle)?)
-                .map_err(|_| format!("JavaScript value handle {handle} is not callable"))
+                .map_err(|_| not_callable_message(&ctx, handle))
         })?;
         let args_array = decode_argument_array(&ctx, &args_json, true)?;
         if args_array.len() == 0 {
@@ -4244,11 +4280,16 @@ fn error_property_json<'js>(ctx: &Ctx<'js>, exc: &Value<'js>) -> Option<String> 
 }
 
 fn describe_host_exception(ctx: &Ctx<'_>, label: &str) -> String {
+    // A napi callback reference surfaces the JS error to the addon verbatim (it becomes the
+    // pending napi exception), so it carries no `label threw:` decoration.
+    let decorate = |message: &str| {
+        if label.starts_with("__thaw_napi_reference_") { message.to_string() } else { format!("`{label}` threw: {message}") }
+    };
     let exc = ctx.catch();
     let properties = error_property_json(ctx, &exc);
     let mut body = if let Some(obj) = exc.as_object() {
         if let Ok(message) = obj.get::<_, String>("message") {
-            let display = format!("`{label}` threw: {message}");
+            let display = decorate(&message);
             // Preserve the established message → code → name getter order.
             let code = obj.get::<_, String>("code").ok();
             let mut body = match obj.get::<_, String>("name") {
@@ -4261,14 +4302,14 @@ fn describe_host_exception(ctx: &Ctx<'_>, label: &str) -> String {
             }
             body
         } else if let Some(value) = exc.as_string() {
-            format!("`{label}` threw: {}", value.to_string().unwrap_or_default())
+            decorate(&value.to_string().unwrap_or_default())
         } else {
-            format!("`{label}` threw: {exc:?}")
+            decorate(&format!("{exc:?}"))
         }
     } else if let Some(value) = exc.as_string() {
-        format!("`{label}` threw: {}", value.to_string().unwrap_or_default())
+        decorate(&value.to_string().unwrap_or_default())
     } else {
-        format!("`{label}` threw: {exc:?}")
+        decorate(&format!("{exc:?}"))
     };
     if let Some(properties) = properties {
         body.push(ERROR_PROPERTIES_MARKER);
@@ -4392,7 +4433,7 @@ pub unsafe extern "C" fn thaw_js_call_handle_mixed_exact_consuming_result(
             with_active_or_context(|ctx| {
                 let target = before_registered_graph_decode(args_json_ptr, || {
                     Function::from_value(value_for_handle(&ctx, handle)?)
-                        .map_err(|_| format!("JavaScript value handle {handle} is not callable"))
+                        .map_err(|_| not_callable_message(&ctx, handle))
                 })?;
                 // The shared graph decoder owns the transferred leases once
                 // invoked. Preserve an original JS throw from that decoder
