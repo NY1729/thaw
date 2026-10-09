@@ -303,22 +303,16 @@ fn typed_dynamic_callable_adapter(
             .map(|index| format!("arg{index}"))
             .collect::<Vec<_>>()
             .join(", ");
-        let call = format!("{call_value}(callable, JSON.parse(JSON.stringify([{args}])))");
         declarations.push_str(&format!(
-            "        if ({condition}) return {convert}({call});\n"
+            "        if ({condition}) {{ const callArguments: Json = [{args}]; return {convert}({call_value}(callable, callArguments)); }}\n"
         ));
     }
     let args = (0..required)
         .map(|index| format!("arg{index}"))
         .collect::<Vec<_>>()
         .join(", ");
-    let json_args = if required == 0 {
-        "JSON.parse(\"[]\")".to_string()
-    } else {
-        format!("JSON.parse(JSON.stringify([{args}]))")
-    };
     declarations.push_str(&format!(
-        "        return {convert}({call_value}(callable, {json_args}));\n    }};\n    return invoke;\n}}\n"
+        "        const callArguments: Json = [{args}];\n        return {convert}({call_value}(callable, callArguments));\n    }};\n    return invoke;\n}}\n"
     ));
     Some((adapter, declarations))
 }

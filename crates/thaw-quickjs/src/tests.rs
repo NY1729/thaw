@@ -217,6 +217,39 @@ fn unhandled_timer_exception_fails_the_event_loop() {
 }
 
 #[test]
+fn unhandled_js_promise_rejection_reaches_the_process_event_surface() {
+    // Node's default (`--unhandled-rejections=throw`): offered to 'unhandledRejection' first.
+    assert_eq!(
+        load("globalThis.seen = ''; process.once('unhandledRejection', (reason, promise) => { seen = String(reason) + ':' + (promise instanceof Promise); }); Promise.reject('plain');"),
+        1
+    );
+    assert_eq!(thaw_js_run_event_loop(), 0);
+    assert_eq!(eval_json("seen"), Ok(Some("\"plain:true\"".into())));
+    // Without a listener it is an uncaught exception, which ends the process with code 1 ...
+    assert_eq!(load("Promise.reject(new Error('fatal rejection'));"), 1);
+    assert_eq!(thaw_js_run_event_loop(), 1);
+    // ... unless an 'uncaughtException' listener takes it.
+    assert_eq!(
+        load("globalThis.caught = ''; process.once('uncaughtException', error => { caught = String(error.message || error); }); Promise.reject(7);"),
+        1
+    );
+    assert_eq!(thaw_js_run_event_loop(), 0);
+    assert!(eval_json("caught").unwrap().unwrap().contains("7"));
+}
+
+#[test]
+fn js_promise_rejection_with_a_handler_is_not_reported() {
+    // Handled before the microtask queue drains, handled by an awaiting async function, and handled
+    // through `then(_, onRejected)` must all stay silent.
+    assert_eq!(
+        load("globalThis.order = ''; const early = Promise.reject(1); early.catch(() => { order += 'a'; }); (async () => { try { await Promise.reject(2); } catch { order += 'b'; } })(); Promise.reject(3).then(null, () => { order += 'c'; });"),
+        1
+    );
+    assert_eq!(thaw_js_run_event_loop(), 0);
+    assert_eq!(eval_json("order"), Ok(Some("\"abc\"".into())));
+}
+
+#[test]
 fn terminal_pending_work_is_separate_from_failure_and_exit_code() {
     unsafe extern "C" fn fail_job(
         ctx: *mut rquickjs::qjs::JSContext,

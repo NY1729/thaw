@@ -1315,6 +1315,18 @@ impl<'a> FnLowerer<'a> {
                 self.expect_type(&HirType::F64, index, "array index")?;
                 if let HirType::Array(element) = self.infer_expr_type(array)? {
                     let value = self.lower_array_index_operand(value.clone())?;
+                    // An `undefined` rvalue stores a present-undefined slot: the same state a
+                    // sparse read stored with `a[i] = b[j]` leaves, so it takes the same path.
+                    let value = if self.infer_expr_type(&value)? == HirType::Undefined
+                        && matches!(element.as_ref(), HirType::F64 | HirType::Str)
+                    {
+                        HirExpr::EvalThen(
+                            Box::new(value),
+                            Box::new(HirExpr::OptionalNone(element.as_ref().clone())),
+                        )
+                    } else {
+                        value
+                    };
                     if self.infer_expr_type(&value)? == HirType::Optional(element.clone()) {
                         return self.lower_optional_index_assignment(
                             array.clone(), index.as_ref().clone(), value, element.as_ref().clone(),

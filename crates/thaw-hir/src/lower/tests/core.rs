@@ -1007,17 +1007,3 @@ fn switch_cases_do_not_inherit_presence_guards_from_other_entries() {
     lower("function read(x: number | undefined, key: number): number { if (x === undefined) return 0; switch (key) { case 0: return x; default: return x; } }");
     lower("function read(x: number | undefined, key: number): number { switch (key) { case 0: if (x === undefined) return 0; return x; default: if (x === undefined) return 0; return x; } }");
 }
-
-#[test]
-fn zz_scratch_dbg2() {
-    for source in [
-        "function read(x: number | undefined): number { return x; }",
-        "function read(x: number | null): number { return x; }",
-        "function read(x: number | undefined, key: number): number { switch (key) { case 0: if (x === undefined) return 0; break; default: return x; } return 0; }",
-        "function read(x: number | undefined, key: number): number { if (x === undefined) return 0; switch (key) { case 0: x = undefined; break; } return x; }",
-        "function read(x: number | undefined, key: number): number { switch (key) { case 0: if (x === undefined) return 0; break; } return x; }",
-    ] {
-        let module = thaw_parser::parse_typescript(source).unwrap();
-        match lower_module(&module) { Ok(p) => println!("OK  {source}\n   {}", format!("{:?}", p.functions[0].body).chars().take(400).collect::<String>()), Err(e) => println!("ERR {source}\n   {e}") }
-    }
-}

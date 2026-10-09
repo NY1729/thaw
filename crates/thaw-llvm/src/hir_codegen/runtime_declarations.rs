@@ -2763,6 +2763,11 @@ impl<'ctx> HirCompiler<'ctx> {
             Some(Linkage::External),
         );
         self.module.add_function(
+            "thaw_js_retain_graph_result",
+            handle_result_type.fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
             "thaw_js_set_property_result",
             handle_result_type.fn_type(
                 &[

@@ -623,6 +623,52 @@ impl<'a> FnLowerer<'a> {
                 if compatible {
                     return Ok(value);
                 }
+                // A structural target naming accessor properties of the class
+                // is a fresh snapshot: each field is read through the class's
+                // own member access (getters run now, so a throwing getter
+                // propagates its original exception to the converting site).
+                let object_type = HirType::Object(actual_fields.clone());
+                let binding = format!("__thaw_accessor_source_{}", self.next_binding);
+                let mut reads = Vec::with_capacity(declared_fields.len());
+                let mut uses_accessor = false;
+                for (name, expected) in declared_fields {
+                    if let Some((_, actual)) = actual_fields.iter().find(|(n, _)| n == name) {
+                        if actual != expected {
+                            reads.clear();
+                            break;
+                        }
+                        reads.push((name.clone(), HirExpr::PropAccess(
+                            Box::new(HirExpr::Var(binding.clone())),
+                            object_type.clone(),
+                            name.clone(),
+                        )));
+                        continue;
+                    }
+                    let Some(owner) = self.class_instance_accessor_owner(&object_type, name) else {
+                        reads.clear();
+                        break;
+                    };
+                    let symbol = class_getter_symbol(&owner, name, false);
+                    if self.signatures.get(&symbol).is_none_or(|s| &s.ret != expected) {
+                        reads.clear();
+                        break;
+                    }
+                    uses_accessor = true;
+                    reads.push((name.clone(), HirExpr::Call(
+                        Box::new(HirExpr::Var(symbol)),
+                        vec![self.assert_class_accessor_receiver(
+                            HirExpr::Var(binding.clone()), &owner)],
+                    )));
+                }
+                if uses_accessor && reads.len() == declared_fields.len() {
+                    self.next_binding += 1;
+                    self.scope.insert(binding.clone(), object_type.clone());
+                    let literal = HirExpr::ObjectLit(reads);
+                    return self.wrap_call_argument_bindings(
+                        literal,
+                        &[(binding, object_type, value)],
+                    );
+                }
             }
         }
         if *declared == HirType::Json {

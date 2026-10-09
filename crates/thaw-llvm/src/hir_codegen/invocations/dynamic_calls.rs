@@ -298,7 +298,7 @@ impl<'ctx> HirCompiler<'ctx> {
         let json = self
             .builder
             .build_call(
-                self.module.get_function("thaw_json_stringify").unwrap(),
+                self.module.get_function("thaw_json_graph_encode").unwrap(),
                 &[value.into()],
                 "retained_dynamic_json",
             )
@@ -310,7 +310,7 @@ impl<'ctx> HirCompiler<'ctx> {
         let result = self
             .builder
             .build_call(
-                self.module.get_function("thaw_js_retain_json_result").unwrap(),
+                self.module.get_function("thaw_js_retain_graph_result").unwrap(),
                 &[json.into()],
                 "retain_dynamic_json_result",
             )
