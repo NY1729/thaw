@@ -548,6 +548,14 @@ fn add_installed_inner(
                 )
             })?;
         }
+        let runtime_env = package_runtime_env(&manifest);
+        if !runtime_env.is_empty() {
+            let path = dest_dir.join("runtime-env.json");
+            let json = serde_json::to_string_pretty(&runtime_env)
+                .map_err(|error| format!("failed to serialize runtime environment: {error}"))?;
+            fs::write(&path, json)
+                .map_err(|error| format!("failed to write `{}`: {error}", path.display()))?;
+        }
         fs::write(dest_dir.join("package.d.ts"), dts_source).map_err(|e| {
             format!(
                 "failed to write `{}`: {e}",

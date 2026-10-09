@@ -205,7 +205,7 @@ pub fn generate_shim(
                     .map(|((name, _), ty)| format!("{name}: {}", render_ts_type(ty)))
                     .collect::<Vec<_>>();
                 if let (Some((name, _)), Some(variadic)) = (&func.rest_param, &sig.variadic) {
-                    params.push(format!("...{name}: ({})[]", render_ts_type(variadic)));
+                    params.push(format!("...{name}: {}", render_ts_array_of(variadic)));
                 }
                 let params = params.join(", ");
                 out.push_str(&format!(
@@ -555,6 +555,8 @@ fn wrap_as_commonjs_module(
     // not arbitrary text, so splicing it directly as a property-access
     // identifier (not a bracketed string) is safe -- same for a class
     // name, parsed out of a `declare class` statement.
+    // A native ESM bundle (`render_native_esm_bundle`) hands back a real module namespace
+    // object, which has no `__esModule` flag but is tagged `Module`; treat it like one.
     let bind_default_export = |name: &str| {
         // The `globalThis.<name>` slot here is a *staging* value the
         // immediately-following qualified-alias `loadScript` captures (see
@@ -570,8 +572,8 @@ fn wrap_as_commonjs_module(
         // captured before the next one ran, so overwriting is safe.
         format!(
             "if (typeof module.exports === 'function' && typeof module.exports.{name} === 'undefined') {{ globalThis.{name} = module.exports; }}\n\
-             else if (typeof module.exports === 'object' && module.exports !== null && module.exports.__esModule && typeof module.exports.default === 'function') {{ globalThis.{name} = module.exports.default; }}\n\
-             else if (typeof module.exports === 'object' && module.exports !== null && !module.exports.__esModule && Object.keys(module.exports).length === 1 && (function() {{ var descriptor = Object.getOwnPropertyDescriptor(module.exports, 'default'); return descriptor !== undefined && typeof descriptor.value === 'function'; }})()) {{ globalThis.{name} = module.exports.default; }}\n"
+             else if (typeof module.exports === 'object' && module.exports !== null && (module.exports.__esModule || module.exports[Symbol.toStringTag] === 'Module') && typeof module.exports.default === 'function') {{ globalThis.{name} = module.exports.default; }}\n\
+             else if (typeof module.exports === 'object' && module.exports !== null && !module.exports.__esModule && module.exports[Symbol.toStringTag] !== 'Module' && Object.keys(module.exports).length === 1 && (function() {{ var descriptor = Object.getOwnPropertyDescriptor(module.exports, 'default'); return descriptor !== undefined && typeof descriptor.value === 'function'; }})()) {{ globalThis.{name} = module.exports.default; }}\n"
         )
     };
     let bind_default_exports: String = fallback_names
@@ -585,6 +587,8 @@ fn wrap_as_commonjs_module(
     let bind_bare_globals: String = fallback_names
         .iter()
         .chain(class_names)
+        // A reserved word (`default`, `in`) cannot be a bare identifier.
+        .filter(|name| !is_reserved_js_identifier(name))
         .map(|name| format!("if (typeof {name} !== 'undefined') globalThis.{name} = {name};\n"))
         .collect();
     // Captured *here*, inside the same wrapped script that just set
@@ -684,7 +688,7 @@ fn wrap_as_commonjs_module(
          \x20\x20var __thaw_napi_reference_value = function(id, active) {{ var stored = __thaw_napi_reference_values.get(id), value = stored && typeof stored.deref === 'function' ? stored.deref() : stored, properties = {{}}; if (!value) return properties; Object.keys(value).forEach(function(key) {{ properties[key] = __thaw_napi_argument(value[key], active); }}); return properties; }};\n\
          \x20\x20var __thaw_napi_argument = function(value, active) {{\n\
          \x20\x20\x20\x20if (value === null || (typeof value !== 'function' && typeof value !== 'object')) return value;\n\
-         \x20\x20\x20\x20var handle = __thaw_napi_handles.get(value); if (handle) {{ var owner = globalThis.__thaw_json_graph_owner_of_handle(String(handle)); if (__thaw_napi_owner_metadata && !__thaw_napi_owner_ids.has(owner)) throw new TypeError('native object belongs to another addon'); return {{ __thaw_napi_handle__: handle }}; }} if (__thaw_napi_proxy_owners.has(value)) throw new TypeError('native object belongs to another addon');\n\
+         \x20\x20\x20\x20var handle = __thaw_napi_handles.get(value); if (handle) {{ var owner = globalThis.__thaw_json_graph_owner_of_handle(String(handle)); if (__thaw_napi_owner_metadata ? !__thaw_napi_owner_ids.has(owner) : (__thaw_napi_proxy_owners.has(value) && __thaw_napi_proxy_owners.get(value) !== __thaw_addon)) throw new TypeError('native object belongs to another addon'); return {{ __thaw_napi_handle__: handle }}; }} if (__thaw_napi_proxy_owners.has(value)) throw new TypeError('native object belongs to another addon');\n\
          \x20\x20\x20\x20active = active || new WeakSet();\n\
          \x20\x20\x20\x20var id = __thaw_napi_reference_ids.get(value);\n\
          \x20\x20\x20\x20if (id && active.has(value)) return {{ __thaw_napi_ref__: id }};\n\
@@ -765,8 +769,14 @@ fn wrap_as_commonjs_module(
          \x20\x20if (!globalThis.process.dlopen || !globalThis.process.dlopen.__thaw_addons) {{\n\
          \x20\x20\x20\x20globalThis.process.dlopen = (function(previous) {{\n\
          \x20\x20\x20\x20\x20\x20var addons = Object.create(null);\n\
+         \x20\x20\x20\x20\x20\x20// The executable embeds every native addon, so any alias of the executable itself\n\
+         \x20\x20\x20\x20\x20\x20// (process.execPath, /proc/self/exe, /proc/<pid>/exe) names all of them at once: loaders that\n\
+         \x20\x20\x20\x20\x20\x20// dlopen the executable get one namespace, earlier-registered addons winning on a name clash.\n\
+         \x20\x20\x20\x20\x20\x20var selfPath = function(path) {{ var proc = globalThis.process; return path === proc.execPath || path === '/proc/self/exe' || path === '/proc/' + proc.pid + '/exe'; }};\n\
+         \x20\x20\x20\x20\x20\x20var selfExports = function() {{ var merged = {{}}; Object.keys(addons).forEach(function(owner) {{ var exports = addons[owner]; Object.keys(exports).forEach(function(key) {{ if (!Object.prototype.hasOwnProperty.call(merged, key)) merged[key] = exports[key]; }}); }}); return merged; }};\n\
          \x20\x20\x20\x20\x20\x20var dispatch = function(target, filename, flags) {{\n\
          \x20\x20\x20\x20\x20\x20\x20\x20var nativePath = typeof filename === 'string' ? filename : '', modulePath = target && typeof target.filename === 'string' ? target.filename : '';\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20if (dispatch.__thaw_is_self_path(nativePath)) {{ target.exports = dispatch.__thaw_self_exports(); return target.exports; }}\n\
          \x20\x20\x20\x20\x20\x20\x20\x20var ownerPath = nativePath.indexOf('/thaw_modules/') >= 0 ? nativePath : modulePath;\n\
          \x20\x20\x20\x20\x20\x20\x20\x20var marker = '/thaw_modules/', prefixAt = ownerPath.indexOf(marker), packagePath = prefixAt < 0 ? '' : ownerPath.slice(prefixAt + marker.length);\n\
          \x20\x20\x20\x20\x20\x20\x20\x20var packageName = Object.keys(addons).filter(function(name) {{ return name && packagePath.indexOf(name + '/') === 0; }}).sort(function(a, b) {{ return b.length - a.length; }})[0];\n\
@@ -775,11 +785,11 @@ fn wrap_as_commonjs_module(
          \x20\x20\x20\x20\x20\x20\x20\x20if (typeof previous === 'function') return previous.call(globalThis.process, target, filename, flags);\n\
          \x20\x20\x20\x20\x20\x20\x20\x20var error = new Error('Cannot load native addon ' + nativePath); error.code = 'ERR_DLOPEN_FAILED'; throw error;\n\
          \x20\x20\x20\x20\x20\x20}};\n\
+         \x20\x20\x20\x20\x20\x20dispatch.__thaw_is_self_path = selfPath; dispatch.__thaw_self_exports = selfExports;\n\
          \x20\x20\x20\x20\x20\x20dispatch.__thaw_addons = addons; return dispatch;\n\
          \x20\x20\x20\x20}})(globalThis.process.dlopen);\n\
          \x20\x20}}\n\
-         \x20\x20globalThis.process.dlopen.__thaw_addons["{native_package}"] = __thaw_addon;\n\
-         \x20\x20if (__thaw_addon.QueryEngine && !globalThis.process.env.PRISMA_QUERY_ENGINE_LIBRARY) globalThis.process.env.PRISMA_QUERY_ENGINE_LIBRARY = '/proc/self/exe';\n\
+         \x20\x20globalThis.process.dlopen.__thaw_addons[\"{native_package}\"] = __thaw_addon;\n\
          \x20\x20return __thaw_addon;\n\
          \x20\x20}})();\n\
          }}\n\
@@ -883,7 +893,8 @@ pub fn generate_module_init(bundles: &[ModuleBundle]) -> String {
             // N-API module, whose export object is looked up by name
             // through a different, already-working mechanism).
             let bare_capture_js = format!(
-                "if (typeof globalThis.{export_name} === 'undefined') {{ globalThis[\"{}\"] = globalThis.module.exports != null && Object.prototype.hasOwnProperty.call(globalThis.module.exports, \"{}\") ? globalThis.module.exports[\"{}\"] : globalThis.module.exports != null && Object.prototype.hasOwnProperty.call(globalThis.module.exports, \"default\") ? globalThis.module.exports.default : globalThis.module.exports; }}",
+                "if (typeof globalThis[\"{}\"] === 'undefined') {{ globalThis[\"{}\"] = globalThis.module.exports != null && Object.prototype.hasOwnProperty.call(globalThis.module.exports, \"{}\") ? globalThis.module.exports[\"{}\"] : globalThis.module.exports != null && Object.prototype.hasOwnProperty.call(globalThis.module.exports, \"default\") ? globalThis.module.exports.default : globalThis.module.exports; }}",
+                escape_ts_string_literal(export_name),
                 escape_ts_string_literal(export_name),
                 escape_ts_string_literal(export_name),
                 escape_ts_string_literal(export_name),

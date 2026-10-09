@@ -404,17 +404,18 @@ fn classify_ts_type(
             // reference must use that full key so A.Options cannot silently
             // resolve to B.Options; unique bare references remain available.
             let ref_name = type_reference_name(&ty_ref.type_name);
+            let scoped = scoped_reference(&ref_name, interfaces, generic_interfaces);
 
             // A name matching a resolved (non-generic) `interface` --
             // treated exactly like an inline `{ ... }` type literal.
-            if let Some(resolved) = interfaces.get(&ref_name) {
+            if let Some(resolved) = interfaces.get(&scoped) {
                 return resolved.clone();
             }
             // A generic interface, referenced with concrete type
             // arguments -- resolved on demand via substitution.
-            if let Some(decl) = generic_interfaces.interfaces.get(&ref_name) {
+            if let Some(decl) = generic_interfaces.interfaces.get(&scoped) {
                 return resolve_generic_interface(
-                    generic_canonical_name(&ref_name, generic_interfaces),
+                    generic_canonical_name(&scoped, generic_interfaces),
                     decl,
                     ty_ref,
                     None,
@@ -423,9 +424,9 @@ fn classify_ts_type(
                     &mut Vec::new(),
                 );
             }
-            if let Some(decl) = generic_interfaces.aliases.get(&ref_name) {
+            if let Some(decl) = generic_interfaces.aliases.get(&scoped) {
                 return resolve_generic_alias(
-                    generic_canonical_name(&ref_name, generic_interfaces),
+                    generic_canonical_name(&scoped, generic_interfaces),
                     decl,
                     ty_ref,
                     None,

@@ -52,6 +52,7 @@ impl swc_ecma_visit::Visit for ConstructorHoistedVars {
     fn visit_class(&mut self, _class: &thaw_parser::ast::Class) {}
 }
 
+#[allow(dead_code)]
 fn rewrite_external_class_constructors(
     source: &str,
     classes: &[ClassConstructorRewrite],
@@ -348,6 +349,7 @@ fn rewrite_external_class_constructors_named(
 /// substitution over the original source afterward, copying everything
 /// else verbatim -- this project carries no general JS/TS code
 /// generator, so re-printing from the AST isn't an option.
+#[allow(dead_code)]
 fn rewrite_qualified_calls(
     source: &str,
     rewrites: &[QualifiedCallRewrite],

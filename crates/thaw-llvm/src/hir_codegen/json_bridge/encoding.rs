@@ -170,6 +170,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .map_err(|error| error.to_string())
     }
 
+    #[allow(dead_code)]
     fn compile_native_object_to_json(
         &mut self,
         object: PointerValue<'ctx>,
@@ -241,6 +242,49 @@ impl<'ctx> HirCompiler<'ctx> {
             .map_err(|error| error.to_string())?;
         self.builder.position_at_end(visibility_done);
         Ok(())
+    }
+
+    /// A native `Map`/`Set` as the Json wrapper the inspector understands
+    /// (`{ __thaw_map_entries__: [[k, v], ...] }` / `{ __thaw_set_values__: [...] }`).
+    /// Only reachable from `console.log`, where it prints like Node (`Map(1) { 'a' => 1 }`).
+    fn compile_native_collection_to_json(
+        &mut self,
+        collection: PointerValue<'ctx>,
+        ty: &HirType,
+        preserve_undefined: bool,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let (snapshot, wrapper_key, element_type) = match ty {
+            HirType::Map(key, value) => (
+                "thaw_map_snapshot_entries",
+                "__thaw_map_entries__",
+                HirType::Tuple(vec![(**key).clone(), (**value).clone()]),
+            ),
+            HirType::Set(element) => ("thaw_map_snapshot_keys", "__thaw_set_values__", (**element).clone()),
+            other => return Err(format!("{other:?} is not a native collection")),
+        };
+        let buffer = self.builder
+            .build_call(self.module.get_function(snapshot).unwrap(), &[collection.into()], "console_collection_snapshot")
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value().basic()
+            .ok_or("collection snapshot returned no value")?
+            .into_pointer_value();
+        let handle = self.compile_array_wrap(buffer)?;
+        let entries = self.compile_native_array_to_json_with_undefined(handle, &element_type, preserve_undefined)?;
+        let object = self.builder
+            .build_call(self.module.get_function("thaw_json_object_new").unwrap(), &[], "console_collection_json")
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value().basic()
+            .ok_or("thaw_json_object_new returned no value")?;
+        self.builder.build_call(
+            self.module.get_function("thaw_json_typed_decode_scope_own").unwrap(),
+            &[object.into()], "track_marshaled_collection",
+        ).map_err(|error| error.to_string())?;
+        let key = self.builder.build_global_string_ptr(wrapper_key, "console_collection_key")
+            .map_err(|error| error.to_string())?;
+        self.compile_json_object_set_native_with_undefined(
+            object, key.as_pointer_value(), entries, &HirType::Json, preserve_undefined, true,
+        )?;
+        Ok(object)
     }
 
     fn compile_native_object_to_json_with_undefined(
@@ -401,6 +445,32 @@ impl<'ctx> HirCompiler<'ctx> {
                 "brand_native_date_json",
             ).map_err(|error| error.to_string())?;
         }
+        // console.log names a class instance after its most-derived class; the
+        // inspector reads the name back from this private key. Error-family
+        // instances keep their own display and so are left unnamed.
+        if self.console_omit_absent_fields {
+            let marker = fields.iter()
+                .find_map(|(name, _)| name.strip_prefix("__thaw_class_identity_\u{1e}"));
+            // A native RegExp has no identity marker; its `{source, flags, lastIndex}` shape is
+            // the type thaw-hir gives every RegExp (`regex_object_type`).
+            let is_regexp = matches!(fields.as_slice(), [(a, HirType::Str), (b, HirType::Str), (c, HirType::F64)]
+                if a == "source" && b == "flags" && c == "lastIndex");
+            let class = if is_regexp { Some("RegExp") } else {
+                marker.and_then(|ancestry| ancestry.split('\u{1f}').next())
+                    .filter(|_| !marker.unwrap().split('\u{1f}').any(thaw_hir::is_error_family_name))
+            };
+            if let Some(class) = class {
+                let key = self.builder.build_global_string_ptr("__thaw_class__", "console_class_key")
+                    .map_err(|error| error.to_string())?;
+                let name = self.builder.build_global_string_ptr(class, "console_class_name")
+                    .map_err(|error| error.to_string())?;
+                self.builder.build_call(
+                    self.module.get_function("thaw_json_object_set_string").unwrap(),
+                    &[json.into(), key.as_pointer_value().into(), name.as_pointer_value().into()],
+                    "set_console_class",
+                ).map_err(|error| error.to_string())?;
+            }
+        }
         // Carries `object`'s own frozen/sealed/non-extensible state (if
         // any -- a no-op otherwise) across onto the freshly built `json`
         // pointer, so `Object.freeze({...})` assigned into an `any`-typed
@@ -542,7 +612,8 @@ impl<'ctx> HirCompiler<'ctx> {
             _ => {}
         }
         let owned = owned
-            || matches!(field_type, HirType::Null | HirType::Undefined
+            || matches!(field_type, HirType::Null | HirType::Undefined | HirType::I64
+                | HirType::Map(..) | HirType::Set(_)
                 | HirType::Array(_) | HirType::Tuple(_) | HirType::Object(_)
                 | HirType::JsValue | HirType::Function(..) | HirType::CallableFunction(..))
             || (matches!(field_type, HirType::Json | HirType::Dictionary(_)) && value.is_int_value());
@@ -601,6 +672,14 @@ impl<'ctx> HirCompiler<'ctx> {
                     "thaw_json_object_set_json"
                 }
                 HirType::Null | HirType::Undefined => "thaw_json_object_set_json",
+                HirType::I64 => {
+                    value = self.compile_json_bigint(value)?;
+                    "thaw_json_object_set_json"
+                }
+                HirType::Map(..) | HirType::Set(_) if self.console_omit_absent_fields => {
+                    value = self.compile_native_collection_to_json(value.into_pointer_value(), field_type, preserve_undefined)?;
+                    "thaw_json_object_set_json"
+                }
                 HirType::JsValue => {
                     value = self.compile_dynamic_value_placeholder(value)?;
                     "thaw_json_object_set_json"
@@ -681,10 +760,22 @@ impl<'ctx> HirCompiler<'ctx> {
         handle: BasicValueEnum<'ctx>,
     ) -> Result<BasicValueEnum<'ctx>, String> {
         if !self.compiling_quickjs_dynamic_arguments {
-            return Err(
-                "a dynamic (JsValue) value can only be passed as an argument to another QuickJS-backed dynamic call"
-                    .into(),
-            );
+            // No QuickJS reviver downstream: embed the live value itself (a Json Host lease).
+            self.uses_quickjs = true;
+            self.uses_quickjs_handles = true;
+            self.tracks_owned_json_roots = true;
+            let json = self
+                .builder
+                .build_call(
+                    self.module.get_function("thaw_json_from_borrowed_handle").unwrap(),
+                    &[handle.into_int_value().into()],
+                    "dynamic_value_json_host",
+                )
+                .map_err(|error| error.to_string())?
+                .try_as_basic_value()
+                .basic()
+                .ok_or("live JSON host conversion returned no value")?;
+            return self.compile_check_json_host_error(json, Some("thaw_json_destroy"));
         }
         self.compile_dynamic_value_placeholder_unchecked(handle)
     }
@@ -892,6 +983,9 @@ impl<'ctx> HirCompiler<'ctx> {
                 .build_unconditional_branch(done)
                 .map_err(|error| error.to_string())?;
             self.builder.position_at_end(undefined_block);
+            // `T | null | undefined` holds an explicit `undefined` value, which
+            // Node prints (`{ nullish: undefined }`); only a bare optional
+            // property is omitted when absent.
             if preserve_undefined {
                 let undefined = self.compile_napi_undefined_json()?;
                 self.compile_json_object_set_native_with_undefined(
@@ -913,7 +1007,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 preserve_undefined,
                 true,
             )?;
-        } else if preserve_undefined {
+        } else if preserve_undefined && !self.console_omit_absent_fields {
             let undefined = self.compile_napi_undefined_json()?;
             self.compile_json_object_set_native_with_undefined(
                 json,
@@ -1153,6 +1247,7 @@ impl<'ctx> HirCompiler<'ctx> {
         Ok(json)
     }
 
+    #[allow(dead_code)]
     fn compile_native_tuple_to_json(
         &mut self,
         tuple: PointerValue<'ctx>,
@@ -1228,6 +1323,15 @@ impl<'ctx> HirCompiler<'ctx> {
         self.compile_json_array_push_native_with_undefined(json, value, element_type, false)
     }
 
+    /// A Json BigInt for a native `i64` (the runtime owns the allocation).
+    fn compile_json_bigint(&mut self, value: BasicValueEnum<'ctx>) -> Result<BasicValueEnum<'ctx>, String> {
+        self.builder
+            .build_call(self.module.get_function("thaw_json_receiver_bigint").unwrap(), &[value.into()], "json_bigint")
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value().basic()
+            .ok_or_else(|| "thaw_json_receiver_bigint returned no value".to_string())
+    }
+
     fn compile_json_array_push_native_with_undefined(
         &mut self,
         json: BasicValueEnum<'ctx>,
@@ -1284,7 +1388,8 @@ impl<'ctx> HirCompiler<'ctx> {
             _ => {}
         }
         let generated_owned = matches!(element_type,
-            HirType::Null | HirType::Undefined | HirType::Void
+            HirType::Null | HirType::Undefined | HirType::Void | HirType::I64
+            | HirType::Map(..) | HirType::Set(_)
             | HirType::Array(_) | HirType::Tuple(_) | HirType::Object(_)
             | HirType::JsValue | HirType::Function(..) | HirType::CallableFunction(..))
             || (matches!(element_type, HirType::Json | HirType::Dictionary(_)) && value.is_int_value());
@@ -1345,15 +1450,35 @@ impl<'ctx> HirCompiler<'ctx> {
             HirType::Null | HirType::Undefined | HirType::Void => {
                 "thaw_json_array_push_json"
             }
+            // A bigint element becomes a Json BigInt (printed `123n`; `JSON.stringify` rejects it).
+            HirType::I64 => {
+                value = self.compile_json_bigint(value)?;
+                "thaw_json_array_push_json"
+            }
+            HirType::Map(..) | HirType::Set(_) if self.console_omit_absent_fields => {
+                value = self.compile_native_collection_to_json(value.into_pointer_value(), element_type, preserve_undefined)?;
+                "thaw_json_array_push_json"
+            }
             HirType::JsValue => {
                 value = self.compile_dynamic_value_placeholder(value)?;
                 "thaw_json_array_push_json"
             }
             HirType::Function(params, ret) | HirType::CallableFunction(params, _, _, ret) => {
-                value = self.compile_register_native_callback_from_closure(
+                // A rest callable's physical ABI is its fixed prefix plus one packed `Array`.
+                let (abi_params, has_rest) = match element_type {
+                    HirType::CallableFunction(params, _, Some(rest), _) => {
+                        let mut abi = params.clone();
+                        abi.push(HirType::Array(rest.clone()));
+                        (abi, true)
+                    }
+                    _ => (params.clone(), false),
+                };
+                value = self.compile_register_native_callback_from_closure_with_rest(
                     value.into_pointer_value(),
-                    params,
+                    &abi_params,
                     ret,
+                    has_rest,
+                    false,
                 )?;
                 value = self.compile_dynamic_value_placeholder(value)?;
                 "thaw_json_array_push_json"

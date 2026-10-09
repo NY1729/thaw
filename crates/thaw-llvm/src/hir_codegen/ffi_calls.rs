@@ -1099,7 +1099,7 @@ impl<'ctx> HirCompiler<'ctx> {
             }
             HirType::Object(fields) => {
                 let base = value.into_pointer_value();
-                let i64_type = self.context.i64_type();
+                let _i64_type = self.context.i64_type();
                 for (index, (name, field_ty)) in fields.iter().enumerate() {
                     let pointer = self.compile_field_ptr_from_pointer(base, fields, index)?;
                     let field = self

@@ -580,8 +580,7 @@ pub unsafe extern "C" fn thaw_map_iterator_next(
     let ordinal = cursor.max(0.0) as u64;
     let entries = unsafe { std::slice::from_raw_parts(header.entries, header.entries_len as usize) };
     let start = entries.partition_point(|entry| entry.ordinal < ordinal);
-    for index in start..entries.len() {
-        let entry = entries[index];
+    for &entry in entries.iter().skip(start) {
         if entry.state != ENTRY_LIVE {
             continue;
         }

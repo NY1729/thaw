@@ -114,7 +114,7 @@ pub unsafe extern "C" fn thaw_string_to_lower_case(value: *const c_char) -> *con
     if value.is_null() {
         return std::ptr::null();
     }
-    unsafe { wtf8_case_map(value, false, &Default::default()) }
+    unsafe { wtf8_case_map(value, false, &icu_locale_core::LanguageIdentifier::UNKNOWN) }
 }
 
 #[no_mangle]
@@ -124,7 +124,7 @@ pub unsafe extern "C" fn thaw_string_to_upper_case(value: *const c_char) -> *con
     if value.is_null() {
         return std::ptr::null();
     }
-    unsafe { wtf8_case_map(value, true, &Default::default()) }
+    unsafe { wtf8_case_map(value, true, &icu_locale_core::LanguageIdentifier::UNKNOWN) }
 }
 
 unsafe fn thaw_string_to_locale_case(
@@ -136,7 +136,12 @@ unsafe fn thaw_string_to_locale_case(
         return std::ptr::null();
     }
     let locale = unsafe { CStr::from_ptr(locale) }.to_string_lossy();
-    let language = locale.split('-').next().unwrap_or("").parse().unwrap_or_default();
+    let language = locale
+        .split('-')
+        .next()
+        .unwrap_or("")
+        .parse::<icu_locale_core::LanguageIdentifier>()
+        .unwrap_or(icu_locale_core::LanguageIdentifier::UNKNOWN);
     unsafe { wtf8_case_map(value, upper, &language) }
 }
 
@@ -179,7 +184,7 @@ pub unsafe extern "C" fn thaw_encode_uri_component(value: *const c_char) -> *con
     if !wtf8_is_well_formed(bytes) { return std::ptr::null(); }
     let value = wtf8_encode_utf16(&wtf8_decode_utf16(bytes));
     let mut output = String::with_capacity(value.len());
-    for byte in value.bytes() {
+    for byte in value {
         match byte {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'!' | b'~' | b'*'
             | b'\'' | b'(' | b')' => output.push(byte as char),
@@ -204,7 +209,7 @@ pub unsafe extern "C" fn thaw_encode_uri(value: *const c_char) -> *const c_char 
     if !wtf8_is_well_formed(bytes) { return std::ptr::null(); }
     let value = wtf8_encode_utf16(&wtf8_decode_utf16(bytes));
     let mut output = String::with_capacity(value.len());
-    for byte in value.bytes() {
+    for byte in value {
         match byte {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'!' | b'~' | b'*'
             | b'\'' | b'(' | b')' | b';' | b'/' | b'?' | b':' | b'@' | b'&' | b'=' | b'+'
@@ -318,6 +323,7 @@ pub unsafe extern "C" fn thaw_string_repeat(value: *const c_char, count: f64) ->
     arena_wtf8(&output).map_or(std::ptr::null(), |value| value.cast())
 }
 
+#[allow(dead_code)]
 fn expand_replacement(
     replacement: &str,
     matched: &str,

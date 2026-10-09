@@ -359,6 +359,12 @@ impl<'a> FnLowerer<'a> {
         // receiver is itself the *method call* `z.string().min(2)`, which
         // needs this same hint recursively for its own receiver in turn.
         let receiver = self.lower_expr_with_expected_type(receiver_expr, Some(&HirType::JsValue))?;
+        // A `Json` receiver (a live native-owner wrapper) yields its host handle.
+        let receiver = if self.infer_expr_type(&receiver)? == HirType::Json {
+            self.coerce_to_declared(&HirType::JsValue, receiver)?
+        } else {
+            receiver
+        };
         // Each argument gets the same one-shot `JsValue` hint the receiver
         // just did, for the identical reason: an argument that's itself a
         // method call chained off a `JsValue` receiver (`z.string().pipe(
@@ -631,11 +637,11 @@ impl<'a> FnLowerer<'a> {
                     "`{callee_name}(...)` is only supported on a JSON value for now (got {ty:?})"
                 ));
             }
-            return Ok(match callee_name {
+            Ok(match callee_name {
                 "Number" => HirExpr::JsonAsNumber(Box::new(value)),
                 "String" => HirExpr::JsonAsString(Box::new(value)),
                 _ => HirExpr::JsonAsBool(Box::new(value)),
-            });
+            })
     }
 
 }

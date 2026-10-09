@@ -139,7 +139,7 @@ fn url_builtin_supports_legacy_parse_and_format() {
     let empty_node_modules = temp_registry("builtin_url_legacy_node_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    assert_eq!(file_count, 2);
+    assert_eq!(file_count, 3);
     let script = format!(
         "globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseUrl = module.exports;"
     );
@@ -869,6 +869,8 @@ fn http2_stream_terminal_paths_drain_queue_and_suppress_late_frames() {
 
 #[test]
 fn http2_zero_initial_window_blocks_data_until_window_update() {
+    // Real Node (verified with a raw SETTINGS peer): the SETTINGS ACK is written first and the
+    // newly unblocked DATA frame follows it, so the data frame is the LAST frame after the update.
     use std::ffi::{CStr, CString};
 
     let dir = temp_registry("builtin_http2_zero_window");
@@ -890,7 +892,7 @@ module.exports = function () {
   var secondWindow = second._sendWindow, secondWrite = second.write('b');
   var beforeSettings = [secondWindow, secondWrite, second._writeQueue.length, dataCount()];
   session._frame(4, 0, 0, Buffer.from([0, 4, 0, 0, 0, 1]));
-  var afterSettings = [second._sendWindow, second._writeQueue.length, dataCount(), frames[frames.length - 2][9]];
+  var afterSettings = [second._sendWindow, second._writeQueue.length, dataCount(), frames[frames.length - 1][9]];
   session.localSettings.initialWindowSize = 0;
   var receiveWindow = new http2.Http2Stream(session, 99)._receiveWindow;
   return blocked.concat(resumed, beforeSettings, afterSettings, [receiveWindow]);
@@ -1061,7 +1063,7 @@ module.exports = function() {
     let arguments = CString::new("[]").unwrap();
     let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
     let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
-    assert_eq!(result, r#"[[true,0,0,false],[false,1,1,true],[false,1,1,true],"HPACK table size exceeds SETTINGS limit",["200",0],["200",1],["200",1]]"#);
+    assert_eq!(result, r#"[[true,0,0,true],[false,1,1,true],[false,1,1,true],"HPACK table size exceeds SETTINGS limit",["200",0],["200",1],["200",1]]"#);
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
 }

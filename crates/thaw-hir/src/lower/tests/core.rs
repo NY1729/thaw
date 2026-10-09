@@ -462,11 +462,19 @@ fn lowers_typeof_to_an_evaluating_typed_closure() {
                         && matches!(body.as_ref(), HirExpr::Lit(HirLit::Str(value)) if value == "number"))
                     && matches!(values.as_slice(), [HirExpr::Call(_, _)]))
     ));
+    // A function value can carry `undefined` in the raw Function pointer ABI, so `typeof` of a
+    // function reference keeps a runtime check: `undefined` when the value is the absent
+    // sentinel, `"function"` otherwise (previously a bare string literal).
     assert!(matches!(
         &main.body[1],
         HirStmt::Expr(HirExpr::Call(_, args))
-            if matches!(&args[0], HirExpr::Lit(HirLit::Str(value)) if value == "function")
-    ));
+            if matches!(&args[0], HirExpr::Call(lambda, values)
+                if matches!(lambda.as_ref(), HirExpr::Lambda(_, params, HirType::Str, body)
+                    if params.len() == 1
+                        && format!("{body:?}").contains("Lit(Str(\"function\"))")
+                        && format!("{body:?}").contains("Lit(Str(\"undefined\"))"))
+                    && matches!(values.as_slice(), [HirExpr::FunctionRef(name, _, _)] if name == "callback"))
+    ), "{:?}", main.body[1]);
 }
 
 #[test]
@@ -509,10 +517,15 @@ fn lowers_number_field_update_expressions() {
         &program.functions[0].body[1],
         HirStmt::Let(_, HirType::F64, HirExpr::Call(_, _))
     ));
+    // The prefix update binds the object once, reads the old value, and assigns the new value
+    // inside a closure (same staging as the postfix form) instead of a bare property assignment.
     assert!(matches!(
         &program.functions[0].body[2],
-        HirStmt::Let(_, HirType::F64, HirExpr::PropAssign(_, _, field, _)) if field == "value"
+        HirStmt::Let(_, HirType::F64, HirExpr::Call(_, _))
     ));
+    let lowered = format!("{:?}", program.functions[0].body[2]);
+    assert!(lowered.contains("PropAssign(Var(\"__thaw_update_object_"), "{lowered}");
+    assert!(lowered.contains("\"value\""), "{lowered}");
 }
 
 #[test]

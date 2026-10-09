@@ -709,6 +709,15 @@ impl<'a> FnLowerer<'a> {
                 vec![receiver, key_value],
             ));
         }
+        // A string primitive owns enumerable index keys; the Json inspector
+        // already knows the string rules.
+        if matches!(&receiver_type, HirType::Str | HirType::StrLiteral(_)) {
+            let json = self.wrap_native_value_as_json(receiver, receiver_type)?;
+            return Ok(HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_json_property_is_enumerable".into())),
+                vec![json, key_value],
+            ));
+        }
         if !matches!(&receiver_type, HirType::Object(_)) {
             return Err(format!(
                 "`propertyIsEnumerable` currently requires a fixed object or dictionary, got {receiver_type:?}"

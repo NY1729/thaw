@@ -487,7 +487,7 @@ fn compiles_native_array_find_and_find_last() {
     "#;
     assert_eq!(
         compile_and_run(source, "array_find"),
-        "2\nundefined\nb\nfalse\n{\"value\":2}\nreceiver\nthisArg\n2\n3\n2\nundefined\nundefined\nawaited\na\ntrue\ntrue\nundefined\n42\nundefined\n"
+        "2\nundefined\nb\nfalse\n{ value: 2 }\nreceiver\nthisArg\n2\n3\n2\nundefined\nundefined\nawaited\na\ntrue\ntrue\nundefined\n42\nundefined\n"
     );
 }
 
@@ -535,7 +535,7 @@ fn compiles_native_array_at() {
     "#;
     assert_eq!(
         compile_and_run(source, "array_at"),
-        "1\n3\n2\n1\nundefined\nundefined\nundefined\nb\nfalse\n{\"value\":1}\nundefined\nreceiver\nindex\n3\nawaited receiver\nawaited index\na\nundefined undefined 3\n"
+        "1\n3\n2\n1\nundefined\nundefined\nundefined\nb\nfalse\n{ value: 1 }\nundefined\nreceiver\nindex\n3\nawaited receiver\nawaited index\na\nundefined undefined 3\n"
     );
 }
 
@@ -1123,6 +1123,29 @@ fn native_array_delete_keeps_length_and_presence_distinct() {
     assert_eq!(
         compile_and_run(source, "native_array_delete_presence"),
         "true 3 false false\ntrue [1,null,3] [1,3]\n[1,null,3]\n4 13\ntrue\n{\"b\":2}\ntrue [1,null,3]\ntrue false [null,\"b\"]\ntrue false true [1,null]\ntrue true true true 3\ntrue true\nTypeError\nfalse\n"
+    );
+}
+
+#[test]
+fn assigning_undefined_stores_a_present_undefined_slot_for_any_primitive_element_type() {
+    // Expected output taken from real Node (22.x): `a[i] = undefined` keeps the index present.
+    let source = r#"
+        function main(): void {
+            const names: string[] = ["a", "b"];
+            names[0] = undefined;
+            console.log(Object.hasOwn(names, 0), names.length, JSON.stringify(names), names.includes(undefined), 0 in names);
+            const nums: number[] = [1, 2, 3];
+            nums[2] = undefined;
+            nums[0] = 5;
+            console.log(Object.hasOwn(nums, 2), nums.length, JSON.stringify(nums), nums.join(","), nums.indexOf(undefined));
+            let calls = 0;
+            const pick = (): number[] => { calls++; return nums; };
+            console.log(pick()[1] = undefined, calls, JSON.stringify(nums));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "assign_undefined_present_slot"),
+        "true 2 [null,\"b\"] true true\ntrue 3 [5,2,null] 5,2, 2\nundefined 1 [5,null,null]\n"
     );
 }
 

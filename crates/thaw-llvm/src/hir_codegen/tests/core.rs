@@ -73,7 +73,7 @@ fn console_log_serializes_arrays_objects_and_json_values() {
 
     assert_eq!(
         compile_and_run(source, "structured_console_log"),
-        "[1,2] [\"a\",\"b\"] [true,false]\n[[1,2],[3]]\n{\"name\":\"thaw\",\"active\":true,\"scores\":[4,5]}\n{\"name\":\"thaw\",\"active\":true,\"scores\":[4,5]}\n{ nested: [ 1, true, null ] }\ndynamic text null\n"
+        "[ 1, 2 ] [ 'a', 'b' ] [ true, false ]\n[ [ 1, 2 ], [ 3 ] ]\n{ name: 'thaw', active: true, scores: [ 4, 5 ] }\n{ name: 'thaw', active: true, scores: [ 4, 5 ] }\n{ nested: [ 1, true, null ] }\ndynamic text null\n"
     );
 }
 
@@ -92,7 +92,7 @@ fn console_log_formats_numbers_precisely_and_inline_expressions_correctly() {
     "#;
     assert_eq!(
         compile_and_run(source, "console_log_numbers_and_inline_exprs"),
-        "9007199254740991\n0.30000000000000004\n1000000\nNaN\n{\"a\":3,\"b\":true,\"c\":\"text1\",\"d\":2}\n{\"big\":9007199254740991,\"neg\":-5,\"cmp\":true}\n[{\"x\":1},{\"x\":2}]\n"
+        "9007199254740991\n0.30000000000000004\n1000000\nNaN\n{ a: 3, b: true, c: 'text1', d: 2 }\n{ big: 9007199254740991, neg: -5, cmp: true }\n[ { x: 1 }, { x: 2 } ]\n"
     );
 }
 
@@ -118,7 +118,7 @@ fn console_log_serializes_typed_tuples_in_all_tagged_positions() {
 
     assert_eq!(
         compile_and_run(source, "tuple_console_log"),
-        "[1,\"two\",true,{\"x\":3,\"label\":\"p\"},[4,5]]\n[[6,\"seven\"],[false,{\"x\":8,\"label\":\"q\"}]]\n[\"nine\",10]\nundefined\n[11,\"twelve\"]\n"
+        "[ 1, 'two', true, { x: 3, label: 'p' }, [ 4, 5 ] ]\n[ [ 6, 'seven' ], [ false, { x: 8, label: 'q' } ] ]\n[ 'nine', 10 ]\nundefined\n[ 11, 'twelve' ]\n"
     );
 }
 
@@ -149,7 +149,10 @@ fn console_log_serializes_tagged_values_inside_collections() {
 
     assert_eq!(
         compile_and_run(source, "tagged_collection_console"),
-        "[1,null,3]\n[\"a\",null,\"c\"]\n[true,null,null]\n[null,null,null]\n{\"nullable\":null}\n{\"optional\":2,\"nullable\":\"x\",\"nullish\":null}\n"
+        // Verified against Node 22: `console.log` prints `undefined` array
+        // elements and an explicit `undefined` property, but omits an absent
+        // optional property.
+        "[ 1, undefined, 3 ]\n[ 'a', null, 'c' ]\n[ true, null, undefined ]\n[ undefined, null, undefined ]\n{ nullable: null, nullish: undefined }\n{ optional: 2, nullable: 'x', nullish: null }\n"
     );
 }
 
@@ -172,7 +175,7 @@ fn console_methods_use_their_node_compatible_output_streams() {
 
     let (stdout, stderr) = compile_and_run_output(source, "console_output_streams");
     assert_eq!(stdout, "info 1\ndebug true\nevaluated\n");
-    assert_eq!(stderr, "A warning\nerror {\"code\":7}\n");
+    assert_eq!(stderr, "A warning\nerror { code: 7 }\n");
 }
 
 #[test]
@@ -209,7 +212,7 @@ fn console_assert_evaluates_all_arguments_and_only_reports_falsy_conditions() {
     );
     assert_eq!(
         stderr,
-        "Assertion failed\nAssertion failed: failed 2 {\"code\":7}\nAssertion failed: zero\nAssertion failed: empty\nAssertion failed: json\nAssertion failed\n"
+        "Assertion failed\nAssertion failed: failed 2 { code: 7 }\nAssertion failed: zero\nAssertion failed: empty\nAssertion failed: json\nAssertion failed\n"
     );
 }
 
@@ -286,7 +289,7 @@ fn top_level_destructuring_supports_nested_defaults_rests_and_runtime_keys() {
 
     assert_eq!(
         compile_and_run(source, "top_level_destructuring"),
-        "2 1 2 fallback 3\n4 6 [7] 1 8 {\"kept\":9}\n"
+        "2 1 2 fallback 3\n4 6 [ 7 ] 1 8 { kept: 9 }\n"
     );
 }
 
@@ -320,7 +323,7 @@ fn local_dictionary_destructuring_supports_computed_keys_and_rest() {
 
     assert_eq!(
         compile_and_run(source, "local_dictionary_destructuring"),
-        "1 1 1 2 4 {\"second\":3}\n{\"selected\":1,\"first\":2,\"second\":3}\n"
+        "1 1 1 2 4 { second: 3 }\n{ selected: 1, first: 2, second: 3 }\n"
     );
 }
 
@@ -438,7 +441,7 @@ fn dictionary_destructuring_assignment_supports_computed_keys_defaults_and_rest(
 
     assert_eq!(
         compile_and_run(source, "dictionary_destructuring_assignment"),
-        "1 1 1 4 {\"kept\":2}\n{\"selected\":1,\"kept\":2}\n"
+        "1 1 1 4 { kept: 2 }\n{ selected: 1, kept: 2 }\n"
     );
 }
 
@@ -669,7 +672,7 @@ fn structured_dictionary_values_support_reads_and_destructuring() {
 
     assert_eq!(
         compile_and_run(source, "structured_dictionary_destructuring"),
-        "1 one 1 one {\"kept\":{\"value\":2,\"label\":\"two\"}}\n[3,4] {\"kept\":[5]}\n[\"a\",\"b\"] [true,false]\n6 seven [[9,10],[11]]\n[\"x\",\"y\"] [[13],[14,15]] 16\ntuple 17 eighteen\n19 null undefined\nundefined 20 null\n"
+        "1 one 1 one { kept: { value: 2, label: 'two' } }\n[ 3, 4 ] { kept: [ 5 ] }\n[ 'a', 'b' ] [ true, false ]\n6 seven [ [ 9, 10 ], [ 11 ] ]\n[ 'x', 'y' ] [ [ 13 ], [ 14, 15 ] ] 16\ntuple 17 eighteen\n19 null undefined\nundefined 20 null\n"
     );
 }
 
@@ -2335,7 +2338,7 @@ fn console_log_prints_inline_number_conversions_inside_object_literals() {
     "#;
     assert_eq!(
         compile_and_run(source, "console_log_inline_number_conversions"),
-        "{\"n\":42}\n{\"p\":42}\n{\"f\":3.14}\n{\"b\":1}\n"
+        "{ n: 42 }\n{ p: 42 }\n{ f: 3.14 }\n{ b: 1 }\n"
     );
 }
 
@@ -2604,7 +2607,10 @@ fn propagates_synchronous_native_callback_exceptions_to_quickjs() {
     "#;
     assert_eq!(
         compile_and_run(source, "native_callback_exception"),
-        "`invokeCallback` threw: callback failed\n"
+        // Node: `error.message` of an Error thrown inside a callback that crosses
+        // the JS boundary is the bare message; the old "`label` threw:" prefix was a
+        // Thaw-only decoration (checked with node 22: prints "callback failed").
+        "callback failed\n"
     );
 }
 
@@ -2725,8 +2731,28 @@ fn dynamic_json_calls_release_bridge_temporaries() {
     let mut compiler = HirCompiler::new(&context, "dynamic_json_cleanup");
     compiler.compile_program(&program).unwrap();
     let ir = compiler.print_to_string();
-    assert_eq!(ir.matches("call void @thaw_cstring_destroy").count(), 2, "{ir}");
-    assert_eq!(ir.matches("call void @thaw_json_destroy").count(), 1, "{ir}");
+    // Inspect only the user entry point: the generated `main` carries its own
+    // process-listener cstring cleanup that is unrelated to the bridge.
+    let body = ir.split("define internal void @thaw_user_main(").nth(1).expect(&ir)
+        .split("\n}").next().expect(&ir);
+    // The encoded argument graph and the parsed argument are released right
+    // after the call, before the pending-exception branch.
+    let call = body.find("@thaw_js_call_graph_result(").expect(&ir);
+    let after = &body[call..];
+    let args = after.find("call void @thaw_cstring_destroy(ptr %call_dynamic_args_json)").expect(&ir);
+    let parsed = after.find("call void @thaw_json_destroy(ptr %json_parse)").expect(&ir);
+    let branch = after.find("br i1 %has_pending_exception").expect(&ir);
+    assert!(args < parsed && parsed < branch, "{ir}");
+    // The result graph text is released immediately after it is decoded.
+    let decode = body.find("%decode_quickjs_graph = call ptr @thaw_json_graph_decode(").expect(&ir);
+    assert!(body[decode..].lines().nth(1).unwrap()
+        .contains("call void @thaw_cstring_destroy(ptr %call_dynamic_value)"), "{ir}");
+    // Every early exit that holds the encoded arguments also releases them.
+    for exit in ["json_stringify_invalid:", "json_stringify_host_failed:"] {
+        let block = body.split(exit).nth(1).expect(&ir).split("\n\n").next().unwrap();
+        assert!(block.contains("call void @thaw_cstring_destroy(ptr %call_dynamic_args_json)"), "{ir}");
+        assert!(block.contains("call void @thaw_json_destroy(ptr %json_parse)"), "{ir}");
+    }
 }
 
 #[test]
@@ -2763,7 +2789,7 @@ fn dynamic_json_setter_destroys_owned_result_before_exception_branch() {
         compiler.compile_program(&program).unwrap();
         let ir = compiler.print_to_string();
         let setter = ir.lines().position(|line| {
-            line.contains("call ") && line.contains("@thaw_js_set_property_json_result(")
+            line.contains("call ") && line.contains("@thaw_js_set_property_json_graph_result(")
         }).expect(&ir);
         let suffix = ir.lines().skip(setter).collect::<Vec<_>>().join("\n");
         let extracted = suffix.find("dynamic_property_json_set_value = extractvalue").expect(&ir);
@@ -2773,7 +2799,15 @@ fn dynamic_json_setter_destroys_owned_result_before_exception_branch() {
         assert!(suffix[destroyed..].lines().next().unwrap()
             .contains("%dynamic_property_json_set_value"), "{ir}");
         let branch_line = suffix[branch..].lines().next().unwrap();
-        assert!(branch_line.contains(if caught { "label %catch" } else { "label %propagate_exception" }), "{ir}");
+        // The setter runs inside the lowered try body, which propagates the
+        // pending exception to its caller; the caller's catch is entered through
+        // the catch-entry cleanup block (an empty trampoline into `%catch`).
+        assert!(branch_line.contains("label %propagate_exception"), "{ir}");
+        if caught {
+            let trampoline = ir.split("cleanup_before_catch:").nth(1).expect(&ir)
+                .lines().nth(1).unwrap();
+            assert!(trampoline.contains("br label %catch"), "{ir}");
+        }
     }
 }
 
@@ -2938,8 +2972,14 @@ fn generated_main_uses_result_reporters_and_destroys_listener_errors() {
         && line.contains("@thaw_promise_set_unhandled_reporter_result(")), "{ir}");
     assert!(ir.lines().any(|line| line.contains("call ")
         && line.contains("@thaw_js_terminal_work_pending(")), "{ir}");
-    assert!(ir.contains("destroy_js_listener_exception"), "{ir}");
-    assert!(ir.contains("destroy_rejection_listener_exception"), "{ir}");
+    // Listener errors returned in the `{ handled, error }` result pair are owned C
+    // strings; the generated main destroys them through `thaw_cstring_destroy`
+    // (previously asserted via the named blocks destroy_js_listener_exception /
+    // destroy_rejection_listener_exception).
+    for owned in ["%process_exception_listener_error", "%process_rejection_listener_error"] {
+        assert!(ir.lines().any(|line| line.contains("call void @thaw_cstring_destroy(ptr ")
+            && line.trim_end().ends_with(&format!("{owned})"))), "{owned}: {ir}");
+    }
 }
 
 #[test]
@@ -2977,9 +3017,18 @@ fn opaque_hir_throw_does_not_trust_user_metadata_suffix() {
     let mut compiler = HirCompiler::new(&context, "opaque_catch_provenance");
     compiler.compile_program(&program).unwrap();
     let ir = compiler.print_to_string();
+    // Current carrier design: provenance is read from the pending-native-text
+    // global into `catch_native_text_slot`, and the rethrow only trusts it when the
+    // catch value is unchanged and equals that recorded pointer
+    // (`caught_native_trusted`). The source binding named like the old synthetic
+    // suffix must never be consulted as provenance: its cell is allocated and
+    // initialised once and never loaded.
     assert!(ir.contains("catch_native_text_slot"), "{ir}");
-    assert!(ir.contains("rethrown_native_text_provenance"), "{ir}");
-    assert!(ir.contains("error__thaw_exception_native_text"), "{ir}");
+    assert!(ir.contains("%rethrow_native_text = select i1 %caught_native_trusted, ptr %caught_native_text, ptr null"), "{ir}");
+    let function = ir.split("define internal void @opaque_test(").nth(1).unwrap().split("\n}").next().unwrap();
+    let spoof_uses = function.lines().filter(|line| line.contains("%error__thaw_exception_native_text_cell")).count();
+    assert_eq!(spoof_uses, 2, "spoofed suffix binding must only be allocated and initialised: {function}");
+    assert!(!function.lines().any(|line| line.contains("load ptr, ptr %error__thaw_exception_native_text_cell")), "{function}");
 }
 
 #[test]
@@ -3004,8 +3053,13 @@ fn catch_rethrow_retains_native_text_after_nested_lambda_compilation() {
     let mut compiler = HirCompiler::new(&context, "catch_lambda_native_text_ir");
     compiler.compile_program(&program).unwrap();
     let ir = compiler.print_to_string();
-    assert!(ir.contains("__thaw_async_lambda_"), "{ir}");
-    assert!(ir.contains("rethrown_native_text_provenance"), "{ir}");
+    // The async lambda is a Promise-returning `__thaw_lambda_N` in the current naming.
+    assert!(ir.contains("define internal ptr @__thaw_lambda_"), "{ir}");
+    // Behavioural form of "the rethrow keeps the native text after the nested
+    // lambdas were compiled": the uncaught report still names the original error.
+    let (_stdout, stderr, code) = compile_and_run_failing(source, "catch_lambda_native_text_run");
+    assert_eq!(code, Some(1), "{stderr}");
+    assert!(stderr.contains("TypeError: native failure"), "{stderr}");
 }
 
 #[test]
@@ -3027,14 +3081,19 @@ fn main_cleanup_keeps_process_reporting_and_addons_live_on_init_failure() {
     let finish = ir.find("finish_napi_shutdown").unwrap();
     assert!(ordinary < begin && begin < finish, "{ir}");
     assert!(ir.contains("take_shutdown_error") && ir.contains("terminal_promise_notifications"), "{ir}");
-    assert!(ir.contains("original_exception_owned_report_text")
-        && ir.contains("destroy_original_exception_report")
-        && ir.contains("listener_exception_owned_report_text")
-        && ir.contains("destroy_native_handler_exception_report"), "{ir}");
+    // The owned report texts are produced and released through
+    // `thaw_cstring_destroy` (the earlier named destroy_* blocks no longer exist).
+    for owned in ["%original_exception_owned_report_text", "%listener_exception_owned_report_text"] {
+        assert!(ir.lines().any(|line| line.contains(&"= call ptr @thaw_runtime_exception_report_text(".to_string())
+            && line.trim_start().starts_with(owned)), "{owned}: {ir}");
+        assert!(ir.lines().any(|line| line.contains("call void @thaw_cstring_destroy(ptr ")
+            && line.trim_end().ends_with(&format!("{owned})"))), "{owned}: {ir}");
+    }
     let original = ir.find("process_pending_exception = load ptr").unwrap();
     let listener = ir[original..].find("emit_process_uncaught_exception = call").unwrap() + original;
     let handler = ir[listener..].find("process_handler_exception = load ptr").unwrap() + listener;
-    let next_report = ir[handler..].find("report_uncaught_exception = call").unwrap() + handler;
+    // The uncaught-report call is void now (no `report_uncaught_exception` result name).
+    let next_report = ir[handler..].find("call void @thaw_runtime_report_uncaught(").unwrap() + handler;
     for slot in [
         "@__thaw_pending_exception_object",
         "@__thaw_pending_exception_value_tag",
@@ -3341,8 +3400,11 @@ fn branch_capture_of_parameter_claims_before_condition_enables_quickjs() {
     assert_eq!(body.matches("store i8 0, ptr %value_capture_claim_cell").count(), 1, "{ir}");
     // The first condition is false for `obj`; the second closure must still
     // have a reachable claim block. Neither retain can precede its test.
+    // Claim blocks are appended after the branch merge blocks in the textual
+    // order, so only "zeroed before any test, and each retain after its own
+    // test" is a layout-independent statement.
     assert!(zero < conditions[0] && conditions[0] < retains[0]
-        && retains[0] < conditions[1] && conditions[1] < retains[1], "{ir}");
+        && conditions[0] < conditions[1] && conditions[1] < retains[1], "{ir}");
     assert!(compiler.uses_quickjs() && compiler.uses_quickjs_handles, "{ir}");
 }
 
@@ -3387,7 +3449,7 @@ fn absent_function_pointer_checks_after_plain_call_arguments() {
     compiler.compile_program(&program).unwrap();
     let ir = compiler.print_to_string();
     let main = ir.lines()
-        .skip_while(|line| !(line.starts_with("define ") && line.contains("@main(")))
+        .skip_while(|line| !(line.starts_with("define ") && line.contains("@thaw_user_main(")))
         .take_while(|line| *line != "}")
         .collect::<Vec<_>>()
         .join("\n");
@@ -3425,4 +3487,28 @@ fn absent_function_registration_takes_undefined_handle_path() {
     let ir = compiler.print_to_string();
     assert!(ir.contains("native_callback_is_undefined"), "{ir}");
     assert!(ir.contains("native_callback_undefined_handle"), "{ir}");
+}
+
+
+/// A `JsValue` stored in a native object literal or tuple that is handed to a
+/// `JsValue` slot keeps its live JS identity (graph wire), not a structural copy.
+#[test]
+fn retained_native_aggregate_keeps_nested_jsvalue_identity() {
+    let source = r#"
+        function main(): void {
+            loadScript("globalThis.dynamicBox = { value: 1 };");
+            const box: JsValue = getDynamicValue("dynamicBox");
+            const record: JsValue = keepDynamic({ label: "kept", nested: box, deeper: { again: box } });
+            console.log(getDynamicProperty(record, "nested") === box);
+            console.log(getDynamicProperty(getDynamicProperty(record, "deeper"), "again") === box);
+            const pair: JsValue = keepDynamic([box, { inner: box }]);
+            console.log(getDynamicProperty(pair, "0") === box);
+            console.log(getDynamicProperty(getDynamicProperty(pair, "1"), "inner") === box);
+        }
+        function keepDynamic(value: JsValue): JsValue { return value; }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "retained_aggregate_keeps_jsvalue_identity"),
+        "true\ntrue\ntrue\ntrue\n"
+    );
 }

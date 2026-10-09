@@ -66,6 +66,7 @@ impl<'ctx> HirCompiler<'ctx> {
         if let Some(handler) = &loop_rejection_handler {
             guarded_rethrow_handlers.insert(enabled_guard.clone(), handler.clone());
         }
+        let condition_state = segments.len();
         let current = segments.last_mut().unwrap();
         current.stmts.push(HirStmt::Let(
             enabled_guard.clone(),
@@ -96,7 +97,6 @@ impl<'ctx> HirCompiler<'ctx> {
                 vec![HirExpr::Lit(HirLit::F64(0.0))],
             )
         };
-        let condition_state = segments.len();
         current.await_next = Some(condition_state);
         segments.push(AsyncSegment {
             stmts: Vec::new(),

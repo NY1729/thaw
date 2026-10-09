@@ -201,7 +201,7 @@ function __thaw_bundle_origin_for(ownerKey) {
       // native namespaces expose the exported alias in `name` instead.
       return __thaw_native_entry.readNative(resolution.key, resolution.name);
     }
-    var source = __thaw_bundle_require(resolution.key, __thaw_bundle_factory_of(resolution.key));
+    var source = __thaw_bundle_require(resolution.key, __thaw_bundle_factory_of(resolution.key), true);
     return resolution.kind === 'namespace' ? source : source[resolution.name];
   }
   function linksReady(key, visited) {
@@ -448,7 +448,9 @@ fn render_bundle(main_key: &str, modules: &[BundledModule]) -> String {
 }
 
 fn render_bundle_mode(main_key: &str, modules: &[BundledModule], mixed: Option<&MixedBundleRender>) -> String {
-    let mut out = String::from("module.exports = (function(require) {\n");
+    // A host without a global `require` still gets a working bundle: unresolved
+    // externals then fail with MODULE_NOT_FOUND instead of a TypeError on `require.addon`.
+    let mut out = String::from("module.exports = (function(require) {\nif (typeof require !== 'function') require = function(name) { var error = new Error('Cannot find module ' + name); error.code = 'MODULE_NOT_FOUND'; throw error; };\n");
 
     out.push_str("var __thaw_bundle_exports = globalThis.__thaw_bundle_exports || (globalThis.__thaw_bundle_exports = {});\n");
     out.push_str("var __thaw_bundle_builtin_names = Object.freeze(");
@@ -640,7 +642,7 @@ fn render_bundle_mode(main_key: &str, modules: &[BundledModule], mixed: Option<&
          \x20\x20\x20\x20\x20\x20if (target) return __thaw_bundle_require(target.key, target.factory);\n\
          \x20\x20\x20\x20\x20\x20return require(spec);\n\
          \x20\x20\x20\x20};\n\
-         \x20\x20\x20\x20localRequire.addon = require.addon;\n\
+         \x20\x20\x20\x20localRequire.addon = typeof require === 'function' ? require.addon : undefined;\n\
          \x20\x20\x20\x20localRequire.resolve = function(spec) { return __thaw_bundle_resolve(map, spec, null, false, false); };\n\
          \x20\x20\x20\x20localRequire.cache = __thaw_bundle_cache;\n\
          \x20\x20\x20\x20var localImport = function(spec) { var target = __thaw_bundle_target(importMap, spec); if (target) return __thaw_bundle_require(target.key, target.factory); if (__thaw_bundle_import_missing(knownPackages, spec)) throw new Error('Cannot resolve import ' + spec); return require(spec); };\n\
@@ -656,9 +658,11 @@ fn render_bundle_mode(main_key: &str, modules: &[BundledModule], mixed: Option<&
          \x20\x20var text = String(base || '');\n\
          \x20\x20var keys = Object.keys(__thaw_bundle_require_maps);\n\
          \x20\x20var factoryKey = keys.indexOf(text) >= 0 ? text : keys.reduce(function(best, key) { return text.endsWith('/' + key) && (!best || key.length > best.length) ? key : best; }, null);\n\
-         \x20\x20var map = __thaw_bundle_require_maps[factoryKey] || {};\n\
+         \x20\x20var map = {}, staticMap = __thaw_bundle_import_maps[factoryKey] || {}, requireMap = __thaw_bundle_require_maps[factoryKey] || {};\n\
+         \x20\x20for (var staticSpec in staticMap) if (Object.prototype.hasOwnProperty.call(staticMap, staticSpec)) map[staticSpec] = staticMap[staticSpec];\n\
+         \x20\x20for (var requireSpec in requireMap) if (Object.prototype.hasOwnProperty.call(requireMap, requireSpec)) map[requireSpec] = requireMap[requireSpec];\n\
          \x20\x20var created = function(spec) { if ((String(spec) === 'bindings' || String(spec) === 'node-gyp-build') && typeof require.addon === 'function') return require.addon; spec = String(spec); if (Object.prototype.hasOwnProperty.call(__thaw_bundle_async_keys, spec)) throw __thaw_bundle_async_error(spec); if (Object.prototype.hasOwnProperty.call(__thaw_bundle_exports, spec)) return __thaw_bundle_exports[spec]; var target = __thaw_bundle_target(map, spec); if (!target && !factoryKey) { for (var index = 0; index < keys.length && !target; index++) target = __thaw_bundle_target(__thaw_bundle_require_maps[keys[index]] || {}, spec); } if (target) return __thaw_bundle_require(target.key, target.factory); return require(spec); };\n\
-         \x20\x20created.addon = require.addon;\n\
+         \x20\x20created.addon = typeof require === 'function' ? require.addon : undefined;\n\
          \x20\x20created.resolve = function(spec) { return __thaw_bundle_resolve(map, spec, keys, !factoryKey, true); };\n\
          \x20\x20created.cache = __thaw_bundle_cache; return created;\n\
          }\n\
@@ -706,7 +710,7 @@ fn render_bundle_mode(main_key: &str, modules: &[BundledModule], mixed: Option<&
          globalThis.__thaw_bundle_create_import = __thaw_bundle_create_import;\n\
          globalThis.__thaw_bundle_create_import_async = __thaw_bundle_create_import_async;\n\
          var __thaw_worker_bundle_source =\n\
-         \x20\x20'(function() {\\nvar __thaw_worker_bundle_source = globalThis.__thaw_worker_bundle_source;\\nvar require = function(name) { if (name === "worker_threads" || name === "node:worker_threads") return globalThis.__thaw_worker_module; if (String(name).endsWith(".node") && typeof require.addon === "function") return require.addon(); var error = new Error("Cannot find module " + name); error.code = "MODULE_NOT_FOUND"; throw error; };\\nrequire.addon = globalThis.require && globalThis.require.addon;\\nvar __thaw_bundle_exports = globalThis.__thaw_bundle_exports || (globalThis.__thaw_bundle_exports = {});\\nvar __thaw_bundle_builtin_names = Object.freeze(' + JSON.stringify(__thaw_bundle_builtin_names) + ');\\nvar __thaw_bundle_cache = {};\\nvar __thaw_bundle_async_keys = ' + JSON.stringify(__thaw_bundle_async_keys) + ';\\nvar __thaw_bundle_edges = Object.create(null);\\nvar __thaw_bundle_star_linkers = Object.create(null);\\nvar __thaw_bundle_edge_version = 0;\\nvar __thaw_bundle_factories = {' +\n\
+         \x20\x20'(function() {\\nvar __thaw_worker_bundle_source = globalThis.__thaw_worker_bundle_source;\\nvar require = function(name) { if (name === \"worker_threads\" || name === \"node:worker_threads\") return globalThis.__thaw_worker_module; if (String(name).endsWith(\".node\") && typeof require.addon === \"function\") return require.addon(); var error = new Error(\"Cannot find module \" + name); error.code = \"MODULE_NOT_FOUND\"; throw error; };\\nrequire.addon = globalThis.require && globalThis.require.addon;\\nvar __thaw_bundle_exports = globalThis.__thaw_bundle_exports || (globalThis.__thaw_bundle_exports = {});\\nvar __thaw_bundle_builtin_names = Object.freeze(' + JSON.stringify(__thaw_bundle_builtin_names) + ');\\nvar __thaw_bundle_cache = {};\\nvar __thaw_bundle_async_keys = ' + JSON.stringify(__thaw_bundle_async_keys) + ';\\nvar __thaw_bundle_edges = Object.create(null);\\nvar __thaw_bundle_star_linkers = Object.create(null);\\nvar __thaw_bundle_edge_version = 0;\\nvar __thaw_bundle_factories = {' +\n\
          \x20\x20Object.keys(__thaw_bundle_factories).map(function(key) { return JSON.stringify(key) + ': ' + __thaw_bundle_factories[key].toString(); }).join(',\\n') +\n\
          \x20\x20'};\\nvar __thaw_bundle_require_maps = ' + JSON.stringify(__thaw_bundle_require_maps) + ';\\n' +\n\
          \x20\x20'var __thaw_bundle_import_maps = ' + JSON.stringify(__thaw_bundle_import_maps) + ';\\n' +\n\
@@ -814,8 +818,9 @@ fn render_bundle_mode(main_key: &str, modules: &[BundledModule], mixed: Option<&
                 bodyAbort = function() { if (bodyFinished) return; bodyFinished = true; cleanupBody(); if (controller) controller.error(aborted()); if (incoming.destroy) incoming.destroy(); };
                 if (request.signal) request.signal.addEventListener('abort', bodyAbort, { once: true });
                 var contentEncodings = String(responseHeaders.get('content-encoding') || '').toLowerCase().split(',').map(function(value) { return value.trim(); });
-                if (contentEncodings.every(function(value) { return value === 'gzip' || value === 'deflate' || value === 'br'; }))
-                  for (var coding = contentEncodings.length - 1; coding >= 0; coding--) stream = stream.pipeThrough(new DecompressionStream(contentEncodings[coding]));
+                var codecs = { gzip: 'gzip', 'x-gzip': 'gzip', deflate: 'deflate', br: 'brotli' };
+                if (contentEncodings.every(function(value) { return Object.prototype.hasOwnProperty.call(codecs, value); }))
+                  for (var coding = contentEncodings.length - 1; coding >= 0; coding--) stream = stream.pipeThrough(new DecompressionStream(codecs[contentEncodings[coding]]));
               }
               var response;
               try { response = new Response(stream, { status: status, statusText: incoming.statusMessage || '', headers: responseHeaders }); }

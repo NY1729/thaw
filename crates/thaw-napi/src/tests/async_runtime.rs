@@ -345,7 +345,7 @@ unsafe extern "C" fn cleanup_finalizer_rejects_new_async_roots(
     let mut work = ptr::null_mut();
     assert_eq!(napi_create_async_work(env, ptr::null_mut(), ptr::null_mut(),
         Some(noop_execute), None, ptr::null_mut(), &mut work), NAPI_CLOSING);
-    let existing = (&mut *(*env).async_works[0]) as *mut AsyncWork;
+    let existing = Arc::as_ptr(&(&*env).async_works[0]).cast_mut();
     assert_eq!(napi_queue_async_work(env, existing), NAPI_CLOSING);
     assert_eq!(napi_add_env_cleanup_hook(env, Some(cleanup_probe), ptr::null_mut()), NAPI_CLOSING);
 }
@@ -864,7 +864,7 @@ fn method_with_callback_can_stop_its_own_pending_async_work() {
         callback: stop_work,
         data: gate_data.cast(),
         properties: HashMap::new(),
-        _thaw_bridge: None,
+        _thaw_bridge: None, _accessor_owner: None,
     }));
     let receiver = env.alloc(Value::Object(HashMap::from([(
         PropertyKey::String("stop".into()), method,
@@ -915,7 +915,7 @@ fn threadsafe_function_queues_worker_calls_and_finalizes_on_main_thread() {
         callback: threadsafe_js_callback,
         data: probe.cast(),
         properties: HashMap::new(),
-        _thaw_bridge: None,
+        _thaw_bridge: None, _accessor_owner: None,
     }));
     let mut threadsafe = ptr::null_mut();
     unsafe {
@@ -1297,7 +1297,7 @@ fn later_finalizer_cannot_dispatch_prior_env_callback_data() {
     let callback_data = Box::into_raw(Box::new(7_u8)).cast::<c_void>();
     let function = first.alloc(Value::Function(Function {
         callback: counted_native_callback, data: callback_data,
-        properties: HashMap::new(), _thaw_bridge: None,
+        properties: HashMap::new(), _thaw_bridge: None, _accessor_owner: None,
     }));
     first.finalizers.push(FinalizeRecord {
         data: callback_data, finalize: Some(release_callback_data), hint: ptr::null_mut(),
@@ -1318,14 +1318,14 @@ fn later_finalizer_cannot_dispatch_prior_env_callback_data() {
         let mut host = host.borrow_mut();
         host.functions.insert("cleanup_prior_export".into(), Function {
             callback: counted_native_callback, data: callback_data,
-            properties: HashMap::new(), _thaw_bridge: None,
+            properties: HashMap::new(), _thaw_bridge: None, _accessor_owner: None,
         });
         host.exports.insert("cleanup_prior_export".into(), (first_env as usize, function));
         host.module_envs.extend([first, second]);
     });
     retire_owned_envs();
     assert_eq!(CALLED_AFTER_FINALIZATION.load(Ordering::Acquire), 0);
-    let retained = HOST.with(|host| host.borrow_mut().module_envs.drain(..).collect::<Vec<_>>());
+    let retained = HOST.with(|host| std::mem::take(&mut host.borrow_mut().module_envs));
     drop(retained);
 }
 
@@ -1395,7 +1395,7 @@ fn later_finalizer_cannot_read_prior_env_external_backing_store() {
     second.shutdown_requested = true;
     HOST.with(|host| host.borrow_mut().module_envs.extend([first, second]));
     retire_owned_envs();
-    let retained = HOST.with(|host| host.borrow_mut().module_envs.drain(..).collect::<Vec<_>>());
+    let retained = HOST.with(|host| std::mem::take(&mut host.borrow_mut().module_envs));
     drop(retained);
 }
 
@@ -1419,7 +1419,7 @@ fn finalizer_queued_work_keeps_other_env_owned_until_completion() {
     assert_eq!(thaw_napi_run_async_work(), 1);
     assert!(HOST.with(|host| host.borrow().module_envs.iter()
         .any(|env| (&**env as *const Env).cast_mut() == second_env && env.finalized)));
-    let retained = HOST.with(|host| host.borrow_mut().module_envs.drain(..).collect::<Vec<_>>());
+    let retained = HOST.with(|host| std::mem::take(&mut host.borrow_mut().module_envs));
     drop(retained);
 }
 
@@ -1502,7 +1502,7 @@ fn threadsafe_function_reports_full_deadlock_and_abort_cleanup() {
         callback: threadsafe_js_callback,
         data: probe.cast(),
         properties: HashMap::new(),
-        _thaw_bridge: None,
+        _thaw_bridge: None, _accessor_owner: None,
     }));
     let mut threadsafe = ptr::null_mut();
     unsafe {
@@ -1579,7 +1579,7 @@ fn threadsafe_function_serializes_multiple_producers() {
         callback: threadsafe_js_callback,
         data: probe.cast(),
         properties: HashMap::new(),
-        _thaw_bridge: None,
+        _thaw_bridge: None, _accessor_owner: None,
     }));
     let mut threadsafe = ptr::null_mut();
     unsafe {

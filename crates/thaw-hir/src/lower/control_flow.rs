@@ -227,6 +227,7 @@ fn collect_referenced_bindings(expr: &HirExpr, names: &mut BTreeSet<Symbol>) {
         | HirExpr::ObjectAlloc(_)
         | HirExpr::ClassAlloc(_)
         | HirExpr::FunctionRef(..)
+        | HirExpr::FunctionRefThis(..)
         | HirExpr::MethodRef(..) => {}
     }
 }
@@ -324,6 +325,7 @@ fn contains_await(expr: &HirExpr) -> bool {
         | HirExpr::NonArrowFunction(..)
         | HirExpr::Lambda(..)
         | HirExpr::FunctionRef(..)
+        | HirExpr::FunctionRefThis(..)
         | HirExpr::MethodRef(..)
         | HirExpr::Lit(_)
         | HirExpr::OptionalNone(_)
@@ -457,7 +459,7 @@ fn rewrite_async_arrow_returns(
 }
 
 fn collect_stmt_bindings(stmts: &[HirStmt], names: &mut BTreeSet<Symbol>) {
-    collect_stmt_bindings_with_bound(stmts, names, &BTreeSet::new());
+    collect_stmt_bindings_with_bound(stmts, names, &mut BTreeSet::new());
 }
 
 fn collect_expr_bindings_with_bound(
@@ -470,39 +472,45 @@ fn collect_expr_bindings_with_bound(
     names.extend(referenced.into_iter().filter(|name| !bound.contains(name)));
 }
 
+/// HIR locals are function-scoped: a `Let` nested in a `try`/`if`/`while`
+/// body stays visible to the statements that follow the block (the lowering
+/// relies on this for `__thaw_finally_*` captures), so `bound` is threaded
+/// through nested blocks instead of being cloned per block.
 fn collect_stmt_bindings_with_bound(
     stmts: &[HirStmt],
     names: &mut BTreeSet<Symbol>,
-    initial_bound: &BTreeSet<Symbol>,
+    bound: &mut BTreeSet<Symbol>,
 ) {
-    let mut bound = initial_bound.clone();
     for stmt in stmts {
         match stmt {
             HirStmt::Expr(expr) | HirStmt::Throw(expr) => {
-                collect_expr_bindings_with_bound(expr, names, &bound)
+                collect_expr_bindings_with_bound(expr, names, bound)
             }
             HirStmt::Let(name, _, expr) => {
-                collect_expr_bindings_with_bound(expr, names, &bound);
+                collect_expr_bindings_with_bound(expr, names, bound);
                 bound.insert(name.clone());
             }
-            HirStmt::Return(Some(expr)) => collect_expr_bindings_with_bound(expr, names, &bound),
+            HirStmt::Return(Some(expr)) => collect_expr_bindings_with_bound(expr, names, bound),
             HirStmt::If(cond, then_body, else_body) => {
-                collect_expr_bindings_with_bound(cond, names, &bound);
-                collect_stmt_bindings_with_bound(then_body, names, &bound);
-                collect_stmt_bindings_with_bound(else_body, names, &bound);
+                collect_expr_bindings_with_bound(cond, names, bound);
+                collect_stmt_bindings_with_bound(then_body, names, bound);
+                collect_stmt_bindings_with_bound(else_body, names, bound);
             }
             HirStmt::While(cond, body) => {
-                collect_expr_bindings_with_bound(cond, names, &bound);
-                collect_stmt_bindings_with_bound(body, names, &bound);
+                collect_expr_bindings_with_bound(cond, names, bound);
+                collect_stmt_bindings_with_bound(body, names, bound);
             }
             HirStmt::Finally(body, _) => {
-                collect_stmt_bindings_with_bound(body, names, &bound);
+                collect_stmt_bindings_with_bound(body, names, bound);
             }
             HirStmt::Try(body, catch_name, catch_body, _) => {
-                collect_stmt_bindings_with_bound(body, names, &bound);
-                let mut catch_bound = bound.clone();
-                catch_bound.insert(catch_name.clone());
-                collect_stmt_bindings_with_bound(catch_body, names, &catch_bound);
+                collect_stmt_bindings_with_bound(body, names, bound);
+                let catch_was_bound = bound.contains(catch_name);
+                bound.insert(catch_name.clone());
+                collect_stmt_bindings_with_bound(catch_body, names, bound);
+                if !catch_was_bound {
+                    bound.remove(catch_name);
+                }
             }
             HirStmt::Return(None)
             | HirStmt::Break
@@ -638,15 +646,15 @@ fn capture_finally_throw(&mut self, value: HirExpr) -> Result<(Vec<HirStmt>, Hir
     };
     if let HirExpr::Call(callee, args) = &value {
         if let HirExpr::Var(marker) = callee.as_ref() {
-            if marker == "@@thaw_trusted_exception_text" && args.len() == 1 {
+            if marker == "@@thaw_published_exception_text" && args.len() == 1 {
                 let captured = capture(self, args[0].clone())?;
-                // The preceding throw lowering has already published the
-                // scalar/object provenance channels. A nested handled throw
-                // in `finally` can clear them, so snapshot the complete
-                // tuple alongside the evaluated display text. The existing
-                // pending-rethrow marker restores the tuple after `finally`.
+                // The published-tuple marker is emitted only after the
+                // source throw's clear-and-setter sequence. A nested handled
+                // throw in `finally` can clear those fresh channels, so
+                // snapshot the tuple with its display bytes and restore it
+                // after the finalizer.
                 let mut snapshot = vec![captured.clone(), captured.clone(), captured];
-                for field in ["aggregate", "tag", "f64", "i64", "bool", "object"] {
+                for field in ["aggregate", "tag", "f64", "i64", "bool", "object", "native"] {
                     snapshot.push(capture(self, HirExpr::Call(
                         Box::new(HirExpr::Var(format!("__thaw_pending_exception_{field}"))),
                         Vec::new(),
@@ -657,7 +665,17 @@ fn capture_finally_throw(&mut self, value: HirExpr) -> Result<(Vec<HirStmt>, Hir
                     snapshot,
                 )));
             }
-            if marker == "@@thaw_rethrow_pending_exception" && args.len() == 9 {
+            if marker == "@@thaw_trusted_exception_text" && args.len() == 1 {
+                // This marker carries text only. In particular, a generated
+                // destructuring error captured before a finalizer must not
+                // adopt unrelated exception metadata left by that finalizer.
+                let captured = capture(self, args[0].clone())?;
+                return Ok((captures, HirExpr::Call(
+                    Box::new(HirExpr::Var("@@thaw_trusted_exception_text".into())),
+                    vec![captured],
+                )));
+            }
+            if marker == "@@thaw_rethrow_pending_exception" && args.len() == 10 {
                 let captured_args = args.iter().cloned()
                     .map(|arg| capture(self, arg))
                     .collect::<Result<Vec<_>, _>>()?;
@@ -846,6 +864,7 @@ fn native_typeof_name(ty: &HirType) -> Option<&'static str> {
         HirType::Symbol => Some("symbol"),
         HirType::Bool => Some("boolean"),
         HirType::Function(_, _) => Some("function"),
+        HirType::FunctionWithThis(_, _) => Some("function"),
         HirType::CallableFunction(..) => Some("function"),
         HirType::Array(_)
         | HirType::Bytes
@@ -870,7 +889,8 @@ fn native_typeof_name(ty: &HirType) -> Option<&'static str> {
         | HirType::Nullish(_)
         | HirType::Void
         | HirType::Dynamic
-        | HirType::JsValue => None,
+        | HirType::JsValue
+        | HirType::NativeException => None,
     }
 }
 
@@ -878,4 +898,25 @@ fn equivalent_union_members(left: &[HirType], right: &[HirType]) -> bool {
     left.len() == right.len()
         && left.iter().all(|member| right.contains(member))
         && right.iter().all(|member| left.contains(member))
+}
+
+#[cfg(test)]
+mod thaw_remaining_traversals_control_flow_controls {
+    use super::*;
+
+    #[test]
+    fn thaw_remaining_function_ref_this_has_no_binding_or_await_facts() {
+        let callable = HirExpr::FunctionRefThis(
+            "callable_with_this".into(),
+            HirType::Bytes,
+            vec![HirType::Bytes],
+            HirType::Bytes,
+        );
+        let mut bindings = std::collections::BTreeSet::new();
+
+        collect_referenced_bindings(&callable, &mut bindings);
+
+        assert!(bindings.is_empty());
+        assert!(!contains_await(&callable));
+    }
 }

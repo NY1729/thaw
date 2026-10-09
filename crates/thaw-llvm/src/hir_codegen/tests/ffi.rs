@@ -62,6 +62,8 @@ fn compiles_ambient_declaration_and_links_a_real_native_function() {
         .arg(&runtime_lib)
         .arg(&std_lib)
         .arg(&runtime_lib)
+        // A caught-error `console.log` reaches the JsValue console path, which lives in thaw-quickjs.
+        .arg(build_staticlib("thaw-quickjs"))
         .arg("-o")
         .arg(&exe_path)
         .status()
@@ -430,6 +432,8 @@ fn ffi_variadic_number_rest_calls_real_c_varargs() {
         .arg(&runtime_lib)
         .arg(&std_lib)
         .arg(&runtime_lib)
+        // A caught-error `console.log` reaches the JsValue console path, which lives in thaw-quickjs.
+        .arg(build_staticlib("thaw-quickjs"))
         .arg("-o")
         .arg(&exe_path)
         .status()
@@ -511,6 +515,8 @@ fn ffi_thaw_result_abi_propagates_native_errors_into_try_catch() {
         .arg(&runtime_lib)
         .arg(&std_lib)
         .arg(&runtime_lib)
+        // A caught-error `console.log` reaches the JsValue console path, which lives in thaw-quickjs.
+        .arg(build_staticlib("thaw-quickjs"))
         .arg("-o")
         .arg(&exe_path)
         .status()
@@ -613,6 +619,8 @@ fn ffi_void_calls_support_direct_and_thaw_result_error_abis() {
         .arg(&runtime_lib)
         .arg(&std_lib)
         .arg(&runtime_lib)
+        // A caught-error `console.log` reaches the JsValue console path, which lives in thaw-quickjs.
+        .arg(build_staticlib("thaw-quickjs"))
         .arg("-o")
         .arg(&exe_path)
         .status()
@@ -712,6 +720,8 @@ fn ffi_owned_result_strings_are_copied_and_destroyed_once() {
         .arg(&runtime_lib)
         .arg(&std_lib)
         .arg(&runtime_lib)
+        // A caught-error `console.log` reaches the JsValue console path, which lives in thaw-quickjs.
+        .arg(build_staticlib("thaw-quickjs"))
         .arg("-o")
         .arg(&exe_path)
         .status()
@@ -828,6 +838,8 @@ fn ffi_call_marshals_array_and_object_returns_from_portable_c_structs() {
         .arg(&runtime_lib)
         .arg(&std_lib)
         .arg(&runtime_lib)
+        // A caught-error `console.log` reaches the JsValue console path, which lives in thaw-quickjs.
+        .arg(build_staticlib("thaw-quickjs"))
         .arg("-o")
         .arg(&exe_path)
         .status()
@@ -927,6 +939,8 @@ fn ffi_call_marshals_object_returns_from_packed_c_structs() {
         .arg(&runtime_lib)
         .arg(&std_lib)
         .arg(&runtime_lib)
+        // A caught-error `console.log` reaches the JsValue console path, which lives in thaw-quickjs.
+        .arg(build_staticlib("thaw-quickjs"))
         .arg("-o")
         .arg(&exe_path)
         .status()
@@ -1296,6 +1310,8 @@ fn ffi_call_uses_explicit_c_aggregate_offsets_and_alignment() {
         .arg(&runtime_lib)
         .arg(&std_lib)
         .arg(&runtime_lib)
+        // A caught-error `console.log` reaches the JsValue console path, which lives in thaw-quickjs.
+        .arg(build_staticlib("thaw-quickjs"))
         .arg("-o")
         .arg(&exe_path)
         .status()
@@ -1412,6 +1428,8 @@ fn ffi_object_return_copies_and_destroys_owned_string_fields() {
         .arg(&runtime_lib)
         .arg(&std_lib)
         .arg(&runtime_lib)
+        // A caught-error `console.log` reaches the JsValue console path, which lives in thaw-quickjs.
+        .arg(build_staticlib("thaw-quickjs"))
         .arg("-o")
         .arg(&exe_path)
         .status()
@@ -1537,6 +1555,8 @@ fn ffi_nested_aggregate_returns_are_rebuilt_and_owned_recursively() {
         .arg(&runtime_lib)
         .arg(&std_lib)
         .arg(&runtime_lib)
+        // A caught-error `console.log` reaches the JsValue console path, which lives in thaw-quickjs.
+        .arg(build_staticlib("thaw-quickjs"))
         .arg("-o")
         .arg(&exe_path)
         .status()
@@ -1617,6 +1637,8 @@ fn ffi_call_supports_pointer_length_string_parameters_and_returns() {
         .arg(&runtime_lib)
         .arg(&std_lib)
         .arg(&runtime_lib)
+        // A caught-error `console.log` reaches the JsValue console path, which lives in thaw-quickjs.
+        .arg(build_staticlib("thaw-quickjs"))
         .arg("-o")
         .arg(&exe_path)
         .status()
@@ -1708,6 +1730,8 @@ fn ffi_call_marshals_a_number_array_into_pointer_plus_length() {
         .arg(&runtime_lib)
         .arg(&std_lib)
         .arg(&runtime_lib)
+        // A caught-error `console.log` reaches the JsValue console path, which lives in thaw-quickjs.
+        .arg(build_staticlib("thaw-quickjs"))
         .arg("-o")
         .arg(&exe_path)
         .status()
@@ -1789,6 +1813,8 @@ fn ffi_call_marshals_string_arrays_in_both_directions() {
         .arg(&runtime_lib)
         .arg(&std_lib)
         .arg(&runtime_lib)
+        // A caught-error `console.log` reaches the JsValue console path, which lives in thaw-quickjs.
+        .arg(build_staticlib("thaw-quickjs"))
         .arg("-o")
         .arg(&exe_path)
         .status()
@@ -1865,6 +1891,8 @@ fn ffi_call_marshals_boolean_arrays_in_both_directions() {
         .arg(&runtime_lib)
         .arg(&std_lib)
         .arg(&runtime_lib)
+        // A caught-error `console.log` reaches the JsValue console path, which lives in thaw-quickjs.
+        .arg(build_staticlib("thaw-quickjs"))
         .arg("-o")
         .arg(&exe_path)
         .status()
@@ -1956,6 +1984,8 @@ double flag_destroy_count(void) { return destroyed; }
         .arg(&runtime_lib)
         .arg(&std_lib)
         .arg(&runtime_lib)
+        // A caught-error `console.log` reaches the JsValue console path, which lives in thaw-quickjs.
+        .arg(build_staticlib("thaw-quickjs"))
         .arg("-o")
         .arg(&exe_path)
         .status()
@@ -2034,6 +2064,8 @@ fn ffi_call_marshals_js_value_arrays_in_both_directions() {
         .arg(&runtime_lib)
         .arg(&std_lib)
         .arg(&runtime_lib)
+        // A caught-error `console.log` reaches the JsValue console path, which lives in thaw-quickjs.
+        .arg(build_staticlib("thaw-quickjs"))
         .arg("-o")
         .arg(&exe_path)
         .status()
@@ -2116,6 +2148,8 @@ fn ffi_call_recursively_marshals_array_fields_in_object_parameters() {
         .arg(&runtime_lib)
         .arg(&std_lib)
         .arg(&runtime_lib)
+        // A caught-error `console.log` reaches the JsValue console path, which lives in thaw-quickjs.
+        .arg(build_staticlib("thaw-quickjs"))
         .arg("-o")
         .arg(&exe_path)
         .status()
@@ -2213,6 +2247,8 @@ double native_tagged(
         .arg(&runtime_lib)
         .arg(&std_lib)
         .arg(&runtime_lib)
+        // A caught-error `console.log` reaches the JsValue console path, which lives in thaw-quickjs.
+        .arg(build_staticlib("thaw-quickjs"))
         .arg("-o")
         .arg(&exe_path)
         .status()
@@ -2298,6 +2334,8 @@ TaggedNumber native_nullish(double state) {
         .arg(&runtime_lib)
         .arg(&std_lib)
         .arg(&runtime_lib)
+        // A caught-error `console.log` reaches the JsValue console path, which lives in thaw-quickjs.
+        .arg(build_staticlib("thaw-quickjs"))
         .arg("-o")
         .arg(&exe_path)
         .status()
@@ -2379,6 +2417,8 @@ NativeTuple native_tuple(double number, const char *text, bool flag) {
         .arg(&runtime_lib)
         .arg(&std_lib)
         .arg(&runtime_lib)
+        // A caught-error `console.log` reaches the JsValue console path, which lives in thaw-quickjs.
+        .arg(build_staticlib("thaw-quickjs"))
         .arg("-o")
         .arg(&exe_path)
         .status()
@@ -2474,6 +2514,8 @@ double tuple_destroy_count(void) { return destroyed; }
         .arg(&runtime_lib)
         .arg(&std_lib)
         .arg(&runtime_lib)
+        // A caught-error `console.log` reaches the JsValue console path, which lives in thaw-quickjs.
+        .arg(build_staticlib("thaw-quickjs"))
         .arg("-o")
         .arg(&exe_path)
         .status()
@@ -2544,6 +2586,8 @@ fn ffi_call_marshals_an_object_into_one_scalar_argument_per_field() {
         .arg(&runtime_lib)
         .arg(&std_lib)
         .arg(&runtime_lib)
+        // A caught-error `console.log` reaches the JsValue console path, which lives in thaw-quickjs.
+        .arg(build_staticlib("thaw-quickjs"))
         .arg("-o")
         .arg(&exe_path)
         .status()

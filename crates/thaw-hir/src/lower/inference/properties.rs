@@ -79,7 +79,45 @@ impl<'a> FnLowerer<'a> {
                     Box::new(tag), Box::new(HirExpr::Lit(HirLit::F64(5.0))))),
                 HirType::Bool,
             );
-            let live = self.caught_carrier_as_json(bound)?;
+            // A thrown `Error` is a framed string (carrier member 3); its
+            // fields are decoded by the same helpers a `Str` receiver uses.
+            let error_helper = match property {
+                "message" => Some("__thaw_error_message"),
+                "name" => Some("__thaw_error_name"),
+                "cause" => Some("__thaw_error_cause"),
+                "code" => Some("__thaw_error_code"),
+                "stack" => Some("__thaw_error_stack"),
+                "error" => Some("__thaw_error_suppressed_error"),
+                "suppressed" => Some("__thaw_error_suppressed"),
+                _ => None,
+            };
+            let framed_field = error_helper.map(|helper| HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_json_receiver_string".into())),
+                vec![HirExpr::Call(
+                    Box::new(HirExpr::Var(helper.into())),
+                    vec![HirExpr::UnionValue(Box::new(bound.clone()), 3, elements.to_vec())],
+                )],
+            ));
+            let live = self.caught_carrier_as_json(bound.clone())?;
+            // `error.stack` of a live caught object without its own `stack`: the first line a real
+            // stack starts with (`Name: message`); a native binary has no frames to append.
+            let live_read = if property == "stack" {
+                HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_json_error_stack".into())),
+                    vec![live],
+                )
+            } else {
+                HirExpr::JsonGet(Box::new(live), property.into())
+            };
+            let read = match framed_field {
+                Some(field) => HirExpr::Conditional(
+                    Box::new(HirExpr::BinOp(BinOp::EqEqEq,
+                        Box::new(HirExpr::UnionTag(Box::new(bound.clone()), elements.to_vec())),
+                        Box::new(HirExpr::Lit(HirLit::F64(3.0))))),
+                    Box::new(field), Box::new(live_read), HirType::Json,
+                ),
+                None => live_read,
+            };
             let result = HirExpr::Conditional(
                 Box::new(absent),
                 Box::new(HirExpr::ThrowValue(
@@ -88,7 +126,7 @@ impl<'a> FnLowerer<'a> {
                     )))),
                     Box::new(HirExpr::JsonObjectLit(Vec::new(), HirType::Json)),
                 )),
-                Box::new(HirExpr::JsonGet(Box::new(live), property.into())),
+                Box::new(read),
                 HirType::Json,
             );
             let lowered = self.wrap_call_argument_bindings(

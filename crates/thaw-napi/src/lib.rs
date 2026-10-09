@@ -55,11 +55,17 @@ struct ForeignCallbackGuard(bool);
 
 impl ForeignCallbackGuard {
     fn new() -> Self {
-        Self(FOREIGN_CALLBACK_DEPTH.try_with(|depth| depth.set(depth.get() + 1)).is_ok())
+        Self(
+            FOREIGN_CALLBACK_DEPTH
+                .try_with(|depth| depth.set(depth.get() + 1))
+                .is_ok(),
+        )
     }
 
     fn active() -> bool {
-        FOREIGN_CALLBACK_DEPTH.try_with(|depth| depth.get() != 0).unwrap_or(false)
+        FOREIGN_CALLBACK_DEPTH
+            .try_with(|depth| depth.get() != 0)
+            .unwrap_or(false)
     }
 }
 
@@ -70,10 +76,15 @@ impl Drop for ForeignCallbackGuard {
                 if depth.get() == 1 {
                     // Keep this guard active while finalizers can reenter.
                     loop {
-                        let pending = NAPI_RECIPIENT_GRAPH_PINS.try_with(|pins|
-                            std::mem::take(&mut *pins.borrow_mut())).unwrap_or_default();
-                        if pending.is_empty() { break; }
-                        for reference in pending { release_napi_graph_reference(reference); }
+                        let pending = NAPI_RECIPIENT_GRAPH_PINS
+                            .try_with(|pins| std::mem::take(&mut *pins.borrow_mut()))
+                            .unwrap_or_default();
+                        if pending.is_empty() {
+                            break;
+                        }
+                        for reference in pending {
+                            release_napi_graph_reference(reference);
+                        }
                     }
                 }
                 depth.set(depth.get() - 1);
@@ -82,8 +93,15 @@ impl Drop for ForeignCallbackGuard {
     }
 }
 
-unsafe fn invoke_napi_callback(env: NapiEnv, callback: NapiCallback, info: NapiCallbackInfo) -> NapiValue {
-    if env.as_ref().is_some_and(|env| env.shutdown_requested || env.finalizing || env.finalized) {
+unsafe fn invoke_napi_callback(
+    env: NapiEnv,
+    callback: NapiCallback,
+    info: NapiCallbackInfo,
+) -> NapiValue {
+    if env
+        .as_ref()
+        .is_some_and(|env| env.shutdown_requested || env.finalizing || env.finalized)
+    {
         return closing_napi_callback(env, info);
     }
     let _dispatch = ForeignCallbackGuard::new();
@@ -172,8 +190,8 @@ impl ReadyEvent {
     // their creating Host thread may execute a JS-facing ready callback.
     unsafe fn owner(self) -> std::thread::ThreadId {
         match self {
-            Self::AsyncCompletion(address) => (*(address as *const AsyncWork)).owner.clone(),
-            Self::ThreadsafeFunction(address) => (*(address as *const ThreadsafeFunction)).creator.clone(),
+            Self::AsyncCompletion(address) => (*(address as *const AsyncWork)).owner,
+            Self::ThreadsafeFunction(address) => (*(address as *const ThreadsafeFunction)).creator,
         }
     }
 }
@@ -208,10 +226,14 @@ fn record_process_default_uv_loop() {
     // Hosts never infer ownership from a global symbol at poll time.
     let current_tid = unsafe { libc::syscall(libc::SYS_gettid) };
     let main_tid = unsafe { libc::getpid() } as libc::c_long;
-    if current_tid != main_tid { return; }
+    if current_tid != main_tid {
+        return;
+    }
     type UvDefaultLoop = unsafe extern "C" fn() -> *mut c_void;
     let symbol = unsafe { libc::dlsym(libc::RTLD_DEFAULT, c"uv_default_loop".as_ptr()) };
-    if symbol.is_null() { return; }
+    if symbol.is_null() {
+        return;
+    }
     let loop_ptr = unsafe { std::mem::transmute::<*mut c_void, UvDefaultLoop>(symbol)() };
     if !loop_ptr.is_null() {
         HOST.with(|host| host.borrow_mut().main_default_uv_loop = Some(loop_ptr as usize));
@@ -222,11 +244,15 @@ fn known_uv_loops() -> Vec<usize> {
     let mut loops = registered_uv_loops();
     let owned = HOST.with(|host| host.borrow().owned_uv_loop);
     if let Some(owned) = owned {
-        if !loops.contains(&owned) { loops.push(owned); }
+        if !loops.contains(&owned) {
+            loops.push(owned);
+        }
     }
     let default_loop = HOST.with(|host| host.borrow().main_default_uv_loop);
     if let Some(default_loop) = default_loop {
-        if !loops.contains(&default_loop) { loops.push(default_loop); }
+        if !loops.contains(&default_loop) {
+            loops.push(default_loop);
+        }
     }
     loops
 }
@@ -279,8 +305,12 @@ fn ready_events() -> &'static Mutex<VecDeque<ReadyEvent>> {
 
 fn take_ready_event_for_current_thread() -> Option<ReadyEvent> {
     let owner = std::thread::current().id();
-    let mut ready = ready_events().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    let position = ready.iter().position(|event| unsafe { event.owner() == owner })?;
+    let mut ready = ready_events()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let position = ready
+        .iter()
+        .position(|event| unsafe { event.owner() == owner })?;
     ready.remove(position)
 }
 
@@ -378,7 +408,10 @@ fn async_worker(pool: Arc<AsyncPool>) {
             work.state.store(ASYNC_EXECUTING, Ordering::Release);
             work_address
         };
-        let work = unsafe { &*(work_address as *const AsyncWork) };
+        // The queue entry owns one strong reference (see napi_queue_async_work);
+        // keep it until this worker is completely done with the item.
+        let work_ref = unsafe { Arc::from_raw(work_address as *const AsyncWork) };
+        let work = &*work_ref;
         unsafe {
             (work.execute)(work.env as NapiEnv, work.data as *mut c_void);
         }
@@ -388,6 +421,7 @@ fn async_worker(pool: Arc<AsyncPool>) {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .push_back(ReadyEvent::AsyncCompletion(work_address));
+        drop(work_ref);
     }
 }
 
@@ -487,7 +521,10 @@ pub enum Value {
     },
     External(*mut c_void),
     // One independently retained QuickJS handle, owned by this Env.
-    QuickJsHandle { handle: u64, object_like: bool },
+    QuickJsHandle {
+        handle: u64,
+        object_like: bool,
+    },
     Symbol {
         id: u64,
         description: String,
@@ -577,7 +614,11 @@ pub struct NapiTypeTag {
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
-enum NapiGraphWrapperKind { Map, Set, RegExp }
+enum NapiGraphWrapperKind {
+    Map,
+    Set,
+    RegExp,
+}
 
 pub struct Env {
     owner: std::thread::ThreadId,
@@ -682,7 +723,9 @@ pub struct Env {
     deferreds: Vec<Box<Deferred>>,
     // Box keeps async-work addresses stable for worker and completion queues.
     #[allow(clippy::vec_box)]
-    async_works: Vec<Box<AsyncWork>>,
+    // Shared with the worker pool: a queued or executing work item stays
+    // allocated until the worker drops its reference, even if the Env is gone.
+    async_works: Vec<Arc<AsyncWork>>,
     // Box keeps reference handles stable so deleted handles can be rejected safely.
     #[allow(clippy::vec_box)]
     references: Vec<Box<Reference>>,
@@ -757,8 +800,12 @@ impl Drop for QuickJsAccessorRoots {
         // reenters this addon. Keep Env retirement deferred until both
         // independent roots have been returned to the QuickJS registry.
         let _dispatch = ForeignCallbackGuard::new();
-        if self.getter != 0 { thaw_quickjs::thaw_js_release_handle(self.getter); }
-        if self.setter != 0 { thaw_quickjs::thaw_js_release_handle(self.setter); }
+        if self.getter != 0 {
+            thaw_quickjs::thaw_js_release_handle(self.getter);
+        }
+        if self.setter != 0 {
+            thaw_quickjs::thaw_js_release_handle(self.setter);
+        }
     }
 }
 
@@ -842,13 +889,17 @@ impl Env {
 
     fn alloc(&mut self, value: Value) -> NapiValue {
         let value = Box::into_raw(Box::new(value));
-        self.next_value_generation = self.next_value_generation.checked_add(1)
+        self.next_value_generation = self
+            .next_value_generation
+            .checked_add(1)
             .expect("N-API value generation limit exceeded");
         let generation = self.next_value_generation;
         self.value_generations.insert(value as usize, generation);
         self.values.push(value);
         if let Some(scope) = self.active_handle_scopes.last().copied() {
-            unsafe { (*scope).values.push((value, generation)); }
+            unsafe {
+                (*scope).values.push((value, generation));
+            }
         }
         value
     }
@@ -921,8 +972,8 @@ unsafe fn async_work_ref<'a>(
     let work = env_ref
         .async_works
         .iter()
-        .find(|candidate| std::ptr::eq(candidate.as_ref(), work))
-        .map(Box::as_ref)
+        .find(|candidate| std::ptr::eq(Arc::as_ptr(candidate), work))
+        .map(|candidate| &**candidate)
         .ok_or(NAPI_INVALID_ARG);
     if work.is_err() {
         record_status(env, NAPI_INVALID_ARG);
@@ -934,23 +985,27 @@ thread_local! {
     // A raw napi_value is a pointer-shaped ABI token. Keep its tiny slot
     // reserved after scope retirement so a stale token can never alias a
     // later allocation; its owned payload is dropped immediately.
+    #[allow(clippy::vec_box)]
     static RETIRED_SCOPE_HANDLE_SLOTS: RefCell<Vec<Box<Value>>> = const { RefCell::new(Vec::new()) };
     static RETIRED_SCOPE_HANDLE_IDS: RefCell<HashSet<usize>> = RefCell::new(HashSet::new());
 }
 
 impl Env {
     fn scope_reachable_values(
-        &self, candidates: &HashSet<usize>, escaped: Option<NapiValue>,
-        external_roots: &[NapiValue], include_js_weak: bool,
+        &self,
+        candidates: &HashSet<usize>,
+        escaped: Option<NapiValue>,
+        external_roots: &[NapiValue],
+        include_js_weak: bool,
         include_graph_references: bool,
     ) -> HashSet<usize> {
         fn enqueue(
-            value: NapiValue, live: &HashSet<usize>, seen: &mut HashSet<usize>,
+            value: NapiValue,
+            live: &HashSet<usize>,
+            seen: &mut HashSet<usize>,
             queue: &mut VecDeque<NapiValue>,
         ) {
-            if !value.is_null() && live.contains(&(value as usize))
-                && seen.insert(value as usize)
-            {
+            if !value.is_null() && live.contains(&(value as usize)) && seen.insert(value as usize) {
                 queue.push_back(value);
             }
         }
@@ -969,21 +1024,34 @@ impl Env {
                 }
             }
         }
-        if let Some(value) = escaped { enqueue(value, &live, &mut seen, &mut queue); }
+        if let Some(value) = escaped {
+            enqueue(value, &live, &mut seen, &mut queue);
+        }
         for key in &self.rooted_scope_escapes {
             enqueue(*key as NapiValue, &live, &mut seen, &mut queue);
         }
         enqueue(self.global, &live, &mut seen, &mut queue);
-        if let Some(value) = self.exception { enqueue(value, &live, &mut seen, &mut queue); }
-        for value in external_roots { enqueue(*value, &live, &mut seen, &mut queue); }
+        if let Some(value) = self.exception {
+            enqueue(value, &live, &mut seen, &mut queue);
+        }
+        for value in external_roots {
+            enqueue(*value, &live, &mut seen, &mut queue);
+        }
         for reference in &self.references {
-            if !reference.deleted && reference.count > 0
-                && (include_graph_references || !self.graph_reference_tokens
-                    .contains(&(reference.as_ref() as *const Reference as usize))) {
+            if !reference.deleted
+                && reference.count > 0
+                && (include_graph_references
+                    || !self
+                        .graph_reference_tokens
+                        .contains(&(reference.as_ref() as *const Reference as usize)))
+            {
                 enqueue(reference.value, &live, &mut seen, &mut queue);
             }
         }
-        for value in self.property_keys.values().chain(self.utf16_property_keys.values())
+        for value in self
+            .property_keys
+            .values()
+            .chain(self.utf16_property_keys.values())
             .chain(self.quickjs_references.values())
         {
             enqueue(*value, &live, &mut seen, &mut queue);
@@ -996,7 +1064,11 @@ impl Env {
             if self.strong_symbol_ids.contains(id)
                 || self.js_registering_symbol_ids.contains(id)
                 || (self.graph_owner_id == 0
-                    && matches!(unsafe { value_ref(*value) }, Ok(Value::QuickJsHandle { .. }))) {
+                    && matches!(
+                        unsafe { value_ref(*value) },
+                        Ok(Value::QuickJsHandle { .. })
+                    ))
+            {
                 enqueue(*value, &live, &mut seen, &mut queue);
             }
             #[cfg(feature = "quickjs")]
@@ -1011,13 +1083,18 @@ impl Env {
             enqueue(*handle as NapiValue, &live, &mut seen, &mut queue);
         }
         for context in &self.async_contexts {
-            if !context.destroyed { enqueue(context.resource, &live, &mut seen, &mut queue); }
+            if !context.destroyed {
+                enqueue(context.resource, &live, &mut seen, &mut queue);
+            }
         }
         for deferred in &self.deferreds {
-            let Ok(state) = deferred.state.try_borrow() else { return candidates.clone(); };
+            let Ok(state) = deferred.state.try_borrow() else {
+                return candidates.clone();
+            };
             match &*state {
-                PromiseState::Resolved(value) | PromiseState::Rejected(value) =>
-                    enqueue(*value, &live, &mut seen, &mut queue),
+                PromiseState::Resolved(value) | PromiseState::Rejected(value) => {
+                    enqueue(*value, &live, &mut seen, &mut queue)
+                }
                 PromiseState::Pending => {}
             }
             // A Deferred independently owns the state of the Promise value.
@@ -1030,10 +1107,14 @@ impl Env {
                 }
             }
         }
-        let Ok(functions) = threadsafe_functions().try_lock() else { return candidates.clone(); };
+        let Ok(functions) = threadsafe_functions().try_lock() else {
+            return candidates.clone();
+        };
         for function in functions.iter() {
             if function.env == self as *const Env as usize {
-                let Ok(state) = function.state.try_lock() else { return candidates.clone(); };
+                let Ok(state) = function.state.try_lock() else {
+                    return candidates.clone();
+                };
                 if !state.live_released {
                     enqueue(function.function as NapiValue, &live, &mut seen, &mut queue);
                 }
@@ -1046,8 +1127,14 @@ impl Env {
             let key = *value as usize;
             // Instance data and posted finalizers belong to the Env itself;
             // object/wrap/external callbacks are collected with their owner.
-            let env_owned = self.posted_finalizers.iter().any(|record| record.backing as usize == key)
-                || self.instance_data.as_ref().is_some_and(|record| record.backing as usize == key);
+            let env_owned = self
+                .posted_finalizers
+                .iter()
+                .any(|record| record.backing as usize == key)
+                || self
+                    .instance_data
+                    .as_ref()
+                    .is_some_and(|record| record.backing as usize == key);
             if env_owned {
                 enqueue(*value, &live, &mut seen, &mut queue);
             }
@@ -1060,7 +1147,9 @@ impl Env {
                     for (name, child) in fields {
                         children.push(*child);
                         if let PropertyKey::Symbol(id) = name {
-                            if let Some(symbol) = self.symbols.get(id) { children.push(*symbol); }
+                            if let Some(symbol) = self.symbols.get(id) {
+                                children.push(*symbol);
+                            }
                         }
                     }
                 }
@@ -1069,7 +1158,9 @@ impl Env {
                     for (name, child) in &function.properties {
                         children.push(*child);
                         if let PropertyKey::Symbol(id) = name {
-                            if let Some(symbol) = self.symbols.get(id) { children.push(*symbol); }
+                            if let Some(symbol) = self.symbols.get(id) {
+                                children.push(*symbol);
+                            }
                         }
                     }
                     #[cfg(feature = "quickjs")]
@@ -1079,15 +1170,18 @@ impl Env {
                             children.push(roots.setter_native);
                         }
                     }
-                },
+                }
                 Value::BufferView { array_buffer, .. }
                 | Value::TypedArray { array_buffer, .. }
                 | Value::DataView { array_buffer, .. } => children.push(*array_buffer),
                 Value::Promise(state) => {
-                    let Ok(state) = state.try_borrow() else { return candidates.clone(); };
+                    let Ok(state) = state.try_borrow() else {
+                        return candidates.clone();
+                    };
                     match &*state {
-                        PromiseState::Resolved(child) | PromiseState::Rejected(child) =>
-                            children.push(*child),
+                        PromiseState::Resolved(child) | PromiseState::Rejected(child) => {
+                            children.push(*child)
+                        }
                         PromiseState::Pending => {}
                     }
                 }
@@ -1100,28 +1194,38 @@ impl Env {
                 for (name, child) in properties {
                     children.push(*child);
                     if let PropertyKey::Symbol(id) = name {
-                        if let Some(symbol) = self.symbols.get(id) { children.push(*symbol); }
+                        if let Some(symbol) = self.symbols.get(id) {
+                            children.push(*symbol);
+                        }
                     }
                 }
             }
             for ((owner, name), accessor) in &self.accessors {
                 if *owner == key {
-                    if let Some(value) = accessor.getter_reflection { children.push(value); }
-                    if let Some(value) = accessor.setter_reflection { children.push(value); }
+                    if let Some(value) = accessor.getter_reflection {
+                        children.push(value);
+                    }
+                    if let Some(value) = accessor.setter_reflection {
+                        children.push(value);
+                    }
                     #[cfg(feature = "quickjs")]
                     if let Some(roots) = &accessor.js_owner {
                         children.push(roots.getter_native);
                         children.push(roots.setter_native);
                     }
                     if let PropertyKey::Symbol(id) = name {
-                        if let Some(symbol) = self.symbols.get(id) { children.push(*symbol); }
+                        if let Some(symbol) = self.symbols.get(id) {
+                            children.push(*symbol);
+                        }
                     }
                 }
             }
             if let Some(class) = self.instances.get(&key) {
                 children.push(*class as NapiValue);
             }
-            for child in children { enqueue(child, &live, &mut seen, &mut queue); }
+            for child in children {
+                enqueue(child, &live, &mut seen, &mut queue);
+            }
         }
         seen
     }
@@ -1151,12 +1255,16 @@ unsafe fn open_handle_scope(
 }
 
 fn scope_external_roots(env: NapiEnv, host_managed: bool) -> Option<Vec<NapiValue>> {
-    if !host_managed { return Some(Vec::new()); }
+    if !host_managed {
+        return Some(Vec::new());
+    }
     HOST.try_with(|host| {
         let host = host.try_borrow().ok()?;
         let mut roots = Vec::new();
         for (candidate_env, value) in host.exports.values() {
-            if *candidate_env == env as usize { roots.push(*value); }
+            if *candidate_env == env as usize {
+                roots.push(*value);
+            }
         }
         roots.extend(host.compiled_callbacks.values().copied());
         let symbols = unsafe { env.as_ref()? };
@@ -1164,49 +1272,74 @@ fn scope_external_roots(env: NapiEnv, host_managed: bool) -> Option<Vec<NapiValu
             for (name, value) in &function.properties {
                 roots.push(*value);
                 if let PropertyKey::Symbol(id) = name {
-                    if let Some(symbol) = symbols.symbols.get(id) { roots.push(*symbol); }
+                    if let Some(symbol) = symbols.symbols.get(id) {
+                        roots.push(*symbol);
+                    }
                 }
             }
         }
         Some(roots)
-    }).ok().flatten()
+    })
+    .ok()
+    .flatten()
 }
 
 #[cfg(feature = "quickjs")]
 unsafe fn sync_js_origin_symbol_pins(env: NapiEnv) {
     let _dispatch = ForeignCallbackGuard::new();
-    let Some(host_managed) = env.as_ref().and_then(|owner|
+    let Some(host_managed) = env.as_ref().and_then(|owner| {
         (owner.graph_owner_id != 0 && !owner.finalizing && !owner.finalized)
-            .then_some(owner.host_managed)) else { return; };
-    let Some(external_roots) = scope_external_roots(env, host_managed) else { return; };
+            .then_some(owner.host_managed)
+    }) else {
+        return;
+    };
+    let Some(external_roots) = scope_external_roots(env, host_managed) else {
+        return;
+    };
     let Some((graph_owner_id, changes)) = env.as_ref().map(|owner| {
-        let candidates: HashSet<_> = owner.js_origin_symbol_ids.iter()
+        let candidates: HashSet<_> = owner
+            .js_origin_symbol_ids
+            .iter()
             .filter_map(|id| owner.symbols.get(id).copied())
             .filter(|value| owner.values.contains(value))
-            .map(|value| value as usize).collect();
+            .map(|value| value as usize)
+            .collect();
         // A wire's positive graph reference must pin the original JS Symbol
         // until its decoder consumes the transfer. Do not include the JS
         // weak-live table itself: that would make the pin self-sustaining.
-        let native = owner.scope_reachable_values(&candidates, None, &external_roots,
-            false, true);
-        let changes = owner.js_origin_symbol_ids.iter().filter_map(|id| {
-            let value = *owner.symbols.get(id)?;
-            let generation = *owner.value_generations.get(&(value as usize))?;
-            let pin = native.contains(&(value as usize));
-            (pin != owner.js_pinned_symbol_ids.contains(id))
-                .then_some((*id, value, generation, pin))
-        }).collect::<Vec<_>>();
+        let native = owner.scope_reachable_values(&candidates, None, &external_roots, false, true);
+        let changes = owner
+            .js_origin_symbol_ids
+            .iter()
+            .filter_map(|id| {
+                let value = *owner.symbols.get(id)?;
+                let generation = *owner.value_generations.get(&(value as usize))?;
+                let pin = native.contains(&(value as usize));
+                (pin != owner.js_pinned_symbol_ids.contains(id))
+                    .then_some((*id, value, generation, pin))
+            })
+            .collect::<Vec<_>>();
         (owner.graph_owner_id, changes)
-    }) else { return; };
+    }) else {
+        return;
+    };
     for (id, value, generation, pin) in changes {
         if thaw_quickjs::thaw_js_napi_symbol_set_pin(graph_owner_id, id, u8::from(pin)) == 0 {
             continue;
         }
-        let Some(owner) = env.as_mut() else { return; };
+        let Some(owner) = env.as_mut() else {
+            return;
+        };
         if owner.value_generations.get(&(value as usize)) != Some(&generation)
-            || owner.symbols.get(&id) != Some(&value) { continue; }
-        if pin { owner.js_pinned_symbol_ids.insert(id); }
-        else { owner.js_pinned_symbol_ids.remove(&id); }
+            || owner.symbols.get(&id) != Some(&value)
+        {
+            continue;
+        }
+        if pin {
+            owner.js_pinned_symbol_ids.insert(id);
+        } else {
+            owner.js_pinned_symbol_ids.remove(&id);
+        }
     }
 }
 
@@ -1232,32 +1365,49 @@ struct ScopedFinalizerErrorGuard {
 impl ScopedFinalizerErrorGuard {
     unsafe fn new(env: NapiEnv) -> Self {
         let Ok(owner) = env_mut(env) else {
-            return Self { env, original_exception: None, temporary_reference: None, original_error: None };
+            return Self {
+                env,
+                original_exception: None,
+                temporary_reference: None,
+                original_error: None,
+            };
         };
         let original_exception = owner.exception.take();
         // A separate positive Reference remains a root even if a reentrant
         // finalizer also escapes this Value. A temporary set entry could not
         // distinguish those two owners when it was removed.
-        let temporary_reference = original_exception.map(|value|
-            alloc_reference(owner, value, 1));
+        let temporary_reference = original_exception.map(|value| alloc_reference(owner, value, 1));
         let info = &owner.last_error_info;
         Self {
-            env, original_exception, temporary_reference,
-            original_error: Some((info.error_message, info.engine_reserved,
-                info.engine_error_code, info.error_code)),
+            env,
+            original_exception,
+            temporary_reference,
+            original_error: Some((
+                info.error_message,
+                info.engine_reserved,
+                info.engine_error_code,
+                info.error_code,
+            )),
         }
     }
 }
 
 impl Drop for ScopedFinalizerErrorGuard {
     fn drop(&mut self) {
-        let Some((message, reserved, engine_code, code)) = self.original_error else { return; };
+        let Some((message, reserved, engine_code, code)) = self.original_error else {
+            return;
+        };
         unsafe {
-            let Ok(owner) = env_mut(self.env) else { return; };
+            let Ok(owner) = env_mut(self.env) else {
+                return;
+            };
             owner.exception = self.original_exception;
             if let Some(reference) = self.temporary_reference {
-                if let Some(index) = owner.references.iter().position(|candidate|
-                    std::ptr::eq(candidate.as_ref(), reference)) {
+                if let Some(index) = owner
+                    .references
+                    .iter()
+                    .position(|candidate| std::ptr::eq(candidate.as_ref(), reference))
+                {
                     owner.references.swap_remove(index);
                 }
             }
@@ -1292,12 +1442,20 @@ impl ScopedFinalizeCallbacks {
     }
 }
 
-unsafe fn retire_scoped_value(env_ref: &mut Env, value: NapiValue, generation: u64,
-    old_payloads: &mut Vec<Value>, old_accessors: &mut Vec<Accessor>,
-    quickjs_releases: &mut Vec<u64>, callbacks: &mut ScopedFinalizeCallbacks) {
+unsafe fn retire_scoped_value(
+    env_ref: &mut Env,
+    value: NapiValue,
+    generation: u64,
+    old_payloads: &mut Vec<Value>,
+    old_accessors: &mut Vec<Accessor>,
+    quickjs_releases: &mut Vec<u64>,
+    callbacks: &mut ScopedFinalizeCallbacks,
+) {
     let key = value as usize;
-    if env_ref.value_generations.get(&key) != Some(&generation)
-        || !env_ref.values.contains(&value) { return; }
+    if env_ref.value_generations.get(&key) != Some(&generation) || !env_ref.values.contains(&value)
+    {
+        return;
+    }
     if let Some(index) = env_ref.values.iter().position(|entry| *entry == value) {
         env_ref.values.swap_remove(index);
     }
@@ -1305,26 +1463,37 @@ unsafe fn retire_scoped_value(env_ref: &mut Env, value: NapiValue, generation: u
     // Mark before invoking any callback so reentrant graph/proxy lookups
     // cannot renew an owner whose scoped payload is being retired.
     env_ref.finalized_handles.insert(key);
-    if let Some(wrap) = env_ref.wraps.remove(&key) { callbacks.wraps.push(wrap); }
+    if let Some(wrap) = env_ref.wraps.remove(&key) {
+        callbacks.wraps.push(wrap);
+    }
     if let Some(records) = env_ref.object_finalizers.remove(&key) {
         callbacks.objects.extend(records);
     }
     let mut retained = Vec::new();
     for record in std::mem::take(&mut env_ref.finalizers) {
-        if record.backing == value { callbacks.externals.push(record); }
-        else { retained.push(record); }
+        if record.backing == value {
+            callbacks.externals.push(record);
+        } else {
+            retained.push(record);
+        }
     }
     env_ref.finalizers = retained;
     let mut retained = Vec::new();
     for record in std::mem::take(&mut env_ref.noenv_finalizers) {
-        if record.backing == value { callbacks.noenv.push(record); }
-        else { retained.push(record); }
+        if record.backing == value {
+            callbacks.noenv.push(record);
+        } else {
+            retained.push(record);
+        }
     }
     env_ref.noenv_finalizers = retained;
     env_ref.utf16_strings.remove(&key);
     env_ref.utf16_symbols.remove(&key);
-    let removed_symbols: HashSet<u64> = env_ref.symbols.iter()
-        .filter_map(|(id, symbol)| (*symbol == value).then_some(*id)).collect();
+    let removed_symbols: HashSet<u64> = env_ref
+        .symbols
+        .iter()
+        .filter_map(|(id, symbol)| (*symbol == value).then_some(*id))
+        .collect();
     for id in &removed_symbols {
         env_ref.symbols.remove(id);
         env_ref.strong_symbol_ids.remove(id);
@@ -1335,7 +1504,9 @@ unsafe fn retire_scoped_value(env_ref: &mut Env, value: NapiValue, generation: u
         env_ref.js_pinned_symbol_ids.remove(id);
     }
     #[cfg(feature = "quickjs")]
-    env_ref.quickjs_symbol_ids.retain(|_, id| !removed_symbols.contains(id));
+    env_ref
+        .quickjs_symbol_ids
+        .retain(|_, id| !removed_symbols.contains(id));
     env_ref.error_names.remove(&key);
     // These tables describe the Value; they do not independently own it.
     env_ref.graph_wrappers.remove(&key);
@@ -1343,8 +1514,12 @@ unsafe fn retire_scoped_value(env_ref: &mut Env, value: NapiValue, generation: u
     // Remove owner descriptors before callbacks run. Their Arc<QuickJsAccessorRoots>
     // destructors may reenter this Env, so defer the actual Drop until after
     // the entire unreachable set has been detached.
-    let accessor_keys: Vec<_> = env_ref.accessors.keys()
-        .filter(|(owner, _)| *owner == key).cloned().collect();
+    let accessor_keys: Vec<_> = env_ref
+        .accessors
+        .keys()
+        .filter(|(owner, _)| *owner == key)
+        .cloned()
+        .collect();
     for accessor_key in accessor_keys {
         if let Some(accessor) = env_ref.accessors.remove(&accessor_key) {
             old_accessors.push(accessor);
@@ -1364,7 +1539,9 @@ unsafe fn retire_scoped_value(env_ref: &mut Env, value: NapiValue, generation: u
     env_ref.live_constructor_returns.remove(&key);
     env_ref.prototypes.remove(&key);
     env_ref.type_tags.remove(&key);
-    env_ref.property_attributes.retain(|(owner, _), _| *owner != key);
+    env_ref
+        .property_attributes
+        .retain(|(owner, _), _| *owner != key);
     env_ref.property_order.remove(&key);
     env_ref.sealed_objects.remove(&key);
     env_ref.nonextensible_objects.remove(&key);
@@ -1376,7 +1553,9 @@ unsafe fn retire_scoped_value(env_ref: &mut Env, value: NapiValue, generation: u
     }
     let mut tombstone = Box::from_raw(value);
     old_payloads.push(std::mem::replace(&mut *tombstone, Value::Undefined));
-    RETIRED_SCOPE_HANDLE_IDS.with(|ids| { ids.borrow_mut().insert(key); });
+    RETIRED_SCOPE_HANDLE_IDS.with(|ids| {
+        ids.borrow_mut().insert(key);
+    });
     RETIRED_SCOPE_HANDLE_SLOTS.with(|slots| slots.borrow_mut().push(tombstone));
 }
 
@@ -1386,17 +1565,25 @@ unsafe fn sweep_pending_scope_values(env: NapiEnv) {
     let _dispatch = ForeignCallbackGuard::new();
     #[cfg(feature = "quickjs")]
     sync_js_origin_symbol_pins(env);
-    let Ok(env_ref) = env_mut(env) else { return; };
-    if env_ref.pending_scope_values.is_empty() { return; }
-    let Some(external_roots) = scope_external_roots(env, env_ref.host_managed) else { return; };
+    let Ok(env_ref) = env_mut(env) else {
+        return;
+    };
+    if env_ref.pending_scope_values.is_empty() {
+        return;
+    }
+    let Some(external_roots) = scope_external_roots(env, env_ref.host_managed) else {
+        return;
+    };
     let values = std::mem::take(&mut env_ref.pending_scope_values);
-    let candidates: HashSet<_> = values.iter()
-        .filter(|(value, generation)|
+    let candidates: HashSet<_> = values
+        .iter()
+        .filter(|(value, generation)| {
             env_ref.value_generations.get(&(*value as usize)) == Some(generation)
-                && env_ref.values.contains(value))
-        .map(|(value, _)| *value as usize).collect();
-    let reachable = env_ref.scope_reachable_values(&candidates, None, &external_roots,
-        true, true);
+                && env_ref.values.contains(value)
+        })
+        .map(|(value, _)| *value as usize)
+        .collect();
+    let reachable = env_ref.scope_reachable_values(&candidates, None, &external_roots, true, true);
     let mut old_payloads = Vec::new();
     let mut old_accessors = Vec::new();
     let mut quickjs_releases = Vec::new();
@@ -1405,12 +1592,26 @@ unsafe fn sweep_pending_scope_values(env: NapiEnv) {
         if reachable.contains(&(value as usize)) {
             env_ref.pending_scope_values.push((value, generation));
         } else {
-            retire_scoped_value(env_ref, value, generation, &mut old_payloads, &mut old_accessors, &mut quickjs_releases, &mut callbacks);
+            retire_scoped_value(
+                env_ref,
+                value,
+                generation,
+                &mut old_payloads,
+                &mut old_accessors,
+                &mut quickjs_releases,
+                &mut callbacks,
+            );
         }
     }
     let _error_guard = ScopedFinalizerErrorGuard::new(env);
-    for payload in old_payloads { drop(payload); capture_shutdown_exception(env); }
-    for accessor in old_accessors { drop(accessor); capture_shutdown_exception(env); }
+    for payload in old_payloads {
+        drop(payload);
+        capture_shutdown_exception(env);
+    }
+    for accessor in old_accessors {
+        drop(accessor);
+        capture_shutdown_exception(env);
+    }
     #[cfg(feature = "quickjs")]
     for handle in quickjs_releases {
         thaw_quickjs::thaw_js_release_handle(handle);
@@ -1430,14 +1631,23 @@ struct ScopeMutationSweep {
 }
 
 impl ScopeMutationSweep {
-    fn new(env: NapiEnv) -> Self { Self { env, changed: false } }
-    fn changed(&mut self) { self.changed = true; }
+    fn new(env: NapiEnv) -> Self {
+        Self {
+            env,
+            changed: false,
+        }
+    }
+    fn changed(&mut self) {
+        self.changed = true;
+    }
 }
 
 impl Drop for ScopeMutationSweep {
     fn drop(&mut self) {
         if self.changed {
-            unsafe { sweep_pending_scope_values(self.env); }
+            unsafe {
+                sweep_pending_scope_values(self.env);
+            }
         }
     }
 }
@@ -1448,42 +1658,63 @@ unsafe fn close_handle_scope(
     kind: HandleScopeKind,
 ) -> NapiStatus {
     let _dispatch = ForeignCallbackGuard::new();
-    let Ok(env_ref) = env_mut(env) else { return NAPI_INVALID_ARG; };
+    let Ok(env_ref) = env_mut(env) else {
+        return NAPI_INVALID_ARG;
+    };
     let scope_ptr = scope.cast::<HandleScope>();
-    let Some(index) = env_ref.handle_scopes.iter().position(|candidate|
-        std::ptr::eq(candidate.as_ref(), scope_ptr))
-    else { return record_status(env, NAPI_INVALID_ARG); };
+    let Some(index) = env_ref
+        .handle_scopes
+        .iter()
+        .position(|candidate| std::ptr::eq(candidate.as_ref(), scope_ptr))
+    else {
+        return record_status(env, NAPI_INVALID_ARG);
+    };
     let scope_ref = &env_ref.handle_scopes[index];
-    if scope_ref.env != env as usize { return record_status(env, NAPI_INVALID_ARG); }
-    if scope_ref.closed || scope_ref.kind != kind
+    if scope_ref.env != env as usize {
+        return record_status(env, NAPI_INVALID_ARG);
+    }
+    if scope_ref.closed
+        || scope_ref.kind != kind
         || env_ref.active_handle_scopes.last().copied() != Some(scope_ptr)
-    { return record_status(env, NAPI_HANDLE_SCOPE_MISMATCH); }
+    {
+        return record_status(env, NAPI_HANDLE_SCOPE_MISMATCH);
+    }
     let mut values = std::mem::take(&mut env_ref.handle_scopes[index].values);
     values.extend(std::mem::take(&mut env_ref.pending_scope_values));
     let escaped = env_ref.handle_scopes[index].escaped_value.take();
     env_ref.handle_scopes[index].closed = true;
     env_ref.active_handle_scopes.pop();
-    let escaped = escaped.and_then(|(value, generation)|
-        (env_ref.value_generations.get(&(value as usize)) == Some(&generation)).then_some(value));
+    let escaped = escaped.and_then(|(value, generation)| {
+        (env_ref.value_generations.get(&(value as usize)) == Some(&generation)).then_some(value)
+    });
     if env_ref.active_handle_scopes.is_empty() {
-        if let Some(value) = escaped { env_ref.rooted_scope_escapes.insert(value as usize); }
+        if let Some(value) = escaped {
+            env_ref.rooted_scope_escapes.insert(value as usize);
+        }
     }
-    let candidates: HashSet<_> = values.iter()
-        .filter(|(value, generation)|
+    let candidates: HashSet<_> = values
+        .iter()
+        .filter(|(value, generation)| {
             env_ref.value_generations.get(&(*value as usize)) == Some(generation)
-                && env_ref.values.contains(value))
-        .map(|(value, _)| *value as usize).collect();
+                && env_ref.values.contains(value)
+        })
+        .map(|(value, _)| *value as usize)
+        .collect();
     #[cfg(feature = "quickjs")]
     sync_js_origin_symbol_pins(env);
-    if candidates.is_empty() { return NAPI_OK; }
+    if candidates.is_empty() {
+        return NAPI_OK;
+    }
     let Some(external_roots) = scope_external_roots(env, env_ref.host_managed) else {
         if let Some(parent) = env_ref.active_handle_scopes.last().copied() {
             (*parent).values.extend(values);
-        } else { env_ref.pending_scope_values.extend(values); }
+        } else {
+            env_ref.pending_scope_values.extend(values);
+        }
         return NAPI_OK;
     };
-    let reachable = env_ref.scope_reachable_values(&candidates, escaped, &external_roots,
-        true, true);
+    let reachable =
+        env_ref.scope_reachable_values(&candidates, escaped, &external_roots, true, true);
     let mut old_payloads = Vec::new();
     let mut old_accessors = Vec::new();
     let mut quickjs_releases = Vec::new();
@@ -1491,16 +1722,37 @@ unsafe fn close_handle_scope(
     for (value, generation) in values {
         let key = value as usize;
         if env_ref.value_generations.get(&key) != Some(&generation)
-            || !env_ref.values.contains(&value) { continue; }
+            || !env_ref.values.contains(&value)
+        {
+            continue;
+        }
         if reachable.contains(&key) {
             if let Some(parent) = env_ref.active_handle_scopes.last().copied() {
                 (*parent).values.push((value, generation));
-            } else { env_ref.pending_scope_values.push((value, generation)); }
-        } else { retire_scoped_value(env_ref, value, generation, &mut old_payloads, &mut old_accessors, &mut quickjs_releases, &mut callbacks); }
+            } else {
+                env_ref.pending_scope_values.push((value, generation));
+            }
+        } else {
+            retire_scoped_value(
+                env_ref,
+                value,
+                generation,
+                &mut old_payloads,
+                &mut old_accessors,
+                &mut quickjs_releases,
+                &mut callbacks,
+            );
+        }
     }
     let _error_guard = ScopedFinalizerErrorGuard::new(env);
-    for payload in old_payloads { drop(payload); capture_shutdown_exception(env); }
-    for accessor in old_accessors { drop(accessor); capture_shutdown_exception(env); }
+    for payload in old_payloads {
+        drop(payload);
+        capture_shutdown_exception(env);
+    }
+    for accessor in old_accessors {
+        drop(accessor);
+        capture_shutdown_exception(env);
+    }
     #[cfg(feature = "quickjs")]
     for handle in quickjs_releases {
         thaw_quickjs::thaw_js_release_handle(handle);
@@ -1516,17 +1768,23 @@ impl Env {
     unsafe fn disable_dispatch(env: NapiEnv, host_owned: bool) {
         // Cleanup code may release callback data. Keep the Env discoverable,
         // but remove every route which could execute that data again.
-        if host_owned { HOST.with(|host| {
-            let mut host = host.borrow_mut();
-            let names = host.exports.iter()
-                .filter(|(_, (owner, _))| *owner == env as usize)
-                .map(|(name, _)| name.clone()).collect::<Vec<_>>();
-            for name in names {
-                host.exports.remove(&name);
-                host.functions.remove(&name);
-            }
-            host.compiled_callbacks.retain(|_, value| !(*env).values.contains(value));
-        }); }
+        if host_owned {
+            HOST.with(|host| {
+                let mut host = host.borrow_mut();
+                let names = host
+                    .exports
+                    .iter()
+                    .filter(|(_, (owner, _))| *owner == env as usize)
+                    .map(|(name, _)| name.clone())
+                    .collect::<Vec<_>>();
+                for name in names {
+                    host.exports.remove(&name);
+                    host.functions.remove(&name);
+                }
+                host.compiled_callbacks
+                    .retain(|_, value| !(*env).values.contains(value));
+            });
+        }
     }
 
     unsafe fn begin_async_cleanup(env: NapiEnv, host_owned: bool) {
@@ -1540,10 +1798,13 @@ impl Env {
                 // Registration and draining use the handle lock. Removal only
                 // tombstones handles and never mutates this owner-thread Vec.
                 let _handles = async_cleanup_handles()
-                    .lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
                 std::mem::take(&mut (*env).async_cleanup_hooks)
             };
-            if pending.is_empty() { break; }
+            if pending.is_empty() {
+                break;
+            }
             for handle in pending.into_iter().rev() {
                 // Serialize the state transition and counter with removal. A hook
                 // may finish on another thread immediately after it starts.
@@ -1551,9 +1812,15 @@ impl Env {
                     let handles = async_cleanup_handles()
                         .lock()
                         .unwrap_or_else(|poisoned| poisoned.into_inner());
-                    handles.iter().find(|entry| std::ptr::eq(entry.as_ref(), handle))
+                    handles
+                        .iter()
+                        .find(|entry| std::ptr::eq(entry.as_ref(), handle))
                         .and_then(|entry| {
-                            if entry.state.compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire).is_ok() {
+                            if entry
+                                .state
+                                .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+                                .is_ok()
+                            {
                                 ACTIVE_ASYNC_CLEANUP_HOOKS.fetch_add(1, Ordering::AcqRel);
                                 Some((entry.hook, entry.data))
                             } else {
@@ -1583,18 +1850,28 @@ impl Env {
 
 impl Env {
     fn invalidate_external_backing(&mut self, backing: NapiValue) {
-        if backing.is_null() || !self.values.contains(&backing) { return; }
+        if backing.is_null() || !self.values.contains(&backing) {
+            return;
+        }
         match unsafe { &mut *backing } {
             Value::ExternalBuffer { data, length } => {
                 *data = ptr::null_mut();
                 *length = 0;
             }
-            Value::ExternalSharedArrayBuffer { data, length, retired } => {
+            Value::ExternalSharedArrayBuffer {
+                data,
+                length,
+                retired,
+            } => {
                 *data = ptr::null_mut();
                 *length = 0;
                 *retired = true;
             }
-            Value::ExternalArrayBuffer { data, length, detached } => {
+            Value::ExternalArrayBuffer {
+                data,
+                length,
+                detached,
+            } => {
                 *data = ptr::null_mut();
                 *length = 0;
                 *detached = true;
@@ -1607,7 +1884,9 @@ impl Env {
     // Keep the owning Box in HOST while invoking addon hooks/finalizers. Its
     // NapiEnv address and owner lookups remain valid across reentrant calls.
     unsafe fn finish_cleanup(env: NapiEnv, host_owned: bool) {
-        if (*env).finalizing || (*env).finalized { return; }
+        if (*env).finalizing || (*env).finalized {
+            return;
+        }
         Self::disable_dispatch(env, host_owned);
         (*env).finalizing = true;
         let _dispatch = ForeignCallbackGuard::new();
@@ -1630,7 +1909,8 @@ impl Env {
             }
         }
         for record in std::mem::take(&mut (*env).object_finalizers)
-            .into_values().flatten()
+            .into_values()
+            .flatten()
         {
             if let Some(finalize) = record.finalize {
                 (*env).invalidate_external_backing(record.backing);
@@ -1670,12 +1950,20 @@ impl Env {
                     *data = ptr::null_mut();
                     *length = 0;
                 }
-                Value::ExternalSharedArrayBuffer { data, length, retired } => {
+                Value::ExternalSharedArrayBuffer {
+                    data,
+                    length,
+                    retired,
+                } => {
                     *data = ptr::null_mut();
                     *length = 0;
                     *retired = true;
                 }
-                Value::ExternalArrayBuffer { data, length, detached } => {
+                Value::ExternalArrayBuffer {
+                    data,
+                    length,
+                    detached,
+                } => {
                     *data = ptr::null_mut();
                     *length = 0;
                     *detached = true;
@@ -1697,7 +1985,8 @@ impl Env {
         // borrow or reference into an Env value. The Box remains pinned.
         #[cfg(feature = "quickjs")]
         let quickjs_handles = std::mem::take(&mut (*env).quickjs_live_values)
-            .into_keys().collect::<Vec<_>>();
+            .into_keys()
+            .collect::<Vec<_>>();
         #[cfg(feature = "quickjs")]
         for handle in quickjs_handles {
             thaw_quickjs::thaw_js_release_handle(handle);
@@ -1707,6 +1996,7 @@ impl Env {
 
 impl Drop for Env {
     fn drop(&mut self) {
+        forget_standalone_graph_owner(self.graph_owner_id);
         if !self.finalized {
             // Direct internal Env owners still use the synchronous Drop path.
             // Host-owned Envs explicitly start hooks while their Box is pinned.
@@ -1754,6 +2044,28 @@ struct Host {
 }
 
 impl Host {
+    /// The registered key for `name`: the exact key, or (for a bare name) the single
+    /// package-qualified `pkg::name` that `present` accepts. Ambiguous names resolve to nothing.
+    fn qualified_key(&self, name: &str, present: impl Fn(&str) -> bool) -> Option<String> {
+        if present(name) {
+            return Some(name.to_string());
+        }
+        if name.contains("::") {
+            return None;
+        }
+        let mut found = None;
+        for package in &self.qualified_packages {
+            let key = format!("{package}::{name}");
+            if present(&key) {
+                if found.is_some() {
+                    return None;
+                }
+                found = Some(key);
+            }
+        }
+        found
+    }
+
     fn new() -> Self {
         Self {
             functions: HashMap::new(),
@@ -1773,54 +2085,84 @@ impl Host {
     }
 
     fn has_active_async_work(&self) -> bool {
-        self.module_envs.iter().chain(&self.pending_call_envs)
+        self.module_envs
+            .iter()
+            .chain(&self.pending_call_envs)
             .flat_map(|env| &env.async_works)
-            .any(|work| matches!(work.state.load(Ordering::Acquire),
-                ASYNC_QUEUED | ASYNC_EXECUTING | ASYNC_COMPLETE_PENDING))
+            .any(|work| {
+                matches!(
+                    work.state.load(Ordering::Acquire),
+                    ASYNC_QUEUED | ASYNC_EXECUTING | ASYNC_COMPLETE_PENDING
+                )
+            })
     }
 
     fn has_active_cleanup(&self) -> bool {
-        self.module_envs.iter().chain(&self.pending_call_envs)
-            .any(|env| env.async_cleanup_dispatching || env.async_cleanup_pending()
-                || (env.shutdown_requested && !env.async_cleanup_hooks.is_empty()))
+        self.module_envs
+            .iter()
+            .chain(&self.pending_call_envs)
+            .any(|env| {
+                env.async_cleanup_dispatching
+                    || env.async_cleanup_pending()
+                    || (env.shutdown_requested && !env.async_cleanup_hooks.is_empty())
+            })
     }
 }
 
 fn host_threadsafe_state(referenced_only: bool) -> bool {
     let owner = std::thread::current().id();
-    threadsafe_functions().lock().unwrap_or_else(|poisoned| poisoned.into_inner())
-        .iter().filter(|function| function.creator == owner)
+    threadsafe_functions()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .iter()
+        .filter(|function| function.creator == owner)
         .any(|function| {
-            if referenced_only { function.referenced.load(Ordering::Acquire) }
-            else { !function.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).live_released }
+            if referenced_only {
+                function.referenced.load(Ordering::Acquire)
+            } else {
+                !function
+                    .state
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .live_released
+            }
         })
 }
 
 fn host_has_unfinalized_threadsafe() -> bool {
     let owner = std::thread::current().id();
-    threadsafe_functions().lock().unwrap_or_else(|poisoned| poisoned.into_inner())
-        .iter().filter(|function| function.creator == owner)
-        .any(|function| !function.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).finalizer_completed)
+    threadsafe_functions()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .iter()
+        .filter(|function| function.creator == owner)
+        .any(|function| {
+            !function
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .finalizer_completed
+        })
 }
 
 impl Drop for Host {
     fn drop(&mut self) {
-        if self.has_active_async_work()
-            || host_threadsafe_state(false)
-            || self.has_active_cleanup()
-            || self.owned_uv_loop.is_some()
-            || self.main_default_uv_loop.is_some()
-            || self.module_envs.iter().chain(&self.pending_call_envs)
-                .any(|env| env.native_graph_pins != 0
-                    || !env.async_cleanup_hooks.is_empty() || env.async_cleanup_dispatching
-                    || env.shutdown_requested)
+        // Host lives in a thread-local slot, so this runs from the TLS
+        // destructor: addon finalizers and cleanup hooks re-enter HOST through
+        // N-API calls and `LocalKey::with` panics once the slot is destroyed
+        // (a panic inside an extern "C" finalizer aborts the process). Running
+        // user code here is therefore never valid; anything not yet finalized
+        // is left for the OS to reclaim at process exit.
+        // ponytail: leaked, not finalized; an explicit pre-TLS-teardown pass
+        // (run on thread exit before the slot dies) would also run finalizers.
+        for env in self
+            .module_envs
+            .drain(..)
+            .chain(self.pending_call_envs.drain(..))
         {
-            // ponytail: At process exit the OS reclaims these environments; running
-            // addon finalizers after thread-local HOST destruction is invalid.
-            for env in self.module_envs.drain(..) {
-                Box::leak(env);
-            }
-            for env in self.pending_call_envs.drain(..) {
+            if env.finalized {
+                drop(env);
+            } else {
                 Box::leak(env);
             }
         }
@@ -1830,26 +2172,29 @@ impl Drop for Host {
 // Host vectors own each Box throughout hook dispatch. Do not hold a HOST
 // borrow or a Rust Env reference across addon callbacks or finalizers.
 fn retire_owned_envs() {
-    if ForeignCallbackGuard::active() { return; }
+    if ForeignCallbackGuard::active() {
+        return;
+    }
     loop {
-        if HOST.with(|host| host.borrow().has_active_async_work())
-            || host_threadsafe_state(false)
-        {
+        if HOST.with(|host| host.borrow().has_active_async_work()) || host_threadsafe_state(false) {
             return;
         }
         // Keep boxes in their original Host vectors while callback code runs.
         let retiring = HOST.with(|host| {
             let host = host.borrow();
-            host.pending_call_envs.iter()
+            host.pending_call_envs
+                .iter()
                 .chain(host.module_envs.iter().filter(|env| env.shutdown_requested))
-                .map(|env| (&**env as *const Env).cast_mut()).collect::<Vec<_>>()
+                .map(|env| (&**env as *const Env).cast_mut())
+                .collect::<Vec<_>>()
         });
         for env in &retiring {
             unsafe { Env::disable_dispatch(*env, true) };
         }
         for env in &retiring {
-            if unsafe { !(*(*env)).async_cleanup_dispatching
-                && !(*(*env)).async_cleanup_hooks.is_empty() } {
+            if unsafe {
+                !(*(*env)).async_cleanup_dispatching && !(*(*env)).async_cleanup_hooks.is_empty()
+            } {
                 unsafe { Env::begin_async_cleanup(*env, true) };
             }
         }
@@ -1868,8 +2213,10 @@ fn retire_owned_envs() {
         // A finalizer may register a hook or queue work on another Env. Do
         // one owner at a time, then restart the global hook/work barrier.
         let next = retiring.into_iter().find(|env| unsafe {
-            !(*(*env)).finalized && !(*(*env)).async_cleanup_dispatching
-                && !(*(*env)).finalizing && !(*(*env)).async_cleanup_pending()
+            !(*(*env)).finalized
+                && !(*(*env)).async_cleanup_dispatching
+                && !(*(*env)).finalizing
+                && !(*(*env)).async_cleanup_pending()
                 && (*(*env)).native_graph_pins == 0
                 && (*(*env)).async_cleanup_hooks.is_empty()
         });
@@ -1886,7 +2233,9 @@ thread_local! {
 unsafe fn capture_shutdown_exception(env: NapiEnv) {
     // Describing a named N-API error consults HOST. During thread-local Host
     // destruction there is no safe reporter; do not reenter that TLS slot.
-    if HOST.try_with(|_| ()).is_err() { return; }
+    if HOST.try_with(|_| ()).is_err() {
+        return;
+    }
     if let Err(error) = take_env_exception(env) {
         let _ = HOST.try_with(|host| {
             let mut host = host.borrow_mut();
@@ -1900,7 +2249,9 @@ unsafe fn capture_shutdown_exception(env: NapiEnv) {
 pub extern "C" fn thaw_napi_report_shutdown_errors() -> usize {
     let errors = HOST.with(|host| std::mem::take(&mut host.borrow_mut().shutdown_errors));
     let count = errors.len();
-    for error in errors { eprintln!("thaw-napi: uncaught shutdown exception: {error}"); }
+    for error in errors {
+        eprintln!("thaw-napi: uncaught shutdown exception: {error}");
+    }
     count
 }
 
@@ -2004,18 +2355,22 @@ unsafe fn env_for_value_output<'a>(
 }
 
 unsafe fn value_ref<'a>(value: NapiValue) -> Result<&'a Value, NapiStatus> {
-    if value.is_null() || RETIRED_SCOPE_HANDLE_IDS.with(|ids| ids.borrow().contains(&(value as usize))) {
+    if value.is_null()
+        || RETIRED_SCOPE_HANDLE_IDS.with(|ids| ids.borrow().contains(&(value as usize)))
+    {
         return Err(NAPI_INVALID_ARG);
     }
     value.as_ref().ok_or(NAPI_INVALID_ARG)
 }
 
 unsafe fn value_belongs_to_environment(env: NapiEnv, value: NapiValue) -> bool {
-    if value.is_null() || !env.as_ref().is_some_and(|env| !env.finalized) {
+    if value.is_null() || env.as_ref().is_none_or(|env| env.finalized) {
         record_status(env, NAPI_INVALID_ARG);
         return false;
     }
-    let belongs = env.as_ref().is_some_and(|env| !env.finalized && env.values.contains(&value))
+    let belongs = env
+        .as_ref()
+        .is_some_and(|env| !env.finalized && env.values.contains(&value))
         || HOST.with(|host| {
             host.borrow()
                 .module_envs
@@ -2043,7 +2398,10 @@ fn is_object_value(value: &Value) -> bool {
             | Value::TypedArray { .. }
             | Value::DataView { .. }
             | Value::Function(_)
-            | Value::QuickJsHandle { object_like: true, .. }
+            | Value::QuickJsHandle {
+                object_like: true,
+                ..
+            }
             | Value::Promise(_)
             | Value::Error(_)
             | Value::Date(_)

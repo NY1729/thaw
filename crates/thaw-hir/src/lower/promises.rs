@@ -85,6 +85,7 @@ impl<'a> FnLowerer<'a> {
             ("i64", HirType::I64, Some("__thaw_pending_exception_i64")),
             ("bool", HirType::Bool, Some("__thaw_pending_exception_bool")),
             ("object", HirType::Object(Vec::new()), Some("__thaw_pending_exception_object")),
+            ("native", HirType::NativeException, Some("__thaw_pending_exception_native")),
         ];
         fields.into_iter().map(|(field, ty, getter)| {
             let name = Self::promise_rejection_snapshot_name(binding, field);
@@ -247,7 +248,13 @@ impl<'a> FnLowerer<'a> {
         parameter_types: &[HirType],
         expected_return: Option<&HirType>,
     ) -> Result<(), String> {
-        let (params, rest, ret) = match self.infer_expr_type(callback)? {
+        let callback_type = self.infer_expr_type(callback)?;
+        // A `this`-taking closure exposes the signature it wraps.
+        let callback_type = match callback_type {
+            HirType::FunctionWithThis(_, inner) => *inner,
+            other => other,
+        };
+        let (params, rest, ret) = match callback_type {
             HirType::Function(mut params, ret) => {
                 let rest = if let HirExpr::FunctionRef(symbol, _, _) = callback {
                     self.signatures.get(symbol).and_then(|signature| signature.native_rest.clone())
@@ -269,9 +276,10 @@ impl<'a> FnLowerer<'a> {
                     }
             })
             || rest.as_ref().is_some_and(|element| {
-                parameter_types[params.len()..].iter().any(|supplied| {
-                    !callback_param_compatible(supplied, element)
-                })
+                !supplied_is_rest_array(&parameter_types[params.len()..], element)
+                    && parameter_types[params.len()..].iter().any(|supplied| {
+                        !callback_param_compatible(supplied, element)
+                    })
             })
         {
             return Err(format!(
@@ -333,6 +341,10 @@ impl<'a> FnLowerer<'a> {
                 arguments.push(self.coerce_to_declared(expected, input)?);
             }
             if let Some(element) = rest {
+                if supplied_is_rest_array(&supplied[fixed.len().min(supplied.len())..], &element) {
+                    arguments.push(HirExpr::Var(input_names[fixed.len()].clone()));
+                    return Ok(arguments);
+                }
                 let remaining = input_names.iter().skip(fixed.len())
                     .map(|name| self.coerce_to_declared(&element, HirExpr::Var(name.clone())))
                     .collect::<Result<Vec<_>, _>>()?;
@@ -361,7 +373,17 @@ impl<'a> FnLowerer<'a> {
             result_type,
             Box::new(HirExpr::Block(vec![HirStmt::Return(Some(normalized))])),
         );
-        Ok(HirExpr::Call(Box::new(binder), vec![callback]))
+        // An adapter for a plain variable is a new closure on every use;
+        // alias it to the variable's closure so the host sees one identity.
+        let stable = matches!(&callback, HirExpr::Var(_));
+        let adapted = HirExpr::Call(Box::new(binder), vec![callback.clone()]);
+        if stable {
+            return Ok(HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_closure_alias".into())),
+                vec![adapted, callback],
+            ));
+        }
+        Ok(adapted)
     }
 
     fn callback_parameter_count(&self, expr: &Expr, label: &str) -> Result<usize, String> {
@@ -685,7 +707,10 @@ impl<'a> FnLowerer<'a> {
             _ => return Err("cannot infer Promise type from this executor".into()),
         };
         let Some(resolve_binding) = resolve_binding else {
-            return Err("cannot infer Promise type without a resolve parameter".into());
+            // `new Promise<T>(() => ...)`: no resolver to read the type from,
+            // so the explicit type argument is the Promise's result type.
+            return explicit.cloned().map(|resolved| (resolved, false))
+                .ok_or_else(|| "cannot infer Promise type without a resolve parameter".into());
         };
         let resolve_binding = match resolve_binding {
             Pat::Ident(binding) => binding,
@@ -826,6 +851,7 @@ impl<'a> FnLowerer<'a> {
             }
         }
         let mut inferred = None;
+        let mut unobservable_argument = false;
         for (mut value, mut spread) in calls.values {
             if spread {
                 let single = match &value {
@@ -846,10 +872,25 @@ impl<'a> FnLowerer<'a> {
                 locals: &calls.locals,
                 expanding: BTreeSet::new(),
             });
-            let value = self.lower_expr(&value).map_err(|error| {
-                format!("cannot infer Promise type from resolve argument: {error}")
-            })?;
-            let actual = self.infer_expr_type(&value)?;
+            let lowered = self.lower_expr(&value).and_then(|lowered| {
+                self.infer_expr_type(&lowered).map(|actual| (lowered, actual))
+            });
+            let (value, actual) = match lowered {
+                Ok(pair) => pair,
+                // The argument may use a binding local to the executor body
+                // (`xs.forEach((v) => resolve(v))`): with an explicit type
+                // argument the Promise type does not depend on it.
+                Err(_) if explicit.is_some() => {
+                    unobservable_argument = true;
+                    continue;
+                }
+                Err(error) => {
+                    return Err(format!(
+                        "cannot infer Promise type from resolve argument: {error}"
+                    ));
+                }
+            };
+            let _ = &value;
             let actual = if spread {
                 match actual {
                     HirType::Tuple(mut values) if values.len() == 1 => values.remove(0),
@@ -889,7 +930,12 @@ impl<'a> FnLowerer<'a> {
             return Ok((HirType::Void, true));
         }
         if let Some(inferred) = inferred {
-            return Ok((inferred, true));
+            return Ok((inferred, !unobservable_argument));
+        }
+        if unobservable_argument {
+            if let Some(explicit) = explicit {
+                return Ok((explicit.clone(), false));
+            }
         }
         if calls.referenced {
             // `resolve` is handed off by reference (no direct
@@ -905,4 +951,10 @@ impl<'a> FnLowerer<'a> {
         Err("cannot infer Promise type because the executor has no resolvable `resolve(value)` call"
             .into())
     }
+}
+
+/// A native callback ABI passes a rest parameter as one array of its element type.
+fn supplied_is_rest_array(supplied: &[HirType], element: &HirType) -> bool {
+    matches!(supplied, [HirType::Array(inner)] if inner.as_ref() == element)
+        && !callback_param_compatible(&supplied[0], element)
 }

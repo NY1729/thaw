@@ -84,6 +84,24 @@ fn callback_param_compatible(expected: &HirType, actual: &HirType) -> bool {
     )
 }
 
+/// Is `narrow` an object type that names only fields `wide` also has, with
+/// identical types, in any order (width subtyping by name)? Such a parameter can
+/// be lowered at the wider type: the value handed over keeps its one physical
+/// layout, so field reads and writes through the narrower annotation still reach
+/// the original object.
+fn object_width_subset(narrow: &HirType, wide: &HirType) -> bool {
+    let (HirType::Object(narrow_fields), HirType::Object(wide_fields)) = (narrow, wide) else {
+        return false;
+    };
+    narrow != wide
+        && narrow_fields.len() <= wide_fields.len()
+        && narrow_fields.iter().all(|(name, ty)| {
+            wide_fields
+                .iter()
+                .any(|(wide_name, wide_ty)| wide_name == name && wide_ty == ty)
+        })
+}
+
 /// A callback parameter declared to return `void` accepts a function
 /// value of any return type, including `Promise<T>` -- the caller has
 /// stated it discards whatever comes back, so an `async` handler
@@ -142,6 +160,12 @@ fn callable_abi_compatible(declared: &HirType, actual: &HirType) -> bool {
 /// in where `expected` is declared: return-type compatibility (ignoring
 /// `void`) plus per-parameter width subtyping.
 fn callable_value_compatible(expected: &HirType, actual: &HirType) -> bool {
+    // A `this`-taking closure also carries the ordinary receiver-free entry, so
+    // it stands in wherever its visible function type is expected.
+    let actual = match actual {
+        HirType::FunctionWithThis(_, visible) => visible.as_ref(),
+        other => other,
+    };
     match (expected, actual) {
         (HirType::Function(expected_params, expected_ret), HirType::Function(params, ret)) => {
             callable_return_compatible(expected_ret, ret)
@@ -200,6 +224,7 @@ impl<'a> FnLowerer<'a> {
             || actual == *expected
             || bytes_array_compatible(expected, &actual)
             || callable_compatible
+            || (*expected == HirType::Str && matches!(actual, HirType::StrLiteral(_)))
             || match (expected, value) {
                 (HirType::Tuple(types), HirExpr::ArrayLit(values)) => {
                     types.len() == values.len()
@@ -207,6 +232,12 @@ impl<'a> FnLowerer<'a> {
                             .iter()
                             .zip(values)
                             .all(|(ty, value)| self.expect_type(ty, value, context).is_ok())
+                }
+                // `[[k, v], ...]` against `Array<Tuple>`: each literal element is the tuple.
+                (HirType::Array(element), HirExpr::ArrayLit(values)) if matches!(element.as_ref(), HirType::Tuple(_)) => {
+                    values
+                        .iter()
+                        .all(|value| self.expect_type(element, value, context).is_ok())
                 }
                 (HirType::Object(types), HirExpr::ObjectLit(values)) => {
                     types.len() == values.len()
@@ -558,7 +589,10 @@ impl<'a> FnLowerer<'a> {
                     }
 
                     "__thaw_assert_class_identity" => {
-                        let [object, HirExpr::Lit(HirLit::Str(_))] = args.as_slice() else {
+                        let (object, HirExpr::Lit(HirLit::Str(_))) = (match args.as_slice() {
+                            [object, name] | [object, name, HirExpr::Lit(HirLit::Str(_))] => (object, name),
+                            _ => return Err("class identity assertion expects an object and a literal class name".into()),
+                        }) else {
                             return Err("class identity assertion expects an object and a literal class name".into());
                         };
                         let ty = self.infer_expr_type(object)?;
@@ -624,7 +658,7 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&HirType::Bool, include_non_enumerable, "full object keys mode")?;
                         return Ok(HirType::Array(Box::new(HirType::Str)));
                     }
-                    "__thaw_object_hide_marker" => {
+                    "__thaw_object_hide_marker" | "__thaw_object_set_class_identity" => {
                         let [object, marker] = args.as_slice() else {
                             return Err("object marker registration expects an object and a marker".into());
                         };
@@ -1472,6 +1506,13 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&HirType::Str, class_name, "instanceof class name")?;
                         return Ok(HirType::Bool);
                     }
+                    "__thaw_native_wrapper_is_live" => {
+                        let [value] = args.as_slice() else {
+                            return Err("native wrapper check expects one operand".into());
+                        };
+                        self.expect_type(&HirType::Json, value, "native wrapper check receiver")?;
+                        return Ok(HirType::Bool);
+                    }
                     "__thaw_error_is_error" => {
                         let [value] = args.as_slice() else {
                             return Err("Error.isError expects one operand".into());
@@ -1483,8 +1524,67 @@ impl<'a> FnLowerer<'a> {
                         let [value] = args.as_slice() else {
                             return Err(format!("{name} expects one operand"));
                         };
-                        if !matches!(self.infer_expr_type(value)?, HirType::Object(_) | HirType::Json) {
+                        if !matches!(self.infer_expr_type(value)?, HirType::Object(_)) {
                             return Err(format!("{name} expects an object operand"));
+                        }
+                        return Ok(HirType::Void);
+                    }
+                    "__thaw_set_pending_exception_json" => {
+                        let [value] = args.as_slice() else {
+                            return Err(format!("{name} expects one operand"));
+                        };
+                        if !matches!(self.infer_expr_type(value)?, HirType::Json | HirType::Dictionary(_)) {
+                            return Err(format!("{name} expects a JSON-backed operand"));
+                        }
+                        return Ok(HirType::Void);
+                    }
+                    "__thaw_set_pending_exception_native" => {
+                        if args.len() != 3
+                            || crate::native_exception_tag(&self.infer_expr_type(&args[0])?).is_none()
+                            || self.infer_expr_type(&args[1])? != HirType::I64
+                            || self.infer_expr_type(&args[2])? != HirType::Str
+                        {
+                            return Err("native exception publication requires a supported native value, category, and layout token".into());
+                        }
+                        return Ok(HirType::Void);
+                    }
+                    "__thaw_set_pending_exception_native_value" => {
+                        if args.len() != 1 || self.infer_expr_type(&args[0])? != HirType::NativeException {
+                            return Err("native exception restoration requires its private descriptor".into());
+                        }
+                        return Ok(HirType::Void);
+                    }
+                    "__thaw_native_exception_owner" => {
+                        if args.len() != 3 || self.infer_expr_type(&args[0])? != HirType::NativeException
+                            || self.infer_expr_type(&args[1])? != HirType::I64
+                            || self.infer_expr_type(&args[2])? != HirType::Str
+                        {
+                            return Err("native exception projection requires descriptor, category, and layout".into());
+                        }
+                        return Ok(HirType::NativeException);
+                    }
+                    "__thaw_native_exception_owner_present" => {
+                        if args.len() != 1 || self.infer_expr_type(&args[0])? != HirType::NativeException {
+                            return Err("native exception owner check requires its projected pointer".into());
+                        }
+                        return Ok(HirType::Bool);
+                    }
+                    "__thaw_native_exception_tag" => {
+                        if args.len() != 1 || self.infer_expr_type(&args[0])? != HirType::NativeException {
+                            return Err("native exception category requires its descriptor".into());
+                        }
+                        return Ok(HirType::I64);
+                    }
+                    "__thaw_capture_exception_js_value" => {
+                        let [value] = args.as_slice() else {
+                            return Err(format!("{name} expects one operand"));
+                        };
+                        self.expect_type(&HirType::JsValue, value, name)?;
+                        return Ok(HirType::Json);
+                    }
+                    "__thaw_clear_pending_exception_provenance" => {
+                        if !args.is_empty() {
+                            return Err(format!("{name} expects no operands"));
                         }
                         return Ok(HirType::Void);
                     }
@@ -1509,13 +1609,15 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&HirType::I64, tag, "exception typeof tag")?;
                         return Ok(HirType::Str);
                     }
-                    "@@thaw_rethrow_pending_exception"
+                    "@@thaw_published_exception_text"
+                    | "@@thaw_rethrow_pending_exception"
                     | "@@thaw_snapshot_caught_exception" => return Ok(HirType::Str),
                     "__thaw_pending_exception_native_text" => return Ok(HirType::Str),
                     "__thaw_pending_exception_aggregate" => return Ok(HirType::Object(Vec::new())),
                     "__thaw_pending_exception_object" => {
                         return Ok(HirType::Object(Vec::new()));
                     }
+                    "__thaw_pending_exception_native" => return Ok(HirType::NativeException),
                     "__thaw_exception_object_present" => {
                         let [value] = args.as_slice() else {
                             return Err(format!("{name} expects one operand"));
@@ -1536,6 +1638,12 @@ impl<'a> FnLowerer<'a> {
                         };
                         self.expect_type(&HirType::I64, tag, "exception tag")?;
                         return Ok(HirType::Void);
+                    }
+                    "__thaw_closure_alias" => {
+                        let [adapter, _original] = args.as_slice() else {
+                            return Err("closure alias expects an adapter and the original closure".into());
+                        };
+                        return self.infer_expr_type(adapter);
                     }
                     "__thaw_detach_promise" | "__thaw_detach_rejection" => {
                         let [promise] = args.as_slice() else {
@@ -2245,6 +2353,13 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&HirType::Bool, value, "JSON bool")?;
                         return Ok(HirType::Json);
                     }
+                    "__thaw_json_error_to_string" | "__thaw_json_error_stack" => {
+                        let [value] = args.as_slice() else {
+                            return Err("caught JSON error helper expects one operand".into());
+                        };
+                        self.expect_type(&HirType::Json, value, "caught JSON error value")?;
+                        return Ok(if name == "__thaw_json_error_stack" { HirType::Json } else { HirType::Str });
+                    }
                     "__thaw_json_receiver_string" => {
                         let [value] = args.as_slice() else {
                             return Err("JSON string expects one operand".into());
@@ -2306,7 +2421,8 @@ impl<'a> FnLowerer<'a> {
                         return Ok(HirType::I64);
                     }
                     "__thaw_json_is_date_shape" => return Ok(HirType::Bool),
-                    "__thaw_json_is_buffer_shape" => return Ok(HirType::Bool),
+                    "__thaw_json_is_buffer_shape" | "__thaw_json_is_live_iterable" => return Ok(HirType::Bool),
+                    "__thaw_console_bytes" => return Ok(HirType::Array(Box::new(HirType::F64))),
                     "__thaw_json_date_timestamp" => return Ok(HirType::F64),
                     "__thaw_json_date_set_timestamp" => return Ok(HirType::F64),
                     "__thaw_json_brand_wrapper" => return Ok(HirType::Json),
@@ -2567,7 +2683,11 @@ impl<'a> FnLowerer<'a> {
                     "__thaw_lookup_native_projector" =>
                         return Ok(HirType::Optional(Box::new(HirType::Function(
                             Vec::new(), Box::new(HirType::JsValue))))),
-                    "__thaw_register_native_object_projector"
+                    "__thaw_lookup_native_exception_describer" =>
+                        return Ok(HirType::Optional(Box::new(HirType::Function(
+                            Vec::new(), Box::new(HirType::Json))))),
+                    "__thaw_register_native_exception_describer"
+                    | "__thaw_register_native_object_projector"
                     | "__thaw_register_native_object_layout" => return Ok(HirType::Bool),
                     "__thaw_release_native_projection_callbacks" => return Ok(HirType::Void),
                     "__thaw_require_native_owner" => return Ok(HirType::Void),
@@ -2869,11 +2989,15 @@ impl<'a> FnLowerer<'a> {
             // instead of discarding or pretending to know that ABI.
             HirExpr::RecursiveClosure(_, ty, _) => Ok(ty.clone()),
             HirExpr::TypedClosure(ty, inner) => {
-                if let HirType::FunctionWithThis(receiver, _) = self.infer_expr_type(inner)? {
-                    Ok(HirType::FunctionWithThis(receiver, Box::new(ty.clone())))
-                } else {
-                    Ok(ty.clone())
+                // Only a function type can carry a `this` receiver; other closures
+                // (e.g. `new Map()` over the `__thaw_map_new` intrinsic) must not
+                // have their inner intrinsic call inferred.
+                if matches!(ty, HirType::Function(..) | HirType::CallableFunction(..)) {
+                    if let HirType::FunctionWithThis(receiver, _) = self.infer_expr_type(inner)? {
+                        return Ok(HirType::FunctionWithThis(receiver, Box::new(ty.clone())));
+                    }
                 }
+                Ok(ty.clone())
             },
             HirExpr::NonArrowFunction(closure) => match closure.as_ref() {
                 HirExpr::Lambda(_, params, ret, _) if params.first().is_some_and(|param| param.name == "__thaw_this") =>

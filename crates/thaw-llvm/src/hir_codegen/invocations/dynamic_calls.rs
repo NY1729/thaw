@@ -7,6 +7,9 @@ impl<'ctx> HirCompiler<'ctx> {
         };
         self.uses_quickjs = true;
         self.uses_quickjs_handles = true;
+        // The iterator result is captured as a live graph; reading its `done`/`value`
+        // later needs the host operations, like the other dynamic call paths.
+        self.compile_register_js_callback_host_operations()?;
         let iterator = self.compile_expr(iterator)?.into_int_value();
         let mode = self.compile_expr(mode)?.into_int_value();
         let mode = self.builder.build_int_truncate(mode, self.context.i8_type(),
@@ -111,6 +114,10 @@ impl<'ctx> HirCompiler<'ctx> {
                 self.compile_host_json_from_borrowed_dynamic(args),
             "__thaw_lookup_native_object" => self.compile_lookup_native_object(args),
             "__thaw_lookup_native_projector" => self.compile_lookup_native_projector(args),
+            "__thaw_register_native_exception_describer" =>
+                self.compile_register_native_exception_describer(args),
+            "__thaw_lookup_native_exception_describer" =>
+                self.compile_lookup_native_exception_describer(args),
             "__thaw_register_native_object_projector" =>
                 self.compile_register_native_object_projector(args),
             "__thaw_register_native_object_layout" =>
@@ -291,7 +298,7 @@ impl<'ctx> HirCompiler<'ctx> {
         let json = self
             .builder
             .build_call(
-                self.module.get_function("thaw_json_stringify").unwrap(),
+                self.module.get_function("thaw_json_graph_encode").unwrap(),
                 &[value.into()],
                 "retained_dynamic_json",
             )
@@ -303,7 +310,7 @@ impl<'ctx> HirCompiler<'ctx> {
         let result = self
             .builder
             .build_call(
-                self.module.get_function("thaw_js_retain_json_result").unwrap(),
+                self.module.get_function("thaw_js_retain_graph_result").unwrap(),
                 &[json.into()],
                 "retain_dynamic_json_result",
             )
@@ -380,7 +387,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .try_as_basic_value()
             .basic()
             .unwrap();
-        let args_json = self.compile_check_json_stringify_error_with_cleanup(args_json, &[array])?;
+        let args_json = self.compile_check_json_stringify_error_with_cleanup(args_json, &[array.into()])?;
         let result = self
             .builder
             .build_call(
@@ -462,7 +469,7 @@ impl<'ctx> HirCompiler<'ctx> {
             "cached_native_object_tag")
             .map_err(|error| error.to_string())?.into_struct_value();
         self.builder.build_insert_value(tagged, handle, 1, "cached_native_object_value")
-            .map(Into::into).map_err(|error| error.to_string())
+            .map(|value| value.into_struct_value().into()).map_err(|error| error.to_string())
     }
 
     fn compile_require_native_owner(
@@ -492,7 +499,7 @@ impl<'ctx> HirCompiler<'ctx> {
         Ok(self.context.i8_type().const_zero().into())
     }
 
-    fn compile_register_native_object_layout(
+    pub(super) fn compile_register_native_object_layout(
         &mut self, args: &[HirExpr],
     ) -> Result<BasicValueEnum<'ctx>, String> {
         let [owner, HirExpr::Lit(HirLit::Bool(required))] = args else {
@@ -585,6 +592,43 @@ impl<'ctx> HirCompiler<'ctx> {
         Ok(self.context.i8_type().const_zero().into())
     }
 
+    fn compile_register_native_exception_describer(
+        &mut self, args: &[HirExpr],
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let [owner, factory] = args else {
+            return Err("exception describer registration expects owner and factory".into());
+        };
+        let owner = self.compile_expr(owner)?.into_pointer_value();
+        let factory = self.compile_expr(factory)?.into_pointer_value();
+        Ok(self.builder.build_call(
+            self.module.get_function("thaw_object_register_describer").unwrap(),
+            &[owner.into(), factory.into()], "register_exception_describer",
+        ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+            .ok_or("exception describer registration returned no value")?)
+    }
+
+    fn compile_lookup_native_exception_describer(
+        &mut self, args: &[HirExpr],
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let [owner] = args else {
+            return Err("exception describer lookup expects an owner".into());
+        };
+        let owner = self.compile_expr(owner)?.into_pointer_value();
+        let describer = self.builder.build_call(
+            self.module.get_function("thaw_object_describer").unwrap(),
+            &[owner.into()], "lookup_exception_describer",
+        ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+            .ok_or("exception describer lookup returned no value")?.into_pointer_value();
+        let present = self.builder.build_is_not_null(describer, "exception_describer_present")
+            .map_err(|error| error.to_string())?;
+        let ty = self.basic_type(&HirType::Optional(Box::new(HirType::Function(
+            Vec::new(), Box::new(HirType::Json)))))?.into_struct_type();
+        let tagged = self.builder.build_insert_value(ty.get_undef(), present, 0,
+            "exception_describer_tag").map_err(|error| error.to_string())?.into_struct_value();
+        self.builder.build_insert_value(tagged, describer, 1, "exception_describer_value")
+            .map(|value| value.into_struct_value().into()).map_err(|error| error.to_string())
+    }
+
     fn compile_lookup_native_projector(
         &mut self, args: &[HirExpr],
     ) -> Result<BasicValueEnum<'ctx>, String> {
@@ -606,7 +650,7 @@ impl<'ctx> HirCompiler<'ctx> {
         let tagged = self.builder.build_insert_value(ty.get_undef(), present, 0,
             "native_projector_tag").map_err(|error| error.to_string())?.into_struct_value();
         self.builder.build_insert_value(tagged, projector, 1, "native_projector_value")
-            .map(Into::into).map_err(|error| error.to_string())
+            .map(|value| value.into_struct_value().into()).map_err(|error| error.to_string())
     }
 
     fn compile_intern_native_object(

@@ -11,25 +11,38 @@ fn call(func_name: &str, args_json: &str) -> String {
 
 #[test]
 fn host_query_callable_slot_does_not_collide_with_number_conversion() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
         globalThis.hostQueryNumber = { valueOf() { return 17; } };
         globalThis.hostQueryCallable = new Proxy(function () {}, {});
         globalThis.hostQueryOriginal = globalThis.__thaw_json_host_query;
         globalThis.__thaw_json_host_query = () => 'function';
-    "#), 1);
+    "#
+        ),
+        1
+    );
     let number = thaw_js_get_global(c"hostQueryNumber".as_ptr());
     let callable = thaw_js_get_global(c"hostQueryCallable".as_ptr());
     let kind = thaw_js_host_query_result(number, 14);
     let callable_kind = thaw_js_host_query_result(callable, 14);
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
         globalThis.__thaw_json_host_query = globalThis.hostQueryOriginal;
         delete globalThis.hostQueryOriginal;
-    "#), 1);
+    "#
+        ),
+        1
+    );
     let coerced = thaw_js_host_query_result(number, 16);
     assert!(kind.error.is_null() && coerced.error.is_null() && callable_kind.error.is_null());
     assert_eq!(unsafe { CStr::from_ptr(kind.value) }.to_bytes(), b"0");
     assert_eq!(unsafe { CStr::from_ptr(coerced.value) }.to_bytes(), b"17");
-    assert_eq!(unsafe { CStr::from_ptr(callable_kind.value) }.to_bytes(), b"1");
+    assert_eq!(
+        unsafe { CStr::from_ptr(callable_kind.value) }.to_bytes(),
+        b"1"
+    );
     unsafe {
         thaw_arena::destroy_string(kind.value.cast_mut());
         thaw_arena::destroy_string(coerced.value.cast_mut());
@@ -37,10 +50,15 @@ fn host_query_callable_slot_does_not_collide_with_number_conversion() {
     }
     assert_eq!(thaw_js_release_handle(number), 1);
     assert_eq!(thaw_js_release_handle(callable), 1);
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
         delete globalThis.hostQueryNumber;
         delete globalThis.hostQueryCallable;
-    "#), 1);
+    "#
+        ),
+        1
+    );
 }
 
 fn load(source: &str) -> u8 {
@@ -51,7 +69,9 @@ fn load(source: &str) -> u8 {
 #[test]
 fn stdin_pause_keeps_the_rest_of_a_polled_batch_until_resume() {
     std::thread::spawn(|| {
-        assert_eq!(load(r#"
+        assert_eq!(
+            load(
+                r#"
       function stdinPauseBatch() {
         const originalStart = __thaw_process_start_stdin;
         const originalPoll = __thaw_process_poll_stdin;
@@ -91,10 +111,17 @@ fn stdin_pause_keeps_the_rest_of_a_polled_batch_until_resume() {
           __thaw_process_poll_stdin = originalPoll;
         }
       }
-    "#), 1);
-        assert_eq!(call("stdinPauseBatch", "[]"),
-            r#"[[],["a"],["a","b","end"],1,1]"#);
-    }).join().unwrap();
+    "#
+            ),
+            1
+        );
+        assert_eq!(
+            call("stdinPauseBatch", "[]"),
+            r#"[[],["a"],["a","b","end"],1,1]"#
+        );
+    })
+    .join()
+    .unwrap();
 }
 
 #[test]
@@ -190,20 +217,66 @@ fn unhandled_timer_exception_fails_the_event_loop() {
 }
 
 #[test]
+fn unhandled_js_promise_rejection_reaches_the_process_event_surface() {
+    // Node's default (`--unhandled-rejections=throw`): offered to 'unhandledRejection' first.
+    assert_eq!(
+        load("globalThis.seen = ''; process.once('unhandledRejection', (reason, promise) => { seen = String(reason) + ':' + (promise instanceof Promise); }); Promise.reject('plain');"),
+        1
+    );
+    assert_eq!(thaw_js_run_event_loop(), 0);
+    assert_eq!(eval_json("seen"), Ok(Some("\"plain:true\"".into())));
+    // Without a listener it is an uncaught exception, which ends the process with code 1 ...
+    assert_eq!(load("Promise.reject(new Error('fatal rejection'));"), 1);
+    assert_eq!(thaw_js_run_event_loop(), 1);
+    // ... unless an 'uncaughtException' listener takes it.
+    assert_eq!(
+        load("globalThis.caught = ''; process.once('uncaughtException', error => { caught = String(error.message || error); }); Promise.reject(7);"),
+        1
+    );
+    assert_eq!(thaw_js_run_event_loop(), 0);
+    assert!(eval_json("caught").unwrap().unwrap().contains("7"));
+}
+
+#[test]
+fn js_promise_rejection_with_a_handler_is_not_reported() {
+    // Handled before the microtask queue drains, handled by an awaiting async function, and handled
+    // through `then(_, onRejected)` must all stay silent.
+    assert_eq!(
+        load("globalThis.order = ''; const early = Promise.reject(1); early.catch(() => { order += 'a'; }); (async () => { try { await Promise.reject(2); } catch { order += 'b'; } })(); Promise.reject(3).then(null, () => { order += 'c'; });"),
+        1
+    );
+    assert_eq!(thaw_js_run_event_loop(), 0);
+    assert_eq!(eval_json("order"), Ok(Some("\"abc\"".into())));
+}
+
+#[test]
 fn terminal_pending_work_is_separate_from_failure_and_exit_code() {
     unsafe extern "C" fn fail_job(
-        ctx: *mut rquickjs::qjs::JSContext, _argc: i32, _argv: *mut rquickjs::qjs::JSValue,
+        ctx: *mut rquickjs::qjs::JSContext,
+        _argc: i32,
+        _argv: *mut rquickjs::qjs::JSValue,
     ) -> rquickjs::qjs::JSValue {
         unsafe { rquickjs::qjs::JS_ThrowTypeError(ctx, c"first job".as_ptr()) }
     }
     unsafe extern "C" fn later_job(
-        ctx: *mut rquickjs::qjs::JSContext, _argc: i32, _argv: *mut rquickjs::qjs::JSValue,
+        ctx: *mut rquickjs::qjs::JSContext,
+        _argc: i32,
+        _argv: *mut rquickjs::qjs::JSValue,
     ) -> rquickjs::qjs::JSValue {
         let source = c"globalThis.afterFailedJob = 1";
-        unsafe { rquickjs::qjs::JS_Eval(
-            ctx, source.as_ptr(), source.to_bytes().len(), c"<terminal-test>".as_ptr(),
-            rquickjs::qjs::JS_EVAL_TYPE_GLOBAL as i32,
-        ) }
+        unsafe {
+            rquickjs::qjs::JS_Eval(
+                ctx,
+                source.as_ptr(),
+                source
+                    .to_bytes()
+                    .len()
+                    .try_into()
+                    .expect("terminal test source length fits QuickJS size_t"),
+                c"<terminal-test>".as_ptr(),
+                rquickjs::qjs::JS_EVAL_TYPE_GLOBAL as i32,
+            )
+        }
     }
     assert_eq!(load("globalThis.afterFailedJob = 0"), 1);
     with_context(|ctx| unsafe {
@@ -514,7 +587,9 @@ fn error_properties_round_trip_through_the_tagged_exception_format() {
 
 #[test]
 fn framed_error_rebuilds_original_message_and_keeps_display_separate() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
       function framedErrorRoundTrip() {
         const raw = '\u0001Error\u0001\u001eE1:7:5:show\u0002meraw\u0003x\u0005{"status":418}';
         const emptyName = '\u0001\u0001\u001eE1:3:-:a\u0002b';
@@ -525,15 +600,19 @@ fn framed_error_rebuilds_original_message_and_keeps_display_separate() {
         return [frame.display, frame.original, restored.name, restored.message,
                 restored.status, revived.message, emptyRestored.name, emptyRestored.message];
       }
-    "#), 1);
+    "#
+        ),
+        1
+    );
     assert_eq!(call("framedErrorRoundTrip", "[]"),
         "[\"show\\u0002me\",\"raw\\u0003x\",\"Error\",\"raw\\u0003x\",418,\"raw\\u0003x\",\"\",\"a\\u0002b\"]");
 }
 
-
 #[test]
 fn framed_error_actual_throw_and_rejection_keep_empty_name_getter_order_and_original() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
       function throwEmptyName() { const error = new Error('a\u0002b'); error.name = ''; throw error; }
       function rejectFramedError() { return Promise.reject(Object.assign(new Error('raw\u0003x'), { status: 418 })); }
       globalThis.errorGetterOrder = '';
@@ -545,7 +624,10 @@ fn framed_error_actual_throw_and_rejection_keep_empty_name_getter_order_and_orig
         });
       }
       function readErrorGetterOrder() { return errorGetterOrder; }
-    "#), 1);
+    "#
+        ),
+        1
+    );
     let empty = thaw_js_call_result(c"throwEmptyName".as_ptr(), c"[]".as_ptr());
     assert!(empty.value.is_null());
     let wire = unsafe { CStr::from_ptr(empty.error) }.to_bytes();
@@ -560,7 +642,10 @@ fn framed_error_actual_throw_and_rejection_keep_empty_name_getter_order_and_orig
     let wire = unsafe { CStr::from_ptr(rejected.error) }.to_bytes();
     let frame = thaw_arena::error_wire::parse_tagged(wire).unwrap();
     assert_eq!(frame.chain, b"Error");
-    assert_eq!(frame.display, b"`rejectFramedError`'s promise rejected: raw\x03x");
+    assert_eq!(
+        frame.display,
+        b"`rejectFramedError`'s promise rejected: raw\x03x"
+    );
     assert_eq!(frame.original, Some(&b"raw\x03x"[..]));
     assert_eq!(frame.suffix, b"\x05{\"status\":418}");
     unsafe { thaw_arena::destroy_string(rejected.error.cast_mut()) };
@@ -635,7 +720,9 @@ fn performance_timeline_marks_measures_and_observes_entries() {
 
 #[test]
 fn performance_measure_end_duration_and_option_dictionary_order() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
       function measureEndDuration() {
         performance.clearMarks(); performance.clearMeasures();
         performance.mark('from', { startTime: 10 });
@@ -674,9 +761,14 @@ fn performance_measure_end_duration_and_option_dictionary_order() {
                 [emptyThird.startTime, emptyThird.duration], missingThird,
                 [accessed.startTime, accessed.duration, accessed.detail], events, errors];
       }
-    "#), 1);
-    assert_eq!(call("measureEndDuration", "[]"),
-        r#"[[80,20],[80,20],[5,20],[5,95],[10,90],true,[0,100],true,[80,20,"d"],["detail","duration","coerce","end","start"],[true,true,true,true,true]]"#);
+    "#
+        ),
+        1
+    );
+    assert_eq!(
+        call("measureEndDuration", "[]"),
+        r#"[[80,20],[80,20],[5,20],[5,95],[10,90],true,[0,100],true,[80,20,"d"],["detail","duration","coerce","end","start"],[true,true,true,true,true]]"#
+    );
 }
 
 #[test]
@@ -701,7 +793,8 @@ fn structured_clone_copies_cycles_and_builtins() {
 #[test]
 fn clone_traversals_read_getters_once_and_check_marked_nodes_in_place() {
     assert_eq!(
-        load(r#"async function cloneReadAndMarkControls() {
+        load(
+            r#"async function cloneReadAndMarkControls() {
             let reads = 0;
             const copy = structuredClone({ get value() { reads++; return reads; } });
             const thrown = {}, throwing = { get value() { throw thrown; } };
@@ -737,11 +830,14 @@ fn clone_traversals_read_getters_once_and_check_marked_nodes_in_place() {
                     markedMap, markedSet, cycleCopy.self === cycleCopy,
                     codecReads, codec.value, codecNestedReads, codecMarked,
                     portReads, portValue, portMarked];
-        }"#),
+        }"#
+        ),
         1
     );
-    assert_eq!(call("cloneReadAndMarkControls", "[]"),
-        "[1,1,true,1,true,true,true,true,1,1,1,true,1,1,true]");
+    assert_eq!(
+        call("cloneReadAndMarkControls", "[]"),
+        "[1,1,true,1,true,true,true,true,1,1,1,true,1,1,true]"
+    );
 }
 
 #[test]
@@ -785,7 +881,8 @@ fn message_port_transfer_detaches_the_source_port() {
 #[test]
 fn structured_clone_failure_keeps_staged_transfers_attached() {
     assert_eq!(
-        load(r#"function failedTransferIsAtomic() {
+        load(
+            r#"function failedTransferIsAtomic() {
             const channel = new MessageChannel(), buffer = new ArrayBuffer(3);
             const thrown = new Error('getter failed'); let reads = 0, sameError = false;
             const value = { port: channel.port1, get fail() { reads++; throw thrown; } };
@@ -812,7 +909,8 @@ fn structured_clone_failure_keeps_staged_transfers_attached() {
             moved.close(); channel.port2.close();
             first.port1.close(); first.port2.close(); second.port2.close();
             return [sameError, reads, attached, success, reentryRejected, reentryState];
-        }"#),
+        }"#
+        ),
         1
     );
     assert_eq!(
@@ -824,7 +922,8 @@ fn structured_clone_failure_keeps_staged_transfers_attached() {
 #[test]
 fn message_port_retains_messages_until_started() {
     assert_eq!(
-        load(r#"async function portStartQueue() {
+        load(
+            r#"async function portStartQueue() {
             const channel = new MessageChannel(), seen = [];
             channel.port1.postMessage('first'); channel.port1.postMessage('second');
             await Promise.resolve();
@@ -874,16 +973,21 @@ fn message_port_retains_messages_until_started() {
             closed.port1.close(); pulled.port1.close(); pulled.port2.close();
             return [beforeStart, afterStart, assignedSeen, nodeSeen,
                     transferPending, movedSeen, discarded, queuedForPull];
-        }"#),
+        }"#
+        ),
         1
     );
-    assert_eq!(call("portStartQueue", "[]"),
-        r#"[[],["first","second"],["assigned"],["node"],[false,1],["moved"],[0,0],1]"#);
+    assert_eq!(
+        call("portStartQueue", "[]"),
+        r#"[[],["first","second"],["assigned"],["node"],[false,1],["moved"],[0,0],1]"#
+    );
 }
 
 #[test]
 fn url_search_params_skips_empty_fields_but_keeps_empty_names() {
-    assert_eq!(load(r#"function emptyQueryFields() {
+    assert_eq!(
+        load(
+            r#"function emptyQueryFields() {
         const check = (value, expected) => { if (value !== expected) throw new Error('query field assertion'); };
         const params = new URLSearchParams('?&&a=1&&');
         check(params.size, 1); check(params.getAll('').length, 0); check(params.toString(), 'a=1');
@@ -893,13 +997,18 @@ fn url_search_params_skips_empty_fields_but_keeps_empty_names() {
         const url = new URL('https://example.test/?&&a=1&&');
         check(url.searchParams.size, 1); url.searchParams.append('b', '2'); check(url.search, '?a=1&b=2');
         return true;
-    }"#), 1);
+    }"#
+        ),
+        1
+    );
     assert_eq!(call("emptyQueryFields", "[]"), "true");
 }
 
 #[test]
 fn url_search_params_form_encoding_and_live_iteration() {
-    assert_eq!(load(r#"function checkLiveParams() {
+    assert_eq!(
+        load(
+            r#"function checkLiveParams() {
         const check = (value, expected) => { if (value !== expected) throw new Error(value + ' != ' + expected); };
         check(new URLSearchParams({k: "!'()~* -._"}).toString(), 'k=%21%27%28%29%7E*+-._');
         const params = new URLSearchParams('a=1&b=2'), entries = params.entries();
@@ -920,7 +1029,10 @@ fn url_search_params_form_encoding_and_live_iteration() {
             if (key === 'a') { changed.delete('a'); changed.append('d', '4'); }
         }, receiver);
         check(seen.join('|'), 'a:1|c:3|d:4'); return true;
-    }"#), 1);
+    }"#
+        ),
+        1
+    );
     assert_eq!(call("checkLiveParams", "[]"), "true");
 }
 
@@ -968,7 +1080,9 @@ fn worker_transport_codec_preserves_graphs_and_builtins() {
 
 #[test]
 fn url_preserves_params_reference_and_decodes_malformed_form_input() {
-    assert_eq!(load(r#"function checkUrlParamsIdentity() {
+    assert_eq!(
+        load(
+            r#"function checkUrlParamsIdentity() {
         const check = (value, expected) => { if (value !== expected) throw new Error('URL assertion'); };
         const url = new URL('https://example.test/?a=1'), params = url.searchParams;
         url.search = '?b=2'; check(url.searchParams, params); check(params.get('a'), null); check(params.get('b'), '2');
@@ -980,7 +1094,10 @@ fn url_preserves_params_reference_and_decodes_malformed_form_input() {
         check(malformed.get('bom'), '\uFEFF'); check(malformed.get('plus'), 'a b'); check(malformed.get('unicode'), '雪');
         check(new URL('https://example.test/?x=%FF').searchParams.get('x'), '�');
         return true;
-    }"#), 1);
+    }"#
+        ),
+        1
+    );
     assert_eq!(call("checkUrlParamsIdentity", "[]"), "true");
 }
 
@@ -1010,7 +1127,8 @@ fn url_resolves_relative_paths_and_synchronizes_search_params() {
 #[test]
 fn url_rejects_out_of_range_ports_without_mutating_setters() {
     assert_eq!(
-        load(r#"function urlPortBounds() {
+        load(
+            r#"function urlPortBounds() {
             const url = new URL('https://example.test:8080/path');
             const rejectedConstructor = URL.canParse('https://example.test:65536/') === false
               && URL.parse('https://example.test:70000/') === null;
@@ -1027,15 +1145,21 @@ fn url_rejects_out_of_range_ports_without_mutating_setters() {
             url.port = '';
             return [rejectedConstructor, rejectedPort, rejectedPaddedPort,
               rejectedHost, acceptedPort, acceptedHost, url.port === ''];
-        }"#),
+        }"#
+        ),
         1
     );
-    assert_eq!(call("urlPortBounds", "[]"), "[true,true,true,true,true,true,true]");
+    assert_eq!(
+        call("urlPortBounds", "[]"),
+        "[true,true,true,true,true,true,true]"
+    );
 }
 
 #[test]
 fn url_native_parser_preserves_url_components_and_setters() {
-    assert_eq!(load(r#"function nativeUrlCases() {
+    assert_eq!(
+        load(
+            r#"function nativeUrlCases() {
         const opaque = new URL('urn:x/../y');
         opaque.pathname = 'changed';
         const encoded = new URL('https://example.test/');
@@ -1085,13 +1209,21 @@ fn url_native_parser_preserves_url_components_and_setters() {
           new URL('child', customBase).href === 'https://base.test/root/child' && baseCalls === 1,
           new URL('https://example.test/\uD800').pathname === '/%EF%BF%BD'
         ];
-    }"#), 1);
-    assert_eq!(call("nativeUrlCases", "[]"), "[true,true,true,true,true,true,true,true,true,true,true,true,true]");
+    }"#
+        ),
+        1
+    );
+    assert_eq!(
+        call("nativeUrlCases", "[]"),
+        "[true,true,true,true,true,true,true,true,true,true,true,true,true]"
+    );
 }
 
 #[test]
 fn url_setter_reentrant_string_conversion_uses_latest_url() {
-    assert_eq!(load(r#"function reentrantUrlSetter() {
+    assert_eq!(
+        load(
+            r#"function reentrantUrlSetter() {
         const url = new URL('https://old.test/old');
         let calls = 0;
         url.pathname = { toString() {
@@ -1100,7 +1232,10 @@ fn url_setter_reentrant_string_conversion_uses_latest_url() {
             return '/outer';
         } };
         return calls === 1 && url.href === 'https://new.test/outer';
-    }"#), 1);
+    }"#
+        ),
+        1
+    );
     assert_eq!(call("reentrantUrlSetter", "[]"), "true");
 }
 
@@ -1383,7 +1518,7 @@ fn webassembly_calls_javascript_function_imports_with_scalar_and_multi_values() 
                      (func (export \"explode\") call $fail))`);\n\
                    const calls = []; const module = new WebAssembly.Module(source);\n\
                    const instance = new WebAssembly.Instance(module, { host: { twice(value) { return value * 2; }, add64(left, right) { return left + right; }, pair(value) { return [value, value + 0.5]; }, notify(value) { calls.push(value); }, fail() { throw new Error('import boom'); } } });\n\
-                   let trapped = false; try { instance.exports.explode(); } catch (error) { trapped = error instanceof WebAssembly.RuntimeError && error.message.includes('import boom'); }\n\
+                   let trapped = false; try { instance.exports.explode(); } catch (error) { trapped = error instanceof Error && !(error instanceof WebAssembly.RuntimeError) && error.message.includes('import boom'); }\n\
                    let missing = false; try { new WebAssembly.Instance(module, {}); } catch (error) { missing = error instanceof WebAssembly.LinkError; }\n\
                    return [instance.exports.run(21), calls, instance.exports.wide().toString(), instance.exports.many(), trapped, missing, WebAssembly.Module.imports(module).length];\n\
                  }"
@@ -2220,7 +2355,9 @@ fn crypto_generates_rsa_ec_and_ed25519_key_pairs_that_round_trip() {
 /// keep ordinary unencrypted KeyObject, PEM, and DER paths available.
 #[test]
 fn crypto_rejects_encrypted_private_key_output_before_generation_or_export() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
       function encryptedPrivateOutputGuards() {
         const cryptoModule = __thaw_crypto_module;
         const originalGenerate = __thaw_crypto_generate_key_pair_json;
@@ -2284,9 +2421,14 @@ fn crypto_rejects_encrypted_private_key_output_before_generation_or_export() {
           passphraseRejected, typeof unencrypted === 'string' && unencrypted.indexOf('-----BEGIN PRIVATE KEY-----') === 0,
           publicUnaffected, secretUnaffected];
       }
-    "#), 1);
-    assert_eq!(call("encryptedPrivateOutputGuards", "[]"),
-      "[[true,true,true,true,true,true],1,1,true,true,true,true,true,true]");
+    "#
+        ),
+        1
+    );
+    assert_eq!(
+        call("encryptedPrivateOutputGuards", "[]"),
+        "[[true,true,true,true,true,true],1,1,true,true,true,true,true,true]"
+    );
 }
 
 /// `generateKeyPairSync`'s `privateKeyEncoding`/`publicKeyEncoding`
@@ -2929,13 +3071,20 @@ fn thrown_exception_reports_an_error_object_instead_of_crashing() {
 
 #[test]
 fn napi_reference_callback_separates_throw_from_returned_error_shaped_object() {
-    assert_eq!(load(r#"globalThis.__thaw_napi_reference_746291101 = () => ({ __thaw_error__: 'ordinary' });
-globalThis.__thaw_napi_reference_746291102 = () => { throw new TypeError('boom\0tail'); };"#), 1);
+    assert_eq!(
+        load(
+            r#"globalThis.__thaw_napi_reference_746291101 = () => ({ __thaw_error__: 'ordinary' });
+globalThis.__thaw_napi_reference_746291102 = () => { throw new TypeError('boom\0tail'); };"#
+        ),
+        1
+    );
     let args = c"[]";
-    let returned = unsafe { thaw_js_call_reference(746291101_usize as *mut std::ffi::c_void, args.as_ptr()) };
+    let returned =
+        unsafe { thaw_js_call_reference(746291101_usize as *mut std::ffi::c_void, args.as_ptr()) };
     let returned = unsafe { CStr::from_ptr(returned) }.to_str().unwrap();
     assert_eq!(returned, r#"{"__thaw_error__":"ordinary"}"#);
-    let thrown = unsafe { thaw_js_call_reference(746291102_usize as *mut std::ffi::c_void, args.as_ptr()) };
+    let thrown =
+        unsafe { thaw_js_call_reference(746291102_usize as *mut std::ffi::c_void, args.as_ptr()) };
     let thrown = unsafe { CStr::from_ptr(thrown) }.to_str().unwrap();
     let message: String = serde_json::from_str(thrown.strip_prefix('\u{2}').unwrap()).unwrap();
     assert!(message.starts_with("\u{1}TypeError\u{1}"));
@@ -3165,7 +3314,8 @@ fn shared_json_reviver_reconstructs_well_known_symbol_values() {
 #[test]
 fn property_key_bridge_distinguishes_registered_symbols() {
     assert_eq!(
-        load(r#"function registeredSymbolPropertyKeys() {
+        load(
+            r#"function registeredSymbolPropertyKeys() {
           const key = 'part:\u0000\ud800';
           const registered = __thaw_property_key('\u0003R41:' + key);
           const repeated = __thaw_property_key('\u0003R41:' + key);
@@ -3182,15 +3332,21 @@ fn property_key_bridge_distinguishes_registered_symbols() {
             revived[0] === registered, revived[1] === registered,
             revived[2] !== registered, revived[3] === empty,
             __thaw_property_key('\u001f@@iterator') === Symbol.iterator];
-        }"#),
+        }"#
+        ),
         1
     );
-    assert_eq!(call("registeredSymbolPropertyKeys", "[]"), "[true,true,true,true,true,true,true,true,true,true,true]");
+    assert_eq!(
+        call("registeredSymbolPropertyKeys", "[]"),
+        "[true,true,true,true,true,true,true,true,true,true,true]"
+    );
 }
 
 #[test]
 fn native_loose_equality_helper_preserves_primitive_order_and_identity() {
-    assert_eq!(load(r#"function nativeLooseEquality() {
+    assert_eq!(
+        load(
+            r#"function nativeLooseEquality() {
       const effects = [];
       const left = function () {};
       const right = function () {};
@@ -3206,8 +3362,14 @@ fn native_loose_equality_helper_preserves_primitive_order_and_identity() {
       registered[Symbol.toPrimitive] = () => Symbol.for('tag');
       const symbol = __thaw_native_loose_equal(registered, '\u0003R100:tag', 0, 2);
       return [number, reversed, bigint, largeBigint, symbol, effects.join(',')];
-    }"#), 1);
-    assert_eq!(call("nativeLooseEquality", "[]"), "[true,true,true,true,true,\"left,right,left\"]");
+    }"#
+        ),
+        1
+    );
+    assert_eq!(
+        call("nativeLooseEquality", "[]"),
+        "[true,true,true,true,true,\"left,right,left\"]"
+    );
 }
 
 #[test]
@@ -3963,7 +4125,8 @@ fn intl_segmenter_matches_real_node() {
 #[test]
 fn intl_relative_time_numbering_system_extension_and_option() {
     assert_eq!(
-        load(r#"function intlRelativeNumbering() {
+        load(
+            r#"function intlRelativeNumbering() {
           const arab = new Intl.RelativeTimeFormat('en-u-nu-arab', { numeric: 'always' });
           const override = new Intl.RelativeTimeFormat('en-u-nu-latn', { numberingSystem: 'arab' });
           const fallback = new Intl.RelativeTimeFormat('en-u-nu-zzzz');
@@ -3982,7 +4145,8 @@ fn intl_relative_time_numbering_system_extension_and_option() {
             reads === 1 && once.resolvedOptions().numberingSystem === 'arab',
             invalid,
           ];
-        }"#),
+        }"#
+        ),
         1
     );
     assert_eq!(
@@ -3995,7 +4159,9 @@ fn intl_relative_time_numbering_system_extension_and_option() {
 #[test]
 fn intl_relative_time_rejects_inherited_unit_names() {
     // Unrun regression: invalid unit names must not resolve Object.prototype.
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
         function inheritedRelativeUnits() {
             const formatter = new Intl.RelativeTimeFormat('en');
             return ['toString', 'constructor', '__proto__', 'hasOwnProperty'].map(unit => {
@@ -4003,9 +4169,14 @@ fn intl_relative_time_rejects_inherited_unit_names() {
                 catch (error) { return error.name; }
             });
         }
-    "#), 1);
-    assert_eq!(call("inheritedRelativeUnits", "[]"),
-        r#"["RangeError","RangeError","RangeError","RangeError"]"#);
+    "#
+        ),
+        1
+    );
+    assert_eq!(
+        call("inheritedRelativeUnits", "[]"),
+        r#"["RangeError","RangeError","RangeError","RangeError"]"#
+    );
 }
 
 /// `Intl.RelativeTimeFormat` (M11, entirely new capability, backed by
@@ -5148,7 +5319,8 @@ fn intl_followup_locale_list_boundary() {
 #[test]
 fn intl_followup_exact_notation_and_style_grouping() {
     assert_eq!(
-        load(r#"function intlDeferredNumberCases() {
+        load(
+            r#"function intlDeferredNumberCases() {
           const scientific = new Intl.NumberFormat('en-US', { notation: 'scientific', maximumFractionDigits: 15 });
           const engineering = new Intl.NumberFormat('en-US', { notation: 'engineering', maximumFractionDigits: 18 });
           const big = 9007199254740993n;
@@ -5170,7 +5342,8 @@ fn intl_followup_exact_notation_and_style_grouping() {
             wideExponent.formatToParts('1e-20000').map(part => part.value).join('') === wideExponent.format('1e-20000'),
             wideExponent.formatRangeToParts('1e20000', '2e20000').map(part => part.value).join('') === range && !range.includes('Infinity'),
           ];
-        }"#),
+        }"#
+        ),
         1
     );
     assert_eq!(
@@ -5186,7 +5359,8 @@ fn intl_followup_exact_notation_and_style_grouping() {
 #[test]
 fn intl_large_exact_digits_share_format_parts_range_and_styles() {
     assert_eq!(
-        load(r#"function intlLargeExact() {
+        load(
+            r#"function intlLargeExact() {
           const short = '1' + '0'.repeat(10000);
           const huge = '1' + '0'.repeat(33000);
           const giant = BigInt(huge);
@@ -5242,7 +5416,8 @@ fn intl_large_exact_digits_share_format_parts_range_and_styles() {
             range.includes('–') && !range.includes('Infinity'),
             grouped.formatRangeToParts(huge, huge + '1').map(p => p.value).join('') === range,
           ];
-        }"#),
+        }"#
+        ),
         1
     );
     assert_eq!(call("intlLargeExact", "[]"), "[true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true]");
@@ -5255,7 +5430,8 @@ fn intl_large_exact_digits_share_format_parts_range_and_styles() {
 #[test]
 fn intl_flexible_day_period_with_fractional_seconds_only() {
     assert_eq!(
-        load(r#"function intlFlexibleFractionOnly() {
+        load(
+            r#"function intlFlexibleFractionOnly() {
           const date = new Date('2024-07-04T15:05:09.123Z');
           const shapes = [
             ['en-US', true, ' '], ['de', true, ' '], ['vi', true, ' '],
@@ -5290,10 +5466,14 @@ fn intl_flexible_day_period_with_fractional_seconds_only() {
             one.filter(part => part.type !== 'literal').map(part => part.type).join(',') === 'fractionalSecond,dayPeriod',
             standalone.filter(part => part.type !== 'literal').map(part => part.type).join(',') === 'fractionalSecond',
             leadingZero.find(part => part.type === 'fractionalSecond').value === '005'];
-        }"#),
+        }"#
+        ),
         1
     );
-    assert_eq!(call("intlFlexibleFractionOnly", "[]"), "[true,true,true,true,true,true,true,true,true,true,true,true]");
+    assert_eq!(
+        call("intlFlexibleFractionOnly", "[]"),
+        "[true,true,true,true,true,true,true,true,true,true,true,true]"
+    );
 }
 
 /// Combined flexible day-period requests use the locale skeleton without
@@ -5302,7 +5482,8 @@ fn intl_flexible_day_period_with_fractional_seconds_only() {
 #[test]
 fn intl_flexible_day_period_combined_without_hour() {
     assert_eq!(
-        load(r#"function intlFlexibleCombined() {
+        load(
+            r#"function intlFlexibleCombined() {
           const date = new Date('2024-07-04T15:05:09Z');
           const base = { dayPeriod: 'long', timeZone: 'UTC' };
           function parts(locale, extra) {
@@ -5339,7 +5520,8 @@ fn intl_flexible_day_period_combined_without_hour() {
             fields(cycle, ['minute', 'dayPeriod']) && samePeriod(cycle),
             fields(withHour, ['hour', 'dayPeriod']),
           ];
-        }"#),
+        }"#
+        ),
         1
     );
     assert_eq!(
@@ -5354,7 +5536,8 @@ fn intl_flexible_day_period_combined_without_hour() {
 #[test]
 fn intl_rounded_zero_sign_matches_format_parts_and_ranges() {
     assert_eq!(
-        load(r#"function intlRoundedZeroSign() {
+        load(
+            r#"function intlRoundedZeroSign() {
           const options = { maximumFractionDigits: 0, useGrouping: false };
           const exceptZero = new Intl.NumberFormat('en-US', { ...options, signDisplay: 'exceptZero' });
           const negative = new Intl.NumberFormat('en-US', { ...options, signDisplay: 'negative' });
@@ -5384,7 +5567,8 @@ fn intl_rounded_zero_sign_matches_format_parts_and_ranges() {
             new Intl.NumberFormat('en-US', { signDisplay: 'exceptZero', maximumSignificantDigits: 3 })
               .format('-1e-40000').startsWith('-'),
           ];
-        }"#),
+        }"#
+        ),
         1
     );
     assert_eq!(
@@ -5397,12 +5581,14 @@ fn intl_rounded_zero_sign_matches_format_parts_and_ranges() {
 #[test]
 fn intl_followup_flexible_day_period_without_icu4c() {
     assert_eq!(
-        load(r#"function intlFlexibleDayPeriod() {
+        load(
+            r#"function intlFlexibleDayPeriod() {
           const date = new Date('2024-07-04T15:00:00Z');
           const options = { hour: 'numeric', dayPeriod: 'long', timeZone: 'UTC' };
           return new Intl.DateTimeFormat('en-US', options).formatToParts(date)
             .some(part => part.type === 'dayPeriod' && part.value.toLowerCase().includes('afternoon'));
-        }"#),
+        }"#
+        ),
         1
     );
     assert_eq!(call("intlFlexibleDayPeriod", "[]"), "true");
@@ -5411,7 +5597,8 @@ fn intl_followup_flexible_day_period_without_icu4c() {
 #[test]
 fn buffer_boundary_and_encoding_regressions() {
     assert_eq!(
-        load(r#"function bufferBoundaryRegressions() {
+        load(
+            r#"function bufferBoundaryRegressions() {
           const written = Buffer.alloc(2);
           const n = written.write('61', 'hex');
           const short = Buffer.alloc(2);
@@ -5429,7 +5616,8 @@ fn buffer_boundary_and_encoding_regressions() {
           return [n, written.toString('hex'), limited, short.toString(), utf8Count,
             utf8.toString('hex'), filled.toString('hex'), fromElements.toString('hex'), readFailed, writeFailed,
             fractionalLengthFailed, infiniteLengthFailed];
-        }"#),
+        }"#
+        ),
         1
     );
     assert_eq!(
@@ -5440,7 +5628,9 @@ fn buffer_boundary_and_encoding_regressions() {
 
 #[test]
 fn stream_source_callbacks_are_captured_once_before_start() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
       async function streamSourceCallbackCapture() {
         const reads = [], calls = [];
         const source = {
@@ -5455,14 +5645,21 @@ fn stream_source_callbacks_are_captured_once_before_start() {
         await reader.cancel('stop');
         return [reads, calls, value];
       }
-    "#), 1);
-    assert_eq!(call("streamSourceCallbackCapture", "[]"),
-        r#"[["autoAllocateChunkSize","cancel","pull","start","type"],[["start",true],["pull",true],["cancel",true,"stop"]],"chunk"]"#);
+    "#
+        ),
+        1
+    );
+    assert_eq!(
+        call("streamSourceCallbackCapture", "[]"),
+        r#"[["autoAllocateChunkSize","cancel","pull","start","type"],[["start",true],["pull",true],["cancel",true,"stop"]],"chunk"]"#
+    );
 }
 
 #[test]
 fn stream_sink_callbacks_are_captured_once_before_start() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
       async function streamSinkCallbackCapture() {
         const reads = [], calls = [];
         const sink = {
@@ -5482,14 +5679,21 @@ fn stream_sink_callbacks_are_captured_once_before_start() {
         await new WritableStream(abortSink).abort('stop');
         return [reads, calls];
       }
-    "#), 1);
-    assert_eq!(call("streamSinkCallbackCapture", "[]"),
-        r#"[["abort","close","start","type","write"],[["start",true],["write",true,"chunk"],["close",true],["abort-after-start",true,"stop"]]]"#);
+    "#
+        ),
+        1
+    );
+    assert_eq!(
+        call("streamSinkCallbackCapture", "[]"),
+        r#"[["abort","close","start","type","write"],[["start",true],["write",true,"chunk"],["close",true],["abort-after-start",true,"stop"]]]"#
+    );
 }
 
 #[test]
 fn stream_transformer_callbacks_are_captured_once_before_start() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
       async function streamTransformerCallbackCapture() {
         const reads = [], calls = [];
         const transformer = {
@@ -5509,14 +5713,21 @@ fn stream_transformer_callbacks_are_captured_once_before_start() {
         await new TransformStream(cancelTransformer).readable.cancel('stop');
         return [reads, calls, value];
       }
-    "#), 1);
-    assert_eq!(call("streamTransformerCallbackCapture", "[]"),
-        r#"[["cancel","flush","readableType","start","transform","writableType"],[["start",true],["transform",true,"chunk"],["flush",true],["cancel-after-start",true,"stop"]],"chunk"]"#);
+    "#
+        ),
+        1
+    );
+    assert_eq!(
+        call("streamTransformerCallbackCapture", "[]"),
+        r#"[["cancel","flush","readableType","start","transform","writableType"],[["start",true],["transform",true,"chunk"],["flush",true],["cancel-after-start",true,"stop"]],"chunk"]"#
+    );
 }
 
 #[test]
 fn stream_dictionary_rejects_noncallable_callbacks_before_start() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
       function streamRejectsNoncallableCallbacks() {
         let starts = 0;
         const check = construct => { try { construct(); return false; } catch (error) { return error instanceof TypeError; } };
@@ -5527,14 +5738,21 @@ fn stream_dictionary_rejects_noncallable_callbacks_before_start() {
           starts
         ];
       }
-    "#), 1);
-    assert_eq!(call("streamRejectsNoncallableCallbacks", "[]"),
-        "[true,true,true,0]");
+    "#
+        ),
+        1
+    );
+    assert_eq!(
+        call("streamRejectsNoncallableCallbacks", "[]"),
+        "[true,true,true,0]"
+    );
 }
 
 #[test]
 fn stream_strategy_getters_precede_callback_conversion_once() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
       function streamStrategyGetterOrder() {
         const reads = [];
         const strategy = name => ({
@@ -5568,14 +5786,21 @@ fn stream_strategy_getters_precede_callback_conversion_once() {
         new TransformStream(transformer, strategy('transformWritable'), strategy('transformReadable'));
         return reads;
       }
-    "#), 1);
-    assert_eq!(call("streamStrategyGetterOrder", "[]"),
-        r#"["readable.highWaterMark","readable.size","source.autoAllocateChunkSize","source.cancel","source.pull","source.start","source.type","source.start()","writable.highWaterMark","writable.size","sink.abort","sink.close","sink.start","sink.type","sink.write","sink.start()","transformWritable.highWaterMark","transformWritable.size","transformReadable.highWaterMark","transformReadable.size","transformer.cancel","transformer.flush","transformer.readableType","transformer.start","transformer.transform","transformer.writableType","transformer.start()"]"#);
+    "#
+        ),
+        1
+    );
+    assert_eq!(
+        call("streamStrategyGetterOrder", "[]"),
+        r#"["readable.highWaterMark","readable.size","source.autoAllocateChunkSize","source.cancel","source.pull","source.start","source.type","source.start()","writable.highWaterMark","writable.size","sink.abort","sink.close","sink.start","sink.type","sink.write","sink.start()","transformWritable.highWaterMark","transformWritable.size","transformReadable.highWaterMark","transformReadable.size","transformer.cancel","transformer.flush","transformer.readableType","transformer.start","transformer.transform","transformer.writableType","transformer.start()"]"#
+    );
 }
 
 #[test]
 fn stream_start_exceptions_escape_constructors_synchronously() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
       function streamStartThrowsSynchronously() {
         const sentinel = new Error('start failure');
         const throwsSame = construct => { try { construct(); return false; } catch (error) { return error === sentinel; } };
@@ -5585,13 +5810,21 @@ fn stream_start_exceptions_escape_constructors_synchronously() {
           throwsSame(() => new TransformStream({ start() { throw sentinel; } }))
         ];
       }
-    "#), 1);
-    assert_eq!(call("streamStartThrowsSynchronously", "[]"), "[true,true,true]");
+    "#
+        ),
+        1
+    );
+    assert_eq!(
+        call("streamStartThrowsSynchronously", "[]"),
+        "[true,true,true]"
+    );
 }
 
 #[test]
 fn writable_pending_writes_skip_sink_after_error_or_abort() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
       async function writablePendingWriteStops() {
         const events = [], error = new Error('controller');
         let controller;
@@ -5615,14 +5848,21 @@ fn writable_pending_writes_skip_sink_after_error_or_abort() {
         const abortClosed = await second.closed.then(() => false, reason => reason === 'stop');
         return [events, writeError, closedError, queuedError, abortClosed];
       }
-    "#), 1);
-    assert_eq!(call("writablePendingWriteStops", "[]"),
-        r#"[[["second-abort","stop"]],true,true,true,true]"#);
+    "#
+        ),
+        1
+    );
+    assert_eq!(
+        call("writablePendingWriteStops", "[]"),
+        r#"[[["second-abort","stop"]],true,true,true,true]"#
+    );
 }
 
 #[test]
 fn writable_queued_writes_drain_before_close_and_reject_on_failure() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
       async function writableCloseAfterQueuedWrites() {
         const events = [];
         const writer = new WritableStream({
@@ -5642,14 +5882,21 @@ fn writable_queued_writes_drain_before_close_and_reject_on_failure() {
           await failedClose.then(() => false, error => error === failure),
           await failedWriter.closed.then(() => false, error => error === failure)];
       }
-    "#), 1);
-    assert_eq!(call("writableCloseAfterQueuedWrites", "[]"),
-        r#"[["a","b","close"],true,true,true]"#);
+    "#
+        ),
+        1
+    );
+    assert_eq!(
+        call("writableCloseAfterQueuedWrites", "[]"),
+        r#"[["a","b","close"],true,true,true]"#
+    );
 }
 
 #[test]
 fn writable_abort_failure_settles_writer_closed_with_original_reason() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
       async function writableAbortFailureSettlement() {
         const reason = new Error('abort reason'), failure = new Error('sink failure');
         const events = [];
@@ -5659,14 +5906,21 @@ fn writable_abort_failure_settles_writer_closed_with_original_reason() {
         const secondAbort = await writer.abort('again').then(() => true, () => false);
         return [events, abortFailure, closedReason, secondAbort];
       }
-    "#), 1);
-    assert_eq!(call("writableAbortFailureSettlement", "[]"),
-        "[[true],true,true,true]");
+    "#
+        ),
+        1
+    );
+    assert_eq!(
+        call("writableAbortFailureSettlement", "[]"),
+        "[[true],true,true,true]"
+    );
 }
 
 #[test]
 fn writable_abort_during_in_flight_close_does_not_call_sink_abort() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
       async function writableAbortDuringClose() {
         const events = [];
         let finish, resolveEntered;
@@ -5682,13 +5936,18 @@ fn writable_abort_during_in_flight_close_does_not_call_sink_abort() {
         await Promise.all([closing, aborting, writer.closed]);
         return events;
       }
-    "#), 1);
+    "#
+        ),
+        1
+    );
     assert_eq!(call("writableAbortDuringClose", "[]"), r#"["close"]"#);
 }
 
 #[test]
 fn writable_close_queued_keeps_controller_desired_size() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
       function writableDesiredSizeWhileClosing() {
         const writer = new WritableStream({ write() {} }, { highWaterMark: 3 }).getWriter();
         const pending = writer.write('x');
@@ -5698,13 +5957,18 @@ fn writable_close_queued_keeps_controller_desired_size() {
         pending.catch(() => {}); closing.catch(() => {});
         return [before, during];
       }
-    "#), 1);
+    "#
+        ),
+        1
+    );
     assert_eq!(call("writableDesiredSizeWhileClosing", "[]"), "[2,2]");
 }
 
 #[test]
 fn writable_in_flight_close_success_overrides_controller_error() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
       async function writableCloseWinsControllerError() {
         let controller, finish, resolveEntered;
         const entered = new Promise(resolve => { resolveEntered = resolve; });
@@ -5721,13 +5985,21 @@ fn writable_in_flight_close_success_overrides_controller_error() {
         const closedResult = await writer.closed.then(() => true, () => false);
         return [closeResult, closedResult, writer.desiredSize];
       }
-    "#), 1);
-    assert_eq!(call("writableCloseWinsControllerError", "[]"), "[true,true,0]");
+    "#
+        ),
+        1
+    );
+    assert_eq!(
+        call("writableCloseWinsControllerError", "[]"),
+        "[true,true,0]"
+    );
 }
 
 #[test]
 fn writable_in_flight_close_failure_preserves_stored_error() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
       async function writableCloseFailsAfterAbort() {
         let controller, fail, resolveEntered;
         const entered = new Promise(resolve => { resolveEntered = resolve; });
@@ -5748,13 +6020,21 @@ fn writable_in_flight_close_failure_preserves_stored_error() {
           controller.signal.aborted
         ];
       }
-    "#), 1);
-    assert_eq!(call("writableCloseFailsAfterAbort", "[]"), "[true,true,true,true]");
+    "#
+        ),
+        1
+    );
+    assert_eq!(
+        call("writableCloseFailsAfterAbort", "[]"),
+        "[true,true,true,true]"
+    );
 }
 
 #[test]
 fn writable_in_flight_close_failure_after_controller_error() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
       async function writableCloseFailsAfterControllerError() {
         let controller, fail, resolveEntered;
         const entered = new Promise(resolve => { resolveEntered = resolve; });
@@ -5773,13 +6053,21 @@ fn writable_in_flight_close_failure_after_controller_error() {
           writer.desiredSize
         ];
       }
-    "#), 1);
-    assert_eq!(call("writableCloseFailsAfterControllerError", "[]"), "[true,true,null]");
+    "#
+        ),
+        1
+    );
+    assert_eq!(
+        call("writableCloseFailsAfterControllerError", "[]"),
+        "[true,true,null]"
+    );
 }
 
 #[test]
 fn writable_abort_listener_reentry_shares_pending_abort() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
       async function writableAbortListenerReentry() {
         let controller, nested;
         const calls = [];
@@ -5794,13 +6082,21 @@ fn writable_abort_listener_reentry_shares_pending_abort() {
         const closed = await writer.closed.then(() => false, reason => reason === 'first');
         return [same, calls, closed];
       }
-    "#), 1);
-    assert_eq!(call("writableAbortListenerReentry", "[]"), r#"[true,["first"],true]"#);
+    "#
+        ),
+        1
+    );
+    assert_eq!(
+        call("writableAbortListenerReentry", "[]"),
+        r#"[true,["first"],true]"#
+    );
 }
 
 #[test]
 fn headers_iterators_observe_mutation_and_resume_after_done() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
       function headersIteratorsObserveMutation() {
         const headers = new Headers([['b', 'B'], ['d', 'D']]);
         const keys = headers.keys(), values = headers.values(), entries = headers.entries();
@@ -5814,14 +6110,21 @@ fn headers_iterators_observe_mutation_and_resume_after_done() {
         const resumed = [keys.next().value, values.next().value, entries.next().value];
         return [first, second, third, done, resumed];
       }
-    "#), 1);
-    assert_eq!(call("headersIteratorsObserveMutation", "[]"),
-        r#"[["b","B",["b","B"]],["c","C",["c","C"]],[null,null,null],[true,true,true],["e","E",["e","E"]]]"#);
+    "#
+        ),
+        1
+    );
+    assert_eq!(
+        call("headersIteratorsObserveMutation", "[]"),
+        r#"[["b","B",["b","B"]],["c","C",["c","C"]],[null,null,null],[true,true,true],["e","E",["e","E"]]]"#
+    );
 }
 
 #[test]
 fn headers_for_each_refetches_pairs_after_callback() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
       function headersForEachRefetchesPairs() {
         const headers = new Headers([['a', 'A'], ['b', 'B']]);
         const receiver = {};
@@ -5836,14 +6139,21 @@ fn headers_for_each_refetches_pairs_after_callback() {
         headers.forEach(visit, receiver);
         return [seen, [...headers.keys()], [...headers]];
       }
-    "#), 1);
-    assert_eq!(call("headersForEachRefetchesPairs", "[]"),
-        r#"[[["a","A",true,true],["c","C",true,true],["d","D",true,true]],["a","c","d"],[["a","A"],["c","C"],["d","D"]]]"#);
+    "#
+        ),
+        1
+    );
+    assert_eq!(
+        call("headersForEachRefetchesPairs", "[]"),
+        r#"[[["a","A",true,true],["c","C",true,true],["d","D",true,true]],["a","c","d"],[["a","A"],["c","C"],["d","D"]]]"#
+    );
 }
 
 #[test]
 fn headers_set_cookie_and_iterator_brands() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
       function headersSetCookieAndIteratorBrands() {
         const headers = new Headers([['x', 'one'], ['set-cookie', 'a=1'], ['x', 'two'], ['set-cookie', 'b=2']]);
         const entries = headers.entries();
@@ -5857,14 +6167,21 @@ fn headers_set_cookie_and_iterator_brands() {
         const rejectsIterator = (() => { try { entries.next.call({}); return false; } catch (error) { return error instanceof TypeError; } })();
         return [initial, done, resumed, combined, rejectsReceiver, rejectsIterator];
       }
-    "#), 1);
-    assert_eq!(call("headersSetCookieAndIteratorBrands", "[]"),
-        r#"[[["set-cookie","a=1"],["set-cookie","b=2"],["x","one, two"]],true,["z","Z"],["a=1","b=2","one, two, three","Z"],true,true]"#);
+    "#
+        ),
+        1
+    );
+    assert_eq!(
+        call("headersSetCookieAndIteratorBrands", "[]"),
+        r#"[[["set-cookie","a=1"],["set-cookie","b=2"],["x","one, two"]],true,["z","Z"],["a=1","b=2","one, two, three","Z"],true,true]"#
+    );
 }
 
 #[test]
 fn form_data_iterators_observe_set_and_resume_after_done() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
       function formDataIteratorsObserveSet() {
         const data = new FormData();
         data.append('a', 'A'); data.append('b', 'B'); data.append('c', 'C');
@@ -5878,14 +6195,21 @@ fn form_data_iterators_observe_set_and_resume_after_done() {
         const resumed = [keys.next().value, values.next().value, entries.next().value, defaultIterator.next().value];
         return [first, second, third, done, resumed];
       }
-    "#), 1);
-    assert_eq!(call("formDataIteratorsObserveSet", "[]"),
-        r#"[["a","A",["a","A"],["a","A"]],["b","B2",["b","B2"],["b","B2"]],["c","C",["c","C"],["c","C"]],[true,true,true,true],["d","D",["d","D"],["d","D"]]]"#);
+    "#
+        ),
+        1
+    );
+    assert_eq!(
+        call("formDataIteratorsObserveSet", "[]"),
+        r#"[["a","A",["a","A"],["a","A"]],["b","B2",["b","B2"],["b","B2"]],["c","C",["c","C"],["c","C"]],[true,true,true,true],["d","D",["d","D"],["d","D"]]]"#
+    );
 }
 
 #[test]
 fn form_data_iteration_refetches_after_delete_and_callback() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
       function formDataIterationRefetchesAfterDelete() {
         const data = new FormData();
         data.append('a', 'A'); data.append('b', 'B'); data.append('c', 'C');
@@ -5905,14 +6229,21 @@ fn form_data_iteration_refetches_after_delete_and_callback() {
         data.forEach(visit, receiver);
         return [first, second, seen, [...data.keys()], [...data]];
       }
-    "#), 1);
-    assert_eq!(call("formDataIterationRefetchesAfterDelete", "[]"),
-        r#"[["a","A"],["c","C"],[["a","A",true,true],["c","C2",true,true],["d","D",true,true]],["a","c","d"],[["a","A"],["c","C2"],["d","D"]]]"#);
+    "#
+        ),
+        1
+    );
+    assert_eq!(
+        call("formDataIterationRefetchesAfterDelete", "[]"),
+        r#"[["a","A"],["c","C"],[["a","A",true,true],["c","C2",true,true],["d","D",true,true]],["a","c","d"],[["a","A"],["c","C2"],["d","D"]]]"#
+    );
 }
 
 #[test]
 fn form_data_iteration_checks_receiver_at_call_time() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
       function formDataIterationChecksReceiver() {
         const data = new FormData();
         const iterator = data.keys();
@@ -5921,13 +6252,21 @@ fn form_data_iteration_checks_receiver_at_call_time() {
           rejects(FormData.prototype.entries), rejects(FormData.prototype.forEach),
           rejects(FormData.prototype[Symbol.iterator]), rejects(iterator.next)];
       }
-    "#), 1);
-    assert_eq!(call("formDataIterationChecksReceiver", "[]"), "[true,true,true,true,true,true]");
+    "#
+        ),
+        1
+    );
+    assert_eq!(
+        call("formDataIterationChecksReceiver", "[]"),
+        "[true,true,true,true,true,true]"
+    );
 }
 
 #[test]
 fn readable_reader_closed_promises_follow_each_lock() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
       async function readableReaderClosedPromisesFollowLock() {
         let controller;
         const stream = new ReadableStream({ start(value) { controller = value; } });
@@ -5946,13 +6285,21 @@ fn readable_reader_closed_promises_follow_each_lock() {
         third.releaseLock();
         return [firstReleased, firstAfterRelease, secondResolved, settledStayedResolved, releasedGetter, closedLock];
       }
-    "#), 1);
-    assert_eq!(call("readableReaderClosedPromisesFollowLock", "[]"), "[true,true,true,true,true,true]");
+    "#
+        ),
+        1
+    );
+    assert_eq!(
+        call("readableReaderClosedPromisesFollowLock", "[]"),
+        "[true,true,true,true,true,true]"
+    );
 }
 
 #[test]
 fn byob_reader_closed_promises_follow_each_lock_and_error() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
       async function byobReaderClosedPromisesFollowLock() {
         let controller;
         const reason = new Error('source');
@@ -5971,13 +6318,21 @@ fn byob_reader_closed_promises_follow_each_lock_and_error() {
         third.releaseLock();
         return [firstReleased, secondErrored, errorStayed, releasedGetter, erroredLock];
       }
-    "#), 1);
-    assert_eq!(call("byobReaderClosedPromisesFollowLock", "[]"), "[true,true,true,true,true]");
+    "#
+        ),
+        1
+    );
+    assert_eq!(
+        call("byobReaderClosedPromisesFollowLock", "[]"),
+        "[true,true,true,true,true]"
+    );
 }
 
 #[test]
 fn writer_ready_and_closed_promises_follow_each_lock() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
       async function writerReadyAndClosedPromisesFollowLock() {
         const reason = new Error('abort');
         const stream = new WritableStream({}, { highWaterMark: 0 });
@@ -5997,13 +6352,21 @@ fn writer_ready_and_closed_promises_follow_each_lock() {
         third.releaseLock();
         return [releasedReady, releasedClosed, firstAfterRelease, abortReady, abortClosed, releasedGetter, erroredLock];
       }
-    "#), 1);
-    assert_eq!(call("writerReadyAndClosedPromisesFollowLock", "[]"), "[true,true,true,true,true,true,true]");
+    "#
+        ),
+        1
+    );
+    assert_eq!(
+        call("writerReadyAndClosedPromisesFollowLock", "[]"),
+        "[true,true,true,true,true,true,true]"
+    );
 }
 
 #[test]
 fn writer_backpressure_reassignment_keeps_old_promise_rejected() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
       async function writerBackpressureReassignment() {
         let resolveWrite, resolveEntered;
         const entered = new Promise(resolve => { resolveEntered = resolve; });
@@ -6029,13 +6392,21 @@ fn writer_backpressure_reassignment_keeps_old_promise_rejected() {
         third.releaseLock();
         return [oldReady, oldClosed, settledInitial, resumedReady, finishedClosed, releasedGetter, closedLock];
       }
-    "#), 1);
-    assert_eq!(call("writerBackpressureReassignment", "[]"), "[true,true,true,true,true,true,true]");
+    "#
+        ),
+        1
+    );
+    assert_eq!(
+        call("writerBackpressureReassignment", "[]"),
+        "[true,true,true,true,true,true,true]"
+    );
 }
 
 #[test]
 fn writer_relock_during_abort_waits_for_closed_settlement() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
       async function writerRelockDuringAbort() {
         let resolveAbort, resolveEntered;
         const entered = new Promise(resolve => { resolveEntered = resolve; });
@@ -6054,13 +6425,18 @@ fn writer_relock_during_abort_waits_for_closed_settlement() {
         second.releaseLock();
         return [firstReleased, secondReady, secondReason];
       }
-    "#), 1);
+    "#
+        ),
+        1
+    );
     assert_eq!(call("writerRelockDuringAbort", "[]"), "[true,true,true]");
 }
 
 #[test]
 fn tee_preserves_falsy_error_reasons_in_default_and_byte_branches() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
       async function teePreservesFalsyErrors() {
         const reasons = [0, false, '', null, undefined, NaN];
         const results = [];
@@ -6075,14 +6451,19 @@ fn tee_preserves_falsy_error_reasons_in_default_and_byte_branches() {
         }
         return results;
       }
-    "#), 1);
+    "#
+        ),
+        1
+    );
     assert_eq!(call("teePreservesFalsyErrors", "[]"),
         "[[true,true],[true,true],[true,true],[true,true],[true,true],[true,true],[true,true],[true,true],[true,true],[true,true],[true,true],[true,true]]");
 }
 
 #[test]
 fn tee_closes_normally_and_keeps_cancellation_separate_from_errors() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
       async function teeCloseAndCancelPaths() {
         const results = [];
         for (const bytes of [false, true]) {
@@ -6109,14 +6490,21 @@ fn tee_closes_normally_and_keeps_cancellation_separate_from_errors() {
         }
         return results;
       }
-    "#), 1);
-    assert_eq!(call("teeCloseAndCancelPaths", "[]"),
-        "[[true,true],[true,true],[true,true],[true,true],[true,true],[true,true]]");
+    "#
+        ),
+        1
+    );
+    assert_eq!(
+        call("teeCloseAndCancelPaths", "[]"),
+        "[[true,true],[true,true],[true,true],[true,true],[true,true],[true,true]]"
+    );
 }
 
 #[test]
 fn pipe_to_detects_destination_error_while_read_is_pending() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
       async function pipeToDetectsDestinationError(preventCancel) {
         let destinationController, resolvePull, canceled;
         const pullEntered = new Promise(resolve => { resolvePull = resolve; });
@@ -6132,14 +6520,25 @@ fn pipe_to_detects_destination_error_while_read_is_pending() {
         const rejected = await piping.then(() => false, reason => reason === error);
         return [rejected, canceled === error, source.locked, destination.locked];
       }
-    "#), 1);
-    assert_eq!(call("pipeToDetectsDestinationError", "[false]"), "[true,true,false,false]");
-    assert_eq!(call("pipeToDetectsDestinationError", "[true]"), "[true,false,false,false]");
+    "#
+        ),
+        1
+    );
+    assert_eq!(
+        call("pipeToDetectsDestinationError", "[false]"),
+        "[true,true,false,false]"
+    );
+    assert_eq!(
+        call("pipeToDetectsDestinationError", "[true]"),
+        "[true,false,false,false]"
+    );
 }
 
 #[test]
 fn pipe_to_waits_for_destination_capacity_before_reading() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
       async function pipeToWaitsForDestinationCapacity() {
         let destinationController, canceled;
         const source = new ReadableStream({ cancel(reason) { canceled = reason; } }, { highWaterMark: 0 });
@@ -6151,13 +6550,21 @@ fn pipe_to_waits_for_destination_capacity_before_reading() {
         const rejected = await piping.then(() => false, reason => reason === error);
         return [hadNoReadRequest, rejected, canceled === error, source.locked, destination.locked];
       }
-    "#), 1);
-    assert_eq!(call("pipeToWaitsForDestinationCapacity", "[]"), "[true,true,true,false,false]");
+    "#
+        ),
+        1
+    );
+    assert_eq!(
+        call("pipeToWaitsForDestinationCapacity", "[]"),
+        "[true,true,true,false,false]"
+    );
 }
 
 #[test]
 fn pipe_to_observes_source_termination_while_backpressured() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
       async function pipeToObservesSourceTermination(errored) {
         let sourceController, abortReason, closeCount = 0;
         const source = new ReadableStream({ start(controller) { sourceController = controller; } }, { highWaterMark: 0 });
@@ -6172,14 +6579,25 @@ fn pipe_to_observes_source_termination_while_backpressured() {
         const outcome = await piping.then(() => 'resolved', error => error === reason ? 'source-error' : 'other-error');
         return [outcome, abortReason === reason, closeCount, source.locked, destination.locked];
       }
-    "#), 1);
-    assert_eq!(call("pipeToObservesSourceTermination", "[false]"), "[\"resolved\",false,1,false,false]");
-    assert_eq!(call("pipeToObservesSourceTermination", "[true]"), "[\"source-error\",true,0,false,false]");
+    "#
+        ),
+        1
+    );
+    assert_eq!(
+        call("pipeToObservesSourceTermination", "[false]"),
+        "[\"resolved\",false,1,false,false]"
+    );
+    assert_eq!(
+        call("pipeToObservesSourceTermination", "[true]"),
+        "[\"source-error\",true,0,false,false]"
+    );
 }
 
 #[test]
 fn pipe_to_rejects_an_already_closed_destination() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
       async function pipeToRejectsClosedDestination() {
         let canceled;
         const source = new ReadableStream({ cancel(reason) { canceled = reason; } }, { highWaterMark: 0 });
@@ -6188,13 +6606,21 @@ fn pipe_to_rejects_an_already_closed_destination() {
         const outcome = await source.pipeTo(destination).then(() => false, error => error instanceof TypeError);
         return [outcome, canceled instanceof TypeError, source.locked, destination.locked];
       }
-    "#), 1);
-    assert_eq!(call("pipeToRejectsClosedDestination", "[]"), "[true,true,false,false]");
+    "#
+        ),
+        1
+    );
+    assert_eq!(
+        call("pipeToRejectsClosedDestination", "[]"),
+        "[true,true,false,false]"
+    );
 }
 
 #[test]
 fn pipe_to_respects_ordered_initial_close_and_pending_destination_close() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
       async function pipeToOrderedCloseStates() {
         const source = new ReadableStream({ start(controller) { controller.close(); } });
         const destination = new WritableStream();
@@ -6216,13 +6642,21 @@ fn pipe_to_respects_ordered_initial_close_and_pending_destination_close() {
         return [bothClosed, prematureClose, canceled instanceof TypeError,
           source.locked, destination.locked, liveSource.locked, closingDestination.locked];
       }
-    "#), 1);
-    assert_eq!(call("pipeToOrderedCloseStates", "[]"), "[true,true,true,false,false,false,false]");
+    "#
+        ),
+        1
+    );
+    assert_eq!(
+        call("pipeToOrderedCloseStates", "[]"),
+        "[true,true,true,false,false,false,false]"
+    );
 }
 
 #[test]
 fn pipe_to_preserves_prevent_flags_and_falsy_destination_reason() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
       async function pipeToPreventFlagsAndFalsyReason() {
         let sourceController, abortCount = 0, closeCount = 0;
         const failedSource = new ReadableStream({ start(controller) { sourceController = controller; } }, { highWaterMark: 0 });
@@ -6245,13 +6679,21 @@ fn pipe_to_preserves_prevent_flags_and_falsy_destination_reason() {
         return [sourceError, abortCount, preventedClose, closeCount, openDestination.locked,
           destinationError, canceled, cancelReason === undefined, waitingSource.locked, failedDestination.locked];
       }
-    "#), 1);
-    assert_eq!(call("pipeToPreventFlagsAndFalsyReason", "[]"), "[true,0,true,0,false,true,true,true,false,false]");
+    "#
+        ),
+        1
+    );
+    assert_eq!(
+        call("pipeToPreventFlagsAndFalsyReason", "[]"),
+        "[true,0,true,0,false,true,true,true,false,false]"
+    );
 }
 
 #[test]
 fn pipe_to_distinguishes_equal_signal_and_source_error_reasons() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
       async function pipeToEqualErrorOrigins() {
         const reason = new Error('shared');
         let cancelAttempts = 0, abortCount = 0;
@@ -6265,13 +6707,21 @@ fn pipe_to_distinguishes_equal_signal_and_source_error_reasons() {
         const rejected = await piping.then(() => false, error => error === reason);
         return [rejected, cancelAttempts, abortCount, source.locked, destination.locked];
       }
-    "#), 1);
-    assert_eq!(call("pipeToEqualErrorOrigins", "[]"), "[true,0,1,false,false]");
+    "#
+        ),
+        1
+    );
+    assert_eq!(
+        call("pipeToEqualErrorOrigins", "[]"),
+        "[true,0,1,false,false]"
+    );
 }
 
 #[test]
 fn pipe_to_initial_abort_precedes_source_and_destination_propagation() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
       async function pipeToInitialAbortPriority() {
         const signalReason = new Error('signal');
         const sourceReason = new Error('source');
@@ -6310,15 +6760,21 @@ fn pipe_to_initial_abort_precedes_source_and_destination_propagation() {
           closedDestination.locked, readableSource.locked, alreadyClosedDestination.locked,
           preventedSource.locked, preventedDestination.locked];
       }
-    "#), 1);
-    assert_eq!(call("pipeToInitialAbortPriority", "[]"),
-      "[true,0,true,true,true,true,true,true,0,false,false,false,false,false,false,false,false]");
+    "#
+        ),
+        1
+    );
+    assert_eq!(
+        call("pipeToInitialAbortPriority", "[]"),
+        "[true,0,true,true,true,true,true,true,0,false,false,false,false,false,false,false,false]"
+    );
 }
 
 #[test]
 fn crypto_buffer_regressions() {
     assert_eq!(
-        load(r#"async function cryptoBufferRegressions() {
+        load(
+            r#"async function cryptoBufferRegressions() {
           const cryptoModule = __thaw_crypto_module;
           const raw = new Uint8Array([1, 2, 3]);
           const key = await crypto.subtle.importKey('raw', raw, {name: 'HMAC', hash: 'SHA-256'}, false, ['sign']);
@@ -6376,7 +6832,8 @@ fn crypto_buffer_regressions() {
             compressed[0] === (uncompressed[uncompressed.length - 1] & 1) + 2,
             keylen, sha384Length, derivedLength, sha384DerivedLength, invalidIteration, fractionalMinFailed, exactRangeFailed,
             callbackCount, thrown];
-        }"#),
+        }"#
+        ),
         1
     );
     assert_eq!(
@@ -6387,7 +6844,9 @@ fn crypto_buffer_regressions() {
 
 #[test]
 fn native_json_graph_replacer_preserves_holder_date_alias_and_wrappers() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
       function inspectNativeGraph() {
         const graph = { root: { r: 0 }, nodes: [
           { o: [['left', { r: 1 }], ['right', { r: 1 }], ['map', { r: 2 }],
@@ -6411,14 +6870,21 @@ fn native_json_graph_replacer_preserves_holder_date_alias_and_wrappers() {
                 value.set.has(3), value.pattern instanceof RegExp,
                 Object.prototype.hasOwnProperty.call(value, '__proto__'), output];
       }
-    "#), 1);
-    assert_eq!(call("inspectNativeGraph", "[]"),
-        r#"[true,true,true,true,true,"{\"left\":\"1970-01-01T00:00:00.000Z\",\"right\":\"1970-01-01T00:00:00.000Z\",\"__proto__\":7}"]"#);
+    "#
+        ),
+        1
+    );
+    assert_eq!(
+        call("inspectNativeGraph", "[]"),
+        r#"[true,true,true,true,true,"{\"left\":\"1970-01-01T00:00:00.000Z\",\"right\":\"1970-01-01T00:00:00.000Z\",\"__proto__\":7}"]"#
+    );
 }
 
 #[test]
 fn live_json_graph_encoding_does_not_read_replacer_children() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
       function inspectLiveGraphEncoding() {
         const previousRetain = globalThis.__thaw_retain_dynamic_value;
         let reads = 0;
@@ -6431,15 +6897,20 @@ fn live_json_graph_encoding_does_not_read_replacer_children() {
           globalThis.__thaw_retain_dynamic_value = previousRetain;
         }
       }
-    "#), 1);
+    "#
+        ),
+        1
+    );
     assert_eq!(call("inspectLiveGraphEncoding", "[]"), "[0,true,1]");
 }
 
 #[test]
-fn graph_array_symbol_property_roundtrips_order_flags_and_cycle() {
-    assert_eq!(load(r#"
+fn graph_array_own_property_roundtrips_order_flags_and_cycle() {
+    assert_eq!(
+        load(
+            r#"
       function inspectGraphArrayOwnKeys() {
-        const key = Symbol('extra');
+        const key = 'self';
         const array = [7, ,];
         Object.defineProperty(array, '0', { value: 7, enumerable: true,
           writable: false, configurable: true });
@@ -6452,25 +6923,63 @@ fn graph_array_symbol_property_roundtrips_order_flags_and_cycle() {
         const index = Object.getOwnPropertyDescriptor(restored, '0');
         const symbol = Object.getOwnPropertyDescriptor(restored, key);
         return [graph.nodes[1].p.length, restored.length, 1 in restored,
-          own.map(item => typeof item === 'symbol' ? 'symbol' : item).join(','),
+          own.join(','),
           index.writable, index.configurable, symbol.value === restored,
           symbol.enumerable, symbol.configurable, restored.named];
       }
-    "#), 1);
-    assert_eq!(call("inspectGraphArrayOwnKeys", "[]"),
-        "[4,2,false,\"0,length,named,symbol\",false,true,true,false,false,\"saved\"]");
+    "#
+        ),
+        1
+    );
+    assert_eq!(
+        call("inspectGraphArrayOwnKeys", "[]"),
+        "[4,2,false,\"0,length,self,named\",false,true,true,false,false,\"saved\"]"
+    );
+}
+
+// Symbol values/keys need a live handle: a by-value (non-live) snapshot rejects
+// them, and a live encode keeps the whole array behind its handle instead.
+#[test]
+fn graph_array_symbol_property_requires_live_handle() {
+    assert_eq!(
+        load(
+            r#"
+      function inspectGraphArraySymbolKey() {
+        const array = [7];
+        Object.defineProperty(array, Symbol('extra'), { value: 1, enumerable: false });
+        let message = '';
+        try { __thaw_json_graph_encode_js([array], 0, false); } catch (error) { message = error.message; }
+        const live = JSON.parse(__thaw_json_graph_encode_js([array], 0, true));
+        return [message, live.nodes.length, live.nodes[1].hdl !== undefined, live.leases.length];
+      }
+    "#
+        ),
+        1
+    );
+    assert_eq!(
+        call("inspectGraphArraySymbolKey", "[]"),
+        "[\"Unsupported native callback graph value\",2,true,1]"
+    );
 }
 
 #[test]
 fn live_host_number_query_preserves_negative_zero_and_non_finite_values() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
       function inspectLiveHostNumbers() {
         return [__thaw_json_host_query(-0, 10),
                 __thaw_json_host_query(NaN, 10),
                 __thaw_json_host_query(Infinity, 10)];
       }
-    "#), 1);
-    assert_eq!(call("inspectLiveHostNumbers", "[]"), r#"["-0","NaN","Infinity"]"#);
+    "#
+        ),
+        1
+    );
+    assert_eq!(
+        call("inspectLiveHostNumbers", "[]"),
+        r#"["-0","NaN","Infinity"]"#
+    );
 }
 
 // Unrun: paired native metadata is never trusted merely because its hdl is
@@ -6478,11 +6987,15 @@ fn live_host_number_query_preserves_negative_zero_and_non_finite_values() {
 // and the graph decoder still returns the transferred hdl lease.
 #[test]
 fn paired_native_function_graph_rejects_unproven_handle_and_releases_lease() {
-    assert_eq!(load("globalThis.pairedOrdinary = function() { return 1; };"), 1);
+    assert_eq!(
+        load("globalThis.pairedOrdinary = function() { return 1; };"),
+        1
+    );
     let handle = thaw_js_get_global(c"pairedOrdinary".as_ptr());
     assert_ne!(handle, 0);
     assert_eq!(thaw_js_retain_handle(handle), 1);
-    let source = format!(r#"
+    let source = format!(
+        r#"
       function rejectForgedNativePair() {{
         const graph = JSON.stringify({{
           root: {{r: 0}}, nodes: [{{nfn: '1', hdl: {handle}}}],
@@ -6491,7 +7004,8 @@ fn paired_native_function_graph_rejects_unproven_handle_and_releases_lease() {
         try {{ __thaw_json_graph_decode_owned(graph); return false; }}
         catch (error) {{ return error.message === 'Mismatched native Function graph node'; }}
       }}
-    "#);
+    "#
+    );
     assert_eq!(load(&source), 1);
     assert_eq!(call("rejectForgedNativePair", "[]"), "true");
     assert_eq!(thaw_js_release_handle(handle), 1);
@@ -6503,11 +7017,15 @@ fn paired_native_function_graph_rejects_unproven_handle_and_releases_lease() {
 // when the paired token is rejected before any graph object is populated.
 #[test]
 fn paired_native_symbol_graph_rejects_unproven_handle_and_releases_lease() {
-    assert_eq!(load("globalThis.pairedOrdinarySymbol = Symbol('ordinary');"), 1);
+    assert_eq!(
+        load("globalThis.pairedOrdinarySymbol = Symbol('ordinary');"),
+        1
+    );
     let handle = thaw_js_get_global(c"pairedOrdinarySymbol".as_ptr());
     assert_ne!(handle, 0);
     assert_eq!(thaw_js_retain_handle(handle), 1);
-    let source = format!(r#"
+    let source = format!(
+        r#"
       function rejectForgedNativeSymbolPair() {{
         const graph = JSON.stringify({{
           root: {{nsy: '1', hdl: {handle}}}, nodes: [],
@@ -6516,7 +7034,8 @@ fn paired_native_symbol_graph_rejects_unproven_handle_and_releases_lease() {
         try {{ __thaw_json_graph_decode_owned(graph); return false; }}
         catch (error) {{ return error.message === 'Mismatched native Symbol graph token'; }}
       }}
-    "#);
+    "#
+    );
     assert_eq!(load(&source), 1);
     assert_eq!(call("rejectForgedNativeSymbolPair", "[]"), "true");
     assert_eq!(thaw_js_release_handle(handle), 1);
@@ -6525,37 +7044,55 @@ fn paired_native_symbol_graph_rejects_unproven_handle_and_releases_lease() {
 
 #[test]
 fn private_graph_result_marks_real_date_separately_from_user_shape() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
       function graphDateResult() {
         return { real: new Date(0), user: { timestamp: 0 } };
       }
-    "#), 1);
-    let result = thaw_js_call_graph_result(c"graphDateResult".as_ptr(), c"{\"root\":{\"r\":0},\"nodes\":[{\"a\":[]}],\"leases\":[]}".as_ptr());
+    "#
+        ),
+        1
+    );
+    let result = thaw_js_call_graph_result(
+        c"graphDateResult".as_ptr(),
+        c"{\"root\":{\"r\":0},\"nodes\":[{\"a\":[]}],\"leases\":[]}".as_ptr(),
+    );
     assert!(result.error.is_null());
-    let graph: serde_json::Value = serde_json::from_str(
-        &unsafe { CStr::from_ptr(result.value) }.to_string_lossy(),
-    ).unwrap();
-    unsafe { thaw_arena::destroy_string(result.value.cast_mut()); }
+    let graph: serde_json::Value =
+        serde_json::from_str(&unsafe { CStr::from_ptr(result.value) }.to_string_lossy()).unwrap();
+    unsafe {
+        thaw_arena::destroy_string(result.value.cast_mut());
+    }
     assert_eq!(graph["nodes"][1]["d"], 0);
     assert!(graph["nodes"][2].get("o").is_some());
-    assert_eq!(call("graphDateResult", "[]"),
-        r#"{"real":{"timestamp":0},"user":{"timestamp":0}}"#);
+    assert_eq!(
+        call("graphDateResult", "[]"),
+        r#"{"real":{"timestamp":0},"user":{"timestamp":0}}"#
+    );
 }
 
 #[test]
 fn live_host_buffer_query_uses_native_buffer_identity() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
       function inspectLiveHostBuffer() {
         return [__thaw_json_host_query(Buffer.from([1]), 11),
                 __thaw_json_host_query({ type: 'Buffer', data: [1] }, 11)];
       }
-    "#), 1);
+    "#
+        ),
+        1
+    );
     assert_eq!(call("inspectLiveHostBuffer", "[]"), r#"["1","0"]"#);
 }
 
 #[test]
 fn live_host_date_query_uses_internal_slot_and_preserves_invalid_date() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
       function inspectLiveHostDate() {
         return [__thaw_json_host_query(new Date(0), 12),
                 __thaw_json_host_query({ timestamp: 0 }, 12),
@@ -6566,26 +7103,42 @@ fn live_host_date_query_uses_internal_slot_and_preserves_invalid_date() {
                   catch (error) { return error instanceof TypeError ? 'throws' : 'wrong'; }
                 })()];
       }
-    "#), 1);
-    assert_eq!(call("inspectLiveHostDate", "[]"), r#"["1","0","1","NaN","throws"]"#);
+    "#
+        ),
+        1
+    );
+    assert_eq!(
+        call("inspectLiveHostDate", "[]"),
+        r#"["1","0","1","NaN","throws"]"#
+    );
 }
 
 #[test]
 fn live_host_date_setter_mutates_internal_slot_seen_by_alias() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
       function inspectLiveHostDateSetter() {
         const date = new Date(0);
         const alias = date;
         const result = __thaw_json_host_date_set(date, 2000);
         return [result, alias.getTime(), Object.hasOwn(date, 'timestamp')];
       }
-    "#), 1);
-    assert_eq!(call("inspectLiveHostDateSetter", "[]"), r#"["2000",2000,false]"#);
+    "#
+        ),
+        1
+    );
+    assert_eq!(
+        call("inspectLiveHostDateSetter", "[]"),
+        r#"["2000",2000,false]"#
+    );
 }
 
 #[test]
 fn user_date_to_json_is_standard_while_internal_wire_keeps_date_identity() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
       function userDateSerialization() {
         const date = new Date(0);
         const standard = JSON.stringify({ date });
@@ -6596,25 +7149,42 @@ fn user_date_to_json_is_standard_while_internal_wire_keeps_date_identity() {
       function internalDateSerialization() {
         return { date: new Date(0) };
       }
-    "#), 1);
-    assert_eq!(call("userDateSerialization", "[]"),
-        r#"["{\"date\":\"1970-01-01T00:00:00.000Z\"}","{\"date\":{\"timestamp\":42}}"]"#);
-    assert_eq!(call("internalDateSerialization", "[]"), r#"{"date":{"timestamp":0}}"#);
+    "#
+        ),
+        1
+    );
+    assert_eq!(
+        call("userDateSerialization", "[]"),
+        r#"["{\"date\":\"1970-01-01T00:00:00.000Z\"}","{\"date\":{\"timestamp\":42}}"]"#
+    );
+    assert_eq!(
+        call("internalDateSerialization", "[]"),
+        r#"{"date":{"timestamp":0}}"#
+    );
 }
 
 #[test]
 fn private_graph_result_preserves_custom_to_json_before_encoding() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
       function graphCustomToJsonResult() {
         return { item: { toJSON(key) { return { key, value: 7 }; } } };
       }
-    "#), 1);
-    let result = thaw_js_call_graph_result(c"graphCustomToJsonResult".as_ptr(), c"{\"root\":{\"r\":0},\"nodes\":[{\"a\":[]}],\"leases\":[]}".as_ptr());
+    "#
+        ),
+        1
+    );
+    let result = thaw_js_call_graph_result(
+        c"graphCustomToJsonResult".as_ptr(),
+        c"{\"root\":{\"r\":0},\"nodes\":[{\"a\":[]}],\"leases\":[]}".as_ptr(),
+    );
     assert!(result.error.is_null());
-    let graph: serde_json::Value = serde_json::from_str(
-        &unsafe { CStr::from_ptr(result.value) }.to_string_lossy(),
-    ).unwrap();
-    unsafe { thaw_arena::destroy_string(result.value.cast_mut()); }
+    let graph: serde_json::Value =
+        serde_json::from_str(&unsafe { CStr::from_ptr(result.value) }.to_string_lossy()).unwrap();
+    unsafe {
+        thaw_arena::destroy_string(result.value.cast_mut());
+    }
     assert_eq!(graph["nodes"][1]["o"][0][0], "key");
     assert_eq!(graph["nodes"][1]["o"][0][1]["v"], "item");
     assert_eq!(graph["nodes"][1]["o"][1][1]["v"], 7);
@@ -6622,37 +7192,52 @@ fn private_graph_result_preserves_custom_to_json_before_encoding() {
 
 #[test]
 fn private_graph_arguments_do_not_revive_user_marker_shapes() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
       function inspectGraphArguments(real, user, absent, fake) {
         return [real instanceof Date, user instanceof Date,
                 absent === undefined, fake === undefined,
                 user.timestamp, fake.$__thaw_napi_undefined$];
       }
-    "#), 1);
+    "#
+        ),
+        1
+    );
     let graph = c"{\"root\":{\"r\":0},\"nodes\":[{\"a\":[{\"r\":1},{\"r\":2},{\"u\":1},{\"r\":3}]},{\"d\":0},{\"o\":[[\"timestamp\",{\"v\":0}]]},{\"o\":[[\"$__thaw_napi_undefined$\",{\"v\":true}]]}],\"leases\":[]}";
     let result = thaw_js_call_graph_result(c"inspectGraphArguments".as_ptr(), graph.as_ptr());
     assert!(result.error.is_null());
-    let result: serde_json::Value = serde_json::from_str(
-        &unsafe { CStr::from_ptr(result.value) }.to_string_lossy(),
-    ).unwrap();
-    unsafe { thaw_arena::destroy_string(result.value.cast_mut()); }
-    assert_eq!(result["nodes"][0]["a"], serde_json::json!([
-        {"v": true}, {"v": false}, {"v": true}, {"v": false}, {"v": 0}, {"v": true}
-    ]));
+    let decoded: serde_json::Value =
+        serde_json::from_str(&unsafe { CStr::from_ptr(result.value) }.to_string_lossy()).unwrap();
+    unsafe {
+        thaw_arena::destroy_string(result.value.cast_mut());
+    }
+    assert_eq!(
+        decoded["nodes"][0]["a"],
+        serde_json::json!([
+            {"v": true}, {"v": false}, {"v": true}, {"v": false}, {"v": 0}, {"v": true}
+        ])
+    );
 }
 
 #[test]
 fn private_graph_arguments_release_input_leases_before_target_lookup_errors() {
-    assert_eq!(load("globalThis.leaseInput = {}; globalThis.nonCallableLeaseTarget = 1;"), 1);
+    assert_eq!(
+        load("globalThis.leaseInput = {}; globalThis.nonCallableLeaseTarget = 1;"),
+        1
+    );
     for target in ["missingLeaseTarget", "nonCallableLeaseTarget"] {
         let input = thaw_js_get_global(c"leaseInput".as_ptr());
         assert_eq!(thaw_js_retain_handle(input), 1); // one transferred graph lease
         let graph = CString::new(format!(
             r#"{{"root":{{"r":0}},"nodes":[{{"a":[{{"r":1}}]}},{{"hdl":{input}}}],"leases":[{input}]}}"#
         )).unwrap();
-        let result = thaw_js_call_graph_result(CString::new(target).unwrap().as_ptr(), graph.as_ptr());
+        let result =
+            thaw_js_call_graph_result(CString::new(target).unwrap().as_ptr(), graph.as_ptr());
         assert!(!result.error.is_null());
-        unsafe { thaw_arena::destroy_string(result.error.cast_mut()); }
+        unsafe {
+            thaw_arena::destroy_string(result.error.cast_mut());
+        }
         // The ABI entry owns the transferred retain even when the callee is
         // missing or not callable, before the graph decoder is reached.
         assert_eq!(thaw_js_release_handle(input), 1);
@@ -6662,7 +7247,9 @@ fn private_graph_arguments_release_input_leases_before_target_lookup_errors() {
 
 #[test]
 fn private_graph_property_setter_runs_before_result_encoding() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
         globalThis.graphAssignmentOrder = '';
         globalThis.graphAssignmentTarget = {};
         Object.defineProperty(graphAssignmentTarget, 'field', {
@@ -6672,16 +7259,22 @@ fn private_graph_property_setter_runs_before_result_encoding() {
           toJSON() { graphAssignmentOrder += 'J'; return { value: 1 }; }
         };
         globalThis.getGraphAssignmentOrder = () => graphAssignmentOrder;
-    "#), 1);
+    "#
+        ),
+        1
+    );
     let target = thaw_js_get_global(c"graphAssignmentTarget".as_ptr());
     let value = thaw_js_get_global(c"graphAssignmentValue".as_ptr());
     assert_eq!(thaw_js_retain_handle(value), 1);
     let graph = CString::new(format!(
         r#"{{"root":{{"r":0}},"nodes":[{{"a":[{{"r":1}}]}},{{"hdl":{value}}}],"leases":[{value}]}}"#
-    )).unwrap();
+    ))
+    .unwrap();
     let result = thaw_js_set_property_json_graph_result(target, c"field".as_ptr(), graph.as_ptr());
     assert!(!result.error.is_null());
-    unsafe { thaw_arena::destroy_string(result.error.cast_mut()); }
+    unsafe {
+        thaw_arena::destroy_string(result.error.cast_mut());
+    }
     assert_eq!(call("getGraphAssignmentOrder", "[]"), "\"S\"");
     assert_eq!(thaw_js_release_handle(value), 1);
     assert_eq!(thaw_js_release_handle(value), 0);
@@ -6695,18 +7288,22 @@ fn private_graph_arguments_release_input_leases_after_success() {
     assert_eq!(thaw_js_retain_handle(input), 1);
     let graph = CString::new(format!(
         r#"{{"root":{{"r":0}},"nodes":[{{"a":[{{"r":1}}]}},{{"hdl":{input}}}],"leases":[{input}]}}"#
-    )).unwrap();
+    ))
+    .unwrap();
     let result = thaw_js_call_graph_result(c"acceptLeaseInput".as_ptr(), graph.as_ptr());
     assert!(result.error.is_null());
-    unsafe { thaw_arena::destroy_string(result.value.cast_mut()); }
+    unsafe {
+        thaw_arena::destroy_string(result.value.cast_mut());
+    }
     assert_eq!(thaw_js_release_handle(input), 1);
     assert_eq!(thaw_js_release_handle(input), 0);
 }
 
-
 #[test]
 fn private_bigint_graph_token_requires_full_decimal_consumption() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
       function inspectBigIntGraphToken() {
         const decode = text => __thaw_json_graph_decode({ root: { bi: text }, nodes: [] });
         const exact = String(decode('9007199254740993'));
@@ -6716,9 +7313,14 @@ fn private_bigint_graph_token_requires_full_decimal_consumption() {
           catch (error) { return error instanceof TypeError; }
         })];
       }
-    "#), 1);
-    assert_eq!(call("inspectBigIntGraphToken", "[]"),
-        r#"["9007199254740993",true,true,true,true,true,true]"#);
+    "#
+        ),
+        1
+    );
+    assert_eq!(
+        call("inspectBigIntGraphToken", "[]"),
+        r#"["9007199254740993",true,true,true,true,true,true]"#
+    );
 }
 
 #[test]
@@ -6730,22 +7332,33 @@ fn dynamic_property_receiver_rejects_null_and_undefined_but_boxes_strings() {
     let null_result = thaw_js_get_property_result(null_handle.value, property.as_ptr());
     assert_eq!(null_result.value, 0);
     assert!(!null_result.error.is_null());
-    assert!(unsafe { CStr::from_ptr(null_result.error) }.to_string_lossy().starts_with("\u{1}TypeError\u{1}"));
+    assert!(unsafe { CStr::from_ptr(null_result.error) }
+        .to_string_lossy()
+        .starts_with("\u{1}TypeError\u{1}"));
     let key_json = CString::new("\"length\"").unwrap();
-    let json_key_result = thaw_js_get_property_json_key_result(null_handle.value, key_json.as_ptr());
+    let json_key_result =
+        thaw_js_get_property_json_key_result(null_handle.value, key_json.as_ptr());
     assert!(!json_key_result.error.is_null());
-    assert!(unsafe { CStr::from_ptr(json_key_result.error) }.to_string_lossy().starts_with("\u{1}TypeError\u{1}"));
+    assert!(unsafe { CStr::from_ptr(json_key_result.error) }
+        .to_string_lossy()
+        .starts_with("\u{1}TypeError\u{1}"));
 
-    assert_eq!(load("globalThis.__thaw_undefined_receiver = () => undefined"), 1);
+    assert_eq!(
+        load("globalThis.__thaw_undefined_receiver = () => undefined"),
+        1
+    );
     let function = CString::new("__thaw_undefined_receiver").unwrap();
     let function_handle = thaw_js_get_global(function.as_ptr());
     let empty = CString::new("[]").unwrap();
     let undefined_handle = thaw_js_call_handle_handle_result(function_handle, empty.as_ptr(), true);
     assert!(undefined_handle.error.is_null());
     let method = CString::new("toString").unwrap();
-    let undefined_result = thaw_js_call_method_result(undefined_handle.value, method.as_ptr(), empty.as_ptr());
+    let undefined_result =
+        thaw_js_call_method_result(undefined_handle.value, method.as_ptr(), empty.as_ptr());
     assert!(!undefined_result.error.is_null());
-    assert!(unsafe { CStr::from_ptr(undefined_result.error) }.to_string_lossy().starts_with("\u{1}TypeError\u{1}"));
+    assert!(unsafe { CStr::from_ptr(undefined_result.error) }
+        .to_string_lossy()
+        .starts_with("\u{1}TypeError\u{1}"));
 
     let text = CString::new("\"abc\"").unwrap();
     let string_handle = thaw_js_retain_json_result(text.as_ptr());
@@ -6756,7 +7369,10 @@ fn dynamic_property_receiver_rejects_null_and_undefined_but_boxes_strings() {
     let predicate_handle = thaw_js_get_global(predicate.as_ptr());
     let checked = thaw_js_call_handle_value_result(predicate_handle, length.value);
     assert!(checked.error.is_null());
-    assert_eq!(unsafe { CStr::from_ptr(checked.value) }.to_str().unwrap(), "true");
+    assert_eq!(
+        unsafe { CStr::from_ptr(checked.value) }.to_str().unwrap(),
+        "true"
+    );
     unsafe {
         thaw_arena::destroy_string(null_result.error.cast_mut());
         thaw_arena::destroy_string(json_key_result.error.cast_mut());
@@ -6786,7 +7402,9 @@ fn dynamic_reflect_predicates_preserve_thrown_error_class() {
     let delete = thaw_js_delete_property_result(handle, key.as_ptr());
     assert_eq!(delete.value, 0);
     assert!(!delete.error.is_null());
-    assert!(unsafe { CStr::from_ptr(delete.error) }.to_string_lossy().starts_with("\u{1}RangeError\u{1}\u{1e}E1:"));
+    assert!(unsafe { CStr::from_ptr(delete.error) }
+        .to_string_lossy()
+        .starts_with("\u{1}RangeError\u{1}\u{1e}E1:"));
     unsafe {
         thaw_arena::destroy_string(has.error.cast_mut());
         thaw_arena::destroy_string(delete.error.cast_mut());
@@ -6809,7 +7427,10 @@ fn process_report_result_preserves_listener_error_and_ordered_event_identity() {
     assert_eq!(rejection.value, 0);
     assert!(!rejection.error.is_null());
     let error = unsafe { CStr::from_ptr(rejection.error) }.to_string_lossy();
-    assert!(error.starts_with("\u{1}RangeError\u{1}\u{1e}E1:"), "{error}");
+    assert!(
+        error.starts_with("\u{1}RangeError\u{1}\u{1e}E1:"),
+        "{error}"
+    );
     unsafe { thaw_arena::destroy_string(rejection.error.cast_mut()) };
 
     let handled = thaw_js_emit_rejection_handled_result();
@@ -6827,8 +7448,18 @@ fn process_report_result_keeps_embedded_nul_from_thrown_listener() {
     assert!(!result.error.is_null());
     let bytes = unsafe { CStr::from_ptr(result.error) }.to_bytes();
     assert!(bytes.starts_with(b"\x01TypeError\x01"), "{bytes:?}");
-    assert!(bytes.windows(b"left\0right".len()).any(|part| part == b"left\0right"), "{bytes:?}");
-    assert!(bytes.windows(b"ERR_NUL".len()).any(|part| part == b"ERR_NUL"), "{bytes:?}");
+    assert!(
+        bytes
+            .windows(b"left\0right".len())
+            .any(|part| part == b"left\0right"),
+        "{bytes:?}"
+    );
+    assert!(
+        bytes
+            .windows(b"ERR_NUL".len())
+            .any(|part| part == b"ERR_NUL"),
+        "{bytes:?}"
+    );
     unsafe { thaw_arena::destroy_string(result.error.cast_mut()) };
     assert_eq!(load("process.off('unhandledRejection', globalThis.__thawNulListener); delete globalThis.__thawNulListener;"), 1);
 }
@@ -6841,7 +7472,10 @@ fn uncaught_result_reads_owned_native_text_past_embedded_nul() {
     unsafe { thaw_arena::destroy_string(message) };
     assert_eq!(result.value, 1);
     assert!(result.error.is_null());
-    assert_eq!(eval_json("nativeNulError"), Ok(Some("\"left\\u0000right\"".into())));
+    assert_eq!(
+        eval_json("nativeNulError"),
+        Ok(Some("\"left\\u0000right\"".into()))
+    );
 }
 
 #[cfg(feature = "tls")]
@@ -6868,16 +7502,49 @@ fn tls_client_and_accepted_server_handles_remain_independent() {
     let cert_der_path = dir.join("cert.der");
     let key_der_path = dir.join("key.der");
     assert!(Command::new("openssl")
-        .args(["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1", "-subj", "/CN=localhost", "-addext", "subjectAltName=DNS:localhost,IP:127.0.0.1", "-addext", "basicConstraints=critical,CA:FALSE", "-addext", "keyUsage=critical,digitalSignature,keyEncipherment", "-addext", "extendedKeyUsage=serverAuth", "-keyout"])
-        .arg(&key_pem).arg("-out").arg(&cert_pem).output().unwrap().status.success());
+        .args([
+            "req",
+            "-x509",
+            "-newkey",
+            "rsa:2048",
+            "-nodes",
+            "-days",
+            "1",
+            "-subj",
+            "/CN=localhost",
+            "-addext",
+            "subjectAltName=DNS:localhost,IP:127.0.0.1",
+            "-addext",
+            "basicConstraints=critical,CA:FALSE",
+            "-addext",
+            "keyUsage=critical,digitalSignature,keyEncipherment",
+            "-addext",
+            "extendedKeyUsage=serverAuth",
+            "-keyout"
+        ])
+        .arg(&key_pem)
+        .arg("-out")
+        .arg(&cert_pem)
+        .output()
+        .unwrap()
+        .status
+        .success());
     assert!(Command::new("openssl")
-        .args(["x509", "-in"]).arg(&cert_pem)
-        .args(["-outform", "DER", "-out"]).arg(&cert_der_path)
-        .status().unwrap().success());
+        .args(["x509", "-in"])
+        .arg(&cert_pem)
+        .args(["-outform", "DER", "-out"])
+        .arg(&cert_der_path)
+        .status()
+        .unwrap()
+        .success());
     assert!(Command::new("openssl")
-        .args(["pkcs8", "-topk8", "-nocrypt", "-in"]).arg(&key_pem)
-        .args(["-outform", "DER", "-out"]).arg(&key_der_path)
-        .status().unwrap().success());
+        .args(["pkcs8", "-topk8", "-nocrypt", "-in"])
+        .arg(&key_pem)
+        .args(["-outform", "DER", "-out"])
+        .arg(&key_der_path)
+        .status()
+        .unwrap()
+        .success());
     let cert_der = std::fs::read(&cert_der_path).unwrap();
     let key_der = std::fs::read(&key_der_path).unwrap();
     let cert_hex = hex_encode(&cert_der);
@@ -6885,14 +7552,19 @@ fn tls_client_and_accepted_server_handles_remain_independent() {
     let certificate = CertificateDer::from(cert_der.clone());
     let mut external_server_config = rustls::ServerConfig::builder()
         .with_no_client_auth()
-        .with_single_cert(vec![certificate.clone()], PrivatePkcs8KeyDer::from(key_der.clone()).into())
+        .with_single_cert(
+            vec![certificate.clone()],
+            PrivatePkcs8KeyDer::from(key_der.clone()).into(),
+        )
         .unwrap();
     external_server_config.alpn_protocols = vec![b"h2".to_vec()];
     let external_listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let external_port = external_listener.local_addr().unwrap().port();
     let external_server = std::thread::spawn(move || {
         let (socket, _) = external_listener.accept().unwrap();
-        socket.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
         let connection = rustls::ServerConnection::new(Arc::new(external_server_config)).unwrap();
         let mut stream = rustls::StreamOwned::new(connection, socket);
         let mut received = [0];
@@ -6903,16 +7575,28 @@ fn tls_client_and_accepted_server_handles_remain_independent() {
         stream.flush().unwrap();
     });
     let client_result = tls_connect(TlsClientOptions {
-        host: "127.0.0.1", port: external_port, server_name: "localhost",
-        ca_spec: &cert_hex, cert_spec: "", key_spec: "", alpn_spec: "6832",
-        report_alpn: true, reject_unauthorized: true,
+        host: "127.0.0.1",
+        port: external_port,
+        server_name: "localhost",
+        ca_spec: &cert_hex,
+        cert_spec: "",
+        key_spec: "",
+        alpn_spec: "6832",
+        report_alpn: true,
+        reject_unauthorized: true,
     });
     assert!(client_result.starts_with("ok:"), "{client_result}");
     let client_handle: u32 = client_result.split(':').nth(1).unwrap().parse().unwrap();
 
     let listener_result = tls_server_listen(TlsServerOptions {
-        host: "127.0.0.1", port: 0, cert_spec: &cert_hex, key_spec: &key_hex,
-        ca_spec: "", request_cert: false, reject_unauthorized: true, alpn_spec: "687474702f312e31",
+        host: "127.0.0.1",
+        port: 0,
+        cert_spec: &cert_hex,
+        key_spec: &key_hex,
+        ca_spec: "",
+        request_cert: false,
+        reject_unauthorized: true,
+        alpn_spec: "687474702f312e31",
     });
     assert!(listener_result.starts_with("ok:"), "{listener_result}");
     let listener_handle: u32 = listener_result.split(':').nth(1).unwrap().parse().unwrap();
@@ -6920,14 +7604,19 @@ fn tls_client_and_accepted_server_handles_remain_independent() {
     let mut roots = rustls::RootCertStore::empty();
     roots.add(certificate).unwrap();
     let mut external_client_config = rustls::ClientConfig::builder()
-        .with_root_certificates(roots).with_no_client_auth();
+        .with_root_certificates(roots)
+        .with_no_client_auth();
     external_client_config.alpn_protocols = vec![b"http/1.1".to_vec()];
     let external_client = std::thread::spawn(move || {
         let socket = TcpStream::connect(("127.0.0.1", listener_port)).unwrap();
-        socket.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
         let connection = rustls::ClientConnection::new(
-            Arc::new(external_client_config), ServerName::try_from("localhost".to_string()).unwrap()
-        ).unwrap();
+            Arc::new(external_client_config),
+            ServerName::try_from("localhost".to_string()).unwrap(),
+        )
+        .unwrap();
         let mut stream = rustls::StreamOwned::new(connection, socket);
         let mut received = [0];
         stream.read_exact(&mut received).unwrap();
@@ -6952,7 +7641,9 @@ fn tls_client_and_accepted_server_handles_remain_independent() {
     fn read_byte(handle: u32) -> String {
         for _ in 0..1000 {
             let result = tls_poll_read(handle);
-            if result != "pending" { return result; }
+            if result != "pending" {
+                return result;
+            }
             std::thread::sleep(Duration::from_millis(1));
         }
         panic!("TLS read timed out");
@@ -6981,7 +7672,8 @@ fn tls_client_and_accepted_server_handles_remain_independent() {
 #[test]
 fn worker_transport_codec_preserves_sparse_array_slots_and_graph_references() {
     assert_eq!(
-        load(r#"function sparseWorkerTransport() {
+        load(
+            r#"function sparseWorkerTransport() {
             const sparse = new Array(6);
             sparse[1] = undefined;
             sparse[3] = sparse;
@@ -6993,7 +7685,8 @@ fn worker_transport_codec_preserves_sparse_array_slots_and_graph_references() {
                 copy.sparse[1] === undefined, copy.sparse[3] === copy.sparse,
                 copy.map.get('value') === copy.sparse, copy.set.has(copy.sparse),
                 empty.length, Object.keys(empty).length];
-        }"#),
+        }"#
+        ),
         1
     );
     assert_eq!(
@@ -7005,7 +7698,8 @@ fn worker_transport_codec_preserves_sparse_array_slots_and_graph_references() {
 #[test]
 fn event_target_skips_listeners_removed_during_dispatch() {
     assert_eq!(
-        load(r#"function removedDuringDispatch() {
+        load(
+            r#"function removedDuringDispatch() {
             const removed = new EventTarget(), removedCalls = [];
             const oldB = () => removedCalls.push('b');
             removed.addEventListener('work', () => { removedCalls.push('a'); removed.removeEventListener('work', oldB); });
@@ -7044,7 +7738,8 @@ fn event_target_skips_listeners_removed_during_dispatch() {
             changed.dispatchEvent(new Event('work'));
             changed.dispatchEvent(new Event('work'));
             return [removedCalls.join(','), firstDispatch, readdedCalls.join(','), onceCount, changedCalls.join(',')];
-        }"#),
+        }"#
+        ),
         1
     );
     assert_eq!(
@@ -7056,7 +7751,8 @@ fn event_target_skips_listeners_removed_during_dispatch() {
 #[test]
 fn atomics_notify_nonshared_waitable_arrays_delegate_to_native() {
     assert_eq!(
-        load(r#"function notifyNonsharedWaitable() {
+        load(
+            r#"function notifyNonsharedWaitable() {
             const ordinary = new Int32Array(1);
             let countCalls = 0;
             const count = { valueOf() { countCalls++; return 1; } };
@@ -7073,7 +7769,8 @@ fn atomics_notify_nonshared_waitable_arrays_delegate_to_native() {
             const shared = new Int32Array(new SharedArrayBuffer(4));
             return [direct, counted, countCalls, invalidIndex, nonsharedWait,
                 bigInt64, Atomics.notify(shared, 0), Atomics.waitAsync(shared, 0, 1).value];
-        }"#),
+        }"#
+        ),
         1
     );
     assert_eq!(
@@ -7093,16 +7790,31 @@ fn native_callback_cross_mode_identity_survives_released_handle() {
     let first_context = &1u8 as *const u8 as *const c_void;
     let other_context = &2u8 as *const u8 as *const c_void;
     let ordinary = thaw_js_register_native_callback(
-        callback as *const c_void, first_context, 0, 0, 0,
-        std::ptr::null(), 0,
+        callback as *const c_void,
+        first_context,
+        0,
+        0,
+        0,
+        std::ptr::null(),
+        0,
     );
     let graph = thaw_js_register_native_callback_graph(
-        callback as *const c_void, first_context, 0, 0, 0,
-        std::ptr::null(), 0,
+        callback as *const c_void,
+        first_context,
+        0,
+        0,
+        0,
+        std::ptr::null(),
+        0,
     );
     let unrelated = thaw_js_register_native_callback(
-        callback as *const c_void, other_context, 0, 0, 0,
-        std::ptr::null(), 0,
+        callback as *const c_void,
+        other_context,
+        0,
+        0,
+        0,
+        std::ptr::null(),
+        0,
     );
     assert!(ordinary.error.is_null() && graph.error.is_null() && unrelated.error.is_null());
     assert_ne!(ordinary.value, graph.value);
@@ -7111,21 +7823,36 @@ fn native_callback_cross_mode_identity_survives_released_handle() {
         let graph_value = value_for_handle(&ctx, graph.value).unwrap();
         let other = value_for_handle(&ctx, unrelated.value).unwrap();
         let query: Function = ctx.globals().get("__thaw_same_native_callback").unwrap();
-        assert!(query.call::<_, bool>((first.clone(), graph_value.clone())).unwrap());
-        assert!(query.call::<_, bool>((graph_value.clone(), first.clone())).unwrap());
+        assert!(query
+            .call::<_, bool>((first.clone(), graph_value.clone()))
+            .unwrap());
+        assert!(query
+            .call::<_, bool>((graph_value.clone(), first.clone()))
+            .unwrap());
         let strict: Function = ctx.globals().get("__thaw_strict_equal_dynamic").unwrap();
         let loose: Function = ctx.globals().get("__thaw_native_loose_equal").unwrap();
-        assert!(strict.call::<_, bool>((first.clone(), graph_value.clone(), 3.0, 0.0)).unwrap());
-        assert!(loose.call::<_, bool>((graph_value.clone(), first.clone(), 0.0, 3.0)).unwrap());
+        assert!(strict
+            .call::<_, bool>((first.clone(), graph_value.clone(), 3.0, 0.0))
+            .unwrap());
+        assert!(loose
+            .call::<_, bool>((graph_value.clone(), first.clone(), 0.0, 3.0))
+            .unwrap());
         assert!(!query.call::<_, bool>((first.clone(), other)).unwrap());
         let holder = Object::new(ctx.clone()).unwrap();
         holder.set("saved", graph_value).unwrap();
-        ctx.globals().set("__thaw_saved_callback_holder", holder).unwrap();
+        ctx.globals()
+            .set("__thaw_saved_callback_holder", holder)
+            .unwrap();
     });
     assert_eq!(thaw_js_release_handle(graph.value), 1);
     let replacement = thaw_js_register_native_callback_graph(
-        callback as *const c_void, other_context, 0, 0, 0,
-        std::ptr::null(), 0,
+        callback as *const c_void,
+        other_context,
+        0,
+        0,
+        0,
+        std::ptr::null(),
+        0,
     );
     assert!(replacement.error.is_null());
     // The freed numeric slot can be reused for another closure; the saved
@@ -7138,22 +7865,37 @@ fn native_callback_cross_mode_identity_survives_released_handle() {
         let saved: Value = holder.get("saved").unwrap();
         let reacquired = retain_value(&ctx, saved.clone()).unwrap();
         let query: Function = ctx.globals().get("__thaw_same_native_callback").unwrap();
-        assert!(query.call::<_, bool>((first.clone(), saved.clone())).unwrap());
+        assert!(query
+            .call::<_, bool>((first.clone(), saved.clone()))
+            .unwrap());
         assert!(!query.call::<_, bool>((first, replacement_value)).unwrap());
-        assert!(query.call::<_, bool>((saved.clone(), value_for_handle(&ctx, reacquired).unwrap())).unwrap());
-        assert!(!query.call::<_, bool>((saved.clone(), Value::new_undefined(ctx.clone()))).unwrap());
-        let descriptor: Object = ctx.globals().get::<_, Object>("Object").unwrap()
-            .get::<_, Function>("getOwnPropertyDescriptor").unwrap()
-            .call((ctx.globals(), "__thaw_same_native_callback")).unwrap();
+        assert!(query
+            .call::<_, bool>((saved.clone(), value_for_handle(&ctx, reacquired).unwrap()))
+            .unwrap());
+        assert!(!query
+            .call::<_, bool>((saved.clone(), Value::new_undefined(ctx.clone())))
+            .unwrap());
+        let descriptor: Object = ctx
+            .globals()
+            .get::<_, Object>("Object")
+            .unwrap()
+            .get::<_, Function>("getOwnPropertyDescriptor")
+            .unwrap()
+            .call((ctx.globals(), "__thaw_same_native_callback"))
+            .unwrap();
         assert!(!descriptor.get::<_, bool>("writable").unwrap());
         assert!(!descriptor.get::<_, bool>("configurable").unwrap());
-        ctx.globals().set("__thaw_saved_callback_holder", Value::new_undefined(ctx)).unwrap();
+        ctx.globals()
+            .set("__thaw_saved_callback_holder", Value::new_undefined(ctx))
+            .unwrap();
     });
 }
 
 #[test]
 fn result_error_abi_keeps_embedded_nul_in_throw_rejection_and_getter() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
         function throwNulResult() {
             const error = new TypeError('left\u0000right');
             error.code = 'ERR_NUL';
@@ -7166,36 +7908,54 @@ fn result_error_abi_keeps_embedded_nul_in_throw_rejection_and_getter() {
         globalThis.nulGetterResult = {
             get value() { throw new TypeError('getter\u0000body'); }
         };
-    "#), 1);
+    "#
+        ),
+        1
+    );
     let thrown = thaw_js_call_result(c"throwNulResult".as_ptr(), c"[]".as_ptr());
     assert!(thrown.value.is_null());
     let bytes = unsafe { CStr::from_ptr(thrown.error) }.to_bytes();
     let frame = thaw_arena::error_wire::parse_tagged(bytes).unwrap();
     assert_eq!(frame.chain, b"TypeError");
-    assert!(frame.display.windows(b"left\0right".len()).any(|part| part == b"left\0right"));
+    assert!(frame
+        .display
+        .windows(b"left\0right".len())
+        .any(|part| part == b"left\0right"));
     assert_eq!(frame.original, None);
-    assert!(frame.suffix.windows(b"ERR_NUL".len()).any(|part| part == b"ERR_NUL"));
-    assert!(frame.suffix.windows(b"418".len()).any(|part| part == b"418"));
+    assert!(frame
+        .suffix
+        .windows(b"ERR_NUL".len())
+        .any(|part| part == b"ERR_NUL"));
+    assert!(frame
+        .suffix
+        .windows(b"418".len())
+        .any(|part| part == b"418"));
     unsafe { thaw_arena::destroy_string(thrown.error.cast_mut()) };
 
     let rejected = thaw_js_call_result(c"rejectNulResult".as_ptr(), c"[]".as_ptr());
     assert!(rejected.value.is_null());
     let bytes = unsafe { CStr::from_ptr(rejected.error) }.to_bytes();
-    assert!(bytes.windows(b"reject\0body".len()).any(|part| part == b"reject\0body"));
+    assert!(bytes
+        .windows(b"reject\0body".len())
+        .any(|part| part == b"reject\0body"));
     unsafe { thaw_arena::destroy_string(rejected.error.cast_mut()) };
 
     let handle = thaw_js_get_global(c"nulGetterResult".as_ptr());
     let getter = thaw_js_get_property_result(handle, c"value".as_ptr());
     assert_eq!(getter.value, 0);
     let bytes = unsafe { CStr::from_ptr(getter.error) }.to_bytes();
-    assert!(bytes.windows(b"getter\0body".len()).any(|part| part == b"getter\0body"));
+    assert!(bytes
+        .windows(b"getter\0body".len())
+        .any(|part| part == b"getter\0body"));
     unsafe { thaw_arena::destroy_string(getter.error.cast_mut()) };
     assert_eq!(thaw_js_release_handle(handle), 1);
 }
 
 #[test]
 fn graph_replacer_uses_its_holder_without_reading_callable_call_property() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
       function inspectGraphReplacerCallProperty() {
         const value = { item: 3 };
         let callReads = 0;
@@ -7209,26 +7969,36 @@ fn graph_replacer_uses_its_holder_without_reading_callable_call_property() {
         const output = __thaw_json_stringify_replacer(value, null, replacer);
         return [output, callReads];
       }
-    "#), 1);
-    assert_eq!(call("inspectGraphReplacerCallProperty", "[]"),
-        r#"["{\"item\":3}",0]"#);
+    "#
+        ),
+        1
+    );
+    assert_eq!(
+        call("inspectGraphReplacerCallProperty", "[]"),
+        r#"["{\"item\":3}",0]"#
+    );
 }
-
 
 #[test]
 fn tagged_error_reconstruction_reads_versioned_and_legacy_ancestry_names() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
       function inspectAncestryNames() {
         const versioned = __thaw_error_from_tagged(
           '\u0001\u001eLeaf\u001fBase$Name\u001fError\u0001failure');
         const legacy = __thaw_error_from_tagged('\u0001Leaf$Base$Error\u0001failure');
         return [versioned.name, versioned.message, legacy.name, legacy.message];
       }
-    "#), 1);
-    assert_eq!(call("inspectAncestryNames", "[]"),
-        r#"["Leaf","failure","Leaf","failure"]"#);
+    "#
+        ),
+        1
+    );
+    assert_eq!(
+        call("inspectAncestryNames", "[]"),
+        r#"["Leaf","failure","Leaf","failure"]"#
+    );
 }
-
 
 #[test]
 fn typed_callback_origin_registration_returns_the_original_js_function() {
@@ -7237,19 +8007,33 @@ fn typed_callback_origin_registration_returns_the_original_js_function() {
             fn thaw_json_register_callback_origin(closure: *const u8, handle: u64) -> u8;
         }
         unsafe extern "C" fn callback(
-            _context: *const c_void, _arguments: *const c_char,
-        ) -> *const c_char { c"null".as_ptr() }
-        assert_eq!(load("globalThis.__thaw_origin_test = function () { return 42; }"), 1);
+            _context: *const c_void,
+            _arguments: *const c_char,
+        ) -> *const c_char {
+            c"null".as_ptr()
+        }
+        assert_eq!(
+            load("globalThis.__thaw_origin_test = function () { return 42; }"),
+            1
+        );
         let original = with_context(|ctx| {
             let value: Value = ctx.globals().get("__thaw_origin_test").unwrap();
             retain_value(&ctx, value).unwrap()
         });
         let closure = thaw_arena::thaw_arena_alloc(24, 8);
         assert!(!closure.is_null());
-        assert_eq!(unsafe { thaw_json_register_callback_origin(closure, original) }, 1);
+        assert_eq!(
+            unsafe { thaw_json_register_callback_origin(closure, original) },
+            1
+        );
         let restored = thaw_js_register_native_callback_graph(
-            callback as *const c_void, closure.cast(), 0, 0, 0,
-            std::ptr::null(), 0,
+            callback as *const c_void,
+            closure.cast(),
+            0,
+            0,
+            0,
+            std::ptr::null(),
+            0,
         );
         assert!(restored.error.is_null());
         with_context(|ctx| {
@@ -7260,46 +8044,67 @@ fn typed_callback_origin_registration_returns_the_original_js_function() {
         });
         assert_eq!(thaw_js_release_handle(restored.value), 1);
         with_context(|ctx| assert!(value_for_handle(&ctx, original).is_ok()));
-    }).join().unwrap();
+    })
+    .join()
+    .unwrap();
 }
-
 
 #[test]
 fn callback_origin_type_check_ignores_mutable_host_query_global() {
     std::thread::spawn(|| {
-        assert_eq!(load(r#"
+        assert_eq!(
+            load(
+                r#"
             globalThis.__thaw_origin_object = {};
             globalThis.__thaw_origin_callable = new Proxy(function () {}, {});
             globalThis.__thaw_json_host_query = () => '1';
-        "#), 1);
+        "#
+            ),
+            1
+        );
         let (object, callable) = with_context(|ctx| {
             let object: Value = ctx.globals().get("__thaw_origin_object").unwrap();
             let callable: Value = ctx.globals().get("__thaw_origin_callable").unwrap();
-            (retain_value(&ctx, object).unwrap(), retain_value(&ctx, callable).unwrap())
+            (
+                retain_value(&ctx, object).unwrap(),
+                retain_value(&ctx, callable).unwrap(),
+            )
         });
         let spoofed = thaw_js_host_query_result(object, 0);
         assert!(spoofed.error.is_null());
-        assert_eq!(unsafe { CStr::from_ptr(spoofed.value) }.to_string_lossy(), "1");
+        assert_eq!(
+            unsafe { CStr::from_ptr(spoofed.value) }.to_string_lossy(),
+            "1"
+        );
         unsafe { thaw_arena::destroy_string(spoofed.value.cast_mut()) };
         let rejected = thaw_js_host_query_result(object, 14);
         let accepted = thaw_js_host_query_result(callable, 14);
         assert!(rejected.error.is_null() && accepted.error.is_null());
-        assert_eq!(unsafe { CStr::from_ptr(rejected.value) }.to_string_lossy(), "0");
-        assert_eq!(unsafe { CStr::from_ptr(accepted.value) }.to_string_lossy(), "1");
+        assert_eq!(
+            unsafe { CStr::from_ptr(rejected.value) }.to_string_lossy(),
+            "0"
+        );
+        assert_eq!(
+            unsafe { CStr::from_ptr(accepted.value) }.to_string_lossy(),
+            "1"
+        );
         unsafe {
             thaw_arena::destroy_string(rejected.value.cast_mut());
             thaw_arena::destroy_string(accepted.value.cast_mut());
         }
         assert_eq!(thaw_js_release_handle(object), 1);
         assert_eq!(thaw_js_release_handle(callable), 1);
-    }).join().unwrap();
+    })
+    .join()
+    .unwrap();
 }
-
 
 #[cfg(feature = "intl")]
 #[test]
 fn intl_datetime_resolved_hour_cycle_matches_locale_and_midnight() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
         function cycles() {
             return ['en-US', 'de', 'en-US-u-hc-h23', 'de-u-hc-h12', 'en-US-u-hc-h24']
                 .map(locale => {
@@ -7315,19 +8120,34 @@ fn intl_datetime_resolved_hour_cycle_matches_locale_and_midnight() {
             return [d.resolvedOptions().hourCycle,
                 d.formatToParts(new Date(Date.UTC(2024, 0, 1, 0))).find(p => p.type === 'hour').value];
         }
-    "#), 1);
-    assert_eq!(call("cycles", "[]"), serde_json::json!([
-        ["h12", true, "12"], ["h23", false, "00"], ["h23", false, "00"],
-        ["h12", true, "12"], ["h24", false, "24"]
-    ]).to_string());
-    assert_eq!(call("localizedMidnight", "[]"), serde_json::json!(["h24", "٢٤"]).to_string());
+    "#
+        ),
+        1
+    );
+    assert_eq!(
+        call("cycles", "[]"),
+        serde_json::json!([
+            ["h12", true, "12"],
+            ["h23", false, "00"],
+            ["h23", false, "00"],
+            ["h12", true, "12"],
+            ["h24", false, "24"]
+        ])
+        .to_string()
+    );
+    assert_eq!(
+        call("localizedMidnight", "[]"),
+        serde_json::json!(["h24", "٢٤"]).to_string()
+    );
 }
 
 // Unrun: the live-key predicate must use its bootstrap parser and Reflect
 // intrinsics even after a script replaces the public JSON/Object/Reflect API.
 #[test]
 fn live_host_key_predicate_uses_captured_intrinsics() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
         globalThis.nativeKeyTarget = Object.create({ inherited: 1 });
         nativeKeyTarget.own = 2;
         globalThis.nativeKeySymbol = Symbol('live');
@@ -7342,7 +8162,10 @@ fn live_host_key_predicate_uses_captured_intrinsics() {
             Object.defineProperty(globalThis, '__thaw_json_host_key_predicate',
                 { value: () => false });
         } catch (_) {}
-    "#), 1);
+    "#
+        ),
+        1
+    );
     let object = thaw_js_get_global(c"nativeKeyTarget".as_ptr());
     assert_ne!(object, 0);
     for (key, operation, expected) in [
@@ -7364,20 +8187,27 @@ fn live_host_key_predicate_uses_captured_intrinsics() {
         assert!(result.error.is_null());
         assert_eq!(result.value, expected);
     }
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
         [JSON.parse, Reflect.has, Reflect.deleteProperty, Object.hasOwn] =
             savedKeyIntrinsics;
         delete globalThis.savedKeyIntrinsics;
         delete globalThis.nativeKeyTarget;
         delete globalThis.nativeKeySymbol;
-    "#), 1);
+    "#
+        ),
+        1
+    );
     assert_eq!(thaw_js_release_handle(symbol), 1);
     assert_eq!(thaw_js_release_handle(object), 1);
 }
 
 #[test]
 fn private_iterator_helper_keeps_receiver_and_reads_getters_once() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
       globalThis.iteratorIntrinsicObserved = [];
       const source = {
         get [Symbol.iterator]() {
@@ -7406,14 +8236,22 @@ fn private_iterator_helper_keeps_receiver_and_reads_getters_once() {
         && !descriptor.writable && !descriptor.configurable && !replaced
         && globalThis.__thaw_to_iterator === descriptor.value
         && iteratorIntrinsicObserved.join(',') === 'iterator,receiver,next,return';
-    "#), 1);
-    assert_eq!(eval_json("iteratorIntrinsicControl"), Ok(Some("true".into())));
+    "#
+        ),
+        1
+    );
+    assert_eq!(
+        eval_json("iteratorIntrinsicControl"),
+        Ok(Some("true".into()))
+    );
     assert_eq!(load("delete globalThis.iteratorIntrinsicObserved; delete globalThis.iteratorIntrinsicControl;"), 1);
 }
 
 #[test]
 fn response_headers_preserve_immutable_guard_on_clone() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
       function responseHeadersGuard() {
         const response = new Response(null, {headers: {'x-test': 'original'}});
         __thaw_set_response_metadata(response, 'https://example.test/', false);
@@ -7426,14 +8264,21 @@ fn response_headers_preserve_immutable_guard_on_clone() {
         copy.set('x-test', 'copy'); ordinary.headers.set('x-test', 'ordinary');
         return [rejected, response.headers.get('x-test'), copy.get('x-test'), ordinary.headers.get('x-test')];
       }
-    "#), 1);
-    assert_eq!(call("responseHeadersGuard", "[]"),
-        r#"[[true,true,true,true],"original","copy","ordinary"]"#);
+    "#
+        ),
+        1
+    );
+    assert_eq!(
+        call("responseHeadersGuard", "[]"),
+        r#"[[true,true,true,true],"original","copy","ordinary"]"#
+    );
 }
 
 #[test]
 fn request_body_source_survives_copy_and_clone() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
       function requestBodySource() {
         const regular = new Request('https://example.test/', {method: 'POST', body: 'payload'});
         const clone = regular.clone(), copied = new Request(regular);
@@ -7441,14 +8286,22 @@ fn request_body_source_survives_copy_and_clone() {
         const streamClone = streamed.clone(), streamCopy = new Request(streamed);
         return [clone, copied, streamClone, streamCopy, new Request('https://example.test/')].map(__thaw_request_body_replayable);
       }
-    "#), 1);
-    assert_eq!(call("requestBodySource", "[]"), "[true,true,false,false,true]");
+    "#
+        ),
+        1
+    );
+    assert_eq!(
+        call("requestBodySource", "[]"),
+        "[true,true,false,false,true]"
+    );
 }
 
 // Unrun regression: aliases and table reads share one exported function identity.
 #[test]
 fn webassembly_export_aliases_share_function_identity() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
         function wasmExportIdentity() {
             const bytes = new TextEncoder().encode(`(module
                 (func $f (result i32) i32.const 42)
@@ -7473,14 +8326,22 @@ fn webassembly_export_aliases_share_function_identity() {
                 first.exports.a !== second.exports.a,
                 first.exports.a(), first.exports.b()];
         }
-    "#), 1);
-    assert_eq!(call("wasmExportIdentity", "[]"), "[true,true,true,42,true,true,true,true,42,42]");
+    "#
+        ),
+        1
+    );
+    assert_eq!(
+        call("wasmExportIdentity", "[]"),
+        "[true,true,true,42,true,true,true,true,42,42]"
+    );
 }
 
 // Unrun regression: the same scalar conversion governs local and exported globals.
 #[test]
 fn webassembly_global_preserves_numeric_type_boundaries() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
         function wasmGlobalConversion() {
             const rejects = action => { try { action(); return false; } catch (e) { return e instanceof TypeError; } };
             const types = ['i32', 'i64', 'f32', 'f64'];
@@ -7500,16 +8361,21 @@ fn webassembly_global_preserves_numeric_type_boundaries() {
             globals[1].value = { valueOf() { return 18446744073709551617n; } };
             exported.i64.value = '7'; exported.i32.value = '9';
             return [constructorChecks, localChecks, exportedChecks, immutable, conversions, globals[1].value.toString(), exported.i64.value.toString(), exported.i32.value,
-                rejects(() => new WebAssembly.Global({ value: 'i64' }, undefined)), new WebAssembly.Global({ value: 'externref' }).value === null];
+                rejects(() => new WebAssembly.Global({ value: 'i64' }, undefined)), new WebAssembly.Global({ value: 'externref' }).value === undefined];
         }
-    "#), 1);
+    "#
+        ),
+        1
+    );
     assert_eq!(call("wasmGlobalConversion", "[]"), "[[true,true,true,true],[true,true,true,true],[true,true,true,true],true,0,\"1\",\"7\",9,true,true]");
 }
 
 // Unrun regression: Wasm parameter types govern scalar conversion and externref retention.
 #[test]
 fn webassembly_arguments_use_declared_parameter_types() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
         function wasmArgumentTypes() {
             const bytes = new TextEncoder().encode(`(module
                 (func (export "ref") (param externref) (result externref) local.get 0)
@@ -7524,14 +8390,22 @@ fn webassembly_arguments_use_declared_parameter_types() {
             const values = [exports.int('7'), exports.float(object), exports.int(4294967297), exports.int(), exports.int(9, Symbol('ignored')), exports.wide('18446744073709551617').toString()];
             return [refs, values, coercions, rejects(() => exports.int(1n)), rejects(() => exports.wide(1)), rejects(() => exports.float({ valueOf() { return 1n; } }))];
         }
-    "#), 1);
-    assert_eq!(call("wasmArgumentTypes", "[]"), "[[true,true,true,true,true,true],[7,7,1,0,9,\"1\"],1,true,true,true]");
+    "#
+        ),
+        1
+    );
+    assert_eq!(
+        call("wasmArgumentTypes", "[]"),
+        "[[true,true,true,true,true,true],[7,7,1,0,9,\"1\"],1,true,true,true]"
+    );
 }
 
 // Unrun regression: special floats and primitive externrefs cross Global/Table boundaries.
 #[test]
 fn webassembly_codec_preserves_special_numbers_and_reference_values() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
         function wasmCodecBoundaries() {
             const bytes = new TextEncoder().encode(`(module
                 (import "host" "global" (global $g (mut externref)))
@@ -7552,14 +8426,22 @@ fn webassembly_codec_preserves_special_numbers_and_reference_values() {
             });
             return [initial, refs, floats];
         }
-    "#), 1);
-    assert_eq!(call("wasmCodecBoundaries", "[]"), "[[true,true],[true,true,true],[true,true,true,true]]");
+    "#
+        ),
+        1
+    );
+    assert_eq!(
+        call("wasmCodecBoundaries", "[]"),
+        "[[true,true],[true,true,true],[true,true,true,true]]"
+    );
 }
 
 // Unrun regression: start writes and growth are visible before the first exported call.
 #[test]
 fn webassembly_start_refreshes_imported_memory() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
         function wasmStartMemory() {
             const memory = new WebAssembly.Memory({ initial: 1, maximum: 2 });
             const oldBuffer = memory.buffer;
@@ -7578,14 +8460,19 @@ fn webassembly_start_refreshes_imported_memory() {
             const before = [view[0], view[1], view[65536], oldBuffer.byteLength, memory.buffer.byteLength];
             return [before, instance.exports.read(), new Uint8Array(memory.buffer)[0]];
         }
-    "#), 1);
+    "#
+        ),
+        1
+    );
     assert_eq!(call("wasmStartMemory", "[]"), "[[42,65,8,0,131072],50,42]");
 }
 
 // Unrun regression: memory export aliases share the original object and one sync resource.
 #[test]
 fn webassembly_memory_export_aliases_reuse_original_buffer() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
         function wasmMemoryIdentity() {
             const memory = new WebAssembly.Memory({ initial: 1 });
             const bytes = new TextEncoder().encode(`(module
@@ -7599,14 +8486,22 @@ fn webassembly_memory_export_aliases_reuse_original_buffer() {
                 (memory 0) (export "a" (memory 0)) (export "b" (memory 0)))`))).exports;
             return [exports.a === memory, exports.b === memory, exports.a.buffer === memory.buffer, read, new Uint8Array(memory.buffer)[0], own.a === own.b, own.a !== memory];
         }
-    "#), 1);
-    assert_eq!(call("wasmMemoryIdentity", "[]"), "[true,true,true,73,73,true,true]");
+    "#
+        ),
+        1
+    );
+    assert_eq!(
+        call("wasmMemoryIdentity", "[]"),
+        "[true,true,true,73,73,true,true]"
+    );
 }
 
 // Unrun regression: duplicate imports share native memory and refresh growth once.
 #[test]
 fn webassembly_duplicate_memory_imports_share_one_resource() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
         function wasmMemoryImportAliases() {
             const memory = new WebAssembly.Memory({ initial: 1, maximum: 2 });
             const oldBuffer = memory.buffer;
@@ -7624,14 +8519,22 @@ fn webassembly_duplicate_memory_imports_share_one_resource() {
             new Uint8Array(memory.buffer)[0] = 73;
             return [exports.a === memory, exports.b === memory, oldBuffer.byteLength, memory.buffer.byteLength, before, exports.read()];
         }
-    "#), 1);
-    assert_eq!(call("wasmMemoryImportAliases", "[]"), "[true,true,0,131072,42,73]");
+    "#
+        ),
+        1
+    );
+    assert_eq!(
+        call("wasmMemoryImportAliases", "[]"),
+        "[true,true,0,131072,42,73]"
+    );
 }
 
 // Unrun regression target: an imported JS callback reenters its active instance.
 #[test]
 fn webassembly_import_callback_reenters_same_instance() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
         function wasmReentry() {
             const bytes = new TextEncoder().encode(`(module
                 (import "host" "callback" (func $callback (result i32)))
@@ -7645,14 +8548,19 @@ fn webassembly_import_callback_reenters_same_instance() {
             } } });
             return [instance.exports.outer(), instance.exports.inner()];
         }
-    "#), 1);
+    "#
+        ),
+        1
+    );
     assert_eq!(call("wasmReentry", "[]"), "[42,41]");
 }
 
 // Unrun regression target: result coercion reenters the active Caller.
 #[test]
 fn webassembly_import_result_coercion_reenters_same_instance() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
         function wasmResultReentry() {
             const bytes = new TextEncoder().encode(`(module
                 (import "host" "callback" (func $callback (result i32)))
@@ -7664,14 +8572,19 @@ fn webassembly_import_result_coercion_reenters_same_instance() {
             } } });
             return [instance.exports.outer(), conversions];
         }
-    "#), 1);
+    "#
+        ),
+        1
+    );
     assert_eq!(call("wasmResultReentry", "[]"), "[42,1]");
 }
 
 // Unrun regression target: a start import can call another published instance.
 #[test]
 fn webassembly_start_import_calls_existing_instance() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
         function wasmStartReentry() {
             const firstBytes = new TextEncoder().encode(`(module
                 (func (export "read") (result i32) i32.const 41))`);
@@ -7687,14 +8600,19 @@ fn webassembly_start_import_calls_existing_instance() {
             });
             return [next.exports.read(), first.exports.read()];
         }
-    "#), 1);
+    "#
+        ),
+        1
+    );
     assert_eq!(call("wasmStartReentry", "[]"), "[41,41]");
 }
 
 // Unrun regression target: releasing another instance preserves running externrefs.
 #[test]
 fn webassembly_reentrant_dispose_preserves_externrefs() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
         function wasmDisposeDuringCall() {
             const empty = new TextEncoder().encode('(module)');
             const other = new WebAssembly.Instance(new WebAssembly.Module(empty));
@@ -7709,14 +8627,19 @@ fn webassembly_reentrant_dispose_preserves_externrefs() {
             });
             return instance.exports.read() === value;
         }
-    "#), 1);
+    "#
+        ),
+        1
+    );
     assert_eq!(call("wasmDisposeDuringCall", "[]"), "true");
 }
 
 // Unrun regression target: nested imports use the newest Caller for their Store.
 #[test]
 fn webassembly_nested_import_reentry() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
         function wasmNestedReentry() {
             const bytes = new TextEncoder().encode(`(module
                 (import "host" "callback" (func $callback (param i32) (result i32)))
@@ -7728,14 +8651,19 @@ fn webassembly_nested_import_reentry() {
             } });
             return instance.exports.recurse(2);
         }
-    "#), 1);
+    "#
+        ),
+        1
+    );
     assert_eq!(call("wasmNestedReentry", "[]"), "43");
 }
 
 // Unrun regression target: special export names are own properties on a null prototype.
 #[test]
 fn webassembly_special_export_names() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
         function wasmSpecialExports() {
             const bytes = new TextEncoder().encode(`(module
                 (func $value (result i32) i32.const 42)
@@ -7748,14 +8676,22 @@ fn webassembly_special_export_names() {
                 exports.__proto__(), exports.constructor(),
                 exports.__proto__ === exports.constructor, Object.isFrozen(exports)];
         }
-    "#), 1);
-    assert_eq!(call("wasmSpecialExports", "[]"), "[true,true,42,42,true,true]");
+    "#
+        ),
+        1
+    );
+    assert_eq!(
+        call("wasmSpecialExports", "[]"),
+        "[true,true,42,42,true,true]"
+    );
 }
 
 // Unrun regression target: shared memory remains coherent across native callbacks.
 #[test]
 fn webassembly_shared_memory_cross_instance_callback() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
         function wasmSharedCallback() {
             const memory = new WebAssembly.Memory({ initial: 1, maximum: 2 });
             const readerBytes = new TextEncoder().encode(`(module
@@ -7777,14 +8713,22 @@ fn webassembly_shared_memory_cross_instance_callback() {
             const previousPages = memory.grow(1);
             return afterCallback.concat([previousPages, memory.buffer.byteLength, reader.exports.size()]);
         }
-    "#), 1);
-    assert_eq!(call("wasmSharedCallback", "[]"), "[42,42,42,42,73,1,131072,2]");
+    "#
+        ),
+        1
+    );
+    assert_eq!(
+        call("wasmSharedCallback", "[]"),
+        "[42,42,42,42,73,1,131072,2]"
+    );
 }
 
 // Unrun regression target: an exported memory retains the physical memory after dispose.
 #[test]
 fn webassembly_exported_memory_survives_instance_dispose() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
         function wasmRetainedMemory() {
             const bytes = new TextEncoder().encode(`(module
                 (memory (export "memory") 1 2)
@@ -7798,14 +8742,19 @@ fn webassembly_exported_memory_survives_instance_dispose() {
             const oldPages = memory.grow(1);
             return [before, oldPages, memory.buffer.byteLength, new Uint8Array(memory.buffer)[0]];
         }
-    "#), 1);
+    "#
+        ),
+        1
+    );
     assert_eq!(call("wasmRetainedMemory", "[]"), "[65,1,131072,65]");
 }
 
 // Unrun regression target: successful grow(0) replaces and detaches the buffer.
 #[test]
 fn webassembly_memory_zero_growth_detaches_buffer() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
         function wasmZeroGrowth() {
             const memory = new WebAssembly.Memory({ initial: 1, maximum: 1 });
             const oldBuffer = memory.buffer;
@@ -7817,14 +8766,22 @@ fn webassembly_memory_zero_growth_detaches_buffer() {
             return [previous, oldBuffer.byteLength, current !== oldBuffer,
                 current.byteLength, new Uint8Array(current)[0], failed, memory.buffer === current];
         }
-    "#), 1);
-    assert_eq!(call("wasmZeroGrowth", "[]"), "[1,0,true,65536,91,true,true]");
+    "#
+        ),
+        1
+    );
+    assert_eq!(
+        call("wasmZeroGrowth", "[]"),
+        "[1,0,true,65536,91,true,true]"
+    );
 }
 
 // Unrun regression target: callbacks refresh memory defined by the calling module.
 #[test]
 fn webassembly_internal_memory_callback_coherence() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
         function wasmInternalCallback() {
             const bytes = new TextEncoder().encode(`(module
                 (import "host" "callback" (func $callback))
@@ -7840,14 +8797,19 @@ fn webassembly_internal_memory_callback_coherence() {
             memory = instance.exports.memory;
             return [instance.exports.writeAndCall(), observed, new Uint8Array(memory.buffer)[1]];
         }
-    "#), 1);
+    "#
+        ),
+        1
+    );
     assert_eq!(call("wasmInternalCallback", "[]"), "[73,42,73]");
 }
 
 // Unrun regression target: import, coercion and start preserve the exact thrown value.
 #[test]
 fn webassembly_callback_exception_identity() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
         function wasmExceptionIdentity() {
             const marker = { reason: "callback" }, coercion = { reason: "coercion" };
             const bytes = new TextEncoder().encode(`(module
@@ -7875,14 +8837,22 @@ fn webassembly_callback_exception_identity() {
             catch (error) { results.push(error === marker); }
             return results;
         }
-    "#), 1);
-    assert_eq!(call("wasmExceptionIdentity", "[]"), "[true,true,true,true,true,true]");
+    "#
+        ),
+        1
+    );
+    assert_eq!(
+        call("wasmExceptionIdentity", "[]"),
+        "[true,true,true,true,true,true]"
+    );
 }
 
 // Unrun regression target: a table-derived function synchronizes exported memory.
 #[test]
 fn webassembly_table_funcref_memory_coherence() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
         function wasmTableMemory() {
             const bytes = new TextEncoder().encode(`(module
                 (memory (export "memory") 1)
@@ -7896,14 +8866,19 @@ fn webassembly_table_funcref_memory_coherence() {
             write(73);
             return [new Uint8Array(memory.buffer)[0], new Uint8Array(memory.buffer)[1]];
         }
-    "#), 1);
+    "#
+        ),
+        1
+    );
     assert_eq!(call("wasmTableMemory", "[]"), "[73,91]");
 }
 
 // Unrun regression target: start traps are runtime errors; incompatible imports are link errors.
 #[test]
 fn webassembly_start_trap_error_kind() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
         function wasmStartErrorKind() {
             const trap = new TextEncoder().encode(`(module (func $start unreachable) (start $start))`);
             const wrongImport = new TextEncoder().encode(`(module (import "host" "memory" (memory 2)))`);
@@ -7914,14 +8889,19 @@ fn webassembly_start_trap_error_kind() {
             catch (error) { link = error instanceof WebAssembly.LinkError && !(error instanceof WebAssembly.RuntimeError); }
             return [runtime, link];
         }
-    "#), 1);
+    "#
+        ),
+        1
+    );
     assert_eq!(call("wasmStartErrorKind", "[]"), "[true,true]");
 }
 
 // Unrun regression target: registration uses each import value already validated.
 #[test]
 fn webassembly_import_getters_evaluated_once() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
         function wasmImportGetters() {
             const bytes = new TextEncoder().encode(`(module
                 (import "host" "value" (func $value (result i32)))
@@ -7937,14 +8917,19 @@ fn webassembly_import_getters_evaluated_once() {
             const instance = new WebAssembly.Instance(new WebAssembly.Module(bytes), imports);
             return [instance.exports.read(), functions, memories, namespaces];
         }
-    "#), 1);
+    "#
+        ),
+        1
+    );
     assert_eq!(call("wasmImportGetters", "[]"), "[42,1,1,2]");
 }
 
 // Unrun regression target: multiple import results require and consume an iterable.
 #[test]
 fn webassembly_import_multiple_results_iterable() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
         function wasmIterableResults() {
             const bytes = new TextEncoder().encode(`(module
                 (import "host" "values" (func $values (result i32 i32)))
@@ -7960,14 +8945,22 @@ fn webassembly_import_multiple_results_iterable() {
             try { bad.exports.read(); } catch (error) { rejected = error instanceof TypeError; }
             return [values, iterations, rejected, Object.keys(WebAssembly.Module.imports(module)[0]).sort()];
         }
-    "#), 1);
-    assert_eq!(call("wasmIterableResults", "[]"), "[[42,73],1,true,[\"kind\",\"module\",\"name\"]]");
+    "#
+        ),
+        1
+    );
+    assert_eq!(
+        call("wasmIterableResults", "[]"),
+        "[[42,73],1,true,[\"kind\",\"module\",\"name\"]]"
+    );
 }
 
 // Unrun regression target: callback result coercion completes before memory sync.
 #[test]
 fn webassembly_import_result_coercion_memory() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
         function wasmResultCoercionMemory() {
             const memory = new WebAssembly.Memory({ initial: 1 });
             const bytes = new TextEncoder().encode(`(module
@@ -7982,14 +8975,19 @@ fn webassembly_import_result_coercion_memory() {
             } });
             return [instance.exports.run(), observed, new Uint8Array(memory.buffer)[1]];
         }
-    "#), 1);
+    "#
+        ),
+        1
+    );
     assert_eq!(call("wasmResultCoercionMemory", "[]"), "[164,42,73]");
 }
 
 // Unrun regression target: shared unsigned32 conversion validates limits and growth.
 #[test]
 fn webassembly_unsigned_limits_and_table_growth() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
         function wasmUnsignedLimits() {
             const rejects = action => { try { action(); return false; } catch (error) { return error instanceof TypeError; } };
             const invalid = [-1, NaN, Infinity, -Infinity, 4294967296, 1n];
@@ -8010,14 +9008,22 @@ fn webassembly_unsigned_limits_and_table_growth() {
                 initialReads, maximumReads, coercions, previous, before.byteLength,
                 memory.buffer !== before, tablePrevious, table.length, table.get(150000) === undefined];
         }
-    "#), 1);
-    assert_eq!(call("wasmUnsignedLimits", "[]"), "[true,true,true,true,1,1,1,0,0,true,1,150001,true]");
+    "#
+        ),
+        1
+    );
+    assert_eq!(
+        call("wasmUnsignedLimits", "[]"),
+        "[true,true,true,true,1,1,1,0,0,true,1,150001,true]"
+    );
 }
 
 // Unrun regression target: conversion uses the captured integer operations.
 #[test]
 fn webassembly_length_conversion_captures_intrinsics() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
         function wasmCapturedLimits() {
             const trunc = Math.trunc, finite = Number.isFinite;
             try {
@@ -8027,14 +9033,19 @@ fn webassembly_length_conversion_captures_intrinsics() {
                 return memory.buffer.byteLength;
             } finally { Math.trunc = trunc; Number.isFinite = finite; }
         }
-    "#), 1);
+    "#
+        ),
+        1
+    );
     assert_eq!(call("wasmCapturedLimits", "[]"), "0");
 }
 
 // Unrun regression target: table growth does not call a replaced push method.
 #[test]
 fn webassembly_table_growth_captures_push() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
         function wasmCapturedPush() {
             const table = new WebAssembly.Table({ element: "externref", initial: 0, maximum: 3 });
             const push = Array.prototype.push;
@@ -8044,13 +9055,18 @@ fn webassembly_table_growth_captures_push() {
                 return [previous, table.length, table.get(2)];
             } finally { Array.prototype.push = push; }
         }
-    "#), 1);
+    "#
+        ),
+        1
+    );
     assert_eq!(call("wasmCapturedPush", "[]"), "[0,3,\"entry\"]");
 }
 
 #[test]
 fn webassembly_table_index_conversion() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
         function wasmTableIndices() {
             const table = new WebAssembly.Table({ element: "externref", initial: 1 });
             table.set(0.9, "value");
@@ -8062,14 +9078,22 @@ fn webassembly_table_index_conversion() {
             try { table.get(1); } catch (error) { outside = error instanceof RangeError; }
             return [table.get(0.9), table.get(-0), gets, sets, outside];
         }
-    "#), 1);
-    assert_eq!(call("wasmTableIndices", "[]"), "[\"value\",\"value\",true,true,true]");
+    "#
+        ),
+        1
+    );
+    assert_eq!(
+        call("wasmTableIndices", "[]"),
+        "[\"value\",\"value\",true,true,true]"
+    );
 }
 
 // Unrun regression target: streaming instantiate has no receiver dependency.
 #[test]
 fn webassembly_detached_instantiate_streaming() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
         async function wasmDetachedStreaming() {
             const { instantiateStreaming } = WebAssembly;
             const result = await instantiateStreaming(new Response(
@@ -8077,14 +9101,19 @@ fn webassembly_detached_instantiate_streaming() {
                 { headers: { "Content-Type": "application/wasm" } }));
             return result.module instanceof WebAssembly.Module && result.instance instanceof WebAssembly.Instance;
         }
-    "#), 1);
+    "#
+        ),
+        1
+    );
     assert_eq!(call("wasmDetachedStreaming", "[]"), "true");
 }
 
 // Unrun regression target: validate distinguishes binary failure from input errors.
 #[test]
 fn webassembly_validate_input_errors() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
         function wasmValidateInputs() {
             const invalidInputs = [null, undefined, "text", {}, []].every(value => {
                 try { WebAssembly.validate(value); return false; }
@@ -8093,14 +9122,19 @@ fn webassembly_validate_input_errors() {
             const header = new Uint8Array([0,97,115,109,1,0,0,0]);
             return [invalidInputs, WebAssembly.validate(header), WebAssembly.validate(new Uint8Array([0]))];
         }
-    "#), 1);
+    "#
+        ),
+        1
+    );
     assert_eq!(call("wasmValidateInputs", "[]"), "[true,true,false]");
 }
 
 // Unrun regression target: immutable imports are never synchronization writes.
 #[test]
 fn webassembly_immutable_global_import_sync() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
         function wasmImmutableGlobals() {
             const bytes = new TextEncoder().encode(`(module
                 (import "host" "value" (global $value i32))
@@ -8111,14 +9145,19 @@ fn webassembly_immutable_global_import_sync() {
             const second = new WebAssembly.Instance(module, { host: { value } });
             return [first.exports.read(), second.exports.read(), value.value];
         }
-    "#), 1);
+    "#
+        ),
+        1
+    );
     assert_eq!(call("wasmImmutableGlobals", "[]"), "[42,42,42]");
 }
 
 // Unrun regression target: import resources retain declared type and mutability.
 #[test]
 fn webassembly_import_resource_type_mismatches() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
         function wasmResourceTypes() {
             const module = text => new WebAssembly.Module(new TextEncoder().encode(text));
             const globalModule = module('(module (import "host" "value" (global (mut i32))))');
@@ -8134,14 +9173,19 @@ fn webassembly_import_resource_type_mismatches() {
                 new WebAssembly.Instance(globalModule, { host: { value: new WebAssembly.Global({ value: "i32", mutable: true }, 1) } }) instanceof WebAssembly.Instance
             ];
         }
-    "#), 1);
+    "#
+        ),
+        1
+    );
     assert_eq!(call("wasmResourceTypes", "[]"), "[true,true,true,true]");
 }
 
 // Unrun regression target: omitted externref Global initial value is undefined.
 #[test]
 fn webassembly_externref_global_default() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
         function wasmGlobalDefault() {
             const omitted = new WebAssembly.Global({ value: "externref" });
             const explicitNull = new WebAssembly.Global({ value: "externref" }, null);
@@ -8153,14 +9197,19 @@ fn webassembly_externref_global_default() {
             return [omitted.value === undefined, explicitNull.value === null,
                 explicitUndefined.value === undefined, instance.exports.read() === undefined];
         }
-    "#), 1);
+    "#
+        ),
+        1
+    );
     assert_eq!(call("wasmGlobalDefault", "[]"), "[true,true,true,true]");
 }
 
 // Unrun regression target: table missing values differ from explicit undefined.
 #[test]
 fn webassembly_table_reference_defaults() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
         function wasmTableDefaults() {
             const table = new WebAssembly.Table({ element: "externref", initial: 1, maximum: 3 });
             const initial = table.get(0) === undefined;
@@ -8176,14 +9225,22 @@ fn webassembly_table_reference_defaults() {
                 rejects(() => funcs.set(0, undefined)), rejects(() => funcs.grow(1, undefined)),
                 rejects(() => new WebAssembly.Table({ element: "anyfunc", initial: 1 }, undefined))];
         }
-    "#), 1);
-    assert_eq!(call("wasmTableDefaults", "[]"), "[true,true,true,true,true,true,true,true]");
+    "#
+        ),
+        1
+    );
+    assert_eq!(
+        call("wasmTableDefaults", "[]"),
+        "[true,true,true,true,true,true,true,true]"
+    );
 }
 
 // Unrun regression target: Table.set converts reference value before bounds error.
 #[test]
 fn webassembly_table_set_reference_before_bounds() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
         function wasmTableSetOrder() {
             const table = new WebAssembly.Table({ element: "anyfunc", initial: 0 });
             let invalidValue = false, validValue = false, invalidIndex = false;
@@ -8192,14 +9249,19 @@ fn webassembly_table_set_reference_before_bounds() {
             try { table.set(-1, undefined); } catch (error) { invalidIndex = error instanceof TypeError; }
             return [invalidValue, validValue, invalidIndex];
         }
-    "#), 1);
+    "#
+        ),
+        1
+    );
     assert_eq!(call("wasmTableSetOrder", "[]"), "[true,true,true]");
 }
 
 // Unrun regression target: descriptor members are converted once and in order.
 #[test]
 fn webassembly_descriptor_member_reads() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
         function wasmDescriptorReads() {
             let valueReads = 0, elementReads = 0, coercions = 0;
             const order = [];
@@ -8215,14 +9277,22 @@ fn webassembly_descriptor_member_reads() {
             }, "entry");
             return [valueReads, elementReads, coercions, order.join(","), global.value, table.get(0)];
         }
-    "#), 1);
-    assert_eq!(call("wasmDescriptorReads", "[]"), "[1,1,1,\"mutable,value\",3,\"entry\"]");
+    "#
+        ),
+        1
+    );
+    assert_eq!(
+        call("wasmDescriptorReads", "[]"),
+        "[1,1,1,\"mutable,value\",3,\"entry\"]"
+    );
 }
 
 // Unrun regression target: shared Globals are visible inside reentrant callbacks.
 #[test]
 fn webassembly_shared_global_native_authority() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
         function wasmSharedGlobalAuthority() {
             const bytes = new TextEncoder().encode(`(module
                 (import "host" "value" (global $value (mut i32)))
@@ -8246,14 +9316,19 @@ fn webassembly_shared_global_native_authority() {
             exported.value = 7;
             return [result, observed[0], observed[1], exported.value, value.value];
         }
-    "#), 1);
+    "#
+        ),
+        1
+    );
     assert_eq!(call("wasmSharedGlobalAuthority", "[]"), "[2,2,2,7,7]");
 }
 
 // Unrun regression target: shared externref Global preserves object identity.
 #[test]
 fn webassembly_shared_externref_global_authority() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
         function wasmSharedExternrefGlobal() {
             const bytes = new TextEncoder().encode(`(module
                 (import "host" "value" (global $value (mut externref)))
@@ -8278,14 +9353,22 @@ fn webassembly_shared_externref_global_authority() {
             exported.value = undefined;
             return [before, observed, after, value.value === undefined];
         }
-    "#), 1);
-    assert_eq!(call("wasmSharedExternrefGlobal", "[]"), "[true,true,true,true]");
+    "#
+        ),
+        1
+    );
+    assert_eq!(
+        call("wasmSharedExternrefGlobal", "[]"),
+        "[true,true,true,true]"
+    );
 }
 
 // Unrun regression target: Table imports share native values and growth immediately.
 #[test]
 fn webassembly_shared_externref_table_authority() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
         function wasmSharedTableAuthority() {
             const bytes = new TextEncoder().encode(`(module
                 (import "host" "table" (table 1 3 externref))
@@ -8313,14 +9396,22 @@ fn webassembly_shared_externref_table_authority() {
             exported.set(0, undefined);
             return [before, observed, previous, table.length, retained, table.get(0) === undefined];
         }
-    "#), 1);
-    assert_eq!(call("wasmSharedTableAuthority", "[]"), "[true,true,1,2,true,true]");
+    "#
+        ),
+        1
+    );
+    assert_eq!(
+        call("wasmSharedTableAuthority", "[]"),
+        "[true,true,1,2,true,true]"
+    );
 }
 
 // Unrun regression target: failed Table growth preserves contents and identity.
 #[test]
 fn webassembly_native_table_failed_growth() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
         function wasmTableFailedGrowth() {
             const bytes = new TextEncoder().encode('(module (func (export "value") (result i32) i32.const 42))');
             const instance = new WebAssembly.Instance(new WebAssembly.Module(bytes));
@@ -8330,14 +9421,19 @@ fn webassembly_native_table_failed_growth() {
             try { table.grow(1, fn); } catch (error) { rejected = error instanceof RangeError; }
             return [rejected, table.length, table.get(0) === fn, table.get(0)()];
         }
-    "#), 1);
+    "#
+        ),
+        1
+    );
     assert_eq!(call("wasmTableFailedGrowth", "[]"), "[true,1,true,42]");
 }
 
 // Unrun regression target: standalone and exported aliases retain function execution.
 #[test]
 fn webassembly_table_functions_survive_instance_disposal() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
         function wasmTableRetainedFunctions() {
             const bytes = new TextEncoder().encode(`(module
                 (import "host" "table" (table 1 funcref))
@@ -8356,14 +9452,22 @@ fn webassembly_table_functions_survive_instance_disposal() {
             producer.dispose();
             return [first(), second(), first === second, foreign.get(0) === original, foreign.get(0)()];
         }
-    "#), 1);
-    assert_eq!(call("wasmTableRetainedFunctions", "[]"), "[42,42,true,true,7]");
+    "#
+        ),
+        1
+    );
+    assert_eq!(
+        call("wasmTableRetainedFunctions", "[]"),
+        "[42,42,true,true,7]"
+    );
 }
 
 // Unrun regression target: native table.copy preserves foreign function identity.
 #[test]
 fn webassembly_table_copy_preserves_foreign_function_owner() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
         function wasmTableCopiedFunction() {
             const producer = new WebAssembly.Instance(new WebAssembly.Module(
                 new TextEncoder().encode('(module (func (export "value") (result i32) i32.const 19))')));
@@ -8380,14 +9484,19 @@ fn webassembly_table_copy_preserves_foreign_function_owner() {
             producer.dispose(); copier.dispose();
             return [target.get(0) === original, target.get(0)()];
         }
-    "#), 1);
+    "#
+        ),
+        1
+    );
     assert_eq!(call("wasmTableCopiedFunction", "[]"), "[true,19]");
 }
 
 // Unrun: module-owned exported tables can exchange a JS-origin funcref.
 #[test]
 fn webassembly_exported_table_copy_preserves_foreign_identity() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
         function wasmExportedTableCopiedFunction() {
             const producer = new WebAssembly.Instance(new WebAssembly.Module(
                 new TextEncoder().encode('(module (func (export "value") (result i32) i32.const 23))')));
@@ -8405,14 +9514,19 @@ fn webassembly_exported_table_copy_preserves_foreign_identity() {
             producer.dispose(); copier.dispose();
             return [target.get(0) === original, target.get(0)()];
         }
-    "#), 1);
+    "#
+        ),
+        1
+    );
     assert_eq!(call("wasmExportedTableCopiedFunction", "[]"), "[true,23]");
 }
 
 // Unrun: a start callback observes copied identity before instantiate returns.
 #[test]
 fn webassembly_start_callback_observes_copied_table_identity() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
         function wasmStartCopiedTableFunction() {
             const producer = new WebAssembly.Instance(new WebAssembly.Module(
                 new TextEncoder().encode('(module (func (export "value") (result i32) i32.const 29))')));
@@ -8433,14 +9547,19 @@ fn webassembly_start_callback_observes_copied_table_identity() {
             producer.dispose(); copier.dispose();
             return [observed, target.get(0) === original, target.get(0)()];
         }
-    "#), 1);
+    "#
+        ),
+        1
+    );
     assert_eq!(call("wasmStartCopiedTableFunction", "[]"), "[true,true,29]");
 }
 
 // Unrun: element/start writes survive a trapping start, including callable code.
 #[test]
 fn webassembly_failed_start_preserves_imported_table_function() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
         function wasmFailedStartTableFunction() {
             const table = new WebAssembly.Table({ element: "anyfunc", initial: 1 });
             const bytes = new TextEncoder().encode(`(module
@@ -8455,14 +9574,22 @@ fn webassembly_failed_start_preserves_imported_table_function() {
             const value = table.get(0);
             return [trapped, typeof value, value()];
         }
-    "#), 1);
-    assert_eq!(call("wasmFailedStartTableFunction", "[]"), "[true,\"function\",31]");
+    "#
+        ),
+        1
+    );
+    assert_eq!(
+        call("wasmFailedStartTableFunction", "[]"),
+        "[true,\"function\",31]"
+    );
 }
 
 // Unrun: a failed start must not discard a callback stored in an imported Table.
 #[test]
 fn webassembly_failed_start_keeps_imported_callback_identity() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
         function wasmFailedStartImportedCallback() {
             const table = new WebAssembly.Table({ element: "anyfunc", initial: 1 });
             const callback = () => 37;
@@ -8477,14 +9604,22 @@ fn webassembly_failed_start_keeps_imported_callback_identity() {
             catch (error) { trapped = error instanceof WebAssembly.RuntimeError; }
             return [trapped, table.get(0) === callback, table.get(0)()];
         }
-    "#), 1);
-    assert_eq!(call("wasmFailedStartImportedCallback", "[]"), "[true,true,37]");
+    "#
+        ),
+        1
+    );
+    assert_eq!(
+        call("wasmFailedStartImportedCallback", "[]"),
+        "[true,true,37]"
+    );
 }
 
 // Unrun: a function first read during start keeps that callable after publish.
 #[test]
 fn webassembly_start_native_table_function_keeps_identity() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
         function wasmStartNativeTableIdentity() {
             const table = new WebAssembly.Table({ element: "anyfunc", initial: 1 });
             let during;
@@ -8502,7 +9637,10 @@ fn webassembly_start_native_table_function_keeps_identity() {
             instance.dispose();
             return [during === after, after === instance.exports.value, after()];
         }
-    "#), 1);
+    "#
+        ),
+        1
+    );
     assert_eq!(call("wasmStartNativeTableIdentity", "[]"), "[true,true,41]");
 }
 
@@ -8510,7 +9648,9 @@ fn webassembly_start_native_table_function_keeps_identity() {
 // exported Table; no JavaScript Table.set observes that write.
 #[test]
 fn webassembly_guest_table_write_preserves_foreign_argument_identity() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
         function wasmGuestTableWriteIdentity() {
             const producer = new WebAssembly.Instance(new WebAssembly.Module(
                 new TextEncoder().encode('(module (func (export "value") (result i32) i32.const 43))')));
@@ -8525,7 +9665,10 @@ fn webassembly_guest_table_write_preserves_foreign_argument_identity() {
             producer.dispose(); consumer.dispose();
             return [table.get(0) === original, table.get(0)()];
         }
-    "#), 1);
+    "#
+        ),
+        1
+    );
     assert_eq!(call("wasmGuestTableWriteIdentity", "[]"), "[true,43]");
 }
 
@@ -8533,7 +9676,9 @@ fn webassembly_guest_table_write_preserves_foreign_argument_identity() {
 // Table provenance once the last externally owned Table has been released.
 #[test]
 fn webassembly_table_owner_claims_retire_after_last_table() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
         function wasmTableOwnerClaimsRetire() {
             const before = JSON.parse(__thaw_wasm_reference_stats()).imports;
             const producer = new WebAssembly.Instance(new WebAssembly.Module(
@@ -8547,7 +9692,10 @@ fn webassembly_table_owner_claims_retire_after_last_table() {
             __thaw_wasm_release('table', Number(source.__thawName));
             return [held, JSON.parse(__thaw_wasm_reference_stats()).imports === before];
         }
-    "#), 1);
+    "#
+        ),
+        1
+    );
     assert_eq!(call("wasmTableOwnerClaimsRetire", "[]"), "[true,true]");
 }
 
@@ -8555,7 +9703,9 @@ fn webassembly_table_owner_claims_retire_after_last_table() {
 // guest's return decoder, which otherwise sees only its original snapshot.
 #[test]
 fn webassembly_imported_table_late_set_preserves_guest_return_identity() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
         function wasmImportedTableLateSetIdentity() {
             const producer = new WebAssembly.Instance(new WebAssembly.Module(
                 new TextEncoder().encode('(module (func (export "value") (result i32) i32.const 53))')));
@@ -8571,15 +9721,23 @@ fn webassembly_imported_table_late_set_preserves_guest_return_identity() {
             producer.dispose(); consumer.dispose();
             return [returned === original, table.get(0) === original, returned()];
         }
-    "#), 1);
-    assert_eq!(call("wasmImportedTableLateSetIdentity", "[]"), "[true,true,53]");
+    "#
+        ),
+        1
+    );
+    assert_eq!(
+        call("wasmImportedTableLateSetIdentity", "[]"),
+        "[true,true,53]"
+    );
 }
 
 // Unrun: a trapping start's callback claim retires when its final Table slot
 // is cleared, even though the Table wrapper itself remains live.
 #[test]
 fn webassembly_failed_start_last_slot_clear_retires_callback() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
         function wasmFailedStartLastSlotRetires() {
             const before = JSON.parse(__thaw_wasm_reference_stats()).imports;
             const table = new WebAssembly.Table({ element: 'anyfunc', initial: 1 });
@@ -8595,15 +9753,23 @@ fn webassembly_failed_start_last_slot_clear_retires_callback() {
             table.set(0, null);
             return [held, table.length, JSON.parse(__thaw_wasm_reference_stats()).imports === before];
         }
-    "#), 1);
-    assert_eq!(call("wasmFailedStartLastSlotRetires", "[]"), "[true,1,true]");
+    "#
+        ),
+        1
+    );
+    assert_eq!(
+        call("wasmFailedStartLastSlotRetires", "[]"),
+        "[true,1,true]"
+    );
 }
 
 // Unrun: guest table.set bypasses JS setters; the call-exit sweep sees its
 // final-slot removal before a disposed instance can retain stale imports.
 #[test]
 fn webassembly_guest_last_slot_clear_retires_callback() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
         function wasmGuestLastSlotRetires() {
             const before = JSON.parse(__thaw_wasm_reference_stats()).imports;
             const table = new WebAssembly.Table({ element: 'anyfunc', initial: 1 });
@@ -8618,7 +9784,10 @@ fn webassembly_guest_last_slot_clear_retires_callback() {
             instance.exports.clear(); instance.dispose();
             return [held, table.get(0) === null, JSON.parse(__thaw_wasm_reference_stats()).imports === before];
         }
-    "#), 1);
+    "#
+        ),
+        1
+    );
     assert_eq!(call("wasmGuestLastSlotRetires", "[]"), "[true,true,true]");
 }
 
@@ -8627,27 +9796,32 @@ fn webassembly_guest_last_slot_clear_retires_callback() {
 #[test]
 fn webassembly_nested_table_group_redirects_old_state() {
     let mut registry = WasmTable::default();
-    let group = |owner: u32| (
-        std::rc::Rc::new(std::cell::RefCell::new(std::collections::HashSet::from([owner]))),
-        std::rc::Rc::new(std::cell::RefCell::new(HashMap::<String, (u32, u32)>::new())),
-    );
+    let group = |owner: u32| {
+        (
+            std::rc::Rc::new(std::cell::RefCell::new(std::collections::HashSet::from([
+                owner,
+            ]))),
+            std::rc::Rc::new(std::cell::RefCell::new(HashMap::<String, (u32, u32)>::new())),
+        )
+    };
     let first = group(1);
     let second = group(2);
     let third = group(3);
-    let merged = wasm_join_function_groups(
-        &mut registry, &first.0, &first.1, &second.0, &second.1,
-    );
-    let latest = wasm_join_function_groups(
-        &mut registry, &merged.0, &merged.1, &third.0, &third.1,
-    );
+    let merged = wasm_join_function_groups(&mut registry, &first.0, &first.1, &second.0, &second.1);
+    let latest = wasm_join_function_groups(&mut registry, &merged.0, &merged.1, &third.0, &third.1);
     let resolved = wasm_resolve_table_group(&registry, &first);
     assert!(std::rc::Rc::ptr_eq(&resolved.0, &latest.0));
-    assert_eq!(*resolved.0.borrow(), std::collections::HashSet::from([1, 2, 3]));
+    assert_eq!(
+        *resolved.0.borrow(),
+        std::collections::HashSet::from([1, 2, 3])
+    );
 }
 
 #[test]
 fn webassembly_async_compilation_snapshots_input_views_before_returning() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
         async function wasmAsyncSnapshot() {
             const original = new TextEncoder().encode('(module (func (export "value") (result i32) i32.const 7))');
             const backing = new Uint8Array(original.length + 4);
@@ -8667,13 +9841,18 @@ fn webassembly_async_compilation_snapshots_input_views_before_returning() {
             try { await promise; } catch (error) { rejected = error instanceof TypeError; }
             return [new WebAssembly.Instance(module).exports.value(), result.instance.exports.value(), fromModule.exports.value(), synchronous, rejected];
         }
-    "#), 1);
+    "#
+        ),
+        1
+    );
     assert_eq!(call("wasmAsyncSnapshot", "[]"), "[7,7,7,false,true]");
 }
 
 #[test]
 fn webassembly_imports_immutable_numeric_global_values() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
         function wasmPrimitiveGlobals() {
             function module(type, mutable) {
                 return new WebAssembly.Module(new TextEncoder().encode(`(module
@@ -8707,16 +9886,25 @@ fn webassembly_imports_immutable_numeric_global_values() {
                 rejectsForgedReference('funcref'), read('i32', wrapped),
                 Object.keys(metadata).sort().join(',')];
         }
-    "#), 1);
-    assert_eq!(call("wasmPrimitiveGlobals", "[]"),
-        r#"[-1,true,1.5,"-1",7,1,true,true,true,true,true,true,9,"kind,module,name"]"#);
+    "#
+        ),
+        1
+    );
+    assert_eq!(
+        call("wasmPrimitiveGlobals", "[]"),
+        r#"[-1,true,1.5,"-1",7,1,true,true,true,true,true,true,9,"kind,module,name"]"#
+    );
 }
 
 #[test]
 fn worker_source_reader_removes_only_the_leading_bom() {
     let dir = std::env::temp_dir().join(format!(
-        "thaw_worker_bom_{}_{}", std::process::id(),
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        "thaw_worker_bom_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
     ));
     std::fs::create_dir(&dir).unwrap();
     let json = dir.join("data.json");
@@ -8727,7 +9915,9 @@ fn worker_source_reader_removes_only_the_leading_bom() {
     std::fs::write(&package, "\u{feff}{\"main\":\"./entry.js\"}").unwrap();
     std::fs::write(&plain, "{\"value\":3}").unwrap();
     std::fs::write(&double, "\u{feff}\u{feff}{}").unwrap();
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
         function workerBomFiles(json, packageFile, plain, double) {
             const read = globalThis.__thaw_worker_read_source;
             const value = JSON.parse(read(json));
@@ -8735,11 +9925,20 @@ fn worker_source_reader_removes_only_the_leading_bom() {
             return [value.value, manifest.main, JSON.parse(read(plain)).value,
                     read(double).charCodeAt(0)];
         }
-    "#), 1);
+    "#
+        ),
+        1
+    );
     let args = serde_json::to_string(&[
-        json.to_str().unwrap(), package.to_str().unwrap(),
-        plain.to_str().unwrap(), double.to_str().unwrap()
-    ]).unwrap();
-    assert_eq!(call("workerBomFiles", &args), "[\"inside\u{feff}\",\"./entry.js\",3,65279]");
+        json.to_str().unwrap(),
+        package.to_str().unwrap(),
+        plain.to_str().unwrap(),
+        double.to_str().unwrap(),
+    ])
+    .unwrap();
+    assert_eq!(
+        call("workerBomFiles", &args),
+        "[\"inside\u{feff}\",\"./entry.js\",3,65279]"
+    );
     std::fs::remove_dir_all(&dir).unwrap();
 }

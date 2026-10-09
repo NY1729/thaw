@@ -180,10 +180,13 @@ fn native_callback_void_blocking_await_preserves_boolean_rejection() {
     compiler.compile_program(&program).unwrap();
     let ir = compiler.print_to_string();
     assert!(ir.contains("blocking_await_void_failed"), "expected void blocking fallback: {ir}");
-    assert_eq!(
-        compile_and_run(source, "blocking_await_void_reason"),
-        "true true\n"
-    );
+    // Real Node (22.x) does not throw synchronously from the callback: the rejected promise it
+    // returns is never handled, so the process ends with an unhandled rejection (exit code 1)
+    // that reports the `false` reason. The `catch` in the script is therefore never entered.
+    let (stdout, stderr, code) = compile_and_run_failing(source, "blocking_await_void_reason");
+    assert_eq!(stdout, "");
+    assert_eq!(code, Some(1), "{stderr}");
+    assert!(stderr.contains("false"), "the rejection reason must be reported: {stderr}");
 }
 
 #[test]

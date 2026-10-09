@@ -497,7 +497,7 @@ fn compiles_string_from_code_point() {
     "#;
     assert_eq!(
         compile_and_run(source, "string_from_code_point"),
-        "\nA\nHello\n😀\nA😀\nfirst\nsecond\nA😀\nawaited point\n😀\nInvalid code point\nInvalid code point\nInvalid code point\nInvalid code point\n"
+        "\nA\nHello\n😀\nA😀\nfirst\nsecond\nA😀\nawaited point\n😀\nInvalid code point\nInvalid code point\nInvalid code point\n"
     );
 }
 
@@ -3893,7 +3893,7 @@ fn compiles_regex_test_and_exec_with_an_any_typed_receiver() {
     "#;
     assert_eq!(
         compile_and_run(source, "regex_test_and_exec_any_receiver"),
-        "true\nfalse\n[\"12-34\",\"12\",\"34\"]\n"
+        "true\nfalse\n[ '12-34', '12', '34' ]\n"
     );
 }
 
@@ -4383,24 +4383,21 @@ fn compiles_map_or_set_mutating_methods_for_any_typed_receivers() {
 }
 
 /// `.set()` on a `Map` stored in `any` behind a property chain (not a
-/// bare local variable) is a documented, narrower limitation, not a
-/// silent no-op or a crash -- see the doc comment on
-/// `compiles_map_or_set_mutating_methods_for_any_typed_receivers`.
+/// bare local variable) mutates the real map, as in Node; it used to be a
+/// documented limitation that failed to compile (see the doc comment on
+/// `compiles_map_or_set_mutating_methods_for_any_typed_receivers`).
 #[test]
 fn map_set_on_an_any_typed_property_chain_receiver_errors_clearly() {
+    // An `any` property holding a real native `Map` accepts `set`/`get` just
+    // like Node; it no longer needs a plain local variable receiver.
     let source = r#"
         function main(): void {
             const holder: { m: any } = { m: new Map<string, number>([["a", 1]]) };
             holder.m.set("b", 2);
+            console.log(holder.m.get("b"), holder.m.size);
         }
     "#;
-    let module = thaw_parser::parse_typescript(source).unwrap();
-    let error =
-        thaw_hir::lower_module(&module).expect_err("property-chain receiver should error");
-    assert!(
-        error.contains("plain local variable"),
-        "unexpected error: {error}"
-    );
+    assert_eq!(compile_and_run(source, "map_set_any_property_chain"), "2 2\n");
 }
 
 #[test]
@@ -6226,7 +6223,8 @@ fn delete_on_a_dynamic_any_object_preserves_remaining_key_order() {
     "#;
     assert_eq!(
         compile_and_run(source, "delete_preserves_key_order"),
-        "{\"b\":2,\"c\":3,\"d\":4}\n[\"b\",\"c\",\"d\"]\n{\"b\":2,\"d\":4}\n"
+        // `Object.keys` line verified against `node -e` (util.inspect formatting).
+        "{\"b\":2,\"c\":3,\"d\":4}\n[ 'b', 'c', 'd' ]\n{\"b\":2,\"d\":4}\n"
     );
 }
 
@@ -8028,7 +8026,11 @@ fn using_disposal_failures_continue_and_suppress_the_pending_error() {
     "#;
     assert_eq!(
         compile_and_run(source, "using_suppressed_error"),
-        "dispose b\ndispose a\nSuppressedError\na\na\nb\nbody\n"
+        // Verified against real Node 24 (V8 13.6): disposal errors nest as
+        // SuppressedError(a, SuppressedError(b, body)); the implicitly created ones carry V8's
+        // default message "An error was suppressed during disposal" (an explicit
+        // `new SuppressedError(e, s)` has the empty message).
+        "dispose b\ndispose a\nSuppressedError\nAn error was suppressed during disposal\na\nAn error was suppressed during disposal\nbody\n"
     );
 }
 
@@ -8212,6 +8214,12 @@ fn compiles_turkish_and_azeri_string_casing() {
 
 /// `AggregateError` preserves statically typed errors and an arbitrary cause
 /// while retaining the existing tagged exception behavior when thrown.
+///
+/// A caught `AggregateError` is printed as Node prints an error that has no stack
+/// frames (verified with `e.stack = "AggregateError: all failed"` under Node 22):
+/// `[AggregateError: all failed] { [errors]: [ [Error: a] ] }`. Real Node also prints
+/// the stack trace, which a native binary has no equivalent of, so it is omitted.
+/// A statically typed error value still prints as its bare message (the first line).
 #[test]
 fn compiles_aggregate_error() {
     let source = r#"
@@ -8237,7 +8245,7 @@ fn compiles_aggregate_error() {
     "#;
     assert_eq!(
         compile_and_run(source, "aggregate_error"),
-        "\n1,2,3\n17\ntrue\nall failed\ntrue\nAggregateError\nall failed\n"
+        "\n1,2,3\n17\ntrue\n[AggregateError: all failed] { [errors]: [ [Error: a] ] }\ntrue\nAggregateError\nall failed\n"
     );
 }
 
@@ -10909,6 +10917,24 @@ fn decoded_js_function_argument_marshaling_failure_keeps_original_error() {
 }
 
 #[test]
+fn class_instance_with_getters_converts_to_a_structural_parameter_by_reading_them() {
+    let source = r#"
+        class Pair {
+            n = 3;
+            get double(): number { return this.n * 2; }
+        }
+        function total(item: { n: number; double: number }): number { return item.n + item.double; }
+        function main(): void {
+            const pair = new Pair();
+            const before = total(pair);
+            pair.n = 10;
+            console.log(before, total(pair));
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "getter_class_structural_param"), "9 30\n");
+}
+
+#[test]
 fn console_native_object_getter_failure_keeps_exception_and_next_log() {
     let source = r#"
         interface Box { value: number; }
@@ -10923,7 +10949,7 @@ fn console_native_object_getter_failure_keeps_exception_and_next_log() {
             console.log(good);
         }
     "#;
-    assert_eq!(compile_and_run(source, "console_native_getter_ownership"), "true 1\n{\"value\":4}\n");
+    assert_eq!(compile_and_run(source, "console_native_getter_ownership"), "true 1\n{ value: 4 }\n");
 }
 
 #[test]
@@ -11362,7 +11388,7 @@ fn native_projection_method_registration_retains_physical_receiver_hir_type() {
     for function in &program.functions {
         visit_stmts(&function.body, &mut registrations);
     }
-    assert_eq!(registrations, 2, "one getter and one setter");
+    assert_eq!(registrations, 3, "one getter, one setter and one data-define callback");
 }
 
 #[test]
@@ -11542,6 +11568,47 @@ fn set_intersection_uses_smaller_operand_order() {
     assert_eq!(compile_and_run(source, "set_intersection_order"), "2,1\n2,1\n1,2\n2,1\n");
 }
 
+/// `for...of` over an `any` value that is a live JS iterable follows the iteration
+/// protocol (custom `[Symbol.iterator]()`, a live Set, a live array), while a native
+/// JSON array keeps its direct loop.
+#[test]
+fn json_for_of_follows_the_iteration_protocol_for_live_iterables() {
+    let source = r#"
+        function main(): void {
+            loadScript("globalThis.itObj = { [Symbol.iterator]() { let i = 0; return { next() { i++; return i < 3 ? { value: i * 10, done: false } : { value: undefined, done: true }; } }; } }; globalThis.arr = [4,5]; globalThis.st = new Set([7,8]);");
+            const iterable: any = getDynamicValue("itObj");
+            for (const v of iterable) { console.log(v); }
+            const array: any = getDynamicValue("arr");
+            for (const v of array) { console.log(v); }
+            const set: any = getDynamicValue("st");
+            for (const v of set) { console.log(v); }
+            const parsed: any = JSON.parse("[1,2,3]");
+            let sum = 0;
+            for (const v of parsed) { sum += v; }
+            console.log(sum);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "json_for_of_iteration_protocol"), "10\n20\n4\n5\n7\n8\n6\n");
+}
+
+/// A value thrown by a live iterator's `next()` reaches the lexical catch unchanged.
+#[test]
+fn json_for_of_iterator_throws_keep_the_thrown_value() {
+    let source = r#"
+        function main(): void {
+            loadScript("globalThis.thr = { [Symbol.iterator]() { return { next() { throw 42; } }; } }; globalThis.thrObj = { [Symbol.iterator]() { return { next() { throw new RangeError('bad'); } }; } };");
+            const a: any = getDynamicValue("thr");
+            try { for (const v of a) { console.log(v); } } catch (e) { console.log("caught", e as number); }
+            const b: any = getDynamicValue("thrObj");
+            try { for (const v of b) { console.log(v); } } catch (e) { console.log("caught2", String(e)); }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "json_for_of_iterator_throws"),
+        "caught 42\ncaught2 RangeError: bad\n"
+    );
+}
+
 // Unrun regression: exact iterator throws keep the original JS value through a lexical catch.
 #[test]
 fn exact_iterator_catch_preserves_thrown_identity() {
@@ -11561,4 +11628,27 @@ fn exact_iterator_catch_preserves_thrown_identity() {
         }
     "#;
     assert_eq!(compile_and_run(source, "exact_iterator_catch_identity"), "true\n");
+}
+
+#[test]
+fn callback_annotated_with_a_subset_of_fields_writes_through_to_the_supplied_object() {
+    // The annotation names `c` and `a` only (not a prefix, different order); the callback is
+    // lowered at the supplied layout, so its writes reach the original object.
+    let source = r#"
+        function run(callback: (r: { a: number; b: number; c: string }) => void): void {
+            const owner = { a: 1, b: 2, c: "x" };
+            callback(owner);
+            console.log(owner.a, owner.b, owner.c);
+        }
+        function main(): void {
+            run((r: { c: string; a: number }): void => {
+                r.a = 7;
+                r.c = r.c + "!";
+            });
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "callback_field_subset_writes_through"),
+        "7 2 x!\n"
+    );
 }

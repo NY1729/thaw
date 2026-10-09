@@ -134,6 +134,7 @@ macro_rules! jit_loop_expressions {
                         ">".into(),
                         "else".into(),
                         "c0000000000000000".into(),
+                        "asbool".into(),
                         "end".into(),
                     ]),
                     CatchProbe::DictionaryKey(key) => {
@@ -144,6 +145,7 @@ macro_rules! jit_loop_expressions {
                             "din".into(),
                             "else".into(),
                             "c0000000000000000".into(),
+                            "asbool".into(),
                             "end".into(),
                         ]);
                     }
@@ -534,6 +536,10 @@ macro_rules! jit_loop_expressions {
             encode_expression(
                 returned.arg.as_deref()?, parameters, locals, context, &mut encoded,
             )?;
+            // A boolean literal encodes as a numeric constant; mark it as the boolean it is.
+            if boolean_literal(returned.arg.as_deref()?) {
+                encoded.push("asbool".into());
+            }
             let kind = jit_expression_kind(&encoded).map(|(kind, _)| kind);
             if kind == Some(JitKind::Array) {
                 encoded.push("arrayvalue".into());

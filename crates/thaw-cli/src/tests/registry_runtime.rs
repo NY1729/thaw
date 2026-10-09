@@ -121,7 +121,8 @@ fn imports_supported_node_builtin_modules() {
                     console.log(os.arch() + ":" + os.platform() + ":" + os.type() + ":" + os.tmpdir());
                     console.log(Boolean(isatty(1)));
                     console.log(String(querystring.stringify({ a: [1, 2], space: "two words" })));
-                    console.log(String(querystring.parse("a=1&a=2&space=two+words")));
+                    // Node: String() of these null-prototype objects throws, so print them as JSON.
+                    console.log(JSON.stringify(querystring.parse("a=1&a=2&space=two+words")));
                     const emitter = new EventEmitter();
                     let emitted: number = 0;
                     emitter.once("value", (value): void => { emitted = Number(value); });
@@ -130,7 +131,7 @@ fn imports_supported_node_builtin_modules() {
                     console.log(emitted);
                     console.log(String(readDynamicValue(pathToFileURL("/tmp/a b"))));
                     console.log(fileURLToPath(pathToFileURL("/tmp/a b")));
-                    console.log(String(urlToHttpOptions(pathToFileURL("/tmp/a b"))));
+                    console.log(JSON.stringify(urlToHttpOptions(pathToFileURL("/tmp/a b"))));
                 }
             "#,
         )

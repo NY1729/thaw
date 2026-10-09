@@ -139,10 +139,11 @@ impl<'a> FnLowerer<'a> {
                         vec![value],
                     )
                 } else {
+                    // `0 - x`, not `x * -1`: negating a zero component must stay +0.
                     HirExpr::BinOp(
-                        BinOp::Mul,
+                        BinOp::Sub,
+                        Box::new(HirExpr::Lit(HirLit::F64(0.0))),
                         Box::new(value),
-                        Box::new(HirExpr::Lit(HirLit::F64(-1.0))),
                     )
                 };
                 (*name, value)
@@ -413,6 +414,26 @@ impl<'a> FnLowerer<'a> {
                 HirExpr::Lit(HirLit::F64(0.0)),
             ));
         }
+        // A component object that is not a bare literal (wrapped for evaluation
+        // order, or bound to an argument temporary): read each field once.
+        if let HirType::Object(type_fields) = &ty {
+            let name = format!("__thaw_duration_components_{}", self.next_binding);
+            self.next_binding += 1;
+            self.scope.insert(name.clone(), ty.clone());
+            let reads = type_fields
+                .iter()
+                .map(|(field, _)| {
+                    (
+                        field.clone(),
+                        HirExpr::PropAccess(Box::new(HirExpr::Var(name.clone())), ty.clone(), field.to_string()),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let milliseconds = Self::duration_fields_milliseconds(&reads)?;
+            let milliseconds =
+                self.wrap_call_argument_bindings(milliseconds, &[(name, ty.clone(), value)])?;
+            return Ok((milliseconds, HirExpr::Lit(HirLit::F64(0.0))));
+        }
         Err(format!(
             "expected a Duration, an ISO 8601 duration string, or an object of components, got {ty:?}"
         ))
@@ -466,6 +487,62 @@ impl<'a> FnLowerer<'a> {
     }
 
     /// `Temporal.Now.<method>()` and `Temporal.<Namespace>.<method>(...)`.
+    /// Temporal wrappers read their option/field objects statically, so an
+    /// object-literal argument must stay visible instead of hiding behind its
+    /// `__thaw_native_arg_N` temporary and the `Call(Lambda(..))` that binds its
+    /// fields to temporaries for evaluation order.
+    fn lower_temporal_arguments(
+        &mut self,
+        arguments: &[swc_ecma_ast::ExprOrSpread],
+        label: &str,
+    ) -> Result<(Vec<HirExpr>, Vec<LoweredBinding>), String> {
+        let (mut values, mut bindings) = self.lower_native_spread_values(arguments, label)?;
+        for value in values.iter_mut() {
+            let HirExpr::Var(name) = value else { continue };
+            let Some(index) = bindings.iter().position(|(bound, _, _)| bound == name) else {
+                continue;
+            };
+            if let Some(fields) = Self::peel_object_literal(&bindings[index].2) {
+                bindings.remove(index);
+                *value = HirExpr::ObjectLit(fields);
+            }
+        }
+        Ok((values, bindings))
+    }
+
+    /// The fields of an object literal, looking through the evaluation-order
+    /// `Call(Lambda(params, body), args)` wrappers. A parameter is substituted
+    /// only where a field is exactly that parameter, so every argument is still
+    /// evaluated once and in field order; anything else is left alone.
+    fn peel_object_literal(value: &HirExpr) -> Option<Vec<(Symbol, HirExpr)>> {
+        match value {
+            HirExpr::ObjectLit(fields) => Some(fields.clone()),
+            HirExpr::Call(callee, args) => {
+                let HirExpr::Lambda(_, params, _, body) = callee.as_ref() else {
+                    return None;
+                };
+                if params.len() != args.len() {
+                    return None;
+                }
+                let mut fields = Self::peel_object_literal(body)?;
+                for (param, arg) in params.iter().zip(args) {
+                    let mut used = 0;
+                    for (_, field) in fields.iter_mut() {
+                        if matches!(field, HirExpr::Var(name) if *name == param.name) {
+                            *field = arg.clone();
+                            used += 1;
+                        }
+                    }
+                    if used != 1 {
+                        return None;
+                    }
+                }
+                Some(fields)
+            }
+            _ => None,
+        }
+    }
+
     fn lower_temporal_namespace_call(
         &mut self,
         member: &MemberExpr,
@@ -487,7 +564,7 @@ impl<'a> FnLowerer<'a> {
             return Ok(None);
         };
         let label = format!("Temporal.{}.{}", namespace.sym, method.sym);
-        let (arguments, bindings) = self.lower_native_spread_values(&call.args, &label)?;
+        let (arguments, bindings) = self.lower_temporal_arguments(&call.args, &label)?;
 
         if namespace.sym == *"Now" {
             if method.sym == *"zonedDateTimeISO" {
@@ -851,7 +928,7 @@ impl<'a> FnLowerer<'a> {
         let time_zone = (kind == "zonedDateTime")
             .then(|| Self::temporal_zone(receiver.clone(), &receiver_type));
         let label = format!("Temporal {kind}.{}", property.sym);
-        let (arguments, bindings) = self.lower_native_spread_values(&call.args, &label)?;
+        let (arguments, bindings) = self.lower_temporal_arguments(&call.args, &label)?;
         let result = match property.sym.as_ref() {
             "toString" | "toJSON" => {
                 if !arguments.is_empty() {
@@ -881,17 +958,20 @@ impl<'a> FnLowerer<'a> {
                     formatted
                 } else {
                     let calendar = Self::temporal_calendar(receiver.clone(), &receiver_type);
-                    let annotation = HirExpr::BinOp(BinOp::Add,
-                        Box::new(HirExpr::BinOp(BinOp::Add,
-                            Box::new(HirExpr::Lit(HirLit::Str("[u-ca=".into()))),
-                            Box::new(calendar.clone()))),
-                        Box::new(HirExpr::Lit(HirLit::Str("]".into()))));
+                    let concat = |left, right| HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_string_concat".into())),
+                        vec![left, right],
+                    );
+                    let annotation = concat(
+                        concat(HirExpr::Lit(HirLit::Str("[u-ca=".into())), calendar.clone()),
+                        HirExpr::Lit(HirLit::Str("]".into())),
+                    );
                     HirExpr::Conditional(
                         Box::new(HirExpr::BinOp(BinOp::EqEqEq,
                             Box::new(calendar),
                             Box::new(HirExpr::Lit(HirLit::Str("iso8601".into()))))),
                         Box::new(formatted.clone()),
-                        Box::new(HirExpr::BinOp(BinOp::Add, Box::new(formatted), Box::new(annotation))),
+                        Box::new(concat(formatted, annotation)),
                         HirType::Str,
                     )
                 }

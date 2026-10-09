@@ -1042,7 +1042,13 @@ impl<'a> FnLowerer<'a> {
                         return Err("native `.flat()` expects zero or one depth".into());
                     }
                     let depth = if let Some(argument) = arguments.first() {
-                        let value = argument.clone();
+                        // The argument was bound to a temporary; the depth literal is its source.
+                        let value = match argument {
+                            HirExpr::Var(name) => spread_bindings.iter()
+                                .find(|(binding, _, _)| binding == name)
+                                .map_or_else(|| argument.clone(), |(_, _, source)| source.clone()),
+                            _ => argument.clone(),
+                        };
                         self.expect_type(&HirType::F64, &value, "array flat depth")?;
                         let constant = match value {
                             HirExpr::Lit(HirLit::F64(value)) => Some(value),

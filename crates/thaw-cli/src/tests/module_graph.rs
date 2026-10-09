@@ -119,7 +119,7 @@ fn type_only_module_keeps_link_features_for_retained_function_bodies() {
 fn type_only_registry_package_does_not_load_its_bundle() {
     let dir = std::env::temp_dir().join(format!("thaw-type-registry-{}", std::process::id()));
     let registry = dir.join("registry");
-    let package = registry.join("modules").join("types-only");
+    let package = registry.join("types-only");
     std::fs::create_dir_all(&package).unwrap();
     std::fs::write(package.join("package.d.ts"), "export interface Shape { value: number; }\nexport function f(): number;\nexport const value: number;\nexport class Client { read(): number; }\n").unwrap();
     std::fs::write(package.join("bundle.js"), "throw new Error('type-only bundle ran');\n").unwrap();
@@ -792,7 +792,7 @@ fn dynamic_import_failure_cache_survives_lambda_arena_reset() {
 #[test]
 fn dynamic_external_import_defers_package_script() {
     let dir = std::env::temp_dir().join(format!("thaw-lazy-package-{}", std::process::id()));
-    let package = dir.join("registry/modules/later");
+    let package = dir.join("registry/later");
     std::fs::create_dir_all(&package).unwrap();
     std::fs::write(package.join("package.d.ts"), "export function value(): number;").unwrap();
     std::fs::write(package.join("bundle.js"),
@@ -828,7 +828,7 @@ fn dynamic_import_initializes_static_dependencies_only_on_first_call() {
 #[test]
 fn side_effect_only_external_dynamic_import_is_deferred() {
     let dir = std::env::temp_dir().join(format!("thaw-lazy-side-effect-{}", std::process::id()));
-    let package = dir.join("registry/modules/side-effect");
+    let package = dir.join("registry/side-effect");
     std::fs::create_dir_all(&package).unwrap();
     std::fs::write(package.join("package.d.ts"), "export interface Marker { value: number; }").unwrap();
     std::fs::write(package.join("bundle.js"), "console.log('package loaded');").unwrap();
@@ -1185,7 +1185,7 @@ fn registry_transform_receives_each_module_path_for_source_maps() {
     let observed = std::cell::RefCell::new(Vec::new());
     let transform = |source: &str, path: &Path, is_override: bool| {
         let name = if is_override && source != entry_source {
-            FileName::Custom(format!("{} (in-memory entry override)", path.display()).into())
+            FileName::Custom(format!("{} (in-memory entry override)", path.display()))
         } else {
             FileName::Real(path.to_path_buf())
         };
@@ -1207,7 +1207,7 @@ fn registry_transform_receives_each_module_path_for_source_maps() {
     let overrides = std::cell::RefCell::new(Vec::new());
     let override_transform = |source: &str, path: &Path, is_override: bool| {
         if is_override {
-            let name = FileName::Custom(format!("{} (in-memory entry override)", path.display()).into());
+            let name = FileName::Custom(format!("{} (in-memory entry override)", path.display()));
             let (module, map) = thaw_parser::parse_typescript_with_source_map_named(source, name.clone())?;
             assert_eq!(map.lookup_char_pos(module.body[0].span().lo).file.name.as_ref(), &name);
             overrides.borrow_mut().push(name);

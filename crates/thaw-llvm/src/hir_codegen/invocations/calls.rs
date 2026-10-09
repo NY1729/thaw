@@ -22,6 +22,20 @@ impl<'ctx> HirCompiler<'ctx> {
         }
 
         match name.as_str() {
+            "@@thaw_async_caught_carrier" => {
+                let [text, owner, native, tag, number, bigint, boolean] = args else {
+                    return Err("async caught carrier expects text, owner, native, tag, number, bigint and bool".into());
+                };
+                let text = self.compile_expr(text)?.into_pointer_value();
+                let owner = self.compile_expr(owner)?.into_pointer_value();
+                let native = self.compile_expr(native)?.into_pointer_value();
+                let tag = self.compile_expr(tag)?.into_int_value();
+                let number = self.compile_expr(number)?.into_float_value();
+                let bigint = self.compile_expr(bigint)?.into_int_value();
+                let boolean = self.compile_expr(boolean)?.into_int_value();
+                return self.build_caught_exception_carrier(text, owner, native, tag, number, bigint, boolean, false)
+                    .map(Into::into);
+            }
             "@@thaw_capture_throw_text" => {
                 let [value] = args else {
                     return Err("caught throw conversion expects one operand".into());
@@ -63,18 +77,29 @@ impl<'ctx> HirCompiler<'ctx> {
             }
 
             "__thaw_assert_class_identity" => {
-                let [object, HirExpr::Lit(HirLit::Str(class_name))] = args else {
+                let (object_expr, HirExpr::Lit(HirLit::Str(class_name)), layout_checked) = (match args {
+                    [object, name] => (object, name, false),
+                    [object, name, HirExpr::Lit(HirLit::Str(_))] => (object, name, true),
+                    _ => return Err("class identity assertion expects an object and a literal class name".into()),
+                }) else {
                     return Err("class identity assertion expects an object and a literal class name".into());
                 };
-                let object = self.compile_expr(object)?.into_pointer_value();
-                let expected = self.builder.build_global_string_ptr(class_name, "class_assert_name")
-                    .map_err(|error| error.to_string())?;
-                let trusted = self.builder.build_call(
-                    self.module.get_function("thaw_object_has_class_identity").unwrap(),
-                    &[object.into(), expected.as_pointer_value().into()],
-                    "class_assert_identity",
-                ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
-                    .ok_or("class identity assertion returned no value")?.into_int_value();
+                let object = self.compile_expr(object_expr)?.into_pointer_value();
+                // The three-operand form is a typed `as` of a caught value: an
+                // empty class name (interface target) skips the nominal check,
+                // and the target's field layout must fit the registered one.
+                let trusted = if class_name.is_empty() && layout_checked {
+                    self.context.bool_type().const_int(1, false)
+                } else {
+                    let expected = self.builder.build_global_string_ptr(class_name, "class_assert_name")
+                        .map_err(|error| error.to_string())?;
+                    self.builder.build_call(
+                        self.module.get_function("thaw_object_has_class_identity").unwrap(),
+                        &[object.into(), expected.as_pointer_value().into()],
+                        "class_assert_identity",
+                    ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                        .ok_or("class identity assertion returned no value")?.into_int_value()
+                };
                 let function = self.current_function();
                 let accepted = self.context.append_basic_block(function, "class_identity_accepted");
                 let rejected = self.context.append_basic_block(function, "class_identity_rejected");
@@ -83,6 +108,18 @@ impl<'ctx> HirCompiler<'ctx> {
                 self.builder.position_at_end(rejected);
                 self.compile_throw_type_error("Incompatible class accessor receiver")?;
                 self.builder.position_at_end(accepted);
+                if layout_checked {
+                    let fits = self.compile_register_native_object_layout(&[
+                        object_expr.clone(), HirExpr::Lit(HirLit::Bool(false)),
+                    ])?.into_int_value();
+                    let incompatible = self.context.append_basic_block(function, "class_layout_incompatible");
+                    let compatible = self.context.append_basic_block(function, "class_layout_compatible");
+                    self.builder.build_conditional_branch(fits, compatible, incompatible)
+                        .map_err(|error| error.to_string())?;
+                    self.builder.position_at_end(incompatible);
+                    self.compile_throw_type_error("Incompatible native object field layout")?;
+                    self.builder.position_at_end(compatible);
+                }
                 return Ok(object.into());
             }
             "__thaw_object_has_class_identity" => {
@@ -150,6 +187,19 @@ impl<'ctx> HirCompiler<'ctx> {
                 ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
                     .ok_or("full object keys query returned no value")?.into_pointer_value();
                 return Ok(self.compile_array_wrap(raw_keys)?.into());
+            }
+            "__thaw_object_set_class_identity" => {
+                let [object, marker] = args else {
+                    return Err("object class identity registration expects two operands".into());
+                };
+                let object = self.compile_expr(object)?.into_pointer_value();
+                let marker = self.compile_expr(marker)?.into_pointer_value();
+                self.builder.build_call(
+                    self.module.get_function("thaw_object_set_class_identity").unwrap(),
+                    &[object.into(), marker.into()],
+                    "register_error_record_identity",
+                ).map_err(|error| error.to_string())?;
+                return Ok(object.into());
             }
             "__thaw_object_hide_marker" => {
                 let [object, marker] = args else {
@@ -233,7 +283,8 @@ impl<'ctx> HirCompiler<'ctx> {
                 let [object, operation] = args else {
                     return Err(format!("{name} expects an object and an operation"));
                 };
-                let json_state = self.expr_hir_type(object) == Some(HirType::Json);
+                // A `Record` is a JSON container too: it must use the same state key the JSON runtime consults.
+                let json_state = matches!(self.expr_hir_type(object), Some(HirType::Json | HirType::Dictionary(_)));
                 let object = self.compile_expr(object)?;
                 if !object.is_pointer_value() {
                     return Err("object integrity methods require a native object".into());
@@ -1481,6 +1532,7 @@ impl<'ctx> HirCompiler<'ctx> {
             | "__thaw_error_suppressed_error"
             | "__thaw_error_suppressed"
             | "__thaw_error_is_error"
+            | "__thaw_native_wrapper_is_live"
             | "__thaw_error_to_string" => {
                 let [value] = args else {
                     return Err(format!("{name} expects one operand"));
@@ -1537,7 +1589,46 @@ impl<'ctx> HirCompiler<'ctx> {
                 let [receiver, key] = args else {
                     return Err("__thaw_error_property expects a receiver and a property name".into());
                 };
-                let receiver = self.compile_expr(receiver)?;
+                let receiver_type = self.expr_hir_type(receiver);
+                let mut receiver = self.compile_expr(receiver)?;
+                // A union-typed catch value carries its text as the `Str` member's
+                // payload; read it only when that member is the active one.
+                if let (BasicValueEnum::StructValue(union), Some(HirType::Union(members))) =
+                    (receiver, receiver_type)
+                {
+                    let ptr_type = self.context.ptr_type(AddressSpace::default());
+                    receiver = match members.iter().position(|member| *member == HirType::Str) {
+                        Some(index) => {
+                            let tag = self
+                                .builder
+                                .build_extract_value(union, 0, "catch_tag")
+                                .map_err(|error| error.to_string())?
+                                .into_int_value();
+                            let payload = self
+                                .builder
+                                .build_extract_value(union, 1, "catch_payload")
+                                .map_err(|error| error.to_string())?
+                                .into_int_value();
+                            let text = self
+                                .builder
+                                .build_int_to_ptr(payload, ptr_type, "catch_text")
+                                .map_err(|error| error.to_string())?;
+                            let is_text = self
+                                .builder
+                                .build_int_compare(
+                                    inkwell::IntPredicate::EQ,
+                                    tag,
+                                    tag.get_type().const_int(index as u64, false),
+                                    "catch_is_text",
+                                )
+                                .map_err(|error| error.to_string())?;
+                            self.builder
+                                .build_select(is_text, text, ptr_type.const_null(), "catch_text_or_null")
+                                .map_err(|error| error.to_string())?
+                        }
+                        None => ptr_type.const_null().into(),
+                    };
+                }
                 let key = self.compile_expr(key)?;
                 return self
                     .builder
@@ -1746,6 +1837,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     return Err(format!("{name} expects one operand"));
                 };
                 let value = self.compile_expr(value)?;
+                self.clear_pending_native_text()?;
                 self.builder
                     .build_store(self.pending_exception_object().as_pointer_value(), value)
                     .map_err(|error| error.to_string())?;
@@ -1759,6 +1851,129 @@ impl<'ctx> HirCompiler<'ctx> {
                         self.context.i64_type().const_zero(),
                     )
                     .map_err(|error| error.to_string())?;
+                return Ok(self.context.i32_type().const_int(0, false).into());
+            }
+            "__thaw_set_pending_exception_native" => {
+                let [value, tag, layout] = args else {
+                    return Err(format!("{name} expects value, category, and layout"));
+                };
+                let value = self.compile_expr(value)?.into_pointer_value();
+                let tag = self.compile_expr(tag)?.into_int_value();
+                let layout = self.compile_expr(layout)?.into_pointer_value();
+                let descriptor = self.builder.build_call(
+                    self.module.get_function("thaw_exception_native_provenance_new").unwrap(),
+                    &[tag.into(), value.into(), layout.into()],
+                    "pending_native_exception_descriptor",
+                ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                    .ok_or("native exception descriptor returned no value")?.into_pointer_value();
+                self.clear_pending_native_text()?;
+                self.builder.build_store(self.pending_exception_native().as_pointer_value(), descriptor)
+                    .map_err(|error| error.to_string())?;
+                self.builder.build_store(self.pending_exception_object().as_pointer_value(), value)
+                    .map_err(|error| error.to_string())?;
+                self.builder.build_store(self.pending_exception_aggregate_errors().as_pointer_value(),
+                    self.context.ptr_type(AddressSpace::default()).const_null())
+                    .map_err(|error| error.to_string())?;
+                self.builder.build_store(self.pending_exception_value(PENDING_EXCEPTION_VALUE_TAG_SYMBOL).as_pointer_value(), tag)
+                    .map_err(|error| error.to_string())?;
+                return Ok(self.context.i32_type().const_int(0, false).into());
+            }
+            "__thaw_set_pending_exception_native_value" => {
+                let [descriptor] = args else {
+                    return Err(format!("{name} expects one descriptor"));
+                };
+                let descriptor = self.compile_expr(descriptor)?.into_pointer_value();
+                let tag = self.builder.build_call(
+                    self.module.get_function("thaw_exception_native_tag").unwrap(),
+                    &[descriptor.into()], "pending_native_exception_tag",
+                ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                    .ok_or("native exception tag returned no value")?.into_int_value();
+                self.clear_pending_native_text()?;
+                self.builder.build_store(self.pending_exception_native().as_pointer_value(), descriptor)
+                    .map_err(|error| error.to_string())?;
+                self.builder.build_store(self.pending_exception_object().as_pointer_value(),
+                    self.context.ptr_type(AddressSpace::default()).const_null())
+                    .map_err(|error| error.to_string())?;
+                self.builder.build_store(self.pending_exception_aggregate_errors().as_pointer_value(),
+                    self.context.ptr_type(AddressSpace::default()).const_null())
+                    .map_err(|error| error.to_string())?;
+                self.builder.build_store(self.pending_exception_value(PENDING_EXCEPTION_VALUE_TAG_SYMBOL).as_pointer_value(), tag)
+                    .map_err(|error| error.to_string())?;
+                return Ok(self.context.i32_type().const_int(0, false).into());
+            }
+            "__thaw_capture_exception_js_value" => {
+                let [value] = args else {
+                    return Err(format!("{name} expects one operand"));
+                };
+                let handle = self.compile_expr(value)?;
+                return self.compile_original_quickjs_exception_handle(handle, false);
+            }
+            "__thaw_set_pending_exception_json" => {
+                let [value] = args else {
+                    return Err(format!("{name} expects one operand"));
+                };
+                self.tracks_owned_json_roots = true;
+                let value = self.compile_expr(value)?.into_pointer_value();
+                let shared = self.builder.build_call(
+                    self.module.get_function("thaw_json_share").unwrap(),
+                    &[value.into()], "pending_exception_json_share",
+                ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                    .ok_or("JSON exception share returned no value")?;
+                let rooted = self.builder.build_call(
+                    self.module.get_function("thaw_json_track_arena_owned_root").unwrap(),
+                    &[shared.into()], "pending_exception_json_root",
+                ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                    .ok_or("JSON exception root returned no value")?;
+                let rooted = self.compile_check_json_host_error(rooted, None)?.into_pointer_value();
+                self.builder.build_store(self.pending_exception_object().as_pointer_value(), rooted)
+                    .map_err(|error| error.to_string())?;
+                self.builder.build_store(self.pending_exception_aggregate_errors().as_pointer_value(),
+                    self.context.ptr_type(AddressSpace::default()).const_null())
+                    .map_err(|error| error.to_string())?;
+                self.clear_pending_native_text()?;
+                self.builder.build_store(
+                    self.pending_exception_value(PENDING_EXCEPTION_F64_SYMBOL).as_pointer_value(),
+                    self.context.f64_type().const_zero(),
+                ).map_err(|error| error.to_string())?;
+                self.builder.build_store(
+                    self.pending_exception_value(PENDING_EXCEPTION_I64_SYMBOL).as_pointer_value(),
+                    self.context.i64_type().const_zero(),
+                ).map_err(|error| error.to_string())?;
+                self.builder.build_store(
+                    self.pending_exception_value(PENDING_EXCEPTION_BOOL_SYMBOL).as_pointer_value(),
+                    self.context.bool_type().const_zero(),
+                ).map_err(|error| error.to_string())?;
+                self.builder.build_store(
+                    self.pending_exception_value(PENDING_EXCEPTION_VALUE_TAG_SYMBOL).as_pointer_value(),
+                    self.context.i64_type().const_int(7, false),
+                ).map_err(|error| error.to_string())?;
+                return Ok(self.context.i32_type().const_int(0, false).into());
+            }
+            "__thaw_clear_pending_exception_provenance" => {
+                let null = self.context.ptr_type(AddressSpace::default()).const_null();
+                self.builder.build_store(self.pending_exception_object().as_pointer_value(), null)
+                    .map_err(|error| error.to_string())?;
+                self.builder.build_store(self.pending_exception_native().as_pointer_value(), null)
+                    .map_err(|error| error.to_string())?;
+                self.builder.build_store(self.pending_exception_aggregate_errors().as_pointer_value(), null)
+                    .map_err(|error| error.to_string())?;
+                self.builder.build_store(
+                    self.pending_exception_value(PENDING_EXCEPTION_VALUE_TAG_SYMBOL).as_pointer_value(),
+                    self.context.i64_type().const_zero(),
+                ).map_err(|error| error.to_string())?;
+                self.builder.build_store(
+                    self.pending_exception_value(PENDING_EXCEPTION_F64_SYMBOL).as_pointer_value(),
+                    self.context.f64_type().const_zero(),
+                ).map_err(|error| error.to_string())?;
+                self.builder.build_store(
+                    self.pending_exception_value(PENDING_EXCEPTION_I64_SYMBOL).as_pointer_value(),
+                    self.context.i64_type().const_zero(),
+                ).map_err(|error| error.to_string())?;
+                self.builder.build_store(
+                    self.pending_exception_value(PENDING_EXCEPTION_BOOL_SYMBOL).as_pointer_value(),
+                    self.context.bool_type().const_zero(),
+                ).map_err(|error| error.to_string())?;
+                self.clear_pending_native_text()?;
                 return Ok(self.context.i32_type().const_int(0, false).into());
             }
             "__thaw_pending_exception_aggregate" => {
@@ -1777,6 +1992,38 @@ impl<'ctx> HirCompiler<'ctx> {
                         "pending_exception_object_value",
                     )
                     .map_err(|error| error.to_string());
+            }
+            "__thaw_pending_exception_native" => {
+                return self.builder.build_load(self.context.ptr_type(AddressSpace::default()),
+                    self.pending_exception_native().as_pointer_value(),
+                    "pending_exception_native_descriptor")
+                    .map_err(|error| error.to_string());
+            }
+            "__thaw_native_exception_tag" => {
+                let [descriptor] = args else { return Err(format!("{name} expects one descriptor")); };
+                let descriptor = self.compile_expr(descriptor)?.into_pointer_value();
+                return self.builder.build_call(
+                    self.module.get_function("thaw_exception_native_tag").unwrap(),
+                    &[descriptor.into()], "native_exception_tag",
+                ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                    .ok_or("native exception tag returned no value".into());
+            }
+            "__thaw_native_exception_owner" => {
+                let [descriptor, tag, layout] = args else { return Err(format!("{name} expects descriptor, category, and layout")); };
+                let descriptor = self.compile_expr(descriptor)?.into_pointer_value();
+                let tag = self.compile_expr(tag)?.into_int_value();
+                let layout = self.compile_expr(layout)?.into_pointer_value();
+                return self.builder.build_call(
+                    self.module.get_function("thaw_exception_native_owner").unwrap(),
+                    &[descriptor.into(), tag.into(), layout.into()], "native_exception_owner",
+                ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                    .ok_or("native exception owner returned no value".into());
+            }
+            "__thaw_native_exception_owner_present" => {
+                let [owner] = args else { return Err(format!("{name} expects one owner")); };
+                let owner = self.compile_expr(owner)?.into_pointer_value();
+                return self.builder.build_is_not_null(owner, "native_exception_owner_present")
+                    .map(Into::into).map_err(|error| error.to_string());
             }
             "__thaw_exception_object_present" => {
                 let [value] = args else {
@@ -1834,6 +2081,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     _ => (PENDING_EXCEPTION_BOOL_SYMBOL, 3),
                 };
                 let value = self.compile_expr(value)?;
+                self.clear_pending_native_text()?;
                 self.builder.build_store(self.pending_exception_aggregate_errors().as_pointer_value(),
                     self.context.ptr_type(AddressSpace::default()).const_null())
                     .map_err(|error| error.to_string())?;
@@ -1863,6 +2111,8 @@ impl<'ctx> HirCompiler<'ctx> {
                     (3, "boolean"),
                     (4, "string"),
                     (5, "undefined"),
+                    (20, "symbol"),
+                    (28, "function"),
                 ];
                 let mut result = self.compile_expr(&HirExpr::Lit(HirLit::Str("object".into())))?;
                 for (expected, label) in choices.into_iter().rev() {
@@ -1899,6 +2149,24 @@ impl<'ctx> HirCompiler<'ctx> {
                     )
                     .map_err(|error| error.to_string())?;
                 return Ok(self.context.i32_type().const_int(0, false).into());
+            }
+            "__thaw_closure_alias" => {
+                let [adapter, original] = args else {
+                    return Err("closure alias expects an adapter and the original closure".into());
+                };
+                let adapter = self.compile_expr(adapter)?;
+                let original = self.compile_expr(original)?;
+                return self
+                    .builder
+                    .build_call(
+                        self.module.get_function("thaw_closure_alias_register").unwrap(),
+                        &[adapter.into(), original.into()],
+                        "closure_alias",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("closure alias returned no value".into());
             }
             "__thaw_detach_promise" | "__thaw_detach_rejection" => {
                 let [promise] = args else {

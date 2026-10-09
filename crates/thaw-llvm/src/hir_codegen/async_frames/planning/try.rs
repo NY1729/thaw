@@ -18,7 +18,7 @@ impl<'ctx> HirCompiler<'ctx> {
         let try_guard = format!("__thaw_try_{}", *next_guard);
         let catch_guard = format!("__thaw_catch_{}", *next_guard);
         *next_guard += 1;
-        Self::push_async_catch_locals(extra_locals, catch_name);
+        self.push_async_catch_locals(extra_locals, catch_name);
 
         let current = segments.last_mut().unwrap();
         current.stmts.push(HirStmt::Let(
@@ -66,7 +66,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 continue;
             }
             if let HirStmt::Throw(error) = stmt {
-                let mut caught = Self::async_catch_assignments(catch_name, error.clone());
+                let mut caught = self.async_catch_assignments(catch_name, error.clone());
                 caught.extend([
                     HirStmt::Expr(HirExpr::Assign(
                         try_guard.clone(),

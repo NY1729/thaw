@@ -437,26 +437,46 @@ fn elf_range(bytes: &[u8], offset: u64, length: u64) -> Result<&[u8], String> {
     let start = usize::try_from(offset).map_err(|_| "ELF offset exceeds addressable memory")?;
     let length = usize::try_from(length).map_err(|_| "ELF length exceeds addressable memory")?;
     let end = start.checked_add(length).ok_or("ELF range overflows")?;
-    bytes.get(start..end).ok_or_else(|| "ELF range extends beyond file".into())
+    bytes
+        .get(start..end)
+        .ok_or_else(|| "ELF range extends beyond file".into())
 }
 
 impl ElfEndian {
     fn u16(self, bytes: &[u8]) -> Result<u16, String> {
-        let raw: [u8; 2] = bytes.get(..2).ok_or("truncated ELF integer")?
-            .try_into().map_err(|_| "truncated ELF integer")?;
-        Ok(match self { Self::Little => u16::from_le_bytes(raw), Self::Big => u16::from_be_bytes(raw) })
+        let raw: [u8; 2] = bytes
+            .get(..2)
+            .ok_or("truncated ELF integer")?
+            .try_into()
+            .map_err(|_| "truncated ELF integer")?;
+        Ok(match self {
+            Self::Little => u16::from_le_bytes(raw),
+            Self::Big => u16::from_be_bytes(raw),
+        })
     }
 
     fn u32(self, bytes: &[u8]) -> Result<u32, String> {
-        let raw: [u8; 4] = bytes.get(..4).ok_or("truncated ELF integer")?
-            .try_into().map_err(|_| "truncated ELF integer")?;
-        Ok(match self { Self::Little => u32::from_le_bytes(raw), Self::Big => u32::from_be_bytes(raw) })
+        let raw: [u8; 4] = bytes
+            .get(..4)
+            .ok_or("truncated ELF integer")?
+            .try_into()
+            .map_err(|_| "truncated ELF integer")?;
+        Ok(match self {
+            Self::Little => u32::from_le_bytes(raw),
+            Self::Big => u32::from_be_bytes(raw),
+        })
     }
 
     fn u64(self, bytes: &[u8]) -> Result<u64, String> {
-        let raw: [u8; 8] = bytes.get(..8).ok_or("truncated ELF integer")?
-            .try_into().map_err(|_| "truncated ELF integer")?;
-        Ok(match self { Self::Little => u64::from_le_bytes(raw), Self::Big => u64::from_be_bytes(raw) })
+        let raw: [u8; 8] = bytes
+            .get(..8)
+            .ok_or("truncated ELF integer")?
+            .try_into()
+            .map_err(|_| "truncated ELF integer")?;
+        Ok(match self {
+            Self::Little => u64::from_le_bytes(raw),
+            Self::Big => u64::from_be_bytes(raw),
+        })
     }
 }
 
@@ -473,10 +493,13 @@ fn elf_section<'a>(bytes: &'a [u8], name: &[u8]) -> Result<&'a [u8], String> {
     if entry_size < 64 || names_index == 0 || names_index >= count {
         return Err("ELF section table is invalid".into());
     }
-    let table_size = count.checked_mul(entry_size).ok_or("ELF section table overflows")?;
+    let table_size = count
+        .checked_mul(entry_size)
+        .ok_or("ELF section table overflows")?;
     elf_range(bytes, table_offset, table_size)?;
     let entry = |index: u64| -> Result<&[u8], String> {
-        let offset = index.checked_mul(entry_size)
+        let offset = index
+            .checked_mul(entry_size)
             .and_then(|step| table_offset.checked_add(step))
             .ok_or("ELF section offset overflows")?;
         elf_range(bytes, offset, 64)
@@ -485,14 +508,22 @@ fn elf_section<'a>(bytes: &'a [u8], name: &[u8]) -> Result<&'a [u8], String> {
     if endian.u32(&names_header[4..])? != 3 {
         return Err("ELF section names table has an invalid type".into());
     }
-    let names = elf_range(bytes, endian.u64(&names_header[24..])?, endian.u64(&names_header[32..])?)?;
+    let names = elf_range(
+        bytes,
+        endian.u64(&names_header[24..])?,
+        endian.u64(&names_header[32..])?,
+    )?;
     let mut found = None;
     for index in 1..count {
         let section = entry(index)?;
         let name_offset = usize::try_from(endian.u32(section)?)
             .map_err(|_| "ELF section name offset overflows")?;
-        let suffix = names.get(name_offset..).ok_or("ELF section name is out of range")?;
-        let end = suffix.iter().position(|byte| *byte == 0)
+        let suffix = names
+            .get(name_offset..)
+            .ok_or("ELF section name is out of range")?;
+        let end = suffix
+            .iter()
+            .position(|byte| *byte == 0)
             .ok_or("ELF section name is not null terminated")?;
         if &suffix[..end] != name {
             continue;
@@ -503,11 +534,14 @@ fn elf_section<'a>(bytes: &'a [u8], name: &[u8]) -> Result<&'a [u8], String> {
         if endian.u32(&section[4..])? != 1 {
             return Err("Thaw artifact section is not PROGBITS".into());
         }
-        found = Some(elf_range(bytes, endian.u64(&section[24..])?, endian.u64(&section[32..])?)?);
+        found = Some(elf_range(
+            bytes,
+            endian.u64(&section[24..])?,
+            endian.u64(&section[32..])?,
+        )?);
     }
     found.ok_or_else(|| "executable does not contain a Thaw artifact section".into())
 }
-
 
 fn run_inspect(args: &[String]) -> Result<(), String> {
     if args.len() != 1 {
@@ -516,8 +550,7 @@ fn run_inspect(args: &[String]) -> Result<(), String> {
     let path = Path::new(&args[0]);
     let bytes = std::fs::read(path)
         .map_err(|error| format!("failed to read `{}`: {error}", path.display()))?;
-    let endian = elf_endian(&bytes)
-        .map_err(|error| format!("`{}`: {error}", path.display()))?;
+    let endian = elf_endian(&bytes).map_err(|error| format!("`{}`: {error}", path.display()))?;
     let architecture = match endian.u16(&bytes[18..])? {
         0x3e => "x86_64",
         0xb7 => "aarch64",
@@ -583,15 +616,16 @@ fn run_inspect(args: &[String]) -> Result<(), String> {
 
 fn artifact_manifest_from_bytes(bytes: &[u8]) -> Result<serde_json::Value, String> {
     let section = elf_section(bytes, ARTIFACT_SECTION)?;
-    let payload = section.strip_prefix(ARTIFACT_MARKER.as_bytes())
+    let payload = section
+        .strip_prefix(ARTIFACT_MARKER.as_bytes())
         .ok_or("Thaw artifact metadata has an unsupported version")?;
-    let json = payload.strip_suffix(&[0])
+    let json = payload
+        .strip_suffix(&[0])
         .ok_or("Thaw artifact metadata is not null terminated")?;
     if json.is_empty() || json.contains(&0) {
         return Err("Thaw artifact metadata has invalid contents".into());
     }
-    serde_json::from_slice(json)
-        .map_err(|error| format!("invalid Thaw artifact metadata: {error}"))
+    serde_json::from_slice(json).map_err(|error| format!("invalid Thaw artifact metadata: {error}"))
 }
 
 fn run_registry(args: &[String]) -> Result<(), String> {
@@ -702,7 +736,9 @@ fn build_option_value(args: &[String], index: usize) -> Result<Option<&str>, Str
         "--vite" => "--vite requires a directory argument",
         _ => return Ok(None),
     };
-    args.get(index + 1).map(|value| Some(value.as_str())).ok_or_else(|| message.to_string())
+    args.get(index + 1)
+        .map(|value| Some(value.as_str()))
+        .ok_or_else(|| message.to_string())
 }
 
 fn run_build(args: &[String]) -> Result<(), String> {
@@ -961,9 +997,10 @@ fn generate_bridge_shims(bridge_dts: &[PathBuf]) -> Result<String, String> {
         let source = std::fs::read_to_string(path)
             .map_err(|e| format!("failed to read `{}`: {e}", path.display()))?;
         let functions = thaw_bridge::parse_dts_named(
-            &source, thaw_parser::common::FileName::Real(path.clone()),
+            &source,
+            thaw_parser::common::FileName::Real(path.clone()),
         )
-            .map_err(|e| format!("failed to parse `{}`: {e}", path.display()))?;
+        .map_err(|e| format!("failed to parse `{}`: {e}", path.display()))?;
         // `true`: the manual `--bridge` path trusts the classification
         // as-is, since the user is already responsible for supplying a
         // matching `--link`ed library themselves for any FastPath

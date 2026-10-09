@@ -243,7 +243,16 @@ impl<'a> FnLowerer<'a> {
 
         // Expressions that produce typed functions are callable through the
         // same closure ABI as locals. In particular, support `make(x)(y)`.
-        if !matches!(callee_expr.as_ref(), Expr::Ident(_) | Expr::Member(_)) {
+        // `fns[i](x)`: an element of a typed function array is a plain function
+        // value, not a method, so it goes through the same closure ABI.
+        let indexed_function_element = matches!(callee_expr.as_ref(), Expr::Member(member)
+            if matches!(&member.prop, MemberProp::Computed(computed)
+                if member_property_name(&member.prop).is_none()
+                    && well_known_symbol_from_expr(&computed.expr).is_none())
+            && matches!(self.peek_type_without_lowering(&member.obj),
+                Some(HirType::Array(element)) if matches!(*element,
+                    HirType::Function(..) | HirType::CallableFunction(..))));
+        if indexed_function_element || !matches!(callee_expr.as_ref(), Expr::Ident(_) | Expr::Member(_)) {
             if call.type_args.is_some() {
                 return Err("function-value invocation does not accept type arguments".into());
             }
@@ -407,9 +416,13 @@ impl<'a> FnLowerer<'a> {
                             type_args: None,
                         }, Some(class_name));
                     }
-                    return Err(format!(
-                        "class `{class_name}` has no native method `{property}`"
-                    ));
+                    // Date/Object builtins (`getTime`, `hasOwnProperty`, ...) are not
+                    // class methods; they reach the native builtin dispatch below.
+                    if !Self::is_native_instance_builtin(&property) {
+                        return Err(format!(
+                            "class `{class_name}` has no native method `{property}`"
+                        ));
+                    }
                 }
                 // A receiver typed `JsValue` (an opaque handle -- a
                 // Fallback function's return value that couldn't be
@@ -806,8 +819,7 @@ impl<'a> FnLowerer<'a> {
                         | "getOrInsertComputed"
                 ) && (self.receiver_is_map_or_set(&member.obj)
                     || self.peek_type_without_lowering(&member.obj) == Some(HirType::Json)
-                    || (property.sym == *"set"
-                        && self.peek_type_without_lowering(&member.obj) == Some(HirType::Bytes)))
+                    || (property.sym == *"set" && self.receiver_is_bytes(&member.obj)))
                 {
                     return self.lower_native_instance_builtin(member, property, call);
                 }
@@ -1009,6 +1021,26 @@ impl<'a> FnLowerer<'a> {
             if let MemberProp::Computed(computed) = &member.prop {
                 if let Some(symbol) = well_known_symbol_from_expr(&computed.expr) {
                     return self.lower_well_known_symbol_call(member, symbol, call);
+                }
+            }
+        }
+
+        // A method call on a `Json`/`any` variable that is not a native
+        // builtin: the value may be a live native-owner wrapper (a host
+        // lease), so route the call to the live object like a `JsValue`
+        // receiver. A plain decoded Json value fails at run time instead.
+        if let Expr::Member(member) = callee_expr.as_ref() {
+            if let MemberProp::Ident(prop) = &member.prop {
+                if matches!(member.obj.as_ref(), Expr::Ident(_) | Expr::Member(_))
+                    && self.peek_type_without_lowering(&member.obj) == Some(HirType::Json)
+                    && !Self::is_native_instance_builtin(prop.sym.as_ref())
+                {
+                    return self.lower_dynamic_value_method_call(
+                        &member.obj,
+                        prop.sym.as_ref(),
+                        &call.args,
+                        expected_return_hint.as_ref(),
+                    );
                 }
             }
         }
@@ -1423,63 +1455,19 @@ impl<'a> FnLowerer<'a> {
                 self.next_binding += 1;
                 self.scope.insert(value_name.clone(), value_type.clone());
                 let value_var = HirExpr::Var(value_name.clone());
-                let setter = match &value_type {
-                    HirType::Object(_) => HirExpr::Call(
-                        Box::new(HirExpr::Var(
-                            "__thaw_set_pending_exception_object".to_string(),
-                        )),
-                        vec![value_var.clone()],
-                    ),
-                    HirType::F64 => HirExpr::Call(
-                        Box::new(HirExpr::Var(
-                            "__thaw_set_pending_exception_f64".to_string(),
-                        )),
-                        vec![value_var.clone()],
-                    ),
-                    HirType::I64 => HirExpr::Call(
-                        Box::new(HirExpr::Var(
-                            "__thaw_set_pending_exception_i64".to_string(),
-                        )),
-                        vec![value_var.clone()],
-                    ),
-                    HirType::Bool => HirExpr::Call(
-                        Box::new(HirExpr::Var(
-                            "__thaw_set_pending_exception_bool".to_string(),
-                        )),
-                        vec![value_var.clone()],
-                    ),
-                    HirType::Str | HirType::StrLiteral(_) => HirExpr::Call(
-                        Box::new(HirExpr::Var(
-                            "__thaw_set_pending_exception_tag".to_string(),
-                        )),
-                        vec![HirExpr::Lit(HirLit::I64(4))],
-                    ),
-                    HirType::Undefined | HirType::Void => HirExpr::Call(
-                        Box::new(HirExpr::Var(
-                            "__thaw_set_pending_exception_tag".to_string(),
-                        )),
-                        vec![HirExpr::Lit(HirLit::I64(5))],
-                    ),
-                    HirType::Null => HirExpr::Call(
-                        Box::new(HirExpr::Var("__thaw_set_pending_exception_tag".to_string())),
-                        vec![HirExpr::Lit(HirLit::I64(6))],
-                    ),
-                    _ => HirExpr::Call(
-                        Box::new(HirExpr::Var(
-                            "__thaw_set_pending_exception_tag".to_string(),
-                        )),
-                        vec![HirExpr::Lit(HirLit::I64(0))],
-                    ),
-                };
-                let message = self.coerce_primitive_to_string(value_var)?;
-                HirExpr::Block(vec![
-                    HirStmt::Let(value_name, value_type, value),
-                    HirStmt::Expr(setter),
-                    HirStmt::Expr(HirExpr::Call(
-                        Box::new(HirExpr::Var(callee.to_string())),
-                        vec![message],
-                    )),
-                ])
+                let setters = self.rejection_provenance_statements(value_var.clone(), &value_type)?;
+                let message = self.rejection_display_without_user_coercion(value_var, &value_type)?;
+                let mut rejection = vec![HirStmt::Let(value_name, value_type, value)];
+                rejection.push(HirStmt::Expr(HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_clear_pending_exception_provenance".into())),
+                    Vec::new(),
+                )));
+                rejection.extend(setters);
+                rejection.push(HirStmt::Expr(HirExpr::Call(
+                    Box::new(HirExpr::Var(callee.to_string())),
+                    vec![message],
+                )));
+                HirExpr::Block(rejection)
             } else {
                 HirExpr::Call(Box::new(HirExpr::Var(callee.to_string())), vec![value])
             };
@@ -1661,11 +1649,15 @@ impl<'a> FnLowerer<'a> {
             .as_ref()
             .is_some_and(|signature| !signature.generic_type_params.is_empty());
         let mut generic_inferred = HashMap::new();
-        for (index, argument) in call.args.iter().enumerate() {
+        // A statically sized `...tuple` spread fills several parameter positions, so the
+        // contextual parameter of a later argument is looked up at the shifted position.
+        let mut spread_shift = 0usize;
+        for (arg_index, argument) in call.args.iter().enumerate() {
+            let index = arg_index + spread_shift;
             let generic_context = signature
                 .as_ref()
                 .filter(|_| argument.spread.is_none())
-                .and_then(|signature| signature.generic_param_patterns.get(index))
+                .and_then(|signature| generic_pattern_for_physical_argument(signature, index))
                 .and_then(|pattern| match pattern {
                     GenericTypePattern::Function(params, optional, rest, result) => {
                         let params = params
@@ -1782,15 +1774,37 @@ impl<'a> FnLowerer<'a> {
                     {
                         self.lower_expr_with_expected_type(&argument.expr, Some(&HirType::JsValue))?
                     }
-                    _ => self.lower_expr_with_expected_type(&argument.expr, expected)?,
+                    _ => {
+                        let console_read = if callee_name.starts_with("console.") {
+                            self.lower_console_dictionary_read(&argument.expr)?
+                        } else {
+                            None
+                        };
+                        match console_read {
+                            Some(read) => read,
+                            None => self.lower_expr_with_expected_type(&argument.expr, expected)?,
+                        }
+                    }
                 }
             };
             if let Some(pattern) = signature
                 .as_ref()
-                .and_then(|signature| signature.generic_param_patterns.get(index))
+                .and_then(|signature| generic_pattern_for_physical_argument(signature, index))
             {
                 let actual = self.infer_expr_type(&value)?;
                 let _ = match_generic_pattern(pattern, &actual, &mut generic_inferred);
+            }
+            if argument.spread.is_some() {
+                let width = match &value {
+                    HirExpr::ArrayLit(elements) => Some(elements.len()),
+                    other => match self.infer_expr_type(other) {
+                        Ok(HirType::Tuple(elements)) => Some(elements.len()),
+                        _ => None,
+                    },
+                };
+                if let Some(width) = width {
+                    spread_shift += width.saturating_sub(1);
+                }
             }
             lowered.push(value);
         }
@@ -1807,6 +1821,15 @@ impl<'a> FnLowerer<'a> {
                 let name = format!("__thaw_call_arg_{}", self.next_binding);
                 self.next_binding += 1;
                 self.scope.insert(name.clone(), ty.clone());
+                // The temporary stands for the same physical value, so a class
+                // instance viewed through an interface keeps its class alias
+                // (`const n: Named = new C(); n.method()` passes `n` as the
+                // class receiver).
+                if let HirExpr::Var(source) = &value {
+                    if let Some(alias) = self.native_class_aliases.get(source).cloned() {
+                        self.native_class_aliases.insert(name.clone(), alias);
+                    }
+                }
                 argument_bindings.push((name.clone(), ty, value));
                 lowered_arguments.push(HirExpr::Var(name));
                 continue;
@@ -2046,7 +2069,8 @@ impl<'a> FnLowerer<'a> {
                     .generic_param_optional
                     .iter()
                     .take_while(|optional| !**optional)
-                    .count();
+                    .count()
+                    + usize::from(signature.uses_this);
                 lowered_arguments.len() < required || lowered_arguments.len() > params.len()
             } else if variadic.is_some() {
                 lowered_arguments.len() < params.len()
@@ -2111,6 +2135,30 @@ impl<'a> FnLowerer<'a> {
                             *index,
                         )
                     }
+                // `Bytes` is erased to `Array(F64)` after lowering; tag it so the console
+                // prints `<Buffer ..>` like Node instead of a number array.
+                other if matches!(self.infer_expr_type_inner(&other), Ok(HirType::Bytes)) => Ok(
+                    HirExpr::Call(Box::new(HirExpr::Var("__thaw_console_bytes".into())), vec![other]),
+                ),
+                // An object with a `Buffer` field (erased to `number[]` in the typed layout):
+                // rebuild it as `Json` with the field branded as a Buffer so it prints
+                // `{ b: <Buffer ..> }`.
+                // `{ b }` with a `Buffer` field lowers to `(param) => ({ b: param })` applied to the
+                // value (evaluation order); rebuild the body as `Json` with that field branded.
+                HirExpr::Call(callee, call_args) if matches!(callee.as_ref(),
+                    HirExpr::Lambda(_, params, _, body) if matches!(body.as_ref(), HirExpr::ObjectLit(_))
+                        && params.iter().any(|param| param.ty == HirType::Bytes)) => {
+                    let HirExpr::Lambda(captures, params, _, body) = *callee else { unreachable!() };
+                    let HirExpr::ObjectLit(fields) = *body else { unreachable!() };
+                    let entries = fields.into_iter()
+                        .map(|(name, value)| Ok((name, self.coerce_to_declared(&HirType::Json, value)?)))
+                        .collect::<Result<Vec<_>, String>>()?;
+                    Ok(HirExpr::Call(
+                        Box::new(HirExpr::Lambda(captures, params, HirType::Json,
+                            Box::new(HirExpr::JsonObjectLit(entries, HirType::Json)))),
+                        call_args,
+                    ))
+                }
                 other => Ok(other),
             }).collect::<Result<Vec<_>, _>>()?;
         }
@@ -2136,7 +2184,7 @@ impl<'a> FnLowerer<'a> {
         {
             let preserves_key_literal = |index: usize| {
                 let Some(GenericTypePattern::Variable(name)) =
-                    signature.generic_param_patterns.get(index)
+                    generic_pattern_for_physical_argument(signature, index)
                 else {
                     return false;
                 };
@@ -2184,14 +2232,14 @@ impl<'a> FnLowerer<'a> {
                 resolve_explicit_generic_type_tuple(
                     signature,
                     &type_args.params,
-                    &actual,
+                    GenericMatchActuals::Physical(&actual),
                     self.interfaces,
                     self.generic_interfaces,
                 )
             } else {
-                infer_generic_type_tuple(
+                infer_generic_type_tuple_for_call(
                     signature,
-                    &actual,
+                    GenericMatchActuals::Physical(&actual),
                     self.interfaces,
                     self.generic_interfaces,
                     expected_return_hint.as_ref(),
@@ -2415,8 +2463,8 @@ impl<'a> FnLowerer<'a> {
                 .collect::<HashMap<_, _>>();
             if call.type_args.is_some() {
                 for (index, arg) in args.iter_mut().enumerate() {
-                    let Some(pattern) = signature.generic_param_patterns.get(index) else {
-                        break;
+                    let Some(pattern) = generic_pattern_for_physical_argument(signature, index) else {
+                        continue;
                     };
                     let declared = instantiate_generic_pattern(pattern, &substitution)?;
                     if matches!(declared, HirType::F64 | HirType::Str)
@@ -2600,5 +2648,123 @@ impl<'a> FnLowerer<'a> {
                 "`[Symbol.{other}]()` is not supported (thaw models `Symbol.iterator` and `Symbol.toPrimitive`)"
             )),
         }
+    }
+}
+
+// The ordinary Error classes still travel as a tagged string (`Error`
+// annotations lower to `Str`; `__thaw_error_initialize_slot` has no codegen),
+// so these helpers keep the pre-f15 representation instead of inventing a
+// record layout the backend cannot build.
+impl<'a> FnLowerer<'a> {
+    /// `new Error(message?, options?)` and the other ordinary error classes.
+    fn lower_builtin_error_object(
+        &mut self,
+        class_name: &str,
+        args: &[swc_ecma_ast::ExprOrSpread],
+    ) -> Result<HirExpr, String> {
+        if args.iter().any(|argument| argument.spread.is_some()) {
+            return Err(format!("`new {class_name}()` does not support spread arguments"));
+        }
+        if args.len() > 2 {
+            return Err(format!(
+                "`new {class_name}()` expects at most a message and options argument"
+            ));
+        }
+        let message = match args.first() {
+            Some(argument) => {
+                let message = self.lower_expr(&argument.expr)?;
+                self.coerce_primitive_to_string(message)?
+            }
+            None => HirExpr::Lit(HirLit::Str(String::new())),
+        };
+        let tagged = HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_error_frame".to_string())),
+            vec![HirExpr::Lit(HirLit::Str(class_name.to_string())), message],
+        );
+        let Some(options) = args.get(1) else {
+            return Ok(tagged);
+        };
+        let options = self.lower_expr(&options.expr)?;
+        let options_type = self.infer_expr_type(&options)?;
+        let HirType::Object(fields) = &options_type else {
+            return Err("Error options must be an object with a `cause` field".into());
+        };
+        let cause_type = fields
+            .iter()
+            .find(|(name, _)| name == "cause")
+            .map(|(_, ty)| ty)
+            .ok_or("Error options must have a `cause` field")?;
+        let cause = HirExpr::PropAccess(Box::new(options), options_type.clone(), "cause".to_string());
+        let cause = match cause_type {
+            HirType::Str => cause,
+            _ => self.coerce_primitive_to_string(cause)?,
+        };
+        let with_marker = HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_string_concat".to_string())),
+            vec![tagged, HirExpr::Lit(HirLit::Str("\u{2}".to_string()))],
+        );
+        Ok(HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_string_concat".to_string())),
+            vec![with_marker, cause],
+        ))
+    }
+
+    /// A trusted Error-family record: the first field is the class-identity
+    /// marker, kept hidden from enumeration like every other marker.
+    // ponytail: `message_present`/`cause_present` (own-property presence) are
+    // not representable without `__thaw_error_initialize_slot` codegen, so an
+    // omitted message reads as "" and an omitted cause as undefined.
+    fn lower_trusted_error_fields(
+        &mut self,
+        fields: Vec<(Symbol, HirExpr)>,
+        _message_present: HirExpr,
+        _cause_present: Option<HirExpr>,
+    ) -> Result<HirExpr, String> {
+        let marker = match fields.first() {
+            Some((name, _)) if name.starts_with("__thaw_class_identity_\u{1e}") => name.clone(),
+            _ => return Err("Error record needs a leading class-identity marker".into()),
+        };
+        // A trusted record registers nominal identity (and hides the marker),
+        // exactly what a constructor's ClassAlloc does for a class instance.
+        Ok(HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_object_set_class_identity".to_string())),
+            vec![HirExpr::ObjectLit(fields), HirExpr::Lit(HirLit::Str(marker))],
+        ))
+    }
+
+    /// `AggregateError`'s `errors`: only statically typed arrays/tuples have a
+    /// native representation today.
+    fn native_aggregate_errors_as_json(
+        &mut self,
+        source: HirExpr,
+        ty: &HirType,
+    ) -> Result<HirExpr, String> {
+        if matches!(ty, HirType::Array(_) | HirType::Tuple(_)) {
+            Ok(source)
+        } else {
+            Err("`AggregateError` errors must be a statically typed array or tuple".into())
+        }
+    }
+
+    /// No live nominal projection of an options object exists yet; `None` tells
+    /// the caller to use its typed/Json paths (it is not an empty `cause`).
+    fn native_error_options_live_json(
+        &mut self,
+        _source: HirExpr,
+        _ty: &HirType,
+    ) -> Result<Option<HirExpr>, String> {
+        Ok(None)
+    }
+
+    /// `(has cause, cause)` for a fixed-layout options object that has no
+    /// `cause` slot and no accessor: the property is simply absent.
+    fn native_error_options_cause(
+        &mut self,
+        _source: HirExpr,
+        ty: &HirType,
+    ) -> Result<Option<(HirExpr, HirExpr)>, String> {
+        Ok(matches!(ty, HirType::Object(_)).then(|| {
+            (HirExpr::Lit(HirLit::Bool(false)), HirExpr::Lit(HirLit::Undefined))
+        }))
     }
 }

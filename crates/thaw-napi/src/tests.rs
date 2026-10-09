@@ -38,20 +38,41 @@ fn quickjs_reference_throw_sets_napi_exception_without_spoofing_returned_object(
         if throws {
             assert!(result.is_null());
             let mut error = ptr::null_mut();
-            unsafe { assert_eq!(napi_get_and_clear_last_exception(&mut env, &mut error), NAPI_OK); }
-            assert!(matches!(unsafe { value_ref(error) }, Ok(Value::Error(message)) if message == "callback \u{2}boom"));
+            unsafe {
+                assert_eq!(
+                    napi_get_and_clear_last_exception(&mut env, &mut error),
+                    NAPI_OK
+                );
+            }
+            assert!(
+                matches!(unsafe { value_ref(error) }, Ok(Value::Error(message)) if message == "callback \u{2}boom")
+            );
             let mut name = ptr::null_mut();
-            unsafe { assert_eq!(napi_get_named_property(&mut env, error, c"name".as_ptr(), &mut name), NAPI_OK); }
-            assert!(matches!(unsafe { value_ref(name) }, Ok(Value::String(value)) if value == "TypeError"));
+            unsafe {
+                assert_eq!(
+                    napi_get_named_property(&mut env, error, c"name".as_ptr(), &mut name),
+                    NAPI_OK
+                );
+            }
+            assert!(
+                matches!(unsafe { value_ref(name) }, Ok(Value::String(value)) if value == "TypeError")
+            );
             let forwarded = unsafe { describe_env_exception(&mut env, error) }.unwrap();
             let frame = thaw_arena::error_wire::parse_tagged(forwarded.as_bytes()).unwrap();
             assert_eq!(frame.chain, b"TypeError");
             assert_eq!(frame.display, b"callback \x02boom");
             assert_eq!(frame.suffix, b"");
         } else {
-            let Ok(Value::Object(fields)) = (unsafe { value_ref(result) }) else { panic!("callback result was not an object") };
-            let returned = fields.get(&PropertyKey::String("__thaw_error__".into())).copied().unwrap();
-            assert!(matches!(unsafe { value_ref(returned) }, Ok(Value::String(value)) if value == "ordinary"));
+            let Ok(Value::Object(fields)) = (unsafe { value_ref(result) }) else {
+                panic!("callback result was not an object")
+            };
+            let returned = fields
+                .get(&PropertyKey::String("__thaw_error__".into()))
+                .copied()
+                .unwrap();
+            assert!(
+                matches!(unsafe { value_ref(returned) }, Ok(Value::String(value)) if value == "ordinary")
+            );
             assert!(env.exception.is_none());
         }
     }
@@ -60,7 +81,10 @@ fn quickjs_reference_throw_sets_napi_exception_without_spoofing_returned_object(
 #[test]
 fn exported_callback_exception_is_consumed_before_the_next_call() {
     unsafe extern "C" fn throws(env: NapiEnv, _info: NapiCallbackInfo) -> NapiValue {
-        assert_eq!(napi_throw_type_error(env, ptr::null(), c"first failure".as_ptr()), NAPI_OK);
+        assert_eq!(
+            napi_throw_type_error(env, ptr::null(), c"first failure".as_ptr()),
+            NAPI_OK
+        );
         ptr::null_mut()
     }
     unsafe extern "C" fn invalid_exception(env: NapiEnv, _info: NapiCallbackInfo) -> NapiValue {
@@ -78,16 +102,20 @@ fn exported_callback_exception_is_consumed_before_the_next_call() {
         ("stale-test::invalid", invalid_exception as NapiCallback),
         ("stale-test::good", succeeds as NapiCallback),
     ];
-    let exports = callbacks.iter().map(|(name, callback)| {
-        let function = Function {
-            callback: *callback,
-            data: ptr::null_mut(),
-            properties: HashMap::new(),
-            _thaw_bridge: None, _accessor_owner: None,
-        };
-        let value = env.alloc(Value::Function(function.clone()));
-        ((*name).to_string(), function, value)
-    }).collect::<Vec<_>>();
+    let exports = callbacks
+        .iter()
+        .map(|(name, callback)| {
+            let function = Function {
+                callback: *callback,
+                data: ptr::null_mut(),
+                properties: HashMap::new(),
+                _thaw_bridge: None,
+                _accessor_owner: None,
+            };
+            let value = env.alloc(Value::Function(function.clone()));
+            ((*name).to_string(), function, value)
+        })
+        .collect::<Vec<_>>();
     HOST.with(|host| {
         let mut host = host.borrow_mut();
         for (name, function, value) in exports {
@@ -101,7 +129,11 @@ fn exported_callback_exception_is_consumed_before_the_next_call() {
         let first = thaw_napi_call_result(c"stale-test::throw".as_ptr(), c"[]".as_ptr());
         assert!(first.value.is_null());
         let first_error = CString::from_raw(first.error).into_string().unwrap();
-        assert!(first_error.starts_with("\u{1}TypeError\u{1}\u{1e}E1:") && first_error.contains("first failure"), "{first_error}");
+        assert!(
+            first_error.starts_with("\u{1}TypeError\u{1}\u{1e}E1:")
+                && first_error.contains("first failure"),
+            "{first_error}"
+        );
         assert!((*env_ptr).exception.is_none());
         let good = thaw_napi_call_result(c"stale-test::good".as_ptr(), c"[]".as_ptr());
         assert!(good.error.is_null());
@@ -109,7 +141,10 @@ fn exported_callback_exception_is_consumed_before_the_next_call() {
 
         let invalid = thaw_napi_call_result(c"stale-test::invalid".as_ptr(), c"[]".as_ptr());
         assert!(invalid.value.is_null());
-        assert_eq!(CString::from_raw(invalid.error).into_string().unwrap(), "invalid exception");
+        assert_eq!(
+            CString::from_raw(invalid.error).into_string().unwrap(),
+            "invalid exception"
+        );
         assert!((*env_ptr).exception.is_none());
         let good_again = thaw_napi_call_typed_result(c"stale-test::good".as_ptr(), c"[]".as_ptr());
         assert!(good_again.error.is_null());
@@ -117,14 +152,18 @@ fn exported_callback_exception_is_consumed_before_the_next_call() {
     }
     HOST.with(|host| {
         let mut host = host.borrow_mut();
-        for name in ["stale-test::throw", "stale-test::invalid", "stale-test::good"] {
+        for name in [
+            "stale-test::throw",
+            "stale-test::invalid",
+            "stale-test::good",
+        ] {
             host.functions.remove(name);
             host.exports.remove(name);
         }
-        host.module_envs.retain(|entry| (&**entry as *const Env).cast_mut() != env_ptr);
+        host.module_envs
+            .retain(|entry| (&**entry as *const Env).cast_mut() != env_ptr);
     });
 }
-
 
 #[test]
 fn napi_result_error_preserves_embedded_nul_through_owned_and_legacy_paths() {
@@ -140,19 +179,24 @@ fn napi_result_error_preserves_embedded_nul_through_owned_and_legacy_paths() {
         callback: throws_nul,
         data: ptr::null_mut(),
         properties: HashMap::new(),
-        _thaw_bridge: None, _accessor_owner: None,
+        _thaw_bridge: None,
+        _accessor_owner: None,
     };
     let value = env.alloc(Value::Function(function.clone()));
     HOST.with(|host| {
         let mut host = host.borrow_mut();
-        host.functions.insert("nul-result-test::throw".into(), function);
-        host.exports.insert("nul-result-test::throw".into(), (env_ptr as usize, value));
+        host.functions
+            .insert("nul-result-test::throw".into(), function);
+        host.exports
+            .insert("nul-result-test::throw".into(), (env_ptr as usize, value));
         host.module_envs.push(env);
     });
     unsafe {
         let result = thaw_napi_call_result(c"nul-result-test::throw".as_ptr(), c"[]".as_ptr());
         assert!(result.value.is_null());
-        let bytes = thaw_arena::NativeStr::from_ptr(result.error).to_bytes().to_vec();
+        let bytes = thaw_arena::NativeStr::from_ptr(result.error)
+            .to_bytes()
+            .to_vec();
         let frame = thaw_arena::error_wire::parse_tagged(&bytes).unwrap();
         assert_eq!(frame.chain, b"TypeError");
         assert_eq!(frame.display, b"left\0right");
@@ -170,7 +214,8 @@ fn napi_result_error_preserves_embedded_nul_through_owned_and_legacy_paths() {
         let mut host = host.borrow_mut();
         host.functions.remove("nul-result-test::throw");
         host.exports.remove("nul-result-test::throw");
-        host.module_envs.retain(|entry| (&**entry as *const Env).cast_mut() != env_ptr);
+        host.module_envs
+            .retain(|entry| (&**entry as *const Env).cast_mut() != env_ptr);
     });
 }
 
@@ -179,8 +224,14 @@ fn napi_result_error_helpers_keep_owned_nul_bytes() {
     let text = text_result(Err("text\0error".into()));
     let handle = handle_error("handle\0error");
     unsafe {
-        assert_eq!(thaw_arena::NativeStr::from_ptr(text.error).to_bytes(), b"text\0error");
-        assert_eq!(thaw_arena::NativeStr::from_ptr(handle.error).to_bytes(), b"handle\0error");
+        assert_eq!(
+            thaw_arena::NativeStr::from_ptr(text.error).to_bytes(),
+            b"text\0error"
+        );
+        assert_eq!(
+            thaw_arena::NativeStr::from_ptr(handle.error).to_bytes(),
+            b"handle\0error"
+        );
         thaw_arena::destroy_string(text.error);
         thaw_arena::destroy_string(handle.error);
     }
@@ -189,7 +240,10 @@ fn napi_result_error_helpers_keep_owned_nul_bytes() {
 #[test]
 fn nested_export_getter_preserves_its_exception() {
     unsafe extern "C" fn throwing_getter(env: NapiEnv, _info: NapiCallbackInfo) -> NapiValue {
-        assert_eq!(napi_throw_type_error(env, ptr::null(), c"original getter failure".as_ptr()), NAPI_OK);
+        assert_eq!(
+            napi_throw_type_error(env, ptr::null(), c"original getter failure".as_ptr()),
+            NAPI_OK
+        );
         ptr::null_mut()
     }
     let mut env = Box::new(Env::new());
@@ -205,10 +259,16 @@ fn nested_export_getter_preserves_its_exception() {
         attributes: NAPI_DEFAULT_PROPERTY_ATTRIBUTES,
         data: ptr::null_mut(),
     };
-    unsafe { assert_eq!(napi_define_properties(env_ptr, outer, 1, &descriptor), NAPI_OK); }
+    unsafe {
+        assert_eq!(
+            napi_define_properties(env_ptr, outer, 1, &descriptor),
+            NAPI_OK
+        );
+    }
     HOST.with(|host| {
         let mut host = host.borrow_mut();
-        host.exports.insert("throwing-test::Outer".into(), (env_ptr as usize, outer));
+        host.exports
+            .insert("throwing-test::Outer".into(), (env_ptr as usize, outer));
         host.module_envs.push(env);
     });
     unsafe {
@@ -216,14 +276,19 @@ fn nested_export_getter_preserves_its_exception() {
         assert_eq!(result.value, 0);
         assert!(!result.error.is_null());
         let error = CString::from_raw(result.error).into_string().unwrap();
-        assert!(error.starts_with("\u{1}TypeError\u{1}\u{1e}E1:") && error.contains("original getter failure"), "{error}");
+        assert!(
+            error.starts_with("\u{1}TypeError\u{1}\u{1e}E1:")
+                && error.contains("original getter failure"),
+            "{error}"
+        );
         assert!(!error.contains("unknown native addon export"));
         assert!((*env_ptr).exception.is_none());
     }
     HOST.with(|host| {
         let mut host = host.borrow_mut();
         host.exports.remove("throwing-test::Outer");
-        host.module_envs.retain(|entry| (&**entry as *const Env).cast_mut() != env_ptr);
+        host.module_envs
+            .retain(|entry| (&**entry as *const Env).cast_mut() != env_ptr);
     });
 }
 
@@ -239,19 +304,37 @@ fn package_qualified_exports_survive_opposite_load_orders() {
         HOST.with(|host| {
             let mut host = host.borrow_mut();
             let entries = if reverse {
-                [("second-test", second_env, second_client), ("first-test", first_env, first_client)]
+                [
+                    ("second-test", second_env, second_client),
+                    ("first-test", first_env, first_client),
+                ]
             } else {
-                [("first-test", first_env, first_client), ("second-test", second_env, second_client)]
+                [
+                    ("first-test", first_env, first_client),
+                    ("second-test", second_env, second_client),
+                ]
             };
             for (package, env, client) in entries {
-                register_loaded_exports(&mut host, env as usize, Some(package), vec![], vec![("Client".into(), client)]);
+                register_loaded_exports(
+                    &mut host,
+                    env as usize,
+                    Some(package),
+                    vec![],
+                    vec![("Client".into(), client)],
+                );
             }
             host.module_envs.push(first);
             host.module_envs.push(second);
         });
         unsafe {
-            assert_eq!(get_export_result(c"first-test::Client".as_ptr()).unwrap(), first_client as u64);
-            assert_eq!(get_export_result(c"second-test::Client".as_ptr()).unwrap(), second_client as u64);
+            assert_eq!(
+                get_export_result(c"first-test::Client".as_ptr()).unwrap(),
+                first_client as u64
+            );
+            assert_eq!(
+                get_export_result(c"second-test::Client".as_ptr()).unwrap(),
+                second_client as u64
+            );
             assert_eq!(get_export_result(c"Client".as_ptr()).unwrap(), 0);
         }
         HOST.with(|host| {
@@ -287,29 +370,69 @@ fn package_qualified_functions_do_not_publish_colliding_bare_names() {
         let first_ptr = (&mut *first_env) as NapiEnv;
         let second_ptr = (&mut *second_env) as NapiEnv;
         let legacy_ptr = (&mut *legacy_env) as NapiEnv;
-        let first_fn = Function { callback: first, data: ptr::null_mut(), properties: HashMap::new(), _thaw_bridge: None, _accessor_owner: None };
-        let second_fn = Function { callback: second, data: ptr::null_mut(), properties: HashMap::new(), _thaw_bridge: None, _accessor_owner: None };
-        let legacy_fn = Function { callback: legacy, data: ptr::null_mut(), properties: HashMap::new(), _thaw_bridge: None, _accessor_owner: None };
+        let first_fn = Function {
+            callback: first,
+            data: ptr::null_mut(),
+            properties: HashMap::new(),
+            _thaw_bridge: None,
+            _accessor_owner: None,
+        };
+        let second_fn = Function {
+            callback: second,
+            data: ptr::null_mut(),
+            properties: HashMap::new(),
+            _thaw_bridge: None,
+            _accessor_owner: None,
+        };
+        let legacy_fn = Function {
+            callback: legacy,
+            data: ptr::null_mut(),
+            properties: HashMap::new(),
+            _thaw_bridge: None,
+            _accessor_owner: None,
+        };
         let first_value = first_env.alloc(Value::Function(first_fn.clone()));
         let second_value = second_env.alloc(Value::Function(second_fn.clone()));
         let legacy_value = legacy_env.alloc(Value::Function(legacy_fn.clone()));
         HOST.with(|host| {
             let mut host = host.borrow_mut();
-            register_loaded_exports(&mut host, legacy_ptr as usize, None, vec![("same".into(), legacy_fn)], vec![("same".into(), legacy_value)]);
+            register_loaded_exports(
+                &mut host,
+                legacy_ptr as usize,
+                None,
+                vec![("same".into(), legacy_fn)],
+                vec![("same".into(), legacy_value)],
+            );
             let entries = if reverse {
-                [("second-test", second_ptr, second_fn, second_value), ("first-test", first_ptr, first_fn, first_value)]
+                [
+                    ("second-test", second_ptr, second_fn, second_value),
+                    ("first-test", first_ptr, first_fn, first_value),
+                ]
             } else {
-                [("first-test", first_ptr, first_fn, first_value), ("second-test", second_ptr, second_fn, second_value)]
+                [
+                    ("first-test", first_ptr, first_fn, first_value),
+                    ("second-test", second_ptr, second_fn, second_value),
+                ]
             };
             for (package, env, function, value) in entries {
-                register_loaded_exports(&mut host, env as usize, Some(package), vec![("same".into(), function)], vec![("same".into(), value)]);
+                register_loaded_exports(
+                    &mut host,
+                    env as usize,
+                    Some(package),
+                    vec![("same".into(), function)],
+                    vec![("same".into(), value)],
+                );
             }
             host.module_envs.push(first_env);
             host.module_envs.push(second_env);
             host.module_envs.push(legacy_env);
         });
         unsafe {
-            for (name, expected) in [(c"first-test::same", "1.0"), (c"second-test::same", "2.0"), (c"same", "3.0")] {
+            for (name, expected) in [
+                (c"first-test::same", "1.0"),
+                (c"second-test::same", "2.0"),
+                (c"same", "3.0"),
+            ] {
                 let result = thaw_napi_call_result(name.as_ptr(), c"[]".as_ptr());
                 assert!(result.error.is_null());
                 assert_eq!(CStr::from_ptr(result.value).to_str().unwrap(), expected);
@@ -1041,7 +1164,8 @@ const cases = JSON.parse(process.argv[2]);
             callback: bcrypt_async_callback,
             data: ptr::null_mut(),
             properties: HashMap::new(),
-            _thaw_bridge: None, _accessor_owner: None,
+            _thaw_bridge: None,
+            _accessor_owner: None,
         }));
         let echo = env_mut(env).unwrap().alloc(Value::String("echo".into()));
         let workers = env_mut(env).unwrap().alloc(Value::Number(0.0));
@@ -1112,7 +1236,8 @@ fn runs_bcrypt_prebuild_when_supplied() {
             callback: bcrypt_async_callback,
             data: ptr::null_mut(),
             properties: HashMap::new(),
-            _thaw_bridge: None, _accessor_owner: None,
+            _thaw_bridge: None,
+            _accessor_owner: None,
         }));
         let mut info = CallbackInfo {
             args: vec![minor, rounds, seed, callback],
@@ -1297,7 +1422,8 @@ fn loads_parcel_watcher_prebuild_when_supplied() {
             callback: parcel_watcher_callback,
             data: probe.cast(),
             properties: HashMap::new(),
-            _thaw_bridge: None, _accessor_owner: None,
+            _thaw_bridge: None,
+            _accessor_owner: None,
         }));
         let this_arg = env.alloc(Value::Undefined);
         let mut subscribe_info = CallbackInfo {
@@ -1430,22 +1556,27 @@ fn private_napi_result_graph_separates_value_kinds_from_user_fields() {
     let mut env = Env::new();
     let real_date = env.alloc(Value::Date(0.0));
     let timestamp = env.alloc(Value::Number(0.0));
-    let ordinary_date_shape = env.alloc(Value::Object(HashMap::from([
-        (PropertyKey::String("timestamp".into()), timestamp),
-    ])));
+    let ordinary_date_shape = env.alloc(Value::Object(HashMap::from([(
+        PropertyKey::String("timestamp".into()),
+        timestamp,
+    )])));
     let real_undefined = env.alloc(Value::Undefined);
     let truth = env.alloc(Value::Bool(true));
-    let ordinary_undefined_shape = env.alloc(Value::Object(HashMap::from([
-        (PropertyKey::String("$__thaw_napi_undefined$".into()), truth),
-    ])));
+    let ordinary_undefined_shape = env.alloc(Value::Object(HashMap::from([(
+        PropertyKey::String("$__thaw_napi_undefined$".into()),
+        truth,
+    )])));
     let root = env.alloc(Value::Array(vec![
-        Some(real_date), Some(ordinary_date_shape), Some(real_undefined),
+        Some(real_date),
+        Some(ordinary_date_shape),
+        Some(real_undefined),
         Some(ordinary_undefined_shape),
     ]));
     let graph: serde_json::Value = serde_json::from_str(
         &unsafe { napi_result_graph_for_env(&mut env as NapiEnv, root, true) }.unwrap(),
-    ).unwrap();
-    assert_eq!(graph["nodes"][1]["d"], 0);
+    )
+    .unwrap();
+    assert_eq!(graph["nodes"][1]["d"], 0.0);
     assert!(graph["nodes"][2].get("o").is_some());
     assert_eq!(graph["nodes"][0]["a"][2]["u"], 1);
     assert!(graph["nodes"][3].get("o").is_some());
@@ -1461,7 +1592,8 @@ fn private_napi_result_graph_retains_cycle_aliases() {
     items[0] = Some(root);
     let graph: serde_json::Value = serde_json::from_str(
         &unsafe { napi_result_graph_for_env(&mut env as NapiEnv, root, true) }.unwrap(),
-    ).unwrap();
+    )
+    .unwrap();
     assert_eq!(graph["root"]["r"], 0);
     assert_eq!(graph["nodes"][0]["a"][0]["r"], 0);
 }
@@ -1469,7 +1601,9 @@ fn private_napi_result_graph_retains_cycle_aliases() {
 #[test]
 fn private_napi_event_graph_keeps_user_marker_objects_ordinary() {
     unsafe extern "C" fn capture(
-        context: *mut c_void, error: *const c_char, result: *const c_char,
+        context: *mut c_void,
+        error: *const c_char,
+        result: *const c_char,
     ) {
         let output = &mut *(context as *mut Option<(JsonValue, JsonValue)>);
         *output = Some((
@@ -1477,13 +1611,14 @@ fn private_napi_event_graph_keeps_user_marker_objects_ordinary() {
             serde_json::from_str(CStr::from_ptr(result).to_str().unwrap()).unwrap(),
         ));
     }
-    let mut env = Env::new();
+    let env = registered_test_env();
     let zero = env.alloc(Value::Number(0.0));
-    let ordinary_date = env.alloc(Value::Object(HashMap::from([
-        (PropertyKey::String("timestamp".into()), zero),
-    ])));
+    let ordinary_date = env.alloc(Value::Object(HashMap::from([(
+        PropertyKey::String("timestamp".into()),
+        zero,
+    )])));
     let real_date = env.alloc(Value::Date(0.0));
-    let mut output = None;
+    let mut output: Option<(JsonValue, JsonValue)> = None;
     let bridge = Arc::new(ThawCallbackBridge {
         callback: ThawCallback::EventGraph(capture),
         context: (&mut output as *mut Option<(JsonValue, JsonValue)>) as usize,
@@ -1494,24 +1629,38 @@ fn private_napi_event_graph_keeps_user_marker_objects_ordinary() {
         new_target: ptr::null_mut(),
         data: Arc::as_ptr(&bridge) as *mut c_void,
     };
-    unsafe { thaw_compiled_callback(&mut env as NapiEnv, &mut info); }
+    unsafe {
+        thaw_compiled_callback(&mut *env as NapiEnv, &mut info);
+    }
     let (ordinary, date) = output.unwrap();
     assert!(ordinary["nodes"][0].get("o").is_some());
-    assert_eq!(date["nodes"][0]["d"], 0);
+    assert_eq!(date["nodes"][0]["d"], 0.0);
 }
 
 #[test]
 fn private_napi_argument_graph_preserves_origin_and_aliases() {
     let mut env = Env::new();
     let graph = r#"{"root":{"r":0},"nodes":[{"a":[{"r":1},{"r":2},{"u":1},{"r":3},{"r":2}]},{"d":0},{"o":[["timestamp",{"v":0}]]},{"o":[["$__thaw_napi_undefined$",{"v":true}]]}],"leases":[]}"#;
-    let args = unsafe { parse_napi_arguments(&mut env as NapiEnv, graph, true, true, None) }.unwrap();
+    let args =
+        unsafe { parse_napi_arguments(&mut env as NapiEnv, graph, true, true, None) }.unwrap();
     assert!(matches!(unsafe { value_ref(args[0]) }, Ok(Value::Date(time)) if *time == 0.0));
-    assert!(matches!(unsafe { value_ref(args[1]) }, Ok(Value::Object(_))));
-    assert!(matches!(unsafe { value_ref(args[2]) }, Ok(Value::Undefined)));
-    assert!(matches!(unsafe { value_ref(args[3]) }, Ok(Value::Object(_))));
+    assert!(matches!(
+        unsafe { value_ref(args[1]) },
+        Ok(Value::Object(_))
+    ));
+    assert!(matches!(
+        unsafe { value_ref(args[2]) },
+        Ok(Value::Undefined)
+    ));
+    assert!(matches!(
+        unsafe { value_ref(args[3]) },
+        Ok(Value::Object(_))
+    ));
     assert_eq!(args[1], args[4]);
     // The same envelope is ordinary data on the public plain-JSON ABI.
-    assert!(unsafe { parse_napi_arguments(&mut env as NapiEnv, graph, true, false, None) }.is_err());
+    assert!(
+        unsafe { parse_napi_arguments(&mut env as NapiEnv, graph, true, false, None) }.is_err()
+    );
 }
 
 #[test]
@@ -1520,14 +1669,16 @@ fn private_napi_value_callback_graph_preserves_arguments_and_result() {
         let output = &mut *(context as *mut Option<JsonValue>);
         *output = Some(serde_json::from_str(CStr::from_ptr(args).to_str().unwrap()).unwrap());
         CString::new(r#"{"root":{"u":1},"nodes":[],"leases":[]}"#)
-            .unwrap().into_raw()
+            .unwrap()
+            .into_raw()
     }
     let mut env = Env::new();
     let zero = env.alloc(Value::Number(0.0));
-    let ordinary_date = env.alloc(Value::Object(HashMap::from([
-        (PropertyKey::String("timestamp".into()), zero),
-    ])));
-    let mut output = None;
+    let ordinary_date = env.alloc(Value::Object(HashMap::from([(
+        PropertyKey::String("timestamp".into()),
+        zero,
+    )])));
+    let mut output: Option<JsonValue> = None;
     let bridge = Arc::new(ThawCallbackBridge {
         callback: ThawCallback::ValueGraph(callback),
         context: (&mut output as *mut Option<JsonValue>) as usize,
@@ -1552,7 +1703,8 @@ fn private_napi_graph_wrapper_kinds_survive_roundtrip_without_shape_spoofing() {
     let root = napi_graph_value(&mut env, &graph).unwrap();
     let encoded: JsonValue = serde_json::from_str(
         &unsafe { napi_result_graph_for_env(&mut env as NapiEnv, root, true) }.unwrap(),
-    ).unwrap();
+    )
+    .unwrap();
     assert!(encoded["nodes"][1].get("m").is_some());
     assert!(encoded["nodes"][2].get("s").is_some());
     assert!(encoded["nodes"][3].get("re").is_some());
@@ -1565,16 +1717,22 @@ fn private_napi_regexp_graph_last_index_keeps_nonfinite_number_kind() {
         let mut env = Env::new();
         let graph: JsonValue = serde_json::from_str(&format!(
             r#"{{"root":{{"r":0}},"nodes":[{{"re":["x","g","{name}"]}}],"leases":[]}}"#
-        )).unwrap();
+        ))
+        .unwrap();
         let root = napi_graph_value(&mut env, &graph).unwrap();
-        let Value::Object(wrapper) = unsafe { value_ref(root) }.unwrap() else { panic!("expected RegExp wrapper") };
+        let Value::Object(wrapper) = unsafe { value_ref(root) }.unwrap() else {
+            panic!("expected RegExp wrapper")
+        };
         let pattern = wrapper[&PropertyKey::String("__thaw_regexp__".into())];
-        let Value::Object(fields) = unsafe { value_ref(pattern) }.unwrap() else { panic!("expected RegExp pattern") };
+        let Value::Object(fields) = unsafe { value_ref(pattern) }.unwrap() else {
+            panic!("expected RegExp pattern")
+        };
         let index = fields[&PropertyKey::String("lastIndex".into())];
         assert!(matches!(unsafe { value_ref(index) }, Ok(Value::Number(_))));
         let encoded: JsonValue = serde_json::from_str(
             &unsafe { napi_result_graph_for_env(&mut env as NapiEnv, root, true) }.unwrap(),
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(encoded["nodes"][0]["re"][2], name);
     }
 }
@@ -1582,17 +1740,23 @@ fn private_napi_regexp_graph_last_index_keeps_nonfinite_number_kind() {
 #[cfg(feature = "quickjs")]
 #[test]
 fn private_napi_graph_arguments_release_lease_when_export_is_missing() {
-    assert_eq!(thaw_quickjs::thaw_js_load(c"globalThis.napiLeaseInput = {};".as_ptr()), 1);
+    assert_eq!(
+        thaw_quickjs::thaw_js_load(c"globalThis.napiLeaseInput = {};".as_ptr()),
+        1
+    );
     let handle = thaw_quickjs::thaw_js_get_global(c"napiLeaseInput".as_ptr());
     assert_eq!(thaw_quickjs::thaw_js_retain_handle(handle), 1);
     let graph = CString::new(format!(
         r#"{{"root":{{"r":0}},"nodes":[{{"a":[]}}],"leases":[{handle}]}}"#
-    )).unwrap();
+    ))
+    .unwrap();
     let result = unsafe {
         thaw_napi_call_graph_result(c"missingNativeLeaseExport".as_ptr(), graph.as_ptr())
     };
     assert!(!result.error.is_null());
-    unsafe { thaw_arena::destroy_string(result.error); }
+    unsafe {
+        thaw_arena::destroy_string(result.error);
+    }
     assert_eq!(thaw_quickjs::thaw_js_release_handle(handle), 1);
     assert_eq!(thaw_quickjs::thaw_js_release_handle(handle), 0);
 }
@@ -1607,23 +1771,35 @@ fn public_graph_arguments_release_lease_before_native_callback() {
     }
     let mut env = Box::new(Env::new());
     let env_ptr: NapiEnv = &mut *env;
-    let function = Function { callback, data: ptr::null_mut(),
-        properties: HashMap::new(), _thaw_bridge: None, _accessor_owner: None };
+    let function = Function {
+        callback,
+        data: ptr::null_mut(),
+        properties: HashMap::new(),
+        _thaw_bridge: None,
+        _accessor_owner: None,
+    };
     let value = env.alloc(Value::Function(function.clone()));
     HOST.with(|host| {
         let mut host = host.borrow_mut();
-        host.functions.insert("graph-lease-test::call".into(), function);
-        host.exports.insert("graph-lease-test::call".into(), (env_ptr as usize, value));
+        host.functions
+            .insert("graph-lease-test::call".into(), function);
+        host.exports
+            .insert("graph-lease-test::call".into(), (env_ptr as usize, value));
         host.module_envs.push(env);
     });
-    assert_eq!(thaw_quickjs::thaw_js_load(c"globalThis.napiPublicLeaseInput = {};".as_ptr()), 1);
+    assert_eq!(
+        thaw_quickjs::thaw_js_load(c"globalThis.napiPublicLeaseInput = {};".as_ptr()),
+        1
+    );
     let handle = thaw_quickjs::thaw_js_get_global(c"napiPublicLeaseInput".as_ptr());
     assert_eq!(thaw_quickjs::thaw_js_retain_handle(handle), 1);
     let graph = CString::new(format!(
         r#"{{"root":{{"r":0}},"nodes":[{{"a":[]}}],"leases":[{handle}]}}"#
-    )).unwrap();
+    ))
+    .unwrap();
     unsafe {
-        let result = thaw_napi_call_graph_result(c"graph-lease-test::call".as_ptr(), graph.as_ptr());
+        let result =
+            thaw_napi_call_graph_result(c"graph-lease-test::call".as_ptr(), graph.as_ptr());
         assert!(result.error.is_null());
         thaw_arena::destroy_string(result.value);
         assert_eq!(thaw_quickjs::thaw_js_release_handle(handle), 1);
@@ -1633,11 +1809,15 @@ fn public_graph_arguments_release_lease_before_native_callback() {
         assert_eq!(thaw_quickjs::thaw_js_retain_handle(malformed_handle), 1);
         let malformed = CString::new(format!(
             r#"{{"root":{{"r":0}},"nodes":[{{"a":[]}}],"leases":[{malformed_handle},0]}}"#
-        )).unwrap();
-        let result = thaw_napi_call_graph_result(c"graph-lease-test::call".as_ptr(), malformed.as_ptr());
+        ))
+        .unwrap();
+        let result =
+            thaw_napi_call_graph_result(c"graph-lease-test::call".as_ptr(), malformed.as_ptr());
         assert!(!result.error.is_null());
-        assert_eq!(thaw_arena::NativeStr::from_ptr(result.error).to_bytes(),
-            b"invalid native argument graph lease");
+        assert_eq!(
+            thaw_arena::NativeStr::from_ptr(result.error).to_bytes(),
+            b"invalid native argument graph lease"
+        );
         thaw_arena::destroy_string(result.error);
         assert_eq!(thaw_quickjs::thaw_js_release_handle(malformed_handle), 1);
         assert_eq!(thaw_quickjs::thaw_js_release_handle(malformed_handle), 0);
@@ -1646,7 +1826,8 @@ fn public_graph_arguments_release_lease_before_native_callback() {
         let mut host = host.borrow_mut();
         host.functions.remove("graph-lease-test::call");
         host.exports.remove("graph-lease-test::call");
-        host.module_envs.retain(|entry| (&**entry as *const Env).cast_mut() != env_ptr);
+        host.module_envs
+            .retain(|entry| (&**entry as *const Env).cast_mut() != env_ptr);
     });
 }
 
@@ -1658,48 +1839,86 @@ fn quickjs_private_wire_tracks_only_native_date_and_nonfinite_origins() {
     let infinity = env.alloc(Value::Number(f64::INFINITY));
     let minus_infinity = env.alloc(Value::Number(f64::NEG_INFINITY));
     let zero = env.alloc(Value::Number(0.0));
-    let literal_date = env.alloc(Value::Object(HashMap::from([
-        (PropertyKey::String("timestamp".into()), zero),
-    ])));
+    let literal_date = env.alloc(Value::Object(HashMap::from([(
+        PropertyKey::String("timestamp".into()),
+        zero,
+    )])));
     let error_text = env.alloc(Value::String("ordinary".into()));
-    let literal_error = env.alloc(Value::Object(HashMap::from([
-        (PropertyKey::String("__thaw_napi_error__".into()), error_text),
-    ])));
+    let literal_error = env.alloc(Value::Object(HashMap::from([(
+        PropertyKey::String("__thaw_napi_error__".into()),
+        error_text,
+    )])));
     let nested = env.alloc(Value::Object(HashMap::from([
         (PropertyKey::String("__proto__".into()), date),
         (PropertyKey::String("error".into()), literal_error),
     ])));
-    let numeric_key_object = env.alloc(Value::Object(HashMap::from([
-        (PropertyKey::String("0".into()), nan),
-    ])));
+    let numeric_key_object = env.alloc(Value::Object(HashMap::from([(
+        PropertyKey::String("0".into()),
+        nan,
+    )])));
     let root = env.alloc(Value::Array(vec![
-        Some(literal_date), Some(nested), Some(nan), Some(infinity), Some(minus_infinity),
+        Some(literal_date),
+        Some(nested),
+        Some(nan),
+        Some(infinity),
+        Some(minus_infinity),
         Some(numeric_key_object),
     ]));
     let wire = unsafe { quickjs_reference_wire(&mut env as NapiEnv, root, true) }.unwrap();
-    assert_eq!(wire.value[0]["timestamp"], 0);
+    assert_eq!(wire.value[0]["timestamp"], 0.0);
     assert_eq!(wire.value[2], JsonValue::Null);
     assert!(wire.origins.contains(&serde_json::json!([[0], "plain"])));
     assert!(wire.origins.contains(&serde_json::json!([[1], "plain"])));
-    assert!(wire.origins.contains(&serde_json::json!([[1, "__proto__"], "date", null])));
-    assert!(wire.origins.contains(&serde_json::json!([[1, "error"], "plain"])));
-    assert!(wire.origins.contains(&serde_json::json!([[2], "nonfinite", "NaN"])));
-    assert!(wire.origins.contains(&serde_json::json!([[3], "nonfinite", "Infinity"])));
-    assert!(wire.origins.contains(&serde_json::json!([[4], "nonfinite", "-Infinity"])));
-    assert!(wire.origins.contains(&serde_json::json!([[5, "0"], "nonfinite", "NaN"])));
-    assert!(!wire.origins.contains(&serde_json::json!([[5, 0], "nonfinite", "NaN"])));
+    assert!(wire
+        .origins
+        .contains(&serde_json::json!([[1, "__proto__"], "date", null])));
+    assert!(wire
+        .origins
+        .contains(&serde_json::json!([[1, "error"], "plain"])));
+    assert!(wire
+        .origins
+        .contains(&serde_json::json!([[2], "nonfinite", "NaN"])));
+    assert!(wire
+        .origins
+        .contains(&serde_json::json!([[3], "nonfinite", "Infinity"])));
+    assert!(wire
+        .origins
+        .contains(&serde_json::json!([[4], "nonfinite", "-Infinity"])));
+    assert!(wire
+        .origins
+        .contains(&serde_json::json!([[5, "0"], "nonfinite", "NaN"])));
+    assert!(!wire
+        .origins
+        .contains(&serde_json::json!([[5, 0], "nonfinite", "NaN"])));
     env.quickjs_references.insert(77, date);
     let referenced = unsafe { quickjs_reference_wire(&mut env as NapiEnv, root, true) }.unwrap();
-    assert_eq!(referenced.value[1]["__proto__"]["__thaw_napi_ref__"], serde_json::json!(77));
-    assert!(!referenced.origins.iter().any(|entry| entry[0] == serde_json::json!([1, "__proto__"])));
+    assert_eq!(
+        referenced.value[1]["__proto__"]["__thaw_napi_ref__"],
+        serde_json::json!(77)
+    );
+    assert!(!referenced
+        .origins
+        .iter()
+        .any(|entry| entry[0] == serde_json::json!([1, "__proto__"])));
     // Public plain JSON keeps its existing lossy value contract.
-    assert_eq!(unsafe { json_from_value_with_undefined(date, true) }.unwrap(), JsonValue::Null);
-    assert_eq!(unsafe { json_from_value_with_undefined(nan, true) }.unwrap(), JsonValue::Null);
+    assert_eq!(
+        unsafe { json_from_value_with_undefined(date, true) }.unwrap(),
+        JsonValue::Null
+    );
+    assert_eq!(
+        unsafe { json_from_value_with_undefined(nan, true) }.unwrap(),
+        JsonValue::Null
+    );
     // Public result walkers resolve the live owner before invoking accessors.
     let env = Box::new(env);
     HOST.with(|host| host.borrow_mut().module_envs.push(env));
-    assert_eq!(unsafe { json_from_value_with_undefined(literal_date, true) }.unwrap()["timestamp"], 0);
-    HOST.with(|host| { drop(host.borrow_mut().module_envs.pop()); });
+    assert_eq!(
+        unsafe { json_from_value_with_undefined(literal_date, true) }.unwrap()["timestamp"],
+        0.0
+    );
+    HOST.with(|host| {
+        drop(host.borrow_mut().module_envs.pop());
+    });
 }
 
 // Proposed thaw-napi/src/tests.rs integration test. UNRUN; source-only.
@@ -1709,12 +1928,14 @@ fn quickjs_private_wire_tracks_only_native_date_and_nonfinite_origins() {
 #[test]
 fn library_destructor_cannot_reenter_shutdown_or_load() {
     let _guard = lock_async_test();
-    let dir = std::env::temp_dir().join(format!("thaw-napi-dlclose-reentry-{}", std::process::id()));
+    let dir =
+        std::env::temp_dir().join(format!("thaw-napi-dlclose-reentry-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let trace = dir.join("destructor.trace");
     let addon = dir.join("reentry.node");
     let addon_c = dir.join("reentry.c");
-    let text = format!(r#"
+    let text = format!(
+        r#"
         #include <stdint.h>
         #include <stdio.h>
         typedef void* napi_env; typedef void* napi_value;
@@ -1731,14 +1952,21 @@ fn library_destructor_cannot_reenter_shutdown_or_load() {
             FILE* trace = fopen("{}", "w");
             if (trace) {{ fprintf(trace,"%u,%u,%u\n",nested_unload,nested_finish,nested_load); fclose(trace); }}
         }}
-    "#, addon.display(), trace.display());
+    "#,
+        addon.display(),
+        trace.display()
+    );
     std::fs::write(&addon_c, text).unwrap();
     assert!(std::process::Command::new("cc")
         .args(["-shared", "-fPIC"])
-        .arg(&addon_c).arg("-o").arg(&addon)
-        .status().unwrap().success());
+        .arg(&addon_c)
+        .arg("-o")
+        .arg(&addon)
+        .status()
+        .unwrap()
+        .success());
     let path = std::ffi::CString::new(addon.to_string_lossy().as_bytes()).unwrap();
-    assert_eq!(thaw_napi_load(path.as_ptr()), 1);
+    assert_eq!(unsafe { thaw_napi_load(path.as_ptr()) }, 1);
     assert_eq!(thaw_napi_begin_shutdown(), 1);
     assert_eq!(thaw_napi_poll_shutdown(), 1);
     assert_eq!(thaw_napi_finish_shutdown(), 1);
@@ -1756,7 +1984,9 @@ fn graph_callback_reentry_has_no_synthetic_root_or_nested_shutdown() {
         assert_eq!(thaw_napi_begin_shutdown(), 0);
         assert_eq!((*env).values.len(), 1);
         assert!(env_mut(env).is_ok());
-        CString::new(r#"{"root":{"u":1},"nodes":[],"leases":[]}"#).unwrap().into_raw()
+        CString::new(r#"{"root":{"u":1},"nodes":[],"leases":[]}"#)
+            .unwrap()
+            .into_raw()
     }
     let mut env = Env::new();
     let argument = env.alloc(Value::Number(7.0));
@@ -1764,8 +1994,12 @@ fn graph_callback_reentry_has_no_synthetic_root_or_nested_shutdown() {
         callback: ThawCallback::ValueGraph(callback),
         context: (&mut env as *mut Env) as usize,
     });
-    let mut info = CallbackInfo { args: vec![argument], this_arg: ptr::null_mut(),
-        new_target: ptr::null_mut(), data: Arc::as_ptr(&bridge) as *mut c_void };
+    let mut info = CallbackInfo {
+        args: vec![argument],
+        this_arg: ptr::null_mut(),
+        new_target: ptr::null_mut(),
+        data: Arc::as_ptr(&bridge) as *mut c_void,
+    };
     let result = unsafe { thaw_compiled_callback(&mut env, &mut info) };
     assert!(matches!(unsafe { value_ref(result) }, Ok(Value::Undefined)));
     assert_eq!(env.values.len(), 2); // argument + decoded result, no encode root
@@ -1781,10 +2015,15 @@ fn graph_callback_encode_error_releases_synthetic_root() {
     let mut env = Env::new();
     let external = env.alloc(Value::External(ptr::null_mut()));
     let bridge = Arc::new(ThawCallbackBridge {
-        callback: ThawCallback::ValueGraph(unexpected_callback), context: 0,
+        callback: ThawCallback::ValueGraph(unexpected_callback),
+        context: 0,
     });
-    let mut info = CallbackInfo { args: vec![external], this_arg: ptr::null_mut(),
-        new_target: ptr::null_mut(), data: Arc::as_ptr(&bridge) as *mut c_void };
+    let mut info = CallbackInfo {
+        args: vec![external],
+        this_arg: ptr::null_mut(),
+        new_target: ptr::null_mut(),
+        data: Arc::as_ptr(&bridge) as *mut c_void,
+    };
     assert!(unsafe { thaw_compiled_callback(&mut env, &mut info) }.is_null());
     assert!(!CALLED.load(std::sync::atomic::Ordering::SeqCst));
     assert_eq!(env.values.len(), 1);
@@ -1799,10 +2038,15 @@ fn value_callback_reentry_cannot_begin_shutdown() {
     }
     let mut env = Env::new();
     let bridge = Arc::new(ThawCallbackBridge {
-        callback: ThawCallback::Value(callback), context: 0,
+        callback: ThawCallback::Value(callback),
+        context: 0,
     });
-    let mut info = CallbackInfo { args: Vec::new(), this_arg: ptr::null_mut(),
-        new_target: ptr::null_mut(), data: Arc::as_ptr(&bridge) as *mut c_void };
+    let mut info = CallbackInfo {
+        args: Vec::new(),
+        this_arg: ptr::null_mut(),
+        new_target: ptr::null_mut(),
+        data: Arc::as_ptr(&bridge) as *mut c_void,
+    };
     let result = unsafe { thaw_compiled_callback(&mut env, &mut info) };
     assert!(matches!(unsafe { value_ref(result) }, Ok(Value::Null)));
 }
@@ -1812,25 +2056,46 @@ fn snapshot_walkers_read_own_getters_with_original_receiver() {
     unsafe extern "C" fn getter(env: NapiEnv, info: NapiCallbackInfo) -> NapiValue {
         let info = info.as_ref().unwrap();
         assert_eq!(info.this_arg as usize, info.data as usize);
-        env_mut(env).unwrap().alloc(Value::String("from getter".into()))
+        env_mut(env)
+            .unwrap()
+            .alloc(Value::String("from getter".into()))
     }
     let mut env = Box::new(Env::new());
     let env_ptr: NapiEnv = &mut *env;
     let child = env.alloc(Value::Object(HashMap::new()));
     let descriptor = NapiPropertyDescriptor {
-        utf8name: c"computed".as_ptr(), name: ptr::null_mut(), method: None,
-        getter: Some(getter), setter: None, value: ptr::null_mut(),
-        attributes: 0, data: child.cast(),
+        utf8name: c"computed".as_ptr(),
+        name: ptr::null_mut(),
+        method: None,
+        getter: Some(getter),
+        setter: None,
+        value: ptr::null_mut(),
+        attributes: 0,
+        data: child.cast(),
     };
-    unsafe { assert_eq!(napi_define_properties(env_ptr, child, 1, &descriptor), NAPI_OK); }
+    unsafe {
+        assert_eq!(
+            napi_define_properties(env_ptr, child, 1, &descriptor),
+            NAPI_OK
+        );
+    }
     let number = env.alloc(Value::Number(42.0));
-    let Value::Object(fields) = (unsafe { child.as_mut() }).unwrap() else { unreachable!() };
+    let Value::Object(fields) = (unsafe { child.as_mut() }).unwrap() else {
+        unreachable!()
+    };
     fields.insert(PropertyKey::String("a\0b".into()), number);
     let array = env.alloc(Value::Array(vec![None]));
     let index_descriptor = NapiPropertyDescriptor {
-        utf8name: c"0".as_ptr(), data: array.cast(), ..descriptor
+        utf8name: c"0".as_ptr(),
+        data: array.cast(),
+        ..descriptor
     };
-    unsafe { assert_eq!(napi_define_properties(env_ptr, array, 1, &index_descriptor), NAPI_OK); }
+    unsafe {
+        assert_eq!(
+            napi_define_properties(env_ptr, array, 1, &index_descriptor),
+            NAPI_OK
+        );
+    }
     let root = env.alloc(Value::Object(HashMap::from([
         (PropertyKey::String("nested".into()), child),
         (PropertyKey::String("items".into()), array),
@@ -1850,7 +2115,9 @@ fn snapshot_walkers_read_own_getters_with_original_receiver() {
     assert_eq!(wire.value["nested"]["computed"], "from getter");
     assert_eq!(wire.value["nested"]["a\0b"], 42.0);
     assert_eq!(wire.value["items"][0], "from getter");
-    HOST.with(|host| { drop(host.borrow_mut().module_envs.pop()); });
+    HOST.with(|host| {
+        drop(host.borrow_mut().module_envs.pop());
+    });
 }
 
 #[test]
@@ -1864,41 +2131,71 @@ fn graph_snapshot_reads_nested_getter_with_original_receiver() {
     let env_ptr: NapiEnv = &mut env;
     let child = env.alloc(Value::Object(HashMap::new()));
     let descriptor = NapiPropertyDescriptor {
-        utf8name: c"computed".as_ptr(), name: ptr::null_mut(), method: None,
-        getter: Some(getter), setter: None, value: ptr::null_mut(),
-        attributes: 0, data: child.cast(),
+        utf8name: c"computed".as_ptr(),
+        name: ptr::null_mut(),
+        method: None,
+        getter: Some(getter),
+        setter: None,
+        value: ptr::null_mut(),
+        attributes: 0,
+        data: child.cast(),
     };
-    unsafe { assert_eq!(napi_define_properties(env_ptr, child, 1, &descriptor), NAPI_OK); }
+    unsafe {
+        assert_eq!(
+            napi_define_properties(env_ptr, child, 1, &descriptor),
+            NAPI_OK
+        );
+    }
     let root = env.alloc(Value::Array(vec![Some(child)]));
-    let graph: JsonValue = serde_json::from_str(
-        &unsafe { napi_result_graph_for_env(env_ptr, root, true) }.unwrap(),
-    ).unwrap();
-    assert_eq!(graph["nodes"][1]["o"][0], serde_json::json!(["computed", {"v": 9.0}]));
+    let graph: JsonValue =
+        serde_json::from_str(&unsafe { napi_result_graph_for_env(env_ptr, root, true) }.unwrap())
+            .unwrap();
+    assert_eq!(
+        graph["nodes"][1]["o"][0],
+        serde_json::json!(["computed", {"v": 9.0}])
+    );
 }
 
 #[test]
 fn snapshot_getter_exception_is_consumed_once() {
     unsafe extern "C" fn getter(env: NapiEnv, _: NapiCallbackInfo) -> NapiValue {
-        assert_eq!(napi_throw_type_error(env, ptr::null(), c"snapshot getter failed".as_ptr()), NAPI_OK);
+        assert_eq!(
+            napi_throw_type_error(env, ptr::null(), c"snapshot getter failed".as_ptr()),
+            NAPI_OK
+        );
         ptr::null_mut()
     }
     let mut env = Box::new(Env::new());
     let env_ptr: NapiEnv = &mut *env;
     let object = env.alloc(Value::Object(HashMap::new()));
     let descriptor = NapiPropertyDescriptor {
-        utf8name: c"computed".as_ptr(), name: ptr::null_mut(), method: None,
-        getter: Some(getter), setter: None, value: ptr::null_mut(),
-        attributes: 0, data: ptr::null_mut(),
+        utf8name: c"computed".as_ptr(),
+        name: ptr::null_mut(),
+        method: None,
+        getter: Some(getter),
+        setter: None,
+        value: ptr::null_mut(),
+        attributes: 0,
+        data: ptr::null_mut(),
     };
-    unsafe { assert_eq!(napi_define_properties(env_ptr, object, 1, &descriptor), NAPI_OK); }
+    unsafe {
+        assert_eq!(
+            napi_define_properties(env_ptr, object, 1, &descriptor),
+            NAPI_OK
+        );
+    }
     HOST.with(|host| host.borrow_mut().module_envs.push(env));
     let error = unsafe { json_from_value_with_undefined(object, true) }.unwrap_err();
     assert!(error.contains("snapshot getter failed"), "{error}");
     assert!(unsafe { (*env_ptr).exception.is_none() });
-    let error = unsafe { quickjs_reference_wire(env_ptr, object, true) }.err().unwrap();
+    let error = unsafe { quickjs_reference_wire(env_ptr, object, true) }
+        .err()
+        .unwrap();
     assert!(error.contains("snapshot getter failed"), "{error}");
     assert!(unsafe { (*env_ptr).exception.is_none() });
-    HOST.with(|host| { drop(host.borrow_mut().module_envs.pop()); });
+    HOST.with(|host| {
+        drop(host.borrow_mut().module_envs.pop());
+    });
 }
 
 #[test]
@@ -1906,30 +2203,48 @@ fn getter_reentry_updates_later_snapshot_property() {
     unsafe extern "C" fn getter(env: NapiEnv, info: NapiCallbackInfo) -> NapiValue {
         let object = info.as_ref().unwrap().this_arg;
         let nested = env_mut(env).unwrap().alloc(Value::Object(HashMap::new()));
-        assert!(json_from_value_with_undefined_for_env(env, nested, true).unwrap().is_object());
+        assert!(json_from_value_with_undefined_for_env(env, nested, true)
+            .unwrap()
+            .is_object());
         let changed = env_mut(env).unwrap().alloc(Value::Number(99.0));
-        assert_eq!(napi_set_named_property(env, object, c"second".as_ptr(), changed), NAPI_OK);
+        assert_eq!(
+            napi_set_named_property(env, object, c"second".as_ptr(), changed),
+            NAPI_OK
+        );
         changed
     }
     let mut env = Box::new(Env::new());
     let env_ptr: NapiEnv = &mut *env;
     let old = env.alloc(Value::Number(1.0));
-    let object = env.alloc(Value::Object(HashMap::from([
-        (PropertyKey::String("second".into()), old),
-    ])));
+    let object = env.alloc(Value::Object(HashMap::from([(
+        PropertyKey::String("second".into()),
+        old,
+    )])));
     let descriptor = NapiPropertyDescriptor {
-        utf8name: c"first".as_ptr(), name: ptr::null_mut(), method: None,
-        getter: Some(getter), setter: None, value: ptr::null_mut(),
-        attributes: NAPI_DEFAULT_PROPERTY_ATTRIBUTES, data: ptr::null_mut(),
+        utf8name: c"first".as_ptr(),
+        name: ptr::null_mut(),
+        method: None,
+        getter: Some(getter),
+        setter: None,
+        value: ptr::null_mut(),
+        attributes: NAPI_DEFAULT_PROPERTY_ATTRIBUTES,
+        data: ptr::null_mut(),
     };
-    unsafe { assert_eq!(napi_define_properties(env_ptr, object, 1, &descriptor), NAPI_OK); }
+    unsafe {
+        assert_eq!(
+            napi_define_properties(env_ptr, object, 1, &descriptor),
+            NAPI_OK
+        );
+    }
     HOST.with(|host| host.borrow_mut().module_envs.push(env));
     let plain = unsafe { json_from_value_with_undefined(object, true) }.unwrap();
     assert_eq!(plain["first"], 99.0);
     assert_eq!(plain["second"], 99.0);
     let private = unsafe { quickjs_reference_wire(env_ptr, object, true) }.unwrap();
     assert_eq!(private.value["second"], 99.0);
-    HOST.with(|host| { drop(host.borrow_mut().module_envs.pop()); });
+    HOST.with(|host| {
+        drop(host.borrow_mut().module_envs.pop());
+    });
 }
 
 #[test]
@@ -1937,7 +2252,10 @@ fn settled_promise_getter_can_retry_settlement_without_borrow_panic() {
     unsafe extern "C" fn getter(env: NapiEnv, info: NapiCallbackInfo) -> NapiValue {
         let deferred = info.as_ref().unwrap().data.cast::<Deferred>();
         let retry_value = env_mut(env).unwrap().alloc(Value::Undefined);
-        assert_eq!(napi_resolve_deferred(env, deferred, retry_value), NAPI_GENERIC_FAILURE);
+        assert_eq!(
+            napi_resolve_deferred(env, deferred, retry_value),
+            NAPI_GENERIC_FAILURE
+        );
         env_mut(env).unwrap().alloc(Value::Number(7.0))
     }
     let mut env = Box::new(Env::new());
@@ -1946,13 +2264,24 @@ fn settled_promise_getter_can_retry_settlement_without_borrow_panic() {
     let mut deferred = ptr::null_mut();
     let mut promise = ptr::null_mut();
     unsafe {
-        assert_eq!(napi_create_promise(env_ptr, &mut deferred, &mut promise), NAPI_OK);
+        assert_eq!(
+            napi_create_promise(env_ptr, &mut deferred, &mut promise),
+            NAPI_OK
+        );
         let descriptor = NapiPropertyDescriptor {
-            utf8name: c"computed".as_ptr(), name: ptr::null_mut(), method: None,
-            getter: Some(getter), setter: None, value: ptr::null_mut(),
-            attributes: NAPI_DEFAULT_PROPERTY_ATTRIBUTES, data: deferred.cast(),
+            utf8name: c"computed".as_ptr(),
+            name: ptr::null_mut(),
+            method: None,
+            getter: Some(getter),
+            setter: None,
+            value: ptr::null_mut(),
+            attributes: NAPI_DEFAULT_PROPERTY_ATTRIBUTES,
+            data: deferred.cast(),
         };
-        assert_eq!(napi_define_properties(env_ptr, object, 1, &descriptor), NAPI_OK);
+        assert_eq!(
+            napi_define_properties(env_ptr, object, 1, &descriptor),
+            NAPI_OK
+        );
         assert_eq!(napi_resolve_deferred(env_ptr, deferred, object), NAPI_OK);
     }
     HOST.with(|host| host.borrow_mut().module_envs.push(env));
@@ -1961,12 +2290,19 @@ fn settled_promise_getter_can_retry_settlement_without_borrow_panic() {
     #[cfg(feature = "quickjs")]
     unsafe {
         let target = CString::new((promise as u64).to_string()).unwrap();
-        let wire = thaw_napi_handle_bridge(c"promise_state".as_ptr(), target.as_ptr(), c"".as_ptr(), c"[]".as_ptr());
+        let wire = thaw_napi_handle_bridge(
+            c"promise_state".as_ptr(),
+            target.as_ptr(),
+            c"".as_ptr(),
+            c"[]".as_ptr(),
+        );
         let result = CString::from_raw(wire.cast_mut()).into_string().unwrap();
         assert!(result.contains("\"kind\":\"resolved\""), "{result}");
         assert!(result.contains("\"computed\":7.0"), "{result}");
     }
-    HOST.with(|host| { drop(host.borrow_mut().module_envs.pop()); });
+    HOST.with(|host| {
+        drop(host.borrow_mut().module_envs.pop());
+    });
 }
 
 #[test]
@@ -1974,8 +2310,13 @@ fn rejected_promise_object_getter_can_retry_settlement_without_borrow_panic() {
     unsafe extern "C" fn getter(env: NapiEnv, info: NapiCallbackInfo) -> NapiValue {
         let deferred = info.as_ref().unwrap().data.cast::<Deferred>();
         let retry_value = env_mut(env).unwrap().alloc(Value::Undefined);
-        assert_eq!(napi_reject_deferred(env, deferred, retry_value), NAPI_GENERIC_FAILURE);
-        env_mut(env).unwrap().alloc(Value::String("original rejection".into()))
+        assert_eq!(
+            napi_reject_deferred(env, deferred, retry_value),
+            NAPI_GENERIC_FAILURE
+        );
+        env_mut(env)
+            .unwrap()
+            .alloc(Value::String("original rejection".into()))
     }
     let mut env = Box::new(Env::new());
     let env_ptr: NapiEnv = &mut *env;
@@ -1983,27 +2324,46 @@ fn rejected_promise_object_getter_can_retry_settlement_without_borrow_panic() {
     let mut deferred = ptr::null_mut();
     let mut promise = ptr::null_mut();
     unsafe {
-        assert_eq!(napi_create_promise(env_ptr, &mut deferred, &mut promise), NAPI_OK);
+        assert_eq!(
+            napi_create_promise(env_ptr, &mut deferred, &mut promise),
+            NAPI_OK
+        );
         let descriptor = NapiPropertyDescriptor {
-            utf8name: c"message".as_ptr(), name: ptr::null_mut(), method: None,
-            getter: Some(getter), setter: None, value: ptr::null_mut(),
-            attributes: NAPI_DEFAULT_PROPERTY_ATTRIBUTES, data: deferred.cast(),
+            utf8name: c"message".as_ptr(),
+            name: ptr::null_mut(),
+            method: None,
+            getter: Some(getter),
+            setter: None,
+            value: ptr::null_mut(),
+            attributes: NAPI_DEFAULT_PROPERTY_ATTRIBUTES,
+            data: deferred.cast(),
         };
-        assert_eq!(napi_define_properties(env_ptr, object, 1, &descriptor), NAPI_OK);
+        assert_eq!(
+            napi_define_properties(env_ptr, object, 1, &descriptor),
+            NAPI_OK
+        );
         assert_eq!(napi_reject_deferred(env_ptr, deferred, object), NAPI_OK);
     }
     HOST.with(|host| host.borrow_mut().module_envs.push(env));
-    let error = unsafe { json_from_value_with_undefined_for_env(env_ptr, promise, true) }.unwrap_err();
+    let error =
+        unsafe { json_from_value_with_undefined_for_env(env_ptr, promise, true) }.unwrap_err();
     assert!(error.contains("original rejection"), "{error}");
     #[cfg(feature = "quickjs")]
     unsafe {
         let target = CString::new((promise as u64).to_string()).unwrap();
-        let wire = thaw_napi_handle_bridge(c"promise_state".as_ptr(), target.as_ptr(), c"".as_ptr(), c"[]".as_ptr());
+        let wire = thaw_napi_handle_bridge(
+            c"promise_state".as_ptr(),
+            target.as_ptr(),
+            c"".as_ptr(),
+            c"[]".as_ptr(),
+        );
         let result = CString::from_raw(wire.cast_mut()).into_string().unwrap();
         assert!(result.contains("\"kind\":\"rejected\""), "{result}");
         assert!(result.contains("original rejection"), "{result}");
     }
-    HOST.with(|host| { drop(host.borrow_mut().module_envs.pop()); });
+    HOST.with(|host| {
+        drop(host.borrow_mut().module_envs.pop());
+    });
 }
 
 #[test]
@@ -2011,23 +2371,35 @@ fn exception_description_keeps_original_data_without_running_getter() {
     static DESCRIPTION_GETTER_RAN: AtomicBool = AtomicBool::new(false);
     unsafe extern "C" fn throwing_getter(env: NapiEnv, _: NapiCallbackInfo) -> NapiValue {
         DESCRIPTION_GETTER_RAN.store(true, std::sync::atomic::Ordering::SeqCst);
-        assert_eq!(napi_throw_type_error(env, ptr::null(), c"secondary getter failure".as_ptr()), NAPI_OK);
+        assert_eq!(
+            napi_throw_type_error(env, ptr::null(), c"secondary getter failure".as_ptr()),
+            NAPI_OK
+        );
         ptr::null_mut()
     }
     DESCRIPTION_GETTER_RAN.store(false, std::sync::atomic::Ordering::SeqCst);
     let mut env = Env::new();
     let env_ptr: NapiEnv = &mut env;
     let message = env.alloc(Value::String("original failure".into()));
-    let thrown = env.alloc(Value::Object(HashMap::from([
-        (PropertyKey::String("message".into()), message),
-    ])));
+    let thrown = env.alloc(Value::Object(HashMap::from([(
+        PropertyKey::String("message".into()),
+        message,
+    )])));
     let descriptor = NapiPropertyDescriptor {
-        utf8name: c"danger".as_ptr(), name: ptr::null_mut(), method: None,
-        getter: Some(throwing_getter), setter: None, value: ptr::null_mut(),
-        attributes: NAPI_DEFAULT_PROPERTY_ATTRIBUTES, data: ptr::null_mut(),
+        utf8name: c"danger".as_ptr(),
+        name: ptr::null_mut(),
+        method: None,
+        getter: Some(throwing_getter),
+        setter: None,
+        value: ptr::null_mut(),
+        attributes: NAPI_DEFAULT_PROPERTY_ATTRIBUTES,
+        data: ptr::null_mut(),
     };
     unsafe {
-        assert_eq!(napi_define_properties(env_ptr, thrown, 1, &descriptor), NAPI_OK);
+        assert_eq!(
+            napi_define_properties(env_ptr, thrown, 1, &descriptor),
+            NAPI_OK
+        );
         assert_eq!(napi_throw(env_ptr, thrown), NAPI_OK);
         let report = take_env_exception(env_ptr).unwrap_err();
         assert!(report.contains("original failure"), "{report}");
@@ -2049,38 +2421,68 @@ fn snapshot_walkers_use_cross_environment_child_and_promise_owner() {
     let second_env: NapiEnv = &mut *second;
     let root = first.alloc(Value::Object(HashMap::new()));
     let child_undefined = second.alloc(Value::Undefined);
-    let child = second.alloc(Value::Object(HashMap::from([
-        (PropertyKey::String("optional".into()), child_undefined),
-    ])));
+    let child = second.alloc(Value::Object(HashMap::from([(
+        PropertyKey::String("optional".into()),
+        child_undefined,
+    )])));
     let descriptor = NapiPropertyDescriptor {
-        utf8name: c"computed".as_ptr(), name: ptr::null_mut(), method: None,
-        getter: Some(getter), setter: None, value: ptr::null_mut(),
-        attributes: NAPI_DEFAULT_PROPERTY_ATTRIBUTES, data: second_env.cast(),
+        utf8name: c"computed".as_ptr(),
+        name: ptr::null_mut(),
+        method: None,
+        getter: Some(getter),
+        setter: None,
+        value: ptr::null_mut(),
+        attributes: NAPI_DEFAULT_PROPERTY_ATTRIBUTES,
+        data: second_env.cast(),
     };
-    unsafe { assert_eq!(napi_define_properties(second_env, child, 1, &descriptor), NAPI_OK); }
+    unsafe {
+        assert_eq!(
+            napi_define_properties(second_env, child, 1, &descriptor),
+            NAPI_OK
+        );
+    }
     let mut deferred = ptr::null_mut();
     let mut promise = ptr::null_mut();
-    unsafe { assert_eq!(napi_create_promise(first_env, &mut deferred, &mut promise), NAPI_OK); }
+    unsafe {
+        assert_eq!(
+            napi_create_promise(first_env, &mut deferred, &mut promise),
+            NAPI_OK
+        );
+    }
     HOST.with(|host| {
         let mut host = host.borrow_mut();
         host.module_envs.push(first);
         host.module_envs.push(second);
     });
     unsafe {
-        assert_eq!(napi_set_named_property(first_env, root, c"child".as_ptr(), child), NAPI_OK);
+        assert_eq!(
+            napi_set_named_property(first_env, root, c"child".as_ptr(), child),
+            NAPI_OK
+        );
         assert_eq!(napi_resolve_deferred(first_env, deferred, child), NAPI_OK);
         let plain = json_from_value_with_undefined_for_env(first_env, root, true).unwrap();
         assert_eq!(plain["child"]["computed"], 9.0);
-        assert_eq!(plain["child"]["optional"], serde_json::json!({ (TYPED_UNDEFINED_KEY): true }));
+        assert_eq!(
+            plain["child"]["optional"],
+            serde_json::json!({ (TYPED_UNDEFINED_KEY): true })
+        );
         let settled = json_from_value_with_undefined_for_env(first_env, promise, true).unwrap();
         assert_eq!(settled["computed"], 9.0);
-        assert_eq!(settled["optional"], serde_json::json!({ (TYPED_UNDEFINED_KEY): true }));
+        assert_eq!(
+            settled["optional"],
+            serde_json::json!({ (TYPED_UNDEFINED_KEY): true })
+        );
         let private = quickjs_reference_wire(first_env, root, true).unwrap();
         assert_eq!(private.value["child"]["computed"], 9.0);
         #[cfg(feature = "quickjs")]
         {
             let target = CString::new((promise as u64).to_string()).unwrap();
-            let wire = thaw_napi_handle_bridge(c"promise_state".as_ptr(), target.as_ptr(), c"".as_ptr(), c"[]".as_ptr());
+            let wire = thaw_napi_handle_bridge(
+                c"promise_state".as_ptr(),
+                target.as_ptr(),
+                c"".as_ptr(),
+                c"[]".as_ptr(),
+            );
             let result = CString::from_raw(wire.cast_mut()).into_string().unwrap();
             assert!(result.contains("\"computed\":9.0"), "{result}");
         }
@@ -2105,11 +2507,21 @@ fn graph_snapshot_uses_cross_environment_accessor_owner() {
     let root = first.alloc(Value::Array(vec![None]));
     let child = second.alloc(Value::Object(HashMap::new()));
     let descriptor = NapiPropertyDescriptor {
-        utf8name: c"computed".as_ptr(), name: ptr::null_mut(), method: None,
-        getter: Some(getter), setter: None, value: ptr::null_mut(),
-        attributes: NAPI_DEFAULT_PROPERTY_ATTRIBUTES, data: second_env.cast(),
+        utf8name: c"computed".as_ptr(),
+        name: ptr::null_mut(),
+        method: None,
+        getter: Some(getter),
+        setter: None,
+        value: ptr::null_mut(),
+        attributes: NAPI_DEFAULT_PROPERTY_ATTRIBUTES,
+        data: second_env.cast(),
     };
-    unsafe { assert_eq!(napi_define_properties(second_env, child, 1, &descriptor), NAPI_OK); }
+    unsafe {
+        assert_eq!(
+            napi_define_properties(second_env, child, 1, &descriptor),
+            NAPI_OK
+        );
+    }
     HOST.with(|host| {
         let mut host = host.borrow_mut();
         host.module_envs.push(first);
@@ -2140,26 +2552,48 @@ fn cross_environment_registered_function_reference_survives_private_snapshot() {
     let mut second = Box::new(Env::new());
     let first_env: NapiEnv = &mut *first;
     let root = first.alloc(Value::Object(HashMap::new()));
-    let function = || Value::Function(Function {
-        callback: noop, data: ptr::null_mut(), properties: HashMap::new(), _thaw_bridge: None, _accessor_owner: None,
-    });
+    let function = || {
+        Value::Function(Function {
+            callback: noop,
+            data: ptr::null_mut(),
+            properties: HashMap::new(),
+            _thaw_bridge: None,
+            _accessor_owner: None,
+        })
+    };
     let registered = second.alloc(function());
     let ordinary = second.alloc(function());
     second.quickjs_references.insert(991, registered);
     let descriptor = NapiPropertyDescriptor {
-        utf8name: c"fromGetter".as_ptr(), name: ptr::null_mut(), method: None,
-        getter: Some(returns_registered), setter: None, value: ptr::null_mut(),
-        attributes: NAPI_DEFAULT_PROPERTY_ATTRIBUTES, data: registered.cast(),
+        utf8name: c"fromGetter".as_ptr(),
+        name: ptr::null_mut(),
+        method: None,
+        getter: Some(returns_registered),
+        setter: None,
+        value: ptr::null_mut(),
+        attributes: NAPI_DEFAULT_PROPERTY_ATTRIBUTES,
+        data: registered.cast(),
     };
-    unsafe { assert_eq!(napi_define_properties(first_env, root, 1, &descriptor), NAPI_OK); }
+    unsafe {
+        assert_eq!(
+            napi_define_properties(first_env, root, 1, &descriptor),
+            NAPI_OK
+        );
+    }
     HOST.with(|host| {
         let mut host = host.borrow_mut();
         host.module_envs.push(first);
         host.module_envs.push(second);
     });
     unsafe {
-        assert_eq!(napi_set_named_property(first_env, root, c"registered".as_ptr(), registered), NAPI_OK);
-        assert_eq!(napi_set_named_property(first_env, root, c"ordinary".as_ptr(), ordinary), NAPI_OK);
+        assert_eq!(
+            napi_set_named_property(first_env, root, c"registered".as_ptr(), registered),
+            NAPI_OK
+        );
+        assert_eq!(
+            napi_set_named_property(first_env, root, c"ordinary".as_ptr(), ordinary),
+            NAPI_OK
+        );
         let wire = quickjs_reference_wire(first_env, root, true).unwrap();
         assert_eq!(wire.value["registered"]["__thaw_napi_ref__"], 991);
         assert_eq!(wire.value["fromGetter"]["__thaw_napi_ref__"], 991);
@@ -2177,20 +2611,30 @@ fn cyclic_exception_data_reports_original_failure_without_recursing_forever() {
     let mut env = Env::new();
     let env_ptr: NapiEnv = &mut env;
     let object = env.alloc(Value::Object(HashMap::new()));
-    let Value::Object(fields) = (unsafe { object.as_mut() }).unwrap() else { unreachable!() };
+    let Value::Object(fields) = (unsafe { object.as_mut() }).unwrap() else {
+        unreachable!()
+    };
     fields.insert(PropertyKey::String("self".into()), object);
     let array = env.alloc(Value::Array(vec![None]));
-    let Value::Array(items) = (unsafe { array.as_mut() }).unwrap() else { unreachable!() };
+    let Value::Array(items) = (unsafe { array.as_mut() }).unwrap() else {
+        unreachable!()
+    };
     items[0] = Some(array);
     let mut deferred = ptr::null_mut();
     let mut promise = ptr::null_mut();
     unsafe {
-        assert_eq!(napi_create_promise(env_ptr, &mut deferred, &mut promise), NAPI_OK);
+        assert_eq!(
+            napi_create_promise(env_ptr, &mut deferred, &mut promise),
+            NAPI_OK
+        );
         assert_eq!(napi_resolve_deferred(env_ptr, deferred, promise), NAPI_OK);
         for thrown in [object, array, promise] {
             assert_eq!(napi_throw(env_ptr, thrown), NAPI_OK);
             let report = take_env_exception(env_ptr).unwrap_err();
-            assert_eq!(report, "native addon threw an unserializable exception value");
+            assert_eq!(
+                report,
+                "native addon threw an unserializable exception value"
+            );
             assert!(env.exception.is_none());
         }
     }
@@ -2201,9 +2645,10 @@ fn repeated_acyclic_exception_child_is_serialized_on_each_branch() {
     let mut env = Env::new();
     let env_ptr: NapiEnv = &mut env;
     let code = env.alloc(Value::Number(5.0));
-    let shared = env.alloc(Value::Object(HashMap::from([
-        (PropertyKey::String("code".into()), code),
-    ])));
+    let shared = env.alloc(Value::Object(HashMap::from([(
+        PropertyKey::String("code".into()),
+        code,
+    )])));
     let root = env.alloc(Value::Object(HashMap::from([
         (PropertyKey::String("left".into()), shared),
         (PropertyKey::String("right".into()), shared),
@@ -2223,7 +2668,10 @@ fn repeated_acyclic_exception_child_is_serialized_on_each_branch() {
 #[cfg(feature = "quickjs")]
 #[test]
 fn live_quickjs_graph_handle_survives_lease_and_roundtrips_mutation() {
-    assert_eq!(thaw_quickjs::thaw_js_load(c"globalThis.napiLiveRoundtrip = { x: 4 };".as_ptr()), 1);
+    assert_eq!(
+        thaw_quickjs::thaw_js_load(c"globalThis.napiLiveRoundtrip = { x: 4 };".as_ptr()),
+        1
+    );
     let handle = thaw_quickjs::thaw_js_get_global(c"napiLiveRoundtrip".as_ptr());
     assert_ne!(handle, 0);
     assert_eq!(thaw_quickjs::thaw_js_retain_handle(handle), 1); // wire transfer
@@ -2232,19 +2680,27 @@ fn live_quickjs_graph_handle_survives_lease_and_roundtrips_mutation() {
     );
     let mut env = Env::new();
     let root = unsafe { parse_napi_graph_value(&mut env as NapiEnv, &graph) }.unwrap();
-    let Value::Array(children) = unsafe { value_ref(root) }.unwrap() else { panic!("array root") };
+    let Value::Array(children) = unsafe { value_ref(root) }.unwrap() else {
+        panic!("array root")
+    };
     let live = children[0].unwrap();
     assert_eq!(Some(live), children[1]);
-    assert!(matches!(unsafe { value_ref(live) }, Ok(Value::QuickJsHandle { handle: id, .. }) if *id == handle));
+    assert!(
+        matches!(unsafe { value_ref(live) }, Ok(Value::QuickJsHandle { handle: id, .. }) if *id == handle)
+    );
     assert_eq!(thaw_quickjs::thaw_js_release_handle(handle), 1); // original only
     let nine = env.alloc(Value::Number(9.0));
-    assert_eq!(unsafe { napi_set_named_property(&mut env, live, c"x".as_ptr(), nine) }, NAPI_OK);
+    assert_eq!(
+        unsafe { napi_set_named_property(&mut env, live, c"x".as_ptr(), nine) },
+        NAPI_OK
+    );
     let property = thaw_quickjs::thaw_js_get_property_result(handle, c"x".as_ptr());
     assert!(property.error.is_null());
     assert_eq!(unsafe { qjs_query(property.value, 2) }.unwrap(), "9");
     assert_eq!(thaw_quickjs::thaw_js_release_handle(property.value), 1);
-    let encoded: JsonValue = serde_json::from_str(
-        &unsafe { napi_result_graph_for_env(&mut env, live, true) }.unwrap()).unwrap();
+    let encoded: JsonValue =
+        serde_json::from_str(&unsafe { napi_result_graph_for_env(&mut env, live, true) }.unwrap())
+            .unwrap();
     assert_eq!(encoded["nodes"][0]["hdl"], handle);
     assert_eq!(encoded["leases"][0], handle);
     assert_eq!(thaw_quickjs::thaw_js_release_handle(handle), 1); // outbound wire lease
@@ -2260,9 +2716,12 @@ fn live_quickjs_graph_handle_survives_lease_and_roundtrips_mutation() {
 #[test]
 fn graph_defined_native_accessor_owns_callbacks_until_replaced() {
     thaw_quickjs::register_napi_bridge(
-        thaw_napi_export_names, thaw_napi_call_typed_bridge,
-        thaw_napi_handle_bridge, thaw_napi_poll_async_work,
-        thaw_napi_async_work_pending, thaw_napi_graph_owner,
+        thaw_napi_export_names,
+        thaw_napi_call_typed_bridge,
+        thaw_napi_handle_bridge,
+        thaw_napi_poll_async_work,
+        thaw_napi_async_work_pending,
+        thaw_napi_graph_owner,
         release_napi_graph_reference,
     );
     assert_eq!(thaw_quickjs::thaw_js_load(c"globalThis.napiLiveGetter = function(){ return this.seed + 1 }; globalThis.napiLiveSetter = function(value){ this.seed = value };".as_ptr()), 1);
@@ -2274,39 +2733,83 @@ fn graph_defined_native_accessor_owns_callbacks_until_replaced() {
     env.graph_owner_id = 7001;
     let env_ptr: NapiEnv = &mut *env;
     let seed = env.alloc(Value::Number(7.0));
-    let object = env.alloc(Value::Object(HashMap::from([
-        (PropertyKey::String("seed".into()), seed),
-    ])));
+    let object = env.alloc(Value::Object(HashMap::from([(
+        PropertyKey::String("seed".into()),
+        seed,
+    )])));
     HOST.with(|host| host.borrow_mut().module_envs.push(env));
     let key = PropertyKey::String("computed".into());
     assert_ne!(thaw_quickjs::thaw_js_retain_handle(getter), 0);
     assert_ne!(thaw_quickjs::thaw_js_retain_handle(setter), 0);
+    #[allow(clippy::arc_with_non_send_sync)]
     let callbacks = Arc::new(QuickJsAccessorRoots {
-        getter, setter, getter_native: ptr::null_mut(), setter_native: ptr::null_mut(),
+        getter,
+        setter,
+        getter_native: ptr::null_mut(),
+        setter_native: ptr::null_mut(),
     });
-    assert_eq!(unsafe { qjs_install_native_accessor(env_ptr, object, key.clone(),
-        callbacks,
-        true, true, NAPI_ENUMERABLE | NAPI_CONFIGURABLE) }, NAPI_OK);
+    assert_eq!(
+        unsafe {
+            qjs_install_native_accessor(
+                env_ptr,
+                object,
+                key.clone(),
+                callbacks,
+                true,
+                true,
+                NAPI_ENUMERABLE | NAPI_CONFIGURABLE,
+            )
+        },
+        NAPI_OK
+    );
     let mut first = ptr::null_mut();
-    assert_eq!(unsafe { napi_get_named_property(env_ptr, object,
-        c"computed".as_ptr(), &mut first) }, NAPI_OK);
-    let first_handle = qjs_handle(first).expect("live getter result");
+    assert_eq!(
+        unsafe { napi_get_named_property(env_ptr, object, c"computed".as_ptr(), &mut first) },
+        NAPI_OK
+    );
+    let first_handle = unsafe { qjs_handle(first) }.expect("live getter result");
     assert_eq!(unsafe { qjs_query(first_handle, 2) }.unwrap(), "8");
-    let replacement = unsafe { env_mut(env_ptr) }.unwrap().alloc(Value::Number(12.0));
-    assert_eq!(unsafe { napi_set_named_property(env_ptr, object,
-        c"computed".as_ptr(), replacement) }, NAPI_OK);
+    let replacement = unsafe { env_mut(env_ptr) }
+        .unwrap()
+        .alloc(Value::Number(12.0));
+    assert_eq!(
+        unsafe { napi_set_named_property(env_ptr, object, c"computed".as_ptr(), replacement) },
+        NAPI_OK
+    );
     let mut changed = ptr::null_mut();
-    assert_eq!(unsafe { napi_get_named_property(env_ptr, object,
-        c"computed".as_ptr(), &mut changed) }, NAPI_OK);
-    assert_eq!(unsafe { qjs_query(qjs_handle(changed).unwrap(), 2) }.unwrap(), "13");
-    let final_value = unsafe { env_mut(env_ptr) }.unwrap().alloc(Value::Number(99.0));
-    assert_eq!(unsafe { qjs_install_native_data_property(env_ptr, object, key,
-        final_value, true, NAPI_DEFAULT_PROPERTY_ATTRIBUTES) }, NAPI_OK);
+    assert_eq!(
+        unsafe { napi_get_named_property(env_ptr, object, c"computed".as_ptr(), &mut changed) },
+        NAPI_OK
+    );
+    assert_eq!(
+        unsafe { qjs_query(qjs_handle(changed).unwrap(), 2) }.unwrap(),
+        "13"
+    );
+    let final_value = unsafe { env_mut(env_ptr) }
+        .unwrap()
+        .alloc(Value::Number(99.0));
+    assert_eq!(
+        unsafe {
+            qjs_install_native_data_property(
+                env_ptr,
+                object,
+                key,
+                final_value,
+                true,
+                NAPI_DEFAULT_PROPERTY_ATTRIBUTES,
+            )
+        },
+        NAPI_OK
+    );
     let mut data = ptr::null_mut();
-    assert_eq!(unsafe { napi_get_named_property(env_ptr, object,
-        c"computed".as_ptr(), &mut data) }, NAPI_OK);
+    assert_eq!(
+        unsafe { napi_get_named_property(env_ptr, object, c"computed".as_ptr(), &mut data) },
+        NAPI_OK
+    );
     assert_eq!(data, final_value);
-    let owned = HOST.with(|host| host.borrow_mut().module_envs.pop()).unwrap();
+    let owned = HOST
+        .with(|host| host.borrow_mut().module_envs.pop())
+        .unwrap();
     drop(owned);
 }
 
@@ -2319,20 +2822,25 @@ fn graph_defined_native_accessor_owns_callbacks_until_replaced() {
 #[test]
 fn graph_proxy_define_property_keeps_live_native_accessor() {
     thaw_quickjs::register_napi_bridge(
-        thaw_napi_export_names, thaw_napi_call_typed_bridge,
-        thaw_napi_handle_bridge, thaw_napi_poll_async_work,
-        thaw_napi_async_work_pending, thaw_napi_graph_owner,
+        thaw_napi_export_names,
+        thaw_napi_call_typed_bridge,
+        thaw_napi_handle_bridge,
+        thaw_napi_poll_async_work,
+        thaw_napi_async_work_pending,
+        thaw_napi_graph_owner,
         release_napi_graph_reference,
     );
     let mut env = Box::new(Env::new());
     env.graph_owner_id = 7002;
     let env_ptr: NapiEnv = &mut *env;
     let zero = env.alloc(Value::Number(0.0));
-    let object = env.alloc(Value::Object(HashMap::from([
-        (PropertyKey::String("seed".into()), zero),
-    ])));
+    let object = env.alloc(Value::Object(HashMap::from([(
+        PropertyKey::String("seed".into()),
+        zero,
+    )])));
     HOST.with(|host| host.borrow_mut().module_envs.push(env));
-    let script = CString::new(format!(r#"
+    let script = CString::new(format!(
+        r#"
         globalThis.nativeDescriptorOwner =
           __thaw_json_graph_proxy_for_handle("{}");
         Object.defineProperty(nativeDescriptorOwner, "computed", {{
@@ -2345,7 +2853,10 @@ fn graph_proxy_define_property_keeps_live_native_accessor() {
           Reflect.getOwnPropertyDescriptor(nativeDescriptorOwner, 'computed').get;
         nativeDescriptorOwner.computed = 8;
         globalThis.nativeDescriptorObserved = nativeDescriptorOwner.computed;
-    "#, object as u64)).unwrap();
+    "#,
+        object as u64
+    ))
+    .unwrap();
     assert_eq!(thaw_quickjs::thaw_js_load(script.as_ptr()), 1);
     let identity = thaw_quickjs::thaw_js_get_global(c"nativeAccessorIdentity".as_ptr());
     assert_eq!(unsafe { qjs_query(identity, 2) }.unwrap(), "true");
@@ -2354,28 +2865,48 @@ fn graph_proxy_define_property_keeps_live_native_accessor() {
     assert_eq!(unsafe { qjs_query(observed, 2) }.unwrap(), "11");
     assert_eq!(thaw_quickjs::thaw_js_release_handle(observed), 1);
     let mut native = ptr::null_mut();
-    assert_eq!(unsafe { napi_get_named_property(env_ptr, object,
-        c"computed".as_ptr(), &mut native) }, NAPI_OK);
-    assert_eq!(unsafe { qjs_query(qjs_handle(native).unwrap(), 2) }.unwrap(), "11");
+    assert_eq!(
+        unsafe { napi_get_named_property(env_ptr, object, c"computed".as_ptr(), &mut native) },
+        NAPI_OK
+    );
+    assert_eq!(
+        unsafe { qjs_query(qjs_handle(native).unwrap(), 2) }.unwrap(),
+        "11"
+    );
     assert_eq!(thaw_quickjs::thaw_js_load(c"globalThis.nativeOtherReceiver = { seed: 40 }; globalThis.nativeReceiverObserved = [Reflect.get(nativeDescriptorOwner, 'computed', nativeOtherReceiver), Reflect.set(nativeDescriptorOwner, 'computed', 27, nativeOtherReceiver), nativeOtherReceiver.seed, nativeDescriptorOwner.seed];".as_ptr()), 1);
     let receiver_observed = thaw_quickjs::thaw_js_get_global(c"nativeReceiverObserved".as_ptr());
-    assert_eq!(unsafe { qjs_query(receiver_observed, 2) }.unwrap(), "43,true,27,8");
+    assert_eq!(
+        unsafe { qjs_query(receiver_observed, 2) }.unwrap(),
+        "43,true,27,8"
+    );
     assert_eq!(thaw_quickjs::thaw_js_release_handle(receiver_observed), 1);
     assert_eq!(thaw_quickjs::thaw_js_load(c"globalThis.nativeDataReceiverObserved = (() => { let calls = 0; const accessor = {}; Object.defineProperty(accessor, 'seed', { set(value) { calls++; }, configurable: true }); const plain = {}; const accessorWrite = Reflect.set(nativeDescriptorOwner, 'seed', 61, accessor); const plainWrite = Reflect.set(nativeDescriptorOwner, 'seed', 62, plain); return [accessorWrite, calls, plainWrite, plain.seed, nativeDescriptorOwner.seed]; })();".as_ptr()), 1);
     let data_receiver = thaw_quickjs::thaw_js_get_global(c"nativeDataReceiverObserved".as_ptr());
-    assert_eq!(unsafe { qjs_query(data_receiver, 2) }.unwrap(), "false,0,true,62,8");
+    assert_eq!(
+        unsafe { qjs_query(data_receiver, 2) }.unwrap(),
+        "false,0,true,62,8"
+    );
     assert_eq!(thaw_quickjs::thaw_js_release_handle(data_receiver), 1);
     assert_eq!(thaw_quickjs::thaw_js_load(c"globalThis.nativeThrownIdentity = (() => { const marker = { thrown: true }; Object.defineProperty(nativeDescriptorOwner, 'throwingGet', { get() { throw marker; }, configurable: true }); Object.defineProperty(nativeDescriptorOwner, 'throwingSet', { set(_) { throw marker; }, configurable: true }); let read = false, write = false; try { nativeDescriptorOwner.throwingGet; } catch (error) { read = error === marker; } try { nativeDescriptorOwner.throwingSet = 1; } catch (error) { write = error === marker; } return [read, write]; })();".as_ptr()), 1);
     let thrown_identity = thaw_quickjs::thaw_js_get_global(c"nativeThrownIdentity".as_ptr());
-    assert_eq!(unsafe { qjs_query(thrown_identity, 2) }.unwrap(), "true,true");
+    assert_eq!(
+        unsafe { qjs_query(thrown_identity, 2) }.unwrap(),
+        "true,true"
+    );
     assert_eq!(thaw_quickjs::thaw_js_release_handle(thrown_identity), 1);
     assert_eq!(thaw_quickjs::thaw_js_load(c"Object.defineProperty(nativeDescriptorOwner, 'attributeOnlySetter', { set(value) { this.seed = value; }, configurable: true }); Object.defineProperty(nativeDescriptorOwner, 'attributeOnlySetter', { configurable: false }); globalThis.nativeAttributeOnlySetter = [Object.getOwnPropertyDescriptor(nativeDescriptorOwner, 'attributeOnlySetter').get === undefined, Reflect.set(nativeDescriptorOwner, 'attributeOnlySetter', 19), nativeDescriptorOwner.attributeOnlySetter === undefined, nativeDescriptorOwner.seed === 19];".as_ptr()), 1);
     let attribute_only = thaw_quickjs::thaw_js_get_global(c"nativeAttributeOnlySetter".as_ptr());
-    assert_eq!(unsafe { qjs_query(attribute_only, 2) }.unwrap(), "true,true,true,true");
+    assert_eq!(
+        unsafe { qjs_query(attribute_only, 2) }.unwrap(),
+        "true,true,true,true"
+    );
     assert_eq!(thaw_quickjs::thaw_js_release_handle(attribute_only), 1);
     assert_eq!(thaw_quickjs::thaw_js_load(c"Object.defineProperty(nativeDescriptorOwner, 'writeOnly', { set(value) { this.seed = value; }, configurable: false }); globalThis.nativeWriteOnlyObserved = [Reflect.set(nativeDescriptorOwner, 'writeOnly', 13), nativeDescriptorOwner.writeOnly === undefined, nativeDescriptorOwner.seed === 13]; Object.defineProperty(nativeDescriptorOwner, 'stable', { get() { return 9; }, configurable: false }); globalThis.nativeStableRedefined = Reflect.defineProperty(nativeDescriptorOwner, 'stable', Reflect.getOwnPropertyDescriptor(nativeDescriptorOwner, 'stable')); Object.defineProperty(nativeDescriptorOwner, 'computed', { value: 22, writable: true, configurable: true }); Object.defineProperty(nativeDescriptorOwner, 'fixed', { value: 1, writable: true, configurable: false }); Object.defineProperty(nativeDescriptorOwner, 'fixed', { value: 2 }); Object.defineProperty(nativeDescriptorOwner, 'fixed', { writable: false }); globalThis.nativeFixedObserved = nativeDescriptorOwner.fixed; Object.preventExtensions(nativeDescriptorOwner); globalThis.nativeIntegrityObserved = [Object.isExtensible(nativeDescriptorOwner), Reflect.set(nativeDescriptorOwner, 'added', 1), Reflect.ownKeys(nativeDescriptorOwner).includes('fixed'), Reflect.setPrototypeOf(nativeDescriptorOwner, Object.getPrototypeOf(nativeDescriptorOwner))];".as_ptr()), 1);
     let write_only = thaw_quickjs::thaw_js_get_global(c"nativeWriteOnlyObserved".as_ptr());
-    assert_eq!(unsafe { qjs_query(write_only, 2) }.unwrap(), "true,true,true");
+    assert_eq!(
+        unsafe { qjs_query(write_only, 2) }.unwrap(),
+        "true,true,true"
+    );
     assert_eq!(thaw_quickjs::thaw_js_release_handle(write_only), 1);
     let redefined = thaw_quickjs::thaw_js_get_global(c"nativeStableRedefined".as_ptr());
     assert_eq!(unsafe { qjs_query(redefined, 2) }.unwrap(), "true");
@@ -2384,26 +2915,43 @@ fn graph_proxy_define_property_keeps_live_native_accessor() {
     assert_eq!(unsafe { qjs_query(fixed, 2) }.unwrap(), "2");
     assert_eq!(thaw_quickjs::thaw_js_release_handle(fixed), 1);
     let integrity = thaw_quickjs::thaw_js_get_global(c"nativeIntegrityObserved".as_ptr());
-    assert_eq!(unsafe { qjs_query(integrity, 2) }.unwrap(), "false,false,true,true");
+    assert_eq!(
+        unsafe { qjs_query(integrity, 2) }.unwrap(),
+        "false,false,true,true"
+    );
     assert_eq!(thaw_quickjs::thaw_js_release_handle(integrity), 1);
     let mut data = ptr::null_mut();
-    assert_eq!(unsafe { napi_get_named_property(env_ptr, object,
-        c"computed".as_ptr(), &mut data) }, NAPI_OK);
-    assert!(matches!(unsafe { value_ref(data) }, Ok(Value::Number(22.0))));
+    assert_eq!(
+        unsafe { napi_get_named_property(env_ptr, object, c"computed".as_ptr(), &mut data) },
+        NAPI_OK
+    );
+    assert!(matches!(
+        unsafe { value_ref(data) },
+        Ok(Value::Number(22.0))
+    ));
     assert_eq!(thaw_quickjs::thaw_js_load(c"globalThis.nativeNonextensibleReplace = [Reflect.defineProperty(nativeDescriptorOwner, 'computed', { get() { return this.seed + 1; }, configurable: true }), nativeDescriptorOwner.computed === nativeDescriptorOwner.seed + 1, Reflect.defineProperty(nativeDescriptorOwner, 'absentAfterPrevent', { get() { return 1; }, configurable: true })];".as_ptr()), 1);
     let replaced = thaw_quickjs::thaw_js_get_global(c"nativeNonextensibleReplace".as_ptr());
-    assert_eq!(unsafe { qjs_query(replaced, 2) }.unwrap(), "true,true,false");
+    assert_eq!(
+        unsafe { qjs_query(replaced, 2) }.unwrap(),
+        "true,true,false"
+    );
     assert_eq!(thaw_quickjs::thaw_js_release_handle(replaced), 1);
-    let computed = unsafe { env_mut(env_ptr) }.unwrap()
+    let computed = unsafe { env_mut(env_ptr) }
+        .unwrap()
         .alloc(Value::String("computed".into()));
     let mut deleted = false;
-    assert_eq!(unsafe { napi_delete_property(env_ptr, object, computed, &mut deleted) }, NAPI_OK);
+    assert_eq!(
+        unsafe { napi_delete_property(env_ptr, object, computed, &mut deleted) },
+        NAPI_OK
+    );
     assert!(deleted);
     assert_eq!(thaw_quickjs::thaw_js_load(c"globalThis.nativeDeletedObserved = [Reflect.ownKeys(nativeDescriptorOwner).includes('computed'), Reflect.getOwnPropertyDescriptor(nativeDescriptorOwner, 'computed') === undefined, nativeDescriptorOwner.computed === undefined]; delete globalThis.nativeDescriptorOwner;".as_ptr()), 1);
     let deleted = thaw_quickjs::thaw_js_get_global(c"nativeDeletedObserved".as_ptr());
     assert_eq!(unsafe { qjs_query(deleted, 2) }.unwrap(), "false,true,true");
     assert_eq!(thaw_quickjs::thaw_js_release_handle(deleted), 1);
-    let owned = HOST.with(|host| host.borrow_mut().module_envs.pop()).unwrap();
+    let owned = HOST
+        .with(|host| host.borrow_mut().module_envs.pop())
+        .unwrap();
     drop(owned);
 }
 
@@ -2417,9 +2965,12 @@ fn graph_proxy_reflects_native_accessor_with_snapshot_lifetime() {
         info.as_ref().map_or(ptr::null_mut(), |info| info.this_arg)
     }
     thaw_quickjs::register_napi_bridge(
-        thaw_napi_export_names, thaw_napi_call_typed_bridge,
-        thaw_napi_handle_bridge, thaw_napi_poll_async_work,
-        thaw_napi_async_work_pending, thaw_napi_graph_owner,
+        thaw_napi_export_names,
+        thaw_napi_call_typed_bridge,
+        thaw_napi_handle_bridge,
+        thaw_napi_poll_async_work,
+        thaw_napi_async_work_pending,
+        thaw_napi_graph_owner,
         release_napi_graph_reference,
     );
     let mut owner = Box::new(Env::new());
@@ -2427,16 +2978,25 @@ fn graph_proxy_reflects_native_accessor_with_snapshot_lifetime() {
     let object = owner.alloc(Value::Object(HashMap::new()));
     let other = owner.alloc(Value::Object(HashMap::new()));
     let key = PropertyKey::String("live".into());
-    owner.accessors.insert((object as usize, key.clone()), Accessor {
-        getter: Some(own_receiver), setter: None,
-        getter_data: ptr::null_mut(), setter_data: ptr::null_mut(),
-        getter_reflection: None, setter_reflection: None,
-        js_owner: None,
-    });
-    owner.property_attributes.insert((object as usize, key.clone()),
-        NAPI_CONFIGURABLE | NAPI_ENUMERABLE);
+    owner.accessors.insert(
+        (object as usize, key.clone()),
+        Accessor {
+            getter: Some(own_receiver),
+            setter: None,
+            getter_data: ptr::null_mut(),
+            setter_data: ptr::null_mut(),
+            getter_reflection: None,
+            setter_reflection: None,
+            js_owner: None,
+        },
+    );
+    owner.property_attributes.insert(
+        (object as usize, key.clone()),
+        NAPI_CONFIGURABLE | NAPI_ENUMERABLE,
+    );
     HOST.with(|host| host.borrow_mut().module_envs.push(owner));
-    let script = CString::new(format!(r#"
+    let script = CString::new(format!(
+        r#"
         globalThis.nativeAccessorObject = __thaw_json_graph_proxy_for_handle("{}");
         globalThis.nativeAccessorOther = __thaw_json_graph_proxy_for_handle("{}");
         const first = Reflect.getOwnPropertyDescriptor(nativeAccessorObject, 'live').get;
@@ -2444,22 +3004,37 @@ fn graph_proxy_reflects_native_accessor_with_snapshot_lifetime() {
         globalThis.nativeAccessorSame = first === again;
         globalThis.nativeAccessorExtracted = first;
         globalThis.nativeAccessorBefore = first.call(nativeAccessorOther) === nativeAccessorOther;
-    "#, object as u64, other as u64)).unwrap();
+    "#,
+        object as u64, other as u64
+    ))
+    .unwrap();
     assert_eq!(thaw_quickjs::thaw_js_load(script.as_ptr()), 1);
-    let env = HOST.with(|host| host.borrow().module_envs.last().unwrap().as_ref() as *const Env as NapiEnv);
-    let key_value = unsafe { env_mut(env) }.unwrap().alloc(Value::String("live".into()));
+    let env = HOST
+        .with(|host| host.borrow().module_envs.last().unwrap().as_ref() as *const Env as NapiEnv);
+    let key_value = unsafe { env_mut(env) }
+        .unwrap()
+        .alloc(Value::String("live".into()));
     let mut deleted = false;
-    assert_eq!(unsafe { napi_delete_property(env, object, key_value, &mut deleted) }, NAPI_OK);
+    assert_eq!(
+        unsafe { napi_delete_property(env, object, key_value, &mut deleted) },
+        NAPI_OK
+    );
     assert!(deleted);
     assert_eq!(thaw_quickjs::thaw_js_load(c"globalThis.nativeAccessorAfter = nativeAccessorExtracted.call(nativeAccessorOther) === nativeAccessorOther; globalThis.nativeAccessorGone = Reflect.getOwnPropertyDescriptor(nativeAccessorObject, 'live') === undefined;".as_ptr()), 1);
-    for name in [c"nativeAccessorSame".as_ptr(), c"nativeAccessorBefore".as_ptr(),
-        c"nativeAccessorAfter".as_ptr(), c"nativeAccessorGone".as_ptr()] {
+    for name in [
+        c"nativeAccessorSame".as_ptr(),
+        c"nativeAccessorBefore".as_ptr(),
+        c"nativeAccessorAfter".as_ptr(),
+        c"nativeAccessorGone".as_ptr(),
+    ] {
         let handle = thaw_quickjs::thaw_js_get_global(name);
         assert_eq!(unsafe { qjs_query(handle, 2) }.unwrap(), "true");
         assert_eq!(thaw_quickjs::thaw_js_release_handle(handle), 1);
     }
     assert_eq!(thaw_quickjs::thaw_js_load(c"delete globalThis.nativeAccessorObject; delete globalThis.nativeAccessorOther; delete globalThis.nativeAccessorExtracted;".as_ptr()), 1);
-    let owned = HOST.with(|host| host.borrow_mut().module_envs.pop()).unwrap();
+    let owned = HOST
+        .with(|host| host.borrow_mut().module_envs.pop())
+        .unwrap();
     drop(owned);
 }
 
@@ -2470,12 +3045,16 @@ fn graph_proxy_reflects_native_accessor_with_snapshot_lifetime() {
 #[test]
 fn native_array_accessor_graph_keeps_array_identity_and_length() {
     unsafe extern "C" fn seven(_: NapiEnv, info: NapiCallbackInfo) -> NapiValue {
-        info.as_ref().map_or(ptr::null_mut(), |info| info.data as NapiValue)
+        info.as_ref()
+            .map_or(ptr::null_mut(), |info| info.data as NapiValue)
     }
     thaw_quickjs::register_napi_bridge(
-        thaw_napi_export_names, thaw_napi_call_typed_bridge,
-        thaw_napi_handle_bridge, thaw_napi_poll_async_work,
-        thaw_napi_async_work_pending, thaw_napi_graph_owner,
+        thaw_napi_export_names,
+        thaw_napi_call_typed_bridge,
+        thaw_napi_handle_bridge,
+        thaw_napi_poll_async_work,
+        thaw_napi_async_work_pending,
+        thaw_napi_graph_owner,
         release_napi_graph_reference,
     );
     let mut owner = Box::new(Env::new());
@@ -2485,18 +3064,29 @@ fn native_array_accessor_graph_keeps_array_identity_and_length() {
     let seven_value = owner.alloc(Value::Number(7.0));
     let array = owner.alloc(Value::Array(vec![Some(one), None, Some(three_value)]));
     let extra = owner.alloc(Value::Number(11.0));
-    assert_eq!(unsafe { napi_set_named_property(owner.as_mut(), array,
-        c"extra".as_ptr(), extra) }, NAPI_OK);
-    owner.accessors.insert((array as usize, PropertyKey::String("1".into())), Accessor {
-        getter: Some(seven), setter: None,
-        getter_data: seven_value.cast(), setter_data: ptr::null_mut(),
-        getter_reflection: None, setter_reflection: None,
-        js_owner: None,
-    });
-    owner.property_attributes.insert((array as usize, PropertyKey::String("1".into())),
-        NAPI_CONFIGURABLE | NAPI_ENUMERABLE);
+    assert_eq!(
+        unsafe { napi_set_named_property(owner.as_mut(), array, c"extra".as_ptr(), extra) },
+        NAPI_OK
+    );
+    owner.accessors.insert(
+        (array as usize, PropertyKey::String("1".into())),
+        Accessor {
+            getter: Some(seven),
+            setter: None,
+            getter_data: seven_value.cast(),
+            setter_data: ptr::null_mut(),
+            getter_reflection: None,
+            setter_reflection: None,
+            js_owner: None,
+        },
+    );
+    owner.property_attributes.insert(
+        (array as usize, PropertyKey::String("1".into())),
+        NAPI_CONFIGURABLE | NAPI_ENUMERABLE,
+    );
     HOST.with(|host| host.borrow_mut().module_envs.push(owner));
-    let env = HOST.with(|host| host.borrow().module_envs.last().unwrap().as_ref() as *const Env as NapiEnv);
+    let env = HOST
+        .with(|host| host.borrow().module_envs.last().unwrap().as_ref() as *const Env as NapiEnv);
     let wire = unsafe { napi_result_graph_for_env(env, array, true) }.unwrap();
     let encoded: serde_json::Value = serde_json::from_str(&wire).unwrap();
     assert_eq!(encoded["nodes"][0]["nh"], (array as u64).to_string());
@@ -2504,7 +3094,8 @@ fn native_array_accessor_graph_keeps_array_identity_and_length() {
         let token = token.as_str().unwrap().parse::<u64>().unwrap();
         assert_eq!(release_napi_graph_reference(token), 1);
     }
-    let script = CString::new(format!(r#"
+    let script = CString::new(format!(
+        r#"
         globalThis.nativeLiveArray = __thaw_json_graph_proxy_for_handle("{}");
         globalThis.nativeLiveArrayObserved = [
           Array.isArray(nativeLiveArray), nativeLiveArray.length,
@@ -2512,11 +3103,16 @@ fn native_array_accessor_graph_keeps_array_identity_and_length() {
           Reflect.ownKeys(nativeLiveArray).join(','),
           typeof Reflect.getOwnPropertyDescriptor(nativeLiveArray, '1').get
         ];
-    "#, array as u64)).unwrap();
+    "#,
+        array as u64
+    ))
+    .unwrap();
     assert_eq!(thaw_quickjs::thaw_js_load(script.as_ptr()), 1);
     let observed = thaw_quickjs::thaw_js_get_global(c"nativeLiveArrayObserved".as_ptr());
-    assert_eq!(unsafe { qjs_query(observed, 2) }.unwrap(),
-        "true,3,1,7,3,0,1,2,length,extra,function");
+    assert_eq!(
+        unsafe { qjs_query(observed, 2) }.unwrap(),
+        "true,3,1,7,3,0,1,2,length,extra,function"
+    );
     assert_eq!(thaw_quickjs::thaw_js_release_handle(observed), 1);
     assert_eq!(thaw_quickjs::thaw_js_load(
         c"Object.defineProperty(nativeLiveArray, 'length', { writable: false }); globalThis.nativeLiveArrayReadonly = Object.getOwnPropertyDescriptor(nativeLiveArray, 'length').writable;".as_ptr()), 1);
@@ -2524,10 +3120,14 @@ fn native_array_accessor_graph_keeps_array_identity_and_length() {
     assert_eq!(unsafe { qjs_query(readonly, 2) }.unwrap(), "false");
     assert_eq!(thaw_quickjs::thaw_js_release_handle(readonly), 1);
     let three = unsafe { env.as_mut() }.unwrap().alloc(Value::Number(3.0));
-    assert_eq!(unsafe { napi_set_named_property(env, array, c"length".as_ptr(), three) },
-        NAPI_GENERIC_FAILURE);
+    assert_eq!(
+        unsafe { napi_set_named_property(env, array, c"length".as_ptr(), three) },
+        NAPI_GENERIC_FAILURE
+    );
     assert_eq!(thaw_quickjs::thaw_js_load(c"delete globalThis.nativeLiveArray; delete globalThis.nativeLiveArrayObserved; delete globalThis.nativeLiveArrayReadonly;".as_ptr()), 1);
-    let owned = HOST.with(|host| host.borrow_mut().module_envs.pop()).unwrap();
+    let owned = HOST
+        .with(|host| host.borrow_mut().module_envs.pop())
+        .unwrap();
     drop(owned);
 }
 
@@ -2540,46 +3140,84 @@ fn native_array_length_attributes_survive_seal_freeze_and_live_definition() {
     let mut env = Env::new();
     let array = env.alloc(Value::Array(vec![None, None]));
     let length = PropertyKey::String("length".into());
-    assert_eq!(unsafe { property_attributes_for(&mut env, array as usize, &length) },
-        NAPI_WRITABLE);
+    assert_eq!(
+        unsafe { property_attributes_for(&mut env, array as usize, &length) },
+        NAPI_WRITABLE
+    );
     assert_eq!(unsafe { napi_object_seal(&mut env, array) }, NAPI_OK);
-    assert_eq!(unsafe { property_attributes_for(&mut env, array as usize, &length) },
-        NAPI_WRITABLE);
+    assert_eq!(
+        unsafe { property_attributes_for(&mut env, array as usize, &length) },
+        NAPI_WRITABLE
+    );
     let three = env.alloc(Value::Number(3.0));
-    assert_eq!(unsafe { napi_set_named_property(&mut env, array, c"length".as_ptr(), three) }, NAPI_OK);
+    assert_eq!(
+        unsafe { napi_set_named_property(&mut env, array, c"length".as_ptr(), three) },
+        NAPI_OK
+    );
     assert_eq!(unsafe { napi_object_freeze(&mut env, array) }, NAPI_OK);
-    assert_eq!(unsafe { property_attributes_for(&mut env, array as usize, &length) }, 0);
+    assert_eq!(
+        unsafe { property_attributes_for(&mut env, array as usize, &length) },
+        0
+    );
     let four = env.alloc(Value::Number(4.0));
-    assert_eq!(unsafe { napi_set_named_property(&mut env, array, c"length".as_ptr(), four) },
-        NAPI_GENERIC_FAILURE);
+    assert_eq!(
+        unsafe { napi_set_named_property(&mut env, array, c"length".as_ptr(), four) },
+        NAPI_GENERIC_FAILURE
+    );
 
     let other = env.alloc(Value::Array(vec![None]));
     let unused = env.alloc(Value::Undefined);
-    assert_eq!(unsafe { qjs_install_native_data_property(&mut env, other, length.clone(),
-        unused, false, 0) }, NAPI_OK);
-    assert_eq!(unsafe { property_attributes_for(&mut env, other as usize, &length) }, 0);
+    assert_eq!(
+        unsafe {
+            qjs_install_native_data_property(&mut env, other, length.clone(), unused, false, 0)
+        },
+        NAPI_OK
+    );
+    assert_eq!(
+        unsafe { property_attributes_for(&mut env, other as usize, &length) },
+        0
+    );
     let two = env.alloc(Value::Number(2.0));
-    assert_eq!(unsafe { napi_set_named_property(&mut env, other, c"length".as_ptr(), two) },
-        NAPI_GENERIC_FAILURE);
-    assert_eq!(unsafe { napi_set_named_property(&mut env, other, c"1".as_ptr(), two) },
-        NAPI_GENERIC_FAILURE);
+    assert_eq!(
+        unsafe { napi_set_named_property(&mut env, other, c"length".as_ptr(), two) },
+        NAPI_GENERIC_FAILURE
+    );
+    assert_eq!(
+        unsafe { napi_set_named_property(&mut env, other, c"1".as_ptr(), two) },
+        NAPI_GENERIC_FAILURE
+    );
 
     let defined = env.alloc(Value::Array(vec![None, None]));
     let length_descriptor = NapiPropertyDescriptor {
-        utf8name: c"length".as_ptr(), name: ptr::null_mut(), method: None,
-        getter: None, setter: None, value: ptr::null_mut(), attributes: 0,
+        utf8name: c"length".as_ptr(),
+        name: ptr::null_mut(),
+        method: None,
+        getter: None,
+        setter: None,
+        value: ptr::null_mut(),
+        attributes: 0,
         data: ptr::null_mut(),
     };
-    assert_eq!(unsafe { napi_define_properties(&mut env, defined, 1, &length_descriptor) },
-        NAPI_OK);
-    assert_eq!(unsafe { property_attributes_for(&mut env, defined as usize, &length) }, 0);
-    assert_eq!(unsafe { napi_set_named_property(&mut env, defined, c"length".as_ptr(), three) },
-        NAPI_GENERIC_FAILURE);
+    assert_eq!(
+        unsafe { napi_define_properties(&mut env, defined, 1, &length_descriptor) },
+        NAPI_OK
+    );
+    assert_eq!(
+        unsafe { property_attributes_for(&mut env, defined as usize, &length) },
+        0
+    );
+    assert_eq!(
+        unsafe { napi_set_named_property(&mut env, defined, c"length".as_ptr(), three) },
+        NAPI_GENERIC_FAILURE
+    );
     let enumerable_length = NapiPropertyDescriptor {
-        attributes: NAPI_ENUMERABLE, ..length_descriptor
+        attributes: NAPI_ENUMERABLE,
+        ..length_descriptor
     };
-    assert_eq!(unsafe { napi_define_properties(&mut env, defined, 1, &enumerable_length) },
-        NAPI_GENERIC_FAILURE);
+    assert_eq!(
+        unsafe { napi_define_properties(&mut env, defined, 1, &enumerable_length) },
+        NAPI_GENERIC_FAILURE
+    );
 }
 
 // Unrun: indexed accessor installation changes Array length, and shrinking
@@ -2593,36 +3231,70 @@ fn native_array_length_shrink_releases_index_accessors_and_stops_at_fixed_key() 
     let mut env = Box::new(Env::new());
     let array = env.alloc(Value::Array(vec![None]));
     let descriptor = NapiPropertyDescriptor {
-        utf8name: c"3".as_ptr(), name: ptr::null_mut(), method: None,
-        getter: Some(seven), setter: None, value: ptr::null_mut(),
-        attributes: NAPI_CONFIGURABLE | NAPI_ENUMERABLE, data: ptr::null_mut(),
+        utf8name: c"3".as_ptr(),
+        name: ptr::null_mut(),
+        method: None,
+        getter: Some(seven),
+        setter: None,
+        value: ptr::null_mut(),
+        attributes: NAPI_CONFIGURABLE | NAPI_ENUMERABLE,
+        data: ptr::null_mut(),
     };
-    assert_eq!(unsafe { napi_define_properties(&mut *env, array, 1, &descriptor) }, NAPI_OK);
+    assert_eq!(
+        unsafe { napi_define_properties(&mut *env, array, 1, &descriptor) },
+        NAPI_OK
+    );
     assert!(matches!(unsafe { value_ref(array) }, Ok(Value::Array(values)) if values.len() == 4));
     let two = env.alloc(Value::Number(2.0));
-    assert_eq!(unsafe { napi_set_named_property(&mut *env, array, c"length".as_ptr(), two) }, NAPI_OK);
+    assert_eq!(
+        unsafe { napi_set_named_property(&mut *env, array, c"length".as_ptr(), two) },
+        NAPI_OK
+    );
     assert!(matches!(unsafe { value_ref(array) }, Ok(Value::Array(values)) if values.len() == 2));
-    assert!(!env.accessors.contains_key(&(array as usize, PropertyKey::String("3".into()))));
+    assert!(!env
+        .accessors
+        .contains_key(&(array as usize, PropertyKey::String("3".into()))));
 
     let fixed = env.alloc(Value::Number(8.0));
     let tail = env.alloc(Value::Number(9.0));
     let blocked = env.alloc(Value::Array(vec![None, None, Some(fixed), Some(tail)]));
-    env.property_attributes.insert((blocked as usize, PropertyKey::String("2".into())),
-        NAPI_WRITABLE | NAPI_ENUMERABLE);
+    env.property_attributes.insert(
+        (blocked as usize, PropertyKey::String("2".into())),
+        NAPI_WRITABLE | NAPI_ENUMERABLE,
+    );
     let zero = env.alloc(Value::Number(0.0));
-    assert_eq!(unsafe { napi_set_named_property(&mut *env, blocked, c"length".as_ptr(), zero) },
-        NAPI_GENERIC_FAILURE);
-    assert!(matches!(unsafe { value_ref(blocked) }, Ok(Value::Array(values))
-        if values.len() == 3 && values[2] == Some(fixed)));
+    assert_eq!(
+        unsafe { napi_set_named_property(&mut *env, blocked, c"length".as_ptr(), zero) },
+        NAPI_GENERIC_FAILURE
+    );
+    assert!(
+        matches!(unsafe { value_ref(blocked) }, Ok(Value::Array(values))
+        if values.len() == 3 && values[2] == Some(fixed))
+    );
     let shrink_and_freeze = NapiPropertyDescriptor {
-        utf8name: c"length".as_ptr(), name: ptr::null_mut(), method: None,
-        getter: None, setter: None, value: zero, attributes: 0,
+        utf8name: c"length".as_ptr(),
+        name: ptr::null_mut(),
+        method: None,
+        getter: None,
+        setter: None,
+        value: zero,
+        attributes: 0,
         data: ptr::null_mut(),
     };
-    assert_eq!(unsafe { napi_define_properties(&mut *env, blocked, 1,
-        &shrink_and_freeze) }, NAPI_GENERIC_FAILURE);
-    assert_eq!(unsafe { property_attributes_for(&mut *env, blocked as usize,
-        &PropertyKey::String("length".into())) }, 0);
+    assert_eq!(
+        unsafe { napi_define_properties(&mut *env, blocked, 1, &shrink_and_freeze) },
+        NAPI_GENERIC_FAILURE
+    );
+    assert_eq!(
+        unsafe {
+            property_attributes_for(
+                &mut *env,
+                blocked as usize,
+                &PropertyKey::String("length".into()),
+            )
+        },
+        0
+    );
 }
 
 // Unrun: a native descriptor installed as nonconfigurable cannot be replaced
@@ -2638,20 +3310,37 @@ fn native_nonconfigurable_accessor_redefinition_keeps_original_callback() {
     let mut env = Env::new();
     let object = env.alloc(Value::Object(HashMap::new()));
     let original = NapiPropertyDescriptor {
-        utf8name: c"answer".as_ptr(), name: ptr::null_mut(), method: None,
-        getter: Some(first), setter: None, value: ptr::null_mut(),
-        attributes: NAPI_ENUMERABLE, data: ptr::null_mut(),
+        utf8name: c"answer".as_ptr(),
+        name: ptr::null_mut(),
+        method: None,
+        getter: Some(first),
+        setter: None,
+        value: ptr::null_mut(),
+        attributes: NAPI_ENUMERABLE,
+        data: ptr::null_mut(),
     };
-    assert_eq!(unsafe { napi_define_properties(&mut env, object, 1, &original) }, NAPI_OK);
-    assert_eq!(unsafe { napi_define_properties(&mut env, object, 1, &original) }, NAPI_OK);
-    let changed = NapiPropertyDescriptor { getter: Some(second), ..original };
-    assert_eq!(unsafe { napi_define_properties(&mut env, object, 1, &changed) },
-        NAPI_GENERIC_FAILURE);
+    assert_eq!(
+        unsafe { napi_define_properties(&mut env, object, 1, &original) },
+        NAPI_OK
+    );
+    assert_eq!(
+        unsafe { napi_define_properties(&mut env, object, 1, &original) },
+        NAPI_OK
+    );
+    let changed = NapiPropertyDescriptor {
+        getter: Some(second),
+        ..original
+    };
+    assert_eq!(
+        unsafe { napi_define_properties(&mut env, object, 1, &changed) },
+        NAPI_GENERIC_FAILURE
+    );
     let mut out = ptr::null_mut();
-    assert_eq!(unsafe { napi_get_named_property(&mut env, object, c"answer".as_ptr(),
-        &mut out) }, NAPI_OK);
+    assert_eq!(
+        unsafe { napi_get_named_property(&mut env, object, c"answer".as_ptr(), &mut out) },
+        NAPI_OK
+    );
     assert!(matches!(unsafe { value_ref(out) }, Ok(Value::Number(value)) if *value == 1.0));
-
 }
 
 // Unrun: defining an own data descriptor replaces a configurable accessor
@@ -2668,45 +3357,82 @@ fn native_data_definition_skips_setter_and_checks_readonly_compatibility() {
     let object = env.alloc(Value::Object(HashMap::new()));
     let calls = AtomicUsize::new(0);
     let accessor = NapiPropertyDescriptor {
-        utf8name: c"answer".as_ptr(), name: ptr::null_mut(), method: None,
-        getter: None, setter: Some(setter), value: ptr::null_mut(),
-        attributes: NAPI_CONFIGURABLE, data: (&calls as *const AtomicUsize).cast_mut().cast(),
+        utf8name: c"answer".as_ptr(),
+        name: ptr::null_mut(),
+        method: None,
+        getter: None,
+        setter: Some(setter),
+        value: ptr::null_mut(),
+        attributes: NAPI_CONFIGURABLE,
+        data: (&calls as *const AtomicUsize).cast_mut().cast(),
     };
-    assert_eq!(unsafe { napi_define_properties(&mut env, object, 1, &accessor) }, NAPI_OK);
+    assert_eq!(
+        unsafe { napi_define_properties(&mut env, object, 1, &accessor) },
+        NAPI_OK
+    );
     let one = env.alloc(Value::Number(1.0));
     let data = NapiPropertyDescriptor {
-        utf8name: c"answer".as_ptr(), name: ptr::null_mut(), method: None,
-        getter: None, setter: None, value: one,
-        attributes: 0, data: ptr::null_mut(),
+        utf8name: c"answer".as_ptr(),
+        name: ptr::null_mut(),
+        method: None,
+        getter: None,
+        setter: None,
+        value: one,
+        attributes: 0,
+        data: ptr::null_mut(),
     };
-    assert_eq!(unsafe { napi_define_properties(&mut env, object, 1, &data) }, NAPI_OK);
+    assert_eq!(
+        unsafe { napi_define_properties(&mut env, object, 1, &data) },
+        NAPI_OK
+    );
     assert_eq!(calls.load(Ordering::SeqCst), 0);
-    assert_eq!(unsafe { napi_define_properties(&mut env, object, 1, &data) }, NAPI_OK);
+    assert_eq!(
+        unsafe { napi_define_properties(&mut env, object, 1, &data) },
+        NAPI_OK
+    );
     let two = env.alloc(Value::Number(2.0));
     let changed = NapiPropertyDescriptor { value: two, ..data };
-    assert_eq!(unsafe { napi_define_properties(&mut env, object, 1, &changed) },
-        NAPI_GENERIC_FAILURE);
+    assert_eq!(
+        unsafe { napi_define_properties(&mut env, object, 1, &changed) },
+        NAPI_GENERIC_FAILURE
+    );
     let mut out = ptr::null_mut();
-    assert_eq!(unsafe { napi_get_named_property(&mut env, object, c"answer".as_ptr(),
-        &mut out) }, NAPI_OK);
+    assert_eq!(
+        unsafe { napi_get_named_property(&mut env, object, c"answer".as_ptr(), &mut out) },
+        NAPI_OK
+    );
     assert!(matches!(unsafe { value_ref(out) }, Ok(Value::Number(value)) if *value == 1.0));
 
     // Omitting the data value still converts a configurable accessor into an
     // own Undefined slot; it must not merely remove the accessor metadata.
     let empty_accessor = NapiPropertyDescriptor {
-        utf8name: c"empty".as_ptr(), ..accessor
+        utf8name: c"empty".as_ptr(),
+        ..accessor
     };
-    assert_eq!(unsafe { napi_define_properties(&mut env, object, 1, &empty_accessor) }, NAPI_OK);
+    assert_eq!(
+        unsafe { napi_define_properties(&mut env, object, 1, &empty_accessor) },
+        NAPI_OK
+    );
     let empty_data = NapiPropertyDescriptor {
-        utf8name: c"empty".as_ptr(), value: ptr::null_mut(), ..changed
+        utf8name: c"empty".as_ptr(),
+        value: ptr::null_mut(),
+        ..changed
     };
-    assert_eq!(unsafe { napi_define_properties(&mut env, object, 1, &empty_data) }, NAPI_OK);
+    assert_eq!(
+        unsafe { napi_define_properties(&mut env, object, 1, &empty_data) },
+        NAPI_OK
+    );
     let empty_key = env.alloc(Value::String("empty".into()));
     let mut present = false;
-    assert_eq!(unsafe { napi_has_own_property(&mut env, object, empty_key, &mut present) }, NAPI_OK);
+    assert_eq!(
+        unsafe { napi_has_own_property(&mut env, object, empty_key, &mut present) },
+        NAPI_OK
+    );
     assert!(present);
-    assert_eq!(unsafe { napi_get_named_property(&mut env, object, c"empty".as_ptr(),
-        &mut out) }, NAPI_OK);
+    assert_eq!(
+        unsafe { napi_get_named_property(&mut env, object, c"empty".as_ptr(), &mut out) },
+        NAPI_OK
+    );
     assert!(matches!(unsafe { value_ref(out) }, Ok(Value::Undefined)));
 }
 
@@ -2715,7 +3441,10 @@ fn native_data_definition_skips_setter_and_checks_readonly_compatibility() {
 #[cfg(feature = "quickjs")]
 #[test]
 fn live_quickjs_invalid_call_target_releases_argument_lease() {
-    assert_eq!(thaw_quickjs::thaw_js_load(c"globalThis.napiLeaseValue = {};".as_ptr()), 1);
+    assert_eq!(
+        thaw_quickjs::thaw_js_load(c"globalThis.napiLeaseValue = {};".as_ptr()),
+        1
+    );
     let handle = thaw_quickjs::thaw_js_get_global(c"napiLeaseValue".as_ptr());
     assert_ne!(handle, 0);
     assert_eq!(thaw_quickjs::thaw_js_retain_handle(handle), 1);
@@ -2725,7 +3454,9 @@ fn live_quickjs_invalid_call_target_releases_argument_lease() {
     let result = thaw_quickjs::thaw_js_call_handle_with_this_graph_result(0, graph.as_ptr());
     assert_eq!(result.value, 0);
     assert!(!result.error.is_null());
-    unsafe { thaw_arena::destroy_string(result.error); }
+    unsafe {
+        thaw_arena::destroy_string(result.error);
+    }
     // The only remaining reference is the original get_global retain.
     assert_eq!(thaw_quickjs::thaw_js_release_handle(handle), 1);
     assert_eq!(thaw_quickjs::thaw_js_release_handle(handle), 0);
@@ -2736,7 +3467,10 @@ fn live_quickjs_invalid_call_target_releases_argument_lease() {
 #[cfg(feature = "quickjs")]
 #[test]
 fn live_quickjs_invalid_constructor_releases_argument_lease() {
-    assert_eq!(thaw_quickjs::thaw_js_load(c"globalThis.napiConstructorLease = {};".as_ptr()), 1);
+    assert_eq!(
+        thaw_quickjs::thaw_js_load(c"globalThis.napiConstructorLease = {};".as_ptr()),
+        1
+    );
     let handle = thaw_quickjs::thaw_js_get_global(c"napiConstructorLease".as_ptr());
     assert_ne!(handle, 0);
     assert_eq!(thaw_quickjs::thaw_js_retain_handle(handle), 1);
@@ -2746,7 +3480,9 @@ fn live_quickjs_invalid_constructor_releases_argument_lease() {
     let result = thaw_quickjs::thaw_js_construct_handle_graph_args_result(0, graph.as_ptr());
     assert_eq!(result.value, 0);
     assert!(!result.error.is_null());
-    unsafe { thaw_arena::destroy_string(result.error); }
+    unsafe {
+        thaw_arena::destroy_string(result.error);
+    }
     assert_eq!(thaw_quickjs::thaw_js_release_handle(handle), 1);
     assert_eq!(thaw_quickjs::thaw_js_release_handle(handle), 0);
 }
@@ -2762,12 +3498,16 @@ fn paired_native_function_graph_uses_owner_identity_and_foreign_carrier() {
     }
     let mut owner = Env::new();
     let function = owner.alloc(Value::Function(Function {
-        callback: native, data: ptr::null_mut(), properties: HashMap::new(),
-        _thaw_bridge: None, _accessor_owner: None,
+        callback: native,
+        data: ptr::null_mut(),
+        properties: HashMap::new(),
+        _thaw_bridge: None,
+        _accessor_owner: None,
     }));
     let handle = 71_u64;
     let owner_carrier = owner.alloc(Value::QuickJsHandle {
-        handle, object_like: true,
+        handle,
+        object_like: true,
     });
     owner.quickjs_live_values.insert(handle, owner_carrier);
     let graph = serde_json::json!({
@@ -2778,10 +3518,16 @@ fn paired_native_function_graph_uses_owner_identity_and_foreign_carrier() {
 
     let mut recipient = Env::new();
     let foreign_carrier = recipient.alloc(Value::QuickJsHandle {
-        handle, object_like: true,
+        handle,
+        object_like: true,
     });
-    recipient.quickjs_live_values.insert(handle, foreign_carrier);
-    assert_eq!(napi_graph_value(&mut recipient, &graph).unwrap(), foreign_carrier);
+    recipient
+        .quickjs_live_values
+        .insert(handle, foreign_carrier);
+    assert_eq!(
+        napi_graph_value(&mut recipient, &graph).unwrap(),
+        foreign_carrier
+    );
 }
 
 // Unrun: a foreign native Symbol's value token and property-key token share
@@ -2792,17 +3538,22 @@ fn paired_native_function_graph_uses_owner_identity_and_foreign_carrier() {
 fn paired_native_symbol_graph_keeps_value_and_key_identity_across_envs() {
     let mut owner = Env::new();
     let source = owner.alloc(Value::Symbol {
-        id: 93, description: "shared".into(),
+        id: 93,
+        description: "shared".into(),
     });
     let mut recipient = Env::new();
     let handle = 73_u64;
     let carrier = recipient.alloc(Value::QuickJsHandle {
-        handle, object_like: false,
+        handle,
+        object_like: false,
     });
     recipient.quickjs_live_values.insert(handle, carrier);
     recipient.quickjs_symbol_ids.insert(handle, 93);
     let token = serde_json::json!({"nsy": (source as u64).to_string(), "hdl": handle});
-    assert_eq!(napi_graph_token(&mut recipient, &token, &[]).unwrap(), carrier);
+    assert_eq!(
+        napi_graph_token(&mut recipient, &token, &[]).unwrap(),
+        carrier
+    );
     let key = napi_graph_property_key(&mut recipient, &token, &[]).unwrap();
     assert_eq!(key, PropertyKey::Symbol(93));
 }
@@ -2813,12 +3564,15 @@ fn foreign_symbol_identity_preflight_rejects_unknown_pointer_before_dereference(
     let mut owner = Box::new(Env::new());
     owner.graph_owner_id = 1;
     let symbol = owner.alloc(Value::Symbol {
-        id: 94, description: "live".into(),
+        id: 94,
+        description: "live".into(),
     });
     HOST.with(|host| host.borrow_mut().module_envs.push(owner));
     assert_eq!(napi_graph_symbol_identity(symbol).unwrap(), 94);
     assert!(napi_graph_symbol_identity(1_usize as NapiValue).is_err());
-    HOST.with(|host| { drop(host.borrow_mut().module_envs.pop()); });
+    HOST.with(|host| {
+        drop(host.borrow_mut().module_envs.pop());
+    });
 }
 
 // Unrun control: an N-API property key carried by a live QuickJS Symbol
@@ -2839,20 +3593,37 @@ fn live_quickjs_symbol_property_key_keeps_identity() {
     );
     let mut env = Env::new();
     let root = unsafe { parse_napi_graph_value(&mut env as NapiEnv, &graph) }.unwrap();
-    let Value::Array(items) = unsafe { value_ref(root) }.unwrap() else { panic!("array root") };
+    let Value::Array(items) = unsafe { value_ref(root) }.unwrap() else {
+        panic!("array root")
+    };
     let object = items[0].unwrap();
     let key = items[1].unwrap();
     let mut got = ptr::null_mut();
-    assert_eq!(unsafe { napi_get_property(&mut env, object, key, &mut got) }, NAPI_OK);
+    assert_eq!(
+        unsafe { napi_get_property(&mut env, object, key, &mut got) },
+        NAPI_OK
+    );
     let mut original = 0.0;
-    assert_eq!(unsafe { napi_get_value_double(&mut env, got, &mut original) }, NAPI_OK);
+    assert_eq!(
+        unsafe { napi_get_value_double(&mut env, got, &mut original) },
+        NAPI_OK
+    );
     assert_eq!(original, 6.0);
     let replacement = env.alloc(Value::Number(9.0));
-    assert_eq!(unsafe { napi_set_property(&mut env, object, key, replacement) }, NAPI_OK);
+    assert_eq!(
+        unsafe { napi_set_property(&mut env, object, key, replacement) },
+        NAPI_OK
+    );
     let mut updated = ptr::null_mut();
-    assert_eq!(unsafe { napi_get_property(&mut env, object, key, &mut updated) }, NAPI_OK);
+    assert_eq!(
+        unsafe { napi_get_property(&mut env, object, key, &mut updated) },
+        NAPI_OK
+    );
     let mut value = 0.0;
-    assert_eq!(unsafe { napi_get_value_double(&mut env, updated, &mut value) }, NAPI_OK);
+    assert_eq!(
+        unsafe { napi_get_value_double(&mut env, updated, &mut value) },
+        NAPI_OK
+    );
     assert_eq!(value, 9.0);
     assert_eq!(thaw_quickjs::thaw_js_release_handle(key_handle), 1);
     assert_eq!(thaw_quickjs::thaw_js_release_handle(object_handle), 1);
@@ -2873,23 +3644,53 @@ fn live_quickjs_surrogate_string_keys_stay_distinct_on_native_object() {
     assert_ne!(low_handle, 0);
     assert_ne!(valid_handle, 0);
     let mut env = Env::new();
-    let high = env.alloc(Value::QuickJsHandle { handle: high_handle, object_like: false });
-    let low = env.alloc(Value::QuickJsHandle { handle: low_handle, object_like: false });
-    let valid = env.alloc(Value::QuickJsHandle { handle: valid_handle, object_like: false });
+    let high = env.alloc(Value::QuickJsHandle {
+        handle: high_handle,
+        object_like: false,
+    });
+    let low = env.alloc(Value::QuickJsHandle {
+        handle: low_handle,
+        object_like: false,
+    });
+    let valid = env.alloc(Value::QuickJsHandle {
+        handle: valid_handle,
+        object_like: false,
+    });
     let mut object = ptr::null_mut();
-    assert_eq!(unsafe { napi_create_object(&mut env, &mut object) }, NAPI_OK);
+    assert_eq!(
+        unsafe { napi_create_object(&mut env, &mut object) },
+        NAPI_OK
+    );
     let one = env.alloc(Value::Number(1.0));
     let two = env.alloc(Value::Number(2.0));
-    assert_eq!(unsafe { napi_set_property(&mut env, object, high, one) }, NAPI_OK);
-    assert_eq!(unsafe { napi_set_property(&mut env, object, low, two) }, NAPI_OK);
+    assert_eq!(
+        unsafe { napi_set_property(&mut env, object, high, one) },
+        NAPI_OK
+    );
+    assert_eq!(
+        unsafe { napi_set_property(&mut env, object, low, two) },
+        NAPI_OK
+    );
     let mut found = ptr::null_mut();
-    assert_eq!(unsafe { napi_get_property(&mut env, object, high, &mut found) }, NAPI_OK);
+    assert_eq!(
+        unsafe { napi_get_property(&mut env, object, high, &mut found) },
+        NAPI_OK
+    );
     assert_eq!(found, one);
-    assert_eq!(unsafe { napi_get_property(&mut env, object, low, &mut found) }, NAPI_OK);
+    assert_eq!(
+        unsafe { napi_get_property(&mut env, object, low, &mut found) },
+        NAPI_OK
+    );
     assert_eq!(found, two);
     let ordinary = env.alloc(Value::String("a".into()));
-    assert_eq!(unsafe { napi_set_property(&mut env, object, valid, one) }, NAPI_OK);
-    assert_eq!(unsafe { napi_get_property(&mut env, object, ordinary, &mut found) }, NAPI_OK);
+    assert_eq!(
+        unsafe { napi_set_property(&mut env, object, valid, one) },
+        NAPI_OK
+    );
+    assert_eq!(
+        unsafe { napi_get_property(&mut env, object, ordinary, &mut found) },
+        NAPI_OK
+    );
     assert_eq!(found, one);
     assert_eq!(thaw_quickjs::thaw_js_release_handle(high_handle), 0);
     assert_eq!(thaw_quickjs::thaw_js_release_handle(low_handle), 0);
@@ -2899,7 +3700,10 @@ fn live_quickjs_surrogate_string_keys_stay_distinct_on_native_object() {
 #[cfg(feature = "quickjs")]
 #[test]
 fn live_quickjs_object_keeps_native_symbol_key_and_integrity() {
-    assert_eq!(thaw_quickjs::thaw_js_load(c"globalThis.napiSymbolObject = {};".as_ptr()), 1);
+    assert_eq!(
+        thaw_quickjs::thaw_js_load(c"globalThis.napiSymbolObject = {};".as_ptr()),
+        1
+    );
     let handle = thaw_quickjs::thaw_js_get_global(c"napiSymbolObject".as_ptr());
     assert_ne!(handle, 0);
     assert_eq!(thaw_quickjs::thaw_js_retain_handle(handle), 1);
@@ -2908,26 +3712,53 @@ fn live_quickjs_object_keeps_native_symbol_key_and_integrity() {
     let object = unsafe { parse_napi_graph_value(&mut env, &graph) }.unwrap();
     let description = env.alloc(Value::String("shared".into()));
     let mut key = ptr::null_mut();
-    assert_eq!(unsafe { napi_create_symbol(&mut env, description, &mut key) }, NAPI_OK);
+    assert_eq!(
+        unsafe { napi_create_symbol(&mut env, description, &mut key) },
+        NAPI_OK
+    );
     let mut distinct = ptr::null_mut();
-    assert_eq!(unsafe { napi_create_symbol(&mut env, description, &mut distinct) }, NAPI_OK);
+    assert_eq!(
+        unsafe { napi_create_symbol(&mut env, description, &mut distinct) },
+        NAPI_OK
+    );
     let mut equal = true;
-    assert_eq!(unsafe { napi_strict_equals(&mut env, key, distinct, &mut equal) }, NAPI_OK);
+    assert_eq!(
+        unsafe { napi_strict_equals(&mut env, key, distinct, &mut equal) },
+        NAPI_OK
+    );
     assert!(!equal);
     let value = env.alloc(Value::Number(7.0));
-    assert_eq!(unsafe { napi_set_property(&mut env, object, key, value) }, NAPI_OK);
+    assert_eq!(
+        unsafe { napi_set_property(&mut env, object, key, value) },
+        NAPI_OK
+    );
     let mut found = ptr::null_mut();
-    assert_eq!(unsafe { napi_get_property(&mut env, object, key, &mut found) }, NAPI_OK);
+    assert_eq!(
+        unsafe { napi_get_property(&mut env, object, key, &mut found) },
+        NAPI_OK
+    );
     let mut number = 0.0;
-    assert_eq!(unsafe { napi_get_value_double(&mut env, found, &mut number) }, NAPI_OK);
+    assert_eq!(
+        unsafe { napi_get_value_double(&mut env, found, &mut number) },
+        NAPI_OK
+    );
     assert_eq!(number, 7.0);
     let mut present = false;
-    assert_eq!(unsafe { napi_has_own_property(&mut env, object, key, &mut present) }, NAPI_OK);
+    assert_eq!(
+        unsafe { napi_has_own_property(&mut env, object, key, &mut present) },
+        NAPI_OK
+    );
     assert!(present);
-    assert_eq!(unsafe { napi_has_own_property(&mut env, object, distinct, &mut present) }, NAPI_OK);
+    assert_eq!(
+        unsafe { napi_has_own_property(&mut env, object, distinct, &mut present) },
+        NAPI_OK
+    );
     assert!(!present);
     assert_eq!(unsafe { napi_object_freeze(&mut env, object) }, NAPI_OK);
-    assert_eq!(unsafe { napi_delete_property(&mut env, object, key, &mut present) }, NAPI_OK);
+    assert_eq!(
+        unsafe { napi_delete_property(&mut env, object, key, &mut present) },
+        NAPI_OK
+    );
     assert!(!present);
     assert_eq!(thaw_quickjs::thaw_js_release_handle(handle), 1);
     drop(env);
@@ -2951,19 +3782,36 @@ fn live_quickjs_strict_equality_uses_javascript_values() {
         r#"{{"root":{{"r":0}},"nodes":[{{"a":[{{"r":1}},{{"r":2}},{{"r":3}}]}},{{"hdl":{nan}}},{{"hdl":{positive}}},{{"hdl":{negative}}}],"leases":[{nan},{positive},{negative}]}}"#
     );
     let values = unsafe { parse_napi_graph_value(&mut env, &graph) }.unwrap();
-    let Value::Array(values) = unsafe { value_ref(values) }.unwrap() else { panic!("array root") };
+    let Value::Array(values) = unsafe { value_ref(values) }.unwrap() else {
+        panic!("array root")
+    };
     let mut equal = true;
-    assert_eq!(unsafe { napi_strict_equals(&mut env, values[0].unwrap(), values[0].unwrap(), &mut equal) }, NAPI_OK);
+    assert_eq!(
+        unsafe { napi_strict_equals(&mut env, values[0].unwrap(), values[0].unwrap(), &mut equal) },
+        NAPI_OK
+    );
     assert!(!equal);
-    assert_eq!(unsafe { napi_strict_equals(&mut env, values[1].unwrap(), values[2].unwrap(), &mut equal) }, NAPI_OK);
+    assert_eq!(
+        unsafe { napi_strict_equals(&mut env, values[1].unwrap(), values[2].unwrap(), &mut equal) },
+        NAPI_OK
+    );
     assert!(equal);
     let native_zero = env.alloc(Value::Number(0.0));
-    assert_eq!(unsafe { napi_strict_equals(&mut env, values[2].unwrap(), native_zero, &mut equal) }, NAPI_OK);
+    assert_eq!(
+        unsafe { napi_strict_equals(&mut env, values[2].unwrap(), native_zero, &mut equal) },
+        NAPI_OK
+    );
     assert!(equal);
-    assert_eq!(unsafe { napi_strict_equals(&mut env, native_zero, values[2].unwrap(), &mut equal) }, NAPI_OK);
+    assert_eq!(
+        unsafe { napi_strict_equals(&mut env, native_zero, values[2].unwrap(), &mut equal) },
+        NAPI_OK
+    );
     assert!(equal);
     let native_nan = env.alloc(Value::Number(f64::NAN));
-    assert_eq!(unsafe { napi_strict_equals(&mut env, values[0].unwrap(), native_nan, &mut equal) }, NAPI_OK);
+    assert_eq!(
+        unsafe { napi_strict_equals(&mut env, values[0].unwrap(), native_nan, &mut equal) },
+        NAPI_OK
+    );
     assert!(!equal);
     for handle in [nan, positive, negative] {
         assert_eq!(thaw_quickjs::thaw_js_release_handle(handle), 1);
@@ -2984,19 +3832,53 @@ fn live_quickjs_property_names_filter_descriptors_without_getting_values() {
     let mut env = Env::new();
     let object = unsafe { parse_napi_graph_value(&mut env, &graph) }.unwrap();
     let mut own = ptr::null_mut();
-    assert_eq!(unsafe { napi_get_all_property_names(&mut env, object,
-        NAPI_KEY_OWN_ONLY, NAPI_KEY_ALL_PROPERTIES, NAPI_KEY_KEEP_NUMBERS, &mut own) }, NAPI_OK);
-    let Value::Array(own) = unsafe { value_ref(own) }.unwrap() else { panic!("own keys") };
-    assert!(own.iter().flatten().any(|key| matches!(unsafe { value_ref(*key) }, Ok(Value::Number(number)) if *number == 2.0)));
-    assert!(own.iter().flatten().any(|key| matches!(unsafe { value_ref(*key) }, Ok(Value::String(name)) if name == "hidden")));
-    assert!(own.iter().flatten().any(|key| matches!(unsafe { value_ref(*key) }, Ok(Value::QuickJsHandle { .. }))));
+    assert_eq!(
+        unsafe {
+            napi_get_all_property_names(
+                &mut env,
+                object,
+                NAPI_KEY_OWN_ONLY,
+                NAPI_KEY_ALL_PROPERTIES,
+                NAPI_KEY_KEEP_NUMBERS,
+                &mut own,
+            )
+        },
+        NAPI_OK
+    );
+    let Value::Array(own) = unsafe { value_ref(own) }.unwrap() else {
+        panic!("own keys")
+    };
+    assert!(own.iter().flatten().any(
+        |key| matches!(unsafe { value_ref(*key) }, Ok(Value::Number(number)) if *number == 2.0)
+    ));
+    assert!(own.iter().flatten().any(
+        |key| matches!(unsafe { value_ref(*key) }, Ok(Value::String(name)) if name == "hidden")
+    ));
+    assert!(own
+        .iter()
+        .flatten()
+        .any(|key| matches!(unsafe { value_ref(*key) }, Ok(Value::QuickJsHandle { .. }))));
     let mut visible = ptr::null_mut();
-    assert_eq!(unsafe { napi_get_property_names(&mut env, object, &mut visible) }, NAPI_OK);
-    let Value::Array(visible) = unsafe { value_ref(visible) }.unwrap() else { panic!("visible keys") };
-    assert!(visible.iter().flatten().any(|key| matches!(unsafe { value_ref(*key) }, Ok(Value::String(name)) if name == "fromProto")));
-    assert!(!visible.iter().flatten().any(|key| matches!(unsafe { value_ref(*key) }, Ok(Value::String(name)) if name == "hidden")));
-    assert!(!visible.iter().flatten().any(|key| matches!(unsafe { value_ref(*key) }, Ok(Value::String(name)) if name == "shadowed")));
-    assert!(!visible.iter().flatten().any(|key| matches!(unsafe { value_ref(*key) }, Ok(Value::QuickJsHandle { .. }))));
+    assert_eq!(
+        unsafe { napi_get_property_names(&mut env, object, &mut visible) },
+        NAPI_OK
+    );
+    let Value::Array(visible) = unsafe { value_ref(visible) }.unwrap() else {
+        panic!("visible keys")
+    };
+    assert!(visible.iter().flatten().any(
+        |key| matches!(unsafe { value_ref(*key) }, Ok(Value::String(name)) if name == "fromProto")
+    ));
+    assert!(!visible.iter().flatten().any(
+        |key| matches!(unsafe { value_ref(*key) }, Ok(Value::String(name)) if name == "hidden")
+    ));
+    assert!(!visible.iter().flatten().any(
+        |key| matches!(unsafe { value_ref(*key) }, Ok(Value::String(name)) if name == "shadowed")
+    ));
+    assert!(!visible
+        .iter()
+        .flatten()
+        .any(|key| matches!(unsafe { value_ref(*key) }, Ok(Value::QuickJsHandle { .. }))));
     let reads = thaw_quickjs::thaw_js_get_global(c"napiEnumReads".as_ptr());
     assert_eq!(unsafe { qjs_query(reads, 2) }.unwrap(), "0");
     assert_eq!(thaw_quickjs::thaw_js_release_handle(reads), 0);
@@ -3012,135 +3894,331 @@ fn live_quickjs_native_utf16_property_keys_keep_surrogate_units() {
     let mut env = Env::new();
     let mut high_string = ptr::null_mut();
     let mut low_string = ptr::null_mut();
-    assert_eq!(unsafe { napi_create_string_utf16(&mut env, [0xd800_u16].as_ptr(), 1,
-        &mut high_string) }, NAPI_OK);
-    assert_eq!(unsafe { napi_create_string_utf16(&mut env, [0xdc00_u16].as_ptr(), 1,
-        &mut low_string) }, NAPI_OK);
+    assert_eq!(
+        unsafe { napi_create_string_utf16(&mut env, [0xd800_u16].as_ptr(), 1, &mut high_string) },
+        NAPI_OK
+    );
+    assert_eq!(
+        unsafe { napi_create_string_utf16(&mut env, [0xdc00_u16].as_ptr(), 1, &mut low_string) },
+        NAPI_OK
+    );
     let replacement = env.alloc(Value::String("\u{fffd}".into()));
     let mut equal = true;
-    for (left, right) in [(high_string, low_string), (high_string, replacement),
-        (low_string, replacement)] {
-        assert_eq!(unsafe { napi_strict_equals(&mut env, left, right, &mut equal) }, NAPI_OK);
+    for (left, right) in [
+        (high_string, low_string),
+        (high_string, replacement),
+        (low_string, replacement),
+    ] {
+        assert_eq!(
+            unsafe { napi_strict_equals(&mut env, left, right, &mut equal) },
+            NAPI_OK
+        );
         assert!(!equal);
     }
     let joined_array = env.alloc(Value::Array(vec![Some(high_string), Some(low_string)]));
     let mut joined = ptr::null_mut();
-    assert_eq!(unsafe { napi_coerce_to_string(&mut env, joined_array, &mut joined) }, NAPI_OK);
+    assert_eq!(
+        unsafe { napi_coerce_to_string(&mut env, joined_array, &mut joined) },
+        NAPI_OK
+    );
     let mut joined_units = [0_u16; 4];
     let mut joined_count = 0;
-    assert_eq!(unsafe { napi_get_value_string_utf16(&mut env, joined,
-        joined_units.as_mut_ptr(), joined_units.len(), &mut joined_count) }, NAPI_OK);
-    assert_eq!((joined_count, &joined_units[..3]), (3, &[0xd800, b',' as u16, 0xdc00][..]));
-    let valid_scalar = unsafe { parse_napi_graph_value(&mut env,
-        r#"{"root":{"su":[97]},"nodes":[],"leases":[]}"#) }.unwrap();
+    assert_eq!(
+        unsafe {
+            napi_get_value_string_utf16(
+                &mut env,
+                joined,
+                joined_units.as_mut_ptr(),
+                joined_units.len(),
+                &mut joined_count,
+            )
+        },
+        NAPI_OK
+    );
+    assert_eq!(
+        (joined_count, &joined_units[..3]),
+        (3, &[0xd800, b',' as u16, 0xdc00][..])
+    );
+    let valid_scalar = unsafe {
+        parse_napi_graph_value(&mut env, r#"{"root":{"su":[97]},"nodes":[],"leases":[]}"#)
+    }
+    .unwrap();
     let ordinary_a = env.alloc(Value::String("a".into()));
-    assert_eq!(unsafe { napi_strict_equals(&mut env, valid_scalar, ordinary_a, &mut equal) }, NAPI_OK);
+    assert_eq!(
+        unsafe { napi_strict_equals(&mut env, valid_scalar, ordinary_a, &mut equal) },
+        NAPI_OK
+    );
     assert!(equal);
-    let valid_key_object = unsafe { parse_napi_graph_value(&mut env,
-        r#"{"root":{"r":0},"nodes":[{"o":[[{"su":[97]},{"v":3}]]}],"leases":[]}"#) }.unwrap();
+    let valid_key_object = unsafe {
+        parse_napi_graph_value(
+            &mut env,
+            r#"{"root":{"r":0},"nodes":[{"o":[[{"su":[97]},{"v":3}]]}],"leases":[]}"#,
+        )
+    }
+    .unwrap();
     let mut canonical_value = ptr::null_mut();
-    assert_eq!(unsafe { napi_get_named_property(&mut env, valid_key_object, c"a".as_ptr(),
-        &mut canonical_value) }, NAPI_OK);
+    assert_eq!(
+        unsafe {
+            napi_get_named_property(
+                &mut env,
+                valid_key_object,
+                c"a".as_ptr(),
+                &mut canonical_value,
+            )
+        },
+        NAPI_OK
+    );
     let Ok(Value::Number(canonical_number)) = (unsafe { value_ref(canonical_value) }) else {
         panic!("canonical graph key must be visible as ordinary string property");
     };
     assert_eq!(*canonical_number, 3.0);
     let mut high = ptr::null_mut();
     let mut low = ptr::null_mut();
-    assert_eq!(unsafe { node_api_create_property_key_utf16(&mut env, [0xd800_u16].as_ptr(), 1, &mut high) }, NAPI_OK);
-    assert_eq!(unsafe { node_api_create_property_key_utf16(&mut env, [0xdc00_u16].as_ptr(), 1, &mut low) }, NAPI_OK);
+    assert_eq!(
+        unsafe {
+            node_api_create_property_key_utf16(&mut env, [0xd800_u16].as_ptr(), 1, &mut high)
+        },
+        NAPI_OK
+    );
+    assert_eq!(
+        unsafe { node_api_create_property_key_utf16(&mut env, [0xdc00_u16].as_ptr(), 1, &mut low) },
+        NAPI_OK
+    );
     assert_ne!(high, low);
     let mut unit = [0_u16; 2];
     let mut written = 0;
-    assert_eq!(unsafe { napi_get_value_string_utf16(&mut env, high, unit.as_mut_ptr(), unit.len(), &mut written) }, NAPI_OK);
+    assert_eq!(
+        unsafe {
+            napi_get_value_string_utf16(&mut env, high, unit.as_mut_ptr(), unit.len(), &mut written)
+        },
+        NAPI_OK
+    );
     assert_eq!((written, unit[0]), (1, 0xd800));
-    assert_eq!(unsafe { napi_get_value_string_utf16(&mut env, low, unit.as_mut_ptr(), unit.len(), &mut written) }, NAPI_OK);
+    assert_eq!(
+        unsafe {
+            napi_get_value_string_utf16(&mut env, low, unit.as_mut_ptr(), unit.len(), &mut written)
+        },
+        NAPI_OK
+    );
     assert_eq!((written, unit[0]), (1, 0xdc00));
     let mut native = ptr::null_mut();
-    assert_eq!(unsafe { napi_create_object(&mut env, &mut native) }, NAPI_OK);
+    assert_eq!(
+        unsafe { napi_create_object(&mut env, &mut native) },
+        NAPI_OK
+    );
     let nul_units = [b'a' as u16, 0, b'b' as u16];
     let mut nul_key = ptr::null_mut();
-    assert_eq!(unsafe { napi_create_string_utf16(&mut env, nul_units.as_ptr(),
-        nul_units.len(), &mut nul_key) }, NAPI_OK);
+    assert_eq!(
+        unsafe {
+            napi_create_string_utf16(&mut env, nul_units.as_ptr(), nul_units.len(), &mut nul_key)
+        },
+        NAPI_OK
+    );
     let one = env.alloc(Value::Number(1.0));
     let two = env.alloc(Value::Number(2.0));
-    assert_eq!(unsafe { napi_set_property(&mut env, native, nul_key, one) }, NAPI_OK);
+    assert_eq!(
+        unsafe { napi_set_property(&mut env, native, nul_key, one) },
+        NAPI_OK
+    );
     let mut present = false;
-    assert_eq!(unsafe { napi_has_property(&mut env, native, nul_key, &mut present) }, NAPI_OK);
+    assert_eq!(
+        unsafe { napi_has_property(&mut env, native, nul_key, &mut present) },
+        NAPI_OK
+    );
     assert!(present);
     let mut nul_value = ptr::null_mut();
-    assert_eq!(unsafe { napi_get_property(&mut env, native, nul_key, &mut nul_value) }, NAPI_OK);
+    assert_eq!(
+        unsafe { napi_get_property(&mut env, native, nul_key, &mut nul_value) },
+        NAPI_OK
+    );
     assert_eq!(nul_value, one);
-    assert_eq!(unsafe { napi_set_property(&mut env, native, high, one) }, NAPI_OK);
-    assert_eq!(unsafe { napi_set_property(&mut env, native, low, two) }, NAPI_OK);
+    assert_eq!(
+        unsafe { napi_set_property(&mut env, native, high, one) },
+        NAPI_OK
+    );
+    assert_eq!(
+        unsafe { napi_set_property(&mut env, native, low, two) },
+        NAPI_OK
+    );
     let mut found = ptr::null_mut();
-    assert_eq!(unsafe { napi_get_property(&mut env, native, high, &mut found) }, NAPI_OK);
+    assert_eq!(
+        unsafe { napi_get_property(&mut env, native, high, &mut found) },
+        NAPI_OK
+    );
     assert_eq!(found, one);
-    assert_eq!(unsafe { napi_get_property(&mut env, native, low, &mut found) }, NAPI_OK);
+    assert_eq!(
+        unsafe { napi_get_property(&mut env, native, low, &mut found) },
+        NAPI_OK
+    );
     assert_eq!(found, two);
     let encoded: JsonValue = serde_json::from_str(
-        &unsafe { napi_result_graph_for_env(&mut env, native, true) }.unwrap()).unwrap();
+        &unsafe { napi_result_graph_for_env(&mut env, native, true) }.unwrap(),
+    )
+    .unwrap();
     let entries = encoded["nodes"][0]["o"].as_array().unwrap();
-    assert!(entries.iter().any(|entry| entry[0]["su"] == serde_json::json!([0xd800])));
-    assert!(entries.iter().any(|entry| entry[0]["su"] == serde_json::json!([0xdc00])));
+    assert!(entries
+        .iter()
+        .any(|entry| entry[0]["su"] == serde_json::json!([0xd800])));
+    assert!(entries
+        .iter()
+        .any(|entry| entry[0]["su"] == serde_json::json!([0xdc00])));
     assert!(entries.iter().any(|entry| entry[0] == "a\u{0}b"));
     let mut native_deleted = false;
-    assert_eq!(unsafe { napi_delete_property(&mut env, native, nul_key,
-        &mut native_deleted) }, NAPI_OK);
+    assert_eq!(
+        unsafe { napi_delete_property(&mut env, native, nul_key, &mut native_deleted) },
+        NAPI_OK
+    );
     assert!(native_deleted);
-    assert_eq!(unsafe { napi_has_property(&mut env, native, nul_key,
-        &mut present) }, NAPI_OK);
+    assert_eq!(
+        unsafe { napi_has_property(&mut env, native, nul_key, &mut present) },
+        NAPI_OK
+    );
     assert!(!present);
 
-    assert_eq!(thaw_quickjs::thaw_js_load(c"globalThis.napiUtf16Object = {};".as_ptr()), 1);
+    assert_eq!(
+        thaw_quickjs::thaw_js_load(c"globalThis.napiUtf16Object = {};".as_ptr()),
+        1
+    );
     let handle = thaw_quickjs::thaw_js_get_global(c"napiUtf16Object".as_ptr());
     assert_ne!(handle, 0);
     assert_eq!(thaw_quickjs::thaw_js_retain_handle(handle), 1);
     let graph = format!(r#"{{"root":{{"r":0}},"nodes":[{{"hdl":{handle}}}],"leases":[{handle}]}}"#);
     let live = unsafe { parse_napi_graph_value(&mut env, &graph) }.unwrap();
-    assert_eq!(unsafe { napi_set_property(&mut env, live, high, one) }, NAPI_OK);
-    assert_eq!(unsafe { napi_set_property(&mut env, live, low, two) }, NAPI_OK);
-    assert_eq!(unsafe { napi_set_property(&mut env, live, nul_key, one) }, NAPI_OK);
-    assert_eq!(thaw_quickjs::thaw_js_load(c"globalThis.napiSavedReflectSet = Reflect.set; Reflect.set = () => false;".as_ptr()), 1);
-    assert_eq!(unsafe { napi_set_property(&mut env, live, nul_key, two) }, NAPI_OK);
-    assert_eq!(thaw_quickjs::thaw_js_load(c"Reflect.set = napiSavedReflectSet; delete globalThis.napiSavedReflectSet;".as_ptr()), 1);
-    assert_eq!(unsafe { napi_has_property(&mut env, live, nul_key, &mut present) }, NAPI_OK);
+    assert_eq!(
+        unsafe { napi_set_property(&mut env, live, high, one) },
+        NAPI_OK
+    );
+    assert_eq!(
+        unsafe { napi_set_property(&mut env, live, low, two) },
+        NAPI_OK
+    );
+    assert_eq!(
+        unsafe { napi_set_property(&mut env, live, nul_key, one) },
+        NAPI_OK
+    );
+    assert_eq!(
+        thaw_quickjs::thaw_js_load(
+            c"globalThis.napiSavedReflectSet = Reflect.set; Reflect.set = () => false;".as_ptr()
+        ),
+        1
+    );
+    assert_eq!(
+        unsafe { napi_set_property(&mut env, live, nul_key, two) },
+        NAPI_OK
+    );
+    assert_eq!(
+        thaw_quickjs::thaw_js_load(
+            c"Reflect.set = napiSavedReflectSet; delete globalThis.napiSavedReflectSet;".as_ptr()
+        ),
+        1
+    );
+    assert_eq!(
+        unsafe { napi_has_property(&mut env, live, nul_key, &mut present) },
+        NAPI_OK
+    );
     assert!(present);
-    assert_eq!(unsafe { napi_get_property(&mut env, live, nul_key, &mut nul_value) }, NAPI_OK);
+    assert_eq!(
+        unsafe { napi_get_property(&mut env, live, nul_key, &mut nul_value) },
+        NAPI_OK
+    );
     let mut nul_number = 0.0;
-    assert_eq!(unsafe { napi_get_value_double(&mut env, nul_value, &mut nul_number) }, NAPI_OK);
+    assert_eq!(
+        unsafe { napi_get_value_double(&mut env, nul_value, &mut nul_number) },
+        NAPI_OK
+    );
     assert_eq!(nul_number, 2.0);
     let mut nul_names = ptr::null_mut();
-    assert_eq!(unsafe { napi_get_all_property_names(&mut env, live, NAPI_KEY_OWN_ONLY,
-        NAPI_KEY_ALL_PROPERTIES, NAPI_KEY_NUMBERS_TO_STRINGS, &mut nul_names) }, NAPI_OK);
-    let Value::Array(nul_names) = unsafe { value_ref(nul_names) }.unwrap() else { panic!("NUL keys") };
-    assert!(nul_names.iter().flatten().any(|key| matches!(unsafe { value_ref(*key) },
+    assert_eq!(
+        unsafe {
+            napi_get_all_property_names(
+                &mut env,
+                live,
+                NAPI_KEY_OWN_ONLY,
+                NAPI_KEY_ALL_PROPERTIES,
+                NAPI_KEY_NUMBERS_TO_STRINGS,
+                &mut nul_names,
+            )
+        },
+        NAPI_OK
+    );
+    let Value::Array(nul_names) = unsafe { value_ref(nul_names) }.unwrap() else {
+        panic!("NUL keys")
+    };
+    assert!(nul_names
+        .iter()
+        .flatten()
+        .any(|key| matches!(unsafe { value_ref(*key) },
         Ok(Value::String(name)) if name == "a\u{0}b")));
     let mut deleted = false;
-    assert_eq!(unsafe { napi_delete_property(&mut env, live, nul_key, &mut deleted) }, NAPI_OK);
+    assert_eq!(
+        unsafe { napi_delete_property(&mut env, live, nul_key, &mut deleted) },
+        NAPI_OK
+    );
     assert!(deleted);
-    assert_eq!(unsafe { napi_has_property(&mut env, live, nul_key, &mut present) }, NAPI_OK);
+    assert_eq!(
+        unsafe { napi_has_property(&mut env, live, nul_key, &mut present) },
+        NAPI_OK
+    );
     assert!(!present);
-    assert_eq!(unsafe { napi_get_property(&mut env, live, high, &mut found) }, NAPI_OK);
+    assert_eq!(
+        unsafe { napi_get_property(&mut env, live, high, &mut found) },
+        NAPI_OK
+    );
     let mut number = 0.0;
-    assert_eq!(unsafe { napi_get_value_double(&mut env, found, &mut number) }, NAPI_OK);
+    assert_eq!(
+        unsafe { napi_get_value_double(&mut env, found, &mut number) },
+        NAPI_OK
+    );
     assert_eq!(number, 1.0);
-    assert_eq!(unsafe { napi_get_property(&mut env, live, low, &mut found) }, NAPI_OK);
-    assert_eq!(unsafe { napi_get_value_double(&mut env, found, &mut number) }, NAPI_OK);
+    assert_eq!(
+        unsafe { napi_get_property(&mut env, live, low, &mut found) },
+        NAPI_OK
+    );
+    assert_eq!(
+        unsafe { napi_get_value_double(&mut env, found, &mut number) },
+        NAPI_OK
+    );
     assert_eq!(number, 2.0);
     let mut keys = ptr::null_mut();
-    assert_eq!(unsafe { napi_get_all_property_names(&mut env, live, NAPI_KEY_OWN_ONLY,
-        NAPI_KEY_ALL_PROPERTIES, NAPI_KEY_NUMBERS_TO_STRINGS, &mut keys) }, NAPI_OK);
-    let Value::Array(names) = unsafe { value_ref(keys) }.unwrap() else { panic!("UTF-16 keys") };
+    assert_eq!(
+        unsafe {
+            napi_get_all_property_names(
+                &mut env,
+                live,
+                NAPI_KEY_OWN_ONLY,
+                NAPI_KEY_ALL_PROPERTIES,
+                NAPI_KEY_NUMBERS_TO_STRINGS,
+                &mut keys,
+            )
+        },
+        NAPI_OK
+    );
+    let Value::Array(names) = unsafe { value_ref(keys) }.unwrap() else {
+        panic!("UTF-16 keys")
+    };
     let names = names.clone();
-    let mut units = names.iter().flatten().map(|name| {
-        let mut unit = [0_u16; 2];
-        let mut count = 0;
-        assert_eq!(unsafe { napi_get_value_string_utf16(&mut env, *name,
-            unit.as_mut_ptr(), unit.len(), &mut count) }, NAPI_OK);
-        assert_eq!(count, 1);
-        unit[0]
-    }).collect::<Vec<_>>();
+    let mut units = names
+        .iter()
+        .flatten()
+        .map(|name| {
+            let mut unit = [0_u16; 2];
+            let mut count = 0;
+            assert_eq!(
+                unsafe {
+                    napi_get_value_string_utf16(
+                        &mut env,
+                        *name,
+                        unit.as_mut_ptr(),
+                        unit.len(),
+                        &mut count,
+                    )
+                },
+                NAPI_OK
+            );
+            assert_eq!(count, 1);
+            unit[0]
+        })
+        .collect::<Vec<_>>();
     units.sort_unstable();
     assert_eq!(units, vec![0xd800, 0xdc00]);
     assert_eq!(thaw_quickjs::thaw_js_release_handle(handle), 1);
@@ -3162,38 +4240,96 @@ fn live_quickjs_string_coercion_preserves_effects_units_and_throw() {
     for handle in [good_handle, bad_handle, symbol_handle, null_handle] {
         assert_eq!(thaw_quickjs::thaw_js_retain_handle(handle), 1);
     }
-    let good = unsafe { parse_napi_graph_value(&mut env, &format!(
-        r#"{{"root":{{"r":0}},"nodes":[{{"hdl":{good_handle}}}],"leases":[{good_handle}]}}"#)) }.unwrap();
-    let bad = unsafe { parse_napi_graph_value(&mut env, &format!(
-        r#"{{"root":{{"r":0}},"nodes":[{{"hdl":{bad_handle}}}],"leases":[{bad_handle}]}}"#)) }.unwrap();
+    let good = unsafe {
+        parse_napi_graph_value(
+            &mut env,
+            &format!(
+                r#"{{"root":{{"r":0}},"nodes":[{{"hdl":{good_handle}}}],"leases":[{good_handle}]}}"#
+            ),
+        )
+    }
+    .unwrap();
+    let bad = unsafe {
+        parse_napi_graph_value(
+            &mut env,
+            &format!(
+                r#"{{"root":{{"r":0}},"nodes":[{{"hdl":{bad_handle}}}],"leases":[{bad_handle}]}}"#
+            ),
+        )
+    }
+    .unwrap();
     let symbol = unsafe { parse_napi_graph_value(&mut env, &format!(
         r#"{{"root":{{"r":0}},"nodes":[{{"hdl":{symbol_handle}}}],"leases":[{symbol_handle}]}}"#)) }.unwrap();
-    let nullish = unsafe { parse_napi_graph_value(&mut env, &format!(
-        r#"{{"root":{{"r":0}},"nodes":[{{"hdl":{null_handle}}}],"leases":[{null_handle}]}}"#)) }.unwrap();
+    let nullish = unsafe {
+        parse_napi_graph_value(
+            &mut env,
+            &format!(
+                r#"{{"root":{{"r":0}},"nodes":[{{"hdl":{null_handle}}}],"leases":[{null_handle}]}}"#
+            ),
+        )
+    }
+    .unwrap();
     let nested = env.alloc(Value::Array(vec![Some(good), Some(nullish)]));
     let mut output = ptr::null_mut();
-    assert_eq!(unsafe { napi_coerce_to_string(&mut env, nested, &mut output) }, NAPI_OK);
+    assert_eq!(
+        unsafe { napi_coerce_to_string(&mut env, nested, &mut output) },
+        NAPI_OK
+    );
     let mut units = [0_u16; 3];
     let mut written = 0;
-    assert_eq!(unsafe { napi_get_value_string_utf16(&mut env, output,
-        units.as_mut_ptr(), units.len(), &mut written) }, NAPI_OK);
+    assert_eq!(
+        unsafe {
+            napi_get_value_string_utf16(
+                &mut env,
+                output,
+                units.as_mut_ptr(),
+                units.len(),
+                &mut written,
+            )
+        },
+        NAPI_OK
+    );
     assert_eq!((written, &units[..2]), (2, &[0xd800, b',' as u16][..]));
     let reads = thaw_quickjs::thaw_js_get_global(c"napiCoercionReads".as_ptr());
     assert_eq!(unsafe { qjs_query(reads, 10) }.unwrap(), "1");
-    assert_eq!(unsafe { napi_coerce_to_string(&mut env, bad, &mut output) }, NAPI_PENDING_EXCEPTION);
+    assert_eq!(
+        unsafe { napi_coerce_to_string(&mut env, bad, &mut output) },
+        NAPI_PENDING_EXCEPTION
+    );
     let mut exception = ptr::null_mut();
-    assert_eq!(unsafe { napi_get_and_clear_last_exception(&mut env, &mut exception) }, NAPI_OK);
+    assert_eq!(
+        unsafe { napi_get_and_clear_last_exception(&mut env, &mut exception) },
+        NAPI_OK
+    );
     let retained = unsafe { qjs_handle(exception) }.expect("original JS thrown value");
     let same = thaw_quickjs::thaw_js_strict_equal_handles_result(retained, thrown_handle);
     assert!(same.error.is_null());
     assert_eq!(same.value, 1);
     assert_eq!(thaw_quickjs::thaw_js_load(c"globalThis.napiSavedConcat = String.prototype.concat; String.prototype.concat = () => 'spoof';".as_ptr()), 1);
-    assert_eq!(unsafe { napi_coerce_to_string(&mut env, symbol, &mut output) }, NAPI_PENDING_EXCEPTION);
-    assert_eq!(unsafe { napi_get_and_clear_last_exception(&mut env, &mut exception) }, NAPI_OK);
+    assert_eq!(
+        unsafe { napi_coerce_to_string(&mut env, symbol, &mut output) },
+        NAPI_PENDING_EXCEPTION
+    );
+    assert_eq!(
+        unsafe { napi_get_and_clear_last_exception(&mut env, &mut exception) },
+        NAPI_OK
+    );
     assert!(unsafe { qjs_handle(exception) }.is_some());
-    assert_eq!(thaw_quickjs::thaw_js_load(c"String.prototype.concat = napiSavedConcat; delete globalThis.napiSavedConcat;".as_ptr()), 1);
-    for handle in [good_handle, bad_handle, symbol_handle, null_handle,
-        thrown_handle, reads] {
+    assert_eq!(
+        thaw_quickjs::thaw_js_load(
+            c"String.prototype.concat = napiSavedConcat; delete globalThis.napiSavedConcat;"
+                .as_ptr()
+        ),
+        1
+    );
+    for handle in [
+        good_handle,
+        bad_handle,
+        symbol_handle,
+        null_handle,
+        thrown_handle,
+        reads,
+    ] {
         thaw_quickjs::thaw_js_release_handle(handle);
     }
 }
@@ -3213,23 +4349,38 @@ fn live_quickjs_property_errors_preserve_original_exception_identity() {
     let target = unsafe { parse_napi_graph_value(&mut env, &format!(
         r#"{{"root":{{"r":0}},"nodes":[{{"hdl":{target_handle}}}],"leases":[{target_handle}]}}"#)) }.unwrap();
     let mut value = ptr::null_mut();
-    assert_eq!(unsafe { napi_get_named_property(&mut env, target,
-        c"read".as_ptr(), &mut value) }, NAPI_PENDING_EXCEPTION);
+    assert_eq!(
+        unsafe { napi_get_named_property(&mut env, target, c"read".as_ptr(), &mut value) },
+        NAPI_PENDING_EXCEPTION
+    );
     let mut exception = ptr::null_mut();
-    assert_eq!(unsafe { napi_get_and_clear_last_exception(&mut env, &mut exception) }, NAPI_OK);
+    assert_eq!(
+        unsafe { napi_get_and_clear_last_exception(&mut env, &mut exception) },
+        NAPI_OK
+    );
     let returned = unsafe { qjs_handle(exception) }.expect("original JS getter exception");
     let same = thaw_quickjs::thaw_js_strict_equal_handles_result(returned, thrown_handle);
     assert!(same.error.is_null());
     assert_eq!(same.value, 1);
     let argument = env.alloc(Value::Number(3.0));
-    assert_eq!(unsafe { napi_set_named_property(&mut env, target,
-        c"write".as_ptr(), argument) }, NAPI_PENDING_EXCEPTION);
-    assert_eq!(unsafe { napi_get_and_clear_last_exception(&mut env, &mut exception) }, NAPI_OK);
+    assert_eq!(
+        unsafe { napi_set_named_property(&mut env, target, c"write".as_ptr(), argument) },
+        NAPI_PENDING_EXCEPTION
+    );
+    assert_eq!(
+        unsafe { napi_get_and_clear_last_exception(&mut env, &mut exception) },
+        NAPI_OK
+    );
     let returned = unsafe { qjs_handle(exception) }.expect("original JS setter exception");
     let same = thaw_quickjs::thaw_js_strict_equal_handles_result(returned, thrown_handle);
     assert!(same.error.is_null());
     assert_eq!(same.value, 1);
-    assert_eq!(thaw_quickjs::thaw_js_load(c"JSON.parse = napiSavedJSONParse; delete globalThis.napiSavedJSONParse;".as_ptr()), 1);
+    assert_eq!(
+        thaw_quickjs::thaw_js_load(
+            c"JSON.parse = napiSavedJSONParse; delete globalThis.napiSavedJSONParse;".as_ptr()
+        ),
+        1
+    );
     thaw_quickjs::thaw_js_release_handle(target_handle);
     thaw_quickjs::thaw_js_release_handle(thrown_handle);
 }
@@ -3245,46 +4396,72 @@ fn native_function_proxy_reconciles_deleted_shadows_after_prevent_extensions() {
         env_mut(env).unwrap().alloc(Value::Undefined)
     }
     thaw_quickjs::register_napi_bridge(
-        thaw_napi_export_names, thaw_napi_call_typed_bridge,
-        thaw_napi_handle_bridge, thaw_napi_poll_async_work,
-        thaw_napi_async_work_pending, thaw_napi_graph_owner,
+        thaw_napi_export_names,
+        thaw_napi_call_typed_bridge,
+        thaw_napi_handle_bridge,
+        thaw_napi_poll_async_work,
+        thaw_napi_async_work_pending,
+        thaw_napi_graph_owner,
         release_napi_graph_reference,
     );
     let mut env = Box::new(Env::new());
     env.graph_owner_id = 7017;
     let env_ptr: NapiEnv = &mut *env;
     let function = env.alloc(Value::Function(Function {
-        callback: return_undefined, data: ptr::null_mut(), properties: HashMap::new(),
-        _thaw_bridge: None, _accessor_owner: None,
+        callback: return_undefined,
+        data: ptr::null_mut(),
+        properties: HashMap::new(),
+        _thaw_bridge: None,
+        _accessor_owner: None,
     }));
     HOST.with(|host| host.borrow_mut().module_envs.push(env));
-    let source = CString::new(format!(r#"
+    let source = CString::new(format!(
+        r#"
         globalThis.liveNativeFunction = __thaw_json_graph_decode({{
             root: {{ r: 0 }}, nodes: [{{ nfn: "{}" }}]
         }});
         globalThis.originalNativeFunctionName = liveNativeFunction.name;
-    "#, function as u64)).unwrap();
+    "#,
+        function as u64
+    ))
+    .unwrap();
     assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
-    let extra = unsafe { env_mut(env_ptr) }.unwrap().alloc(Value::Number(3.0));
-    let renamed = unsafe { env_mut(env_ptr) }.unwrap()
+    let extra = unsafe { env_mut(env_ptr) }
+        .unwrap()
+        .alloc(Value::Number(3.0));
+    let renamed = unsafe { env_mut(env_ptr) }
+        .unwrap()
         .alloc(Value::String("addon name".into()));
-    assert_eq!(unsafe { napi_set_named_property(env_ptr, function,
-        c"extra".as_ptr(), extra) }, NAPI_OK);
-    assert_eq!(unsafe { napi_set_named_property(env_ptr, function,
-        c"name".as_ptr(), renamed) }, NAPI_OK);
-    assert_eq!(thaw_quickjs::thaw_js_load(c"Object.preventExtensions(liveNativeFunction);".as_ptr()), 1);
+    assert_eq!(
+        unsafe { napi_set_named_property(env_ptr, function, c"extra".as_ptr(), extra) },
+        NAPI_OK
+    );
+    assert_eq!(
+        unsafe { napi_set_named_property(env_ptr, function, c"name".as_ptr(), renamed) },
+        NAPI_OK
+    );
+    assert_eq!(
+        thaw_quickjs::thaw_js_load(c"Object.preventExtensions(liveNativeFunction);".as_ptr()),
+        1
+    );
     for name in ["extra", "name"] {
-        let key = unsafe { env_mut(env_ptr) }.unwrap()
+        let key = unsafe { env_mut(env_ptr) }
+            .unwrap()
             .alloc(Value::String(name.into()));
         let mut deleted = false;
-        assert_eq!(unsafe { napi_delete_property(env_ptr, function, key, &mut deleted) }, NAPI_OK);
+        assert_eq!(
+            unsafe { napi_delete_property(env_ptr, function, key, &mut deleted) },
+            NAPI_OK
+        );
         assert!(deleted);
     }
     assert_eq!(thaw_quickjs::thaw_js_load(c"globalThis.nativeFunctionShadowCleared = !Reflect.ownKeys(liveNativeFunction).includes('extra') && Reflect.getOwnPropertyDescriptor(liveNativeFunction, 'extra') === undefined && liveNativeFunction.extra === undefined && liveNativeFunction.name === originalNativeFunctionName; delete globalThis.liveNativeFunction; delete globalThis.originalNativeFunctionName;".as_ptr()), 1);
     let result = thaw_quickjs::thaw_js_get_global(c"nativeFunctionShadowCleared".as_ptr());
     assert_eq!(unsafe { qjs_query(result, 2) }.unwrap(), "true");
     assert_eq!(thaw_quickjs::thaw_js_release_handle(result), 1);
-    let owned = HOST.with(|host| host.borrow_mut().module_envs.pop()).unwrap();
+    let owned = HOST
+        .with(|host| host.borrow_mut().module_envs.pop())
+        .unwrap();
     drop(owned);
 }
 
@@ -3300,28 +4477,39 @@ fn native_function_proxy_construct_preserves_derived_new_target() {
         let mut new_target = ptr::null_mut();
         assert_eq!(napi_get_new_target(env, info, &mut new_target), NAPI_OK);
         let mut tag = ptr::null_mut();
-        assert_eq!(napi_get_named_property(env, new_target,
-            c"derivedTag".as_ptr(), &mut tag), NAPI_OK);
+        assert_eq!(
+            napi_get_named_property(env, new_target, c"derivedTag".as_ptr(), &mut tag),
+            NAPI_OK
+        );
         let mut number = 0.0;
         let status = napi_get_value_double(env, tag, &mut number);
-        let number = if status == NAPI_OK { number as usize } else { 0 };
+        let number = if status == NAPI_OK {
+            number as usize
+        } else {
+            0
+        };
         OBSERVED_TARGET_TAG.store(number, Ordering::SeqCst);
         if number == 23 {
             return info.as_ref().unwrap().data as NapiValue;
         }
         if number == 29 {
             let mut thrown = ptr::null_mut();
-            assert_eq!(napi_get_named_property(env, new_target,
-                c"throwObject".as_ptr(), &mut thrown), NAPI_OK);
+            assert_eq!(
+                napi_get_named_property(env, new_target, c"throwObject".as_ptr(), &mut thrown),
+                NAPI_OK
+            );
             assert_eq!(napi_throw(env, thrown), NAPI_OK);
             return ptr::null_mut();
         }
         ptr::null_mut()
     }
     thaw_quickjs::register_napi_bridge(
-        thaw_napi_export_names, thaw_napi_call_typed_bridge,
-        thaw_napi_handle_bridge, thaw_napi_poll_async_work,
-        thaw_napi_async_work_pending, thaw_napi_graph_owner,
+        thaw_napi_export_names,
+        thaw_napi_call_typed_bridge,
+        thaw_napi_handle_bridge,
+        thaw_napi_poll_async_work,
+        thaw_napi_async_work_pending,
+        thaw_napi_graph_owner,
         release_napi_graph_reference,
     );
     let mut env = Box::new(Env::new());
@@ -3329,14 +4517,22 @@ fn native_function_proxy_construct_preserves_derived_new_target() {
     let env_ptr: NapiEnv = &mut *env;
     let explicit_return = env.alloc(Value::Object(HashMap::new()));
     let function = env.alloc(Value::Function(Function {
-        callback: constructor, data: explicit_return.cast(), properties: HashMap::new(),
-        _thaw_bridge: None, _accessor_owner: None,
+        callback: constructor,
+        data: explicit_return.cast(),
+        properties: HashMap::new(),
+        _thaw_bridge: None,
+        _accessor_owner: None,
     }));
     let base_prototype = env.alloc(Value::Object(HashMap::new()));
-    assert_eq!(unsafe { napi_set_named_property(env_ptr, function,
-        c"prototype".as_ptr(), base_prototype) }, NAPI_OK);
+    assert_eq!(
+        unsafe {
+            napi_set_named_property(env_ptr, function, c"prototype".as_ptr(), base_prototype)
+        },
+        NAPI_OK
+    );
     HOST.with(|host| host.borrow_mut().module_envs.push(env));
-    let source = CString::new(format!(r#"
+    let source = CString::new(format!(
+        r#"
         globalThis.nativeCtorWithTarget = __thaw_json_graph_decode({{
             root: {{ r: 0 }}, nodes: [{{ nfn: "{}" }}]
         }});
@@ -3393,15 +4589,22 @@ fn native_function_proxy_construct_preserves_derived_new_target() {
                 primitivePrototypeReads === 1,
                 Object.getPrototypeOf(ordinaryFallback) === Object.prototype];
         }})();
-    "#, function as u64)).unwrap();
+    "#,
+        function as u64
+    ))
+    .unwrap();
     assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
     let result = thaw_quickjs::thaw_js_get_global(c"nativeCtorWithTargetResult".as_ptr());
-    assert_eq!(unsafe { qjs_query(result, 2) }.unwrap(),
-        "true,true,true,true,true,true,true,true,true");
+    assert_eq!(
+        unsafe { qjs_query(result, 2) }.unwrap(),
+        "true,true,true,true,true,true,true,true,true"
+    );
     assert_eq!(OBSERVED_TARGET_TAG.load(Ordering::SeqCst), 0);
     assert_eq!(thaw_quickjs::thaw_js_release_handle(result), 1);
     assert_eq!(thaw_quickjs::thaw_js_load(
         c"delete globalThis.nativeCtorWithTargetResult; delete globalThis.nativeCtorWithTarget;".as_ptr()), 1);
-    let owned = HOST.with(|host| host.borrow_mut().module_envs.pop()).unwrap();
+    let owned = HOST
+        .with(|host| host.borrow_mut().module_envs.pop())
+        .unwrap();
     drop(owned);
 }

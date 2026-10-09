@@ -180,11 +180,37 @@ pub fn classify_all(functions: &[DtsFunction]) -> Vec<(String, Classification)> 
         .collect()
 }
 
+/// A TypeScript property key: bare when it is an identifier, quoted otherwise (`~standard`).
+pub fn ts_property_key(name: &str) -> String {
+    let mut chars = name.chars();
+    let identifier = chars.next().is_some_and(|c| c.is_alphabetic() || c == '_' || c == '$')
+        && chars.all(|c| c.is_alphanumeric() || c == '_' || c == '$');
+    if identifier { name.to_string() } else { format!("{name:?}") }
+}
+
 /// Renders a `HirType` back into the TS syntax `thaw_hir::lower::lower_ts_type`
 /// accepts, for `generate_shim`'s ambient declarations. Only ever called on
 /// types that actually came from a successful classification (primitives,
 /// `number[]`, and flat/nested objects), so the `Json`/`Union`/`Dynamic`
 /// arms are just defensive completeness, not expected to be exercised.
+/// `T[]`, parenthesizing element types whose rendering has a top-level operator (`A | B`,
+/// `(x) => y`), which would otherwise bind tighter than the `[]`.
+pub(crate) fn render_ts_array_of(element: &HirType) -> String {
+    fn needs_grouping(ty: &HirType) -> bool {
+        match ty {
+            HirType::Optional(_)
+            | HirType::Nullable(_)
+            | HirType::Nullish(_)
+            | HirType::Function(..)
+            | HirType::CallableFunction(..) => true,
+            HirType::FunctionWithThis(_, visible) => needs_grouping(visible),
+            _ => false,
+        }
+    }
+    let rendered = render_ts_type(element);
+    if needs_grouping(element) { format!("({rendered})[]") } else { format!("{rendered}[]") }
+}
+
 pub(crate) fn render_ts_type(ty: &HirType) -> String {
     match ty {
         HirType::F64 => "number".to_string(),
@@ -201,7 +227,7 @@ pub(crate) fn render_ts_type(ty: &HirType) -> String {
         }
         HirType::JsValue => "JsValue".to_string(),
         HirType::Bytes => "Uint8Array".to_string(),
-        HirType::Array(elem) => format!("{}[]", render_ts_type(elem)),
+        HirType::Array(elem) => render_ts_array_of(elem),
         HirType::Tuple(elements) => format!(
             "[{}]",
             elements
@@ -219,7 +245,7 @@ pub(crate) fn render_ts_type(ty: &HirType) -> String {
         HirType::Object(fields) => {
             let rendered = fields
                 .iter()
-                .map(|(name, ty)| format!("{name}: {}", render_ts_type(ty)))
+                .map(|(name, ty)| format!("{}: {}", ts_property_key(name), render_ts_type(ty)))
                 .collect::<Vec<_>>()
                 .join("; ");
             format!("{{ {rendered} }}")
@@ -258,6 +284,9 @@ pub(crate) fn render_ts_type(ty: &HirType) -> String {
         }
         HirType::Set(element) => format!("Set<{}>", render_ts_type(element)),
         HirType::WeakSet(element) => format!("WeakSet<{}>", render_ts_type(element)),
+        // The `this` type is not part of the declared TS signature.
+        HirType::FunctionWithThis(_, visible) => render_ts_type(visible),
+        HirType::NativeException => "Error".to_string(),
         HirType::Union(_) | HirType::Dynamic => "any".to_string(),
     }
 }

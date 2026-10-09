@@ -1416,17 +1416,144 @@ fn match_generic_pattern(
     }
 }
 
-fn infer_generic_type_tuple(
+#[derive(Clone, Copy)]
+enum GenericMatchActuals<'a> {
+    /// Physical HIR actuals, including the explicit receiver at index zero
+    /// when `signature.uses_this` is true.
+    Physical(&'a [HirType]),
+    /// Physical actuals already split by a caller that has preserved the
+    /// receiver slot separately.
+    ReceiverAndVisible {
+        receiver: Option<&'a HirType>,
+        visible: &'a [HirType],
+    },
+    /// Temporary receiver template used by generic non-arrow expressions.
+    /// It does not change the synthetic signature's physical parameters.
+    SyntheticReceiverAndVisible {
+        pattern: &'a GenericTypePattern,
+        receiver: &'a HirType,
+        visible: &'a [HirType],
+    },
+    /// Contextual inference for visible parameters only, as used by arrows
+    /// and callback signatures that do not represent an actual call.
+    ContextualVisible(&'a [HirType]),
+    /// Explicit type-only instantiation, with no argument matching.
+    TypeOnly,
+}
+
+fn generic_pattern_for_physical_argument(
     signature: &FnSignature,
-    actual_params: &[HirType],
+    index: usize,
+) -> Option<&GenericTypePattern> {
+    if signature.uses_this {
+        if index == 0 {
+            return match signature.generic_this_pattern.as_ref()? {
+                GenericReceiverPattern::Pattern(pattern) => Some(pattern),
+                GenericReceiverPattern::LegacyUnmatched => None,
+            };
+        }
+        signature.generic_param_patterns.get(index - 1)
+    } else {
+        signature.generic_param_patterns.get(index)
+    }
+}
+
+fn validate_actual_call_generic_receiver_metadata(
+    signature: &FnSignature,
+) -> Result<(), String> {
+    match (signature.uses_this, signature.generic_this_pattern.as_ref()) {
+        (true, Some(_)) | (false, None) => Ok(()),
+        (true, None) => Err(
+            "generic function with `this` is missing receiver generic metadata".into(),
+        ),
+        (false, Some(_)) => Err(
+            "generic function without `this` has receiver generic metadata".into(),
+        ),
+    }
+}
+
+fn match_visible_generic_patterns(
+    signature: &FnSignature,
+    visible: &[HirType],
+    inferred: &mut HashMap<Symbol, HirType>,
+) -> Result<(), String> {
+    for (pattern, actual) in signature.generic_param_patterns.iter().zip(visible) {
+        match_generic_pattern(pattern, actual, inferred)?;
+    }
+    Ok(())
+}
+
+fn match_generic_actuals(
+    signature: &FnSignature,
+    actuals: GenericMatchActuals<'_>,
+) -> Result<HashMap<Symbol, HirType>, String> {
+    let actual_call = matches!(
+        actuals,
+        GenericMatchActuals::Physical(_) | GenericMatchActuals::ReceiverAndVisible { .. }
+    );
+    if actual_call {
+        validate_actual_call_generic_receiver_metadata(signature)?;
+    }
+
+    let mut inferred = HashMap::new();
+    match actuals {
+        GenericMatchActuals::Physical(physical) => {
+            let visible = if signature.uses_this {
+                let (receiver, visible) = physical
+                    .split_first()
+                    .ok_or_else(|| "generic function needs a thisArg".to_owned())?;
+                match signature.generic_this_pattern.as_ref() {
+                    Some(GenericReceiverPattern::Pattern(pattern)) => {
+                        match_generic_pattern(pattern, receiver, &mut inferred)?;
+                    }
+                    Some(GenericReceiverPattern::LegacyUnmatched) => {}
+                    None => unreachable!("actual-call metadata was validated above"),
+                }
+                visible
+            } else {
+                physical
+            };
+            match_visible_generic_patterns(signature, visible, &mut inferred)?;
+        }
+        GenericMatchActuals::ReceiverAndVisible { receiver, visible } => {
+            if signature.uses_this {
+                let receiver = receiver
+                    .ok_or_else(|| "generic function needs a thisArg".to_owned())?;
+                match signature.generic_this_pattern.as_ref() {
+                    Some(GenericReceiverPattern::Pattern(pattern)) => {
+                        match_generic_pattern(pattern, receiver, &mut inferred)?;
+                    }
+                    Some(GenericReceiverPattern::LegacyUnmatched) => {}
+                    None => unreachable!("actual-call metadata was validated above"),
+                }
+            } else if receiver.is_some() {
+                return Err("generic function without `this` received a thisArg".into());
+            }
+            match_visible_generic_patterns(signature, visible, &mut inferred)?;
+        }
+        GenericMatchActuals::SyntheticReceiverAndVisible {
+            pattern,
+            receiver,
+            visible,
+        } => {
+            match_generic_pattern(pattern, receiver, &mut inferred)?;
+            match_visible_generic_patterns(signature, visible, &mut inferred)?;
+        }
+        GenericMatchActuals::ContextualVisible(visible) => {
+            match_visible_generic_patterns(signature, visible, &mut inferred)?;
+        }
+        GenericMatchActuals::TypeOnly => {}
+    }
+    Ok(inferred)
+}
+
+fn finalize_inferred_generic_type_tuple(
+    signature: &FnSignature,
+    mut inferred: HashMap<Symbol, HirType>,
     interfaces: &HashMap<Symbol, HirType>,
     generic_interfaces: &GenericInterfaces,
     expected_return: Option<&HirType>,
 ) -> Result<Vec<HirType>, String> {
-    let mut inferred = HashMap::new();
-    for (pattern, actual) in signature.generic_param_patterns.iter().zip(actual_params) {
-        match_generic_pattern(pattern, actual, &mut inferred)?;
-    }
     // A type parameter that appears in no argument at all (e.g. `nanoid
     // <Type extends string>(size?: number): Type`, where `Type` shows up
     // solely in the return position) has nothing above to infer it from.
@@ -1546,10 +1673,64 @@ fn infer_generic_type_tuple(
     Ok(types)
 }
 
+fn infer_generic_type_tuple(
+    signature: &FnSignature,
+    actual_params: &[HirType],
+    interfaces: &HashMap<Symbol, HirType>,
+    generic_interfaces: &GenericInterfaces,
+    expected_return: Option<&HirType>,
+) -> Result<Vec<HirType>, String> {
+    let inferred = match_generic_actuals(
+        signature,
+        GenericMatchActuals::ContextualVisible(actual_params),
+    )?;
+    finalize_inferred_generic_type_tuple(
+        signature,
+        inferred,
+        interfaces,
+        generic_interfaces,
+        expected_return,
+    )
+}
+
+fn infer_generic_type_tuple_for_call(
+    signature: &FnSignature,
+    actuals: GenericMatchActuals<'_>,
+    interfaces: &HashMap<Symbol, HirType>,
+    generic_interfaces: &GenericInterfaces,
+    expected_return: Option<&HirType>,
+) -> Result<Vec<HirType>, String> {
+    let inferred = match_generic_actuals(signature, actuals)?;
+    finalize_inferred_generic_type_tuple(
+        signature,
+        inferred,
+        interfaces,
+        generic_interfaces,
+        expected_return,
+    )
+}
+
+fn infer_generic_type_tuple_with_receiver(
+    signature: &FnSignature,
+    visible: &[HirType],
+    receiver: Option<&HirType>,
+    interfaces: &HashMap<Symbol, HirType>,
+    generic_interfaces: &GenericInterfaces,
+    expected_return: Option<&HirType>,
+) -> Result<Vec<HirType>, String> {
+    infer_generic_type_tuple_for_call(
+        signature,
+        GenericMatchActuals::ReceiverAndVisible { receiver, visible },
+        interfaces,
+        generic_interfaces,
+        expected_return,
+    )
+}
+
 fn resolve_explicit_generic_type_tuple(
     signature: &FnSignature,
     arguments: &[Box<TsType>],
-    actual_params: &[HirType],
+    actuals: GenericMatchActuals<'_>,
     interfaces: &HashMap<Symbol, HirType>,
     generic_interfaces: &GenericInterfaces,
 ) -> Result<Vec<HirType>, String> {
@@ -1568,6 +1749,16 @@ fn resolve_explicit_generic_type_tuple(
             "expects {expected} explicit type argument(s), got {}",
             arguments.len()
         ));
+    }
+
+    if matches!(
+        actuals,
+        GenericMatchActuals::Physical(_) | GenericMatchActuals::ReceiverAndVisible { .. }
+    ) {
+        // Explicit type arguments still validate malformed signature metadata
+        // before resolving those types, but defer receiver presence and all
+        // actual-pattern matching until after defaults and constraints.
+        validate_actual_call_generic_receiver_metadata(signature)?;
     }
 
     let mut types = Vec::with_capacity(signature.generic_type_params.len());
@@ -1621,10 +1812,7 @@ fn resolve_explicit_generic_type_tuple(
         }
     }
 
-    let mut inferred = HashMap::new();
-    for (pattern, actual) in signature.generic_param_patterns.iter().zip(actual_params) {
-        match_generic_pattern(pattern, actual, &mut inferred)?;
-    }
+    let inferred = match_generic_actuals(signature, actuals)?;
     for (name, inferred) in inferred {
         let explicit = &substitution[&name];
         if inferred != runtime_generic_type(explicit) {
@@ -1716,6 +1904,7 @@ fn lower_generic_instance(
     seed_global_scope(&mut lowerer, global_types, immutable_globals);
     for (source, param) in fn_decl.function.params.iter().zip(&params) {
         lowerer.mark_array_parameter(&param.name, &param.ty);
+        lowerer.mark_declared_nullable_parameter(&param.name, &param.ty);
         lowerer.immutable_bindings.remove(&param.name);
         lowerer.scope.insert(param.name.clone(), param.ty.clone());
         lowerer

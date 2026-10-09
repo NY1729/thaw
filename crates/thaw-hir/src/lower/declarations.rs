@@ -363,6 +363,7 @@ fn lower_class_constructor(
         .push(this_name.clone());
     for parameter in &initializer_params {
         lowerer.mark_array_parameter(&parameter.name, &parameter.ty);
+        lowerer.mark_declared_nullable_parameter(&parameter.name, &parameter.ty);
         lowerer
             .scope
             .insert(parameter.name.clone(), parameter.ty.clone());
@@ -834,6 +835,8 @@ fn lower_class_methods(
         }
         for parameter in &params {
             lowerer.mark_array_parameter(&parameter.name, &parameter.ty);
+            lowerer.mark_declared_nullable_parameter(&parameter.name, &parameter.ty);
+        lowerer.mark_declared_nullable_parameter(&parameter.name, &parameter.ty);
             lowerer
                 .scope
                 .insert(parameter.name.clone(), parameter.ty.clone());
@@ -1137,6 +1140,7 @@ fn lower_fn_decl(
     let promise_rejection_callback = name.ends_with(PROMISE_REJECTION_CALLBACK_SUFFIX);
     for (index, (source, param)) in func.params.iter().zip(runtime_params).enumerate() {
         lowerer.mark_array_parameter(&param.name, &param.ty);
+        lowerer.mark_declared_nullable_parameter(&param.name, &param.ty);
         lowerer.immutable_bindings.remove(&param.name);
         lowerer.scope.insert(param.name.clone(), param.ty.clone());
         lowerer
@@ -1452,7 +1456,7 @@ fn lower_function_statements(
                     Box::new(HirExpr::Lit(HirLit::Bool(true))),
                 )),
                 HirStmt::Try(
-                    self.inject_finally_before_exits(
+                    lowerer.inject_finally_before_exits(
                         generator_body,
                         std::slice::from_ref(&clear_running),
                         false,
@@ -1477,6 +1481,70 @@ fn lower_function_statements(
                 vec![close_generator, HirStmt::Throw(HirExpr::Var(uncaught_error.clone()))],
                 Some(uncaught_error),
             )];
+            if generator_suspends {
+                // Requests queue: a `next()` issued while an earlier request is
+                // suspended in an `await` waits for its turn (ticket/serving).
+                let next_ticket = "__thaw_async_generator_next_ticket".to_string();
+                let serving = "__thaw_async_generator_serving".to_string();
+                let ticket = "__thaw_async_generator_ticket".to_string();
+                let queue_error = "__thaw_async_generator_queue_error".to_string();
+                for name in [&next_ticket, &serving] {
+                    lowerer.scope.insert(name.clone(), HirType::F64);
+                    body.push(HirStmt::Let(name.clone(), HirType::F64, HirExpr::Lit(HirLit::F64(0.0))));
+                }
+                lowerer.scope.insert(ticket.clone(), HirType::F64);
+                lowerer.scope.insert(queue_error.clone(), HirType::Str);
+                let var = |name: &String| Box::new(HirExpr::Var(name.clone()));
+                let plus_one = || HirExpr::BinOp(
+                    BinOp::Add, var(&ticket), Box::new(HirExpr::Lit(HirLit::F64(1.0))));
+                let advance = HirStmt::Expr(HirExpr::Assign(serving.clone(), Box::new(plus_one())));
+                let turn = HirExpr::PromiseNew(
+                    Box::new(HirExpr::Lambda(
+                        Vec::new(),
+                        vec![HirParam {
+                            name: "__thaw_async_generator_turn_resolve".into(),
+                            ty: HirType::Function(Vec::new(), Box::new(HirType::Void)),
+                        }],
+                        HirType::Void,
+                        Box::new(HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_async_generator_turn_resolve".into())),
+                            Vec::new(),
+                        )),
+                    )),
+                    HirType::Void,
+                    false,
+                    false,
+                );
+                generator_body = vec![
+                    HirStmt::Let(ticket.clone(), HirType::F64, HirExpr::Var(next_ticket.clone())),
+                    HirStmt::Expr(HirExpr::Assign(
+                        next_ticket.clone(),
+                        Box::new(plus_one()),
+                    )),
+                    HirStmt::While(
+                        HirExpr::BinOp(BinOp::Lt, var(&serving), var(&ticket)),
+                        vec![HirStmt::Expr(HirExpr::Await(Box::new(turn)))],
+                    ),
+                    // A fresh result array per request: an earlier request's
+                    // consumer may not have drained the previous one yet.
+                    HirStmt::Expr(HirExpr::Assign(
+                        "__thaw_generator_values".to_string(),
+                        Box::new(HirExpr::ArrayLit(Vec::new())),
+                    )),
+                    HirStmt::Try(
+                        lowerer.inject_finally_before_exits(
+                            generator_body,
+                            std::slice::from_ref(&advance),
+                            false,
+                            1,
+                        )?,
+                        queue_error.clone(),
+                        vec![advance.clone(), HirStmt::Throw(HirExpr::Var(queue_error.clone()))],
+                        Some(queue_error.clone()),
+                    ),
+                    advance,
+                ];
+            }
         }
         let generator_body = HirExpr::Block(generator_body);
         let mut referenced = BTreeSet::new();

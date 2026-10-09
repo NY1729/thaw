@@ -532,7 +532,10 @@ fn quickjs_errors_use_thaw_try_catch_and_finally() {
     "#;
     assert_eq!(
         compile_and_run(source, "quickjs_result_abi"),
-        "`boom` threw: kaboom\ncleanup\n`later`'s promise rejected: nope\n`badThen`'s promise rejected: bad then\n"
+        // The old "`label` threw:" / "`label`'s promise rejected:" prefixes were Thaw-only
+        // decorations; a caught error prints its bare message (Node prints a stack trace
+        // here, which a native binary has no equivalent of, so only the message remains).
+        "kaboom\ncleanup\nnope\nbad then\n"
     );
 }
 
@@ -552,7 +555,7 @@ fn async_await_catches_a_typed_quickjs_promise_rejection() {
     "#;
     assert_eq!(
         compile_and_run(source, "typed_quickjs_async_rejection"),
-        "AbortError `laterAsync`'s promise rejected: stopped\n"
+        "AbortError stopped\n"
     );
 }
 
@@ -751,10 +754,11 @@ fn frame_split_runs_finally_then_rethrows_child_rejection() {
             console.log("also-unreachable");
         }
     "#;
-    assert_eq!(
-        compile_and_run(source, "async_rejection_finally"),
-        "before\nfinally\n"
-    );
+    // Node prints "before\nfinally\n", then exits 1 on the unhandled rejection.
+    let (stdout, stderr, code) = compile_and_run_failing(source, "async_rejection_finally");
+    assert_eq!(stdout, "before\nfinally\n");
+    assert!(stderr.contains("Uncaught: boom"), "{stderr}");
+    assert_eq!(code, Some(1));
 }
 
 #[test]
@@ -950,20 +954,24 @@ fn throwing_a_non_string_value_coerces_it_to_a_string() {
     "#;
     assert_eq!(
         compile_and_run(source, "throw_non_string_coerces"),
-        "42\ntrue\n[object Object]\n"
+        "42\ntrue\n{ code: 42, reason: 'bad' }\n"
     );
 }
 
 #[test]
 fn throwing_an_unsupported_value_is_a_compile_error_not_a_crash() {
-    let module = thaw_parser::parse_typescript(
+    // Any value is throwable. Node treats `throw Promise.resolve(1)` as an
+    // uncaught exception (exit status 1, `Promise { 1 }` on stderr); the
+    // native program must do the same instead of failing to compile or
+    // crashing.
+    let (stdout, stderr, status) = compile_and_run_failing(
         r#"function main(): void {
             throw Promise.resolve(1);
         }"#,
-    )
-    .unwrap();
-    let error = thaw_hir::lower_module(&module).unwrap_err();
-    assert!(error.contains("string conversion") || error.contains("Promise"), "{error}");
+        "throw_unsupported_value",
+    );
+    assert_eq!((stdout.as_str(), status), ("", Some(1)), "{stderr}");
+    assert!(stderr.starts_with("Uncaught:"), "{stderr}");
 }
 
 /// `const g: any = gen();` (coercing a generator's own internal
@@ -1595,4 +1603,24 @@ fn labeled_do_while_continue_checks_outer_condition_and_exits_outer_loop() {
         }
     "#;
     assert_eq!(compile_and_run(source, "do_while_continue_depth"), "2 2\n2\n");
+}
+
+/// `const err: any = caughtError` must keep `name`/`message` readable (Node: `Error boom`);
+/// the widened framed error used to leak as raw frame text with `undefined` properties.
+#[test]
+fn an_any_copy_of_a_caught_error_exposes_name_and_message() {
+    let output = compile_and_run(
+        r#"
+        function main(): void {
+            try {
+                throw new Error("boom");
+            } catch (e) {
+                const err: any = e;
+                console.log(err.name, err.message);
+            }
+        }
+        "#,
+        "any_copy_of_caught_error",
+    );
+    assert_eq!(output.trim(), "Error boom");
 }

@@ -14,9 +14,15 @@ thread_local! {
     // first reference projection.
     static OBJECT_PROJECTORS: RefCell<HashMap<usize, (String, usize)>> =
         RefCell::new(HashMap::new());
+    // A thrown Error record's `() -> Json` describer, so a catch can read the
+    // record without any QuickJS projection. Arena child of its owner like a
+    // projector.
+    static OBJECT_DESCRIBERS: RefCell<HashMap<usize, usize>> =
+        RefCell::new(HashMap::new());
     // A structural alias can enumerate fields in a different order from the
     // physical allocation. Record its original byte offsets at the first
     // type-erasure boundary, without copying or changing the object ABI.
+    #[allow(clippy::type_complexity)]
     static OBJECT_FIELD_OFFSETS: RefCell<HashMap<usize, (String, HashMap<String, u64>)>> =
         RefCell::new(HashMap::new());
     // The source HIR type carries class ancestry in the marker field name;
@@ -461,7 +467,7 @@ fn full_object_field_names(owner: *const u8) -> Option<Vec<String>> {
         let length = segment[..colon].parse::<usize>().ok()?;
         let end = colon.checked_add(1)?.checked_add(length.checked_mul(2)?)?;
         let hex = segment.get(colon + 1..end)?;
-        let bytes = hex.as_bytes().chunks_exact(2).map(|pair| {
+        let bytes = hex.as_bytes().as_chunks::<2>().0.iter().map(|pair| {
             u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok()
         }).collect::<Option<Vec<_>>>()?;
         String::from_utf8(bytes).ok()
@@ -654,11 +660,35 @@ pub unsafe extern "C" fn thaw_object_projector(
         .unwrap_or(std::ptr::null_mut()))
 }
 
+#[no_mangle]
+/// # Safety
+/// `owner` and `closure` are arena objects.
+pub unsafe extern "C" fn thaw_object_register_describer(owner: *mut u8, closure: *mut u8) -> bool {
+    if owner.is_null() || closure.is_null() || !thaw_arena::contains_allocation(owner as usize) {
+        return false;
+    }
+    OBJECT_DESCRIBERS.with(|describers| {
+        let old = describers.borrow_mut().insert(owner as usize, closure as usize).unwrap_or_default();
+        thaw_arena::replace_reference(owner as usize, old, closure as usize);
+        true
+    })
+}
+
+#[no_mangle]
+/// # Safety
+/// `owner` is an arena object.
+pub unsafe extern "C" fn thaw_object_describer(owner: *const u8) -> *mut u8 {
+    if owner.is_null() { return std::ptr::null_mut(); }
+    OBJECT_DESCRIBERS.with(|describers| describers.borrow().get(&(owner as usize))
+        .map(|closure| *closure as *mut u8).unwrap_or(std::ptr::null_mut()))
+}
+
 fn clear_object_states() {
     OBJECT_STATES.with(|states| states.borrow_mut().clear());
     OBJECT_ACCESSORS.with(|accessors| accessors.borrow_mut().clear());
     OBJECT_PROPERTY_FLAGS.with(|flags| flags.borrow_mut().clear());
     OBJECT_PROJECTORS.with(|projectors| projectors.borrow_mut().clear());
+    OBJECT_DESCRIBERS.with(|describers| describers.borrow_mut().clear());
     OBJECT_FIELD_OFFSETS.with(|offsets| offsets.borrow_mut().clear());
     OBJECT_CLASS_IDENTITIES.with(|identities| identities.borrow_mut().clear());
 }
@@ -669,6 +699,7 @@ fn prune_object_states() {
     OBJECT_ACCESSORS.with(|accessors| accessors.borrow_mut().retain(|pointer, _| !thaw_arena::was_reclaimed(*pointer)));
     OBJECT_PROPERTY_FLAGS.with(|flags| flags.borrow_mut().retain(|pointer, _| !thaw_arena::was_reclaimed(*pointer)));
     OBJECT_PROJECTORS.with(|projectors| projectors.borrow_mut().retain(|pointer, _| !thaw_arena::was_reclaimed(*pointer)));
+    OBJECT_DESCRIBERS.with(|describers| describers.borrow_mut().retain(|pointer, _| !thaw_arena::was_reclaimed(*pointer)));
     OBJECT_FIELD_OFFSETS.with(|offsets| offsets.borrow_mut().retain(|pointer, _| !thaw_arena::was_reclaimed(*pointer)));
     OBJECT_CLASS_IDENTITIES.with(|identities| identities.borrow_mut().retain(|pointer, _| !thaw_arena::was_reclaimed(*pointer)));
 }

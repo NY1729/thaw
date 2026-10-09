@@ -1037,7 +1037,7 @@ impl<'a> FnLowerer<'a> {
                 }
                 if let Some((_, existing)) = field_types.iter_mut().find(|(field, _)| field == &name) {
                     if name.starts_with("__thaw_class_identity_\u{1e}") && *existing != ty {
-                        let mut members = match existing {
+                        let mut members = match &*existing {
                             HirType::Union(members) => members.clone(),
                             previous => vec![previous.clone()],
                         };
@@ -1408,7 +1408,12 @@ impl<'a> FnLowerer<'a> {
                 }
             }
             for (name, value) in additions {
-                let ty = self.infer_expr_type(&value)?;
+                // Keep `Bytes` (instead of the erased `number[]`) so `console.log({ b })` can
+                // still tell a `Buffer` field apart (see `console_object_with_buffers`).
+                let ty = match self.infer_expr_type_inner(&value) {
+                    Ok(HirType::Bytes) => HirType::Bytes,
+                    _ => self.infer_expr_type(&value)?,
+                };
                 let temporary = format!("__thaw_object_field_{}", self.next_binding);
                 self.next_binding += 1;
                 self.scope.insert(temporary.clone(), ty.clone());
@@ -1628,8 +1633,89 @@ impl<'a> FnLowerer<'a> {
                 result.as_ref().clone(),
                 Box::new(Self::unreachable_value(result)?),
             )),
+            HirType::I64 => Ok(HirExpr::Lit(HirLit::I64(0))),
+            HirType::Symbol => Ok(HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_symbol_new".into())),
+                vec![HirExpr::Lit(HirLit::Str(String::new()))],
+            )),
+            HirType::Bytes => Ok(HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_bytes_alloc".into())),
+                vec![HirExpr::Lit(HirLit::F64(0.0))],
+            )),
+            // `new Map()` / `new Set()` and the weak variants share the one allocation
+            // intrinsic; the closure only types it (inference does not look inside).
+            HirType::Map(..) | HirType::WeakMap(..) | HirType::Set(_) | HirType::WeakSet(_) => {
+                Ok(HirExpr::TypedClosure(
+                    ty.clone(),
+                    Box::new(HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_map_new".into())),
+                        Vec::new(),
+                    )),
+                ))
+            }
+            // A promise that resolves with its own placeholder: the executor form every
+            // other `Promise<T>` construction in this crate uses.
+            HirType::Promise(resolved) => {
+                let resolve = "__thaw_unreachable_resolve".to_string();
+                let (resolve_params, resolve_args) = if matches!(resolved.as_ref(), HirType::Void) {
+                    (Vec::new(), Vec::new())
+                } else {
+                    (vec![resolved.as_ref().clone()], vec![Self::unreachable_value(resolved)?])
+                };
+                let executor = HirExpr::Lambda(
+                    Vec::new(),
+                    vec![HirParam {
+                        name: resolve.clone(),
+                        ty: HirType::Function(resolve_params, Box::new(HirType::Void)),
+                    }],
+                    HirType::Void,
+                    Box::new(HirExpr::Call(Box::new(HirExpr::Var(resolve)), resolve_args)),
+                );
+                Ok(HirExpr::PromiseNew(Box::new(executor), resolved.as_ref().clone(), false, false))
+            }
+            // The literal's own inferred type would be an `Array` for equal member types,
+            // so the closure states the tuple type (erased before codegen like `new Map()`).
+            HirType::Tuple(members) => Ok(HirExpr::TypedClosure(
+                ty.clone(),
+                Box::new(HirExpr::ArrayLit(
+                    members.iter().map(Self::unreachable_value).collect::<Result<Vec<_>, _>>()?,
+                )),
+            )),
+            HirType::CallableFunction(params, _, None, result) => Ok(HirExpr::TypedClosure(
+                ty.clone(),
+                Box::new(HirExpr::Lambda(
+                    Vec::new(),
+                    params.iter().enumerate().map(|(index, param)| HirParam {
+                        name: format!("__thaw_unreachable_parameter_{index}"),
+                        ty: param.clone(),
+                    }).collect(),
+                    result.as_ref().clone(),
+                    Box::new(Self::unreachable_value(result)?),
+                )),
+            )),
+            HirType::FunctionWithThis(receiver, visible) => {
+                let HirType::Function(params, result) = visible.as_ref() else {
+                    return Err(format!(
+                        "unreachable value of a `this`-taking function needs a plain visible signature, got {visible:?}"
+                    ));
+                };
+                let mut lambda_params = vec![HirParam {
+                    name: "__thaw_this".into(),
+                    ty: receiver.as_ref().clone(),
+                }];
+                lambda_params.extend(params.iter().enumerate().map(|(index, param)| HirParam {
+                    name: format!("__thaw_unreachable_parameter_{index}"),
+                    ty: param.clone(),
+                }));
+                Ok(HirExpr::NonArrowFunction(Box::new(HirExpr::Lambda(
+                    Vec::new(),
+                    lambda_params,
+                    result.as_ref().clone(),
+                    Box::new(Self::unreachable_value(result)?),
+                ))))
+            }
             other => Err(format!(
-                "unbound `this` cannot synthesize unreachable value of type {other:?}"
+                "cannot synthesize an unreachable placeholder value of type {other:?}"
             )),
         }
     }
@@ -1694,13 +1780,29 @@ impl<'a> FnLowerer<'a> {
         obj: HirExpr,
         obj_ty: HirType,
         property: &str,
-    ) -> (HirExpr, HirType) {
+        reject_unnarrowed: bool,
+    ) -> Result<(HirExpr, HirType), String> {
         let payload = match &obj_ty {
             HirType::Optional(payload) | HirType::Nullable(payload) | HirType::Nullish(payload) => {
                 payload.as_ref().clone()
             }
-            _ => return (obj, obj_ty),
+            _ => return Ok((obj, obj_ty)),
         };
+        // Like `tsc` (strictNullChecks): a property read on a *named binding* whose type may be
+        // `undefined`/`null` and that was not narrowed is a compile-time error. Receivers that are
+        // not plain bindings (element reads, call results, ...) can only look optional because the
+        // native types are more conservative than TypeScript's, so they keep a runtime
+        // `TypeError` guard instead.
+        if reject_unnarrowed {
+            let absent = match &obj_ty {
+                HirType::Optional(_) => "undefined",
+                HirType::Nullable(_) => "null",
+                _ => "null or undefined",
+            };
+            return Err(format!(
+                "Object is possibly {absent}: cannot read property `{property}` of {obj_ty:?} before narrowing it"
+            ));
+        }
         let wrapper_type = obj_ty.clone();
         let name = format!("__thaw_required_receiver_{}", self.next_binding);
         self.next_binding += 1;
@@ -1737,7 +1839,7 @@ impl<'a> FnLowerer<'a> {
             ),
             _ => unreachable!(),
         };
-        (
+        Ok((
             HirExpr::Call(
                 Box::new(HirExpr::Lambda(
                     Vec::new(),
@@ -1754,7 +1856,7 @@ impl<'a> FnLowerer<'a> {
                 vec![obj],
             ),
             payload,
-        )
+        ))
     }
 
     fn lower_unbound_this_member(&self, property: &str) -> Result<HirExpr, String> {
@@ -1782,6 +1884,35 @@ impl<'a> FnLowerer<'a> {
         }
     }
 
+    /// `console.log(record.missing)` must print `undefined` like Node, but a
+    /// `Record<string, number|string|boolean>` read is statically the bare
+    /// payload (a missing key would decode as NaN/""/false). For a console
+    /// argument only, read through the `Optional` form so absence stays visible.
+    pub(super) fn lower_console_dictionary_read(&mut self, expr: &Expr) -> Result<Option<HirExpr>, String> {
+        let Expr::Member(member) = expr else { return Ok(None) };
+        let Expr::Ident(object) = member.obj.as_ref() else { return Ok(None) };
+        let Some(HirType::Dictionary(element)) = self.scope.get(&self.resolve_binding(object.sym.as_ref())).cloned() else {
+            return Ok(None);
+        };
+        if !matches!(element.as_ref(), HirType::F64 | HirType::Str | HirType::Bool) {
+            return Ok(None);
+        }
+        let key = match &member.prop {
+            MemberProp::Ident(prop) => HirExpr::Lit(HirLit::Str(prop.sym.to_string())),
+            MemberProp::Computed(computed) => {
+                let key = self.lower_expr(&computed.expr)?;
+                if self.infer_expr_type(&key)? != HirType::Str {
+                    return Ok(None);
+                }
+                key
+            }
+            _ => return Ok(None),
+        };
+        let object = self.lower_expr(&member.obj)?;
+        let optional = HirType::Optional(element);
+        self.typed_dictionary_read(object, key, &optional).map(Some)
+    }
+
     pub(super) fn typed_dictionary_read(
         &mut self,
         object: HirExpr,
@@ -1805,16 +1936,26 @@ impl<'a> FnLowerer<'a> {
             ],
         );
         let body = match element {
-            HirType::Optional(payload) => HirExpr::Block(vec![HirStmt::If(
-                has_own,
-                vec![HirStmt::Return(Some(HirExpr::OptionalSome(
-                    Box::new(Self::dictionary_value_from_json(raw, payload)?),
-                    payload.as_ref().clone(),
-                )))],
-                vec![HirStmt::Return(Some(HirExpr::OptionalNone(
-                    payload.as_ref().clone(),
-                )))],
-            )]),
+            // A stored `undefined` (e.g. an unmatched named regex group) is the
+            // absent state of an `Optional`, same as a missing key.
+            HirType::Optional(payload) => {
+                let none = || HirStmt::Return(Some(HirExpr::OptionalNone(payload.as_ref().clone())));
+                HirExpr::Block(vec![HirStmt::If(
+                    has_own,
+                    vec![HirStmt::If(
+                        HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_json_is_undefined".into())),
+                            vec![raw.clone()],
+                        ),
+                        vec![none()],
+                        vec![HirStmt::Return(Some(HirExpr::OptionalSome(
+                            Box::new(Self::dictionary_value_from_json(raw, payload)?),
+                            payload.as_ref().clone(),
+                        )))],
+                    )],
+                    vec![none()],
+                )])
+            }
             HirType::Nullable(payload) => {
                 Self::lower_nullable_dictionary_value(raw, payload, false)?
             }
@@ -1964,7 +2105,7 @@ impl<'a> FnLowerer<'a> {
     fn lower_required_member_receiver(&mut self, expr: &Expr, property: &str) -> Result<HirExpr, String> {
         let receiver = self.lower_member_receiver(expr)?;
         let ty = self.infer_expr_type(&receiver)?;
-        Ok(self.unwrap_required_optional_member(receiver, ty, property).0)
+        Ok(self.unwrap_required_optional_member(receiver, ty, property, self.receiver_requires_narrowing(expr))?.0)
     }
 
     fn lower_union_array_index(
@@ -2461,7 +2602,7 @@ impl<'a> FnLowerer<'a> {
                 let obj = self.lower_member_receiver(&member.obj)?;
                 let obj_ty = self.infer_expr_type(&obj)?;
                 let (obj, obj_ty) =
-                    self.unwrap_required_optional_member(obj, obj_ty, "computed property");
+                    self.unwrap_required_optional_member(obj, obj_ty, "computed property", self.receiver_requires_narrowing(&member.obj))?;
                 match obj_ty {
                     HirType::Array(element) => {
                         let index = self.lower_expr(&computed.expr)?;
@@ -2610,7 +2751,8 @@ impl<'a> FnLowerer<'a> {
                     HirType::Json => {
                         let key = self.lower_expr(&computed.expr)?;
                         match self.infer_expr_type(&key)? {
-                            HirType::Str => {
+                            // A symbol is stored under its private string token.
+                            HirType::Str | HirType::Symbol => {
                                 Ok(HirExpr::JsonKey(Box::new(obj), Box::new(key)))
                             }
                             HirType::F64 => {
@@ -2699,7 +2841,7 @@ impl<'a> FnLowerer<'a> {
                 let obj = self.lower_member_receiver(&member.obj)?;
                 let obj_ty = self.infer_expr_type(&obj)?;
                 let (obj, obj_ty) =
-                    self.unwrap_required_optional_member(obj, obj_ty, prop.sym.as_ref());
+                    self.unwrap_required_optional_member(obj, obj_ty, prop.sym.as_ref(), self.receiver_requires_narrowing(&member.obj))?;
                 // A custom property read on a *catch-bound* error string
                 // (`catch (e) { e.status }`, real trigger: koa's
                 // `http-errors` error) has no declared field to read.
@@ -3686,6 +3828,7 @@ impl<'a> FnLowerer<'a> {
         value: HirExpr,
         fields: &[(Symbol, HirType)],
         factory_body: bool,
+        live: bool,
     ) -> Result<HirExpr, String> {
         let source_type = HirType::Object(fields.to_vec());
         let source_name = format!("__thaw_dynamic_accessor_object_{}", self.next_binding);
@@ -3734,9 +3877,18 @@ impl<'a> FnLowerer<'a> {
                     if Self::fixed_object_supports_live_projection(&read_type) {
                         // Preserve nested native storage identity when its
                         // receiver layout is safe to expose as a live host.
-                        read = self.lower_fixed_object_as_dynamic_accessor_object(read, nested, false)?;
+                        read = self.lower_fixed_object_as_dynamic_accessor_object(read, nested, false, live)?;
                         read_type = HirType::JsValue;
                     }
+                }
+                // A receiver-aware method field: expose it as a function with the
+                // receiver already bound to this live owner, so a host call
+                // `view.method(...)` mutates the original storage.
+                if let Some((bound, bound_type)) =
+                    self.bind_projected_method_receiver(&read, &read_type, &source_type)?
+                {
+                    read = bound;
+                    read_type = bound_type;
                 }
                 let callback = HirExpr::Lambda(
                     Vec::new(),
@@ -3885,6 +4037,12 @@ impl<'a> FnLowerer<'a> {
         body.extend(self.lower_ordered_fixed_field_statements(
             HirExpr::Var(source_name.clone()), fields, metadata_actions,
         )?);
+        // One entry past the last key: the wrapper is a live reference to a native owner
+        // (not the projection of a fresh `any` literal, which converts to a mutable copy).
+        body.push(HirStmt::Expr(HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_array_push".into())),
+            vec![HirExpr::Var(accessor_name.clone()), HirExpr::Lit(HirLit::Bool(live))],
+        )));
         let keys = self.coerce_to_declared(
             &HirType::Json,
             HirExpr::Var(keys_name),
@@ -4139,6 +4297,8 @@ impl<'a> FnLowerer<'a> {
         let mut value = None;
         let mut getter = None;
         let mut setter = None;
+        let mut attribute_mask = 0u8;
+        let mut attribute_bits = 0u8;
         for entry in &descriptor.props {
             let swc_ecma_ast::PropOrSpread::Prop(entry) = entry else {
                 return Err(format!("`{label}` descriptor must not spread"));
@@ -4173,7 +4333,21 @@ impl<'a> FnLowerer<'a> {
                 }
                 "get" => getter = Some(entry.as_ref()),
                 "set" => setter = Some(entry.as_ref()),
-                "writable" | "enumerable" | "configurable" => {}
+                "writable" | "enumerable" | "configurable" => {
+                    // Only literal booleans are modelled; an absent attribute
+                    // keeps the property's current flag.
+                    if let swc_ecma_ast::Prop::KeyValue(property) = entry.as_ref() {
+                        if let Expr::Lit(Lit::Bool(flag)) = property.value.as_ref() {
+                            let bit = match name.as_str() {
+                                "writable" => 1u8,
+                                "enumerable" => 2,
+                                _ => 4,
+                            };
+                            attribute_mask |= bit;
+                            if flag.value { attribute_bits |= bit; }
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -4189,6 +4363,47 @@ impl<'a> FnLowerer<'a> {
                         "`{label}` cannot add the new field `{key}` to a fixed object"
                     ));
                 };
+                // Descriptor attributes live on the owner (`thaw_object_*_property_flags`).
+                // Validate the transition before any write, apply it after the value.
+                let attribute_flags = |next: &mut Self, target: &HirExpr| -> (Vec<HirExpr>, Vec<HirExpr>) {
+                    if attribute_mask == 0 || !key_is_plain_field(key) {
+                        return (Vec::new(), Vec::new());
+                    }
+                    let _ = next;
+                    let current = HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_object_property_flags".into())),
+                        vec![target.clone(), HirExpr::Lit(HirLit::Str(key.into()))],
+                    );
+                    let requested = HirExpr::BinOp(
+                        BinOp::BitOr,
+                        Box::new(HirExpr::BinOp(
+                            BinOp::BitAnd,
+                            Box::new(current),
+                            Box::new(HirExpr::Lit(HirLit::F64(f64::from(7 - attribute_mask)))),
+                        )),
+                        Box::new(HirExpr::Lit(HirLit::F64(f64::from(attribute_bits)))),
+                    );
+                    let call = |name: &str| HirExpr::Call(
+                        Box::new(HirExpr::Var(name.into())),
+                        vec![
+                            target.clone(),
+                            HirExpr::Lit(HirLit::Str(key.into())),
+                            requested.clone(),
+                        ],
+                    );
+                    let check = HirExpr::Block(vec![
+                        HirStmt::If(
+                            call("__thaw_object_can_set_property_flags"),
+                            Vec::new(),
+                            vec![HirStmt::Throw(HirExpr::Lit(HirLit::Str(format!(
+                                "\u{1}TypeError\u{1}Cannot redefine property: {key}"
+                            ))))],
+                        ),
+                        HirStmt::Return(Some(HirExpr::Lit(HirLit::Bool(true)))),
+                    ]);
+                    (vec![check], vec![call("__thaw_object_set_property_flags")])
+                };
+                let (attribute_check, attribute_apply) = attribute_flags(self, &target);
                 let getter_name = format!("__thaw_getter_{key}");
                 let setter_name = format!("__thaw_setter_{key}");
                 let existing_getter = fields.iter().find(|(name, _)| name == &getter_name);
@@ -4201,14 +4416,19 @@ impl<'a> FnLowerer<'a> {
                     }
                     let value = self.lower_expr(value)?;
                     let value = self.coerce_to_declared(field_type, value)?;
-                    return Ok(vec![HirExpr::PropAssign(
+                    // Only the plain `[PropAssign]` shape is special-cased by the
+                    // `Reflect.defineProperty` caller; attributes widen it.
+                    let mut assignments = attribute_check;
+                    assignments.push(HirExpr::PropAssign(
                         Box::new(target),
                         target_type.clone(),
                         key.into(),
                         Box::new(value),
-                    )]);
+                    ));
+                    assignments.extend(attribute_apply);
+                    return Ok(assignments);
                 }
-                let mut assignments = Vec::new();
+                let mut assignments = attribute_check;
                 for (entry, hidden, existing) in [
                     (getter, getter_name, existing_getter),
                     (setter, setter_name, existing_setter),
@@ -4231,6 +4451,7 @@ impl<'a> FnLowerer<'a> {
                         Box::new(value),
                     ));
                 }
+                assignments.extend(attribute_apply);
                 Ok(assignments)
             }
             HirType::Json => {
@@ -4256,6 +4477,11 @@ impl<'a> FnLowerer<'a> {
         }
     }
 
+}
+
+/// Hidden marker fields and accessor slots have no descriptor flags of their own.
+fn key_is_plain_field(key: &str) -> bool {
+    !key.starts_with("__thaw_") && !key.starts_with('\u{1f}')
 }
 
 /// The ECMAScript well-known symbols (`Symbol.<name>`) that thaw recognizes
@@ -4361,6 +4587,49 @@ impl<'a> FnLowerer<'a> {
         (HirExpr::ObjectLit(copied), None)
     }
 
+    /// For a method field whose first parameter is the receiver-view object,
+    /// returns a closure over `__thaw_this` taking only the remaining
+    /// parameters, calling the method with a live receiver view of the owner.
+    fn bind_projected_method_receiver(
+        &mut self,
+        method: &HirExpr,
+        method_type: &HirType,
+        owner_type: &HirType,
+    ) -> Result<Option<(HirExpr, HirType)>, String> {
+        let HirType::Function(params, ret) = method_type else {
+            return Ok(None);
+        };
+        let Some(HirType::Object(receiver_fields)) = params.first() else {
+            return Ok(None);
+        };
+        if !receiver_fields.iter().any(|(name, _)| name == "__thaw_object_method_receiver") {
+            return Ok(None);
+        }
+        let this = HirExpr::Var("__thaw_this".into());
+        let (this_arg, view_binding) =
+            self.native_object_method_receiver(this, owner_type, receiver_fields);
+        let captures = vec![HirParam { name: "__thaw_this".into(), ty: owner_type.clone() }];
+        let mut statements = Vec::new();
+        if let Some((name, ty, value)) = view_binding {
+            statements.push(HirStmt::Let(name, ty, value));
+        }
+        let mut rest_params = Vec::new();
+        let mut arguments = vec![this_arg];
+        for (index, ty) in params[1..].iter().enumerate() {
+            let name = format!("__thaw_projected_method_arg_{}_{}", index, self.next_binding);
+            self.scope.insert(name.clone(), ty.clone());
+            arguments.push(HirExpr::Var(name.clone()));
+            rest_params.push(HirParam { name, ty: ty.clone() });
+        }
+        self.next_binding += 1;
+        let call = HirExpr::Call(Box::new(method.clone()), arguments);
+        statements.push(HirStmt::Return(Some(call)));
+        let bound = HirExpr::Lambda(
+            captures, rest_params, ret.as_ref().clone(), Box::new(HirExpr::Block(statements)),
+        );
+        Ok(Some((bound, HirType::Function(params[1..].to_vec(), ret.clone()))))
+    }
+
     /// If an object literal's compiled field table (`fields`) includes a
     /// `[Symbol.toPrimitive]` method (stored under `well_known_symbol_
     /// key`'s sentinel), builds a call to it with the given ECMAScript
@@ -4381,10 +4650,7 @@ impl<'a> FnLowerer<'a> {
         let Some((_, method_ty)) = fields.iter().find(|(name, _)| *name == key) else {
             return Ok(None);
         };
-        let HirType::Function(params, _) = method_ty.clone() else {
-            return Ok(None);
-        };
-        let Some(HirType::Object(receiver_fields)) = params.into_iter().next() else {
+        let HirType::Function(params, ret) = method_ty.clone() else {
             return Ok(None);
         };
         let object_type = HirType::Object(fields.to_vec());
@@ -4393,6 +4659,18 @@ impl<'a> FnLowerer<'a> {
         self.scope.insert(name.clone(), object_type.clone());
         let bound = HirExpr::Var(name.clone());
         let method = HirExpr::PropAccess(Box::new(bound.clone()), object_type.clone(), key);
+        // A method that never reads `this` has no receiver parameter: it takes
+        // only the hint.
+        let Some(HirType::Object(receiver_fields)) = params.into_iter().next() else {
+            let call = HirExpr::Call(
+                Box::new(method),
+                vec![HirExpr::Lit(HirLit::Str(hint.to_string()))],
+            );
+            // Callers expect the raw `Json` result; a typed return is widened.
+            let call = if *ret == HirType::Json { call } else { self.coerce_to_declared(&HirType::Json, call)? };
+            let result = self.wrap_call_argument_bindings(call, &[(name, object_type, value)])?;
+            return Ok(Some(result));
+        };
         let (this_arg, view_binding) = self.native_object_method_receiver(
             bound.clone(), &object_type, &receiver_fields,
         );
@@ -4400,6 +4678,8 @@ impl<'a> FnLowerer<'a> {
             Box::new(method),
             vec![this_arg, HirExpr::Lit(HirLit::Str(hint.to_string()))],
         );
+        // Callers expect the raw `Json` result; a typed return is widened.
+        let call = if *ret == HirType::Json { call } else { self.coerce_to_declared(&HirType::Json, call)? };
         let mut bindings = vec![(name, object_type, value)];
         if let Some(binding) = view_binding { bindings.push(binding); }
         let result = self.wrap_call_argument_bindings(call, &bindings)?;

@@ -15,6 +15,8 @@
 //!
 //! Known limitations, acceptable for what this talks to: no TLS and one
 //! request per TCP connection.
+#![allow(clippy::missing_safety_doc)]
+#![cfg_attr(test, allow(unused_unsafe))]
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
@@ -112,7 +114,7 @@ pub unsafe extern "C" fn thaw_runtime_exception_report_text(
     if error.is_null() {
         return std::ptr::null_mut();
     }
-    let text: Vec<u8> = if error == native_text {
+    let text: Vec<u8> = if error == native_text || is_detached_report_text(error) {
         unsafe { CStr::from_ptr(error) }.to_bytes().to_vec()
     } else {
         match tag {
@@ -252,7 +254,10 @@ static PROMISE_SETTLED_EMPTY_REASON: &[u8] = b"\0";
 
 fn fd_poll_timeout_ms(timeout: Option<Duration>) -> i32 {
     match timeout {
-        Some(duration) => duration.as_nanos().div_ceil(1_000_000).min(i32::MAX as u128) as i32,
+        Some(duration) => duration
+            .as_nanos()
+            .div_ceil(1_000_000)
+            .min(i32::MAX as u128) as i32,
         None => -1,
     }
 }
@@ -354,7 +359,10 @@ fn poll_fd_waits(timeout: Option<Duration>) -> usize {
     let mut watcher_count = 0;
     for (watcher, events) in ready_watchers {
         let registered = FD_WATCHERS.with(|watchers| {
-            watchers.borrow().iter().any(|current| current.id == watcher.id)
+            watchers
+                .borrow()
+                .iter()
+                .any(|current| current.id == watcher.id)
         });
         if registered {
             (watcher.callback)(watcher.context, events);
@@ -500,9 +508,11 @@ pub extern "C" fn thaw_runtime_poll_one() -> u8 {
                     promise.rejected && !promise.handled && !promise.reported_unhandled
                 })
             });
-        return u8::from(io_events != 0
-            || READY_CONTINUATIONS.with(|ready| !ready.borrow().is_empty())
-            || reporting_work);
+        return u8::from(
+            io_events != 0
+                || READY_CONTINUATIONS.with(|ready| !ready.borrow().is_empty())
+                || reporting_work,
+        );
     };
     (subscription.resume)(subscription.frame, result);
     1
@@ -715,10 +725,14 @@ pub struct ThawPromise {
     exception_i64: i64,
     exception_bool: bool,
     exception_object: *const u8,
+    exception_native: *const ExceptionProvenance,
     aggregate_errors: *const u8,
     handled: bool,
     reported_unhandled: bool,
     subscribers: Vec<PromiseSubscription>,
+    internal_references: usize,
+    references: usize,
+    external_root: Option<thaw_arena::ArenaRoot>,
 }
 
 include!("runtime/promises.rs");
