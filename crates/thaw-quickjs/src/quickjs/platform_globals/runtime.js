@@ -946,11 +946,10 @@
     if (state) state.adoptSymbol(id, value);
     return value;
   };
-  const thawNapiSymbolRegister = (owner, value) => {
-      const state = thawGraphNapiSymbolState(owner);
-      if (!state) throw new thawGraphTypeError('Unknown native Symbol owner');
-      return state.registerSymbol(value);
-    };
+  // Only native code can reach this private operation, and a loaded or caller-owned
+  // environment names its own owner ID: create the owner's JS state on first use.
+  const thawNapiSymbolRegister = (owner, value) =>
+      thawGraphNapiState(owner).registerSymbol(value);
   const thawNapiSymbolLive = (owner, id) => {
       const state = thawGraphNapiSymbolState(owner);
       if (!state) throw new thawGraphTypeError('Unknown native Symbol owner');

@@ -321,7 +321,7 @@ impl<'a> FnLowerer<'a> {
             HirType::Object(fields) if matches!(&value, HirExpr::Var(_))
                 && fields.iter().any(|(name, _)|
                     name.starts_with("__thaw_class_identity_\u{1e}")
-                        && name.rsplit('\u{1f}').next().is_some_and(|ancestor| ancestor.ends_with("Error"))) => {
+                        && name.rsplit('\u{1f}').next().is_some_and(is_error_family_name)) => {
                 let HirExpr::Var(owner) = &value else { unreachable!() };
                 let snapshot = self.coerce_to_declared(&HirType::Json, value.clone())?;
                 let describer = HirExpr::Lambda(
@@ -498,7 +498,7 @@ impl<'a> FnLowerer<'a> {
             // no user code runs).
             HirType::Object(fields) if fields.iter().any(|(name, _)|
                 name.starts_with("__thaw_class_identity_\u{1e}")
-                    && name.rsplit('\u{1f}').next().is_some_and(|ancestor| ancestor.ends_with("Error")))
+                    && name.rsplit('\u{1f}').next().is_some_and(is_error_family_name))
                 && fields.iter().any(|(name, ty)| name == "message" && *ty == HirType::Str)
                 && fields.iter().any(|(name, ty)| name == "name" && *ty == HirType::Str) => {
                 let field = |name: &str| HirExpr::PropAccess(

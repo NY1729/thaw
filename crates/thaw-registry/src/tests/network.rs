@@ -2836,6 +2836,63 @@ module.exports = async function(port) {
     let _ = fs::remove_dir_all(&empty_node_modules);
 }
 
+// A request handler may block on a nested event loop (an awaited promise), and that nested loop
+// delivers the request body through the parser's resume hook while the 'request' event is still
+// being emitted. The parser must accept that re-entry instead of deferring it until the handler
+// returns, which the handler is itself waiting for.
+#[test]
+fn http_request_body_is_deliverable_while_the_request_handler_is_still_running() {
+    use std::ffi::{CStr, CString};
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::time::Duration;
+
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    let client = std::thread::spawn(move || {
+        let mut stream = loop {
+            match TcpStream::connect(("127.0.0.1", port)) {
+                Ok(stream) => break stream,
+                Err(_) => std::thread::sleep(Duration::from_millis(2)),
+            }
+        };
+        stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        stream.write_all(b"POST /echo HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello").unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        response
+    });
+
+    let dir = temp_registry("builtin_http_body_during_handler");
+    fs::write(dir.join("index.js"), r#"var http = require('node:http');
+module.exports = async function(port) {
+  var server = http.createServer(function(request, response) {
+    var received = '';
+    request.on('data', function(chunk) { received += String(chunk); });
+    request._bodyResume();
+    request._drainBody();
+    response.end('during-handler=' + received, function() { server.close(); });
+  });
+  await new Promise(function(resolve, reject) { server.on('error', reject); server.on('close', resolve); server.listen(port, '127.0.0.1'); });
+  return 'done';
+};"#).unwrap();
+    let empty_node_modules = temp_registry("builtin_http_body_during_handler_modules");
+    let (bundle, _, _, _) = bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseHttpBodyDuringHandler = globalThis.module.exports;");
+    let source = CString::new(script).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let function = CString::new("exerciseHttpBodyDuringHandler").unwrap();
+    let arguments = CString::new(format!("[{port}]")).unwrap();
+    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(result, "\"done\"");
+    let response = client.join().unwrap();
+    assert!(response.ends_with("during-handler=hello"), "{response}");
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+}
+
 #[test]
 fn http_client_rejects_malformed_incremental_chunk_sizes() {
     use std::ffi::{CStr, CString};

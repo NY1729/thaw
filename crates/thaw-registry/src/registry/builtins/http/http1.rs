@@ -261,7 +261,10 @@ pub(super) fn source(name: &str) -> Option<&'static str> {
                          active = state; request._bodyReadGate = updateGate; request._bodyResume = consume;
                          if (state.bodyDone) request.complete = true;
                          response._reuse = function() { if (terminal || active !== state || state.responseReusable) return; state.responseReusable = true; queueMicrotask(consume); };
-                         server.emit('request', request, response);
+                         // A handler may block on a nested event loop (an awaited promise), which can deliver the body
+                         // through `_bodyResume` -> `consume`; hold off the re-entrancy guard while user code runs.
+                         draining = false;
+                         try { server.emit('request', request, response); } finally { draining = true; }
                          if (terminal || active !== state || socket.destroyed) return;
                          if (state.bodyDone) request._finishBody();
                        }

@@ -1603,6 +1603,58 @@ function main(): void {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// A package's *default export* function that is overloaded by argument type
+/// (`(value: number): string` / `(value: string): number`, `export = conv`) is
+/// reached through a default import under any local name. The call must be
+/// narrowed to the overload its argument statically matches: the default-export
+/// function's overload candidates are registered under the `default` alias a
+/// default import resolves to, not only under the function's own name.
+#[test]
+fn a_default_imported_overloaded_function_narrows_by_argument_type() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-default-overloads-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("dualconv");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "declare function conv(value: number): string;\n\
+         declare function conv(value: string): number;\n\
+         export = conv;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports = function(value) { \
+         return typeof value === 'number' ? 'n' + value : Number(value) * 2; };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import convert from "dualconv";
+function main(): void {
+    const text: string = convert(7);
+    const doubled: number = convert("21");
+    console.log(text, doubled);
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "n7 42\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// A Fallback function whose real JS implementation genuinely returns
 /// `undefined` used to have that result marshaled back indistinguishably
 /// from a real `null` (`resolve_value_impl`, `crates/thaw-quickjs/src/

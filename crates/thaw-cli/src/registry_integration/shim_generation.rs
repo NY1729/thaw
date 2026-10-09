@@ -1173,7 +1173,7 @@ fn generate_registry_shims(
                     if pkg.values.iter().any(|value| value.name == function.name) {
                         // A default import (`import createDebug from "debug"`) is keyed `default`.
                         let default_alias = (pkg.commonjs_export_name.as_deref() == Some(function.name.as_str()))
-                            .then(|| format!("{}_default", sanitize_identifier(&pkg.name)));
+                            .then(|| qualified_export_alias(&pkg.name, "default"));
                         for alias in std::iter::once(function.name.clone()).chain(default_alias) {
                             fallback_function_overload_rewrites.push((
                                 alias,
@@ -1366,9 +1366,20 @@ fn generate_registry_shims(
         let package_overloads = fallback_function_overload_rewrites
             .drain(overload_rewrite_start..)
             .collect::<Vec<_>>();
+        // A default import (`import ms from "ms"`) is keyed `default` at the call
+        // site, so the package's default-export function is also a candidate
+        // under that alias -- for every overload set, not only callable values.
+        let default_aliased = |candidate: &FallbackFunctionOverloadRewrite| {
+            (pkg.commonjs_export_name.as_deref() == Some(candidate.0.as_str())).then(|| {
+                let mut aliased = candidate.clone();
+                aliased.0 = qualified_export_alias(&pkg.name, "default");
+                aliased
+            })
+        };
         for candidate in package_overloads {
             if !union_dispatched_names.contains(&(pkg.name.clone(), candidate.0.clone())) {
                 fallback_function_overload_rewrites.push(candidate.clone());
+                fallback_function_overload_rewrites.extend(default_aliased(&candidate));
             }
             if let Some(qualified) = qualified
                 .iter()
@@ -1386,6 +1397,7 @@ fn generate_registry_shims(
         // there's no duplicate-declaration risk here to guard against.
         for candidate in union_dispatch_overload_rewrites.drain(..) {
             fallback_function_overload_rewrites.push(candidate.clone());
+            fallback_function_overload_rewrites.extend(default_aliased(&candidate));
             if let Some(qualified) = qualified
                 .iter()
                 .find(|qualified| qualified.name == candidate.0)

@@ -457,7 +457,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 if a == "source" && b == "flags" && c == "lastIndex");
             let class = if is_regexp { Some("RegExp") } else {
                 marker.and_then(|ancestry| ancestry.split('\u{1f}').next())
-                    .filter(|_| !marker.unwrap().split('\u{1f}').any(|c| c.ends_with("Error")))
+                    .filter(|_| !marker.unwrap().split('\u{1f}').any(thaw_hir::is_error_family_name))
             };
             if let Some(class) = class {
                 let key = self.builder.build_global_string_ptr("__thaw_class__", "console_class_key")
