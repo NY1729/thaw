@@ -1780,13 +1780,29 @@ impl<'a> FnLowerer<'a> {
         obj: HirExpr,
         obj_ty: HirType,
         property: &str,
-    ) -> (HirExpr, HirType) {
+        reject_unnarrowed: bool,
+    ) -> Result<(HirExpr, HirType), String> {
         let payload = match &obj_ty {
             HirType::Optional(payload) | HirType::Nullable(payload) | HirType::Nullish(payload) => {
                 payload.as_ref().clone()
             }
-            _ => return (obj, obj_ty),
+            _ => return Ok((obj, obj_ty)),
         };
+        // Like `tsc` (strictNullChecks): a property read on a *named binding* whose type may be
+        // `undefined`/`null` and that was not narrowed is a compile-time error. Receivers that are
+        // not plain bindings (element reads, call results, ...) can only look optional because the
+        // native types are more conservative than TypeScript's, so they keep a runtime
+        // `TypeError` guard instead.
+        if reject_unnarrowed {
+            let absent = match &obj_ty {
+                HirType::Optional(_) => "undefined",
+                HirType::Nullable(_) => "null",
+                _ => "null or undefined",
+            };
+            return Err(format!(
+                "Object is possibly {absent}: cannot read property `{property}` of {obj_ty:?} before narrowing it"
+            ));
+        }
         let wrapper_type = obj_ty.clone();
         let name = format!("__thaw_required_receiver_{}", self.next_binding);
         self.next_binding += 1;
@@ -1823,7 +1839,7 @@ impl<'a> FnLowerer<'a> {
             ),
             _ => unreachable!(),
         };
-        (
+        Ok((
             HirExpr::Call(
                 Box::new(HirExpr::Lambda(
                     Vec::new(),
@@ -1840,7 +1856,7 @@ impl<'a> FnLowerer<'a> {
                 vec![obj],
             ),
             payload,
-        )
+        ))
     }
 
     fn lower_unbound_this_member(&self, property: &str) -> Result<HirExpr, String> {
@@ -2089,7 +2105,7 @@ impl<'a> FnLowerer<'a> {
     fn lower_required_member_receiver(&mut self, expr: &Expr, property: &str) -> Result<HirExpr, String> {
         let receiver = self.lower_member_receiver(expr)?;
         let ty = self.infer_expr_type(&receiver)?;
-        Ok(self.unwrap_required_optional_member(receiver, ty, property).0)
+        Ok(self.unwrap_required_optional_member(receiver, ty, property, self.receiver_requires_narrowing(expr))?.0)
     }
 
     fn lower_union_array_index(
@@ -2586,7 +2602,7 @@ impl<'a> FnLowerer<'a> {
                 let obj = self.lower_member_receiver(&member.obj)?;
                 let obj_ty = self.infer_expr_type(&obj)?;
                 let (obj, obj_ty) =
-                    self.unwrap_required_optional_member(obj, obj_ty, "computed property");
+                    self.unwrap_required_optional_member(obj, obj_ty, "computed property", self.receiver_requires_narrowing(&member.obj))?;
                 match obj_ty {
                     HirType::Array(element) => {
                         let index = self.lower_expr(&computed.expr)?;
@@ -2825,7 +2841,7 @@ impl<'a> FnLowerer<'a> {
                 let obj = self.lower_member_receiver(&member.obj)?;
                 let obj_ty = self.infer_expr_type(&obj)?;
                 let (obj, obj_ty) =
-                    self.unwrap_required_optional_member(obj, obj_ty, prop.sym.as_ref());
+                    self.unwrap_required_optional_member(obj, obj_ty, prop.sym.as_ref(), self.receiver_requires_narrowing(&member.obj))?;
                 // A custom property read on a *catch-bound* error string
                 // (`catch (e) { e.status }`, real trigger: koa's
                 // `http-errors` error) has no declared field to read.

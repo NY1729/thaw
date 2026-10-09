@@ -102,7 +102,10 @@ fn resolve_bare_specifier(
     let dep_dir = resolve_dependency_dir(node_modules_dir, caller_dir, dep_name);
     let target = match subpath {
         Some(sub) => {
-            let manifest = read_manifest(&dep_dir).ok()?;
+            // A deep import into a directory without its own package.json
+            // (e.g. `node_modules/.generated/client/default`) is a plain
+            // path under node_modules, same as Node.
+            let manifest = read_manifest(&dep_dir).unwrap_or(serde_json::Value::Null);
             if manifest.get("exports").is_some() {
                 package_subpath_runtime_target(&manifest, sub, conditions)?
             } else {

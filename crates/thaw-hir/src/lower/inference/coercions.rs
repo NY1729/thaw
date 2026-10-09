@@ -1225,6 +1225,14 @@ impl<'a> FnLowerer<'a> {
                     }
                 }
             }
+            // A live `JsValue` handle reaching a union that has a `Json` member
+            // (`resolve(value)` of a `Promise<Json>`): wrap it as `Json` first.
+            if actual == HirType::JsValue {
+                if let Some(index) = elements.iter().position(|element| element == &HirType::Json) {
+                    let json = self.coerce_to_declared(&HirType::Json, value)?;
+                    return Ok(HirExpr::UnionInject(Box::new(json), index, elements.clone()));
+                }
+            }
             return Err(format!(
                 "value has type {actual:?}, which is not a member of {declared:?}"
             ));

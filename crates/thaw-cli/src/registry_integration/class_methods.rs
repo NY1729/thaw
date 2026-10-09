@@ -1626,6 +1626,14 @@ fn rewrite_external_class_methods_with_static_qualified_named(
     fn overload_type_score(declared: &thaw_hir::HirType, actual: &thaw_hir::HirType) -> Option<u8> {
         match (declared, actual) {
             (thaw_hir::HirType::Json, _) => Some(0),
+            // An unresolved generic (`T | null | undefined`, `T` widened to `Json`) is as opaque
+            // as a bare `Json` parameter: it accepts any argument, weakly.
+            (
+                thaw_hir::HirType::Optional(payload)
+                | thaw_hir::HirType::Nullable(payload)
+                | thaw_hir::HirType::Nullish(payload),
+                _,
+            ) if matches!(payload.as_ref(), thaw_hir::HirType::Json | thaw_hir::HirType::JsValue) => Some(0),
             (thaw_hir::HirType::Union(elements), actual) => elements
                 .iter()
                 .filter_map(|element| overload_type_score(element, actual))
@@ -1868,6 +1876,8 @@ fn rewrite_external_class_methods_with_static_qualified_named(
         /// (`import { parse } from "csv-parse"`) -- see the bare-call
         /// `Expr::Ident` branch below for why this exists.
         imported_from: std::collections::HashMap<String, String>,
+        // Local names bound by `import name from "pkg"` (the package's default export).
+        default_imports: std::collections::HashSet<String>,
         import_aliases: std::collections::HashMap<String, String>,
         methods: &'a [ClassMethodRewrite],
         method_contexts: &'a [ClassMethodContext],
@@ -2679,7 +2689,14 @@ fn rewrite_external_class_methods_with_static_qualified_named(
                     let qualified_name = self
                         .imported_from
                         .get(name.sym.as_str())
-                        .map(|package| format!("{}_{}", sanitize_identifier(package), name.sym));
+                        .map(|package| {
+                            // A default import is known by its package, not by the local name.
+                            if self.default_imports.contains(name.sym.as_str()) {
+                                format!("{}_default", sanitize_identifier(package))
+                            } else {
+                                format!("{}_{}", sanitize_identifier(package), name.sym)
+                            }
+                        });
                     // A traceable named import always narrows to its own
                     // package's alias, even when that package contributes no
                     // overload candidates of its own (a single-overload
@@ -3136,6 +3153,7 @@ fn rewrite_external_class_methods_with_static_qualified_named(
 
     let (module, cm) = thaw_parser::parse_typescript_with_source_map_named(source, source_name.clone())?;
     let mut imported_from: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut default_imports = std::collections::HashSet::new();
     let mut import_aliases = std::collections::HashMap::new();
     for item in &module.body {
         let ModuleItem::ModuleDecl(ModuleDecl::Import(import)) = item else {
@@ -3169,6 +3187,7 @@ fn rewrite_external_class_methods_with_static_qualified_named(
                 }
                 ImportSpecifier::Default(default) => {
                     imported_from.insert(default.local.sym.to_string(), package.to_string());
+                    default_imports.insert(default.local.sym.to_string());
                     let identity = package_qualifiers.get(package)
                         .map_or("default".to_string(), |qualifier| format!("{qualifier}::default"));
                     import_aliases.insert(default.local.sym.to_string(), identity);
@@ -3248,6 +3267,7 @@ fn rewrite_external_class_methods_with_static_qualified_named(
         factories,
         functions,
         imported_from,
+        default_imports,
         import_aliases,
         methods,
         method_contexts,

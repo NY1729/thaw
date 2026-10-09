@@ -560,6 +560,8 @@ fn wrap_as_commonjs_module(
     // not arbitrary text, so splicing it directly as a property-access
     // identifier (not a bracketed string) is safe -- same for a class
     // name, parsed out of a `declare class` statement.
+    // A native ESM bundle (`render_native_esm_bundle`) hands back a real module namespace
+    // object, which has no `__esModule` flag but is tagged `Module`; treat it like one.
     let bind_default_export = |name: &str| {
         // The `globalThis.<name>` slot here is a *staging* value the
         // immediately-following qualified-alias `loadScript` captures (see
@@ -575,8 +577,8 @@ fn wrap_as_commonjs_module(
         // captured before the next one ran, so overwriting is safe.
         format!(
             "if (typeof module.exports === 'function' && typeof module.exports.{name} === 'undefined') {{ globalThis.{name} = module.exports; }}\n\
-             else if (typeof module.exports === 'object' && module.exports !== null && module.exports.__esModule && typeof module.exports.default === 'function') {{ globalThis.{name} = module.exports.default; }}\n\
-             else if (typeof module.exports === 'object' && module.exports !== null && !module.exports.__esModule && Object.keys(module.exports).length === 1 && (function() {{ var descriptor = Object.getOwnPropertyDescriptor(module.exports, 'default'); return descriptor !== undefined && typeof descriptor.value === 'function'; }})()) {{ globalThis.{name} = module.exports.default; }}\n"
+             else if (typeof module.exports === 'object' && module.exports !== null && (module.exports.__esModule || module.exports[Symbol.toStringTag] === 'Module') && typeof module.exports.default === 'function') {{ globalThis.{name} = module.exports.default; }}\n\
+             else if (typeof module.exports === 'object' && module.exports !== null && !module.exports.__esModule && module.exports[Symbol.toStringTag] !== 'Module' && Object.keys(module.exports).length === 1 && (function() {{ var descriptor = Object.getOwnPropertyDescriptor(module.exports, 'default'); return descriptor !== undefined && typeof descriptor.value === 'function'; }})()) {{ globalThis.{name} = module.exports.default; }}\n"
         )
     };
     let bind_default_exports: String = fallback_names
@@ -774,6 +776,7 @@ fn wrap_as_commonjs_module(
          \x20\x20\x20\x20\x20\x20var addons = Object.create(null);\n\
          \x20\x20\x20\x20\x20\x20var dispatch = function(target, filename, flags) {{\n\
          \x20\x20\x20\x20\x20\x20\x20\x20var nativePath = typeof filename === 'string' ? filename : '', modulePath = target && typeof target.filename === 'string' ? target.filename : '';\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20if (nativePath === '/proc/self/exe' && dispatch.__thaw_self_addon) {{ target.exports = dispatch.__thaw_self_addon; return target.exports; }}\n\
          \x20\x20\x20\x20\x20\x20\x20\x20var ownerPath = nativePath.indexOf('/thaw_modules/') >= 0 ? nativePath : modulePath;\n\
          \x20\x20\x20\x20\x20\x20\x20\x20var marker = '/thaw_modules/', prefixAt = ownerPath.indexOf(marker), packagePath = prefixAt < 0 ? '' : ownerPath.slice(prefixAt + marker.length);\n\
          \x20\x20\x20\x20\x20\x20\x20\x20var packageName = Object.keys(addons).filter(function(name) {{ return name && packagePath.indexOf(name + '/') === 0; }}).sort(function(a, b) {{ return b.length - a.length; }})[0];\n\
@@ -786,7 +789,7 @@ fn wrap_as_commonjs_module(
          \x20\x20\x20\x20}})(globalThis.process.dlopen);\n\
          \x20\x20}}\n\
          \x20\x20globalThis.process.dlopen.__thaw_addons[\"{native_package}\"] = __thaw_addon;\n\
-         \x20\x20if (__thaw_addon.QueryEngine && !globalThis.process.env.PRISMA_QUERY_ENGINE_LIBRARY) globalThis.process.env.PRISMA_QUERY_ENGINE_LIBRARY = '/proc/self/exe';\n\
+         \x20\x20if (__thaw_addon.QueryEngine && !globalThis.process.env.PRISMA_QUERY_ENGINE_LIBRARY) {{ globalThis.process.env.PRISMA_QUERY_ENGINE_LIBRARY = '/proc/self/exe'; globalThis.process.dlopen.__thaw_self_addon = __thaw_addon; }}\n\
          \x20\x20return __thaw_addon;\n\
          \x20\x20}})();\n\
          }}\n\
