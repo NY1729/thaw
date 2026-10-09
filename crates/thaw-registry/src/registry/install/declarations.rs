@@ -2234,7 +2234,7 @@ struct SourceSupportBindings {
     values: SourceValueBindings,
 }
 
-#[allow(dead_code)] // superseded by the memoized resolution (OwnedSourceViews); kept until the old call sites are removed
+#[cfg(test)] // reference implementation exercised by the resolution tests; production goes through OwnedSourceViews
 fn source_type_bindings(path: &Path) -> Result<SourceTypeBindings, String> {
     source_type_bindings_with_views(path, &OwnedSourceViews::default()).map(|table| (*table).clone())
 }
@@ -2317,11 +2317,6 @@ fn compute_source_type_bindings_with_views(
     }
     CACHE.with(|cache| cache.borrow_mut().insert(cache_key, table.clone()));
     Ok(table)
-}
-
-#[allow(dead_code)] // superseded by the memoized resolution (OwnedSourceViews); kept until the old call sites are removed
-fn source_value_bindings(path: &Path) -> Result<SourceValueBindings, String> {
-    source_value_bindings_with_views(path, &OwnedSourceViews::default()).map(|table| (*table).clone())
 }
 
 fn source_value_bindings_with_views(
@@ -2457,7 +2452,7 @@ fn resolve_lexical_source_value<'a>(
         table.get(&(origin.clone(), scope[..depth].to_vec(), name.to_string())).map(Vec::as_slice))
 }
 
-#[allow(dead_code)] // superseded by the memoized resolution (OwnedSourceViews); kept until the old call sites are removed
+#[cfg(test)] // reference implementation exercised by the resolution tests; production goes through OwnedSourceViews
 fn exported_owned_value_declarations(
     path: &Path,
     name: &str,
@@ -2593,17 +2588,6 @@ fn exported_owned_value_declarations_with_views(
     Ok(unambiguous_terminal_fragments(
         if explicit_selected || !explicit.is_empty() { explicit } else { wildcard },
     ))
-}
-
-#[allow(dead_code)] // superseded by the memoized resolution (OwnedSourceViews); kept until the old call sites are removed
-fn resolve_owned_source_value_reference(
-    origin: &Path,
-    scope: &[String],
-    local_spelling: &str,
-) -> Result<Vec<OwnedDeclaration>, String> {
-    resolve_owned_source_value_reference_with_views(
-        origin, scope, local_spelling, &OwnedSourceViews::default(),
-    )
 }
 
 fn resolve_owned_source_value_reference_with_views(
@@ -3085,17 +3069,6 @@ fn directly_exported_namespace(
     Ok(Some((source_scope, exported_local_name(items, member, kind))))
 }
 
-#[allow(dead_code)] // superseded by the memoized resolution (OwnedSourceViews); kept until the old call sites are removed
-fn resolve_imported_namespace_member(
-    target: &Path,
-    segments: &[String],
-    kind: TypeReferenceKind,
-) -> Result<Vec<OwnedDeclaration>, String> {
-    resolve_imported_namespace_member_with_views(
-        target, segments, kind, &OwnedSourceViews::default(),
-    )
-}
-
 fn resolve_imported_namespace_member_with_views(
     target: &Path,
     segments: &[String],
@@ -3152,7 +3125,7 @@ fn resolve_imported_namespace_member_inner(
     resolve_imported_namespace_member_inner(&next, &segments[1..], kind, visited, views)
 }
 
-#[allow(dead_code)] // superseded by the memoized resolution (OwnedSourceViews); kept until the old call sites are removed
+#[cfg(test)] // reference implementation exercised by the resolution tests; production goes through OwnedSourceViews
 fn resolve_owned_qualified_source_value_reference(
     origin: &Path,
     scope: &[String],
@@ -3243,7 +3216,7 @@ fn source_import_tables_with_views(
     Ok(tables)
 }
 
-#[allow(dead_code)] // superseded by the memoized resolution (OwnedSourceViews); kept until the old call sites are removed
+#[cfg(test)] // reference implementation exercised by the resolution tests; production goes through OwnedSourceViews
 fn resolve_owned_source_type_reference(
     origin: &Path,
     scope: &[String],
@@ -3282,7 +3255,7 @@ fn resolve_owned_source_type_reference_with_views(
     exported_owned_type_declarations(target, imported, views)
 }
 
-#[allow(dead_code)] // superseded by the memoized resolution (OwnedSourceViews); kept until the old call sites are removed
+#[cfg(test)] // reference implementation exercised by the resolution tests; production goes through OwnedSourceViews
 fn resolve_owned_qualified_source_type_reference(
     origin: &Path,
     scope: &[String],
@@ -3370,7 +3343,7 @@ struct OwnedTypeReference {
     fragments: Vec<OwnedDeclaration>,
 }
 
-#[allow(dead_code)] // superseded by the memoized resolution (OwnedSourceViews); kept until the old call sites are removed
+#[cfg(test)] // reference implementation exercised by the resolution tests; production goes through OwnedSourceViews
 fn owned_type_reference_edges(declaration: &OwnedDeclaration) -> Result<Vec<OwnedTypeReference>, String> {
     owned_type_reference_edges_with_views(declaration, &OwnedSourceViews::default())
 }
@@ -3431,7 +3404,7 @@ fn owned_type_reference_edges_with_views(
     Ok(edges)
 }
 
-#[allow(dead_code)] // superseded by the memoized resolution (OwnedSourceViews); kept until the old call sites are removed
+#[cfg(test)] // reference implementation exercised by the resolution tests; production goes through OwnedSourceViews
 fn referenced_private_type_closure(
     emitted: &[EmittedOwnedDeclaration],
     public: &std::collections::BTreeMap<SourceTypeKey, Vec<PublicTypeOccurrence>>,
@@ -3592,14 +3565,6 @@ fn same_declaration_text(left: &str, right: &str) -> bool {
     left == right
         || (left.starts_with(right) && left[right.len()..].trim_start().starts_with("export "))
         || (right.starts_with(left) && right[left.len()..].trim_start().starts_with("export "))
-}
-
-/// The declaration keyword (`class`, `interface`, `function`, ...) of an ambient
-/// snippet, ignoring `export`/`declare`/`abstract` modifiers.
-#[allow(dead_code)] // superseded by the memoized resolution (OwnedSourceViews); kept until the old call sites are removed
-fn declaration_keyword(snippet: &str) -> Option<&str> {
-    snippet.split_whitespace()
-        .find(|word| !matches!(*word, "export" | "declare" | "abstract" | "default"))
 }
 
 /// `parse_declarations_with_source_map_named`, memoized on the exact source text.
@@ -3996,15 +3961,6 @@ fn reexported_owned_declarations_as(
     );
     declarations.into_iter().zip(rewritten).map(|(declaration, snippet)|
         declaration.with_snippet(snippet)).collect()
-}
-
-#[allow(dead_code)] // superseded by the memoized resolution (OwnedSourceViews); kept until the old call sites are removed
-fn all_reexported_type_declarations(
-    path: &Path,
-    visited: &mut std::collections::BTreeSet<PathBuf>,
-) -> Result<Vec<String>, String> {
-    Ok(all_reexported_type_declarations_owned(path, visited)?
-        .into_iter().map(|declaration| declaration.snippet).collect())
 }
 
 fn all_reexported_type_declarations_owned(
@@ -5057,15 +5013,6 @@ fn reexported_default_declaration(
     ))
 }
 
-#[allow(dead_code)] // superseded by the memoized resolution (OwnedSourceViews); kept until the old call sites are removed
-fn all_reexported_function_declarations(
-    path: &Path,
-    visited: &mut std::collections::BTreeSet<PathBuf>,
-) -> Result<Vec<(String, String)>, String> {
-    Ok(all_reexported_function_declarations_owned(path, visited)?
-        .into_iter().map(|(name, declaration)| (name, declaration.snippet)).collect())
-}
-
 fn all_reexported_function_declarations_owned(
     path: &Path,
     visited: &mut std::collections::BTreeSet<PathBuf>,
@@ -5281,7 +5228,7 @@ fn all_reexported_function_declarations_owned(
     Ok(declarations)
 }
 
-#[allow(dead_code)] // superseded by the memoized resolution (OwnedSourceViews); kept until the old call sites are removed
+#[cfg(test)] // reference implementation exercised by the resolution tests; production goes through OwnedSourceViews
 fn reexported_function_declarations(
     path: &Path,
     name: &str,
@@ -5966,7 +5913,7 @@ fn merge_type_only_status(current: Option<bool>, next: Option<bool>) -> Option<b
 
 /// Follow a class or interface binding through named and wildcard declaration
 /// re-exports, retaining imported superclass declarations as type support.
-#[allow(dead_code)] // superseded by the memoized resolution (OwnedSourceViews); kept until the old call sites are removed
+#[cfg(test)] // reference implementation exercised by the resolution tests; production goes through OwnedSourceViews
 fn reexported_class_or_interface_declarations(
     path: &Path,
     name: &str,
@@ -6282,7 +6229,7 @@ fn imported_class_as_local_binding(declarations: Vec<String>, local: &str, type_
 /// A materialized local class replaces its declaration import binding.
 /// Retain other specifiers from the same import, including their original
 /// `type` modifiers and any import attributes after the source literal.
-#[allow(dead_code)] // superseded by the memoized resolution (OwnedSourceViews); kept until the old call sites are removed
+#[cfg(test)] // reference implementation exercised by the resolution tests; production goes through OwnedSourceViews
 fn without_materialized_class_imports(source: &str, locals: &std::collections::BTreeSet<String>) -> Result<String, String> {
     without_materialized_class_imports_named(
         source, locals, thaw_parser::common::FileName::Custom("input.ts".into()),

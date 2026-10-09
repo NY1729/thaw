@@ -38,6 +38,24 @@ pub struct AddedPackage {
     pub native_diagnostic: Option<String>,
 }
 
+/// Environment defaults a package needs at run time, e.g. a loader that finds its native library
+/// through an environment variable, where `$self` stands for this executable (it embeds every
+/// native addon). Declared by the package itself (`"thaw": { "runtimeEnv": { NAME: VALUE } }`) or
+/// by thaw's curated data table; the package's own declaration wins.
+fn package_runtime_env(manifest: &serde_json::Value) -> BTreeMap<String, String> {
+    let defaults: BTreeMap<String, BTreeMap<String, String>> =
+        serde_json::from_str(include_str!("runtime-env-defaults.json")).unwrap_or_default();
+    let mut env = manifest
+        .get("name")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|name| defaults.get(name).cloned())
+        .unwrap_or_default();
+    if let Some(declared) = manifest.pointer("/thaw/runtimeEnv").and_then(serde_json::Value::as_object) {
+        env.extend(declared.iter().filter_map(|(key, value)| Some((key.clone(), value.as_str()?.to_string()))));
+    }
+    env
+}
+
 // Match a complete target suffix in the package leaf, not a prefix of another
 // architecture or libc variant (for example, arm versus arm64).
 fn optional_dependency_matches_target(name: &str, marker: &str) -> bool {
@@ -49,9 +67,7 @@ fn select_optional_dependency_executable(
     node_modules_dir: &Path,
     manifest: &serde_json::Value,
 ) -> Result<Option<PathBuf>, String> {
-    if manifest.get("name").and_then(serde_json::Value::as_str) != Some("esbuild") {
-        return Ok(None);
-    }
+    let manifest_name = manifest.get("name").and_then(serde_json::Value::as_str).unwrap_or_default();
     let Some(optional) = manifest
         .get("optionalDependencies")
         .and_then(serde_json::Value::as_object)
@@ -80,9 +96,11 @@ fn select_optional_dependency_executable(
             }
             _ => None,
         };
+        // Without a declared `bin`, the conventional location is `bin/<the package's own name>`.
+        let own_name = manifest_name.rsplit('/').next().unwrap_or(manifest_name);
         let path = binary
             .map(|path| root.join(path))
-            .unwrap_or_else(|| root.join("bin").join("esbuild"));
+            .unwrap_or_else(|| root.join("bin").join(own_name));
         if path.is_file() {
             return Ok(Some(path));
         }

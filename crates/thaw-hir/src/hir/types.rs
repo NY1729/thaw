@@ -337,3 +337,21 @@ pub fn native_object_layout_token(fields: &[(Symbol, HirType)]) -> String {
     }
     token
 }
+
+/// Whether `name` is one of the built-in error constructors (`Error` and its standard subclasses).
+/// The single source of truth for "is this class chain rooted in a built-in error": a user class
+/// merely *named* `...Error` is not one.
+pub fn is_error_family_name(name: &str) -> bool {
+    matches!(
+        name,
+        "Error"
+            | "TypeError"
+            | "RangeError"
+            | "SyntaxError"
+            | "ReferenceError"
+            | "EvalError"
+            | "URIError"
+            | "AggregateError"
+            | "SuppressedError"
+    )
+}

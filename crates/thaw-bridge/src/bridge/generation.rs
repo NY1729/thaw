@@ -205,12 +205,7 @@ pub fn generate_shim(
                     .map(|((name, _), ty)| format!("{name}: {}", render_ts_type(ty)))
                     .collect::<Vec<_>>();
                 if let (Some((name, _)), Some(variadic)) = (&func.rest_param, &sig.variadic) {
-                    // Only unions and function types need grouping before `[]`.
-                    let element = render_ts_type(variadic);
-                    let element = if element.contains('|') || element.contains("=>") {
-                        format!("({element})")
-                    } else { element };
-                    params.push(format!("...{name}: {element}[]"));
+                    params.push(format!("...{name}: {}", render_ts_array_of(variadic)));
                 }
                 let params = params.join(", ");
                 out.push_str(&format!(
@@ -774,9 +769,14 @@ fn wrap_as_commonjs_module(
          \x20\x20if (!globalThis.process.dlopen || !globalThis.process.dlopen.__thaw_addons) {{\n\
          \x20\x20\x20\x20globalThis.process.dlopen = (function(previous) {{\n\
          \x20\x20\x20\x20\x20\x20var addons = Object.create(null);\n\
+         \x20\x20\x20\x20\x20\x20// The executable embeds every native addon, so any alias of the executable itself\n\
+         \x20\x20\x20\x20\x20\x20// (process.execPath, /proc/self/exe, /proc/<pid>/exe) names all of them at once: loaders that\n\
+         \x20\x20\x20\x20\x20\x20// dlopen the executable get one namespace, earlier-registered addons winning on a name clash.\n\
+         \x20\x20\x20\x20\x20\x20var selfPath = function(path) {{ var proc = globalThis.process; return path === proc.execPath || path === '/proc/self/exe' || path === '/proc/' + proc.pid + '/exe'; }};\n\
+         \x20\x20\x20\x20\x20\x20var selfExports = function() {{ var merged = {{}}; Object.keys(addons).forEach(function(owner) {{ var exports = addons[owner]; Object.keys(exports).forEach(function(key) {{ if (!Object.prototype.hasOwnProperty.call(merged, key)) merged[key] = exports[key]; }}); }}); return merged; }};\n\
          \x20\x20\x20\x20\x20\x20var dispatch = function(target, filename, flags) {{\n\
          \x20\x20\x20\x20\x20\x20\x20\x20var nativePath = typeof filename === 'string' ? filename : '', modulePath = target && typeof target.filename === 'string' ? target.filename : '';\n\
-         \x20\x20\x20\x20\x20\x20\x20\x20if (nativePath === '/proc/self/exe' && dispatch.__thaw_self_addon) {{ target.exports = dispatch.__thaw_self_addon; return target.exports; }}\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20if (dispatch.__thaw_is_self_path(nativePath)) {{ target.exports = dispatch.__thaw_self_exports(); return target.exports; }}\n\
          \x20\x20\x20\x20\x20\x20\x20\x20var ownerPath = nativePath.indexOf('/thaw_modules/') >= 0 ? nativePath : modulePath;\n\
          \x20\x20\x20\x20\x20\x20\x20\x20var marker = '/thaw_modules/', prefixAt = ownerPath.indexOf(marker), packagePath = prefixAt < 0 ? '' : ownerPath.slice(prefixAt + marker.length);\n\
          \x20\x20\x20\x20\x20\x20\x20\x20var packageName = Object.keys(addons).filter(function(name) {{ return name && packagePath.indexOf(name + '/') === 0; }}).sort(function(a, b) {{ return b.length - a.length; }})[0];\n\
@@ -785,11 +785,11 @@ fn wrap_as_commonjs_module(
          \x20\x20\x20\x20\x20\x20\x20\x20if (typeof previous === 'function') return previous.call(globalThis.process, target, filename, flags);\n\
          \x20\x20\x20\x20\x20\x20\x20\x20var error = new Error('Cannot load native addon ' + nativePath); error.code = 'ERR_DLOPEN_FAILED'; throw error;\n\
          \x20\x20\x20\x20\x20\x20}};\n\
+         \x20\x20\x20\x20\x20\x20dispatch.__thaw_is_self_path = selfPath; dispatch.__thaw_self_exports = selfExports;\n\
          \x20\x20\x20\x20\x20\x20dispatch.__thaw_addons = addons; return dispatch;\n\
          \x20\x20\x20\x20}})(globalThis.process.dlopen);\n\
          \x20\x20}}\n\
          \x20\x20globalThis.process.dlopen.__thaw_addons[\"{native_package}\"] = __thaw_addon;\n\
-         \x20\x20if (__thaw_addon.QueryEngine && !globalThis.process.env.PRISMA_QUERY_ENGINE_LIBRARY) {{ globalThis.process.env.PRISMA_QUERY_ENGINE_LIBRARY = '/proc/self/exe'; globalThis.process.dlopen.__thaw_self_addon = __thaw_addon; }}\n\
          \x20\x20return __thaw_addon;\n\
          \x20\x20}})();\n\
          }}\n\

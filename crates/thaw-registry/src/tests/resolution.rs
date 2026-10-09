@@ -3039,6 +3039,83 @@ fn optional_dependency_target_matches_complete_architecture_and_libc_suffixes() 
     assert!(!optional_dependency_matches_target("@example/addon-linux-x64-musl", "linux-x64-glibc"));
 }
 
+// The "platform package ships the executable" rule is shape-driven: any package that lists
+// platform-specific optional dependencies qualifies, whatever its name.
+#[test]
+fn optional_dependency_executable_is_selected_for_any_package_with_platform_packages() {
+    let (platform, arch, _) = target_prebuild_components();
+    let node_modules = std::env::temp_dir().join(format!("thaw-optional-exe-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&node_modules);
+    // (main package, platform package, declared `bin` of the platform package, executable path)
+    let cases = [
+        ("esbuild", format!("@esbuild/{platform}-{arch}"), Some(serde_json::json!("bin/esbuild")), "bin/esbuild"),
+        ("@acme/tool", format!("@acme/tool-{platform}-{arch}"), Some(serde_json::json!({ "acme-tool": "dist/acme-tool" })), "dist/acme-tool"),
+        // No declared `bin`: the conventional `bin/<package leaf>` is used.
+        ("plain", format!("plain-{platform}-{arch}"), None, "bin/plain"),
+    ];
+    for (main, platform_package, bin, executable) in cases {
+        let root = node_modules.join(&platform_package);
+        fs::create_dir_all(root.join(executable).parent().unwrap()).unwrap();
+        fs::write(root.join(executable), b"#!/bin/sh\n").unwrap();
+        let mut manifest = serde_json::json!({ "name": platform_package });
+        if let Some(bin) = bin { manifest["bin"] = bin; }
+        fs::write(root.join("package.json"), manifest.to_string()).unwrap();
+        let parent = serde_json::json!({ "name": main, "optionalDependencies": { platform_package.clone(): "1.0.0" } });
+        let selected = select_optional_dependency_executable(&node_modules, &parent).unwrap();
+        assert_eq!(selected, Some(root.join(executable)), "package `{main}`");
+    }
+    // A package without platform-specific optional dependencies has no platform executable.
+    let none = serde_json::json!({ "name": "esbuild" });
+    assert_eq!(select_optional_dependency_executable(&node_modules, &none).unwrap(), None);
+    let _ = fs::remove_dir_all(node_modules);
+}
+
+#[test]
+fn package_runtime_env_merges_curated_defaults_with_the_packages_own_declaration() {
+    let curated = package_runtime_env(&serde_json::json!({ "name": "@prisma/client" }));
+    assert_eq!(curated.get("PRISMA_QUERY_ENGINE_LIBRARY").map(String::as_str), Some("$self"));
+    let declared = package_runtime_env(&serde_json::json!({
+        "name": "some-native-pkg",
+        "thaw": { "runtimeEnv": { "SOME_LIBRARY": "$self", "IGNORED": 3 } }
+    }));
+    assert_eq!(declared.len(), 1);
+    assert_eq!(declared.get("SOME_LIBRARY").map(String::as_str), Some("$self"));
+    // The package's own declaration wins over the curated table.
+    let overridden = package_runtime_env(&serde_json::json!({
+        "name": "@prisma/client",
+        "thaw": { "runtimeEnv": { "PRISMA_QUERY_ENGINE_LIBRARY": "/custom" } }
+    }));
+    assert_eq!(overridden.get("PRISMA_QUERY_ENGINE_LIBRARY").map(String::as_str), Some("/custom"));
+    assert!(package_runtime_env(&serde_json::json!({ "name": "left-pad" })).is_empty());
+}
+
+#[test]
+fn resolved_package_applies_runtime_env_defaults_without_overriding_the_process_environment() {
+    use std::ffi::CString;
+    let registry = temp_registry("runtime_env_defaults");
+    let package = registry.join("env-pkg");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(package.join("package.d.ts"), "export declare function f(): void;\n").unwrap();
+    fs::write(package.join("bundle.js"), "globalThis.__env_pkg_loaded = true;\n").unwrap();
+    fs::write(
+        package.join("runtime-env.json"),
+        r#"{ "LIBRARY_PATH_VAR": "$self", "NESTED_VAR": "$self/lib", "USER_SET_VAR": "$self" }"#,
+    )
+    .unwrap();
+    let resolved = resolve(&registry, "env-pkg").unwrap();
+    assert_eq!(resolved.runtime_env.len(), 3);
+    let source = resolved.bundle_js.unwrap();
+    assert!(source.ends_with("globalThis.__env_pkg_loaded = true;\n"));
+    let setup = "globalThis.__saved_process = globalThis.process; globalThis.process = { env: { USER_SET_VAR: 'mine' }, execPath: '/opt/app' };";
+    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(setup).unwrap().as_ptr()), 1);
+    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(source).unwrap().as_ptr()), 1);
+    assert_eq!(thaw_quickjs::eval_json("process.env.LIBRARY_PATH_VAR"), Ok(Some("\"/opt/app\"".into())));
+    assert_eq!(thaw_quickjs::eval_json("process.env.NESTED_VAR"), Ok(Some("\"/opt/app/lib\"".into())));
+    assert_eq!(thaw_quickjs::eval_json("process.env.USER_SET_VAR"), Ok(Some("\"mine\"".into())));
+    assert_eq!(thaw_quickjs::thaw_js_load(CString::new("globalThis.process = globalThis.__saved_process;").unwrap().as_ptr()), 1);
+    let _ = fs::remove_dir_all(registry);
+}
+
 #[test]
 fn glibc_shared_library_collection_skips_musl_optional_dependency() {
     let (platform, arch, libc) = target_prebuild_components();
