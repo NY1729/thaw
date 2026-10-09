@@ -315,7 +315,12 @@ pub unsafe extern "C" fn thaw_error_code(message: *const c_char) -> *const c_cha
         return std::ptr::null();
     }
     let text = unsafe { CStr::from_ptr(message) }.to_string_lossy();
-    arena_c_string(split_error_code(&text).unwrap_or("undefined"))
+    // A JS error crossing the boundary carries its own `code` (`ENOENT`,
+    // `Z_DATA_ERROR`) in the `\u{5}<json>` property bag, not a `\u{3}` tag.
+    let code = split_error_code(&text)
+        .map(str::to_owned)
+        .or_else(|| error_property(&text, "code"));
+    arena_c_string(code.as_deref().unwrap_or("undefined"))
         .map_or(std::ptr::null(), |value| value.cast())
 }
 

@@ -2150,6 +2150,24 @@ impl<'ctx> HirCompiler<'ctx> {
                     .map_err(|error| error.to_string())?;
                 return Ok(self.context.i32_type().const_int(0, false).into());
             }
+            "__thaw_closure_alias" => {
+                let [adapter, original] = args else {
+                    return Err("closure alias expects an adapter and the original closure".into());
+                };
+                let adapter = self.compile_expr(adapter)?;
+                let original = self.compile_expr(original)?;
+                return self
+                    .builder
+                    .build_call(
+                        self.module.get_function("thaw_closure_alias_register").unwrap(),
+                        &[adapter.into(), original.into()],
+                        "closure_alias",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("closure alias returned no value".into());
+            }
             "__thaw_detach_promise" | "__thaw_detach_rejection" => {
                 let [promise] = args else {
                     return Err("detach Promise expects one operand".into());

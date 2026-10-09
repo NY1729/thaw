@@ -3529,7 +3529,10 @@ fn parser_identifies_commonjs_export_assignments() {
 fn rewrites_literal_dynamic_import_to_an_async_bundle_require() {
     let rewritten =
         rewrite_esm_to_commonjs("function load() { return import('./feature.js'); }").unwrap();
-    assert!(rewritten.contains("requireAsync(String('./feature.js'))"));
+    // The specifier is stringified inside `requireAsync` itself (a failing
+    // `toString` becomes a rejected promise), so the rewrite no longer wraps
+    // the argument in `String(...)`.
+    assert!(rewritten.contains("requireAsync('./feature.js')"));
     assert!(!rewritten.contains("import("));
 }
 

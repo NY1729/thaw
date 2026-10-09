@@ -111,7 +111,8 @@ fn keeps_unannotated_dynamic_method_promises_raw_until_awaited() {
     assert!(main.body.iter().any(|statement| matches!(
         statement,
         HirStmt::Let(_, HirType::JsValue, HirExpr::Call(callee, _))
-            if matches!(callee.as_ref(), HirExpr::Var(name) if name == "callDynamicMethodHandleRaw")
+            // (formerly `callDynamicMethodHandleRaw`)
+            if matches!(callee.as_ref(), HirExpr::Var(name) if name == "__thaw_call_selected_dynamic_method_raw")
     )));
 }
 

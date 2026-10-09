@@ -1517,6 +1517,17 @@ pub unsafe extern "C" fn thaw_napi_embed_executable_hex(hex: *const c_char) -> *
 
 const TYPED_UNDEFINED_KEY: &str = "$__thaw_napi_undefined$";
 
+/// Bytes of a `Buffer.prototype.toJSON()`-shaped property map; `data` may arrive as a plain array or
+/// wrapped as `{"__thaw_napi_array__": id, "value": [..]}` on the typed wire.
+fn json_buffer_bytes(values: &serde_json::Map<String, JsonValue>) -> Option<Vec<u8>> {
+    if values.get("type").and_then(JsonValue::as_str) != Some("Buffer") { return None; }
+    let data = values.get("data")?;
+    let bytes = data.as_array().or_else(|| {
+        data.get("__thaw_napi_array__").and_then(|_| data.get("value")).and_then(JsonValue::as_array)
+    })?;
+    Some(bytes.iter().map(|value| value.as_u64().unwrap_or(0) as u8).collect())
+}
+
 fn value_from_json_with_undefined(
     env: &mut Env,
     json: &JsonValue,
@@ -1547,15 +1558,8 @@ fn value_from_json_with_undefined(
             {
                 return Ok(env.alloc(Value::Undefined));
             }
-            if values.get("type").and_then(JsonValue::as_str) == Some("Buffer") {
-                if let Some(bytes) = values.get("data").and_then(JsonValue::as_array) {
-                    return Ok(env.alloc(Value::Buffer(
-                        bytes
-                            .iter()
-                            .map(|value| value.as_u64().unwrap_or(0) as u8)
-                            .collect(),
-                    )));
-                }
+            if let Some(bytes) = json_buffer_bytes(values) {
+                return Ok(env.alloc(Value::Buffer(bytes)));
             }
             if let Some(handle) = values
                 .get("__thaw_napi_handle__")
@@ -1600,6 +1604,11 @@ fn value_from_json_with_undefined(
                 .get("__thaw_napi_object__")
                 .and_then(JsonValue::as_u64)
             {
+                if let Some(bytes) = values.get("value").and_then(JsonValue::as_object).and_then(json_buffer_bytes) {
+                    let buffer = env.alloc(Value::Buffer(bytes));
+                    env.quickjs_references.insert(reference, buffer);
+                    return Ok(buffer);
+                }
                 let object = env.quickjs_references.get(&reference).copied().unwrap_or_else(|| {
                     let object = env.alloc(Value::Object(HashMap::new()));
                     env.quickjs_references.insert(reference, object);
@@ -1915,6 +1924,10 @@ fn napi_graph_value(env: &mut Env, graph: &JsonValue) -> Result<NapiValue, Strin
         }
         let node = if fields.get("a").and_then(JsonValue::as_array).is_some() {
             env.alloc(Value::Array(Vec::new()))
+        } else if let Some(bytes) = graph_json_buffer_bytes(descriptions, fields) {
+            // `Buffer.prototype.toJSON()` output (`{type:"Buffer",data:[..]}`) revives as a Buffer,
+            // the same as the plain-JSON argument path.
+            env.alloc(Value::Buffer(bytes))
         } else if fields.get("o").and_then(JsonValue::as_array).is_some() {
             env.alloc(Value::Object(HashMap::new()))
         } else if let Some(timestamp) = fields.get("d") {
@@ -2010,6 +2023,7 @@ fn napi_graph_value(env: &mut Env, graph: &JsonValue) -> Result<NapiValue, Strin
                 }
             }
         } else if let Some(entries) = description.get("o").and_then(JsonValue::as_array) {
+            if matches!(unsafe { node.as_ref() }, Some(Value::Buffer(_))) { continue; }
             let mut decoded = HashMap::new();
             let mut order = Vec::with_capacity(entries.len());
             let mut attributes = Vec::with_capacity(entries.len());
@@ -2532,6 +2546,28 @@ impl NapiGraphInput {
         }
         decoded
     }
+}
+
+/// The bytes of a graph object node shaped exactly like `Buffer.prototype.toJSON()`.
+fn graph_json_buffer_bytes(
+    descriptions: &[JsonValue], fields: &serde_json::Map<String, JsonValue>,
+) -> Option<Vec<u8>> {
+    let entries = fields.get("o")?.as_array()?;
+    let [first, second] = entries.as_slice() else { return None };
+    let (first, second) = (first.as_array()?, second.as_array()?);
+    let ([key_a, token_a], [key_b, token_b]) = (first.as_slice(), second.as_slice()) else { return None };
+    let (type_token, data_token) = match (key_a.as_str()?, key_b.as_str()?) {
+        ("type", "data") => (token_a, token_b),
+        ("data", "type") => (token_b, token_a),
+        _ => return None,
+    };
+    if type_token.get("v")?.as_str()? != "Buffer" { return None; }
+    let data = descriptions.get(data_token.get("r")?.as_u64()? as usize)?;
+    let items = data.as_object()?.get("a")?.as_array()?;
+    if data.as_object()?.len() != 1 { return None; }
+    items.iter()
+        .map(|item| item.get("v")?.as_u64().and_then(|byte| u8::try_from(byte).ok()))
+        .collect()
 }
 
 unsafe fn parse_napi_graph_value(env: NapiEnv, text: &str) -> Result<NapiValue, String> {

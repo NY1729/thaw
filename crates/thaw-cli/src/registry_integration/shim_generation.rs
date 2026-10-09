@@ -99,7 +99,7 @@ fn push_error_family_ambient_declarations(classes: &[thaw_bridge::DtsClass], shi
         let Some(base) = &class.extends else {
             continue;
         };
-        shim.push_str(&format!(
+        let declaration = format!(
             "class {} extends {} {{}}\n",
             class_identifier(&class.name),
             if classes.iter().any(|candidate| &candidate.name == base) {
@@ -107,7 +107,12 @@ fn push_error_family_ambient_declarations(classes: &[thaw_bridge::DtsClass], shi
             } else {
                 base.clone()
             },
-        ));
+        );
+        // Two entry points of one package (`csv-parse` and `csv-parse/sync`) share the class.
+        if shim.starts_with(&declaration) || shim.contains(&format!("\n{declaration}")) {
+            continue;
+        }
+        shim.push_str(&declaration);
     }
 }
 
@@ -1162,6 +1167,25 @@ fn generate_registry_shims(
                         (pkg.name.clone(), function.name.clone()),
                         symbol.clone(),
                     );
+                    // A callable object (`debug`, `ky`) is exported as a live `JsValue` for member
+                    // access (`debug.enable(..)`), but a direct call (`debug("ns")`) must still use
+                    // the typed function, whose declared result (a callable `Debugger`) is a handle.
+                    if pkg.values.iter().any(|value| value.name == function.name) {
+                        // A default import (`import createDebug from "debug"`) is keyed `default`.
+                        let default_alias = (pkg.commonjs_export_name.as_deref() == Some(function.name.as_str()))
+                            .then(|| format!("{}_default", sanitize_identifier(&pkg.name)));
+                        for alias in std::iter::once(function.name.clone()).chain(default_alias) {
+                            fallback_function_overload_rewrites.push((
+                                alias,
+                                symbol.clone(),
+                                function.required_params,
+                                function.params.len(),
+                                scoring_param_hir_types(function, napi),
+                                dts_function_param_field_constraints(function),
+                                None,
+                            ));
+                        }
+                    }
                     if pkg
                         .called_commonjs_namespace_properties
                         .contains(&function.name)
