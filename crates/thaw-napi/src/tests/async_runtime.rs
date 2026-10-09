@@ -345,7 +345,7 @@ unsafe extern "C" fn cleanup_finalizer_rejects_new_async_roots(
     let mut work = ptr::null_mut();
     assert_eq!(napi_create_async_work(env, ptr::null_mut(), ptr::null_mut(),
         Some(noop_execute), None, ptr::null_mut(), &mut work), NAPI_CLOSING);
-    let existing = &mut *(&mut (*env).async_works)[0] as *mut AsyncWork;
+    let existing = Arc::as_ptr(&(&*env).async_works[0]).cast_mut();
     assert_eq!(napi_queue_async_work(env, existing), NAPI_CLOSING);
     assert_eq!(napi_add_env_cleanup_hook(env, Some(cleanup_probe), ptr::null_mut()), NAPI_CLOSING);
 }
