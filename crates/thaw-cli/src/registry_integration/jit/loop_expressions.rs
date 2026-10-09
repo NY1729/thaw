@@ -134,6 +134,7 @@ macro_rules! jit_loop_expressions {
                         ">".into(),
                         "else".into(),
                         "c0000000000000000".into(),
+                        "asbool".into(),
                         "end".into(),
                     ]),
                     CatchProbe::DictionaryKey(key) => {
@@ -144,6 +145,7 @@ macro_rules! jit_loop_expressions {
                             "din".into(),
                             "else".into(),
                             "c0000000000000000".into(),
+                            "asbool".into(),
                             "end".into(),
                         ]);
                     }

@@ -1127,6 +1127,29 @@ fn native_array_delete_keeps_length_and_presence_distinct() {
 }
 
 #[test]
+fn assigning_undefined_stores_a_present_undefined_slot_for_any_primitive_element_type() {
+    // Expected output taken from real Node (22.x): `a[i] = undefined` keeps the index present.
+    let source = r#"
+        function main(): void {
+            const names: string[] = ["a", "b"];
+            names[0] = undefined;
+            console.log(Object.hasOwn(names, 0), names.length, JSON.stringify(names), names.includes(undefined), 0 in names);
+            const nums: number[] = [1, 2, 3];
+            nums[2] = undefined;
+            nums[0] = 5;
+            console.log(Object.hasOwn(nums, 2), nums.length, JSON.stringify(nums), nums.join(","), nums.indexOf(undefined));
+            let calls = 0;
+            const pick = (): number[] => { calls++; return nums; };
+            console.log(pick()[1] = undefined, calls, JSON.stringify(nums));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "assign_undefined_present_slot"),
+        "true 2 [null,\"b\"] true true\ntrue 3 [5,2,null] 5,2, 2\nundefined 1 [5,null,null]\n"
+    );
+}
+
+#[test]
 fn native_array_delete_reflect_integrity_and_evaluation_order() {
     let source = r#"
         function main(): void {

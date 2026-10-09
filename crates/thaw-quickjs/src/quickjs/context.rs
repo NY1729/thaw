@@ -1031,6 +1031,7 @@ fn ensure_context() {
         slot.get_or_insert_with(|| {
             let runtime = Runtime::new().expect("failed to create a QuickJS runtime");
             runtime.set_loader(BundleModuleResolver, BundleModuleLoader);
+            runtime.set_host_promise_rejection_tracker(Some(Box::new(track_js_promise_rejection)));
             let context = Context::full(&runtime).expect("failed to create a QuickJS context");
             context.with(|ctx| {
                 install_shared_array_buffer_functions(&ctx);

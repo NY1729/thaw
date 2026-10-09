@@ -67,6 +67,36 @@ fn accepts_an_abi_compatible_object_prefix() {
 }
 
 #[test]
+fn callback_parameter_naming_a_subset_of_fields_in_any_order_is_accepted() {
+    // Plain, async and generator callbacks whose annotation names only some of the supplied
+    // fields (not a prefix, different order) are lowered at the supplied physical layout.
+    lower(
+        r#"
+        declare function subscribe(callback: (r: { a: number; b: number; c: string }) => void): void;
+        declare function subscribeLater(callback: (r: { a: number; b: number; c: string }) => Promise<void>): void;
+        function main(): void {
+            subscribe((r: { c: string; a: number }): void => { r.a = 7; });
+            subscribeLater(async (r: { b: number }): Promise<void> => { r.b = 1; });
+        }
+        "#,
+    );
+}
+
+#[test]
+fn callback_parameter_naming_a_field_the_caller_does_not_supply_is_rejected() {
+    let module = thaw_parser::parse_typescript(
+        r#"
+        declare function subscribe(callback: (r: { a: number; b: number }) => void): void;
+        function main(): void {
+            subscribe((r: { a: number; missing: number }): void => { r.a = 1; });
+        }
+        "#,
+    )
+    .unwrap();
+    assert!(lower_module(&module).is_err());
+}
+
+#[test]
 fn reports_a_missing_required_object_property() {
     let module = thaw_parser::parse_typescript(
         "type User = { name: string; age: number }; function main(): void { const user: User = { name: 'A' }; }",

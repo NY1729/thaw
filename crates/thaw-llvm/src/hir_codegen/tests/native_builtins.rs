@@ -8026,7 +8026,11 @@ fn using_disposal_failures_continue_and_suppress_the_pending_error() {
     "#;
     assert_eq!(
         compile_and_run(source, "using_suppressed_error"),
-        "dispose b\ndispose a\nSuppressedError\na\na\nb\nbody\n"
+        // Verified against real Node 24 (V8 13.6): disposal errors nest as
+        // SuppressedError(a, SuppressedError(b, body)); the implicitly created ones carry V8's
+        // default message "An error was suppressed during disposal" (an explicit
+        // `new SuppressedError(e, s)` has the empty message).
+        "dispose b\ndispose a\nSuppressedError\nAn error was suppressed during disposal\na\nAn error was suppressed during disposal\nbody\n"
     );
 }
 
@@ -10913,6 +10917,24 @@ fn decoded_js_function_argument_marshaling_failure_keeps_original_error() {
 }
 
 #[test]
+fn class_instance_with_getters_converts_to_a_structural_parameter_by_reading_them() {
+    let source = r#"
+        class Pair {
+            n = 3;
+            get double(): number { return this.n * 2; }
+        }
+        function total(item: { n: number; double: number }): number { return item.n + item.double; }
+        function main(): void {
+            const pair = new Pair();
+            const before = total(pair);
+            pair.n = 10;
+            console.log(before, total(pair));
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "getter_class_structural_param"), "9 30\n");
+}
+
+#[test]
 fn console_native_object_getter_failure_keeps_exception_and_next_log() {
     let source = r#"
         interface Box { value: number; }
@@ -11606,4 +11628,27 @@ fn exact_iterator_catch_preserves_thrown_identity() {
         }
     "#;
     assert_eq!(compile_and_run(source, "exact_iterator_catch_identity"), "true\n");
+}
+
+#[test]
+fn callback_annotated_with_a_subset_of_fields_writes_through_to_the_supplied_object() {
+    // The annotation names `c` and `a` only (not a prefix, different order); the callback is
+    // lowered at the supplied layout, so its writes reach the original object.
+    let source = r#"
+        function run(callback: (r: { a: number; b: number; c: string }) => void): void {
+            const owner = { a: 1, b: 2, c: "x" };
+            callback(owner);
+            console.log(owner.a, owner.b, owner.c);
+        }
+        function main(): void {
+            run((r: { c: string; a: number }): void => {
+                r.a = 7;
+                r.c = r.c + "!";
+            });
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "callback_field_subset_writes_through"),
+        "7 2 x!\n"
+    );
 }

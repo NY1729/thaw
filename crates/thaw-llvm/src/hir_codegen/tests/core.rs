@@ -3489,3 +3489,26 @@ fn absent_function_registration_takes_undefined_handle_path() {
     assert!(ir.contains("native_callback_undefined_handle"), "{ir}");
 }
 
+
+/// A `JsValue` stored in a native object literal or tuple that is handed to a
+/// `JsValue` slot keeps its live JS identity (graph wire), not a structural copy.
+#[test]
+fn retained_native_aggregate_keeps_nested_jsvalue_identity() {
+    let source = r#"
+        function main(): void {
+            loadScript("globalThis.dynamicBox = { value: 1 };");
+            const box: JsValue = getDynamicValue("dynamicBox");
+            const record: JsValue = keepDynamic({ label: "kept", nested: box, deeper: { again: box } });
+            console.log(getDynamicProperty(record, "nested") === box);
+            console.log(getDynamicProperty(getDynamicProperty(record, "deeper"), "again") === box);
+            const pair: JsValue = keepDynamic([box, { inner: box }]);
+            console.log(getDynamicProperty(pair, "0") === box);
+            console.log(getDynamicProperty(getDynamicProperty(pair, "1"), "inner") === box);
+        }
+        function keepDynamic(value: JsValue): JsValue { return value; }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "retained_aggregate_keeps_jsvalue_identity"),
+        "true\ntrue\ntrue\ntrue\n"
+    );
+}

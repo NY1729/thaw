@@ -84,6 +84,24 @@ fn callback_param_compatible(expected: &HirType, actual: &HirType) -> bool {
     )
 }
 
+/// Is `narrow` an object type that names only fields `wide` also has, with
+/// identical types, in any order (width subtyping by name)? Such a parameter can
+/// be lowered at the wider type: the value handed over keeps its one physical
+/// layout, so field reads and writes through the narrower annotation still reach
+/// the original object.
+fn object_width_subset(narrow: &HirType, wide: &HirType) -> bool {
+    let (HirType::Object(narrow_fields), HirType::Object(wide_fields)) = (narrow, wide) else {
+        return false;
+    };
+    narrow != wide
+        && narrow_fields.len() <= wide_fields.len()
+        && narrow_fields.iter().all(|(name, ty)| {
+            wide_fields
+                .iter()
+                .any(|(wide_name, wide_ty)| wide_name == name && wide_ty == ty)
+        })
+}
+
 /// A callback parameter declared to return `void` accepts a function
 /// value of any return type, including `Promise<T>` -- the caller has
 /// stated it discards whatever comes back, so an `async` handler

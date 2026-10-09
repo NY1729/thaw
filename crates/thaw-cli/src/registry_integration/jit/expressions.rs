@@ -1018,7 +1018,7 @@ macro_rules! jit_expressions {
                     encode_string(&key, &mut encoded_key)?;
                     let encoded_key = encoded_key.pop()?.strip_prefix('t')?.to_owned();
                     output.extend(value);
-                    output.push(format!("{prefix}put{encoded_key}"));
+                    output.push(format!("{prefix}init{encoded_key}"));
                 }
             }
             Expr::Member(member) => {
@@ -2003,7 +2003,7 @@ macro_rules! jit_expressions {
                         encode_string(&key, &mut encoded_key)?;
                         let encoded_key = encoded_key.pop()?.strip_prefix('t')?.to_owned();
                         output.extend(value);
-                        output.push(format!("{prefix}put{encoded_key}"));
+                        output.push(format!("{prefix}init{encoded_key}"));
                     }
                     Some(output)
                 }
