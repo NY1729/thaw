@@ -301,7 +301,19 @@ impl<'a> FnLowerer<'a> {
     ) -> Result<HirExpr, String> {
         let mut lhs = lhs;
         let mut lhs_type = self.infer_expr_type(&lhs)?;
-        let rhs_type = self.infer_expr_type(&rhs)?;
+        let mut rhs = rhs;
+        let mut rhs_type = self.infer_expr_type(&rhs)?;
+        // A caught value has no member-wise `Json` form; read it through the carrier adapter
+        // first (`catch (e) { e && e.message }`).
+        let carrier = crate::caught_exception_carrier_type();
+        if lhs_type == carrier {
+            lhs = self.caught_carrier_as_json(lhs)?;
+            lhs_type = HirType::Json;
+        }
+        if rhs_type == carrier {
+            rhs = self.caught_carrier_as_json(rhs)?;
+            rhs_type = HirType::Json;
+        }
         if lhs_type == HirType::JsValue && rhs_type != HirType::JsValue {
             lhs = HirExpr::Call(
                 Box::new(HirExpr::Var("readDynamicValue".to_string())),

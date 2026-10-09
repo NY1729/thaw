@@ -467,8 +467,24 @@ function main(): void {
     // resolving to `v4`'s first, `string`-returning overload instead),
     // this call wouldn't even have compiled -- `const filled: JsValue =
     // v4(...)` would be a type mismatch against a `string` result.
-    let filled_line = lines.next().expect("v4's buffer overload result");
-    let filled_bytes: Vec<&str> = filled_line.split(',').collect();
+    // `console.log` of a `Uint8Array` prints Node's `Uint8Array(16) [ ... ]` (wrapped, six
+    // numbers per line once there are more than six), so collect the numbers between the
+    // opening line and the closing `]`.
+    let header = lines.next().expect("v4's buffer overload result");
+    assert_eq!(header, "Uint8Array(16) [");
+    let mut filled_bytes: Vec<String> = Vec::new();
+    for line in lines.by_ref() {
+        if line == "]" {
+            break;
+        }
+        filled_bytes.extend(
+            line.split(',')
+                .map(str::trim)
+                .filter(|part| !part.is_empty())
+                .map(str::to_string),
+        );
+    }
+    let filled_line = filled_bytes.join(",");
     assert_eq!(
         filled_bytes.len(),
         16,
@@ -2565,7 +2581,7 @@ function main(): void {
     );
     assert_eq!(
         String::from_utf8_lossy(&result.stdout),
-        "<h1>My List</h1>\n<ul>\n\n  <li>apple</li>\n\n  <li>banana</li>\n\n  <li>cherry</li>\n\n</ul>\n<p><b>bold</b></p>\nHello Alice, you are 30 years old.\nerror caught: `ejs::render` threw: ejs:1\n >> 1| <%= missing.value %>\n\nmissing is not defined\n"
+        "<h1>My List</h1>\n<ul>\n\n  <li>apple</li>\n\n  <li>banana</li>\n\n  <li>cherry</li>\n\n</ul>\n<p><b>bold</b></p>\nHello Alice, you are 30 years old.\nerror caught: ejs:1\n >> 1| <%= missing.value %>\n\nmissing is not defined\n"
     );
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -3294,8 +3310,9 @@ run();
     );
     assert_eq!(
         String::from_utf8_lossy(&result.stdout),
-        "archive exists: true\n[\"hello.txt\"]\nhello world\n\
-         gzip archive exists: true\n[\"hello.txt\"]\nhello world\n"
+        // Node prints a string array as `[ 'hello.txt' ]` (util.inspect), not JSON.
+        "archive exists: true\n[ 'hello.txt' ]\nhello world\n\
+         gzip archive exists: true\n[ 'hello.txt' ]\nhello world\n"
     );
     let _ = std::fs::remove_dir_all(dir);
 }

@@ -82,7 +82,10 @@ fn parse_typescript_source(
         "failed to parse TypeScript source".to_string()
     })?;
     let errors = parser.take_errors();
-    if !errors.is_empty() {
+    // Published `.d.ts` files are third-party text: recoverable grammar complaints that only
+    // matter to executable code (execa's `arguments?: readonly string[]` parameter name under
+    // strict mode) must not reject an otherwise parseable declaration.
+    if !declarations && !errors.is_empty() {
         for error in errors {
             error.into_diagnostic(&handler).emit();
         }

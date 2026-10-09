@@ -807,7 +807,7 @@ fn lower_class_params(
                     classify_ts_type(&annotation.type_ann, interfaces, generic_interfaces)
                 })
                 .unwrap_or_else(|| DtsType::Unsupported("missing type annotation".into()));
-            (binding.id.sym.to_string(), ty)
+            (safe_param_name(binding.id.sym.as_ref()), ty)
         })
         .collect()
 }
@@ -1328,7 +1328,7 @@ fn lower_dts_class(
                     let ty = rest.type_ann.as_ref().map(|annotation| {
                         classify_ts_type(rest_element_type(&annotation.type_ann), interfaces, generic_interfaces)
                     }).unwrap_or_else(|| DtsType::Unsupported("missing rest type annotation".into()));
-                    Some((binding.id.sym.to_string(), ty))
+                    Some((safe_param_name(binding.id.sym.as_ref()), ty))
                 }),
                 overloaded: false,
             }),

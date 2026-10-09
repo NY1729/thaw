@@ -898,6 +898,28 @@ impl<'a> FnLowerer<'a> {
             HirType::FunctionWithThis(receiver, visible) => (*visible, Some(*receiver)),
             other => (other, None),
         };
+        // A declared function with a `...rest` parameter is a plain `Function` value whose
+        // last parameter is the rest array; `.bind` must see it as a rest-aware callable so
+        // the bound leading arguments are packed into that array instead of being coerced
+        // against `Array<T>`.
+        let target_type = match (&target, &target_type) {
+            (HirExpr::FunctionRef(name, _, _), HirType::Function(params, ret)) => {
+                match self.signatures.get(name).and_then(|signature| signature.native_rest.clone()) {
+                    Some(element)
+                        if params.last() == Some(&HirType::Array(Box::new(element.clone()))) =>
+                    {
+                        HirType::CallableFunction(
+                            params[..params.len() - 1].to_vec(),
+                            HirOptionalMask::default(),
+                            Some(Box::new(element)),
+                            ret.clone(),
+                        )
+                    }
+                    _ => target_type,
+                }
+            }
+            _ => target_type,
+        };
         let (params, optional, rest, ret) = match &target_type {
             HirType::Function(params, ret) => (
                 params.clone(),

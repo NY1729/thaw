@@ -381,7 +381,8 @@
     switch (operation) {
       case 0: return typeof value;
       case 1: return value ? '1' : '0';
-      case 2: return thawGraphString(thawGraphNumber(value));
+      // 2: String(value); numeric coercion has its own slot (16).
+      case 2: return thawGraphString(value);
       case 3: return thawGraphStringify(thawGraphString(value));
       case 4: return thawGraphArrayIsArray(value) ? '1' : '0';
       case 5: return value === undefined ? '1' : '0';
@@ -2387,6 +2388,12 @@
   const consoleInspect = value => {
     if (typeof value === 'string') return value;
     if (typeof value === 'symbol' || typeof value === 'bigint') return String(value);
+    // An Error stringifies to `{}` under JSON.stringify; keep its name/message and own properties.
+    if (value instanceof Error) {
+      let text = String(value);
+      try { const own = JSON.stringify(value); if (own && own !== '{}') text += ' ' + own; } catch (_) {}
+      return text;
+    }
     try { const encoded = JSON.stringify(value); return encoded === undefined ? String(value) : encoded; }
     catch (_) { return '[Circular]'; }
   };

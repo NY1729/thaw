@@ -114,7 +114,7 @@ pub unsafe extern "C" fn thaw_runtime_exception_report_text(
     if error.is_null() {
         return std::ptr::null_mut();
     }
-    let text: Vec<u8> = if error == native_text {
+    let text: Vec<u8> = if error == native_text || is_detached_report_text(error) {
         unsafe { CStr::from_ptr(error) }.to_bytes().to_vec()
     } else {
         match tag {

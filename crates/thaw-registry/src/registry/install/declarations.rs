@@ -60,7 +60,6 @@ fn append_referenced_owned_declaration(
     });
 }
 
-#[allow(clippy::too_many_arguments)]
 fn inline_triple_slash_references_inner(
     current_path: &Path,
     source: &str,
@@ -96,7 +95,7 @@ fn inline_triple_slash_references_inner(
             )
         })?;
         let (referenced_module, source_map) =
-            thaw_parser::parse_declarations_with_source_map_named(
+            parse_declarations_cached(
                 &referenced_source, thaw_parser::common::FileName::Real(target_path.clone()),
             )?;
         for item in &referenced_module.body {
@@ -246,8 +245,8 @@ fn triple_slash_reference_paths(source: &str) -> Vec<String> {
 fn export_as_namespace_name(entry_path: &Path, source: &str) -> Result<Option<String>, String> {
     use thaw_parser::ast::{ModuleDecl, ModuleItem};
 
-    let module = thaw_parser::parse_declarations_with_source_map_named(
-        source, thaw_parser::common::FileName::Custom(format!("{} (declaration transform input)", entry_path.display())),
+    let module = parse_declarations_cached(
+        source, thaw_parser::common::FileName::Custom(format!("{} (declaration transform input)", entry_path.display()).into()),
     )?.0;
     Ok(module.body.iter().find_map(|item| match item {
         ModuleItem::ModuleDecl(ModuleDecl::TsNamespaceExport(export)) => {
@@ -293,8 +292,8 @@ fn hoisted_export_equals_namespace_members(
     };
     use thaw_parser::common::{SourceMapper, Spanned};
 
-    let (module, source_map) = thaw_parser::parse_declarations_with_source_map_named(
-        entry_source, thaw_parser::common::FileName::Custom(format!("{} (declaration transform input)", entry_path.display())),
+    let (module, source_map) = parse_declarations_cached(
+        entry_source, thaw_parser::common::FileName::Custom(format!("{} (declaration transform input)", entry_path.display()).into()),
     )?;
     let Some(exported_name) = module.body.iter().find_map(|item| match item {
         ModuleItem::ModuleDecl(ModuleDecl::TsExportAssignment(export)) => match export.expr.as_ref()
@@ -389,7 +388,6 @@ fn hoisted_export_equals_namespace_members(
 /// too when `BASE` can't be resolved at all -- e.g. it refers to something
 /// declared in the same file rather than an import, a case not observed in
 /// any real package yet).
-#[allow(clippy::too_many_arguments)]
 fn resolve_namespace_hoisted_import_equals(
     import: &thaw_parser::ast::TsImportEqualsDecl,
     named_import_targets: &std::collections::HashMap<String, (PathBuf, String)>,
@@ -494,8 +492,8 @@ fn resolve_namespace_hoisted_import_equals(
             if members.is_empty() {
                 let selected_records = selected.iter().flat_map(|binding|
                     binding.fragments.iter().filter(move |declaration|
-                        binding.value_export
-                            || !is_type_only_namespace_binding(declaration, &binding.public))
+                        !(!binding.value_export
+                            && is_type_only_namespace_binding(declaration, &binding.public)))
                         .cloned()).map(|declaration|
                     EmittedOwnedDeclaration {
                         declaration, scope: None, public_names: Vec::new(),
@@ -644,8 +642,8 @@ fn resolve_namespace_hoisted_import_equals(
 }
 
 fn parse_labeled_declarations(source: &str, label: String) -> Result<thaw_parser::ast::Module, String> {
-    thaw_parser::parse_declarations_with_source_map_named(
-        source, thaw_parser::common::FileName::Custom(label),
+    parse_declarations_cached(
+        source, thaw_parser::common::FileName::Custom(label.into()),
     ).map(|(module, _)| module)
 }
 
@@ -663,7 +661,7 @@ fn exported_const_object_properties(
     use thaw_parser::common::{SourceMapper, Spanned};
 
     let source = views.read(origin)?;
-    let (module, source_map) = thaw_parser::parse_declarations_with_source_map_named(
+    let (module, source_map) = parse_declarations_cached(
         &source, thaw_parser::common::FileName::Real(origin.to_path_buf()),
     )?;
     let Some(exported) = module.body.iter().find_map(|item| match item {
@@ -749,10 +747,10 @@ fn exported_const_object_properties(
     while let Some((fragment, through_alias)) = pending.pop_front() {
         if !visited.insert((fragment.origin.clone(), fragment.source_scope.clone(),
             fragment.local_name.clone(), fragment.snippet.clone())) { continue; }
-        let (parsed, snippet_map) = thaw_parser::parse_declarations_with_source_map_named(
+        let (parsed, snippet_map) = parse_declarations_cached(
             &fragment.snippet,
             thaw_parser::common::FileName::Custom(
-                format!("{} (owned object type)", fragment.origin.display()),
+                format!("{} (owned object type)", fragment.origin.display()).into(),
             ),
         )?;
         for item in &parsed.body {
@@ -851,7 +849,7 @@ fn dts_delegation_target(entry_path: &Path, entry_source: &str) -> Option<(PathB
         Decl, Expr, ModuleDecl, ModuleItem, Pat, Stmt, TsEntityName, TsType, TsTypeQueryExpr,
     };
 
-    let module = thaw_parser::parse_declarations_with_source_map_named(
+    let module = parse_declarations_cached(
         entry_source, thaw_parser::common::FileName::Real(entry_path.to_path_buf()),
     ).ok()?.0;
     let exported = module.body.iter().find_map(|item| match item {
@@ -942,8 +940,8 @@ fn unwrap_self_ambient_module(entry_path: &Path, entry_source: &str) -> Result<S
     use thaw_parser::ast::{Decl, ModuleItem, Stmt, TsModuleName, TsNamespaceBody};
     use thaw_parser::common::{SourceMapper, Spanned};
 
-    let (module, source_map) = thaw_parser::parse_declarations_with_source_map_named(
-        entry_source, thaw_parser::common::FileName::Custom(format!("{} (declaration transform input)", entry_path.display())),
+    let (module, source_map) = parse_declarations_cached(
+        entry_source, thaw_parser::common::FileName::Custom(format!("{} (declaration transform input)", entry_path.display()).into()),
     )?;
     let canonical_entry = entry_path
         .canonicalize()
@@ -1558,7 +1556,7 @@ fn dts_source_with_reexported_functions_inner_with_metadata(
     }
     let retained_entry = without_materialized_class_imports_named(
         entry_source, &materialized_class_imports,
-        thaw_parser::common::FileName::Custom(format!("{} (unwrapped declaration entry)", entry_path.display())),
+        thaw_parser::common::FileName::Custom(format!("{} (unwrapped declaration entry)", entry_path.display()).into()),
     )?;
     output.replace_range(..entry_source.len(), &retained_entry);
     for record in &mut emitted_owned {
@@ -1601,9 +1599,9 @@ fn builtin_class_and_ancestor_declarations(
     if !visited.insert(name.to_string()) {
         return Ok(Vec::new());
     }
-    let (module, source_map) = thaw_parser::parse_declarations_with_source_map_named(
+    let (module, source_map) = parse_declarations_cached(
         dts_source, thaw_parser::common::FileName::Custom(
-            format!("node:{} (generated builtin declarations)", specifier.strip_prefix("node:").unwrap_or(specifier)),
+            format!("node:{} (generated builtin declarations)", specifier.strip_prefix("node:").unwrap_or(specifier)).into(),
         ),
     )?;
     let mut declarations = Vec::new();
@@ -1705,10 +1703,10 @@ fn source_namespace_children(origin: &Path, snippet: &str) -> Vec<OwnedDeclarati
             prepend_scope(child, name);
         }
     }
-    let Ok((module, source_map)) = thaw_parser::parse_declarations_with_source_map_named(
+    let Ok((module, source_map)) = parse_declarations_cached(
         snippet,
         thaw_parser::common::FileName::Custom(
-            format!("{} (owned namespace)", origin.display()),
+            format!("{} (owned namespace)", origin.display()).into(),
         ),
     ) else { return Vec::new() };
     let namespace = module.body.iter().find_map(|item| match item {
@@ -1896,7 +1894,7 @@ fn selected_namespace_bindings(
         .flat_map(|record| record.public_names.iter().cloned())
         .collect::<std::collections::BTreeSet<_>>();
     let source = views.read(target_path)?;
-    let module = thaw_parser::parse_declarations_with_source_map_named(
+    let module = parse_declarations_cached(
         &source, thaw_parser::common::FileName::Real(target_path.to_path_buf()),
     )?.0;
     let mut namespace_containers = std::collections::BTreeMap::new();
@@ -2049,10 +2047,10 @@ fn owned_type_parameter_forwarding(
 ) -> Result<(String, String), String> {
     use thaw_parser::ast::{Decl, ModuleDecl, ModuleItem, Stmt};
     use thaw_parser::common::{SourceMapper, Spanned};
-    let (module, source_map) = thaw_parser::parse_declarations_with_source_map_named(
+    let (module, source_map) = parse_declarations_cached(
         &declaration.snippet,
         thaw_parser::common::FileName::Custom(
-            format!("{} (selected generic alias)", declaration.origin.display()),
+            format!("{} (selected generic alias)", declaration.origin.display()).into(),
         ),
     )?;
     let parameters = module.body.iter().find_map(|item| {
@@ -2135,12 +2133,49 @@ struct OwnedSourceViews {
     by_origin: std::collections::BTreeMap<PathBuf, String>,
     composite_aliases: std::collections::BTreeMap<(PathBuf, Vec<String>, Vec<String>), CompositeAlias>,
     owned_names: std::collections::BTreeMap<PathBuf, String>,
+    // Parsing a declaration file is the expensive step of every type-reference
+    // lookup; both caches are valid until a view is rewritten (`set`/`append`).
+    disk_sources: std::cell::RefCell<std::collections::BTreeMap<PathBuf, String>>,
+    // (mtime, len) of each disk-backed file the caches were built from; a changed stamp drops them.
+    disk_stamps: std::cell::RefCell<std::collections::BTreeMap<PathBuf, (Option<std::time::SystemTime>, u64)>>,
+    type_bindings: std::cell::RefCell<std::collections::BTreeMap<PathBuf, std::rc::Rc<SourceTypeBindings>>>,
+    import_tables: std::cell::RefCell<std::collections::BTreeMap<PathBuf, std::rc::Rc<SourceImportTables>>>,
+    value_bindings: std::cell::RefCell<std::collections::BTreeMap<PathBuf, std::rc::Rc<SourceValueBindings>>>,
+    modules: std::cell::RefCell<std::collections::BTreeMap<PathBuf, std::rc::Rc<thaw_parser::ast::Module>>>,
+}
+
+/// Per-file import maps used to follow a type reference that is not declared locally.
+struct SourceImportTables {
+    type_imports: std::collections::HashMap<String, (PathBuf, String)>,
+    value_imports: std::collections::HashMap<String, (PathBuf, String)>,
+    import_equals: std::collections::HashMap<String, PathBuf>,
 }
 
 impl OwnedSourceViews {
+    /// Drops every derived cache when a disk-backed file changed since it was cached.
+    fn refresh(&self, path: &Path) {
+        let origin = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        if self.by_origin.contains_key(&origin) { return; }
+        let stamp = fs::metadata(&origin).ok().map(|meta| (meta.modified().ok(), meta.len()));
+        let Some(stamp) = stamp else { return };
+        let mut stamps = self.disk_stamps.borrow_mut();
+        if stamps.get(&origin) == Some(&stamp) { return; }
+        if stamps.insert(origin.clone(), stamp).is_some() {
+            self.disk_sources.borrow_mut().remove(&origin);
+            self.type_bindings.borrow_mut().clear();
+            self.import_tables.borrow_mut().clear();
+            self.value_bindings.borrow_mut().clear();
+            self.modules.borrow_mut().clear();
+        }
+    }
+
     fn set(&mut self, path: &Path, source: String) {
         let origin = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
         self.by_origin.insert(origin, source);
+        self.type_bindings.borrow_mut().clear();
+        self.import_tables.borrow_mut().clear();
+        self.value_bindings.borrow_mut().clear();
+        self.modules.borrow_mut().clear();
     }
 
     fn append(&mut self, path: &Path, source: &str) -> Result<(), String> {
@@ -2152,16 +2187,37 @@ impl OwnedSourceViews {
         let view = self.by_origin.get_mut(&origin).expect("source view was inserted");
         if !view.ends_with('\n') { view.push('\n'); }
         view.push_str(source);
+        self.type_bindings.borrow_mut().clear();
+        self.import_tables.borrow_mut().clear();
+        self.value_bindings.borrow_mut().clear();
+        self.modules.borrow_mut().clear();
         Ok(())
     }
 
     fn read(&self, path: &Path) -> Result<String, String> {
+        self.refresh(path);
         let origin = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
         self.by_origin.get(&origin).cloned().map(Ok).unwrap_or_else(|| {
+            if let Some(cached) = self.disk_sources.borrow().get(&origin) { return Ok(cached.clone()); }
             let disk = fs::read_to_string(&origin).map_err(|error|
                 format!("failed to read source view `{}`: {error}", origin.display()))?;
-            unwrap_self_ambient_module(&origin, &disk)
+            let unwrapped = unwrap_self_ambient_module(&origin, &disk)?;
+            self.disk_sources.borrow_mut().insert(origin.clone(), unwrapped.clone());
+            Ok(unwrapped)
         })
+    }
+
+    /// The parsed declaration module for `path`, shared until a view is rewritten.
+    fn parsed_module(&self, path: &Path) -> Result<std::rc::Rc<thaw_parser::ast::Module>, String> {
+        self.refresh(path);
+        if let Some(cached) = self.modules.borrow().get(path) { return Ok(cached.clone()); }
+        let source = self.read(path)?;
+        let module = thaw_parser::parse_declarations_with_source_map_named(
+            &source, thaw_parser::common::FileName::Real(path.to_path_buf()),
+        )?.0;
+        let module = std::rc::Rc::new(module);
+        self.modules.borrow_mut().insert(path.to_path_buf(), module.clone());
+        Ok(module)
     }
 
     fn has(&self, path: &Path) -> bool {
@@ -2176,12 +2232,21 @@ struct SourceSupportBindings {
     values: SourceValueBindings,
 }
 
-#[allow(dead_code)]
 fn source_type_bindings(path: &Path) -> Result<SourceTypeBindings, String> {
-    source_type_bindings_with_views(path, &OwnedSourceViews::default())
+    source_type_bindings_with_views(path, &OwnedSourceViews::default()).map(|table| (*table).clone())
 }
 
 fn source_type_bindings_with_views(
+    path: &Path, views: &OwnedSourceViews,
+) -> Result<std::rc::Rc<SourceTypeBindings>, String> {
+    views.refresh(path);
+    if let Some(cached) = views.type_bindings.borrow().get(path) { return Ok(cached.clone()); }
+    let table = std::rc::Rc::new(compute_source_type_bindings_with_views(path, views)?);
+    views.type_bindings.borrow_mut().insert(path.to_path_buf(), table.clone());
+    Ok(table)
+}
+
+fn compute_source_type_bindings_with_views(
     path: &Path, views: &OwnedSourceViews,
 ) -> Result<SourceTypeBindings, String> {
     use thaw_parser::ast::{Decl, DefaultDecl, ModuleDecl, ModuleItem, Stmt};
@@ -2199,7 +2264,22 @@ fn source_type_bindings_with_views(
         for child in &declaration.children { insert_owned(table, child.clone()); }
     }
     let source = views.read(path)?;
-    let (module, source_map) = thaw_parser::parse_declarations_with_source_map_named(
+    // Resolving every type reference re-enters here; re-parsing the same
+    // declaration file each time made large packages (hono, drizzle) spin.
+    thread_local! {
+        static CACHE: std::cell::RefCell<std::collections::HashMap<(PathBuf, u64, usize), SourceTypeBindings>>
+            = std::cell::RefCell::new(std::collections::HashMap::new());
+    }
+    let cache_key = {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        source.hash(&mut hasher);
+        (path.to_path_buf(), hasher.finish(), source.len())
+    };
+    if let Some(hit) = CACHE.with(|cache| cache.borrow().get(&cache_key).cloned()) {
+        return Ok(hit);
+    }
+    let (module, source_map) = parse_declarations_cached(
         &source, thaw_parser::common::FileName::Real(path.to_path_buf()),
     )?;
     let mut table = std::collections::BTreeMap::new();
@@ -2232,15 +2312,25 @@ fn source_type_bindings_with_views(
             format!("failed to read source type binding in `{}`: {error:?}", path.display()))?;
         insert_owned(&mut table, OwnedDeclaration::new(path, snippet));
     }
+    CACHE.with(|cache| cache.borrow_mut().insert(cache_key, table.clone()));
     Ok(table)
 }
 
-#[allow(dead_code)]
 fn source_value_bindings(path: &Path) -> Result<SourceValueBindings, String> {
-    source_value_bindings_with_views(path, &OwnedSourceViews::default())
+    source_value_bindings_with_views(path, &OwnedSourceViews::default()).map(|table| (*table).clone())
 }
 
 fn source_value_bindings_with_views(
+    path: &Path, views: &OwnedSourceViews,
+) -> Result<std::rc::Rc<SourceValueBindings>, String> {
+    views.refresh(path);
+    if let Some(cached) = views.value_bindings.borrow().get(path) { return Ok(cached.clone()); }
+    let table = std::rc::Rc::new(compute_source_value_bindings_with_views(path, views)?);
+    views.value_bindings.borrow_mut().insert(path.to_path_buf(), table.clone());
+    Ok(table)
+}
+
+fn compute_source_value_bindings_with_views(
     path: &Path, views: &OwnedSourceViews,
 ) -> Result<SourceValueBindings, String> {
     use thaw_parser::ast::{Decl, DefaultDecl, ModuleDecl, ModuleItem, Pat, Stmt, TsModuleName, TsNamespaceBody};
@@ -2318,11 +2408,26 @@ fn source_value_bindings_with_views(
         Ok(())
     }
     let source = views.read(path)?;
-    let (module, source_map) = thaw_parser::parse_declarations_with_source_map_named(
+    // Memoized like `source_type_bindings_with_views`: every type reference re-enters here.
+    thread_local! {
+        static CACHE: std::cell::RefCell<std::collections::HashMap<(PathBuf, u64, usize), SourceValueBindings>>
+            = std::cell::RefCell::new(std::collections::HashMap::new());
+    }
+    let cache_key = {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        source.hash(&mut hasher);
+        (path.to_path_buf(), hasher.finish(), source.len())
+    };
+    if let Some(hit) = CACHE.with(|cache| cache.borrow().get(&cache_key).cloned()) {
+        return Ok(hit);
+    }
+    let (module, source_map) = parse_declarations_cached(
         &source, thaw_parser::common::FileName::Real(path.to_path_buf()),
     )?;
     let mut values = SourceValueBindings::new();
     collect(path, &source_map, &module.body, &[], &mut values)?;
+    CACHE.with(|cache| cache.borrow_mut().insert(cache_key, values.clone()));
     Ok(values)
 }
 
@@ -2348,7 +2453,6 @@ fn resolve_lexical_source_value<'a>(
         table.get(&(origin.clone(), scope[..depth].to_vec(), name.to_string())).map(Vec::as_slice))
 }
 
-#[allow(dead_code)]
 fn exported_owned_value_declarations(
     path: &Path,
     name: &str,
@@ -2369,7 +2473,7 @@ fn exported_owned_value_declarations_with_views(
     let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     if !visited.insert((canonical.clone(), name.to_string())) { return Ok(Vec::new()); }
     let source = views.read(&canonical)?;
-    let module = thaw_parser::parse_declarations_with_source_map_named(
+    let module = parse_declarations_cached(
         &source, thaw_parser::common::FileName::Real(canonical.clone()),
     )?.0;
     let table = source_value_bindings_with_views(&canonical, views)?;
@@ -2486,7 +2590,6 @@ fn exported_owned_value_declarations_with_views(
     ))
 }
 
-#[allow(dead_code)]
 fn resolve_owned_source_value_reference(
     origin: &Path,
     scope: &[String],
@@ -2508,7 +2611,7 @@ fn resolve_owned_source_value_reference_with_views(
         return Ok(declaration.to_vec());
     }
     let source = views.read(origin)?;
-    let module = thaw_parser::parse_declarations_with_source_map_named(
+    let module = parse_declarations_cached(
         &source, thaw_parser::common::FileName::Real(origin.to_path_buf()),
     )?.0;
     if let Some(target) = import_equals_targets(origin, &module).get(local_spelling) {
@@ -2580,7 +2683,7 @@ fn selected_export_assignment_declarations_with_visited(
         }
         let result = (|| -> Result<Vec<OwnedDeclaration>, String> {
         let source = views.read(&origin)?;
-        let module = thaw_parser::parse_declarations_with_source_map_named(
+        let module = parse_declarations_cached(
             &source, thaw_parser::common::FileName::Real(origin.clone()),
         )?.0;
         let Some(actual) = module.body.iter().find_map(|item| {
@@ -2637,7 +2740,7 @@ fn selected_export_assignment_member_with_views(
     let mut visited = std::collections::BTreeSet::new();
     while visited.insert(current.clone()) {
         let source = views.read(&current)?;
-        let module = thaw_parser::parse_declarations_with_source_map_named(
+        let module = parse_declarations_cached(
             &source, thaw_parser::common::FileName::Real(current.clone()),
         )?.0;
         let Some(actual) = module.body.iter().find_map(|item| {
@@ -2722,14 +2825,11 @@ fn exported_owned_type_declarations_with_visited(
         use thaw_parser::ast::{Decl, DefaultDecl, Expr, ExportSpecifier, ModuleDecl, ModuleExportName, ModuleItem};
         let origin = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
         if !visited.insert((origin.clone(), name.to_string())) { return Ok(Vec::new()) }
-        let source = views.read(&origin)?;
-        let module = thaw_parser::parse_declarations_with_source_map_named(
-            &source, thaw_parser::common::FileName::Real(origin.clone()),
-        )?.0;
+        let module = views.parsed_module(&origin)?;
         let table = source_type_bindings_with_views(&origin, views)?;
-        let value_imports = named_import_targets(&origin, &module);
-        let type_imports = named_type_import_targets(&origin, &module);
-        let import_equals = import_equals_targets(&origin, &module);
+        let tables = source_import_tables_with_views(&origin, views)?;
+        let (value_imports, type_imports, import_equals) =
+            (&tables.value_imports, &tables.type_imports, &tables.import_equals);
         let mut explicit = Vec::new();
         let mut wildcard_targets = Vec::new();
         let mut explicit_selected = false;
@@ -2831,7 +2931,7 @@ fn namespace_reexport_target(
     views: &OwnedSourceViews,
 ) -> Result<Option<PathBuf>, String> {
     let source = views.read(path)?;
-    let module = thaw_parser::parse_declarations_with_source_map_named(
+    let module = parse_declarations_cached(
         &source, thaw_parser::common::FileName::Real(path.to_path_buf()),
     )?.0;
     Ok(collect_namespace_reexports_with_views(
@@ -2839,7 +2939,6 @@ fn namespace_reexport_target(
     )?.into_iter().find(|(name, _)| name == alias).map(|(_, target)| target))
 }
 
-#[allow(clippy::type_complexity)]
 fn named_namespace_reexport_target(
     path: &Path,
     public: &str,
@@ -2848,7 +2947,7 @@ fn named_namespace_reexport_target(
 ) -> Result<(bool, Option<(PathBuf, Vec<String>)>), String> {
     use thaw_parser::ast::{ExportSpecifier, ModuleDecl, ModuleExportName, ModuleItem};
     let source = views.read(path)?;
-    let module = thaw_parser::parse_declarations_with_source_map_named(
+    let module = parse_declarations_cached(
         &source, thaw_parser::common::FileName::Real(path.to_path_buf()),
     )?.0;
     let value_imports = named_import_targets(path, &module);
@@ -2888,7 +2987,6 @@ fn named_namespace_reexport_target(
     Ok((false, None))
 }
 
-#[allow(clippy::type_complexity)]
 fn directly_exported_namespace(
     path: &Path,
     segments: &[String],
@@ -2957,7 +3055,7 @@ fn directly_exported_namespace(
         })
     }
     let source = views.read(path)?;
-    let module = thaw_parser::parse_declarations_with_source_map_named(
+    let module = parse_declarations_cached(
         &source, thaw_parser::common::FileName::Real(path.to_path_buf()),
     )?.0;
     let mut items = module.body.as_slice();
@@ -2979,7 +3077,6 @@ fn directly_exported_namespace(
     Ok(Some((source_scope, exported_local_name(items, member, kind))))
 }
 
-#[allow(dead_code)]
 fn resolve_imported_namespace_member(
     target: &Path,
     segments: &[String],
@@ -3046,7 +3143,6 @@ fn resolve_imported_namespace_member_inner(
     resolve_imported_namespace_member_inner(&next, &segments[1..], kind, visited, views)
 }
 
-#[allow(dead_code)]
 fn resolve_owned_qualified_source_value_reference(
     origin: &Path,
     scope: &[String],
@@ -3086,7 +3182,7 @@ fn resolve_owned_qualified_source_value_reference_with_views(
         }
     }
     let source = views.read(&origin)?;
-    let module = thaw_parser::parse_declarations_with_source_map_named(
+    let module = parse_declarations_cached(
         &source, thaw_parser::common::FileName::Real(origin.clone()),
     )?.0;
     let named_imports = named_import_targets(&origin, &module);
@@ -3122,7 +3218,21 @@ fn resolve_owned_qualified_source_value_reference_with_views(
     )
 }
 
-#[allow(dead_code)]
+fn source_import_tables_with_views(
+    origin: &Path, views: &OwnedSourceViews,
+) -> Result<std::rc::Rc<SourceImportTables>, String> {
+    views.refresh(origin);
+    if let Some(cached) = views.import_tables.borrow().get(origin) { return Ok(cached.clone()); }
+    let module = views.parsed_module(origin)?;
+    let tables = std::rc::Rc::new(SourceImportTables {
+        type_imports: named_type_import_targets(origin, &module),
+        value_imports: named_import_targets(origin, &module),
+        import_equals: import_equals_targets(origin, &module),
+    });
+    views.import_tables.borrow_mut().insert(origin.to_path_buf(), tables.clone());
+    Ok(tables)
+}
+
 fn resolve_owned_source_type_reference(
     origin: &Path,
     scope: &[String],
@@ -3147,26 +3257,20 @@ fn resolve_owned_source_type_reference_with_views(
     // named barrels and default aliases to a terminal owned declaration;
     // keep `local_spelling` separate from that source identity for later
     // span replacement (`import type { Key as Id }`).
-    let source = views.read(origin)?;
-    let module = thaw_parser::parse_declarations_with_source_map_named(
-        &source, thaw_parser::common::FileName::Real(origin.to_path_buf()),
-    )?.0;
-    let type_imports = named_type_import_targets(origin, &module);
-    let value_imports = named_import_targets(origin, &module);
-    if let Some(target) = import_equals_targets(origin, &module).get(local_spelling) {
+    let tables = source_import_tables_with_views(origin, views)?;
+    if let Some(target) = tables.import_equals.get(local_spelling) {
         return selected_export_assignment_declarations_with_views(
             target, TypeReferenceKind::Type, views,
         );
     }
-    let Some((target, imported)) = type_imports.get(local_spelling)
-        .or_else(|| value_imports.get(local_spelling)) else { return Ok(Vec::new()) };
+    let Some((target, imported)) = tables.type_imports.get(local_spelling)
+        .or_else(|| tables.value_imports.get(local_spelling)) else { return Ok(Vec::new()) };
     // The selected follower deliberately returns empty for ambiguous stars
     // and unresolved explicit exports. A legacy first-star fallback would
     // turn either result into a different source owner.
     exported_owned_type_declarations(target, imported, views)
 }
 
-#[allow(dead_code)]
 fn resolve_owned_qualified_source_type_reference(
     origin: &Path,
     scope: &[String],
@@ -3206,7 +3310,7 @@ fn resolve_owned_qualified_source_type_reference_with_views(
         }
     }
     let source = views.read(&origin)?;
-    let module = thaw_parser::parse_declarations_with_source_map_named(
+    let module = parse_declarations_cached(
         &source, thaw_parser::common::FileName::Real(origin.clone()),
     )?.0;
     let named_type_imports = named_type_import_targets(&origin, &module);
@@ -3248,13 +3352,11 @@ struct OwnedTypeReference {
     range: (usize, usize),
     full_range: (usize, usize),
     kind: TypeReferenceKind,
-    #[allow(dead_code)]
     local_spelling: String,
     terminal: SourceTypeKey,
     fragments: Vec<OwnedDeclaration>,
 }
 
-#[allow(dead_code)]
 fn owned_type_reference_edges(declaration: &OwnedDeclaration) -> Result<Vec<OwnedTypeReference>, String> {
     owned_type_reference_edges_with_views(declaration, &OwnedSourceViews::default())
 }
@@ -3264,19 +3366,17 @@ fn owned_type_reference_edges_with_views(
 ) -> Result<Vec<OwnedTypeReference>, String> {
     let table = source_type_bindings_with_views(&declaration.origin, views)?;
     let value_table = source_value_bindings_with_views(&declaration.origin, views)?;
-    let source = views.read(&declaration.origin)?;
-    let module = thaw_parser::parse_declarations_with_source_map_named(
-        &source, thaw_parser::common::FileName::Real(declaration.origin.clone()),
-    )?.0;
+    let module = views.parsed_module(&declaration.origin)?;
     let mut names = table.keys().filter(|(origin, scope, _)|
         origin == &declaration.origin && declaration.source_scope.starts_with(scope))
         .map(|(_, _, name)| name.clone()).collect::<std::collections::BTreeSet<_>>();
     names.extend(value_table.keys().filter(|(origin, scope, _)|
         origin == &declaration.origin && declaration.source_scope.starts_with(scope))
         .map(|(_, _, name)| name.clone()));
-    names.extend(named_type_import_targets(&declaration.origin, &module).into_keys());
-    names.extend(named_import_targets(&declaration.origin, &module).into_keys());
-    names.extend(import_equals_targets(&declaration.origin, &module).into_keys());
+    let import_tables = source_import_tables_with_views(&declaration.origin, views)?;
+    names.extend(import_tables.type_imports.keys().cloned());
+    names.extend(import_tables.value_imports.keys().cloned());
+    names.extend(import_tables.import_equals.keys().cloned());
     names.extend(views.composite_aliases.keys().filter(|(origin, scope, _)|
         origin == &declaration.origin && declaration.source_scope.starts_with(scope))
         .filter_map(|(_, _, path)| path.first().cloned()));
@@ -3317,7 +3417,6 @@ fn owned_type_reference_edges_with_views(
     Ok(edges)
 }
 
-#[allow(dead_code)]
 fn referenced_private_type_closure(
     emitted: &[EmittedOwnedDeclaration],
     public: &std::collections::BTreeMap<SourceTypeKey, Vec<PublicTypeOccurrence>>,
@@ -3467,6 +3566,52 @@ fn render_private_support_declarations(
     Ok(output)
 }
 
+/// Two copies of one source declaration, one of which may carry the trailing
+/// `export type { Name };` statement that followed it in its file.
+fn same_declaration_text(left: &str, right: &str) -> bool {
+    fn bare(text: &str) -> &str {
+        let text = text.trim();
+        text.strip_prefix("export ").map_or(text, str::trim_start)
+    }
+    let (left, right) = (bare(left).trim_end(), bare(right).trim_end());
+    left == right
+        || (left.starts_with(right) && left[right.len()..].trim_start().starts_with("export "))
+        || (right.starts_with(left) && right[left.len()..].trim_start().starts_with("export "))
+}
+
+/// The declaration keyword (`class`, `interface`, `function`, ...) of an ambient
+/// snippet, ignoring `export`/`declare`/`abstract` modifiers.
+fn declaration_keyword(snippet: &str) -> Option<&str> {
+    snippet.split_whitespace()
+        .find(|word| !matches!(*word, "export" | "declare" | "abstract" | "default"))
+}
+
+/// `parse_declarations_with_source_map_named`, memoized on the exact source text.
+/// Resolving declarations re-enters the same files once per type reference;
+/// re-parsing each time made large packages (hono, drizzle, sharp) take minutes.
+fn parse_declarations_cached(
+    source: &str,
+    filename: thaw_parser::common::FileName,
+) -> Result<(thaw_parser::ast::Module, thaw_parser::common::sync::Lrc<thaw_parser::common::SourceMap>), String> {
+    type Parsed = (thaw_parser::ast::Module, thaw_parser::common::sync::Lrc<thaw_parser::common::SourceMap>);
+    thread_local! {
+        static CACHE: std::cell::RefCell<std::collections::HashMap<(u64, usize, String), Parsed>>
+            = std::cell::RefCell::new(std::collections::HashMap::new());
+    }
+    let key = {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        source.hash(&mut hasher);
+        (hasher.finish(), source.len(), format!("{filename:?}"))
+    };
+    if let Some(hit) = CACHE.with(|cache| cache.borrow().get(&key).cloned()) {
+        return Ok(hit);
+    }
+    let parsed = thaw_parser::parse_declarations_with_source_map_named(source, filename)?;
+    CACHE.with(|cache| cache.borrow_mut().insert(key, parsed.clone()));
+    Ok(parsed)
+}
+
 fn append_private_type_closure(
     output: &mut String,
     emitted: &[EmittedOwnedDeclaration],
@@ -3490,11 +3635,15 @@ fn append_private_type_closure(
                 && other.declaration.origin == record.declaration.origin
                 && other.declaration.source_scope == record.declaration.source_scope
                 && other.declaration.local_name == record.declaration.local_name
-                && other.declaration.snippet == record.declaration.snippet) {
+                && same_declaration_text(&other.declaration.snippet, &record.declaration.snippet)) {
                 continue;
             }
             if !owned_type_reference_edges_with_views(&record.declaration, views)?.is_empty() {
-                return Err(format!("unlocated owned declaration in `{}`", record.declaration.origin.display()));
+                return Err(format!(
+                    "unlocated owned declaration `{}` in `{}`",
+                    record.declaration.snippet.chars().take(160).collect::<String>().replace('\n', " "),
+                    record.declaration.origin.display(),
+                ));
             }
             continue;
         }
@@ -3664,10 +3813,10 @@ fn record_owned_entry_declarations(
 ) -> Result<(), String> {
     use thaw_parser::ast::{Decl, DefaultDecl, ExportSpecifier, ModuleDecl, ModuleExportName, ModuleItem, Pat, Stmt};
     use thaw_parser::common::{SourceMapper, Spanned};
-    let (module, source_map) = thaw_parser::parse_declarations_with_source_map_named(
+    let (module, source_map) = parse_declarations_cached(
         retained_entry,
         thaw_parser::common::FileName::Custom(
-            format!("{} (retained declaration entry)", entry_path.display()),
+            format!("{} (retained declaration entry)", entry_path.display()).into(),
         ),
     )?;
     let mut aliases = std::collections::BTreeMap::<String, Vec<String>>::new();
@@ -3833,7 +3982,6 @@ fn reexported_owned_declarations_as(
         declaration.with_snippet(snippet)).collect()
 }
 
-#[allow(dead_code)]
 fn all_reexported_type_declarations(
     path: &Path,
     visited: &mut std::collections::BTreeSet<PathBuf>,
@@ -3858,7 +4006,7 @@ fn all_reexported_type_declarations_owned(
             path.display()
         )
     })?;
-    let (module, source_map) = thaw_parser::parse_declarations_with_source_map_named(
+    let (module, source_map) = parse_declarations_cached(
         &source, thaw_parser::common::FileName::Real(path.to_path_buf()),
     )?;
     let mut declarations = Vec::new();
@@ -3983,7 +4131,11 @@ fn type_only_declaration(snippet: String, exported: Option<&str>) -> String {
             .and_then(|suffix| suffix.strip_suffix(" };")) {
             aliases.push(alias.to_string());
             false
-        } else { *line != own_type_marker.as_str() }
+        } else if *line == own_type_marker.as_str() {
+            false
+        } else {
+            true
+        }
     }).collect::<Vec<_>>().join("\n");
     let mut result = format!("{body}\nexport type {{ {name} }};");
     if name != public {
@@ -4046,7 +4198,7 @@ fn namespace_member_declarations_owned(
 
 fn namespace_member_declarations(snippet: &str) -> Result<Vec<String>, String> {
     use thaw_parser::common::{SourceMapper, Spanned};
-    let (module, source_map) = thaw_parser::parse_declarations_with_source_map_named(
+    let (module, source_map) = parse_declarations_cached(
         snippet,
         thaw_parser::common::FileName::Custom("generated namespace member".into()),
     )?;
@@ -4227,7 +4379,7 @@ fn self_referential_namespace_alias_snippets(
             entry_path.display()
         )
     })?;
-    let (module, source_map) = thaw_parser::parse_declarations_with_source_map_named(
+    let (module, source_map) = parse_declarations_cached(
         &source, thaw_parser::common::FileName::Real(entry_path.to_path_buf()),
     )?;
 
@@ -4363,7 +4515,7 @@ fn collect_namespace_reexports_with_views(
                     continue;
                 };
                 let target_source = views.read(&target_path)?;
-                let target_module = thaw_parser::parse_declarations_with_source_map_named(
+                let target_module = parse_declarations_cached(
                     &target_source, thaw_parser::common::FileName::Real(target_path.clone()),
                 )?.0;
                 found.extend(collect_namespace_reexports_with_views(
@@ -4533,7 +4685,7 @@ fn callable_const_declaration_snippet(
                 path.display()
             )
         })?;
-        let (module, source_map) = thaw_parser::parse_declarations_with_source_map_named(
+        let (module, source_map) = parse_declarations_cached(
             &source, thaw_parser::common::FileName::Real(path.to_path_buf()),
         )?;
         let mut declarations = module
@@ -4769,7 +4921,7 @@ fn declared_function_name_range(snippet: &str) -> Option<(usize, usize)> {
     use thaw_parser::ast::{Decl, DefaultDecl, ModuleDecl, ModuleItem, Pat, Stmt, TsModuleName};
     use thaw_parser::common::Spanned;
 
-    let (module, source_map) = thaw_parser::parse_declarations_with_source_map_named(
+    let (module, source_map) = parse_declarations_cached(
         snippet, thaw_parser::common::FileName::Custom("extracted function declaration snippet".into()),
     ).ok()?;
     // The first declaration is the callable binding, possibly followed by
@@ -4879,7 +5031,8 @@ fn reexported_default_declaration(
         };
         let tail = &body[offset + keyword.len()..];
         let name = declared_name.map_or_else(|| format!(" {internal}"), |_| String::new());
-        let abstract_modifier = if is_abstract { "abstract " } else { "" };
+        // The class span can already start at its own `abstract` keyword.
+        let abstract_modifier = if is_abstract && !prefix.trim_start().starts_with("abstract") { "abstract " } else { "" };
         let candidate = format!("export declare {abstract_modifier}{prefix}{keyword}{name}{tail}");
         if declaration_identity(&candidate).as_deref() == Some(expected) {
             return Ok(candidate);
@@ -4891,7 +5044,6 @@ fn reexported_default_declaration(
     ))
 }
 
-#[allow(dead_code)]
 fn all_reexported_function_declarations(
     path: &Path,
     visited: &mut std::collections::BTreeSet<PathBuf>,
@@ -4916,7 +5068,7 @@ fn all_reexported_function_declarations_owned(
             path.display()
         )
     })?;
-    let (module, source_map) = thaw_parser::parse_declarations_with_source_map_named(
+    let (module, source_map) = parse_declarations_cached(
         &source, thaw_parser::common::FileName::Real(path.to_path_buf()),
     )?;
     let mut declarations = Vec::new();
@@ -5115,7 +5267,6 @@ fn all_reexported_function_declarations_owned(
     Ok(declarations)
 }
 
-#[allow(dead_code)]
 fn reexported_function_declarations(
     path: &Path,
     name: &str,
@@ -5142,7 +5293,7 @@ fn reexported_function_declarations_owned(
             path.display()
         )
     })?;
-    let (module, source_map) = thaw_parser::parse_declarations_with_source_map_named(
+    let (module, source_map) = parse_declarations_cached(
         &source, thaw_parser::common::FileName::Real(path.to_path_buf()),
     )?;
     let mut declarations = Vec::new();
@@ -5423,7 +5574,7 @@ fn export_assignment_function_declarations(path: &Path) -> Result<Vec<String>, S
             path.display()
         )
     })?;
-    let (module, source_map) = thaw_parser::parse_declarations_with_source_map_named(
+    let (module, source_map) = parse_declarations_cached(
         &source, thaw_parser::common::FileName::Real(path.to_path_buf()),
     )?;
     let Some(target) = module.body.iter().find_map(|item| match item {
@@ -5480,7 +5631,7 @@ fn export_assignment_class_or_interface_declarations(path: &Path) -> Result<Vec<
             path.display()
         )
     })?;
-    let (module, source_map) = thaw_parser::parse_declarations_with_source_map_named(
+    let (module, source_map) = parse_declarations_cached(
         &source, thaw_parser::common::FileName::Real(path.to_path_buf()),
     )?;
     let Some(target) = module.body.iter().find_map(|item| match item {
@@ -5720,7 +5871,7 @@ fn reexport_is_type_only(
     if !visited.insert((path.to_path_buf(), name.to_string())) { return Ok(None); }
     let source = fs::read_to_string(path).map_err(|error|
         format!("failed to read re-exported declarations `{}`: {error}", path.display()))?;
-    let module = thaw_parser::parse_declarations_with_source_map_named(
+    let module = parse_declarations_cached(
         &source, thaw_parser::common::FileName::Real(path.to_path_buf()),
     )?.0;
     let value_imports = named_import_targets(path, &module);
@@ -5800,7 +5951,6 @@ fn merge_type_only_status(current: Option<bool>, next: Option<bool>) -> Option<b
 
 /// Follow a class or interface binding through named and wildcard declaration
 /// re-exports, retaining imported superclass declarations as type support.
-#[allow(dead_code)]
 fn reexported_class_or_interface_declarations(
     path: &Path,
     name: &str,
@@ -5845,6 +5995,26 @@ struct TypeReferenceSite {
 /// Source-relative spans of unshadowed type-position references to one binding.
 /// Shared with imported-class renaming and source-owned support closure.
 fn type_reference_sites(snippet: &str, original: &str, origin: &Path) -> Option<Vec<TypeReferenceSite>> {
+    // A declaration that never spells the name cannot reference it: skip the parse and scan.
+    if !snippet.contains(original) { return Some(Vec::new()); }
+    // The same declaration is scanned once per name it could reference; memoize the scan.
+    thread_local! {
+        static SITES: std::cell::RefCell<std::collections::HashMap<(u64, usize, String, PathBuf), Option<Vec<TypeReferenceSite>>>>
+            = std::cell::RefCell::new(std::collections::HashMap::new());
+    }
+    let key = {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        snippet.hash(&mut hasher);
+        (hasher.finish(), snippet.len(), original.to_string(), origin.to_path_buf())
+    };
+    if let Some(hit) = SITES.with(|sites| sites.borrow().get(&key).cloned()) { return hit; }
+    let computed = compute_type_reference_sites(snippet, original, origin);
+    SITES.with(|sites| sites.borrow_mut().insert(key, computed.clone()));
+    computed
+}
+
+fn compute_type_reference_sites(snippet: &str, original: &str, origin: &Path) -> Option<Vec<TypeReferenceSite>> {
     use swc_ecma_visit::{Visit, VisitWith};
     use thaw_parser::ast::{
         Class, Expr, Function, Ident, MemberProp, ObjectPatProp, Pat, TsCallSignatureDecl, TsConditionalType, TsConstructorType,
@@ -5852,7 +6022,7 @@ fn type_reference_sites(snippet: &str, original: &str, origin: &Path) -> Option<
         TsExprWithTypeArgs, TsFnParam, TsMappedType, TsMethodSignature,
         TsTypeAliasDecl, TsTypeParamDecl, TsTypeQuery, TsTypeQueryExpr,
     };
-    use thaw_parser::common::Spanned;
+    use thaw_parser::common::{SourceMapper, Spanned};
 
     struct SelfReferences<'a> {
         original: &'a str,
@@ -6025,9 +6195,9 @@ fn type_reference_sites(snippet: &str, original: &str, origin: &Path) -> Option<
         }
     }
 
-    let (module, source_map) = thaw_parser::parse_declarations_with_source_map_named(
+    let (module, source_map) = parse_declarations_cached(
         snippet, thaw_parser::common::FileName::Custom(
-            format!("{} (type reference snippet)", origin.display()),
+            format!("{} (type reference snippet)", origin.display()).into(),
         ),
     ).ok()?;
     let mut references = SelfReferences { original, spans: Vec::new(),
@@ -6095,7 +6265,6 @@ fn imported_class_as_local_binding(declarations: Vec<String>, local: &str, type_
 /// A materialized local class replaces its declaration import binding.
 /// Retain other specifiers from the same import, including their original
 /// `type` modifiers and any import attributes after the source literal.
-#[allow(dead_code)]
 fn without_materialized_class_imports(source: &str, locals: &std::collections::BTreeSet<String>) -> Result<String, String> {
     without_materialized_class_imports_named(
         source, locals, thaw_parser::common::FileName::Custom("input.ts".into()),
@@ -6110,7 +6279,7 @@ fn without_materialized_class_imports_named(
     use thaw_parser::common::{SourceMapper, Spanned};
 
     if locals.is_empty() { return Ok(source.to_string()) }
-    let (module, source_map) = thaw_parser::parse_declarations_with_source_map_named(
+    let (module, source_map) = parse_declarations_cached(
         source, source_name,
     )?;
     let offset = |position| source_map.lookup_byte_offset(position).pos.0 as usize;
@@ -6182,7 +6351,7 @@ fn reexported_class_or_interface_declarations_inner(
             path.display()
         )
     })?;
-    let (module, source_map) = thaw_parser::parse_declarations_with_source_map_named(
+    let (module, source_map) = parse_declarations_cached(
         &source, thaw_parser::common::FileName::Real(path.to_path_buf()),
     )?;
     let mut local_name = name.to_string();

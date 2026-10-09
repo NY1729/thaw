@@ -543,11 +543,29 @@ fn promise_report_bytes(source: &ThawPromise) -> Vec<u8> {
     })
 }
 
+thread_local! {
+    // Rejection reasons whose text the producer proved (`rejection_text`), handed
+    // to the process-level pending-exception slot by a detached Promise. The
+    // terminal reporter may read them although they are not the slot's
+    // `native_text` pointer.
+    static DETACHED_REPORT_TEXT: RefCell<std::collections::HashSet<usize>> =
+        RefCell::new(std::collections::HashSet::new());
+}
+
+fn is_detached_report_text(text: *const c_char) -> bool {
+    DETACHED_REPORT_TEXT.with(|texts| texts.borrow().contains(&(text as usize)))
+}
+
 extern "C" fn destroy_detached_promise(frame: *mut u8, result: *const u8) {
     let state = unsafe { Box::from_raw(frame.cast::<DetachedPromise>()) };
     if unsafe { thaw_promise_state(state.promise) } == 2 && !state.pending_exception.is_null() {
         let pending = unsafe { &mut *state.pending_exception };
         if pending.is_null() {
+            if !state.owned_report && !result.is_null()
+                && unsafe { &*state.promise }.rejection_text.is_some()
+            {
+                DETACHED_REPORT_TEXT.with(|texts| { texts.borrow_mut().insert(result as usize); });
+            }
             *pending = if state.owned_report {
                 // Snapshot producer-owned text and typed fields while the source
                 // Promise is live. An arbitrary rejection result is opaque.

@@ -483,6 +483,7 @@
         this._sink = sink; this._sinkWrite = write; this._sinkClose = close; this._sinkAbort = abort; this._highWaterMark = highWaterMark; this._sizeAlgorithm = webSizeAlgorithm(size); this._queueTotalSize = 0; this._backpressured = false; this._state = 'writable'; this._closeQueued = false; this._closeInFlight = false; this._closeResult = null; this._abortPromise = null; this._error = undefined; this._writer = null; this._closedStatus = 'pending'; this._closedReason = undefined; this._chain = Promise.resolve();
         this._controller = new WritableStreamDefaultController(this); this._setBackpressure(this._desiredSize() <= 0);
         if (start !== undefined) this._chain = Promise.resolve(webApply(start, sink, [this._controller])).catch(error => { this._errorStream(error); throw error; });
+        this._started = false; Promise.resolve(this._chain).then(() => { this._started = true; }, () => { this._started = true; });
       }
       get locked() { return this._writer !== null; }
       getWriter() { return new WritableStreamDefaultWriter(this); }
@@ -500,16 +501,23 @@
         catch (error) { this._errorStream(error); return Promise.reject(error); }
         this._queueTotalSize += size;
         this._setBackpressure(this._desiredSize() <= 0);
+        // A write submitted while the sink is idle is already in flight (the spec calls the sink
+        // synchronously); a later abort() must wait for it instead of rejecting it.
+        const startsNow = this._started && !this._pendingWrites; this._pendingWrites = (this._pendingWrites || 0) + 1;
         const operation = this._chain.then(() => {
-          if (this._state === 'errored') throw this._error;
+          if (this._state === 'errored' && !startsNow) throw this._error;
           return this._sinkWrite === undefined ? undefined : webApply(this._sinkWrite, this._sink, [chunk, this._controller]);
         });
         const result = operation.then(() => {
+          this._pendingWrites--;
           this._queueTotalSize = Math.max(0, this._queueTotalSize - size);
           if (this._state === 'writable' && !this._closeQueued) this._setBackpressure(this._desiredSize() <= 0);
+          this._runDeferredAbort();
         }, error => {
+          this._pendingWrites--;
           this._queueTotalSize = Math.max(0, this._queueTotalSize - size);
           this._errorStream(error);
+          this._runDeferredAbort();
           throw error;
         });
         this._chain = result.catch(() => {});
@@ -541,6 +549,7 @@
         return result;
       }
       close() { if (this.locked) { const error = new TypeError('WritableStream is locked'); error.code = 'ERR_INVALID_STATE'; return Promise.reject(error); } return this._close(); }
+      _runDeferredAbort() { if (this._pendingWrites || !this._deferredAbort) return; const run = this._deferredAbort; this._deferredAbort = null; run(); }
       _abort(reason) {
         if (this._abortPromise) return this._abortPromise;
         if (this._state !== 'writable') return Promise.resolve();
@@ -551,6 +560,16 @@
         this._controller._abortController.abort(reason);
         if (this._closeInFlight) {
           this._closeResult.then(() => resolveAbort(), error => rejectAbort(error));
+        } else if (this._pendingWrites) {
+          // Spec: the sink abort runs synchronously when the in-flight write finishes, before the
+          // write's own promise reactions.
+          this._deferredAbort = () => {
+            let operation;
+            try { operation = Promise.resolve(this._sinkAbort === undefined ? undefined : webApply(this._sinkAbort, this._sink, [reason])); }
+            catch (error) { operation = Promise.reject(error); }
+            operation.then(() => { this._rejectWriterClosed(reason); resolveAbort(); }, error => { this._rejectWriterClosed(reason); rejectAbort(error); });
+          };
+          this._chain = result.catch(() => {});
         } else {
           const operation = this._chain.then(() => this._sinkAbort === undefined ? undefined : webApply(this._sinkAbort, this._sink, [reason]));
           operation.then(() => { this._rejectWriterClosed(reason); resolveAbort(); }, error => { this._rejectWriterClosed(reason); rejectAbort(error); });

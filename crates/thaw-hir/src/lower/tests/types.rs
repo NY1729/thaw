@@ -212,9 +212,12 @@ fn specializes_multiple_generic_arguments_as_one_call_tuple() {
             ("second".into(), HirType::F64),
         ])
     );
+    // The returned literal is now wrapped in the native-owner staging; compare it unstaged.
     assert!(
-        matches!(&pair.body[0], HirStmt::Return(Some(HirExpr::ObjectLit(fields))) if
-        fields[0].0 == "first" && fields[1].0 == "second")
+        matches!(&pair.body[0], HirStmt::Return(Some(returned))
+            if matches!(unstage_object_literal(returned, &[]), HirExpr::ObjectLit(fields)
+                if fields[0].0 == "first" && fields[1].0 == "second")),
+        "{:?}", pair.body[0]
     );
 }
 
@@ -1205,17 +1208,17 @@ fn lowers_interface_as_a_named_object_type() {
     );
 
     let main = &program.functions[1];
-    // Declared via the interface name, but the literal is still
-    // reordered to the interface's field order (same machinery as
-    // inline object type literals).
+    // Declared via the interface name; the literal keeps its source field order as the
+    // physical layout and the interface's `{ x, y }` order is realized by the registered
+    // layout view (same machinery as inline object type literals).
     assert_eq!(
         unstage_let(&main.body[0]),
         HirStmt::Let(
             "p".into(),
             point_ty,
             HirExpr::ObjectLit(vec![
-                ("x".into(), HirExpr::Lit(HirLit::F64(1.0))),
                 ("y".into(), HirExpr::Lit(HirLit::F64(2.0))),
+                ("x".into(), HirExpr::Lit(HirLit::F64(1.0))),
             ]),
         )
     );
