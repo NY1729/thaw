@@ -815,7 +815,10 @@ impl<'a> FnLowerer<'a> {
                     Pat::Array(array) => &mut array.type_ann,
                     _ => return Err("unsupported contextual generator parameter pattern".into()),
                 };
-                if annotation.is_none() {
+                if annotation.as_ref().is_none_or(|annotation| {
+                    lower_ts_type(&annotation.type_ann, self.interfaces, self.generic_interfaces)
+                        .is_ok_and(|annotated| object_width_subset(&annotated, ty))
+                }) {
                     *annotation = Some(Box::new(swc_ecma_ast::TsTypeAnn {
                         span: swc_common::DUMMY_SP,
                         type_ann: Box::new(hir_type_as_ts_type(ty)?),
@@ -840,7 +843,8 @@ impl<'a> FnLowerer<'a> {
                         annotation.type_ann.as_ref(),
                         TsType::TsKeywordType(keyword)
                             if keyword.kind == TsKeywordTypeKind::TsAnyKeyword
-                    )
+                    ) || lower_ts_type(&annotation.type_ann, self.interfaces, self.generic_interfaces)
+                        .is_ok_and(|annotated| object_width_subset(&annotated, ty))
                 }) {
                     *annotation = Some(Box::new(swc_ecma_ast::TsTypeAnn {
                         span: swc_common::DUMMY_SP,
@@ -1138,6 +1142,14 @@ impl<'a> FnLowerer<'a> {
                     && arrow_body_mutates(&source_name, arrow)
                 {
                     HirType::JsValue
+                } else if let Some(supplied) = expected_index
+                    .filter(|supplied| object_width_subset(ty, supplied))
+                {
+                    // The annotation names only some of the fields the caller supplies
+                    // (width subtyping by name): lower the parameter at the supplied type.
+                    // The value keeps its one physical layout, so reads and writes through
+                    // the narrower annotation reach the original object.
+                    supplied.clone()
                 } else {
                     ty.clone()
                 };

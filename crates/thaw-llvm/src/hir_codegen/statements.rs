@@ -270,13 +270,41 @@ impl<'ctx> HirCompiler<'ctx> {
     fn compile_block(&mut self, stmts: &[HirStmt]) -> Result<bool, String> {
         let entry_map = self.stack_promise_slots.clone();
         let entry_slots = self.stack_promise_slots.keys().copied().collect::<HashSet<_>>();
-        for stmt in stmts {
+        for (index, stmt) in stmts.iter().enumerate() {
             match self.compile_stmt(stmt) {
                 Ok(true) => return Ok(true),
                 Ok(false) => {}
                 Err(error) => {
                     self.stack_promise_slots = entry_map;
                     return Err(error);
+                }
+            }
+            // A local declared inside a loop body and captured by a closure later in the body gets
+            // a fresh arena cell per iteration, allocated where it is promoted. Promoting lazily at
+            // the first capture would put that allocation on one path only, so a use reached through
+            // another path (an injected `continue`/`break`/`return` cleanup, a `catch`) would read a
+            // cell that was never allocated on that path. Promote at the declaration instead, which
+            // dominates every later use. Outside loops the cell goes to the function entry block,
+            // which dominates everything already, and variables declared before the loop are
+            // promoted by `compile_while`'s pre-pass.
+            if let HirStmt::Let(name, _, _) = stmt {
+                let declared_in_loop = !self.loop_promotion_scopes.is_empty()
+                    && !self.loop_promotion_scopes.iter().any(|scope| scope.variables.contains(name));
+                // A `JsValue` capture claims its QuickJS handle only when the capture actually
+                // executes, so it keeps the lazy, first-capture promotion.
+                let hir_ty = self.variable_hir_types.get(name).cloned()
+                    .filter(|ty| *ty != HirType::JsValue);
+                if let (true, Some(hir_ty)) = (declared_in_loop, hir_ty) {
+                    let captured = thaw_hir::closure_captured_names_in_while(
+                        &HirExpr::Lit(HirLit::Bool(false)),
+                        &stmts[index + 1..],
+                    );
+                    if captured.contains(name) {
+                        if let Err(error) = self.promote_variable_to_arena_cell(name, &hir_ty) {
+                            self.stack_promise_slots = entry_map;
+                            return Err(error);
+                        }
+                    }
                 }
             }
         }

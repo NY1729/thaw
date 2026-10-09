@@ -1,3 +1,79 @@
+/// A JS promise rejected with no handler yet: (promise identity, promise, reason).
+type UnhandledJsRejection = (usize, Persistent<Value<'static>>, Persistent<Value<'static>>);
+
+thread_local! {
+    /// Unhandled JS promise rejections, in rejection order.
+    static UNHANDLED_JS_REJECTIONS: RefCell<Vec<UnhandledJsRejection>> = const { RefCell::new(Vec::new()) };
+}
+
+fn js_promise_identity(promise: &Value<'_>) -> usize {
+    // SAFETY: only the pointer value is read, as an identity key.
+    (unsafe { promise.as_raw().u.ptr }) as usize
+}
+
+/// The host consumes a promise's settled result itself (without attaching a reaction), which
+/// counts as handling it.
+fn mark_js_rejection_consumed(promise: &Value<'_>) {
+    let identity = js_promise_identity(promise);
+    let _ = UNHANDLED_JS_REJECTIONS.try_with(|pending| {
+        pending.borrow_mut().retain(|(key, _, _)| *key != identity);
+    });
+}
+
+/// QuickJS rejection tracker: remembers a promise from its rejection until a handler is attached.
+fn track_js_promise_rejection<'js>(ctx: Ctx<'js>, promise: Value<'js>, reason: Value<'js>, is_handled: bool) {
+    if is_handled {
+        mark_js_rejection_consumed(&promise);
+    } else {
+        let identity = js_promise_identity(&promise);
+        let _ = UNHANDLED_JS_REJECTIONS.try_with(|pending| {
+            pending.borrow_mut().push((identity, Persistent::save(&ctx, promise), Persistent::save(&ctx, reason)));
+        });
+    }
+}
+
+/// Node's default `--unhandled-rejections=throw` once the microtask queue has drained: each
+/// still-unhandled rejection is offered to `process.on('unhandledRejection')`; without a
+/// listener it is raised as an uncaught exception. Returns `Some(1)` when the process must exit.
+fn report_unhandled_js_rejections(ctx: &Ctx<'_>) -> Option<i32> {
+    let pending = UNHANDLED_JS_REJECTIONS
+        .try_with(|pending| std::mem::take(&mut *pending.borrow_mut()))
+        .unwrap_or_default();
+    for (_, promise, reason) in pending {
+        let (Ok(promise), Ok(reason)) = (promise.restore(ctx), reason.restore(ctx)) else { continue };
+        let Ok(emit) = ctx.eval::<Function, _>(
+            "(reason, promise) => typeof process !== 'undefined' && process.emit('unhandledRejection', reason, promise)",
+        ) else { continue };
+        let _active = ActiveNapiContext::enter(ctx);
+        if emit.call::<_, bool>((reason.clone(), promise)).unwrap_or(false) {
+            continue;
+        }
+        let describe = ctx.eval::<Function, _>(
+            "(reason) => reason instanceof Error ? ((stack, head) => stack.includes(head) ? stack : head + '\\n' + stack)(\
+             String(reason.stack || ''), String(reason)) : \
+             'UnhandledPromiseRejection: This error originated either by throwing inside of an async function \
+             without a catch block, or by rejecting a promise which was not handled with .catch(). \
+             The promise rejected with the reason \"' + (typeof reason === 'symbol' ? reason.toString() : String(reason)) + '\".'",
+        );
+        let message = describe
+            .and_then(|describe| describe.call::<_, String>((reason,)))
+            .unwrap_or_else(|_| "UnhandledPromiseRejection".to_owned());
+        let text = thaw_arena::owned_string(message.as_bytes());
+        let result = thaw_js_emit_uncaught_result(text);
+        unsafe { thaw_arena::destroy_string(text) };
+        let listener_failed = !result.error.is_null();
+        if listener_failed {
+            eprintln!("{}", unsafe { thaw_arena::NativeStr::from_ptr(result.error) }.to_string_lossy());
+            unsafe { thaw_arena::destroy_string(result.error.cast_mut()) };
+        }
+        if result.value == 0 || listener_failed {
+            eprintln!("{message}");
+            return Some(1);
+        }
+    }
+    None
+}
+
 thread_local! {
     /// Compiled `new Function(...)` results, keyed by the JSON array of
     /// its string arguments (so repeated identical sources reuse the same
@@ -731,6 +807,7 @@ fn finish_with_platform_events<'js>(
         }
         poll_napi_bridge(ctx);
         if let Some(result) = promise.result() {
+            mark_js_rejection_consumed(promise.as_value());
             return result;
         }
         // A nextTick callback may be exactly what resolves `promise` --
@@ -890,6 +967,9 @@ pub extern "C" fn thaw_js_run_event_loop() -> i32 {
         }
         if drained_any {
             continue;
+        }
+        if let Some(code) = report_unhandled_js_rejections(&ctx) {
+            return code;
         }
         let Ok(next_delay) = ctx.globals().get::<_, Function>("__thaw_next_timer_delay") else {
             return process_exit_code(&ctx);
@@ -3713,6 +3793,31 @@ pub extern "C" fn thaw_js_retain_json_result(value_json: *const c_char) -> ThawH
             value: 0,
             error: thaw_arena::owned_string(error),
         },
+    }
+}
+
+/// Retains the value a graph wire encodes (a native `Json` that may hold live
+/// Host leases, e.g. a `JsValue` stored in an object literal). Unlike
+/// `thaw_js_retain_json_result`, which parses plain JSON text, the graph
+/// decoder resolves every lease to the *same* live JS object (identity
+/// preserved) instead of a structural copy.
+#[no_mangle]
+pub extern "C" fn thaw_js_retain_graph_result(graph_json: *const c_char) -> ThawHandleResult {
+    let graph_json = to_str(graph_json);
+    let result = with_active_or_context(|ctx| -> Result<u64, String> {
+        let decode: Function = before_graph_decode(&ctx, &graph_json, true, || {
+            ctx.globals().get("__thaw_json_graph_decode_owned")
+                .map_err(|error| error.to_string())
+        })?;
+        let value: Value = decode.call((graph_json.as_str(),)).map_err(|error| match error {
+            rquickjs::Error::Exception => describe_tagged_exception(&ctx),
+            error => error.to_string(),
+        })?;
+        retain_value(&ctx, value)
+    });
+    match result {
+        Ok(value) => ThawHandleResult { value, error: std::ptr::null() },
+        Err(error) => ThawHandleResult { value: 0, error: thaw_arena::owned_string(error) },
     }
 }
 

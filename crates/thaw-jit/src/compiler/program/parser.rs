@@ -1137,15 +1137,21 @@ impl NumericProgram {
                                 .map(NumericValue::LocalSet)
                         })
                         .or_else(|| {
-                            ["dnput", "dbput", "dsput"].iter().enumerate().find_map(
-                                |(kind, prefix)| {
+                            // `init` is a put into a freshly built literal dictionary: the same
+                            // operation, but one that cannot raise a script-visible error.
+                            ["dnput", "dbput", "dsput", "dninit", "dbinit", "dsinit"]
+                                .iter()
+                                .enumerate()
+                                .find_map(|(kind, prefix)| {
                                     value.strip_prefix(prefix).and_then(|key| {
                                         intern_string(key).map(|key| {
-                                            NumericValue::DictionaryStaticAppend(kind as u8, key)
+                                            NumericValue::DictionaryStaticAppend(
+                                                (kind % 3) as u8,
+                                                key,
+                                            )
                                         })
                                     })
-                                },
-                            )
+                                })
                         })
                         .or_else(|| {
                             let (kind, index) =
