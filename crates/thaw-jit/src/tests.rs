@@ -347,6 +347,20 @@ mod tests {
             unsafe { out_value.write(20.0) };
             1
         }
+        /// Host dictionary queries: only operation 12 (create an empty dictionary) is provided,
+        /// enough for the dictionary-tag probes; everything else reports an unsupported query.
+        unsafe extern "C" fn dictionary_query(
+            operation: u8,
+            _object: *mut libc::c_void,
+            _key: *const c_char,
+            error: *mut *const c_char,
+        ) -> f64 {
+            if operation == 12 {
+                return f64::from_bits(unsafe { libc::malloc(16) } as usize as u64);
+            }
+            unsafe { error.write(c"invalid JIT symbol".as_ptr()) };
+            0.0
+        }
         unsafe extern "C" fn replace_array(
             operation: u8,
             array: *const u8,
@@ -404,7 +418,7 @@ mod tests {
                 Some(from_code_point),
                 None,
                 None,
-                None,
+                Some(dictionary_query),
                 None,
             )
         }
@@ -926,21 +940,25 @@ mod tests {
                 assert_eq!(actual, expected);
             }
         }
-        for (index, expected) in [(0.0, "a"), (1.0, "�"), (-1.0, "")] {
+        // `charAt` returns the single UTF-16 unit; a lone surrogate stays WTF-8 (ED A0 BD for
+        // U+D83D) instead of being replaced, so compare raw bytes rather than valid UTF-8.
+        for (index, expected) in [
+            (0.0, &b"a"[..]),
+            (1.0, &[0xED, 0xA0, 0xBD][..]),
+            (-1.0, &b""[..]),
+        ] {
             let character = CString::new("expr:s0,a1,charat:charat").unwrap();
             let result = call(&character, &[text_argument, index]);
             let result = result.value.to_bits() as usize as *mut c_char;
-            assert_eq!(
-                unsafe { CStr::from_ptr(result) }.to_str().unwrap(),
-                expected
-            );
+            assert_eq!(unsafe { CStr::from_ptr(result) }.to_bytes(), expected);
             unsafe { libc::free(result.cast()) };
         }
         let at = CString::new("expr:s0,a1,at:at").unwrap();
         let result = call(&at, &[text_argument, -1.0]);
         assert!(result.error.is_null());
         let value = result.value.to_bits() as usize as *mut c_char;
-        assert_eq!(unsafe { CStr::from_ptr(value) }.to_str().unwrap(), "�");
+        // `at(-1)` is the last UTF-16 unit, a lone low surrogate: WTF-8 ED B8 80 (U+DE00).
+        assert_eq!(unsafe { CStr::from_ptr(value) }.to_bytes(), &[0xED, 0xB8, 0x80]);
         unsafe { libc::free(value.cast()) };
         assert_eq!(call(&at, &[text_argument, 3.0]).error, ABSENT_STATUS);
         let code_point = CString::new("expr:s0,a1,codepointat:codepointat").unwrap();
@@ -1308,7 +1326,7 @@ mod tests {
             &[f64::from_bits(split_value.as_ptr() as usize as u64)],
         );
         assert!(result.error.is_null());
-        let output = result.value.to_bits() as usize as *mut u8;
+        let output = (result.value.to_bits() & !ARRAY_RESULT_TAG) as usize as *mut u8;
         assert_eq!(unsafe { output.cast::<u64>().read() }, 1);
         assert_eq!(
             unsafe { CStr::from_ptr(output.add(8).cast::<*const c_char>().read()) }.to_bytes(),
@@ -1322,7 +1340,7 @@ mod tests {
             &[f64::from_bits(emoji.as_ptr() as usize as u64)],
         );
         assert!(result.error.is_null());
-        let output = result.value.to_bits() as usize as *mut u8;
+        let output = (result.value.to_bits() & !ARRAY_RESULT_TAG) as usize as *mut u8;
         assert_eq!(unsafe { output.cast::<u64>().read() }, 1);
         assert_eq!(
             unsafe { CStr::from_ptr(output.add(8).cast::<*const c_char>().read()) }.to_bytes(),
@@ -1829,20 +1847,20 @@ mod tests {
             CString::new("expr:rn0,c3ff0000000000000,c4058c00000000000,rnwith:with").unwrap();
         let result = call(&replaced, &[f64::from_bits(handle as usize as u64)]);
         assert!(result.error.is_null());
-        let output = result.value.to_bits() as usize as *mut u8;
+        let output = (result.value.to_bits() & !ARRAY_RESULT_TAG) as usize as *mut u8;
         assert_eq!(unsafe { output.add(16).cast::<f64>().read() }, 99.0);
         unsafe { libc::free(output.cast()) };
         let sorted = CString::new("expr:rn0,rnsorted:sorted").unwrap();
         let result = call(&sorted, &[f64::from_bits(handle as usize as u64)]);
         assert!(result.error.is_null());
-        let output = result.value.to_bits() as usize as *mut u8;
+        let output = (result.value.to_bits() & !ARRAY_RESULT_TAG) as usize as *mut u8;
         assert_eq!(unsafe { output.cast::<u64>().read() }, 3);
         assert_eq!(unsafe { output.add(8).cast::<f64>().read() }, 10.0);
         unsafe { libc::free(output.cast()) };
         let reverse = CString::new("expr:rn0,arrayreversed:reverse").unwrap();
         let result = call(&reverse, &[f64::from_bits(handle as usize as u64)]);
         assert!(result.error.is_null());
-        let output = result.value.to_bits() as usize as *mut u8;
+        let output = (result.value.to_bits() & !ARRAY_RESULT_TAG) as usize as *mut u8;
         assert_eq!(unsafe { output.cast::<u64>().read() }, 3);
         assert_eq!(unsafe { output.add(8).cast::<f64>().read() }, 30.0);
         unsafe { libc::free(output.cast()) };
@@ -1850,7 +1868,7 @@ mod tests {
             CString::new("expr:rn0,c3ff0000000000000,c4000000000000000,arrayslice:slice").unwrap();
         let result = call(&slice, &[f64::from_bits(handle as usize as u64)]);
         assert!(result.error.is_null());
-        let output = result.value.to_bits() as usize as *mut u8;
+        let output = (result.value.to_bits() & !ARRAY_RESULT_TAG) as usize as *mut u8;
         assert_eq!(unsafe { output.cast::<u64>().read() }, 1);
         assert_eq!(unsafe { output.add(8).cast::<f64>().read() }, 20.0);
         unsafe { libc::free(output.cast()) };
@@ -1860,7 +1878,7 @@ mod tests {
         .unwrap();
         let result = call(&literal, &[]);
         assert!(result.error.is_null());
-        let output = result.value.to_bits() as usize as *mut u8;
+        let output = (result.value.to_bits() & !ARRAY_RESULT_TAG) as usize as *mut u8;
         assert_eq!(unsafe { output.cast::<u64>().read() }, 2);
         assert_eq!(unsafe { output.add(8).cast::<f64>().read() }, 1.0);
         assert_eq!(unsafe { output.add(16).cast::<f64>().read() }, 2.0);

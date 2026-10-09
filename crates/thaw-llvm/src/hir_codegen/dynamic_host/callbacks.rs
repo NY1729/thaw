@@ -2971,6 +2971,39 @@ impl<'ctx> HirCompiler<'ctx> {
                     .map_err(|error| error.to_string())?;
                 Ok(self.context.i32_type().const_zero().into())
             }
+            // A decoded JSON result that the declaration types as `JsValue`
+            // (`Session.post(): Promise<JsValue>`): re-materialize it as a
+            // live handle, the same way `retainDynamicJson` does.
+            HirType::JsValue => {
+                let text = self.builder.build_call(
+                    self.module.get_function("thaw_json_stringify").unwrap(),
+                    &[json.into()], "typed_dynamic_js_value_json",
+                ).map_err(|error| error.to_string())?.try_as_basic_value().basic().unwrap();
+                let text = self.compile_check_json_stringify_error(text)?;
+                let result = self.builder.build_call(
+                    self.module.get_function("thaw_js_retain_json_result").unwrap(),
+                    &[text.into()], "typed_dynamic_js_value_retain",
+                ).map_err(|error| error.to_string())?.try_as_basic_value().basic().unwrap()
+                    .into_struct_value();
+                let handle = self.builder.build_extract_value(result, 0, "typed_dynamic_js_value_handle")
+                    .map_err(|error| error.to_string())?;
+                let error = self.builder.build_extract_value(result, 1, "typed_dynamic_js_value_error")
+                    .map_err(|error| error.to_string())?;
+                self.builder.build_call(
+                    self.module.get_function("thaw_cstring_destroy").unwrap(),
+                    &[text.into()], "destroy_typed_dynamic_js_value_json",
+                ).map_err(|error| error.to_string())?;
+                self.builder.build_call(
+                    self.module.get_function("thaw_json_destroy").unwrap(),
+                    &[json.into()], "destroy_typed_dynamic_js_value_source",
+                ).map_err(|error| error.to_string())?;
+                self.builder.build_store(self.pending_exception().as_pointer_value(), error)
+                    .map_err(|error| error.to_string())?;
+                self.clear_pending_native_text()?;
+                self.mark_pending_native_text(error)?;
+                self.branch_on_pending_exception()?;
+                Ok(handle)
+            }
             other => Err(format!("typed dynamic return does not support {other:?} yet")),
         }
     }

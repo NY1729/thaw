@@ -1604,3 +1604,23 @@ fn labeled_do_while_continue_checks_outer_condition_and_exits_outer_loop() {
     "#;
     assert_eq!(compile_and_run(source, "do_while_continue_depth"), "2 2\n2\n");
 }
+
+/// `const err: any = caughtError` must keep `name`/`message` readable (Node: `Error boom`);
+/// the widened framed error used to leak as raw frame text with `undefined` properties.
+#[test]
+fn an_any_copy_of_a_caught_error_exposes_name_and_message() {
+    let output = compile_and_run(
+        r#"
+        function main(): void {
+            try {
+                throw new Error("boom");
+            } catch (e) {
+                const err: any = e;
+                console.log(err.name, err.message);
+            }
+        }
+        "#,
+        "any_copy_of_caught_error",
+    );
+    assert_eq!(output.trim(), "Error boom");
+}

@@ -1,3 +1,4 @@
+#[derive(Clone)]
 struct NarrowingSnapshot {
     optional: HashMap<Symbol, HirType>,
     nullable: HashMap<Symbol, HirType>,
@@ -10,6 +11,9 @@ struct NarrowingSnapshot {
 struct FnLowerer<'a> {
     scope: HashMap<Symbol, HirType>,
     immutable_bindings: HashSet<Symbol>,
+    /// Declared (annotated) function/method parameters whose type may be `undefined`/`null`:
+    /// an un-narrowed property read on one is a compile error, as in `tsc`.
+    strict_nullable_bindings: HashSet<Symbol>,
     static_string_bindings: HashMap<Symbol, String>,
     narrowings: HashMap<Symbol, HirType>,
     nullable_narrowings: HashMap<Symbol, HirType>,
