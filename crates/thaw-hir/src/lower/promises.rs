@@ -373,7 +373,17 @@ impl<'a> FnLowerer<'a> {
             result_type,
             Box::new(HirExpr::Block(vec![HirStmt::Return(Some(normalized))])),
         );
-        Ok(HirExpr::Call(Box::new(binder), vec![callback]))
+        // An adapter for a plain variable is a new closure on every use;
+        // alias it to the variable's closure so the host sees one identity.
+        let stable = matches!(&callback, HirExpr::Var(_));
+        let adapted = HirExpr::Call(Box::new(binder), vec![callback.clone()]);
+        if stable {
+            return Ok(HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_closure_alias".into())),
+                vec![adapted, callback],
+            ));
+        }
+        Ok(adapted)
     }
 
     fn callback_parameter_count(&self, expr: &Expr, label: &str) -> Result<usize, String> {
@@ -841,6 +851,7 @@ impl<'a> FnLowerer<'a> {
             }
         }
         let mut inferred = None;
+        let mut unobservable_argument = false;
         for (mut value, mut spread) in calls.values {
             if spread {
                 let single = match &value {
@@ -861,10 +872,25 @@ impl<'a> FnLowerer<'a> {
                 locals: &calls.locals,
                 expanding: BTreeSet::new(),
             });
-            let value = self.lower_expr(&value).map_err(|error| {
-                format!("cannot infer Promise type from resolve argument: {error}")
-            })?;
-            let actual = self.infer_expr_type(&value)?;
+            let lowered = self.lower_expr(&value).and_then(|lowered| {
+                self.infer_expr_type(&lowered).map(|actual| (lowered, actual))
+            });
+            let (value, actual) = match lowered {
+                Ok(pair) => pair,
+                // The argument may use a binding local to the executor body
+                // (`xs.forEach((v) => resolve(v))`): with an explicit type
+                // argument the Promise type does not depend on it.
+                Err(_) if explicit.is_some() => {
+                    unobservable_argument = true;
+                    continue;
+                }
+                Err(error) => {
+                    return Err(format!(
+                        "cannot infer Promise type from resolve argument: {error}"
+                    ));
+                }
+            };
+            let _ = &value;
             let actual = if spread {
                 match actual {
                     HirType::Tuple(mut values) if values.len() == 1 => values.remove(0),
@@ -904,7 +930,12 @@ impl<'a> FnLowerer<'a> {
             return Ok((HirType::Void, true));
         }
         if let Some(inferred) = inferred {
-            return Ok((inferred, true));
+            return Ok((inferred, !unobservable_argument));
+        }
+        if unobservable_argument {
+            if let Some(explicit) = explicit {
+                return Ok((explicit.clone(), false));
+            }
         }
         if calls.referenced {
             // `resolve` is handed off by reference (no direct

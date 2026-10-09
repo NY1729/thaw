@@ -827,9 +827,14 @@ fn lowers_native_class_instance_methods_with_explicit_receiver() {
         .iter()
         .find(|function| function.name == "main")
         .unwrap();
-    assert!(format!("{:?}", main.body).contains(
-        "Call(Var(\"__thaw_class_Counter_method_add\"), [Var(\"counter\"), Lit(F64(2.0))])"
-    ));
+    // The receiver (`counter`) and the argument are staged into call-argument temporaries and
+    // the receiver is checked for class identity before it is passed explicitly.
+    let lowered = format!("{:?}", main.body);
+    assert!(lowered.contains(
+        "Call(Var(\"__thaw_class_Counter_method_add\"), [Call(Var(\"__thaw_assert_class_identity\"), [Var(\"__thaw_class_call_arg_"
+    ), "{lowered}");
+    assert!(lowered.contains("Lit(Str(\"Counter\"))") && lowered.contains("Lit(F64(2.0))"), "{lowered}");
+    assert!(lowered.contains("[Var(\"counter\")]"), "{lowered}");
 }
 
 #[test]
@@ -1041,12 +1046,16 @@ fn lowers_super_to_the_base_initializer_on_the_same_instance() {
         .iter()
         .find(|function| function.name == "__thaw_class_Derived_initialize")
         .unwrap();
-    assert!(matches!(
-        &initializer.body[0],
-        HirStmt::Expr(HirExpr::Call(callee, args))
-            if matches!(callee.as_ref(), HirExpr::Var(name) if name == "__thaw_class_Base_initialize")
-                && matches!(args.first(), Some(HirExpr::Var(name)) if name == "__thaw_this")
-    ));
+    // The `super(...)` arguments are evaluated first (staged as `__thaw_native_arg_N`), then the
+    // base initializer is invoked on the same `__thaw_this` instance.
+    let super_call = format!("{:?}", initializer.body[0]);
+    assert!(matches!(&initializer.body[0], HirStmt::Expr(HirExpr::Call(_, _))), "{super_call}");
+    assert!(
+        super_call.contains(
+            "Call(Var(\"__thaw_class_Base_initialize\"), [Var(\"__thaw_this\"), Var(\"__thaw_native_arg_0\")])"
+        ),
+        "{super_call}"
+    );
     assert!(matches!(
         &initializer.body[1],
         HirStmt::Expr(HirExpr::PropAssign(_, _, field, _)) if field == "label"
@@ -1071,9 +1080,15 @@ fn lowers_super_method_calls_to_the_direct_base_implementation() {
         .iter()
         .find(|function| function.name == "__thaw_class_Derived_method_answer")
         .unwrap();
-    assert!(format!("{:?}", method.body).contains(
-        "Call(Var(\"__thaw_class_Base_method_answer\"), [Var(\"__thaw_this\"), Var(\"delta\")])"
-    ));
+    // The argument is staged (`__thaw_native_arg_N`) before the direct base call on `__thaw_this`.
+    let lowered = format!("{:?}", method.body);
+    assert!(
+        lowered.contains(
+            "Call(Var(\"__thaw_class_Base_method_answer\"), [Var(\"__thaw_this\"), Var(\"__thaw_native_arg_0\")])"
+        ),
+        "{lowered}"
+    );
+    assert!(lowered.contains("[Var(\"delta\")]"), "{lowered}");
 }
 
 #[test]
@@ -2333,9 +2348,11 @@ fn forward_class_key_throws_during_initialization_even_when_class_is_unused() {
         matches!(step, HirInitStep::StoreGlobal(name, _) if name == "KEY")
     ).unwrap();
     assert!(thrown < key_initialized);
-    let message = format!("{:?}", program.initializers[thrown]);
-    assert!(message.contains("ReferenceError"));
-    assert!(message.contains("before initialization"));
+    // A throw now publishes a staged thrown value (`__thaw_thrown_value_N`), so the message lives
+    // in the initializer steps that stage it just before the throw.
+    let message = format!("{:?}", &program.initializers[..=thrown]);
+    assert!(message.contains("ReferenceError"), "{message}");
+    assert!(message.contains("before initialization"), "{message}");
 }
 
 #[test]

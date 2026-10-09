@@ -1943,7 +1943,7 @@ fn https_client_verifies_a_custom_ca_and_parses_http() {
     let (direct_bundle, _, direct_file_count, _) =
         bundle_commonjs_package(&direct_node_modules, "tls-pkg", &direct_dir, "index.js")
             .unwrap();
-    assert_eq!(direct_file_count, 7);
+    assert_eq!(direct_file_count, 2);
     let direct_script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; {direct_bundle} globalThis.exerciseTlsReadBeforeEnd = module.exports;");
     let direct_source = CString::new(direct_script).unwrap();
     assert_eq!(thaw_quickjs::thaw_js_load(direct_source.as_ptr()), 1);

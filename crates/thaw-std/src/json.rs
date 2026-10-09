@@ -345,6 +345,45 @@ pub extern "C" fn thaw_json_register_callback_origin(closure: *const u8, handle:
     1
 }
 
+thread_local! {
+    // Adapter closure -> the callback it adapts, so a callback passed more than
+    // once through a signature-adapting wrapper keeps one identity at the host
+    // boundary (`emitter.on(e, f); emitter.off(e, f)`).
+    static CLOSURE_ALIASES: RefCell<HashMap<usize, usize>> = RefCell::new(HashMap::new());
+}
+
+fn reset_closure_aliases(tracing: bool) {
+    CLOSURE_ALIASES.with(|aliases| aliases.borrow_mut()
+        .retain(|&adapter, _| tracing && !thaw_arena::was_reclaimed(adapter)));
+}
+
+/// Records that `adapter` only forwards to `original`; returns `adapter`.
+#[no_mangle]
+pub extern "C" fn thaw_closure_alias_register(adapter: *const u8, original: *const u8) -> *const u8 {
+    if !adapter.is_null() && !original.is_null() && adapter != original {
+        CLOSURE_ALIASES.with(|aliases| aliases.borrow_mut().insert(adapter as usize, original as usize));
+        thaw_arena::register_reset_hook(reset_closure_aliases);
+    }
+    adapter
+}
+
+/// The closure an adapter chain ultimately forwards to (the closure itself if
+/// it is not an adapter).
+#[no_mangle]
+pub extern "C" fn thaw_closure_alias_resolve(closure: *const u8) -> *const u8 {
+    CLOSURE_ALIASES.with(|aliases| {
+        let aliases = aliases.borrow();
+        let mut current = closure as usize;
+        for _ in 0..16 {
+            match aliases.get(&current) {
+                Some(&next) => current = next,
+                None => break,
+            }
+        }
+        current as *const u8
+    })
+}
+
 #[no_mangle]
 pub extern "C" fn thaw_json_callback_origin_handle(closure: *const u8) -> u64 {
     CALLBACK_ORIGINS.with(|origins| origins.borrow()
@@ -3939,7 +3978,7 @@ fn json_to_number(value: &Value) -> f64 {
         }
         Value::Object(_) if thaw_json_is_date_shape(value) != 0 => thaw_json_date_timestamp(value),
         Value::Object(_) => f64::NAN,
-        Value::Host(lease) => host_query(lease, 2)
+        Value::Host(lease) => host_query(lease, 16)
             .map(|text| javascript_string_to_number(&text)).unwrap_or(f64::NAN),
     }
 }
@@ -3952,6 +3991,9 @@ unsafe extern "C" {
     /// (thaw-std has no direct crate dependency on thaw-runtime; both
     /// land in the same final linked binary).
     fn thaw_date_to_iso_string(timestamp: f64) -> *const c_char;
+    /// Defined in thaw-runtime's `native_values/errors.rs` (same link-time resolution).
+    fn thaw_error_name(message: *const c_char) -> *const c_char;
+    fn thaw_error_message(message: *const c_char) -> *const c_char;
 }
 
 /// A `console.log`/`JSON.stringify`-ready rendering of a `Date`-shaped
@@ -5614,6 +5656,30 @@ pub extern "C" fn thaw_json_receiver_number(value: f64) -> *mut Value {
 
 #[no_mangle]
 pub extern "C" fn thaw_json_receiver_string(value: *const c_char) -> *mut Value {
+    // A framed error string (`\u{1}Name\u{1}message...` or the `\x1eE1:` wire header) that is
+    // widened to `any` (`const err: any = caughtError`) must keep reading as an Error: expose
+    // `name`/`message`/`stack` as properties instead of leaking the raw frame text.
+    // ponytail: own-property bags (`code`, `cause`, ...) after the frame are not surfaced here.
+    if !value.is_null() {
+        let bytes = unsafe { CStr::from_ptr(value) }.to_bytes();
+        if bytes.first() == Some(&1) || bytes.starts_with(b"\x1eE1:") {
+            let (name, message) = unsafe { (thaw_error_name(value), thaw_error_message(value)) };
+            if !name.is_null() && !message.is_null() {
+                let name = string_value(name);
+                let message = string_value(message);
+                let header = {
+                    let n = match &name { Value::String(text) => text.as_str(), _ => "Error" };
+                    let m = match &message { Value::String(text) => text.as_str(), _ => "" };
+                    if m.is_empty() { n.to_string() } else { format!("{n}: {m}") }
+                };
+                let mut fields = indexmap::IndexMap::new();
+                fields.insert(b"name".to_vec(), name);
+                fields.insert(b"message".to_vec(), message);
+                fields.insert(b"stack".to_vec(), Value::String(header));
+                return leak(Value::shared_object(fields));
+            }
+        }
+    }
     leak(string_value(value))
 }
 

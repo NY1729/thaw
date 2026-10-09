@@ -19,6 +19,7 @@ pub(super) fn source(name: &str) -> Option<&'static str> {
              \x20\x20}\n\
              \x20\x20if (p.charAt(0) !== '/') p = (globalThis.process && process.cwd ? process.cwd() : '/') + '/' + p;\n\
              \x20\x20var n = __thaw_path_normalize(p);\n\
+             \x20\x20if (n.length > 1 && n.charAt(n.length - 1) === '/') n = n.slice(0, -1);\n\
              \x20\x20return n.charAt(0) === '/' ? n : '/' + n;\n\
              }\n\
              function join() {\n\

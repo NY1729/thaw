@@ -74,6 +74,13 @@
     for (const timer of timers.values()) if (!timer.clock) due = Math.min(due, timer.due);
     return due === Infinity ? -1 : Math.max(0, due - nativeDateNow());
   };
+  // Delay to the next timer of any kind, ref'd or not (-1 when none): a blocking wait on a pending promise
+  // may still be resolved by an unref'd timer (e.g. fs.watch/watchFile with `persistent: false`).
+  globalThis.__thaw_next_any_timer_delay = () => {
+    let due = Infinity;
+    for (const timer of timers.values()) if (!timer.clock) due = Math.min(due, timer.due);
+    return due === Infinity ? -1 : Math.max(0, due - nativeDateNow());
+  };
   globalThis.__thaw_run_due_timers = () => {
     const now = nativeDateNow();
     const due = [...timers.entries()]

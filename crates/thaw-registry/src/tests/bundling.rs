@@ -1563,7 +1563,11 @@ fn native_mixed_rewrite_uses_private_opaque_edge_and_origin_reads() {
     assert!(rewritten.contains("import { origin as __thaw_esm_origin_"), "{rewritten}");
     assert!(rewritten.contains("import \"./legacy.cjs\";"), "{rewritten}");
     assert!(rewritten.contains(".readImport(\"./legacy.cjs\", \"value\")"), "{rewritten}");
-    assert!(rewritten.contains(".selectDynamic("), "{rewritten}");
+    // Dynamic imports go through the private origin: it validates the link
+    // first and `completeDynamic` selects the namespace (`selectDynamic` is
+    // now an internal step of `completeDynamic`).
+    assert!(rewritten.contains(".validateDynamic("), "{rewritten}");
+    assert!(rewritten.contains(".completeDynamic("), "{rewritten}");
     assert!(!rewritten.contains("export { local as renamed }"), "{rewritten}");
     assert!(!rewritten.contains("export { value as indirect } from"), "{rewritten}");
     assert!(!rewritten.contains("export * from"), "{rewritten}");

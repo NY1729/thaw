@@ -2122,6 +2122,9 @@ impl<'a> FnLowerer<'a> {
                                     .entry(source_name)
                                     .or_default()
                                     .push(item_name.clone());
+                                if decl.kind == VarDeclKind::Const {
+                                    self.immutable_bindings.insert(item_name.clone());
+                                }
                                 let declared_discriminants = binding.type_ann.as_ref().map(
                                     |annotation| {
                                         object_union_discriminants(
@@ -2531,6 +2534,9 @@ impl<'a> FnLowerer<'a> {
                                 .entry(source_name)
                                 .or_default()
                                 .push(binding_name.clone());
+                            if decl.kind == VarDeclKind::Const {
+                                self.immutable_bindings.insert(binding_name.clone());
+                            }
                             HirStmt::Let(binding_name, HirType::Str, key_value())
                         }
                         ForHead::Pat(pattern) => {
@@ -2664,7 +2670,12 @@ impl<'a> FnLowerer<'a> {
                         selected_name.clone(),
                         Box::new(HirExpr::Lit(HirLit::F64(case_count as f64))),
                     ));
+                    // A case body is entered either by a jump from the dispatch (so only the
+                    // narrowings that held before the switch apply) or by falling through; guards
+                    // established inside another case must not leak into it, nor past the switch.
+                    let switch_narrowings = self.save_narrowings();
                     for (index, case) in switch_stmt.cases.iter().enumerate() {
+                        self.restore_narrowings(switch_narrowings.clone());
                         let isolated_entry = index == 0
                             || Self::switch_case_prevents_fallthrough(
                                 &switch_stmt.cases[index - 1].cons,
@@ -2793,6 +2804,7 @@ impl<'a> FnLowerer<'a> {
                             Vec::new(),
                         ));
                     }
+                    self.restore_narrowings(switch_narrowings);
                     if default_index < case_count
                         && switch_stmt.cases.iter().all(|case| {
                             case.cons.last().is_some_and(Self::stmt_definitely_exits)
@@ -2857,7 +2869,12 @@ impl<'a> FnLowerer<'a> {
                                     "only a simple identifier catch binding is supported".into(),
                                 )
                             }
-                            None => "_".to_string(),
+                            None => {
+                                // An optional catch binding is anonymous: it must not shadow a
+                                // user binding named `_`.
+                                self.next_binding += 1;
+                                format!("@@thaw_anonymous_catch_{}", self.next_binding)
+                            }
                         };
                         let saved = self.bindings.clone();
                         let catch_name = self.bind_local(
