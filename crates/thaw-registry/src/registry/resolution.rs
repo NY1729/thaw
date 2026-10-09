@@ -14,6 +14,9 @@ pub struct ResolvedPackage {
     pub native_dependencies: Vec<PathBuf>,
     pub platform_executable: Option<PathBuf>,
     pub bundle_js: Option<String>,
+    /// Environment defaults this package needs at run time (`runtime-env.json`), already applied
+    /// as a prelude of `bundle_js`; kept for inspection. `$self` is this executable.
+    pub runtime_env: BTreeMap<String, String>,
     /// The version `add` recorded in `version.txt`, if this package went
     /// through `add` (rather than hand-curation, or an `add` run before
     /// this field existed) -- see `AddedPackage::resolved_version`.
@@ -97,6 +100,17 @@ pub fn resolve(registry_dir: &Path, name: &str) -> Result<ResolvedPackage, Strin
         None
     };
 
+    let runtime_env: BTreeMap<String, String> = fs::read_to_string(package_root.join("runtime-env.json"))
+        .ok()
+        .and_then(|source| serde_json::from_str(&source).ok())
+        .unwrap_or_default();
+    // ponytail: the defaults ride on the package's bundle, so a native-only package without a bundle
+    // runs no JS to apply them; give such packages a prelude-only bundle if one ever needs this.
+    let bundle_js = match bundle_js {
+        Some(source) if !runtime_env.is_empty() => Some(format!("{}{source}", runtime_env_prelude(&runtime_env))),
+        other => other,
+    };
+
     let version = fs::read_to_string(dir.join("version.txt"))
         .ok()
         .map(|s| s.trim().to_string());
@@ -130,9 +144,20 @@ pub fn resolve(registry_dir: &Path, name: &str) -> Result<ResolvedPackage, Strin
         native_dependencies,
         platform_executable,
         bundle_js,
+        runtime_env,
         version,
         dependency_versions,
     })
+}
+
+/// JavaScript that gives each environment variable a default unless the process already sets it;
+/// `$self` expands to this executable (it embeds the package's native addons).
+fn runtime_env_prelude(env: &BTreeMap<String, String>) -> String {
+    let defaults = serde_json::to_string(env).unwrap_or_else(|_| "{}".to_string());
+    format!(
+        "(function(defaults) {{ var env = globalThis.process.env, self = globalThis.process.execPath; \
+         Object.keys(defaults).forEach(function(key) {{ if (env[key] === undefined) env[key] = defaults[key].split('$self').join(self); }}); }})({defaults});\n"
+    )
 }
 
 /// Resolves the deliberately small built-in surface exposed to user imports.
@@ -380,6 +405,7 @@ pub fn resolve_builtin(specifier: &str) -> Result<ResolvedPackage, String> {
         native_dependencies: Vec::new(),
         platform_executable: None,
         bundle_js: Some(bundle_builtin_module(name)?),
+        runtime_env: BTreeMap::new(),
         version: None,
         dependency_versions: None,
     })

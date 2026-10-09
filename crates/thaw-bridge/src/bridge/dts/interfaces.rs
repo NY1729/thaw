@@ -227,47 +227,71 @@ fn lexical_type_key(
     contains(reference).then(|| reference.to_string())
 }
 
-fn scoped_type_context<'a>(
+thread_local! {
+    /// Declaration scope that bare type references are currently resolved against (see
+    /// `scoped_type_context`).
+    static TYPE_SCOPE: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+}
+
+/// Restores the previous `TYPE_SCOPE` when the scoped context goes out of use.
+struct TypeScopeGuard(String);
+
+impl Drop for TypeScopeGuard {
+    fn drop(&mut self) {
+        TYPE_SCOPE.with(|scope| *scope.borrow_mut() = std::mem::take(&mut self.0));
+    }
+}
+
+/// A shared map plus, for the first of a context pair, the scope guard that keeps lexical
+/// lookups (`scoped_reference`) aimed at the right declaration scope.
+struct Scoped<'b, T> {
+    value: &'b T,
+    _guard: Option<TypeScopeGuard>,
+}
+
+impl<T> std::ops::Deref for Scoped<'_, T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        self.value
+    }
+}
+
+/// Makes references classified while the returned context is alive resolve lexically from
+/// `scope` outward (`scope.Name`, parent scopes, then bare `Name`). The maps are shared, not
+/// copied: the lookup sites call `scoped_reference` instead.
+fn scoped_type_context<'a, 'b>(
     scope: &str,
+    interfaces: &'b HashMap<String, DtsType>,
+    generic: &'b GenericInterfaces<'a>,
+) -> (Scoped<'b, HashMap<String, DtsType>>, Scoped<'b, GenericInterfaces<'a>>) {
+    let previous = TYPE_SCOPE.with(|current| std::mem::replace(&mut *current.borrow_mut(), scope.to_string()));
+    (
+        Scoped { value: interfaces, _guard: Some(TypeScopeGuard(previous)) },
+        Scoped { value: generic, _guard: None },
+    )
+}
+
+/// The key a type reference resolves to in the current declaration scope.
+fn scoped_reference(
+    reference: &str,
     interfaces: &HashMap<String, DtsType>,
-    generic: &GenericInterfaces<'a>,
-) -> (HashMap<String, DtsType>, GenericInterfaces<'a>) {
-    let mut resolved = interfaces.clone();
-    let mut scoped_generic = generic.clone();
-    let mut references = HashSet::new();
-    for name in interfaces.keys().chain(generic.interfaces.keys())
-        .chain(generic.aliases.keys()).chain(generic.classes.iter())
-    {
-        let mut suffix = name.as_str();
-        while let Some((_, rest)) = suffix.split_once('.') {
-            references.insert(rest.to_string());
-            suffix = rest;
+    generic: &GenericInterfaces<'_>,
+) -> String {
+    scoped_generic_reference(reference, |name| interfaces.contains_key(name) || generic_has(generic, name))
+}
+
+fn generic_has(generic: &GenericInterfaces<'_>, name: &str) -> bool {
+    generic.interfaces.contains_key(name) || generic.aliases.contains_key(name) || generic.classes.contains(name)
+}
+
+fn scoped_generic_reference(reference: &str, contains: impl Fn(&str) -> bool) -> String {
+    TYPE_SCOPE.with(|scope| {
+        let scope = scope.borrow();
+        if scope.is_empty() {
+            return reference.to_string();
         }
-    }
-    for reference in references {
-        let Some(key) = lexical_type_key(&reference, scope, |name| {
-            interfaces.contains_key(name) || generic.interfaces.contains_key(name)
-                || generic.aliases.contains_key(name) || generic.classes.contains(name)
-        }) else { continue; };
-        if key == reference { continue; }
-        resolved.remove(&reference);
-        scoped_generic.interfaces.remove(&reference);
-        scoped_generic.aliases.remove(&reference);
-        scoped_generic.classes.remove(&reference);
-        scoped_generic.canonical_names.remove(&reference);
-        if let Some(ty) = interfaces.get(&key) {
-            resolved.insert(reference, ty.clone());
-        } else if let Some(decl) = generic.interfaces.get(&key) {
-            scoped_generic.canonical_names.insert(reference.clone(), key);
-            scoped_generic.interfaces.insert(reference, *decl);
-        } else if let Some(decl) = generic.aliases.get(&key) {
-            scoped_generic.canonical_names.insert(reference.clone(), key);
-            scoped_generic.aliases.insert(reference, *decl);
-        } else if generic.classes.contains(&key) {
-            scoped_generic.classes.insert(reference);
-        }
-    }
-    (resolved, scoped_generic)
+        lexical_type_key(reference, &scope, contains).unwrap_or_else(|| reference.to_string())
+    })
 }
 
 /// Preserve the enclosing declaration namespace in resolver keys. Bare names
@@ -1021,8 +1045,14 @@ fn lower_dts_method_signature(
     }
 }
 
-/// `eval` / `arguments` are legal parameter names in a `.d.ts` but cannot be binding names in the
-/// strict-mode TypeScript the generated shims are parsed as, so rename them.
+/// A `.d.ts` may name a parameter with any identifier, but the generated shims are parsed as
+/// strict-mode module code, where `eval`/`arguments` cannot be bound and the strict-mode future
+/// reserved words (and `await`) cannot be identifiers at all -- so rename those. Parameter names are
+/// only labels in a signature, so the rename is invisible to callers.
 fn safe_param_name(name: &str) -> String {
-    if matches!(name, "eval" | "arguments") { format!("{name}_") } else { name.to_string() }
+    const STRICT_MODE_RESERVED: &[&str] = &[
+        "eval", "arguments", "await", "implements", "interface", "let", "package", "private",
+        "protected", "public", "static", "yield",
+    ];
+    if STRICT_MODE_RESERVED.contains(&name) { format!("{name}_") } else { name.to_string() }
 }

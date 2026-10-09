@@ -367,6 +367,16 @@ fn bundle_commonjs_package(
     )
 }
 
+/// The module text of `bytes`, or `None` when the file is a binary asset
+/// (invalid UTF-8, or NUL bytes in its first 8 KiB -- text modules have none).
+fn module_source_text(bytes: Vec<u8>) -> Option<String> {
+    let head = &bytes[..bytes.len().min(8192)];
+    if head.contains(&0) {
+        return None;
+    }
+    String::from_utf8(bytes).ok()
+}
+
 fn bundle_commonjs_package_cached(
     node_modules_dir: &Path,
     root_package: &str,
@@ -404,8 +414,14 @@ fn bundle_commonjs_package_cached(
         let (source, analysis, source_name) = if let Some(cached) = source_cache.modules.get(&source_cache_key) {
             cached.clone()
         } else {
-            let source = fs::read_to_string(&abs_path)
+            let bytes = fs::read(&abs_path)
                 .map_err(|e| format!("failed to read `{key}` while bundling: {e}"))?;
+            // A require/exports target that is not text (a shared library, an
+            // image, any binary asset a package ships) is not a module: leave it
+            // out of the bundle like `.node`/`.wasm`, so it is reached by path.
+            let Some(source) = module_source_text(bytes) else {
+                continue;
+            };
             let had_shebang = source.starts_with("#!") && source.contains('\n');
             let is_json = abs_path.extension().is_some_and(|ext| ext == "json");
             let source = source

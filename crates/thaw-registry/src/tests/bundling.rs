@@ -667,6 +667,49 @@ fn bundled_direct_node_require_uses_the_loaded_addon() {
     let _ = fs::remove_dir_all(node_modules);
 }
 
+/// A package may ship binary assets (a versioned shared library such as
+/// `libfoo.so.1.2.3`, an image, a data blob) that another package's `exports`
+/// map or a relative `require` points at. They are not modules: the bundler
+/// must leave them out (like `.node`/`.wasm`) instead of failing to read them
+/// as UTF-8 text, whatever their extension.
+#[test]
+fn binary_assets_reached_by_require_are_left_out_of_the_bundle() {
+    let node_modules = temp_registry("bundle_binary_assets_node_modules");
+    let package = node_modules.join("pkg");
+    let libs = node_modules.join("@vendor/libs");
+    fs::create_dir_all(package.join("data")).unwrap();
+    fs::create_dir_all(libs.join("lib")).unwrap();
+    fs::write(
+        package.join("index.js"),
+        "var path = null; try { path = require('@vendor/libs/binary'); } catch (_) {} \
+         try { require('./data/blob.bin'); } catch (_) {} module.exports = path;",
+    )
+    .unwrap();
+    fs::write(
+        libs.join("package.json"),
+        r#"{"name":"@vendor/libs","exports":{"./binary":"./lib/libvendor.so.1.2.3"}}"#,
+    )
+    .unwrap();
+    // ELF magic with NUL bytes, and an unrelated-extension blob that is not UTF-8.
+    fs::write(libs.join("lib/libvendor.so.1.2.3"), b"\x7fELF\x02\x01\x01\x00\x00\x00").unwrap();
+    fs::write(package.join("data/blob.bin"), [0xffu8, 0xfe, 0xfd, 0x80]).unwrap();
+
+    let (bundle, _, file_count, _) =
+        bundle_commonjs_package(&node_modules, "pkg", &package, "index.js").unwrap();
+    assert_eq!(file_count, 1, "only the JavaScript entry point is a module");
+    assert!(!bundle.contains("ELF") && !bundle.contains("\u{fffd}"), "binary content must not be embedded as module source");
+    let _ = fs::remove_dir_all(node_modules);
+}
+
+#[test]
+fn module_source_text_separates_text_modules_from_binary_assets() {
+    assert_eq!(module_source_text(b"module.exports = 1;".to_vec()).as_deref(), Some("module.exports = 1;"));
+    assert_eq!(module_source_text("// \u{3042} utf-8 text\n".as_bytes().to_vec()).as_deref(), Some("// \u{3042} utf-8 text\n"));
+    assert!(module_source_text(vec![0xff, 0xfe, 0x00]).is_none());
+    assert!(module_source_text(b"\x7fELF\x00\x01".to_vec()).is_none());
+    assert!(module_source_text(vec![0x80; 16]).is_none());
+}
+
 /// A dependency subpath whose `exports` offers `{ default, node, import }`
 /// but no `require` -- real-world example: `@babel/runtime/helpers/extends`
 /// (`{"node":"./helpers/extends.js","import":"./helpers/esm/extends.js",

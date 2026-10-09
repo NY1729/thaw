@@ -115,7 +115,8 @@ fn describe_generic_parameter_type(ty: &TsType, generic: &GenericInterfaces<'_>)
     let TsEntityName::Ident(name) = &reference.type_name else {
         return describe_ts_type(ty);
     };
-    let Some(alias) = generic.aliases.get(name.sym.as_str()) else {
+    let scoped = scoped_generic_reference(name.sym.as_str(), |n| generic_has(generic, n));
+    let Some(alias) = generic.aliases.get(&scoped) else {
         return describe_ts_type(ty);
     };
     let Some(parameters) = &alias.type_params else {
@@ -154,8 +155,9 @@ fn describe_generic_parameter_type(ty: &TsType, generic: &GenericInterfaces<'_>)
                         }
                     }
                     if depth < 8 {
+                        let scoped = scoped_generic_reference(name.sym.as_str(), |n| generic_has(generic, n));
                         if let (Some(alias), Some(arguments)) = (
-                            generic.aliases.get(name.sym.as_str()),
+                            generic.aliases.get(&scoped),
                             &reference.type_params,
                         ) {
                             if let Some(parameters) = &alias.type_params {
@@ -262,7 +264,8 @@ fn describe_contextual_rest_type(ty: &TsType, generic: &GenericInterfaces<'_>) -
             return described;
         };
         if let TsEntityName::Ident(name) = &reference.type_name {
-            if let Some(alias) = generic.aliases.get(name.sym.as_str()) {
+            let scoped = scoped_generic_reference(name.sym.as_str(), |n| generic_has(generic, n));
+            if let Some(alias) = generic.aliases.get(&scoped) {
                 if let TsType::TsUnionOrIntersectionType(
                     TsUnionOrIntersectionType::TsUnionType(union),
                 ) = alias.type_ann.as_ref()

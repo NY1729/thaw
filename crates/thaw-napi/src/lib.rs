@@ -1990,6 +1990,7 @@ impl Env {
 
 impl Drop for Env {
     fn drop(&mut self) {
+        forget_standalone_graph_owner(self.graph_owner_id);
         if !self.finalized {
             // Direct internal Env owners still use the synchronous Drop path.
             // Host-owned Envs explicitly start hooks while their Box is pinned.

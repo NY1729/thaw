@@ -15,18 +15,7 @@ fn declaration_names_for_normalization(declaration: &Decl) -> Vec<String> {
 /// `declarations`/`interfaces` (see `module/classes.rs`'s synthetic
 /// base-layout branch).
 fn is_error_family_name(name: &str) -> bool {
-    matches!(
-        name,
-        "Error"
-            | "TypeError"
-            | "RangeError"
-            | "SyntaxError"
-            | "ReferenceError"
-            | "EvalError"
-            | "URIError"
-            | "AggregateError"
-            | "SuppressedError"
-    )
+    crate::is_error_family_name(name)
 }
 
 /// Standard-library constructors whose `.prototype` the realm exposes as a

@@ -433,7 +433,8 @@ fn native_class_proxies_use_native_properties_and_release_native_handles() {
     assert!(wrapped.contains("new ctor(value.__thaw_napi_error__)"));
     assert!(wrapped.contains("result.value['$__thaw_napi_undefined$'] === true"));
     assert!(wrapped.contains("globalThis.process.dlopen = (function(previous)"));
-    assert!(wrapped.contains("__thaw_addon.QueryEngine"));
+    assert!(wrapped.contains("__thaw_is_self_path"));
+    assert!(!wrapped.contains("PRISMA_QUERY_ENGINE_LIBRARY"));
 }
 
 #[test]
@@ -1094,7 +1095,7 @@ fn commonjs_native_addon_view_uses_its_packages_qualified_exports() {
          globalThis.__thaw_napi_bridge_call = function(name) { return JSON.stringify({kind:'value',value:name,origins:[]}); };"
     ).unwrap();
     assert_eq!(thaw_quickjs::thaw_js_load(bridge.as_ptr()), 1);
-    assert_eq!(thaw_quickjs::thaw_js_load(CString::new("globalThis.__thaw_saved_process = globalThis.process; globalThis.process = {env:{}};").unwrap().as_ptr()), 1);
+    assert_eq!(thaw_quickjs::thaw_js_load(CString::new("globalThis.__thaw_saved_process = globalThis.process; globalThis.process = {env:{}, execPath:'/opt/app/main', pid:4242};").unwrap().as_ptr()), 1);
     for (package, slot) in [("first-pkg", "firstAddon"), ("second-pkg", "secondAddon"), ("@scope/third", "scopedAddon"), ("zero-pkg", "zeroAddon"), ("legacy-pkg", "legacyAddon"), ("", "emptyAddon")] {
         let source = format!("globalThis.{slot} = require('binding.node'); globalThis.{slot}Require = require; globalThis.{slot}Dlopen = process.dlopen;");
         let wrapped = wrap_as_commonjs_module(&source, &[], &[], &[], package);
@@ -1117,6 +1118,12 @@ fn commonjs_native_addon_view_uses_its_packages_qualified_exports() {
     assert_eq!(thaw_quickjs::eval_json("legacyAddon.legacy()"), Ok(Some("\"legacy\"".into())));
     assert_eq!(thaw_quickjs::eval_json("legacyAddonDlopen({exports:{},filename:'/thaw_modules/legacy-pkg/index.js'}, 'binding.node').legacy()"), Ok(Some("\"legacy\"".into())));
     assert_eq!(thaw_quickjs::eval_json("emptyAddonDlopen({exports:{},filename:'/thaw_modules//index.js'}, 'binding.node').legacy()"), Ok(Some("\"legacy\"".into())));
+    // Any alias of the executable itself names every embedded addon at once; the earlier-registered
+    // package wins a name clash (`same`), and each package-only export stays reachable.
+    for alias in ["/proc/self/exe", "/opt/app/main", "/proc/4242/exe"] {
+        assert_eq!(thaw_quickjs::eval_json(&format!("firstAddonDlopen({{exports:{{}}}}, '{alias}').same()")), Ok(Some("\"first-pkg::same\"".into())));
+        assert_eq!(thaw_quickjs::eval_json(&format!("firstAddonDlopen({{exports:{{}}}}, '{alias}').legacy()")), Ok(Some("\"legacy\"".into())));
+    }
     assert_eq!(thaw_quickjs::eval_json("Object.getOwnPropertyDescriptor(process, 'dlopen').configurable"), Ok(Some("false".into())));
     assert_eq!(thaw_quickjs::thaw_js_load(CString::new("globalThis.process = globalThis.__thaw_saved_process; delete globalThis.__thaw_saved_process;").unwrap().as_ptr()), 1);
 }

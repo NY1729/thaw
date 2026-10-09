@@ -1623,17 +1623,30 @@ fn rewrite_external_class_methods_with_static_qualified_named(
         }
     }
 
+    /// A parameter type that carries no information of its own: `Json`/`JsValue` (an unresolved
+    /// generic widened to the top type), possibly wrapped in any number of `T | null | undefined`
+    /// layers.
+    fn is_opaque_generic(ty: &thaw_hir::HirType) -> bool {
+        match ty {
+            thaw_hir::HirType::Json | thaw_hir::HirType::JsValue => true,
+            thaw_hir::HirType::Optional(inner)
+            | thaw_hir::HirType::Nullable(inner)
+            | thaw_hir::HirType::Nullish(inner) => is_opaque_generic(inner),
+            _ => false,
+        }
+    }
+
     fn overload_type_score(declared: &thaw_hir::HirType, actual: &thaw_hir::HirType) -> Option<u8> {
         match (declared, actual) {
             (thaw_hir::HirType::Json, _) => Some(0),
             // An unresolved generic (`T | null | undefined`, `T` widened to `Json`) is as opaque
             // as a bare `Json` parameter: it accepts any argument, weakly.
             (
-                thaw_hir::HirType::Optional(payload)
-                | thaw_hir::HirType::Nullable(payload)
-                | thaw_hir::HirType::Nullish(payload),
+                thaw_hir::HirType::Optional(inner)
+                | thaw_hir::HirType::Nullable(inner)
+                | thaw_hir::HirType::Nullish(inner),
                 _,
-            ) if matches!(payload.as_ref(), thaw_hir::HirType::Json | thaw_hir::HirType::JsValue) => Some(0),
+            ) if is_opaque_generic(inner) => Some(0),
             (thaw_hir::HirType::Union(elements), actual) => elements
                 .iter()
                 .filter_map(|element| overload_type_score(element, actual))
@@ -2691,11 +2704,12 @@ fn rewrite_external_class_methods_with_static_qualified_named(
                         .get(name.sym.as_str())
                         .map(|package| {
                             // A default import is known by its package, not by the local name.
-                            if self.default_imports.contains(name.sym.as_str()) {
-                                format!("{}_default", sanitize_identifier(package))
+                            let export = if self.default_imports.contains(name.sym.as_str()) {
+                                "default"
                             } else {
-                                format!("{}_{}", sanitize_identifier(package), name.sym)
-                            }
+                                name.sym.as_str()
+                            };
+                            qualified_export_alias(package, export)
                         });
                     // A traceable named import always narrows to its own
                     // package's alias, even when that package contributes no
