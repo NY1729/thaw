@@ -158,9 +158,9 @@
     // parent is processed.
     if (value && typeof value === 'object') {
       for (const key of Object.keys(value)) {
-        if (key.charCodeAt(0) === 0x1f && key.startsWith('\u001f@@')) {
-          const symbol = Symbol[key.slice(3)];
-          if (symbol) {
+        if (key.startsWith('\u001f@@') || key.startsWith('__thaw_symbol_')) {
+          const symbol = thawPropertyKey(key);
+          if (typeof symbol === 'symbol') {
             Object.defineProperty(value, symbol, {
               value: value[key],
               writable: true,

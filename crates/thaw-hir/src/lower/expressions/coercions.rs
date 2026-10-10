@@ -1622,11 +1622,14 @@ impl<'a> FnLowerer<'a> {
         let undefined = self.call_dynamic_strict_comparator(
             "__thaw_strict_equal_undefined_dynamic", Vec::new(), vec![handle.clone()])?;
         let null = self.call_dynamic_strict_comparator(
-            "__thaw_strict_equal_null_dynamic", Vec::new(), vec![handle])?;
-        let false_value = HirExpr::Lit(HirLit::Bool(false));
+            "__thaw_strict_equal_null_dynamic", Vec::new(), vec![handle.clone()])?;
+        // A native container reaches the JS realm as a shadow tagged with its origin serial, so a
+        // live JS object is `===` to it exactly when it is that container's shadow.
+        let identity = self.call_dynamic_strict_comparator(
+            "__thaw_strict_equal_dynamic", vec![json.clone()], vec![handle])?;
         let object = Self::strict_if(
             HirExpr::Call(Box::new(HirExpr::Var("__thaw_json_is_null".into())), vec![json]),
-            null, false_value);
+            null, identity);
         let native = Self::strict_if(test_kind("string"), string,
             Self::strict_if(test_kind("number"), number,
             Self::strict_if(test_kind("boolean"), boolean,
@@ -1783,6 +1786,31 @@ impl<'a> FnLowerer<'a> {
         }
         if left_fn || right_fn {
             let other = if left_fn { rhs_ty } else { lhs_ty };
+            // A caught native function keeps its original owner in the exception descriptor;
+            // identity is the checked projection back to that owner.
+            if strict && matches!(other, HirType::NativeException) {
+                let (descriptor, function, function_ty) = if left_fn {
+                    (rhs, lhs, lhs_ty)
+                } else {
+                    (lhs, rhs, rhs_ty)
+                };
+                let tag = crate::native_exception_tag(function_ty).ok_or("function exception has no native category")?;
+                let layout = crate::native_exception_layout_token(function_ty)
+                    .ok_or("function exception has no layout token")?;
+                let owner = HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_native_exception_owner".into())),
+                    vec![descriptor, HirExpr::Lit(HirLit::I64(tag as i64)), HirExpr::Lit(HirLit::Str(layout))],
+                );
+                let present = HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_native_exception_owner_present".into())),
+                    vec![owner.clone()],
+                );
+                return Ok(choose(present,
+                    HirExpr::BinOp(BinOp::EqEqEq,
+                        Box::new(HirExpr::TypedClosure(function_ty.clone(), Box::new(owner))),
+                        Box::new(function)),
+                    HirExpr::Lit(HirLit::Bool(false))));
+            }
             if strict {
                 return if matches!(other, HirType::Json | HirType::JsValue | HirType::Dictionary(_)) {
                     self.function_dynamic_pair(lhs, lhs_ty, rhs, rhs_ty, true)

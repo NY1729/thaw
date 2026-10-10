@@ -1074,11 +1074,7 @@ impl<'ctx> HirCompiler<'ctx> {
             )?;
             rejected
         } else {
-            self.builder.build_call(
-                self.module.get_function("thaw_json_callback_error").unwrap(),
-                &[pending.into()], "callback_error_result",
-            ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
-                .ok_or("thaw_json_callback_error returned no value")?
+            self.compile_callback_error_with_tuple(pending, "callback_error_result")?
         };
         self.builder
             .build_store(
@@ -1454,10 +1450,8 @@ impl<'ctx> HirCompiler<'ctx> {
             )?;
             rejected
         } else {
-            self.builder.build_call(self.module.get_function("thaw_json_callback_error").unwrap(),
-                &[raised.into()], "frame_isolated_callback_exception")
-                .map_err(|error| error.to_string())?.try_as_basic_value().basic()
-                .ok_or("thaw_json_callback_error returned no value")?.into_pointer_value()
+            self.compile_callback_error_with_tuple(raised, "frame_isolated_callback_exception")?
+                .into_pointer_value()
         };
         for (slot, value) in &previous {
             self.builder.build_store(slot.as_pointer_value(), *value)
@@ -1550,6 +1544,37 @@ impl<'ctx> HirCompiler<'ctx> {
             .try_as_basic_value()
             .basic()
             .ok_or("rejected native Promise has no error")?;
+        let get = |this: &Self, name: &str| -> Result<BasicValueEnum<'ctx>, String> {
+            Ok(this.builder.build_call(
+                this.module.get_function(name).ok_or("missing Promise exception getter")?,
+                &[promise.into()], name,
+            ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                .ok_or("Promise exception getter returned no value")?)
+        };
+        let tag = get(self, "thaw_promise_exception_tag")?;
+        let number = get(self, "thaw_promise_exception_f64")?;
+        let bigint = get(self, "thaw_promise_exception_i64")?;
+        let boolean = get(self, "thaw_promise_exception_bool")?.into_int_value();
+        let boolean = self.builder.build_int_z_extend(boolean, self.context.i8_type(),
+            "native_promise_error_bool_byte").map_err(|error| error.to_string())?;
+        let object = get(self, "thaw_promise_exception_object")?;
+        let native = get(self, "thaw_promise_exception_native")?;
+        let native_text = get(self, "thaw_promise_exception_native_text_copy")?;
+        let aggregate = get(self, "thaw_promise_exception_aggregate_errors")?;
+        // A non-null copy is available only when the Promise producer
+        // authenticated its rejection text. Keep that trusted payload as an
+        // exact pending/native-text alias in the captured tuple. Otherwise
+        // preserve the Promise's opaque result pointer unchanged.
+        let has_native_text = self.builder.build_is_not_null(native_text.into_pointer_value(),
+            "native_promise_has_trusted_text").map_err(|error| error.to_string())?;
+        let pending = self.builder.build_select(has_native_text, native_text, error,
+            "native_promise_pending_exception").map_err(|error| error.to_string())?;
+        let error = self.builder.build_call(
+            self.module.get_function("thaw_json_callback_error_tuple").unwrap(),
+            &[pending.into(), tag.into(), number.into(), bigint.into(), boolean.into(), object.into(), native.into(), native_text.into(), aggregate.into()],
+            "native_promise_error_packet",
+        ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+            .ok_or("native Promise exception packet returned no value")?;
         self.builder
             .build_call(
                 self.module.get_function("thaw_promise_destroy").unwrap(),
@@ -1878,6 +1903,10 @@ impl<'ctx> HirCompiler<'ctx> {
     ) -> Result<BasicValueEnum<'ctx>, String> {
         self.uses_quickjs = true;
         self.uses_quickjs_handles = true;
+        // Callback failures can carry tracked Box<Value> payloads across a
+        // JavaScript Error carrier. Start tracing before module initialization
+        // so the packet lease can preserve the existing arena owner graph.
+        self.tracks_owned_json_roots = true;
         let absent = self.builder.build_is_null(closure, "native_callback_is_undefined")
             .map_err(|error| error.to_string())?;
         let function = self.current_function();
@@ -3009,4 +3038,52 @@ impl<'ctx> HirCompiler<'ctx> {
         }
     }
 
+}
+
+impl<'ctx> HirCompiler<'ctx> {
+    /// The JavaScript-facing error frame for a callback that threw, carrying the thrown value's
+    /// typed payload (see `thaw_json_callback_error_tuple`) so a native `catch` further out
+    /// receives the original number/boolean/bigint/owner rather than only its display text.
+    fn compile_callback_error_with_tuple(
+        &mut self,
+        pending: PointerValue<'ctx>,
+        name: &str,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let load = |this: &Self, symbol: &str, ty: BasicTypeEnum<'ctx>, label: &str| {
+            this.builder
+                .build_load(ty, this.pending_exception_value(symbol).as_pointer_value(), label)
+                .map_err(|error| error.to_string())
+        };
+        let tag = load(self, PENDING_EXCEPTION_VALUE_TAG_SYMBOL, self.context.i64_type().into(), "callback_thrown_tag")?;
+        let number = load(self, PENDING_EXCEPTION_F64_SYMBOL, self.context.f64_type().into(), "callback_thrown_f64")?;
+        let bigint = load(self, PENDING_EXCEPTION_I64_SYMBOL, self.context.i64_type().into(), "callback_thrown_i64")?;
+        let boolean = load(self, PENDING_EXCEPTION_BOOL_SYMBOL, self.context.bool_type().into(), "callback_thrown_bool")?;
+        let boolean = self.builder
+            .build_int_z_extend(boolean.into_int_value(), self.context.i8_type(), "callback_thrown_bool_byte")
+            .map_err(|error| error.to_string())?;
+        let ptr_type = self.context.ptr_type(AddressSpace::default());
+        let object = self.builder
+            .build_load(ptr_type, self.pending_exception_object().as_pointer_value(), "callback_thrown_object")
+            .map_err(|error| error.to_string())?;
+        let native = self.builder
+            .build_load(ptr_type, self.pending_exception_native().as_pointer_value(), "callback_thrown_native")
+            .map_err(|error| error.to_string())?;
+        let native_text = self.builder
+            .build_load(ptr_type, self.pending_exception_native_text().as_pointer_value(), "callback_thrown_native_text")
+            .map_err(|error| error.to_string())?;
+        let aggregate = self.builder
+            .build_load(ptr_type, self.pending_exception_aggregate_errors().as_pointer_value(), "callback_thrown_aggregate_errors")
+            .map_err(|error| error.to_string())?;
+        self.builder
+            .build_call(
+                self.module.get_function("thaw_json_callback_error_tuple").unwrap(),
+                &[pending.into(), tag.into(), number.into(), bigint.into(), boolean.into(),
+                  object.into(), native.into(), native_text.into(), aggregate.into()],
+                name,
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| "thaw_json_callback_error_tuple returned no value".to_string())
+    }
 }

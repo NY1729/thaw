@@ -915,6 +915,7 @@ impl<'ctx> HirCompiler<'ctx> {
         share_json: bool,
     ) -> Result<StructValue<'ctx>, String> {
         let i64_ty = self.context.i64_type();
+        if share_json { self.tracks_owned_json_roots = true; }
         let selected_owner = if share_json {
             let is_json = self.builder.build_int_compare(inkwell::IntPredicate::EQ,
                 exception_tag, i64_ty.const_int(7, false), "caught_is_json")
@@ -1084,8 +1085,12 @@ impl<'ctx> HirCompiler<'ctx> {
                 "caught_exception",
             )
             .map_err(|e| e.to_string())?;
+        self.compile_restore_parked_native_throw(thrown.into_pointer_value())?;
+        let restored_thrown = self.builder.build_load(
+            ptr_ty, self.pending_exception().as_pointer_value(), "restored_caught_exception",
+        ).map_err(|e| e.to_string())?;
         self.builder
-            .build_store(catch_slot, thrown)
+            .build_store(catch_slot, restored_thrown)
             .map_err(|e| e.to_string())?;
         let valid_slot = self.builder.build_alloca(self.context.bool_type(), "catch_original_valid_slot")
             .map_err(|e| e.to_string())?;
@@ -1093,7 +1098,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .map_err(|e| e.to_string())?;
         let original_slot = self.builder.build_alloca(str_ty, "catch_original_value_slot")
             .map_err(|e| e.to_string())?;
-        self.builder.build_store(original_slot, thrown).map_err(|e| e.to_string())?;
+        self.builder.build_store(original_slot, restored_thrown).map_err(|e| e.to_string())?;
         let native_text_slot = self.builder.build_alloca(str_ty, "catch_native_text_slot")
             .map_err(|e| e.to_string())?;
         let native_text = self.builder.build_load(
@@ -1270,5 +1275,115 @@ impl<'ctx> HirCompiler<'ctx> {
         } else {
             Ok(false)
         }
+    }
+}
+
+impl<'ctx> HirCompiler<'ctx> {
+    /// A native throw that crossed JavaScript arrives as an authenticated private Error carrier.
+    /// Restore its complete packet before the native catch binding snapshots the thrown value.
+    fn compile_restore_parked_native_throw(&mut self, thrown: PointerValue<'ctx>) -> Result<(), String> {
+        let token = self.builder.build_call(
+            self.module.get_function("thaw_exception_native_token").unwrap(),
+            &[thrown.into()], "parked_native_throw_token",
+        ).map_err(|e| e.to_string())?.try_as_basic_value().basic()
+            .ok_or("parked throw token returned no value")?.into_int_value();
+        self.compile_apply_parked_native_throw(token)
+    }
+
+    /// Dead or absent tokens leave the pending tuple untouched; only a live private carrier
+    /// may replace all pending channels.
+    fn compile_apply_parked_native_throw(&mut self, token: IntValue<'ctx>) -> Result<(), String> {
+        let i64_ty = self.context.i64_type();
+        let ptr_ty = self.context.ptr_type(AddressSpace::default());
+        let function = self.current_function();
+        let present = self.builder.build_int_compare(
+            inkwell::IntPredicate::NE, token, i64_ty.const_zero(), "parked_native_throw_present",
+        ).map_err(|e| e.to_string())?;
+        let restore = self.context.append_basic_block(function, "restore_parked_native_throw");
+        let materialize = self.context.append_basic_block(function, "materialize_parked_native_throw");
+        let done = self.context.append_basic_block(function, "parked_native_throw_checked");
+        let check_live = self.context.append_basic_block(function, "check_parked_native_throw_live");
+        self.builder.build_conditional_branch(present, check_live, done).map_err(|e| e.to_string())?;
+        self.builder.position_at_end(check_live);
+        let live = self.builder.build_call(
+            self.module.get_function("thaw_exception_token_is_live").unwrap(),
+            &[token.into()], "parked_native_throw_live",
+        ).map_err(|e| e.to_string())?.try_as_basic_value().basic()
+            .ok_or("parked throw liveness returned no value")?.into_int_value();
+        let valid = self.builder.build_int_compare(
+            inkwell::IntPredicate::NE, live, self.context.i8_type().const_zero(),
+            "parked_native_throw_is_live",
+        ).map_err(|e| e.to_string())?;
+        self.builder.build_conditional_branch(valid, materialize, done).map_err(|e| e.to_string())?;
+        self.builder.position_at_end(materialize);
+        let snapshot_type = i64_ty.array_type(9);
+        let snapshot = self.allocate_variable_cell(snapshot_type.into(), "parked_native_throw_snapshot")?;
+        let snapshot_out = self.builder.build_pointer_cast(snapshot, ptr_ty, "parked_native_throw_snapshot_out")
+            .map_err(|e| e.to_string())?;
+        let copied = self.builder.build_call(
+            self.module.get_function("thaw_exception_native_snapshot").unwrap(),
+            &[token.into(), snapshot_out.into()], "parked_native_throw_materialized",
+        ).map_err(|e| e.to_string())?.try_as_basic_value().basic()
+            .ok_or("parked throw snapshot returned no value")?.into_int_value();
+        let copied = self.builder.build_int_compare(
+            inkwell::IntPredicate::NE, copied, self.context.i8_type().const_zero(),
+            "parked_native_throw_snapshot_ok",
+        ).map_err(|e| e.to_string())?;
+        self.builder.build_conditional_branch(copied, restore, done).map_err(|e| e.to_string())?;
+        self.builder.position_at_end(restore);
+        let field = |this: &Self, index: u64| -> Result<IntValue<'ctx>, String> {
+            // SAFETY: `snapshot` points to the `[9 x i64]` alloca above, and
+            // each call below supplies a compile-time field index in 0..9.
+            let element = unsafe { this.builder.build_gep(snapshot_type, snapshot, &[
+                this.context.i32_type().const_zero(), this.context.i32_type().const_int(index, false),
+            ], "parked_native_throw_snapshot_field") }.map_err(|e| e.to_string())?;
+            Ok(this.builder.build_load(i64_ty, element, "parked_native_throw_field")
+                .map_err(|e| e.to_string())?.into_int_value())
+        };
+        let tag = field(self, 0)?;
+        let number_bits = field(self, 1)?;
+        let bigint = field(self, 2)?;
+        let boolean_bits = field(self, 3)?;
+        let object_bits = field(self, 4)?;
+        let native_bits = field(self, 5)?;
+        let pending_bits = field(self, 6)?;
+        let native_text_bits = field(self, 7)?;
+        let aggregate_bits = field(self, 8)?;
+        let number = self.builder.build_bit_cast(number_bits, self.context.f64_type(), "parked_native_throw_number")
+            .map_err(|e| e.to_string())?;
+        let boolean = self.builder.build_int_truncate(boolean_bits, self.context.bool_type(), "parked_native_throw_bool")
+            .map_err(|e| e.to_string())?;
+        let object = self.builder.build_int_to_ptr(object_bits, ptr_ty, "parked_native_throw_object")
+            .map_err(|e| e.to_string())?;
+        let native = self.builder.build_int_to_ptr(native_bits, ptr_ty, "parked_native_throw_native")
+            .map_err(|e| e.to_string())?;
+        let pending = self.builder.build_int_to_ptr(pending_bits, ptr_ty, "parked_native_throw_pending")
+            .map_err(|e| e.to_string())?;
+        let native_text = self.builder.build_int_to_ptr(native_text_bits, ptr_ty, "parked_native_throw_native_text")
+            .map_err(|e| e.to_string())?;
+        let aggregate = self.builder.build_int_to_ptr(aggregate_bits, ptr_ty, "parked_native_throw_aggregate")
+            .map_err(|e| e.to_string())?;
+        for (symbol, value) in [
+            (PENDING_EXCEPTION_VALUE_TAG_SYMBOL, BasicValueEnum::from(tag)),
+            (PENDING_EXCEPTION_F64_SYMBOL, number),
+            (PENDING_EXCEPTION_I64_SYMBOL, BasicValueEnum::from(bigint)),
+            (PENDING_EXCEPTION_BOOL_SYMBOL, BasicValueEnum::from(boolean)),
+        ] {
+            self.builder.build_store(self.pending_exception_value(symbol).as_pointer_value(), value)
+                .map_err(|e| e.to_string())?;
+        }
+        self.builder.build_store(self.pending_exception_object().as_pointer_value(), object)
+            .map_err(|e| e.to_string())?;
+        self.builder.build_store(self.pending_exception_native().as_pointer_value(), native)
+            .map_err(|e| e.to_string())?;
+        self.builder.build_store(self.pending_exception().as_pointer_value(), pending)
+            .map_err(|e| e.to_string())?;
+        self.builder.build_store(self.pending_exception_native_text().as_pointer_value(), native_text)
+            .map_err(|e| e.to_string())?;
+        self.builder.build_store(self.pending_exception_aggregate_errors().as_pointer_value(), aggregate)
+            .map_err(|e| e.to_string())?;
+        self.builder.build_unconditional_branch(done).map_err(|e| e.to_string())?;
+        self.builder.position_at_end(done);
+        Ok(())
     }
 }

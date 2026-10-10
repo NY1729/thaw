@@ -1452,10 +1452,15 @@ fn object_type_tags_are_stable_and_unique() {
 }
 
 fn lock_async_test() -> std::sync::MutexGuard<'static, ()> {
-    ASYNC_TEST_LOCK
+    let guard = ASYNC_TEST_LOCK
         .get_or_init(|| Mutex::new(()))
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    // The ready queue is process-wide and an event names its owning thread
+    // through a pointer to work a finished test already freed. Under the lock
+    // no other async test is live, so anything still queued is such a leftover.
+    ready_events().lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clear();
+    guard
 }
 
 #[test]

@@ -3844,6 +3844,9 @@ impl<'a> FnLowerer<'a> {
         self.next_binding += 1;
         let callbacks_name = format!("__thaw_dynamic_callbacks_{}", self.next_binding);
         self.next_binding += 1;
+        let methods_name = format!("__thaw_dynamic_methods_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(methods_name.clone(), HirType::Array(Box::new(HirType::Bool)));
         self.scope.insert(keys_name.clone(), HirType::Array(Box::new(HirType::Str)));
         self.scope.insert(readable_name.clone(), HirType::Array(Box::new(HirType::Bool)));
         self.scope.insert(writable_name.clone(), HirType::Array(Box::new(HirType::Bool)));
@@ -3866,6 +3869,7 @@ impl<'a> FnLowerer<'a> {
                 Box::new(HirExpr::Var("getDynamicValue".into())),
                 vec![HirExpr::Lit(HirLit::Str("undefined".into()))],
             );
+            let mut is_method = false;
             let getter = if setter_only {
                 absent_callback()
             } else {
@@ -3889,6 +3893,7 @@ impl<'a> FnLowerer<'a> {
                 {
                     read = bound;
                     read_type = bound_type;
+                    is_method = true;
                 }
                 let callback = HirExpr::Lambda(
                     Vec::new(),
@@ -3940,6 +3945,7 @@ impl<'a> FnLowerer<'a> {
                 append(&readable_name, HirExpr::Lit(HirLit::Bool(!setter_only))),
                 append(&writable_name, HirExpr::Lit(HirLit::Bool(writable))),
                 append(&accessor_name, HirExpr::Lit(HirLit::Bool(has_getter || has_setter))),
+                append(&methods_name, HirExpr::Lit(HirLit::Bool(is_method))),
             ]));
             callback_actions.push((index, vec![
                 append(&callbacks_name, getter),
@@ -4033,6 +4039,8 @@ impl<'a> FnLowerer<'a> {
                 HirExpr::ArrayLit(Vec::new())),
             HirStmt::Let(callbacks_name.clone(), HirType::Array(Box::new(HirType::JsValue)),
                 HirExpr::ArrayLit(Vec::new())),
+            HirStmt::Let(methods_name.clone(), HirType::Array(Box::new(HirType::Bool)),
+                HirExpr::ArrayLit(Vec::new())),
         ]);
         body.extend(self.lower_ordered_fixed_field_statements(
             HirExpr::Var(source_name.clone()), fields, metadata_actions,
@@ -4059,9 +4067,13 @@ impl<'a> FnLowerer<'a> {
             &HirType::Json,
             HirExpr::Var(accessor_name),
         )?;
+        let methods = self.coerce_to_declared(
+            &HirType::Json,
+            HirExpr::Var(methods_name),
+        )?;
         let arguments = self.coerce_to_declared(
             &HirType::Json,
-            HirExpr::ArrayLit(vec![keys, readable, writable, accessors]),
+            HirExpr::ArrayLit(vec![keys, readable, writable, accessors, methods]),
         )?;
         let args_name = format!("__thaw_native_projection_args_{}", self.next_binding);
         self.next_binding += 1;

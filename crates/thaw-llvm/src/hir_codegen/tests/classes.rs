@@ -3709,6 +3709,30 @@ fn non_arrow_json_receiver_enables_arena_tracing_before_module_init() {
 }
 
 #[test]
+fn native_callback_registration_enables_exception_arena_tracing_before_module_init() {
+    let source = r#"
+        function __thaw_module_init(): void {}
+        function main(): void {
+            const callback: () => number = (): number => 73;
+            const handle: JsValue = registerNativeCallback(callback);
+        }
+    "#;
+    let module = thaw_parser::parse_typescript(source).unwrap();
+    let program = thaw_hir::lower_module(&module).unwrap();
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "native_callback_exception_tracing");
+    compiler.compile_program(&program).unwrap();
+    let ir = compiler.print_to_string();
+    assert!(ir.lines().any(|line| line.contains("call ")
+        && line.contains("@thaw_js_register_native_callback(")), "{ir}");
+    let main = ir.find("define i32 @main(").expect(&ir);
+    let body = &ir[main..main + ir[main..].find("\n}").unwrap()];
+    let enable = body.find("call void @thaw_arena_enable_tracing(").expect(body);
+    let init = body.find("call void @__thaw_module_init(").expect(body);
+    assert!(enable < init, "{body}");
+}
+
+#[test]
 fn typed_js_function_origin_enables_tracing_before_module_init() {
     let source = r#"
         declare function __thaw_typed_js_72657475726e43616c6c6261636b(): {

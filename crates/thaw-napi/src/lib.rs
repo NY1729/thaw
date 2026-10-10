@@ -990,6 +990,22 @@ thread_local! {
     static RETIRED_SCOPE_HANDLE_IDS: RefCell<HashSet<usize>> = RefCell::new(HashSet::new());
 }
 
+// The registries guarded by these mutexes are held only momentarily by other
+// threads (creation, release, finalization). Wait out such contention so a
+// scope sweep is not silently skipped; a lock this thread already holds
+// (reentrant finalizer) never frees, so the wait is bounded and the caller
+// keeps its conservative answer.
+fn lock_briefly<T>(mutex: &Mutex<T>) -> Option<std::sync::MutexGuard<'_, T>> {
+    for _ in 0..20_000 {
+        match mutex.try_lock() {
+            Ok(guard) => return Some(guard),
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => return Some(poisoned.into_inner()),
+            Err(std::sync::TryLockError::WouldBlock) => std::thread::yield_now(),
+        }
+    }
+    None
+}
+
 impl Env {
     fn scope_reachable_values(
         &self,
@@ -1107,12 +1123,12 @@ impl Env {
                 }
             }
         }
-        let Ok(functions) = threadsafe_functions().try_lock() else {
+        let Some(functions) = lock_briefly(threadsafe_functions()) else {
             return candidates.clone();
         };
         for function in functions.iter() {
             if function.env == self as *const Env as usize {
-                let Ok(state) = function.state.try_lock() else {
+                let Some(state) = lock_briefly(&function.state) else {
                     return candidates.clone();
                 };
                 if !state.live_released {

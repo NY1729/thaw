@@ -2152,7 +2152,7 @@ fn graph_snapshot_reads_nested_getter_with_original_receiver() {
             .unwrap();
     assert_eq!(
         graph["nodes"][1]["o"][0],
-        serde_json::json!(["computed", {"v": 9.0}])
+        serde_json::json!(["computed", {"v": 9.0}, 0])
     );
 }
 
@@ -3630,8 +3630,8 @@ fn live_quickjs_symbol_property_key_keeps_identity() {
     drop(env);
 }
 
-// Unrun: a QuickJS-origin string key keeps exact code units when used on a
-// native object. Rust's lossy String conversion would merge these two keys.
+// A QuickJS-origin string key keeps exact code units when used on a native
+// object. Rust's lossy String conversion would merge these two keys.
 #[cfg(feature = "quickjs")]
 #[test]
 fn live_quickjs_surrogate_string_keys_stay_distinct_on_native_object() {
@@ -3692,9 +3692,14 @@ fn live_quickjs_surrogate_string_keys_stay_distinct_on_native_object() {
         NAPI_OK
     );
     assert_eq!(found, one);
-    assert_eq!(thaw_quickjs::thaw_js_release_handle(high_handle), 0);
-    assert_eq!(thaw_quickjs::thaw_js_release_handle(low_handle), 0);
-    assert_eq!(thaw_quickjs::thaw_js_release_handle(valid_handle), 0);
+    // Node-API object lifetime management: a napi_value passed to
+    // napi_set_property / napi_get_property (key or value) is not consumed by
+    // the call; the caller's handle stays valid until its scope closes. The
+    // QuickJS handles therefore still belong to the test and release cleanly
+    // (1), exactly like the key handle in the preceding test.
+    assert_eq!(thaw_quickjs::thaw_js_release_handle(high_handle), 1);
+    assert_eq!(thaw_quickjs::thaw_js_release_handle(low_handle), 1);
+    assert_eq!(thaw_quickjs::thaw_js_release_handle(valid_handle), 1);
 }
 
 #[cfg(feature = "quickjs")]
@@ -3819,8 +3824,8 @@ fn live_quickjs_strict_equality_uses_javascript_values() {
     drop(env);
 }
 
-// Unrun source control: own-key metadata and prototype traversal must not
-// read an accessor value; numeric keys and live Symbols keep their key kinds.
+// Own-key metadata and prototype traversal must not read an accessor value;
+// numeric keys and live Symbols keep their key kinds.
 #[cfg(feature = "quickjs")]
 #[test]
 fn live_quickjs_property_names_filter_descriptors_without_getting_values() {
@@ -3854,10 +3859,14 @@ fn live_quickjs_property_names_filter_descriptors_without_getting_values() {
     assert!(own.iter().flatten().any(
         |key| matches!(unsafe { value_ref(*key) }, Ok(Value::String(name)) if name == "hidden")
     ));
+    // A live Symbol key keeps its key kind: it crosses the graph as a native
+    // Symbol that owns a stable ID and a weak cache entry for the engine's
+    // identity (not as an independently strong QuickJS handle, which would
+    // form an Env -> handle -> Env cycle).
     assert!(own
         .iter()
         .flatten()
-        .any(|key| matches!(unsafe { value_ref(*key) }, Ok(Value::QuickJsHandle { .. }))));
+        .any(|key| matches!(unsafe { value_ref(*key) }, Ok(Value::Symbol { .. }))));
     let mut visible = ptr::null_mut();
     assert_eq!(
         unsafe { napi_get_property_names(&mut env, object, &mut visible) },
@@ -3881,7 +3890,9 @@ fn live_quickjs_property_names_filter_descriptors_without_getting_values() {
         .any(|key| matches!(unsafe { value_ref(*key) }, Ok(Value::QuickJsHandle { .. }))));
     let reads = thaw_quickjs::thaw_js_get_global(c"napiEnumReads".as_ptr());
     assert_eq!(unsafe { qjs_query(reads, 2) }.unwrap(), "0");
-    assert_eq!(thaw_quickjs::thaw_js_release_handle(reads), 0);
+    // thaw_js_get_global retains a handle for every value, primitives included
+    // (see the `nativeAccessorIdentity` boolean elsewhere): releasing it succeeds.
+    assert_eq!(thaw_quickjs::thaw_js_release_handle(reads), 1);
     assert_eq!(thaw_quickjs::thaw_js_release_handle(handle), 1);
     drop(env);
 }
@@ -4334,6 +4345,31 @@ fn live_quickjs_string_coercion_preserves_effects_units_and_throw() {
     }
 }
 
+#[cfg(feature = "quickjs")]
+#[test]
+fn graph_owned_native_symbol_coercion_throws_engine_type_error_before_exposure() {
+    let mut env = Env::new();
+    assert!(ensure_graph_owner_id(&mut env));
+    let description = env.alloc(Value::String("unexposed".into()));
+    let mut symbol = ptr::null_mut();
+    assert_eq!(unsafe { napi_create_symbol(&mut env, description, &mut symbol) }, NAPI_OK);
+
+    // The native graph bridge must use its captured Symbol intrinsic and the
+    // actual native Symbol descriptor, even when user code replaces Symbol.
+    assert_eq!(thaw_quickjs::thaw_js_load(
+        c"globalThis.__savedNapiSymbol = Symbol; globalThis.Symbol = () => 17;".as_ptr()), 1);
+
+    let mut output = ptr::null_mut();
+    assert_eq!(unsafe { napi_coerce_to_string(&mut env, symbol, &mut output) }, NAPI_PENDING_EXCEPTION);
+    let mut exception = ptr::null_mut();
+    assert_eq!(unsafe { napi_get_and_clear_last_exception(&mut env, &mut exception) }, NAPI_OK);
+    let handle = unsafe { qjs_handle(exception) }.expect("engine TypeError handle");
+    assert!(unsafe { qjs_query(handle, 2) }.unwrap().starts_with("TypeError:"));
+    assert_eq!(thaw_quickjs::thaw_js_release_handle(handle), 1);
+    assert_eq!(thaw_quickjs::thaw_js_load(
+        c"globalThis.Symbol = __savedNapiSymbol; delete globalThis.__savedNapiSymbol;".as_ptr()), 1);
+}
+
 // Unrun: QuickJS getter/setter failures reached through N-API retain the
 // original thrown object. The public HostOperations setter keeps its older
 // three-argument ABI; these N-API operations use the private result path.
@@ -4553,11 +4589,15 @@ fn native_function_proxy_construct_preserves_derived_new_target() {
             let prototypeReads = 0;
             const desired = {{ derived: true }};
             const customTarget = new Proxy(function() {{}}, {{
-                get(target, key, receiver) {{
-                    if (key === 'prototype') {{ prototypeReads++; return desired; }}
-                    if (key === 'derivedTag') return 23;
-                    return Reflect.get(target, key, receiver);
-                }}
+              get(target, key, receiver) {{
+                if (key === 'prototype') {{ prototypeReads++; return desired; }}
+                if (key === 'derivedTag') return 23;
+                return Reflect.get(target, key, receiver);
+              }},
+              getOwnPropertyDescriptor(target, key) {{
+                if (key === 'prototype') throw new Error('unexpected descriptor probe');
+                return Reflect.getOwnPropertyDescriptor(target, key);
+              }}
             }});
             const explicit = Reflect.construct(nativeCtorWithTarget, [], customTarget);
             const explicitAgain = Reflect.construct(nativeCtorWithTarget, [], customTarget);
@@ -4581,13 +4621,52 @@ fn native_function_proxy_construct_preserves_derived_new_target() {
             }});
             const ordinaryFallback = Reflect.construct(nativeCtorWithTarget,
                 [], primitiveTarget);
+            let alternatingReads = 0;
+            let descriptorReads = 0;
+            const alternatingTarget = new Proxy(function() {{}}, {{
+              get(target, key, receiver) {{
+                if (key === 'prototype') {{
+                  alternatingReads++;
+                  return alternatingReads === 1 ? desired : 7;
+                }}
+                return Reflect.get(target, key, receiver);
+              }},
+              getOwnPropertyDescriptor(target, key) {{
+                if (key === 'prototype') {{ descriptorReads++; throw new Error('unexpected descriptor probe'); }}
+                return Reflect.getOwnPropertyDescriptor(target, key);
+              }}
+            }});
+            const alternatingObject = Reflect.construct(nativeCtorWithTarget,
+                [], alternatingTarget);
+            const alternatingFallback = Reflect.construct(nativeCtorWithTarget,
+                [], alternatingTarget);
+            const markerForPrototype = {{ prototype: 'threw' }};
+            let throwingReads = 0;
+            const throwingTarget = new Proxy(function() {{}}, {{
+              get(target, key, receiver) {{
+                if (key === 'prototype') {{ throwingReads++; throw markerForPrototype; }}
+                return Reflect.get(target, key, receiver);
+              }},
+              getOwnPropertyDescriptor(target, key) {{
+                if (key === 'prototype') {{ descriptorReads++; throw new Error('unexpected descriptor probe'); }}
+                return Reflect.getOwnPropertyDescriptor(target, key);
+              }}
+            }});
+            let originalPrototypeThrow = false;
+            try {{ Reflect.construct(nativeCtorWithTarget, [], throwingTarget); }}
+            catch (error) {{ originalPrototypeThrow = error === markerForPrototype; }}
             return [directTargetRead, derived instanceof Derived,
                 Object.getPrototypeOf(derived) === Derived.prototype,
                 prototypeReads === 2,
                 Object.getPrototypeOf(explicit) !== desired,
                 explicit === explicitAgain, thrownIdentity,
                 primitivePrototypeReads === 1,
-                Object.getPrototypeOf(ordinaryFallback) === Object.prototype];
+                Object.getPrototypeOf(ordinaryFallback) === Object.prototype,
+                alternatingReads === 2,
+                descriptorReads === 0,
+                Object.getPrototypeOf(alternatingObject) === desired,
+                Object.getPrototypeOf(alternatingFallback) === Object.prototype,
+                throwingReads === 1, originalPrototypeThrow];
         }})();
     "#,
         function as u64
@@ -4597,7 +4676,7 @@ fn native_function_proxy_construct_preserves_derived_new_target() {
     let result = thaw_quickjs::thaw_js_get_global(c"nativeCtorWithTargetResult".as_ptr());
     assert_eq!(
         unsafe { qjs_query(result, 2) }.unwrap(),
-        "true,true,true,true,true,true,true,true,true"
+        "true,true,true,true,true,true,true,true,true,true,true,true,true,true,true"
     );
     assert_eq!(OBSERVED_TARGET_TAG.load(Ordering::SeqCst), 0);
     assert_eq!(thaw_quickjs::thaw_js_release_handle(result), 1);

@@ -2935,6 +2935,8 @@ fn ensure_context() {
                 ctx.globals().remove("__thaw_async_context_bootstrap")
                     .expect("failed to remove async context bootstrap");
                 platform_result.expect("failed to install JavaScript platform globals");
+                install_native_exception_bridge(&ctx)
+                    .expect("failed to install native exception carrier bridge");
             });
             (runtime, context)
         });

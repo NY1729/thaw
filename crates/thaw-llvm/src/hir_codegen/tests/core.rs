@@ -2615,6 +2615,56 @@ fn propagates_synchronous_native_callback_exceptions_to_quickjs() {
 }
 
 #[test]
+fn callback_exception_snapshot_survives_captured_catch_closure_and_async_suspension() {
+    let source = r#"
+        declare function __thaw_typed_js_696e766f6b654361707475726564(
+            callback: () => void,
+        ): void;
+
+        async function main(): Promise<void> {
+            loadScript("globalThis.invokeCaptured = callback => callback();");
+            let inspect: () => string = () => "missing";
+            try {
+                __thaw_typed_js_696e766f6b654361707475726564(
+                    (): void => { throw 73; },
+                );
+            } catch (error) {
+                inspect = () => typeof error + ":" + String(error);
+            }
+            await sleep(0);
+            console.log(inspect());
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "callback_exception_captured_catch_after_async_reset"),
+        "number:73\n"
+    );
+}
+
+#[test]
+fn async_native_callback_rejection_preserves_embedded_nul_text() {
+    let source = r#"
+        declare function __thaw_typed_js_696e766f6b654465666572726564(
+            callback: () => Promise<void>,
+        ): void;
+
+        function main(): void {
+            loadScript("globalThis.invokeDeferred = callback => { callback().catch(error => console.log(error.name + ':' + error.message)); };");
+            __thaw_typed_js_696e766f6b654465666572726564(
+                async (): Promise<void> => {
+                    await sleep(0);
+                    throw new TypeError("before\0after");
+                },
+            );
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "async_native_callback_rejection_embedded_nul"),
+        "TypeError:before\0after\n"
+    );
+}
+
+#[test]
 fn native_callback_own_typed_throw_and_deferred_sync_throw_keep_host_abi() {
     let source = r#"
         declare function __thaw_typed_js_696e766f6b6553796e63(
