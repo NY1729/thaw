@@ -1698,6 +1698,38 @@ fn typed_quickjs_catches_preserve_original_thrown_values() {
 }
 
 #[test]
+fn typed_quickjs_error_instanceof_uses_the_original_value() {
+    let source = r#"
+        declare function __thaw_typed_js_7468726f774d794572726f72(): void;
+        declare function __thaw_typed_js_7468726f774572726f72(): void;
+        declare function __thaw_typed_js_7468726f774f626a656374(): void;
+        declare function __thaw_typed_js_7468726f77537472696e67(): void;
+        declare function __thaw_typed_js_7468726f775361766564(): void;
+        declare function __thaw_typed_js_73616d655361766564(value: any): boolean;
+        function main(): void {
+            loadScript("function MyError(message) { this.name = 'MyError'; this.message = message; } MyError.prototype = Object.create(Error.prototype); MyError.prototype.constructor = MyError; globalThis.MyError = MyError; globalThis.savedError = new MyError('saved'); globalThis.throwMyError = () => { throw new MyError('boom'); }; globalThis.throwError = () => { throw new Error('base'); }; globalThis.throwObject = () => { throw {name: 'Error', message: 'fake'}; }; globalThis.throwString = () => { throw 'Error: fake'; }; globalThis.throwSaved = () => { throw savedError; }; globalThis.sameSaved = value => value === savedError;");
+            try { __thaw_typed_js_7468726f774d794572726f72(); }
+            catch (error) { console.log(error instanceof Error); }
+            try { __thaw_typed_js_7468726f774572726f72(); }
+            catch (error) { console.log(error instanceof Error); }
+            try { __thaw_typed_js_7468726f774f626a656374(); }
+            catch (error) { console.log(error instanceof Error); }
+            try { __thaw_typed_js_7468726f77537472696e67(); }
+            catch (error) { console.log(error instanceof Error); }
+            try { __thaw_typed_js_7468726f775361766564(); }
+            catch (error) {
+                const value: any = error;
+                console.log(__thaw_typed_js_73616d655361766564(value), error instanceof Error);
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "typed_quickjs_error_instanceof_original_value"),
+        "true\ntrue\nfalse\nfalse\ntrue true\n"
+    );
+}
+
+#[test]
 fn legacy_caught_error_json_properties_stay_live_for_the_invocation() {
     let source = r#"
         function main(): void {
