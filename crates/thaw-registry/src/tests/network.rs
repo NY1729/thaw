@@ -1603,6 +1603,108 @@ fn http_server_supports_standard_timeout_configuration() {
 }
 
 #[test]
+fn http_server_releases_completed_connection_close_responses() {
+    use std::ffi::{CStr, CString};
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+    use std::time::Duration;
+
+    let probe = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = probe.local_addr().unwrap().port();
+    drop(probe);
+    let client = std::thread::spawn(move || {
+        for path in ["/buffered-now", "/buffered-later", "/streamed-now", "/streamed-later"] {
+            let deadline = std::time::Instant::now() + Duration::from_secs(3);
+            let mut stream = loop {
+                match TcpStream::connect(("127.0.0.1", port)) {
+                    Ok(stream) => break stream,
+                    Err(_) if std::time::Instant::now() < deadline => {
+                        std::thread::sleep(Duration::from_millis(2));
+                    }
+                    Err(error) => panic!("failed to connect for {path}: {error}"),
+                }
+            };
+            stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            write!(stream, "GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n").unwrap();
+            let mut response = Vec::new();
+            stream.read_to_end(&mut response).unwrap();
+            assert!(response.starts_with(b"HTTP/1.1 200 OK\r\n"), "{path}: {response:?}");
+            assert!(response.ends_with(b"ok"), "{path}: {response:?}");
+            if path == "/buffered-now" {
+                stream.write_all(&vec![b'x'; 256 * 1024]).unwrap();
+                stream.shutdown(std::net::Shutdown::Write).unwrap();
+            }
+        }
+    });
+
+    let dir = temp_registry("builtin_http_connection_close_cleanup");
+    fs::write(
+        dir.join("index.js"),
+        r#"var http = require('node:http'); module.exports = async function(port) {
+            var originalConcat = Buffer.concat, markerBytesConcatenated = 0;
+            Buffer.concat = function(parts) {
+                if (parts.length === 2 && Buffer.isBuffer(parts[1])) {
+                    var bytes = parts[1], markerOnly = bytes.length > 0;
+                    for (var i = 0; markerOnly && i < bytes.length; i++) if (bytes[i] !== 120) markerOnly = false;
+                    if (markerOnly) markerBytesConcatenated += bytes.length;
+                }
+                return originalConcat.apply(this, arguments);
+            };
+            var sockets = [], closed = 0, server = http.createServer(function(request, response) {
+                response.setHeader('Content-Length', '2');
+                if (request.url === '/buffered-now') response.end('ok');
+                else if (request.url === '/buffered-later') setTimeout(function() { response.end('ok'); }, 10);
+                else if (request.url === '/streamed-now') { response.write('o'); response.end('k'); }
+                else { response.write('o'); setTimeout(function() { response.end('k'); }, 10); }
+            });
+            server.on('connection', function(socket) { sockets.push(socket); socket.on('close', function() { closed++; }); });
+            return await new Promise(function(resolve, reject) {
+                server.on('error', reject);
+                server.listen(port, '127.0.0.1', function() {
+                    var watchdog;
+                    var inspect = setInterval(function() {
+                        if (closed === 4) {
+                            clearInterval(inspect);
+                            clearTimeout(watchdog);
+                            server.getConnections(function(error, count) {
+                                if (error) return reject(error);
+                                server.close(function() { Buffer.concat = originalConcat; resolve([closed, count, markerBytesConcatenated]); });
+                            });
+                        }
+                    }, 10);
+                    watchdog = setTimeout(function() {
+                        clearInterval(inspect);
+                        var closedBeforeCleanup = closed;
+                        server.getConnections(function(error, count) {
+                            if (error) return reject(error);
+                            sockets.forEach(function(socket) { socket.destroy(); });
+                            server.close(function() { Buffer.concat = originalConcat; resolve([closedBeforeCleanup, count, markerBytesConcatenated]); });
+                        });
+                    }, 2000);
+                });
+            });
+        };"#,
+    )
+    .unwrap();
+    let empty_node_modules = temp_registry("builtin_http_connection_close_cleanup_node_modules");
+    let (bundle, _, _, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseHttpConnectionCloseCleanup = module.exports;");
+    let source = CString::new(script).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let function = CString::new("exerciseHttpConnectionCloseCleanup").unwrap();
+    let arguments = CString::new(format!("[{port}]" )).unwrap();
+    let result = unsafe {
+        CStr::from_ptr(thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr()))
+    }
+    .to_string_lossy();
+    client.join().unwrap();
+    assert_eq!(result, "[4,0,0]", "connections should close without queueing bytes after a terminal close response");
+    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(empty_node_modules);
+}
+
+#[test]
 fn http_server_handles_chunked_bodies_and_pipelined_keep_alive_requests() {
     use std::ffi::{CStr, CString};
     use std::io::{Read, Write};
