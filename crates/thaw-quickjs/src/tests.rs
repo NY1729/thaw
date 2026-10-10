@@ -9942,3 +9942,80 @@ fn worker_source_reader_removes_only_the_leading_bom() {
     );
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[test]
+fn proxy_get_own_property_descriptor_trap_keeps_accessor_descriptors() {
+    assert_eq!(
+        load(
+            r#"
+        globalThis.proxyAccessorDescriptors = function () {
+          const getter = function () { return 7; };
+          const setter = function (v) {};
+          const source = Object.defineProperties({}, {
+            both: { get: getter, set: setter, configurable: true, enumerable: true },
+            getOnly: { get: getter, configurable: true, enumerable: false },
+            setOnly: { set: setter, configurable: true, enumerable: true },
+          });
+          const shape = (target) => {
+            const p = new Proxy(target, {
+              getOwnPropertyDescriptor(_, key) {
+                return Reflect.getOwnPropertyDescriptor(source, key);
+              },
+            });
+            return ['both', 'getOnly', 'setOnly'].map((key) => {
+              const d = Reflect.getOwnPropertyDescriptor(p, key);
+              return [
+                'value' in d || 'writable' in d,
+                d.get === Reflect.getOwnPropertyDescriptor(source, key).get,
+                d.set === Reflect.getOwnPropertyDescriptor(source, key).set,
+                d.enumerable, d.configurable,
+              ].join(':');
+            }).join('|');
+          };
+          // Both an empty object target and an array target (indices) must work.
+          const overArray = new Proxy([1, 2, 3], {
+            getOwnPropertyDescriptor() { return Reflect.getOwnPropertyDescriptor(source, 'both'); },
+          });
+          const element = Object.getOwnPropertyDescriptor(overArray, '1');
+          return [shape({}), shape([]), typeof element.get, 'value' in element].join('/');
+        };
+    "#
+        ),
+        1
+    );
+    let accessor = "false:true:true:true:true|false:true:true:false:true|false:true:true:true:true";
+    let expected = format!("{accessor}/{accessor}/function/false");
+    assert_eq!(
+        call("proxyAccessorDescriptors", "[]"),
+        serde_json::to_string(&expected).unwrap()
+    );
+}
+
+#[test]
+fn proxy_define_property_trap_checks_nonconfigurable_writable_invariant() {
+    assert_eq!(
+        load(r#"
+        globalThis.proxyDefineInvariant = function () {
+          const target = {};
+          Object.defineProperty(target, 'fixed', {
+            value: 1, writable: true, configurable: false,
+          });
+          const proxy = new Proxy(target, {
+            defineProperty() { return true; },
+          });
+          const valueOnly = Reflect.defineProperty(proxy, 'fixed', { value: 2 });
+          const writableTrue = Reflect.defineProperty(proxy, 'fixed', { writable: true });
+          let writableFalseThrows = false;
+          try { Reflect.defineProperty(proxy, 'fixed', { writable: false }); }
+          catch (error) { writableFalseThrows = error instanceof TypeError; }
+          return [valueOnly, writableTrue, writableFalseThrows,
+            target.fixed, Object.getOwnPropertyDescriptor(target, 'fixed').writable].join(':');
+        };
+        "#),
+        1
+    );
+    assert_eq!(
+        call("proxyDefineInvariant", "[]"),
+        serde_json::to_string("true:true:true:1:true").unwrap()
+    );
+}
