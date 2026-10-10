@@ -2859,6 +2859,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     &[data.into()],
                     "dynamic_bytes_result",
                 ).map_err(|error| error.to_string())?.try_as_basic_value().basic().ok_or("thaw_json_to_number_array returned no value")?.into_pointer_value();
+                self.compile_check_json_host_error(data, Some("thaw_json_destroy"))?;
                 let wrapped = self.compile_array_wrap(result)?;
                 self.builder.build_call(self.module.get_function("thaw_json_destroy").unwrap(),
                     &[data.into()], "destroy_dynamic_bytes_data")
@@ -2931,6 +2932,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     .basic()
                     .ok_or_else(|| "thaw_json_to_number_array returned no value".to_string())?
                     .into_pointer_value();
+                self.compile_check_json_host_error(result.into(), None)?;
                 let wrapped = self.compile_array_wrap(result)?;
                 self.compile_destroy_typed_input_if_detached(json, ty, None)?;
                 Ok(wrapped.into())
