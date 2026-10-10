@@ -2966,6 +2966,22 @@ module.exports = function() {
     try { drain(); } catch (error) { eofCaught = error === marker; }
     var eofResult = [eofCaught, eofEvents, eof.destroyed, eof._handle];
 
+    var endDestroy = socket(910009), endDestroyEvents = [], endDestroyCaught = false;
+    globalThis.__thaw_net_poll_read = function() { return 'eof'; };
+    endDestroy.on('end', function() { endDestroyEvents.push('end'); endDestroy.destroy(); });
+    endDestroy.on('close', function(value) { endDestroyEvents.push('close:' + value); });
+    endDestroy._startRead();
+    try { drain(); } catch (error) { endDestroyCaught = error === marker; }
+    var endDestroyResult = [endDestroyCaught, endDestroyEvents, endDestroy.destroyed, endDestroy._handle];
+
+    var endThrow = socket(910010), endThrowEvents = [], endThrowCaught = false;
+    globalThis.__thaw_net_poll_read = function() { return 'eof'; };
+    endThrow.on('end', function() { endThrowEvents.push('end'); throw marker; });
+    endThrow.on('close', function(value) { endThrowEvents.push('close:' + value); });
+    endThrow._startRead();
+    try { drain(); } catch (error) { endThrowCaught = error === marker; }
+    var endThrowResult = [endThrowCaught, endThrowEvents, endThrow.destroyed, endThrow._handle];
+
     var data = socket(910004), dataEvents = [], dataCaught = false;
     globalThis.__thaw_net_poll_read = function() { return 'ok:61'; };
     data.on('data', function() { dataEvents.push('data'); throw marker; });
@@ -3000,7 +3016,7 @@ module.exports = function() {
     try { queued.shift()(); } catch (error) { acceptCaught = error === marker; }
     server.close(); drain();
     var acceptedResult = [acceptCaught, retired.slice(), server.connections, scheduled];
-    return [duplicateResult, readResult, eofResult, dataResult, nativeResult, falsyResult, acceptedResult];
+    return [duplicateResult, readResult, eofResult, endDestroyResult, endThrowResult, dataResult, nativeResult, falsyResult, acceptedResult];
   } finally {
     globalThis.queueMicrotask = originalQueue;
     globalThis.__thaw_net_poll_read = originalPoll;
@@ -3020,9 +3036,249 @@ module.exports = function() {
     let arguments = CString::new("[]").unwrap();
     let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
     let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
-    assert_eq!(result, r#"[[true,["error","close"],[910001],true,0],[true,["error:ECONNRESET","close:true"],true,0,[]],[true,["end","close:false"],true,0],[true,["data","close"],true,0,[910004]],[true,["close"],true,0],[true,["close"],true,0],[true,[910007],0,1]]"#);
+    assert_eq!(result, r#"[[true,["error","close"],[910001],true,0],[true,["error:ECONNRESET","close:true"],true,0,[]],[true,["end","close:false"],true,0],[false,["end","close:false"],true,0],[true,["end","close:false"],true,0],[true,["data","close"],true,0,[910004]],[true,["close"],true,0],[true,["close"],true,0],[true,[910007],0,1]]"#);
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
+}
+
+#[test]
+fn net_socket_reconnect_resets_readable_state_and_invalidates_old_polls() {
+    use std::ffi::{CStr, CString};
+
+    let dir = temp_registry("builtin_net_socket_reconnect_readable_reset");
+    fs::write(
+        dir.join("index.js"),
+        r#"var net = require('node:net');
+module.exports = function() {
+  var originalQueue = globalThis.queueMicrotask, originalTimer = globalThis.setTimeout, originalClear = globalThis.clearTimeout;
+  var originalConnect = globalThis.__thaw_net_connect, originalPoll = globalThis.__thaw_net_poll_read, originalDestroy = globalThis.__thaw_net_destroy;
+  var microtasks = [], timers = [], calls = Object.create(null), destroyedHandles = [];
+  globalThis.queueMicrotask = function(task) { microtasks.push(task); };
+  globalThis.setTimeout = function(task) { timers.push(task); return timers.length; };
+  globalThis.clearTimeout = function() {};
+  globalThis.__thaw_net_connect = function() { return 'ok:' + (940001 + calls.connects++); };
+  globalThis.__thaw_net_destroy = function(handle) { destroyedHandles.push(handle); return 'ok'; };
+  globalThis.__thaw_net_poll_read = function(handle) {
+    calls[handle] = (calls[handle] || 0) + 1;
+    if (handle === 940001) return 'ok:6f6c64e2';
+    if (calls[handle] === 1) return 'ok:98836e6577';
+    return 'eof';
+  };
+  function runMicrotask() { if (!microtasks.length) throw new Error('expected queued microtask'); microtasks.shift()(); } function drainUntil(predicate) { for (var steps = 0; !predicate() && steps < 32; steps++) { if (!microtasks.length) throw new Error('microtask predicate not reached'); microtasks.shift()(); } if (!predicate()) throw new Error('microtask drain limit'); }
+  try {
+    calls.connects = 0;
+    var socket = new net.Socket(), data = [], events = [];
+    socket.setEncoding('utf8');
+    socket.readableFlowing = false;
+    socket.on('connect', function() { events.push('connect'); });
+    socket.on('data', function(chunk) { data.push(chunk); events.push('data'); });
+    socket.on('end', function() { events.push('end'); });
+    socket.on('close', function(error) { events.push('close:' + error); });
+
+    socket.connect({ port: 1, host: 'localhost' });
+    runMicrotask();
+    runMicrotask();
+    socket.pause();
+    socket.destroy();
+    socket.connect({ port: 2, host: 'localhost' });
+    socket.resume();
+    drainUntil(function() { return calls[940002] === 1 && timers.length >= 2; });
+    var oldPoll = timers.shift();
+    var newPoll = timers.shift();
+    oldPoll();
+    newPoll();
+    drainUntil(function() { return events.indexOf('end') >= 0 && events.indexOf('close:false') >= 0; });
+    var text = data.join('');
+
+    var staleSocket = new net.Socket(), staleConnectEvents = [];
+    staleSocket.on('connect', function() { staleConnectEvents.push('connect'); });
+    staleSocket.on('close', function(value) { staleConnectEvents.push('close:' + value); });
+    staleSocket.connect({ port: 3, host: 'localhost' });
+    staleSocket.connect({ port: 4, host: 'localhost' });
+    drainUntil(function() { return staleConnectEvents.indexOf('connect') >= 0 && staleConnectEvents.indexOf('close:false') >= 0; });
+    return [calls[940001], calls[940002], text.indexOf('old') === -1, text.indexOf('☃') === -1, text.indexOf('new') >= 0, events, socket.readableLength, socket.readableEnded, staleConnectEvents, staleSocket._handle, staleSocket.destroyed, destroyedHandles.indexOf(940003) >= 0];
+  } finally {
+    globalThis.queueMicrotask = originalQueue;
+    globalThis.setTimeout = originalTimer;
+    globalThis.clearTimeout = originalClear;
+    globalThis.__thaw_net_connect = originalConnect;
+    globalThis.__thaw_net_poll_read = originalPoll;
+    globalThis.__thaw_net_destroy = originalDestroy;
+  }
+};"#,
+    )
+    .unwrap();
+    let empty_node_modules = temp_registry("builtin_net_socket_reconnect_readable_reset_modules");
+    let (bundle, _, _, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    let source = CString::new(format!(
+        "globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseNetSocketReconnectReset = module.exports;"
+    ))
+    .unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let result = thaw_quickjs::thaw_js_call(
+        c"exerciseNetSocketReconnectReset".as_ptr(),
+        c"[]".as_ptr(),
+    );
+    assert_eq!(
+        unsafe { CStr::from_ptr(result) }.to_string_lossy(),
+        r#"[1,2,true,true,true,["connect","close:false","connect","data","end","close:false"],0,true,["close:false","connect"],940004,false,true]"#
+    );
+    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(empty_node_modules);
+}
+
+#[test]
+fn net_socket_eof_handler_reconnect_throw_keeps_new_generation_live() {
+    use std::ffi::{CStr, CString};
+
+    let dir = temp_registry("builtin_net_socket_eof_reconnect_throw");
+    fs::write(
+        dir.join("index.js"),
+        r#"var net = require('node:net');
+module.exports = function() {
+  var originalQueue = globalThis.queueMicrotask, originalTimer = globalThis.setTimeout, originalConnect = globalThis.__thaw_net_connect, originalPoll = globalThis.__thaw_net_poll_read, originalDestroy = globalThis.__thaw_net_destroy;
+  var microtasks = [], timers = [], calls = Object.create(null), marker = new Error('old end handler'), reconnected = false;
+  globalThis.queueMicrotask = function(task) { microtasks.push(task); };
+  globalThis.setTimeout = function(task) { timers.push(task); return timers.length; };
+  globalThis.__thaw_net_connect = function() { return 'ok:' + (calls.connects++ === 0 ? 960001 : 960002); };
+  globalThis.__thaw_net_destroy = function() { return 'ok'; };
+  globalThis.__thaw_net_poll_read = function(handle) {
+    calls[handle] = (calls[handle] || 0) + 1;
+    if (handle === 960001) return 'eof';
+    return calls[handle] === 1 ? 'ok:6e6577' : 'pending';
+  };
+  function runMicrotask() { if (!microtasks.length) throw new Error('expected queued microtask'); microtasks.shift()(); }
+  try {
+    calls.connects = 0;
+    var socket = new net.Socket(), events = [], data = [];
+    socket.on('connect', function() { events.push('connect'); });
+    socket.on('end', function() {
+      events.push(reconnected ? 'new-end' : 'old-end');
+      if (!reconnected) { reconnected = true; socket.connect({ port: 2, host: 'localhost' }); throw marker; }
+    });
+    socket.on('data', function(chunk) { data.push(chunk.toString()); events.push('data'); });
+    socket.on('close', function(error) { events.push('close:' + error); });
+    socket.connect({ port: 1, host: 'localhost' });
+    runMicrotask();
+    var caught = false;
+    try { runMicrotask(); } catch (error) { caught = error === marker; }
+    runMicrotask();
+    runMicrotask();
+    return [caught, socket.destroyed, socket._handle, socket.readableEnded, data, events, calls[960001], calls[960002]];
+  } finally {
+    globalThis.queueMicrotask = originalQueue;
+    globalThis.setTimeout = originalTimer;
+    globalThis.__thaw_net_connect = originalConnect;
+    globalThis.__thaw_net_poll_read = originalPoll;
+    globalThis.__thaw_net_destroy = originalDestroy;
+  }
+};"#,
+    )
+    .unwrap();
+    let empty_node_modules = temp_registry("builtin_net_socket_eof_reconnect_throw_modules");
+    let (bundle, _, _, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    let source = CString::new(format!(
+        "globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseNetSocketEofReconnectThrow = module.exports;"
+    ))
+    .unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let result = thaw_quickjs::thaw_js_call(
+        c"exerciseNetSocketEofReconnectThrow".as_ptr(),
+        c"[]".as_ptr(),
+    );
+    assert_eq!(
+        unsafe { CStr::from_ptr(result) }.to_string_lossy(),
+        r#"[true,false,960002,false,["new"],["connect","old-end","close:false","connect","data"],1,1]"#
+    );
+    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(empty_node_modules);
+}
+
+#[test]
+fn net_accepted_paused_socket_reconnects_without_old_half_open_shutdown() {
+    use std::ffi::{CStr, CString};
+
+    let dir = temp_registry("builtin_net_accepted_paused_reconnect");
+    fs::write(
+        dir.join("index.js"),
+        r#"var net = require('node:net');
+module.exports = function() {
+  var originalQueue = globalThis.queueMicrotask, originalTimer = globalThis.__thaw_set_timeout_ref, originalSocketTimer = globalThis.setTimeout, originalClearSocketTimer = globalThis.clearTimeout;
+  var originalListen = globalThis.__thaw_net_listen, originalAccept = globalThis.__thaw_net_poll_accept, originalPoll = globalThis.__thaw_net_poll_read;
+  var originalConnect = globalThis.__thaw_net_connect, originalDestroy = globalThis.__thaw_net_destroy, originalClose = globalThis.__thaw_net_close_listener;
+  var originalShutdown = globalThis.__thaw_net_shutdown, microtasks = [], timers = [], polls = [], destroyed = [], shutdowns = [], acceptCount = 0, newPolls = 0, reconnecting = false, accepted, marker = new Error('accepted end handler');
+  globalThis.queueMicrotask = function(task) { microtasks.push(task); };
+  globalThis.setTimeout = function(task) { timers.push(task); return timers.length; };
+  globalThis.clearTimeout = function() {};
+  globalThis.__thaw_set_timeout_ref = function(task) { timers.push(task); return timers.length; };
+  globalThis.__thaw_net_listen = function() { return 'ok:970000:12345'; };
+  globalThis.__thaw_net_poll_accept = function() { return acceptCount++ === 0 ? 'ok:970001:127.0.0.1:10001' : 'pending'; };
+  globalThis.__thaw_net_poll_read = function(handle, isServer) {
+    polls.push([handle, arguments.length > 1 && isServer === true]);
+    if (handle === 970001) return 'eof';
+    if (handle === 970002) return newPolls++ === 0 ? 'ok:6e6577' : 'pending';
+    return 'pending';
+  };
+  globalThis.__thaw_net_connect = function() { return 'ok:970002'; };
+  globalThis.__thaw_net_destroy = function(handle) { destroyed.push(handle); return 'ok'; };
+  globalThis.__thaw_net_shutdown = function(handle) { shutdowns.push(handle); return 'ok'; };
+  globalThis.__thaw_net_close_listener = function() {};
+  function runMicrotask() { if (!microtasks.length) throw new Error('expected queued microtask'); microtasks.shift()(); } var caughtExpected = false; function drainUntil(predicate) { for (var steps = 0; !predicate() && steps < 32; steps++) { if (!microtasks.length) throw new Error('microtask predicate not reached'); try { microtasks.shift()(); } catch (error) { if (error !== marker || caughtExpected) throw error; caughtExpected = true; } } if (!predicate()) throw new Error('microtask drain limit'); }
+  try {
+    var events = [], data = [];
+    var server = net.createServer({ allowHalfOpen: false }, function(socket) {
+      accepted = socket;
+      socket.pause();
+      socket.setEncoding('utf8');
+      socket.on('end', function() { events.push('server-end'); if (!reconnecting) { reconnecting = true; socket.connect({ port: 2, host: 'localhost' }); throw marker; } });
+      socket.on('connect', function() { events.push('connect'); });
+      socket.on('data', function(chunk) { data.push(chunk); events.push('data'); });
+      socket.on('close', function(error) { events.push('close:' + error); });
+    });
+    server.listen(12345);
+    runMicrotask();
+    var wasAcceptedPaused = accepted._isServer && accepted.isPaused();
+    accepted.resume();
+    drainUntil(function() { return data.length === 1 && events.indexOf('server-end') >= 0 && events.indexOf('close:false') >= 0 && events.indexOf('connect') >= 0; });
+    var caught = caughtExpected;
+    server.close();
+    return [caught, wasAcceptedPaused, accepted._isServer, accepted._allowHalfOpen, accepted._handle, accepted.destroyed, data, events, polls, destroyed, shutdowns, server.connections];
+  } finally {
+    globalThis.queueMicrotask = originalQueue;
+    globalThis.setTimeout = originalSocketTimer;
+    globalThis.clearTimeout = originalClearSocketTimer;
+    globalThis.__thaw_set_timeout_ref = originalTimer;
+    globalThis.__thaw_net_listen = originalListen;
+    globalThis.__thaw_net_poll_accept = originalAccept;
+    globalThis.__thaw_net_poll_read = originalPoll;
+    globalThis.__thaw_net_connect = originalConnect;
+    globalThis.__thaw_net_destroy = originalDestroy;
+    globalThis.__thaw_net_close_listener = originalClose;
+    globalThis.__thaw_net_shutdown = originalShutdown;
+  }
+};"#,
+    )
+    .unwrap();
+    let empty_node_modules = temp_registry("builtin_net_accepted_paused_reconnect_modules");
+    let (bundle, _, _, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    let source = CString::new(format!(
+        "globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseNetAcceptedPausedReconnect = module.exports;"
+    ))
+    .unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let result = thaw_quickjs::thaw_js_call(
+        c"exerciseNetAcceptedPausedReconnect".as_ptr(),
+        c"[]".as_ptr(),
+    );
+    assert_eq!(
+        unsafe { CStr::from_ptr(result) }.to_string_lossy(),
+        r#"[true,true,false,false,970002,false,["new"],["server-end","close:false","connect","data"],[[970001,true],[970002,false]],[970001],[],0]"#
+    );
+    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(empty_node_modules);
 }
 
 #[test]
@@ -3098,7 +3354,7 @@ fn net_accepted_socket_keeps_write_half_only_when_requested() {
     fs::write(dir.join("index.js"), r#"var net = require('node:net'); module.exports = function(port, allowHalfOpen) { return new Promise(function(resolve, reject) {
       var server = net.createServer({ allowHalfOpen: allowHalfOpen }), socket, ends = 0, closes = 0, callbacks = 0, callbacksOnClose = -1, writableOnEnd = false;
       var timeout = setTimeout(function() { if (socket) socket.destroy(); server.close(); }, 2000);
-      server.on('connection', function(value) { socket = value; value.on('error', reject); value.on('end', function() { ends++; writableOnEnd = value.writable; if (allowHalfOpen) setTimeout(function() { value.end('pong', function() { callbacks++; }); }, 10); else value.write('sync'); }); value.on('close', function() { closes++; callbacksOnClose = callbacks; server.close(); }); });
+      server.on('connection', function(value) { socket = value; value.on('error', reject); value.on('end', function() { ends++; writableOnEnd = value.writable; if (allowHalfOpen) setTimeout(function() { value.end('pong', function() { callbacks++; }); }, 10); else value.write('sync'); }); value.on('close', function() { closes++; callbacksOnClose = callbacks; server.close(); }); value.resume(); });
       server.on('error', reject); server.on('close', function() { clearTimeout(timeout); resolve([ends, closes, writableOnEnd, callbacksOnClose]); });
       server.listen(port, '127.0.0.1');
     }); };"#).unwrap();
@@ -3204,4 +3460,127 @@ fn tls_end_preserves_an_http_owned_read_pause() {
     assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[true,false]");
     let _ = fs::remove_dir_all(dir);
     let _ = fs::remove_dir_all(node_modules);
+}
+
+#[test]
+fn net_socket_read_queue_preserves_reads_and_eof_order() {
+    use std::ffi::{CStr, CString};
+
+    let dir = temp_registry("builtin_net_socket_read_queue");
+    fs::write(
+        dir.join("index.js"),
+        r#"var net = require('node:net');
+        module.exports = async function() {
+            var originalPoll = globalThis.__thaw_net_poll_read;
+            var originalDestroy = globalThis.__thaw_net_destroy;
+            var calls = Object.create(null), firstSocket, secondSocket, decoderSocket, emptySocket, queuedEofSocket;
+            globalThis.__thaw_net_poll_read = function(handle) {
+                calls[handle] = (calls[handle] || 0) + 1;
+                if (handle === 910001) {
+                    firstSocket.pause();
+                    return 'ok:616263';
+                }
+                if (handle === 910002) {
+                    if (calls[handle] === 1) { secondSocket.pause(); return 'ok:78e2'; }
+                    if (calls[handle] === 2) return 'ok:9883';
+                    return 'eof';
+                }
+                if (handle === 910003) return calls[handle] === 1 ? 'ok:e2' : 'eof';
+                if (handle === 910004) return 'eof';
+                return 'eof';
+            };
+            globalThis.__thaw_net_destroy = function() { return 'ok'; };
+            function socketFor(handle) {
+                var socket = new net.Socket();
+                socket._handle = handle;
+                socket.readable = true;
+                socket.writable = true;
+                return socket;
+            }
+            try {
+                var closeRead = await new Promise(function(resolve, reject) {
+                    firstSocket = socketFor(910001);
+                    var data = [], events = [], buffered = 0, paused = false;
+                    firstSocket.on('error', reject);
+                    firstSocket.on('data', function(chunk) { data.push(chunk.toString()); });
+                    firstSocket.on('close', function() {
+                        events.push('close');
+                        var empty = firstSocket.read(0), lengthAfterEmpty = firstSocket.readableLength;
+                        var chunk = firstSocket.read(2), remainder = firstSocket.read(), repeated = firstSocket.read();
+                        resolve([data, buffered, paused, empty === null, lengthAfterEmpty, chunk && chunk.toString(), remainder && remainder.toString(), repeated === null, firstSocket.readableLength, events]);
+                    });
+                    setTimeout(function() { buffered = firstSocket.readableLength; paused = firstSocket.isPaused(); firstSocket.destroy(); }, 0);
+                });
+                var resumed = await new Promise(function(resolve, reject) {
+                    secondSocket = socketFor(910002);
+                    secondSocket.setEncoding('utf8');
+                    var data = [], events = [], buffered = 0, paused = false;
+                    secondSocket.on('error', reject);
+                    secondSocket.on('data', function(chunk) { data.push(chunk); events.push('data:' + chunk); });
+                    secondSocket.on('end', function() { events.push('end'); });
+                    secondSocket.on('close', function(error) { events.push('close:' + error); resolve([buffered, paused, data, secondSocket.readableLength, secondSocket._readableState.endEmitted, events]); });
+                    setTimeout(function() { buffered = secondSocket.readableLength; paused = secondSocket.isPaused(); secondSocket.resume(); }, 0);
+                });
+                var decoderEof = await new Promise(function(resolve, reject) {
+                    decoderSocket = socketFor(910003);
+                    decoderSocket.setEncoding('utf8');
+                    var data = [], events = [];
+                    decoderSocket.on('error', reject);
+                    decoderSocket.on('data', function(chunk) { data.push(chunk); events.push('data:' + chunk); });
+                    decoderSocket.on('end', function() { events.push('end'); });
+                    decoderSocket.on('close', function(error) { events.push('close:' + error); resolve([data, events, decoderSocket._readableState.endEmitted]); });
+                });
+                var emptyEof = await new Promise(function(resolve, reject) {
+                    emptySocket = socketFor(910004);
+                    var events = [];
+                    emptySocket.on('error', reject);
+                    emptySocket.on('end', function() { events.push('end'); });
+                    emptySocket.on('close', function(error) { events.push('close:' + error); resolve([events, emptySocket._readableState.endEmitted]); });
+                    emptySocket._startRead();
+                });
+                var queuedEof = await new Promise(function(resolve) {
+                    queuedEofSocket = socketFor(910005);
+                    queuedEofSocket.pause();
+                    var events = [];
+                    queuedEofSocket.on('end', function() { events.push('end'); });
+                    queuedEofSocket.on('close', function() {
+                        events.push('close');
+                        var buffered = queuedEofSocket.readableLength, ended = queuedEofSocket.readableEnded;
+                        var endBeforeDrain = queuedEofSocket._readableState.endEmitted;
+                        var first = queuedEofSocket.read(1), remainder = queuedEofSocket.read();
+                        resolve([buffered, ended, endBeforeDrain, first && first.toString(), remainder && remainder.toString(), queuedEofSocket.readableLength, queuedEofSocket._readableState.endEmitted, events]);
+                    });
+                    queuedEofSocket.push(Buffer.from('6162', 'hex'));
+                    queuedEofSocket.push(null);
+                    queuedEofSocket.emit('close', false);
+                });
+                return [closeRead, resumed, decoderEof, emptyEof, queuedEof];
+            } finally {
+                globalThis.__thaw_net_poll_read = originalPoll;
+                globalThis.__thaw_net_destroy = originalDestroy;
+            }
+        };
+        "#,
+    )
+    .unwrap();
+    let empty_node_modules = temp_registry("builtin_net_socket_read_queue_node_modules");
+    let (bundle, _, _, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    let source = CString::new(format!(
+        "globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; \
+         globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} \
+         globalThis.exerciseNetSocketReadQueue = module.exports;"
+    ))
+    .unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let result = thaw_quickjs::thaw_js_call(
+        c"exerciseNetSocketReadQueue".as_ptr(),
+        c"[]".as_ptr(),
+    );
+    assert_eq!(
+        unsafe { CStr::from_ptr(result) }.to_string_lossy(),
+        r#"[[[],3,true,true,3,"ab","c",true,0,["close"]],[1,true,["x","☃"],0,true,["data:x","data:☃","end","close:false"]],[["�"],["data:�","end","close:false"],true],[["end","close:false"],true],[2,true,false,"a","b",0,true,["close","end"]]]"#
+    );
+    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(empty_node_modules);
 }
