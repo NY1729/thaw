@@ -1869,6 +1869,45 @@ impl<'a> FnLowerer<'a> {
                                 result = self.lower_logical_expr(result, check, false)?;
                             }
                         }
+                        // Caught QuickJS exceptions can retain their original
+                        // object in the Json arm. Check the union tag before
+                        // projecting it, then hand that authenticated value to
+                        // the engine's real `instanceof` path. This preserves
+                        // prototype identity and keeps ordinary Json/name
+                        // lookalikes from matching.
+                        if extends_error_family && !all_arrays {
+                            if let Some(index) = elements.iter().position(|element| *element == HirType::Json) {
+                                let check = HirExpr::BinOp(
+                                    BinOp::EqEqEq,
+                                    Box::new(HirExpr::UnionTag(
+                                        Box::new(HirExpr::Var(name.clone())), elements.clone(),
+                                    )),
+                                    Box::new(HirExpr::Lit(HirLit::F64(index as f64))),
+                                );
+                                let projected = HirExpr::UnionValue(
+                                    Box::new(HirExpr::Var(name.clone())), index, elements.clone(),
+                                );
+                                let class_name = self.coerce_to_declared(
+                                    &HirType::Json,
+                                    HirExpr::Lit(HirLit::Str(class.sym.to_string())),
+                                )?;
+                                let arguments = self.wrap_native_value_as_json(
+                                    HirExpr::ArrayLit(vec![class_name, projected]),
+                                    HirType::Array(Box::new(HirType::Json)),
+                                )?;
+                                let identity = HirExpr::JsonAsBool(Box::new(HirExpr::Call(
+                                    Box::new(HirExpr::Var("callDynamic".into())),
+                                    vec![
+                                        HirExpr::Lit(HirLit::Str(
+                                            "__thaw_instanceof_dynamic_value_by_name".into(),
+                                        )),
+                                        arguments,
+                                    ],
+                                )));
+                                let check = self.lower_logical_expr(check, identity, true)?;
+                                result = self.lower_logical_expr(result, check, false)?;
+                            }
+                        }
                         // A thrown `Error` travels as a framed string; its
                         // ancestry is decoded from the frame (an unframed
                         // string is never an instance).
