@@ -258,7 +258,8 @@ fn stream_writables_serialize_async_work_and_signal_backpressure() {
     let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
     assert_eq!(
         result,
-        r#"[true,false,0,true,["start:a","end:a","start:bb","callback:a","end:bb","drain:false","start:c","callback:bb","end:c","end-callback","finish"],true,false,"XYZ",true]"#
+        // Node 22.22.2 (same script): end() was already called, so no 'drain' is emitted.
+        r#"[true,false,0,true,["start:a","end:a","start:bb","callback:a","end:bb","start:c","callback:bb","end:c","end-callback","finish"],true,false,"XYZ",true]"#
     );
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);

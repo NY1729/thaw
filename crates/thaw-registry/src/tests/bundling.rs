@@ -968,7 +968,8 @@ fn bare_requests_use_calling_file_but_package_import_targets_use_manifest_root()
     fs::write(far.join("index.js"), "module.exports = 'far-v2';").unwrap();
 
     let (bundle, _, file_count, versions) = bundle_commonjs_package(&modules, "app", &app, "lib/entry.js").unwrap();
-    assert_eq!(file_count, 3);
+    // entry + both dep index.js + the two manifests the resolver consults (app: `imports`, near dep: version/main).
+    assert_eq!(file_count, 5);
     assert!(bundle.contains("\"dep\": \"app/lib/node_modules/dep/index.js\""), "{bundle}");
     assert!(bundle.contains("\"#dep\": \"app/node_modules/dep/index.js\""), "{bundle}");
     assert!(bundle.contains("near-v3"));
@@ -1465,9 +1466,11 @@ fn bundled_require_cache_and_commonjs_this_respect_module_format() {
 #[test]
 fn async_commonjs_factory_keeps_top_level_this_after_await() {
     use std::ffi::{CStr, CString};
+    // Node 22: `import()` of a CommonJS module exposes `this.x = …` only through `default`
+    // (cjs-module-lexer does not see `this.`), so the namespace has no `answer` — read `default.answer`.
     let package = temp_registry("bundle_async_factory_context");
     let modules = temp_registry("bundle_async_factory_context_modules");
-    fs::write(package.join("index.js"), "module.exports = async function() { var value = await import('./late.cjs'); return value.answer; };").unwrap();
+    fs::write(package.join("index.js"), "module.exports = async function() { var value = await import('./late.cjs'); return value.default.answer; };").unwrap();
     fs::write(package.join("late.cjs"), "await Promise.resolve(); this.answer = 42;").unwrap();
     let (bundle, _, _, _) = bundle_commonjs_package(&modules, "pkg", &package, "index.js").unwrap();
     let script = format!("globalThis.module = {{exports: {{}}}}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.asyncFactoryContext = module.exports;");

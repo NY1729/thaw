@@ -16,6 +16,8 @@ fn host_worker_bootstrap(worker_data_json: &str, config_json: &str, thread_id: u
         const __thaw_has_own = Object.prototype.hasOwnProperty;
         const __thaw_is_extensible = Object.isExtensible;
         const __thaw_define_property = Object.defineProperty;
+        const __thaw_live_children_key = Symbol.for('thaw.worker.liveChildren');
+        if (globalThis.process && !__thaw_has_own.call(globalThis.process, __thaw_live_children_key)) __thaw_define_property(globalThis.process, __thaw_live_children_key, {{ value: 0, writable: true, configurable: true }});
         const __thaw_map_get = Map.prototype.get;
         const __thaw_map_set = Map.prototype.set;
         const __thaw_map_delete = Map.prototype.delete;
@@ -173,6 +175,7 @@ fn host_worker_bootstrap(worker_data_json: &str, config_json: &str, thread_id: u
           }});
         }}
         globalThis.__thaw_worker_module = {{ isMainThread: false, threadId: {thread_id}, threadName: String(__thaw_host_worker_config.threadName || ''), workerData, parentPort, resourceLimits: Object.assign({{}}, __thaw_host_worker_config.resourceLimits || {{}}), MessageChannel, MessagePort, BroadcastChannel, receiveMessageOnPort(port) {{ const record = port && port.__thawQueue && port.__thawQueue.shift(); return record ? {{ message: record.data }} : undefined; }}, postMessageToThread: __thaw_host_post_message_to_thread }};
+        if (typeof globalThis.__thaw_bundle_create_require === 'function') {{ try {{ const nestedWorkerThreads = globalThis.__thaw_bundle_create_require('')('node:worker_threads'); if (nestedWorkerThreads && typeof nestedWorkerThreads.Worker === 'function') globalThis.__thaw_worker_module.Worker = nestedWorkerThreads.Worker; }} catch (_) {{}} }}
         globalThis.require = function(name) {{
           if (name === 'worker_threads' || name === 'node:worker_threads') return globalThis.__thaw_worker_module;
           if (typeof globalThis.__thaw_bundle_create_require === 'function') return globalThis.__thaw_bundle_create_require('')(name);
@@ -210,7 +213,7 @@ fn host_worker_bootstrap(worker_data_json: &str, config_json: &str, thread_id: u
         }};
         globalThis.__thaw_host_worker_drain = function() {{ return JSON.stringify(__thaw_host_worker_events.splice(0)); }};
         globalThis.__thaw_host_worker_should_exit = function() {{
-          return globalThis.__thaw_host_worker_closed || (((__thaw_host_worker_listeners.get('message') || []).length === 0) && ((!process.listenerCount || process.listenerCount('workerMessage') === 0)) && __thaw_direct_pending.size === 0 && __thaw_host_ports.size === 0 && ((__thaw_stdin_listeners.get('data') || []).length === 0) && ((__thaw_stdin_listeners.get('end') || []).length === 0) && __thaw_next_timer_delay() < 0);
+          return globalThis.__thaw_host_worker_closed || (((__thaw_host_worker_listeners.get('message') || []).length === 0) && ((!process.listenerCount || process.listenerCount('workerMessage') === 0)) && __thaw_direct_pending.size === 0 && __thaw_host_ports.size === 0 && ((__thaw_stdin_listeners.get('data') || []).length === 0) && ((__thaw_stdin_listeners.get('end') || []).length === 0) && ((process[Symbol.for('thaw.worker.liveChildren')] || 0) === 0) && __thaw_next_timer_delay() < 0);
         }};
         "#
     )
@@ -368,10 +371,21 @@ fn run_host_worker(
             // Native completions belong to this Worker thread. Keep its Ctx
             // active while dispatching and then run JS jobs they scheduled.
             poll_napi_bridge(&ctx);
+            // Nested Workers (and any other host event source registered by the
+            // script) deliver through the same platform-event poll as the main thread.
+            if let Ok(poll) = ctx.globals().get::<_, Function>("__thaw_poll_platform_events") {
+                poll.call::<_, ()>(()).map_err(|error| match error {
+                    rquickjs::Error::Exception => describe_exception(&ctx),
+                    error => error.to_string(),
+                })?;
+            }
             loop {
                 drain_next_tick_queue(&ctx).map_err(|error| error.to_string())?;
                 if !execute_worker_pending_job(&ctx)? { break; }
             }
+            // Callbacks run by the polls above may have posted messages; flush
+            // them before the exit check can end this thread.
+            drain_host_worker_events(&ctx, &events)?;
 
             let should_exit: Function = ctx
                 .globals()
@@ -381,6 +395,7 @@ fn run_host_worker(
                 .call::<_, bool>(())
                 .map_err(|error| error.to_string())?
                 && !napi_bridge_pending()
+                && !host_workers_active()
             {
                 return Ok(0);
             }

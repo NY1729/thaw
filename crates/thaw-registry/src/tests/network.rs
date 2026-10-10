@@ -3161,3 +3161,47 @@ fn http_server_finishes_buffered_pipeline_after_peer_half_close() {
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&modules);
 }
+
+#[test]
+fn tls_end_preserves_an_http_owned_read_pause() {
+    use std::ffi::{CStr, CString};
+
+    let dir = temp_registry("tls_http_read_pause_owner");
+    fs::write(
+        dir.join("index.js"),
+        r#"var tls = require('node:tls');
+        module.exports = function() {
+            var originalShutdown = globalThis.__thaw_tls_shutdown;
+            globalThis.__thaw_tls_shutdown = function() { return 'ok'; };
+            try {
+                var socket = new tls.TLSSocket();
+                socket._handle = 1;
+                socket.writable = true;
+                socket._readReady = true;
+                socket._setHttpReadPaused(true);
+                socket.end();
+                return [socket._httpReadPaused === true, socket._reading === true];
+            } finally {
+                globalThis.__thaw_tls_shutdown = originalShutdown;
+            }
+        };"#,
+    )
+    .unwrap();
+    let node_modules = temp_registry("tls_http_read_pause_owner_node_modules");
+    let (bundle, _, _, _) =
+        bundle_commonjs_package(&node_modules, "pkg", &dir, "index.js").unwrap();
+    let script = CString::new(format!(
+        "globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; \
+         globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} \
+         globalThis.exerciseTlsHttpReadPauseOwner = module.exports;"
+    ))
+    .unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(script.as_ptr()), 1);
+    let result = thaw_quickjs::thaw_js_call(
+        c"exerciseTlsHttpReadPauseOwner".as_ptr(),
+        c"[]".as_ptr(),
+    );
+    assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "[true,false]");
+    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(node_modules);
+}

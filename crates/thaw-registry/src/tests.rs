@@ -599,7 +599,7 @@ fn import_meta_is_one_mutable_object_without_a_generated_name_collision() {
     );
     let script = format!(
         "globalThis.__thaw_import_meta_identity_case = (function() {{ \
-         var module = {{ exports: {{}} }}, __filename = '/module.js'; \
+         var module = {{ exports: {{}} }}, exports = module.exports, __filename = '/module.js'; \
          {rewritten} return module.exports.check; }})();"
     );
     assert_eq!(
