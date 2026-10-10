@@ -8018,8 +8018,11 @@ fn using_disposal_failures_continue_and_suppress_the_pending_error() {
             } catch (error) {
                 console.log(error.name);
                 console.log(error.message);
+                console.log(error.error.name);
                 console.log(error.error.message);
+                console.log(error.suppressed.name);
                 console.log(error.suppressed.message);
+                console.log(error.suppressed.suppressed.name);
                 console.log(error.suppressed.suppressed.message);
             }
         }
@@ -8030,7 +8033,54 @@ fn using_disposal_failures_continue_and_suppress_the_pending_error() {
         // SuppressedError(a, SuppressedError(b, body)); the implicitly created ones carry V8's
         // default message "An error was suppressed during disposal" (an explicit
         // `new SuppressedError(e, s)` has the empty message).
-        "dispose b\ndispose a\nSuppressedError\nAn error was suppressed during disposal\na\nAn error was suppressed during disposal\nbody\n"
+        "dispose b\ndispose a\nSuppressedError\nAn error was suppressed during disposal\nError\na\nSuppressedError\nAn error was suppressed during disposal\nError\nbody\n"
+    );
+}
+
+#[test]
+fn using_single_disposal_error_and_explicit_suppressed_error_keep_distinct_messages() {
+    let source = r#"
+        function main(): void {
+            try {
+                using resource = {
+                    [Symbol.dispose]() { throw new Error("dispose"); }
+                };
+            } catch (error) {
+                console.log(error.name);
+                console.log(error.message);
+            }
+            const explicit = new SuppressedError(new Error("new"), new Error("old"));
+            console.log(explicit.name);
+            console.log(explicit.message);
+            console.log(explicit.error.message);
+            console.log(explicit.suppressed.message);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "using_single_disposal_error"),
+        "Error\ndispose\nSuppressedError\n\nnew\nold\n"
+    );
+}
+
+#[test]
+fn using_suppressed_error_projects_an_opaque_native_reason_through_its_carrier() {
+    let source = r#"
+        function main(): void {
+            try {
+                using resource = {
+                    [Symbol.dispose]() { throw new Error("dispose"); }
+                };
+                throw new Map<string, number>();
+            } catch (error) {
+                console.log(error.name);
+                console.log(error.error.message);
+                console.log(JSON.stringify(error.suppressed));
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "using_suppressed_native_reason"),
+        "SuppressedError\ndispose\n{}\n"
     );
 }
 
