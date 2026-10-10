@@ -1737,6 +1737,11 @@ impl<'ctx> HirCompiler<'ctx> {
             Some(Linkage::External),
         );
         self.module.add_function(
+            "thaw_error_property_json",
+            i8_ptr.fn_type(&[i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
             "thaw_error_is_instance",
             self.context
                 .bool_type()
@@ -2873,6 +2878,13 @@ impl<'ctx> HirCompiler<'ctx> {
         );
         self.module.add_function(
             "thaw_js_call_handle_mixed_exact_consuming_result",
+            exact_mixed_result_type.fn_type(&[
+                self.context.i64_type().into(), i8_ptr.into(), i8_ptr.into(),
+            ], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_js_call_handle_mixed_exact_resolved_consuming_result",
             exact_mixed_result_type.fn_type(&[
                 self.context.i64_type().into(), i8_ptr.into(), i8_ptr.into(),
             ], false),

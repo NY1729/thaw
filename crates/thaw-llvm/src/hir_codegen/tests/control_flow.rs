@@ -1624,3 +1624,95 @@ fn an_any_copy_of_a_caught_error_exposes_name_and_message() {
     );
     assert_eq!(output.trim(), "Error boom");
 }
+
+#[test]
+fn typed_quickjs_catches_preserve_original_thrown_values() {
+    let source = r#"
+        declare function __thaw_typed_js_626f6f6d(): void;
+        declare function __thaw_typed_js_6c69746572616c(): void;
+        declare function __thaw_typed_js_70726f6d697365(): void;
+        declare function __thaw_typed_js_6163636573736f72(): void;
+        declare function __thaw_typed_js_66756e6374696f6e5468726f77(): void;
+        declare function __thaw_typed_js_68616e646c65(): JsValue;
+        declare function __thaw_typed_js_6c61746572(): number;
+        declare function __thaw_typed_js_74616b65(value: any): void;
+        declare function __thaw_typed_js_69734e756d626572(value: any): boolean;
+        declare function __thaw_typed_js_69734e756c6c(value: any): boolean;
+        declare function __thaw_typed_js_6973556e646566696e6564(value: any): boolean;
+        declare function __thaw_typed_js_697346756e6374696f6e(value: any): boolean;
+        declare function __thaw_typed_js_73616d654f726967696e616c(value: any): boolean;
+        declare function __thaw_typed_js_6e6f744f74686572(value: any): boolean;
+        declare function __thaw_typed_js_73616d6550726f7073(value: any): boolean;
+        declare function __thaw_typed_js_73616d654672616d65(value: string): boolean;
+        declare function __thaw_typed_js_73616d6550726f6d697365(value: any): boolean;
+        declare function __thaw_typed_js_73616d654163636573736f72(value: any): boolean;
+        declare function __thaw_typed_js_73616d655061796c6f6164(value: any): boolean;
+        function main(): void {
+            loadScript("globalThis.savedError = new Error('boom'); savedError.status = 418; savedError.expose = true; savedError.payload = { id: 9 }; Object.defineProperty(savedError, 'hidden', { value: 13 }); savedError[Symbol.for('identity')] = 17; globalThis.otherError = new Error('boom'); globalThis.savedPromise = Promise.resolve(1); globalThis.later = () => Promise.resolve(42); globalThis.accessorMarker = new Error('getter marker'); globalThis.savedAccessor = Object.defineProperty({}, 'message', { get() { throw accessorMarker; } }); globalThis.literalFrame = String.fromCharCode(1)+'Error'+String.fromCharCode(1,30)+'E1:4:-:boom'+String.fromCharCode(5)+'{'+String.fromCharCode(34)+'status'+String.fromCharCode(34)+':418}'; globalThis.boom = () => { throw savedError; }; globalThis.literal = () => { throw literalFrame; }; globalThis.promise = () => { throw savedPromise; }; globalThis.accessor = () => { throw savedAccessor; }; globalThis.handle = () => { throw savedError; }; globalThis.take = value => { throw value; }; globalThis.thrownFunction = () => 1; globalThis.functionThrow = () => { throw thrownFunction; }; globalThis.isNumber = value => Object.is(value, 17); globalThis.isNull = value => value === null; globalThis.isUndefined = value => value === undefined; globalThis.isFunction = value => value === thrownFunction; globalThis.sameOriginal = value => value === savedError; globalThis.notOther = value => value !== otherError; globalThis.sameProps = value => value.hidden === 13 && value[Symbol.for('identity')] === 17 && value.status === 418; globalThis.samePayload = value => value === savedError.payload; globalThis.sameFrame = value => value === literalFrame; globalThis.samePromise = value => value === savedPromise; globalThis.sameAccessor = value => value === savedAccessor;");
+            console.log(__thaw_typed_js_6c61746572());
+            try { __thaw_typed_js_68616e646c65(); } catch (error) {
+                const value: any = error;
+                console.log(__thaw_typed_js_73616d654f726967696e616c(value));
+            }
+            try { __thaw_typed_js_626f6f6d(); } catch (error) {
+                const value: any = error;
+                console.log(typeof value, value.status, __thaw_typed_js_73616d654f726967696e616c(value), __thaw_typed_js_6e6f744f74686572(value), __thaw_typed_js_73616d6550726f7073(value));
+            }
+            try { __thaw_typed_js_626f6f6d(); } catch (error) {
+                console.log(typeof error, error.status, error.expose, error.missing, __thaw_typed_js_73616d655061796c6f6164(error.payload));
+            }
+            try { __thaw_typed_js_6c69746572616c(); } catch (error) {
+                const value: any = error;
+                console.log(typeof value, __thaw_typed_js_73616d654672616d65(value));
+            }
+            try { __thaw_typed_js_70726f6d697365(); } catch (error) {
+                const value: any = error;
+                console.log(typeof value, __thaw_typed_js_73616d6550726f6d697365(value));
+            }
+            try { __thaw_typed_js_6163636573736f72(); } catch (error) {
+                const value: any = error;
+                console.log(__thaw_typed_js_73616d654163636573736f72(value));
+            }
+            try { __thaw_typed_js_74616b65(17); } catch (error) {
+                const value: any = error;
+                console.log(typeof value, __thaw_typed_js_69734e756d626572(value));
+            }
+            try { __thaw_typed_js_74616b65(null); } catch (error) {
+                const value: any = error;
+                console.log(typeof value, __thaw_typed_js_69734e756c6c(value));
+            }
+            try { __thaw_typed_js_74616b65(undefined); } catch (error) {
+                const value: any = error;
+                console.log(typeof value, __thaw_typed_js_6973556e646566696e6564(value));
+            }
+            try { __thaw_typed_js_66756e6374696f6e5468726f77(); } catch (error) {
+                const value: any = error;
+                console.log(typeof value, __thaw_typed_js_697346756e6374696f6e(value));
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "typed_quickjs_original_throw_identity"),
+        "42\ntrue\nobject 418 true true true\nobject 418 true undefined true\nstring true\nobject true\ntrue\nnumber true\nobject true\nundefined true\nfunction true\n"
+    );
+}
+
+#[test]
+fn legacy_caught_error_json_properties_stay_live_for_the_invocation() {
+    let source = r#"
+        function main(): void {
+            const legacy = String.fromCharCode(5) + "{\"status\":418,\"expose\":true,\"explicitNull\":null,\"payload\":{\"id\":9}}";
+            try {
+                throw legacy;
+            } catch (error) {
+                const payload = error.payload;
+                console.log(error.status, error.expose, error.explicitNull, error.missing, payload.id);
+                console.log(payload.id);
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "legacy_caught_error_json_properties"),
+        "418 true null undefined 9\n9\n"
+    );
+}

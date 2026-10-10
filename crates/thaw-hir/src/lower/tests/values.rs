@@ -1406,8 +1406,9 @@ fn lowers_calls_through_function_typed_object_properties() {
 
 /// `typeof e` for a `catch (e)` binding reads the preserved exception tag,
 /// and a custom property read
-/// (`e.status`) routes through `__thaw_error_property` rather than a
-/// string operation -- real trigger: koa's `onerror` reading an
+/// (`e.status`) dispatches by caught-value tag: legacy framed strings use a
+/// typed property projection while live JavaScript errors use JsonGet --
+/// real trigger: koa's `onerror` reading an
 /// `http-errors` error's `status`. `e.name`/`e.message` keep using the
 /// existing tagged-string helpers.
 #[test]
@@ -1426,8 +1427,13 @@ fn typeof_and_custom_properties_on_a_caught_error() {
     let source = format!("{:?}", program.functions);
     assert!(source.contains("__thaw_exception_typeof"), "{source}");
     assert!(
-        source.contains("__thaw_error_property"),
-        "`e.status` should route to `__thaw_error_property`:\n{source}"
+        source.contains("__thaw_error_property_json"),
+        "legacy caught strings should use typed property projection:\n{source}"
+    );
+    assert!(source.contains("JsonGet"), "live caught errors should use JsonGet:\n{source}");
+    assert!(
+        !source.contains("Var(\"__thaw_error_property\")"),
+        "catch carrier must not use the string-only helper:\n{source}"
     );
     assert!(source.contains("__thaw_error_name"), "{source}");
     assert!(source.contains("__thaw_error_message"), "{source}");
@@ -1601,5 +1607,3 @@ fn logical_operators_over_different_types_yield_the_union_of_the_operands() {
     ).unwrap();
     assert!(lower_module(&module).is_err(), "the union result must not silently narrow to one operand type");
 }
-
-
