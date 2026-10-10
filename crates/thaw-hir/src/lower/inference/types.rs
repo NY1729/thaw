@@ -2396,6 +2396,19 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&HirType::JsValue, value, "live JSON host handle")?;
                         return Ok(HirType::Json);
                     }
+                    "__thaw_json_from_consumed_dynamic" => {
+                        let [value] = args.as_slice() else {
+                            return Err("consuming live JSON conversion expects one handle".into());
+                        };
+                        self.expect_type(&HirType::JsValue, value, "consumed live JSON handle")?;
+                        return Ok(HirType::Json);
+                    }
+                    "__thaw_json_argument_array" => {
+                        for value in args {
+                            self.expect_type(&HirType::Json, value, "dynamic JSON argument")?;
+                        }
+                        return Ok(HirType::Json);
+                    }
                     "__thaw_json_borrowed_handle_id" => {
                         let [value] = args.as_slice() else {
                             return Err("borrowed JSON handle probe expects one operand".into());

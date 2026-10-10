@@ -110,6 +110,7 @@ impl<'ctx> HirCompiler<'ctx> {
             "@@thaw_retain_borrowed_dynamic_handle" =>
                 self.compile_retain_borrowed_dynamic_handle(args),
             "__thaw_json_host_from_dynamic" => self.compile_host_json_from_dynamic(args),
+            "__thaw_json_from_consumed_dynamic" => self.compile_consumed_json_from_dynamic(args),
             "__thaw_json_host_from_borrowed_dynamic" =>
                 self.compile_host_json_from_borrowed_dynamic(args),
             "__thaw_lookup_native_object" => self.compile_lookup_native_object(args),
@@ -216,6 +217,36 @@ impl<'ctx> HirCompiler<'ctx> {
         self.builder.build_call(self.module.get_function("thaw_js_release_handle").unwrap(),
             &[handle.into()], "release_live_json_builder_handle")
             .map_err(|error| error.to_string())?;
+        self.compile_check_json_host_error(json, Some("thaw_json_destroy"))
+    }
+
+    /// Consumes the freshly projected handle after the generic Json
+    /// conversion has retained/materialized its own value. Unlike the
+    /// host-only helper above, this preserves the runtime's copy-vs-live
+    /// policy for native object projections.
+    fn compile_consumed_json_from_dynamic(
+        &mut self,
+        args: &[HirExpr],
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let [source] = args else {
+            return Err("consuming JSON conversion expects one handle".into());
+        };
+        self.uses_quickjs = true;
+        self.uses_quickjs_handles = true;
+        self.tracks_owned_json_roots = true;
+        let handle = self.compile_expr(source)?.into_int_value();
+        let json = self.builder.build_call(
+            self.module.get_function("thaw_json_from_borrowed_handle").unwrap(),
+            &[handle.into()], "consumed_dynamic_json",
+        ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+            .ok_or("consuming JSON conversion returned no value")?;
+        // This projection call produced a fresh retained handle. The Json
+        // conversion owns an independent copy/lease, so release the temporary
+        // on both success and HostError paths.
+        self.builder.build_call(
+            self.module.get_function("thaw_js_release_handle").unwrap(),
+            &[handle.into()], "release_consumed_dynamic_projection",
+        ).map_err(|error| error.to_string())?;
         self.compile_check_json_host_error(json, Some("thaw_json_destroy"))
     }
 

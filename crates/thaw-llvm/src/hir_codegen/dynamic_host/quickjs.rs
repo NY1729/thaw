@@ -673,7 +673,17 @@ impl<'ctx> HirCompiler<'ctx> {
         let outer = self.compiling_quickjs_dynamic_arguments;
         self.compiling_quickjs_dynamic_arguments = true;
         let compiled = (|| -> Result<_, String> {
-            let array = self.compile_expr(expression)?;
+            let array = if let HirExpr::Call(callee, values) = expression {
+                if matches!(callee.as_ref(), HirExpr::Var(name)
+                    if name == "__thaw_json_argument_array")
+                {
+                    self.compile_owned_json_argument_array(values)?
+                } else {
+                    self.compile_expr(expression)?
+                }
+            } else {
+                self.compile_expr(expression)?
+            };
             let encoded = self.builder.build_call(
                 self.module.get_function("thaw_json_graph_encode").unwrap(), &[array.into()], label,
             ).map_err(|error| error.to_string())?.try_as_basic_value().basic().unwrap();
@@ -696,6 +706,82 @@ impl<'ctx> HirCompiler<'ctx> {
         self.builder.build_unreachable().map_err(|error| error.to_string())?;
         self.builder.position_at_end(success);
         compiled
+    }
+
+    /// Builds the selected-method argument graph while preserving the one
+    /// compiler-designated owned Box per fresh fixed-object projection.
+    /// Each Box is cloned into the graph and destroyed immediately; the
+    /// array itself is guarded across later argument evaluation failures.
+    fn compile_owned_json_argument_array(
+        &mut self,
+        values: &[HirExpr],
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let array = self.builder.build_call(
+            self.module.get_function("thaw_json_array_new").unwrap(),
+            &[],
+            "owned_dynamic_argument_array",
+        ).map_err(|error| error.to_string())?
+            .try_as_basic_value().basic()
+            .ok_or("thaw_json_array_new returned no owned argument array")?;
+        let array_slot = self.builder.build_alloca(
+            self.context.ptr_type(AddressSpace::default()),
+            "owned_dynamic_argument_array_slot",
+        ).map_err(|error| error.to_string())?;
+        self.builder.build_store(array_slot, array)
+            .map_err(|error| error.to_string())?;
+
+        let failed = self.context.append_basic_block(
+            self.current_function(), "owned_dynamic_argument_array_failed",
+        );
+        let done = self.context.append_basic_block(
+            self.current_function(), "owned_dynamic_argument_array_done",
+        );
+        self.push_catch_target(failed);
+        let result = (|| -> Result<(), String> {
+            for value in values {
+                let owned = matches!(value,
+                    HirExpr::Call(callee, args)
+                        if matches!(callee.as_ref(), HirExpr::Var(name)
+                            if name == "__thaw_json_from_consumed_dynamic")
+                            && args.len() == 1
+                );
+                let child = self.compile_expr(value)?;
+                if owned {
+                    // `thaw_json_array_push_json` only clones the Value and
+                    // its Host lease; no user callback runs between clone
+                    // and destruction of the temporary Box.
+                    self.compile_json_array_push_owned(array, child)?;
+                } else {
+                    self.builder.build_call(
+                        self.module.get_function("thaw_json_array_push_json").unwrap(),
+                        &[array.into(), child.into()],
+                        "borrowed_dynamic_argument_push",
+                    ).map_err(|error| error.to_string())?;
+                }
+            }
+            Ok(())
+        })();
+        self.pop_catch_target();
+        result?;
+        self.builder.build_store(array_slot, self.context.ptr_type(AddressSpace::default()).const_null())
+            .map_err(|error| error.to_string())?;
+        self.builder.build_unconditional_branch(done)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(failed);
+        let guarded_array = self.builder.build_load(
+            self.context.ptr_type(AddressSpace::default()), array_slot,
+            "failed_owned_dynamic_argument_array",
+        ).map_err(|error| error.to_string())?;
+        self.builder.build_store(array_slot, self.context.ptr_type(AddressSpace::default()).const_null())
+            .map_err(|error| error.to_string())?;
+        self.builder.build_call(
+            self.module.get_function("thaw_json_destroy").unwrap(),
+            &[guarded_array.into()], "destroy_failed_owned_dynamic_argument_array",
+        ).map_err(|error| error.to_string())?;
+        self.branch_on_pending_exception()?;
+        self.builder.build_unreachable().map_err(|error| error.to_string())?;
+        self.builder.position_at_end(done);
+        Ok(array)
     }
 
     fn compile_call_dynamic_method(
