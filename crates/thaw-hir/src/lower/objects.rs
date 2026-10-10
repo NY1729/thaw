@@ -2842,35 +2842,33 @@ impl<'a> FnLowerer<'a> {
                 let obj_ty = self.infer_expr_type(&obj)?;
                 let (obj, obj_ty) =
                     self.unwrap_required_optional_member(obj, obj_ty, prop.sym.as_ref(), self.receiver_requires_narrowing(&member.obj))?;
-                // A custom property read on a *catch-bound* error string
-                // (`catch (e) { e.status }`, real trigger: koa's
-                // `http-errors` error) has no declared field to read.
-                // Route it through `thaw_error_property`, which pulls the
-                // value out of the caught error's own `\u{5}<json>` bag.
-                // Only for a `catch` binding: an ordinary string has no
-                // such bag, and treating every `str.status` as an error
-                // lookup would be wrong.
-                if let HirExpr::Var(name) = &obj {
-                    if self.catch_bindings.contains(name)
-                        && !matches!(
-                            prop.sym.as_ref(),
-                            "length"
-                                | "name"
-                                | "message"
-                                | "cause"
-                                | "code"
-                                | "stack"
-                                | "error"
-                                | "suppressed"
-                        )
-                    {
-                        return Ok(HirExpr::Call(
-                            Box::new(HirExpr::Var("__thaw_error_property".to_string())),
-                            vec![
-                                obj,
-                                HirExpr::Lit(HirLit::Str(prop.sym.to_string())),
-                            ],
-                        ));
+                // Raw catch-bound strings can carry the legacy
+                // `\u{5}<json>` property bag. Structured caught values must
+                // continue to union-property lowering, where the active
+                // member selects that bag or the live JavaScript object.
+                if obj_ty != crate::caught_exception_carrier_type() {
+                    if let HirExpr::Var(name) = &obj {
+                        if self.catch_bindings.contains(name)
+                            && !matches!(
+                                prop.sym.as_ref(),
+                                "length"
+                                    | "name"
+                                    | "message"
+                                    | "cause"
+                                    | "code"
+                                    | "stack"
+                                    | "error"
+                                    | "suppressed"
+                            )
+                        {
+                            return Ok(HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_error_property".to_string())),
+                                vec![
+                                    obj,
+                                    HirExpr::Lit(HirLit::Str(prop.sym.to_string())),
+                                ],
+                            ));
+                        }
                     }
                 }
                 // `.prototype` on a first-class *function* value -- a

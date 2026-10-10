@@ -244,6 +244,13 @@ fn error_property(message: &str, name: &str) -> Option<String> {
     })
 }
 
+fn error_property_json(message: &str, name: &str) -> Option<String> {
+    let bag = metadata_suffix(message).split_once(ERROR_PROPS_MARKER)?.1;
+    let value: serde_json::Value = serde_json::from_str(bag).ok()?;
+    let value = value.as_object()?.get(name)?;
+    serde_json::to_string(value).ok()
+}
+
 /// # Safety
 /// `message` must be null or a valid, NUL-terminated C string.
 ///
@@ -260,6 +267,27 @@ pub unsafe extern "C" fn thaw_error_property(
     let text = unsafe { CStr::from_ptr(message) }.to_string_lossy();
     let name = unsafe { CStr::from_ptr(name) }.to_string_lossy();
     match error_property(&text, &name) {
+        Some(value) => arena_c_string(&value).map_or(std::ptr::null(), |value| value.cast()),
+        None => std::ptr::null(),
+    }
+}
+
+/// Reads a legacy framed error property's JSON representation. Missing keys
+/// return null; present values, including null, retain their JSON type.
+///
+/// # Safety
+/// `message` and `name` must be null or valid, NUL-terminated C strings.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_error_property_json(
+    message: *const c_char,
+    name: *const c_char,
+) -> *const c_char {
+    if message.is_null() || name.is_null() {
+        return std::ptr::null();
+    }
+    let text = unsafe { CStr::from_ptr(message) }.to_string_lossy();
+    let name = unsafe { CStr::from_ptr(name) }.to_string_lossy();
+    match error_property_json(&text, &name) {
         Some(value) => arena_c_string(&value).map_or(std::ptr::null(), |value| value.cast()),
         None => std::ptr::null(),
     }
@@ -732,6 +760,16 @@ mod error_native_tests {
         }
         assert_eq!(call_message("\u{1}TypeError\u{1}plain\u{3}ERR_TEST"), "plain");
         assert_eq!(call_message("plain"), "plain");
+    }
+
+    #[test]
+    fn legacy_error_property_json_preserves_types_and_null() {
+        let source = "legacy\u{5}{\"status\":418,\"expose\":true,\"payload\":{\"id\":9},\"explicitNull\":null}";
+        assert_eq!(error_property_json(source, "status").as_deref(), Some("418"));
+        assert_eq!(error_property_json(source, "expose").as_deref(), Some("true"));
+        assert_eq!(error_property_json(source, "payload").as_deref(), Some("{\"id\":9}"));
+        assert_eq!(error_property_json(source, "explicitNull").as_deref(), Some("null"));
+        assert_eq!(error_property_json(source, "missing"), None);
     }
 
     #[test]

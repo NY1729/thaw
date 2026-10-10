@@ -1642,6 +1642,65 @@ impl<'ctx> HirCompiler<'ctx> {
                     .basic()
                     .ok_or("error custom property access returned no value".into());
             }
+            "__thaw_error_property_json" => {
+                let [receiver, key] = args else {
+                    return Err("__thaw_error_property_json expects a receiver and a property name".into());
+                };
+                let receiver = self.compile_expr(receiver)?;
+                let key = self.compile_expr(key)?;
+                let text = self.builder.build_call(
+                    self.module.get_function("thaw_error_property_json").unwrap(),
+                    &[receiver.into(), key.into()],
+                    "error_custom_property_json_text",
+                ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                    .ok_or("error custom property JSON lookup returned no value")?.into_pointer_value();
+                let missing_block = self.context.append_basic_block(self.current_function(), "error_property_missing");
+                let present_block = self.context.append_basic_block(self.current_function(), "error_property_present");
+                let done_block = self.context.append_basic_block(self.current_function(), "error_property_done");
+                let missing = self.builder.build_is_null(text, "error_property_is_missing")
+                    .map_err(|error| error.to_string())?;
+                self.builder.build_conditional_branch(missing, missing_block, present_block)
+                    .map_err(|error| error.to_string())?;
+                self.builder.position_at_end(missing_block);
+                let undefined = self.builder.build_call(
+                    self.module.get_function("thaw_json_undefined").unwrap(),
+                    &[],
+                    "missing_error_property_undefined",
+                ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                    .ok_or("undefined error property returned no value")?;
+                self.builder.build_unconditional_branch(done_block).map_err(|error| error.to_string())?;
+                let missing_end = self.builder.get_insert_block().unwrap();
+                self.builder.position_at_end(present_block);
+                let value = self.builder.build_call(
+                    self.module.get_function("thaw_json_parse").unwrap(),
+                    &[text.into()],
+                    "parsed_error_property_json",
+                ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                    .ok_or("parsed error property returned no value")?;
+                self.builder.build_unconditional_branch(done_block).map_err(|error| error.to_string())?;
+                let present_end = self.builder.get_insert_block().unwrap();
+                self.builder.position_at_end(done_block);
+                let result = self.builder.build_phi(self.context.ptr_type(AddressSpace::default()), "error_property_json")
+                    .map_err(|error| error.to_string())?;
+                result.add_incoming(&[(&undefined, missing_end), (&value, present_end)]);
+                self.tracks_owned_json_roots = true;
+                // Both parse and undefined allocate a fresh Box<Value>. Check
+                // any QuickJS getter/coercion failure before registering the
+                // successful merged value as an invocation-owned root.
+                let checked = self.compile_check_json_host_error(
+                    result.as_basic_value(), Some("thaw_json_destroy"),
+                )?;
+                let rooted = self.builder.build_call(
+                    self.module.get_function("thaw_json_track_arena_owned_root").unwrap(),
+                    &[checked.into()],
+                    "error_property_json_root",
+                ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                    .ok_or("error property JSON root returned no value")?;
+                // Root registration can itself fail and consume the Box;
+                // observe that host error without destroying the result twice.
+                let rooted = self.compile_check_json_host_error(rooted, None)?;
+                return Ok(rooted);
+            }
             "__thaw_i64_to_string" => {
                 let [value] = args else {
                     return Err("bigint string conversion expects one operand".into());

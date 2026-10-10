@@ -917,7 +917,7 @@ impl<'ctx> HirCompiler<'ctx> {
         )
     }
 
-    fn compile_check_json_stringify_error_with_inputs_and_handles(
+    pub(super) fn compile_check_json_stringify_error_with_inputs_and_handles(
         &mut self,
         result: BasicValueEnum<'ctx>,
         cleanup: &[BasicValueEnum<'ctx>],

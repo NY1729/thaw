@@ -41,7 +41,7 @@ impl<'ctx> HirCompiler<'ctx> {
         self.compile_exact_iterator_handle_result(result, "iterator_acquire")
     }
 
-    fn compile_exact_iterator_handle_result(
+    pub(super) fn compile_exact_iterator_handle_result(
         &mut self, result: inkwell::values::StructValue<'ctx>, _label: &str,
     ) -> Result<BasicValueEnum<'ctx>, String> {
         let value = self.builder.build_extract_value(result, 0, "iterator_step_record")

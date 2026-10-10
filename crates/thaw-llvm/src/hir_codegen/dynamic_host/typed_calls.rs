@@ -1007,13 +1007,9 @@ impl<'ctx> HirCompiler<'ctx> {
             return Ok(value);
         }
         if signature.backend == DynamicBackend::QuickJs && signature.ret == HirType::JsValue {
+            // The constructor route below predates the exact-call helper and needs
+            // QuickJS handle support even though it does not enter that helper.
             self.uses_quickjs_handles = true;
-            // `napi_constructor_export_name` is plain `"$new$Class..."`
-            // runtime-key parsing, not actually NAPI-specific despite the
-            // name -- reused here for a Fallback (QuickJS-NG) class's own
-            // `new Class(...)` construction (real example: hono's
-            // `Hono`), the same way the `DynamicBackend::Napi` branch
-            // above uses it for a native addon's.
             if let Some(constructor_name) = napi_constructor_export_name(&signature.symbol) {
                 let constructor_name = self
                     .builder
@@ -1078,67 +1074,9 @@ impl<'ctx> HirCompiler<'ctx> {
                 self.branch_on_pending_exception()?;
                 return Ok(value);
             }
-            let callable = self
-                .builder
-                .build_call(
-                    self.module.get_function("thaw_js_get_global").unwrap(),
-                    &[name.as_pointer_value().into()],
-                    "typed_dynamic_callable",
-                )
-                .map_err(|error| error.to_string())?
-                .try_as_basic_value()
-                .basic()
-                .unwrap();
-            let args_json = self
-                .builder
-                .build_call(
-                    self.module.get_function("thaw_json_graph_encode").unwrap(),
-                    &[array.into()],
-                    "typed_dynamic_callable_args",
-                )
-                .map_err(|error| error.to_string())?
-                .try_as_basic_value()
-                .basic()
-                .unwrap();
-            let args_json = self.compile_check_json_stringify_error_with_cleanup(args_json, &[array])?;
-            let result = self
-                .builder
-                .build_call(
-                    self.module
-                        .get_function("thaw_js_call_handle_handle_graph_args_result")
-                        .unwrap(),
-                    &[
-                        callable.into(),
-                        args_json.into(),
-                        self.context.bool_type().const_int(1, false).into(),
-                    ],
-                    "typed_dynamic_callable_result",
-                )
-                .map_err(|error| error.to_string())?
-                .try_as_basic_value()
-                .basic()
-                .unwrap()
-                .into_struct_value();
-            let value = self
-                .builder
-                .build_extract_value(result, 0, "typed_dynamic_callable_value")
-                .map_err(|error| error.to_string())?;
-            let error = self
-                .builder
-                .build_extract_value(result, 1, "typed_dynamic_callable_error")
-                .map_err(|error| error.to_string())?;
-            self.destroy_typed_host_arguments(array, args_json)?;
-            self.builder.build_call(
-                self.module.get_function("thaw_js_release_handle").unwrap(),
-                &[callable.into()],
-                "release_typed_dynamic_callable",
-            ).map_err(|error| error.to_string())?;
-            self.builder
-                .build_store(self.pending_exception().as_pointer_value(), error)
-                .map_err(|error| error.to_string())?;
-            self.clear_pending_native_text()?;
-            self.mark_pending_native_text(error)?;
-            self.branch_on_pending_exception()?;
+            let value = self.compile_typed_quickjs_exact_call(
+                name.as_pointer_value(), array, false,
+            )?;
             return Ok(value);
         }
         if signature.backend == DynamicBackend::Napi && !function_argument.is_empty() {
@@ -1155,14 +1093,22 @@ impl<'ctx> HirCompiler<'ctx> {
             )?;
             return self.compile_typed_dynamic_result(json, &signature.ret);
         }
-        let backend = match signature.backend {
-            DynamicBackend::Jit => unreachable!("JIT calls return before JSON marshalling"),
-            DynamicBackend::QuickJs => "thaw_js_call_graph_result",
-            DynamicBackend::Napi => "thaw_napi_call_typed_graph_result",
+        let result = if signature.backend == DynamicBackend::QuickJs {
+            let handle = self.compile_typed_quickjs_exact_call(
+                name.as_pointer_value(), array, true,
+            )?;
+            let json = self.compile_original_quickjs_exception_handle(handle, true)?;
+            self.compile_typed_dynamic_result(json, &signature.ret)?
+        } else {
+            let backend = match signature.backend {
+                DynamicBackend::Jit => unreachable!("JIT calls return before JSON marshalling"),
+                DynamicBackend::QuickJs => unreachable!("QuickJS calls use exact exception transport"),
+                DynamicBackend::Napi => "thaw_napi_call_typed_graph_result",
+            };
+            let json =
+                self.compile_json_backend_values(name.as_pointer_value().into(), array, backend)?;
+            self.compile_typed_dynamic_result(json, &signature.ret)?
         };
-        let json =
-            self.compile_json_backend_values(name.as_pointer_value().into(), array, backend)?;
-        let result = self.compile_typed_dynamic_result(json, &signature.ret)?;
         if let Some(argument) = returned_bytes_argument {
             self.builder
                 .build_call(
@@ -1180,6 +1126,51 @@ impl<'ctx> HirCompiler<'ctx> {
             return Ok(argument.into());
         }
         Ok(result)
+    }
+
+    fn compile_typed_quickjs_exact_call(
+        &mut self,
+        name: inkwell::values::PointerValue<'ctx>,
+        array: BasicValueEnum<'ctx>,
+        resolve_success: bool,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        self.uses_quickjs = true;
+        self.uses_quickjs_handles = true;
+        self.compile_register_js_callback_host_operations()?;
+        let callable = self.builder.build_call(
+            self.module.get_function("thaw_js_get_global").unwrap(),
+            &[name.into()], "typed_exact_callable",
+        ).map_err(|error| error.to_string())?
+            .try_as_basic_value().basic().ok_or("QuickJS global lookup returned no handle")?
+            .into_int_value();
+        let args_json = self.builder.build_call(
+            self.module.get_function("thaw_json_graph_encode").unwrap(),
+            &[array.into()], "typed_exact_args_json",
+        ).map_err(|error| error.to_string())?
+            .try_as_basic_value().basic().ok_or("QuickJS argument graph encoding returned no string")?;
+        let args_json = self.compile_check_json_stringify_error_with_inputs_and_handles(
+            args_json, &[array], &[], &[], &[callable],
+        )?;
+        let i64_type = self.context.i64_type();
+        let handles = self.builder.build_alloca(
+            i64_type.array_type(1), "typed_exact_empty_handles",
+        ).map_err(|error| error.to_string())?;
+        self.builder.build_store(handles, i64_type.const_zero())
+            .map_err(|error| error.to_string())?;
+        let function = if resolve_success {
+            "thaw_js_call_handle_mixed_exact_resolved_consuming_result"
+        } else {
+            "thaw_js_call_handle_mixed_exact_consuming_result"
+        };
+        let result = self.builder.build_call(
+            self.module.get_function(function).unwrap(),
+            &[callable.into(), args_json.into(), handles.into()],
+            "typed_exact_call_result",
+        ).map_err(|error| error.to_string())?
+            .try_as_basic_value().basic().ok_or("exact QuickJS call returned no result")?
+            .into_struct_value();
+        self.destroy_typed_host_arguments(array, args_json)?;
+        self.compile_exact_iterator_handle_result(result, "typed exact call")
     }
 
 }

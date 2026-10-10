@@ -4771,6 +4771,22 @@ pub unsafe extern "C" fn thaw_js_call_handle_mixed_graph_result(handle: u64, arg
 pub unsafe extern "C" fn thaw_js_call_handle_mixed_exact_consuming_result(
     handle: u64, args_json: *const c_char, handles: *const u8,
 ) -> ThawCallWithExceptionResult {
+    unsafe { thaw_js_call_handle_mixed_exact_consuming_impl(handle, args_json, handles, false) }
+}
+
+/// Compiler-private exact call variant matching typed named-call success
+/// semantics: resolve successful returned Promises while preserving a
+/// synchronous thrown value on the exact exception-handle lane.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_js_call_handle_mixed_exact_resolved_consuming_result(
+    handle: u64, args_json: *const c_char, handles: *const u8,
+) -> ThawCallWithExceptionResult {
+    unsafe { thaw_js_call_handle_mixed_exact_consuming_impl(handle, args_json, handles, true) }
+}
+
+unsafe fn thaw_js_call_handle_mixed_exact_consuming_impl(
+    handle: u64, args_json: *const c_char, handles: *const u8, resolve_success: bool,
+) -> ThawCallWithExceptionResult {
     enum Outcome { Value(u64), Exception(u64, bool) }
     // Snapshot before user code can re-enter and mutate the native array.
     let acquired = unsafe { native_handle_slice(handles) }.map(|values| values.to_vec());
@@ -4827,7 +4843,14 @@ pub unsafe extern "C" fn thaw_js_call_handle_mixed_exact_consuming_result(
                         .map_err(|error| error.to_string())?;
                 }
                 match target.call_arg(call_args) {
-                    Ok(value) => retain_value(&ctx, value).map(Outcome::Value),
+                    Ok(value) => {
+                        let value = if resolve_success {
+                            resolve_promise_value(&ctx, value, "typed dynamic call", true)?
+                        } else {
+                            value
+                        };
+                        retain_value(&ctx, value).map(Outcome::Value)
+                    },
                     Err(rquickjs::Error::Exception) => {
                         let thrown = ctx.catch();
                         let object_like = thrown.is_object() || thrown.is_function();

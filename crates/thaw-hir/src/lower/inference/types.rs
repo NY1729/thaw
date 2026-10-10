@@ -1491,6 +1491,14 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&HirType::Str, key, "error property name")?;
                         return Ok(HirType::Str);
                     }
+                    "__thaw_error_property_json" => {
+                        let [receiver, key] = args.as_slice() else {
+                            return Err(format!("{name} expects a receiver and a property name"));
+                        };
+                        self.expect_type(&HirType::Str, receiver, "error property receiver")?;
+                        self.expect_type(&HirType::Str, key, "error property name")?;
+                        return Ok(HirType::Json);
+                    }
                     "__thaw_js_handle_to_string" => {
                         let [argument] = args.as_slice() else {
                             return Err("JsValue string conversion expects one operand".into());
