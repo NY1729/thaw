@@ -968,7 +968,7 @@ unsafe extern "C" fn thaw_napi_handle_bridge(
             }
             "call" => {
                 let name = CString::new(name).map_err(|_| "method contains NUL")?;
-                let value = call_method_value_impl(handle, name.as_ptr(), args, true, false)?;
+                let value = call_method_value_impl(handle, name.as_ptr(), args, true, false, None)?;
                 Ok(quickjs_wire_result("value", quickjs_bridge_value(value)?))
             }
             "set_symbol" => {
@@ -2253,6 +2253,11 @@ impl Drop for GraphLeases {
 struct NapiGraphInput {
     parsed: Result<JsonValue, String>,
     leases: std::cell::RefCell<Option<GraphLeases>>,
+    // Graph-decoded values are temporary N-API handles. Keep their scope
+    // alive until the caller has finished invoking and encoding the result.
+    // Leases are dropped before this scope so transfer roots remain valid
+    // while scope reachability is computed.
+    dispatch_scope: std::cell::RefCell<Option<(NapiEnv, *mut c_void)>>,
     malformed_lease: bool,
     // Keep the owning Env pinned through a failed lookup's lease release.
     // Fields drop in declaration order, so this guard outlives `leases`.
@@ -2336,12 +2341,45 @@ impl NapiGraphInput {
         Self {
             parsed,
             leases: std::cell::RefCell::new(Some(leases)),
+            dispatch_scope: std::cell::RefCell::new(None),
             malformed_lease,
             _dispatch: ForeignCallbackGuard::new(),
         }
     }
 
+    unsafe fn ensure_dispatch_scope(&self, env: NapiEnv) -> Result<(), String> {
+        let mut scope = self.dispatch_scope.borrow_mut();
+        if let Some((owner, _)) = *scope {
+            return if owner == env {
+                Ok(())
+            } else {
+                Err("native graph input cannot cross addon environments".into())
+            };
+        }
+        let mut handle_scope = ptr::null_mut();
+        let status = open_handle_scope(env, &mut handle_scope, HandleScopeKind::Escapable);
+        if status != NAPI_OK || handle_scope.is_null() {
+            return Err("cannot open native graph dispatch scope".into());
+        }
+        *scope = Some((env, handle_scope));
+        Ok(())
+    }
+
+    unsafe fn escape_result(&self, value: NapiValue) -> Result<(), String> {
+        let Some((env, scope)) = *self.dispatch_scope.borrow() else {
+            return Ok(());
+        };
+        let mut escaped = ptr::null_mut();
+        let status = napi_escape_handle(env, scope, value, &mut escaped);
+        if status == NAPI_OK && escaped == value {
+            Ok(())
+        } else {
+            Err("cannot preserve native graph dispatch result".into())
+        }
+    }
+
     unsafe fn decode(&self, env: NapiEnv) -> Result<NapiValue, String> {
+        self.ensure_dispatch_scope(env)?;
         let parsed = self.parsed.as_ref().map_err(Clone::clone)?;
         if parsed.get("leases").and_then(JsonValue::as_array).is_none() {
             return Err("native argument graph has no lease list".into());
@@ -2618,6 +2656,17 @@ impl NapiGraphInput {
     }
 }
 
+impl Drop for NapiGraphInput {
+    fn drop(&mut self) {
+        // GraphLeases may refer to handles retained by this Env. Release them
+        // before closing the scope, while the Env dispatch guard is still held.
+        drop(self.leases.get_mut().take());
+        if let Some((env, scope)) = self.dispatch_scope.get_mut().take() {
+            unsafe { close_handle_scope(env, scope, HandleScopeKind::Escapable); }
+        }
+    }
+}
+
 /// The bytes of a graph object node shaped exactly like `Buffer.prototype.toJSON()`.
 fn graph_json_buffer_bytes(
     descriptions: &[JsonValue], fields: &serde_json::Map<String, JsonValue>,
@@ -2641,7 +2690,10 @@ fn graph_json_buffer_bytes(
 }
 
 unsafe fn parse_napi_graph_value(env: NapiEnv, text: &str) -> Result<NapiValue, String> {
-    NapiGraphInput::parse(text).decode(env)
+    let input = NapiGraphInput::parse(text);
+    let value = input.decode(env)?;
+    input.escape_result(value)?;
+    Ok(value)
 }
 
 unsafe fn graph_input_for_args(args: *const c_char, graph_args: bool) -> Option<NapiGraphInput> {
@@ -3905,7 +3957,7 @@ unsafe fn parse_napi_arguments(
     if graph_args {
         let root = match graph_input {
             Some(input) => input.decode(env)?,
-            None => parse_napi_graph_value(env, text)?,
+            None => return Err("native graph arguments require a dispatch owner".into()),
         };
         let Value::Array(arguments) = (unsafe { value_ref(root) })
             .map_err(|_| "native argument graph root is invalid")? else {
@@ -5026,7 +5078,13 @@ unsafe fn call_export_handle_impl(
         if callable == 0 {
             return Err("unknown native addon export".into());
         }
-        Ok(call_function_handle(callable, args, preserve_undefined, graph_args, graph_input.as_ref())? as u64)
+        let value = call_function_handle(callable, args, preserve_undefined, graph_args, graph_input.as_ref())?;
+        if !is_native_instance(value as usize) {
+            if let Some(input) = graph_input.as_ref() {
+                input.escape_result(value)?;
+            }
+        }
+        Ok(value as u64)
     })();
     match result {
         Ok(value) => returned_handle(value),
@@ -5077,16 +5135,16 @@ unsafe fn call_export_with_functions(
     args: *const c_char,
     functions: *const ThawNativeFunctionArgument,
     function_count: usize, graph_args: bool,
+    graph_input: Option<&NapiGraphInput>,
 ) -> Result<NapiValue, String> {
     let _dispatch = ForeignCallbackGuard::new();
-    let graph_input = graph_input_for_args(args, graph_args);
     if function_count != 0 && functions.is_null() {
         return Err("native addon function argument list is null".into());
     }
     let name = text(name)?;
     let callable = get_export_result(CString::new(name.as_str()).unwrap().as_ptr())?;
     let env = module_env_for_handle(callable)?;
-    let mut values = module_arguments(env, args, true, graph_args, graph_input.as_ref())?;
+    let mut values = module_arguments(env, args, true, graph_args, graph_input)?;
     let functions = if function_count == 0 {
         &[]
     } else {
@@ -5183,8 +5241,15 @@ unsafe fn call_export_handle_with_functions_impl(
     graph_args: bool,
 ) -> ThawNapiHandleResult {
     let _dispatch = ForeignCallbackGuard::new();
+    let graph_input = graph_input_for_args(args, graph_args);
     let result = (|| -> Result<u64, String> {
-        Ok(call_export_with_functions(name, args, functions, function_count, graph_args)? as u64)
+        let value = call_export_with_functions(name, args, functions, function_count, graph_args, graph_input.as_ref())?;
+        if !is_native_instance(value as usize) {
+            if let Some(input) = graph_input.as_ref() {
+                input.escape_result(value)?;
+            }
+        }
+        Ok(value as u64)
     })();
     match result {
         Ok(value) => returned_handle(value),
@@ -5200,8 +5265,9 @@ pub unsafe extern "C" fn thaw_napi_call_with_functions_typed_result(
     function_count: usize,
 ) -> ThawResult {
     let _dispatch = ForeignCallbackGuard::new();
+    let graph_input = graph_input_for_args(args, false);
     text_result(
-        call_export_with_functions(name, args, functions, function_count, false).and_then(|value| {
+        call_export_with_functions(name, args, functions, function_count, false, graph_input.as_ref()).and_then(|value| {
             serde_json::to_string(&json_from_value_with_undefined(value, true)?)
                 .map_err(|error| error.to_string())
         }),
@@ -5227,7 +5293,8 @@ pub unsafe extern "C" fn thaw_napi_call_with_functions_typed_graph_result(
     functions: *const ThawNativeFunctionArgument, function_count: usize,
 ) -> ThawResult {
     let _dispatch = ForeignCallbackGuard::new();
-    text_result(call_export_with_functions(name, args, functions, function_count, true)
+    let graph_input = graph_input_for_args(args, true);
+    text_result(call_export_with_functions(name, args, functions, function_count, true, graph_input.as_ref())
         .and_then(|value| encode_napi_result(value, true, true)))
 }
 
@@ -5322,6 +5389,11 @@ unsafe fn construct_handle_impl(
                 "native addon constructor failed with status {status}"
             ));
         }
+        if !is_native_instance(instance as usize) {
+            if let Some(input) = graph_input.as_ref() {
+                input.escape_result(instance)?;
+            }
+        }
         Ok(instance as u64)
     })();
     match result {
@@ -5359,13 +5431,13 @@ unsafe fn call_method_value_impl(
     args: *const c_char,
     preserve_undefined: bool,
     graph_args: bool,
+    graph_input: Option<&NapiGraphInput>,
 ) -> Result<NapiValue, String> {
     let _dispatch = ForeignCallbackGuard::new();
-    let graph_input = graph_input_for_args(args, graph_args);
     (|| -> Result<NapiValue, String> {
         let env = module_env_for_handle(receiver)?;
         let method_name = text(method)?;
-        let values = module_arguments(env, args, preserve_undefined, graph_args, graph_input.as_ref())?;
+        let values = module_arguments(env, args, preserve_undefined, graph_args, graph_input)?;
         let mut callable = ptr::null_mut();
         let method_name_c = CString::new(method_name.clone()).map_err(|_| "method contains NUL")?;
         let status = napi_get_named_property(
@@ -5404,7 +5476,8 @@ unsafe fn call_method_impl(
     graph_result: bool,
 ) -> ThawResult {
     let _dispatch = ForeignCallbackGuard::new();
-    text_result(call_method_value_impl(receiver, method, args, preserve_undefined, graph_result)
+    let graph_input = graph_input_for_args(args, graph_result);
+    text_result(call_method_value_impl(receiver, method, args, preserve_undefined, graph_result, graph_input.as_ref())
         .and_then(|value| encode_napi_result(value, preserve_undefined, graph_result)))
 }
 
@@ -6027,6 +6100,31 @@ mod native_graph_pin_tests {
     }
 
     #[test]
+    fn graph_dispatch_scope_retires_unreturned_decoded_carrier() {
+        let mut env = Box::new(Env::new());
+        let env_ptr = &mut *env as NapiEnv;
+        HOST.with(|host| host.borrow_mut().module_envs.push(env));
+        let input = NapiGraphInput::parse(
+            r#"{"root":{"r":0},"nodes":[{"o":[]}],"leases":[]}"#,
+        );
+        let value = unsafe { input.decode(env_ptr) }.unwrap();
+        assert_eq!(unsafe { (*env_ptr).active_handle_scopes.len() }, 1);
+        assert!(unsafe { (*env_ptr).values.contains(&value) });
+        drop(input);
+        assert!(unsafe { (*env_ptr).active_handle_scopes.is_empty() });
+        assert!(!unsafe { (*env_ptr).values.contains(&value) },
+            "an unreturned graph object must be retired with its dispatch scope");
+        let returned = unsafe { parse_napi_graph_value(
+            env_ptr,
+            r#"{"root":{"r":0},"nodes":[{"o":[]}],"leases":[]}"#,
+        ) }.unwrap();
+        assert!(unsafe { (*env_ptr).rooted_scope_escapes.contains(&(returned as usize)) },
+            "a graph value crossing the adapter boundary must escape its dispatch scope");
+        let env = HOST.with(|host| host.borrow_mut().module_envs.pop().unwrap());
+        drop(env);
+    }
+
+    #[test]
     fn graph_release_rejects_ordinary_reference_and_duplicate_token() {
         let mut env = Box::new(Env::new());
         env.graph_owner_id = next_graph_owner_id().unwrap();
@@ -6087,7 +6185,9 @@ mod native_graph_pin_tests {
 
         let wire = unsafe { napi_result_graph_for_env(env_ptr, value, true) }.unwrap();
         assert_eq!(unsafe { (*env_ptr).native_graph_pins }, 1);
-        assert_eq!(unsafe { NapiGraphInput::parse(&wire).decode(env_ptr) }.unwrap(), value);
+        let input = NapiGraphInput::parse(&wire);
+        assert_eq!(unsafe { input.decode(env_ptr) }.unwrap(), value);
+        drop(input);
         assert_eq!(unsafe { (*env_ptr).native_graph_pins }, 0);
         STANDALONE_GRAPH_OWNERS.with(|owners| { owners.borrow_mut().remove(&owner); });
         drop(env);
@@ -6159,7 +6259,9 @@ mod native_graph_pin_tests {
         assert_eq!(parsed["nodes"][0]["nh"], (value as u64).to_string());
         assert_eq!(parsed["napiLeases"].as_array().unwrap().len(), 1);
         assert_eq!(unsafe { (*env_ptr).native_graph_pins }, 1);
-        assert_eq!(unsafe { NapiGraphInput::parse(&wire).decode(env_ptr) }.unwrap(), value);
+        let exported_input = NapiGraphInput::parse(&wire);
+        assert_eq!(unsafe { exported_input.decode(env_ptr) }.unwrap(), value);
+        drop(exported_input);
         assert_eq!(unsafe { (*env_ptr).native_graph_pins }, 0);
 
         let pin = retain_napi_graph_handle(value as u64);
@@ -6222,9 +6324,14 @@ mod native_graph_pin_tests {
             "root": {"r": 0}, "nodes": [{"nh": (value as u64).to_string()}],
             "leases": [], "napiLeases": [pin.to_string()],
         }).to_string();
+        let mut caller_scope = ptr::null_mut();
+        assert_eq!(unsafe { napi_open_handle_scope(env_ptr, &mut caller_scope) }, NAPI_OK);
         let outer = ForeignCallbackGuard::new();
         assert_eq!(unsafe { parse_napi_graph_value(env_ptr, &wire) }.unwrap(), value);
         release_napi_handle(value as u64).unwrap();
+        assert_eq!(unsafe { (*env_ptr).native_graph_pins }, 1);
+        assert!(!unsafe { (*env_ptr).finalized_handles.contains(&(value as usize)) });
+        assert_eq!(unsafe { napi_close_handle_scope(env_ptr, caller_scope) }, NAPI_OK);
         assert_eq!(unsafe { (*env_ptr).native_graph_pins }, 1);
         assert!(!unsafe { (*env_ptr).finalized_handles.contains(&(value as usize)) });
         drop(outer);
@@ -6547,10 +6654,14 @@ mod typed_native_graph_value_tests {
         assert_eq!(function_json["nodes"][0]["nfn"], (function as u64).to_string());
         assert_eq!(symbol_json["root"]["nsy"], (symbol as u64).to_string());
         assert_eq!(unsafe { (*env_ptr).native_graph_pins }, 2);
-        assert_eq!(unsafe { NapiGraphInput::parse(&function_wire).decode(env_ptr) }.unwrap(), function);
-        assert_eq!(unsafe { NapiGraphInput::parse(&symbol_wire).decode(env_ptr) }.unwrap(), symbol);
-        assert_eq!(unsafe { (*env_ptr).native_graph_pins }, 0);
+        let function_input = NapiGraphInput::parse(&function_wire);
+        let symbol_input = NapiGraphInput::parse(&symbol_wire);
+        assert_eq!(unsafe { function_input.decode(env_ptr) }.unwrap(), function);
+        assert_eq!(unsafe { symbol_input.decode(env_ptr) }.unwrap(), symbol);
         assert_eq!(unsafe { (*env_ptr).utf16_symbols.get(&(symbol as usize)) }, Some(&vec![0xD800]));
+        drop(symbol_input);
+        drop(function_input);
+        assert_eq!(unsafe { (*env_ptr).native_graph_pins }, 0);
 
         let env = HOST.with(|host| host.borrow_mut().module_envs.pop().unwrap());
         drop(env);
@@ -6578,7 +6689,8 @@ mod typed_native_graph_value_tests {
         let graph: JsonValue = serde_json::from_str(&wire).unwrap();
         assert_eq!(graph["nodes"][0]["o"][0][0]["nsy"], (symbol as u64).to_string());
         assert_eq!(graph["nodes"][0]["o"][0][2], NAPI_WRITABLE);
-        let decoded = unsafe { NapiGraphInput::parse(&wire).decode(env_ptr) }.unwrap();
+        let input = NapiGraphInput::parse(&wire);
+        let decoded = unsafe { input.decode(env_ptr) }.unwrap();
         let Value::Object(decoded_fields) = unsafe { value_ref(decoded) }.unwrap() else {
             panic!("native graph result is not an object");
         };
@@ -6588,6 +6700,7 @@ mod typed_native_graph_value_tests {
             Some(&vec![PropertyKey::Symbol(symbol_id)]));
         assert_eq!(unsafe { (*env_ptr).property_attributes.get(
             &(decoded as usize, PropertyKey::Symbol(symbol_id))) }, Some(&NAPI_WRITABLE));
+        drop(input);
         assert_eq!(unsafe { (*env_ptr).native_graph_pins }, 0);
 
         let env = HOST.with(|host| host.borrow_mut().module_envs.pop().unwrap());
@@ -6623,7 +6736,8 @@ mod typed_native_graph_value_tests {
         assert!(props.iter().any(|part| part[0]["nsy"].as_str() == Some(symbol_text.as_str())
             && part[2] == NAPI_WRITABLE));
         assert!(props.iter().any(|part| part[0] == "0" && part[2] == NAPI_ENUMERABLE));
-        let decoded = unsafe { NapiGraphInput::parse(&wire).decode(env_ptr) }.unwrap();
+        let input = NapiGraphInput::parse(&wire);
+        let decoded = unsafe { input.decode(env_ptr) }.unwrap();
         assert!(matches!(unsafe { value_ref(decoded) }, Ok(Value::Array(values))
             if values.len() == 2 && values[0].is_some() && values[1].is_none()));
         // A plain object value is snapshotted, so the decoded array carries a
@@ -6635,6 +6749,7 @@ mod typed_native_graph_value_tests {
         assert!(matches!(unsafe { value_ref(copied) }, Ok(Value::Object(fields)) if fields.is_empty()));
         assert_eq!(unsafe { (*env_ptr).property_attributes.get(
             &(decoded as usize, PropertyKey::String("0".into()))) }, Some(&NAPI_ENUMERABLE));
+        drop(input);
         assert_eq!(unsafe { (*env_ptr).native_graph_pins }, 0);
 
         let env = HOST.with(|host| host.borrow_mut().module_envs.pop().unwrap());

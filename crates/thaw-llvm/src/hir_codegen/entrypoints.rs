@@ -1241,6 +1241,7 @@ impl<'ctx> HirCompiler<'ctx> {
         self.builder.build_unconditional_branch(ordinary).unwrap();
         self.builder.position_at_end(begin);
         if self.uses_napi {
+            let collect = self.context.append_basic_block(function, "terminal_shutdown_collect");
             let poll = self.context.append_basic_block(function, "terminal_shutdown_poll");
             let release = self.context.append_basic_block(function, "terminal_shutdown_release_handles");
             let close = self.context.append_basic_block(function, "terminal_shutdown_close");
@@ -1251,7 +1252,16 @@ impl<'ctx> HirCompiler<'ctx> {
             let started = self.builder.build_int_compare(
                 IntPredicate::NE, started, started.get_type().const_zero(), "napi_shutdown_started",
             ).unwrap();
-            self.builder.build_conditional_branch(started, poll, wait).unwrap();
+            self.builder.build_conditional_branch(started, collect, wait).unwrap();
+            self.builder.position_at_end(collect);
+            // The N-API pin barrier may depend on ordinary QuickJS function
+            // finalizers. Collect once while addon Envs are still live; the
+            // normal event-loop and N-API poll path below drains their jobs.
+            self.builder.build_call(
+                self.module.get_function("thaw_js_collect_garbage").unwrap(), &[],
+                "collect_terminal_graph_roots",
+            ).unwrap();
+            self.builder.build_unconditional_branch(poll).unwrap();
             self.builder.position_at_end(poll);
             // A live unreferenced handle can keep the phase barrier closed.
             // Retry with its Env and library retained until its owner closes it.
@@ -1265,6 +1275,10 @@ impl<'ctx> HirCompiler<'ctx> {
             ).unwrap();
             self.report_napi_shutdown_errors(failure, shutdown_error_seen);
             self.drive_terminal_work(failure, quickjs_failure, false);
+            self.builder.build_call(
+                self.module.get_function("thaw_js_collect_garbage").unwrap(), &[],
+                "collect_terminal_work_garbage",
+            ).unwrap();
             let ready = self.builder.build_call(
                 self.module.get_function("thaw_napi_poll_shutdown").unwrap(), &[],
                 "confirm_napi_shutdown",
@@ -1274,6 +1288,20 @@ impl<'ctx> HirCompiler<'ctx> {
             ).unwrap();
             let new_errors = self.report_napi_shutdown_errors(failure, shutdown_error_seen);
             let new_work = self.drive_terminal_work(failure, quickjs_failure, false);
+            self.builder.build_call(
+                self.module.get_function("thaw_js_collect_garbage").unwrap(), &[],
+                "collect_terminal_work_garbage_again",
+            ).unwrap();
+            let pending_after_gc = self.builder.build_call(
+                self.module.get_function("thaw_js_terminal_work_pending").unwrap(), &[],
+                "shutdown_work_pending_after_gc",
+            ).unwrap().try_as_basic_value().basic().unwrap().into_int_value();
+            let pending_after_gc = self.builder.build_int_compare(
+                IntPredicate::NE, pending_after_gc, pending_after_gc.get_type().const_zero(),
+                "shutdown_more_work_after_gc",
+            ).unwrap();
+            let new_work = self.builder.build_or(new_work, pending_after_gc,
+                "shutdown_work_or_gc_jobs").unwrap();
             let unsettled = self.builder.build_or(new_errors, new_work, "shutdown_more_work").unwrap();
             let quiescent = self.builder.build_not(unsettled, "shutdown_quiescent").unwrap();
             let may_close = self.builder.build_and(ready, quiescent, "shutdown_can_close").unwrap();

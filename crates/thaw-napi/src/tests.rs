@@ -1641,8 +1641,9 @@ fn private_napi_event_graph_keeps_user_marker_objects_ordinary() {
 fn private_napi_argument_graph_preserves_origin_and_aliases() {
     let mut env = Env::new();
     let graph = r#"{"root":{"r":0},"nodes":[{"a":[{"r":1},{"r":2},{"u":1},{"r":3},{"r":2}]},{"d":0},{"o":[["timestamp",{"v":0}]]},{"o":[["$__thaw_napi_undefined$",{"v":true}]]}],"leases":[]}"#;
+    let input = NapiGraphInput::parse(graph);
     let args =
-        unsafe { parse_napi_arguments(&mut env as NapiEnv, graph, true, true, None) }.unwrap();
+        unsafe { parse_napi_arguments(&mut env as NapiEnv, graph, true, true, Some(&input)) }.unwrap();
     assert!(matches!(unsafe { value_ref(args[0]) }, Ok(Value::Date(time)) if *time == 0.0));
     assert!(matches!(
         unsafe { value_ref(args[1]) },
@@ -1657,6 +1658,7 @@ fn private_napi_argument_graph_preserves_origin_and_aliases() {
         Ok(Value::Object(_))
     ));
     assert_eq!(args[1], args[4]);
+    drop(input);
     // The same envelope is ordinary data on the public plain-JSON ABI.
     assert!(
         unsafe { parse_napi_arguments(&mut env as NapiEnv, graph, true, false, None) }.is_err()
