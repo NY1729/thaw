@@ -267,7 +267,7 @@ struct SuspendedTypedDecodeScope;
 
 impl Drop for SuspendedTypedDecodeScope {
     fn drop(&mut self) {
-        TYPED_DECODE_SCOPES.with(|scopes| {
+        let _ = TYPED_DECODE_SCOPES.try_with(|scopes| {
             let boundary = scopes.borrow_mut().pop();
             debug_assert!(matches!(boundary, Some(None)));
         });
@@ -275,7 +275,12 @@ impl Drop for SuspendedTypedDecodeScope {
 }
 
 fn without_typed_decode_scope<T>(callback: impl FnOnce() -> T) -> T {
-    TYPED_DECODE_SCOPES.with(|scopes| scopes.borrow_mut().push(None));
+    if TYPED_DECODE_SCOPES
+        .try_with(|scopes| scopes.borrow_mut().push(None))
+        .is_err()
+    {
+        return callback();
+    }
     let _boundary = SuspendedTypedDecodeScope;
     callback()
 }
@@ -7906,6 +7911,54 @@ pub unsafe extern "C" fn thaw_json_object_assign(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    static TLS_DROP_HOST_RELEASES: std::sync::atomic::AtomicUsize =
+        std::sync::atomic::AtomicUsize::new(0);
+
+    extern "C" fn tls_drop_host_release(_: u64) -> u8 {
+        TLS_DROP_HOST_RELEASES.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        1
+    }
+
+    thread_local! {
+        static TLS_DROP_HOST_HOLDER: RefCell<Option<Rc<HostLease>>> = const { RefCell::new(None) };
+    }
+
+    #[test]
+    fn host_lease_release_survives_decode_tls_destruction() {
+        const CHILD_ENV: &str = "THAW_TEST_HOST_LEASE_TLS_DROP_CHILD";
+        if std::env::var_os(CHILD_ENV).is_some() {
+            std::thread::spawn(|| {
+                // Initialize the lease-owning TLS first; TLS destructors run in reverse order.
+                TLS_DROP_HOST_HOLDER.with(|holder| {
+                    *holder.borrow_mut() = Some(Rc::new(HostLease {
+                        handle: 1,
+                        release: tls_drop_host_release,
+                    }));
+                });
+                TYPED_DECODE_SCOPES.with(|scopes| scopes.borrow_mut().push(None));
+            })
+            .join()
+            .unwrap();
+            assert_eq!(
+                TLS_DROP_HOST_RELEASES.load(std::sync::atomic::Ordering::SeqCst),
+                1
+            );
+            return;
+        }
+
+        let result = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("host_lease_release_survives_decode_tls_destruction")
+            .arg("--nocapture")
+            .env(CHILD_ENV, "1")
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "TLS-destructor child failed: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
 
     #[test]
     fn exception_owned_json_root_survives_reset_until_packet_lease_drops() {
