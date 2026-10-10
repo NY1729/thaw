@@ -4067,11 +4067,34 @@ thread_local! { static HOST_INSPECT_DEPTH: Cell<usize> = const { Cell::new(0) };
 /// (children recurse); everything else (functions, Errors, Map/Set, ...) keeps the host's
 /// own `String(value)` text.
 // ponytail: a class instance prints as a plain object (no class name query op exists).
+fn host_inspect_text(lease: &Rc<HostLease>, actual_string: bool) -> crate::inspect::Node {
+    use crate::inspect::Node;
+    let Some(encoded) = host_query(lease, 3) else {
+        return Node::Raw(String::new());
+    };
+    let Some(value) = JsonParser::new(encoded.as_bytes()).parse() else {
+        set_host_error("Invalid host inspection text".into());
+        return Node::Raw(String::new());
+    };
+    match (actual_string, value) {
+        (true, Value::String(text)) => Node::Str(text.encode_utf16().collect()),
+        (true, Value::Wtf8(bytes)) => Node::Str(wtf8_decode_utf16(&bytes)),
+        (false, Value::String(text)) => Node::Raw(text),
+        (false, Value::Wtf8(bytes)) => Node::Raw(wtf8_to_string(&bytes)),
+        _ => {
+            set_host_error("Invalid host inspection text".into());
+            Node::Raw(String::new())
+        }
+    }
+}
+
 fn host_inspect_node(lease: &Rc<HostLease>, stack: &mut Vec<usize>) -> crate::inspect::Node {
     use crate::inspect::{Ctor, Node};
-    let raw = || Node::Raw(host_query(lease, 3).unwrap_or_default());
-    if host_query(lease, 0).as_deref() != Some("object") {
-        return raw();
+    let Some(kind) = host_query(lease, 0) else {
+        return Node::Raw(String::new());
+    };
+    if kind != "object" {
+        return host_inspect_text(lease, kind == "string");
     }
     if host_query(lease, 12).as_deref() == Some("1") {
         let text = host_query(lease, 13)
@@ -4084,8 +4107,11 @@ fn host_inspect_node(lease: &Rc<HostLease>, stack: &mut Vec<usize>) -> crate::in
     if HOST_INSPECT_DEPTH.with(Cell::get) >= 4 {
         return Node::Raw(if array { "[Array]" } else { "[Object]" }.to_string());
     }
-    if !array && host_query(lease, 3).as_deref() != Some("\"[object Object]\"") {
-        return raw();
+    if !array {
+        let text = host_inspect_text(lease, false);
+        if !matches!(&text, Node::Raw(value) if value == "[object Object]") {
+            return text;
+        }
     }
     HOST_INSPECT_DEPTH.with(|depth| depth.set(depth.get() + 1));
     let node = if array {
@@ -6263,6 +6289,20 @@ pub unsafe extern "C" fn thaw_json_is_buffer(value: *const Value) -> u8 {
 }
 
 #[no_mangle]
+/// Returns whether a live Host value is an actual JavaScript Error-family instance.
+/// Plain Json values and non-Host values are not authenticated as Errors.
+///
+/// # Safety
+///
+/// `value` must be null or point to a valid JSON `Value`.
+pub unsafe extern "C" fn thaw_json_is_host_error_family(value: *const Value) -> u8 {
+    match unsafe { value.as_ref() } {
+        Some(Value::Host(lease)) => u8::from(host_query(lease, 22).as_deref() == Some("1")),
+        _ => 0,
+    }
+}
+
+#[no_mangle]
 /// # Safety
 ///
 /// `value` must be null or point to a valid JSON `Value`.
@@ -7989,6 +8029,7 @@ mod tests {
         static HOST_ARRAY_TEST_FAIL_GET: Cell<bool> = const { Cell::new(false) };
         static HOST_ARRAY_TEST_FAIL_INDEX: Cell<i32> = const { Cell::new(-1) };
         static HOST_ARRAY_TEST_GETS: Cell<usize> = const { Cell::new(0) };
+        static HOST_ARRAY_TEST_QUERY3: Cell<usize> = const { Cell::new(0) };
     }
 
     extern "C" fn host_array_test_retain(_: u64) -> u8 {
@@ -8000,9 +8041,18 @@ mod tests {
     }
 
     extern "C" fn host_array_test_query(handle: u64, operation: u8) -> HostTextResult {
+        if operation == 3 {
+            HOST_ARRAY_TEST_QUERY3.with(|count| count.set(count.get() + 1));
+        }
         let value = match (handle, operation) {
+            (6, 0) => b"string".as_slice(),
+            (6, 3) => br#""line\n\ud800""#.as_slice(),
+            (7, 0) => b"object".as_slice(),
+            (7, 3) => br#""custom label""#.as_slice(),
             (1, 4) => b"1".as_slice(),
             (5, 11) => b"1".as_slice(),
+            (8, 22) => b"1".as_slice(),
+            (9, 22) => b"0".as_slice(),
             (1, 0) => b"object".as_slice(),
             (1, 7) => b"0".as_slice(),
             (2, 0) => b"number".as_slice(),
@@ -8085,6 +8135,55 @@ mod tests {
         let length = thaw_json_array_length(value);
         unsafe { thaw_json_destroy(value) };
         length
+    }
+
+    #[test]
+    fn host_error_family_query_only_authenticates_host_values() {
+        std::thread::spawn(|| {
+            install_host_array_test_operations();
+            let error = host_array_test_value(8);
+            let ordinary = host_array_test_value(9);
+            let plain = thaw_json_object_new();
+            assert_eq!(unsafe { thaw_json_is_host_error_family(error) }, 1);
+            assert_eq!(unsafe { thaw_json_is_host_error_family(ordinary) }, 0);
+            assert_eq!(unsafe { thaw_json_is_host_error_family(plain) }, 0);
+            unsafe {
+                thaw_json_destroy(error);
+                thaw_json_destroy(ordinary);
+                thaw_json_destroy(plain);
+            }
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    fn host_inspector_decodes_query_envelopes_once_and_quotes_actual_strings() {
+        std::thread::spawn(|| {
+            install_host_array_test_operations();
+            HOST_ARRAY_TEST_QUERY3.with(|count| count.set(0));
+
+            let string = host_array_test_value(6);
+            let text = thaw_json_console_string(string);
+            assert_eq!(read_c_string(text), "'line\\n\\ud800'");
+            unsafe {
+                thaw_cstring_destroy(text.cast_mut());
+                thaw_json_destroy(string);
+            }
+            assert_eq!(HOST_ARRAY_TEST_QUERY3.with(Cell::get), 1);
+
+            HOST_ARRAY_TEST_QUERY3.with(|count| count.set(0));
+            let custom = host_array_test_value(7);
+            let text = thaw_json_console_string(custom);
+            assert_eq!(read_c_string(text), "custom label");
+            unsafe {
+                thaw_cstring_destroy(text.cast_mut());
+                thaw_json_destroy(custom);
+            }
+            assert_eq!(HOST_ARRAY_TEST_QUERY3.with(Cell::get), 1);
+        })
+        .join()
+        .unwrap();
     }
 
     #[test]

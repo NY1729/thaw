@@ -5,6 +5,8 @@
   const thawDateApply = Reflect.apply;
   const thawBootstrapDefineProperty = Object.defineProperty;
   const thawBootstrapIteratorKey = Symbol.iterator;
+  const thawHostErrorPrototype = Error.prototype;
+  const thawHostIsPrototypeOf = Object.prototype.isPrototypeOf;
   Object.defineProperty(globalThis, '__thaw_date_from_live_value', {
     value: value => thawDateApply(thawDateGetTime, new thawDateConstructor(value), []),
     configurable: false, writable: false,
@@ -430,6 +432,8 @@
       case 18: return thawGraphObjectIsFrozen(value) ? '1' : '0';
       case 19: return thawGraphObjectIsSealed(value) ? '1' : '0';
       case 20: return thawNapiReflectIsExtensible(value) ? '0' : '1';
+      case 22:
+        return thawDateApply(thawHostIsPrototypeOf, thawHostErrorPrototype, [value]) ? '1' : '0';
       default: throw new thawGraphTypeError('Invalid native host query');
     }
   };
