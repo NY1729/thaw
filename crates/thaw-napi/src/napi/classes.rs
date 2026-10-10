@@ -723,14 +723,18 @@ unsafe fn napi_new_instance_with_target(
     // Get(new.target, "prototype") may invoke user code even when the
     // constructor itself is new.target. Snapshot the callback first, then
     // perform this read before taking an Env mutation borrow.
-    let prototype = {
+    let prototype = if !fallback_prototype.is_null() {
+        // The QuickJS proxy construct trap already performed the one observable
+        // Get(newTarget, "prototype") while computing this realm-correct fallback.
+        Some(fallback_prototype)
+    } else {
         let mut prototype = ptr::null_mut();
         let status = napi_get_named_property(env, new_target,
             c"prototype".as_ptr(), &mut prototype);
         if status != NAPI_OK { return record_status(env, status); }
         match value_ref(prototype) {
             Ok(value) if is_object_value(value) => Some(prototype),
-            _ => (!fallback_prototype.is_null()).then_some(fallback_prototype),
+            _ => None,
         }
     };
     let Ok(host_env) = env_mut(env) else { return NAPI_INVALID_ARG; };

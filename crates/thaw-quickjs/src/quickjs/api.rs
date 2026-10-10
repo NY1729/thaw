@@ -6,6 +6,169 @@ thread_local! {
     static UNHANDLED_JS_REJECTIONS: RefCell<Vec<UnhandledJsRejection>> = const { RefCell::new(Vec::new()) };
 }
 
+#[cfg(test)]
+#[test]
+fn native_exception_packet_uses_private_error_identity_across_rethrow_and_description() {
+    std::thread::spawn(|| {
+    thaw_arena::thaw_arena_enable_tracing();
+    let rooted = thaw_arena::thaw_arena_alloc(8, 8);
+    let packet_roots = vec![thaw_arena::ArenaRoot::new(rooted as usize)];
+    let packet = thaw_arena::exception::register_packet(
+        thaw_arena::exception::ExceptionPacket {
+            id: 0, pending: 0, native_text: 0, object: rooted as usize, native: 0, aggregate: 0,
+            tag: 4, number: 0, bigint: 0, boolean: 0,
+            _roots: packet_roots, _owned_bytes: Vec::new(),
+            _leases: Vec::new(),
+        },
+    ).unwrap().1;
+    let packet_id = packet.id;
+    with_context(move |ctx| {
+        install_native_exception_bridge(&ctx).unwrap();
+        let carrier = reconstitute_exception_packet(&ctx, "packet message", packet.clone()).unwrap();
+        ctx.globals().set("__nativeExceptionCarrierTest", carrier.clone()).unwrap();
+        let same: bool = ctx.eval(
+            "(() => { let first, second; try { throw __nativeExceptionCarrierTest; } catch (e) { first = e; } try { throw __nativeExceptionCarrierTest; } catch (e) { second = e; } return first === second; })()",
+        ).unwrap();
+        assert!(same, "rethrowing preserves the same Error identity");
+        let bridge = ctx.userdata::<NativeExceptionBridge>().unwrap();
+        let token: u64 = bridge.token_of.clone().restore(&ctx).unwrap().call::<_, String>((carrier.clone(),))
+            .unwrap().parse().unwrap();
+        assert_eq!(token, packet.id);
+
+        let forged: Value<'_> = ctx.eval(
+            "Object.assign(new Error('packet message'), { __thaw_native_throw: 1 })",
+        ).unwrap();
+        let token: u64 = bridge.token_of.clone().restore(&ctx).unwrap().call::<_, String>((forged,))
+            .unwrap().parse().unwrap();
+        assert_eq!(token, 0, "public text and properties do not authenticate a packet");
+        drop(bridge);
+
+        let _ = ctx.throw(carrier.clone());
+        let description = describe_tagged_exception(&ctx);
+        let lookalike = owned_exception_error(BoundaryError::from("packet message"));
+        assert!(thaw_arena::owned_exception(lookalike).is_none(),
+            "equal display text does not associate a plain error with a packet");
+        let owned = owned_exception_error(description);
+        assert_eq!(thaw_arena::owned_exception(owned).unwrap().id, packet.id);
+        unsafe {
+            thaw_arena::destroy_string(owned);
+            thaw_arena::destroy_string(lookalike);
+        }
+
+        thaw_arena::thaw_arena_reset();
+        assert!(thaw_arena::contains_allocation(rooted as usize),
+            "packet ArenaRoot keeps payload allocations alive across arena reset");
+        drop(packet);
+        drop(carrier);
+        ctx.eval::<(), _>("(() => { delete globalThis.__nativeExceptionCarrierTest; })()")
+            .unwrap();
+        ctx.run_gc();
+        assert!(!thaw_arena::exception::is_live(packet_id),
+            "collecting the private Error guardian releases the final packet owner");
+    });
+    }).join().expect("exception carrier arena ownership test");
+}
+
+struct NativeExceptionBridge {
+    make: Persistent<Function<'static>>,
+    token_of: Persistent<Function<'static>>,
+}
+
+/// Error text and authenticated exception ownership carried together until an FFI boundary.
+#[derive(Clone)]
+struct BoundaryError {
+    text: String,
+    packet: Option<std::rc::Rc<thaw_arena::exception::ExceptionPacket>>,
+}
+
+impl From<String> for BoundaryError {
+    fn from(text: String) -> Self { Self { text, packet: None } }
+}
+
+impl From<&str> for BoundaryError {
+    fn from(text: &str) -> Self { text.to_owned().into() }
+}
+
+impl BoundaryError {
+    fn decorate(mut self, text: String) -> Self {
+        self.text = text;
+        self
+    }
+}
+
+impl std::fmt::Display for BoundaryError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.text)
+    }
+}
+
+impl std::fmt::Debug for BoundaryError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("BoundaryError")
+            .field("text", &self.text)
+            .field("packet_id", &self.packet.as_ref().map(|packet| packet.id))
+            .finish()
+    }
+}
+
+unsafe impl<'js> rquickjs::JsLifetime<'js> for NativeExceptionBridge {
+    type Changed<'to> = NativeExceptionBridge;
+}
+
+fn install_native_exception_bridge(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
+    if ctx.userdata::<NativeExceptionBridge>().is_some() { return Ok(()); }
+    let pair: Array = ctx.eval(r#"(() => {
+      const packets = new WeakMap();
+      const weakMapSet = WeakMap.prototype.set;
+      const weakMapGet = WeakMap.prototype.get;
+      const apply = Reflect.apply;
+      const build = globalThis.__thaw_error_from_tagged;
+      return [
+        (text, id, guardian) => {
+          const error = build(text);
+          apply(weakMapSet, packets, [error, { id, guardian }]);
+          return error;
+        },
+        error => { const packet = apply(weakMapGet, packets, [error]); return packet ? packet.id : '0'; },
+      ];
+    })()"#)?;
+    let make: Function = pair.get(0)?;
+    let token_of: Function = pair.get(1)?;
+    ctx.store_userdata(NativeExceptionBridge {
+        make: Persistent::save(ctx, make),
+        token_of: Persistent::save(ctx, token_of),
+    }).map(|_| ()).map_err(|_| rquickjs::Error::new_from_js_message(
+        "native exception bridge", "Function", "Cannot install exception bridge"))
+}
+
+fn reconstitute_exception_packet<'js>(
+    ctx: &Ctx<'js>,
+    text: &str,
+    packet: std::rc::Rc<thaw_arena::exception::ExceptionPacket>,
+) -> rquickjs::Result<Value<'js>> {
+    let bridge = ctx.userdata::<NativeExceptionBridge>()
+        .ok_or_else(|| rquickjs::Error::new_from_js_message(
+            "native exception bridge", "Function", "Exception bridge is unavailable"))?;
+    let make = bridge.make.clone();
+    drop(bridge);
+    let guardian_packet = packet.clone();
+    let guardian = Function::new(ctx.clone(), move || {
+        let _keep_packet_alive = &guardian_packet;
+    })?;
+    make.restore(ctx)?.call((text, packet.id.to_string(), guardian))
+}
+
+fn owned_exception_error(error: BoundaryError) -> *mut c_char {
+    let pointer = thaw_arena::owned_string(error.text.as_bytes());
+    if let Some(packet) = error.packet {
+        if !thaw_arena::bind_owned_exception(pointer, packet) {
+            unsafe { thaw_arena::destroy_string(pointer) };
+            return thaw_arena::owned_string(b"native exception packet binding failed");
+        }
+    }
+    pointer
+}
+
 fn js_promise_identity(promise: &Value<'_>) -> usize {
     // SAFETY: only the pointer value is read, as an identity key.
     (unsafe { promise.as_raw().u.ptr }) as usize
@@ -89,7 +252,7 @@ thread_local! {
 #[no_mangle]
 pub extern "C" fn thaw_js_new_function(args_json: *const c_char) -> ThawHandleResult {
     let args_json = to_str(args_json);
-    let result = with_active_or_context(|ctx| -> Result<u64, String> {
+    let result = with_active_or_context(|ctx| -> Result<u64, BoundaryError> {
         if let Some(handle) = DYNAMIC_FUNCTIONS.with(|cache| cache.borrow().get(&args_json).copied())
         {
             return Ok(handle);
@@ -107,7 +270,7 @@ pub extern "C" fn thaw_js_new_function(args_json: *const c_char) -> ThawHandleRe
         }
         let function: Value = constructor.call_arg(call_args).map_err(|error| match error {
             rquickjs::Error::Exception => describe_tagged_exception(&ctx),
-            error => error.to_string(),
+            error => error.to_string().into(),
         })?;
         let handle = retain_value(&ctx, function)?;
         DYNAMIC_FUNCTIONS.with(|cache| cache.borrow_mut().insert(args_json.clone(), handle));
@@ -120,7 +283,7 @@ pub extern "C" fn thaw_js_new_function(args_json: *const c_char) -> ThawHandleRe
         },
         Err(error) => ThawHandleResult {
             value: 0,
-            error: thaw_arena::owned_string(error),
+            error: owned_exception_error(error),
         },
     }
 }
@@ -296,11 +459,11 @@ fn process_emit_result(ctx: &Ctx<'_>, result: rquickjs::Result<bool>) -> ThawHan
         Err(error) => {
             let error = match error {
                 rquickjs::Error::Exception => describe_tagged_exception(ctx),
-                other => other.to_string(),
+                other => other.to_string().into(),
             };
             ThawHandleResult {
                 value: 0,
-                error: thaw_arena::owned_string(error),
+                error: owned_exception_error(error),
             }
         }
     }
@@ -419,7 +582,7 @@ fn load_impl(ctx: Ctx<'_>, source: &str) -> Result<(), String> {
         loop {
             drain_next_tick_queue(&ctx).map_err(|error| match error {
                 rquickjs::Error::Exception => describe_exception_with_stack(&ctx),
-                error => error.to_string(),
+                error => error.to_string().into(),
             })?;
             if !ctx.execute_pending_job() {
                 break;
@@ -441,13 +604,13 @@ pub fn eval_json(source: &str) -> Result<Option<String>, String> {
             .eval::<Value<'_>, _>(source)
             .map_err(|error| match error {
                 rquickjs::Error::Exception => describe_exception(&ctx),
-                error => error.to_string(),
+                error => error.to_string().into(),
             })?;
         ctx.json_stringify(value)
             .map(|value| value.map(|value| value.to_string().unwrap_or_default()))
             .map_err(|error| match error {
                 rquickjs::Error::Exception => describe_exception(&ctx),
-                error => error.to_string(),
+                error => error.to_string().into(),
             })
     })
 }
@@ -466,7 +629,7 @@ pub extern "C" fn thaw_js_call(
 
     let text = with_context(|ctx| match call_impl(ctx, &func_name, &args_json) {
         Ok(text) => text,
-        Err(reason) => format!("{{\"__thaw_error__\":{}}}", json_escape_string(&reason)),
+        Err(reason) => format!("{{\"__thaw_error__\":{}}}", json_escape_string(&reason.text)),
     });
 
     CString::new(text).unwrap_or_default().into_raw() as *const c_char
@@ -491,7 +654,7 @@ pub unsafe extern "C" fn thaw_js_call_reference(
             with_context(|ctx| match call_impl(ctx, &name, &args_json) {
                 Ok(text) => text,
                 Err(reason) => {
-                    format!("\u{2}{}", json_escape_string(&reason))
+                    format!("\u{2}{}", json_escape_string(&reason.text))
                 }
             })
         } else {
@@ -502,7 +665,7 @@ pub unsafe extern "C" fn thaw_js_call_reference(
             ) {
                 Ok(text) => text,
                 Err(reason) => {
-                    format!("\u{2}{}", json_escape_string(&reason))
+                    format!("\u{2}{}", json_escape_string(&reason.text))
                 }
             }
         }
@@ -527,7 +690,7 @@ pub extern "C" fn thaw_js_call_result(
         },
         Err(reason) => ThawResult {
             value: std::ptr::null(),
-            error: thaw_arena::owned_string(reason),
+            error: owned_exception_error(reason),
         },
     }
 }
@@ -550,12 +713,12 @@ pub extern "C" fn thaw_js_call_graph_result(
         Ok(text) => ThawResult { value: thaw_arena::owned_string(text), error: std::ptr::null() },
         Err(reason) => ThawResult {
             value: std::ptr::null(),
-            error: thaw_arena::owned_string(reason),
+            error: owned_exception_error(reason),
         },
     }
 }
 
-fn call_impl(ctx: Ctx<'_>, func_name: &str, args_json: &str) -> Result<String, String> {
+fn call_impl(ctx: Ctx<'_>, func_name: &str, args_json: &str) -> Result<String, BoundaryError> {
     let target: Function = ctx
         .globals()
         .get(func_name)
@@ -563,7 +726,7 @@ fn call_impl(ctx: Ctx<'_>, func_name: &str, args_json: &str) -> Result<String, S
     invoke_impl(ctx, target, func_name, args_json, false, false)
 }
 
-fn decode_argument_array<'js>(ctx: &Ctx<'js>, text: &str, graph: bool) -> Result<Array<'js>, String> {
+fn decode_argument_array<'js>(ctx: &Ctx<'js>, text: &str, graph: bool) -> Result<Array<'js>, BoundaryError> {
     if graph {
         let decode: Function = before_graph_decode(ctx, text, true, || {
             ctx.globals().get("__thaw_json_graph_decode_owned")
@@ -571,14 +734,14 @@ fn decode_argument_array<'js>(ctx: &Ctx<'js>, text: &str, graph: bool) -> Result
         })?;
         decode.call((text,)).map_err(|error| match error {
             rquickjs::Error::Exception => describe_tagged_exception(ctx),
-            error => error.to_string(),
+            error => error.to_string().into(),
         })
     } else {
         let json: Object = ctx.globals().get("JSON").map_err(|error| error.to_string())?;
         let parse: Function = json.get("parse").map_err(|error| error.to_string())?;
         let reviver: Function = ctx.globals().get("__thaw_json_date_reviver")
             .map_err(|error| error.to_string())?;
-        parse.call((text, reviver)).map_err(|error| error.to_string())
+        parse.call((text, reviver)).map_err(|error| error.to_string().into())
     }
 }
 
@@ -627,9 +790,9 @@ fn owned_graph_wire(text: &str) -> *mut c_char {
     })
 }
 
-fn before_graph_decode<'js, T>(
-    ctx: &Ctx<'js>, text: &str, graph: bool, lookup: impl FnOnce() -> Result<T, String>,
-) -> Result<T, String> {
+fn before_graph_decode<'js, T, E>(
+    ctx: &Ctx<'js>, text: &str, graph: bool, lookup: impl FnOnce() -> Result<T, E>,
+) -> Result<T, E> {
     lookup().inspect_err(|_error| {
         if graph {
             release_unconsumed_graph_leases(ctx, text);
@@ -637,10 +800,10 @@ fn before_graph_decode<'js, T>(
     })
 }
 
-fn before_registered_graph_decode<T>(
+fn before_registered_graph_decode<T, E>(
     wire: *const c_char,
-    lookup: impl FnOnce() -> Result<T, String>,
-) -> Result<T, String> {
+    lookup: impl FnOnce() -> Result<T, E>,
+) -> Result<T, E> {
     lookup().inspect_err(|_error| {
         // Exact mixed graph wires are already registered by their native
         // producer. Consume that grant on lookup failures before dispatch.
@@ -656,7 +819,7 @@ fn invoke_impl<'js>(
     args_json: &str,
     preserve_error: bool,
     graph_result: bool,
-) -> Result<String, String> {
+) -> Result<String, BoundaryError> {
     let args_array = decode_argument_array(&ctx, args_json, graph_result)?;
 
     let mut call_args = Args::new_unsized(ctx.clone());
@@ -667,7 +830,7 @@ fn invoke_impl<'js>(
     let result: Value = target.call_arg(call_args).map_err(|e| match e {
         rquickjs::Error::Exception if preserve_error => describe_tagged_exception(&ctx),
         rquickjs::Error::Exception => describe_host_exception(&ctx, label),
-        e => format!("`{label}` threw: {e}"),
+        e => format!("`{label}` threw: {e}").into(),
     })?;
 
     if graph_result {
@@ -703,23 +866,22 @@ fn resolve_promise_value<'js>(
     result: Value<'js>,
     label: &str,
     preserve_error: bool,
-) -> Result<Value<'js>, String> {
+) -> Result<Value<'js>, BoundaryError> {
     let to_string_err = |e: rquickjs::Error| e.to_string();
     let assimilate: Function = ctx
         .eval("(value) => Promise.resolve(value)")
         .map_err(to_string_err)?;
     let promise: rquickjs::Promise = assimilate.call((result,)).map_err(|e| match e {
         rquickjs::Error::Exception => {
-            format!(
-                "`{label}` could not resolve its result: {}",
-                describe_exception(ctx)
-            )
+            let error = describe_tagged_exception(ctx);
+            let text = format!("`{label}` could not resolve its result: {}", error.text);
+            error.decorate(text)
         }
-        e => format!("`{label}` could not resolve its result: {e}"),
+        e => format!("`{label}` could not resolve its result: {e}").into(),
     })?;
     finish_with_platform_events(ctx, &promise).map_err(|e| match e {
         rquickjs::Error::Exception => describe_promise_exception(ctx, label, preserve_error),
-        e => format!("`{label}`'s promise rejected or stalled: {e}"),
+        e => format!("`{label}`'s promise rejected or stalled: {e}").into(),
     })
 }
 
@@ -728,7 +890,7 @@ fn resolve_value_impl<'js>(
     result: Value<'js>,
     label: &str,
     preserve_error: bool,
-) -> Result<String, String> {
+) -> Result<String, BoundaryError> {
     let result = resolve_promise_value(&ctx, result, label, preserve_error)?;
 
     // `ctx.json_stringify` (rather than calling the JS `JSON.stringify`
@@ -759,12 +921,10 @@ fn resolve_value_impl<'js>(
         .globals()
         .get("__thaw_json_safe_stringify")
         .map_err(|e| format!("failed to JSON-encode the result: {e}"))?;
-    stringify
+    Ok(stringify
         .call::<_, Option<String>>((result,))
-        .map_err(|e| format!("failed to JSON-encode the result: {e}"))
-        .map(|value| {
-            value.unwrap_or_else(|| r#"{"$__thaw_napi_undefined$":true}"#.to_string())
-        })
+        .map_err(|e| format!("failed to JSON-encode the result: {e}"))?
+        .unwrap_or_else(|| r#"{"$__thaw_napi_undefined$":true}"#.to_string()))
 }
 
 // Private result wire for compiled calls. Graph node tags identify real
@@ -773,7 +933,7 @@ fn resolve_value_impl<'js>(
 fn resolve_value_wire_impl<'js>(
     ctx: Ctx<'js>, result: Value<'js>, label: &str,
     preserve_error: bool, graph_result: bool,
-) -> Result<String, String> {
+) -> Result<String, BoundaryError> {
     if graph_result { resolve_value_graph_impl(ctx, result, label, preserve_error) }
     else { resolve_value_impl(ctx, result, label, preserve_error) }
 }
@@ -783,13 +943,13 @@ fn resolve_value_graph_impl<'js>(
     result: Value<'js>,
     label: &str,
     preserve_error: bool,
-) -> Result<String, String> {
+) -> Result<String, BoundaryError> {
     let result = resolve_promise_value(&ctx, result, label, preserve_error)?;
     let encode: Function = ctx.globals().get("__thaw_json_graph_encode_js")
         .map_err(|error| error.to_string())?;
     encode.call((result, 0, false, true)).map_err(|error| match error {
         rquickjs::Error::Exception => describe_tagged_exception(&ctx),
-        error => error.to_string(),
+        error => error.to_string().into(),
     })
 }
 
@@ -1230,7 +1390,7 @@ fn wtf8_from_units(units: &[u16]) -> Vec<u8> {
 /// `String(value)` as WTF-8 bytes: the JS string's code units are read
 /// out one at a time (via `charCodeAt`) so a lone surrogate survives --
 /// `rquickjs`'s direct `String` -> Rust `String` conversion rejects it.
-fn js_handle_string_wtf8<'js>(ctx: &Ctx<'js>, value: rquickjs::Value<'js>) -> Result<Vec<u8>, String> {
+fn js_handle_string_wtf8<'js>(ctx: &Ctx<'js>, value: rquickjs::Value<'js>) -> Result<Vec<u8>, BoundaryError> {
     let format: Function = ctx
         .eval(
             "(value) => { const s = String(value); const parts = []; \
@@ -1239,8 +1399,8 @@ fn js_handle_string_wtf8<'js>(ctx: &Ctx<'js>, value: rquickjs::Value<'js>) -> Re
         )
         .map_err(|error| error.to_string())?;
     let units: String = format.call((value,)).map_err(|error| match error {
-        rquickjs::Error::Exception => describe_exception(ctx),
-        error => error.to_string(),
+        rquickjs::Error::Exception => describe_tagged_exception(ctx),
+        error => error.to_string().into(),
     })?;
     let units: Vec<u16> = units
         .split(',')
@@ -1251,7 +1411,7 @@ fn js_handle_string_wtf8<'js>(ctx: &Ctx<'js>, value: rquickjs::Value<'js>) -> Re
 
 #[no_mangle]
 pub extern "C" fn thaw_js_handle_to_string(handle: u64) -> *const c_char {
-    let bytes = with_active_or_context(|ctx| -> Result<Vec<u8>, String> {
+    let bytes = with_active_or_context(|ctx| -> Result<Vec<u8>, BoundaryError> {
         let value = value_for_handle(&ctx, handle)?;
         js_handle_string_wtf8(&ctx, value)
     })
@@ -1268,7 +1428,7 @@ pub extern "C" fn thaw_js_handle_to_string(handle: u64) -> *const c_char {
 /// couldn't silently break any of those.
 #[no_mangle]
 pub extern "C" fn thaw_js_handle_to_console_string(handle: u64) -> *const c_char {
-    let bytes = with_active_or_context(|ctx| -> Result<Vec<u8>, String> {
+    let bytes = with_active_or_context(|ctx| -> Result<Vec<u8>, BoundaryError> {
         let value = value_for_handle(&ctx, handle)?;
         let format: Function = ctx
             .eval(
@@ -1278,8 +1438,8 @@ pub extern "C" fn thaw_js_handle_to_console_string(handle: u64) -> *const c_char
             )
             .map_err(|error| error.to_string())?;
         let units: String = format.call((value,)).map_err(|error| match error {
-            rquickjs::Error::Exception => describe_exception(&ctx),
-            error => error.to_string(),
+            rquickjs::Error::Exception => describe_tagged_exception(&ctx),
+            error => error.to_string().into(),
         })?;
         let units: Vec<u16> = units
             .split(',')
@@ -1295,7 +1455,7 @@ pub extern "C" fn thaw_js_handle_to_console_string(handle: u64) -> *const c_char
 /// for the std inspector (`thaw_console_typed_or`), or null for any other value.
 #[no_mangle]
 pub extern "C" fn thaw_js_handle_typed_array_probe(handle: u64) -> *const c_char {
-    let probe = with_active_or_context(|ctx| -> Result<Option<String>, String> {
+    let probe = with_active_or_context(|ctx| -> Result<Option<String>, BoundaryError> {
         let value = value_for_handle(&ctx, handle)?;
         let probe: Function = ctx
             .eval(
@@ -1305,7 +1465,7 @@ pub extern "C" fn thaw_js_handle_typed_array_probe(handle: u64) -> *const c_char
                  v: Array.from(v, (x) => typeof x === 'bigint' ? x + 'n' : Object.is(x, -0) ? '-0' : String(x)) }); }",
             )
             .map_err(|error| error.to_string())?;
-        probe.call::<_, Option<String>>((value,)).map_err(|error| error.to_string())
+        Ok(probe.call::<_, Option<String>>((value,)).map_err(|error| error.to_string())?)
     });
     match probe {
         Ok(Some(text)) => thaw_arena::owned_string(text),
@@ -1334,7 +1494,7 @@ pub unsafe extern "C" fn thaw_js_dynamic_object_query(
         }
         return 0.0;
     }
-    let result = with_active_or_context(|ctx| -> Result<String, String> {
+    let result = with_active_or_context(|ctx| -> Result<String, BoundaryError> {
         let value = value_for_handle(&ctx, handle)?;
         let snapshot: Function = ctx
             .eval(
@@ -1342,8 +1502,8 @@ pub unsafe extern "C" fn thaw_js_dynamic_object_query(
             )
             .map_err(|error| error.to_string())?;
         snapshot.call((value,)).map_err(|error| match error {
-            rquickjs::Error::Exception => describe_exception(&ctx),
-            error => error.to_string(),
+            rquickjs::Error::Exception => describe_tagged_exception(&ctx),
+            error => error.to_string().into(),
         })
     });
     match result {
@@ -1368,29 +1528,29 @@ pub unsafe extern "C" fn thaw_js_dynamic_object_query(
         }
         Err(message) => {
             if let Some(error) = error.as_mut() {
-                *error = CString::new(message).unwrap_or_default().into_raw();
+                *error = CString::new(message.text).unwrap_or_default().into_raw();
             }
             0.0
         }
     }
 }
 
-fn handle_array<'js>(ctx: &Ctx<'js>) -> Result<Array<'js>, String> {
+fn handle_array<'js>(ctx: &Ctx<'js>) -> Result<Array<'js>, BoundaryError> {
     ctx.globals()
         .get("__thaw_value_handles")
-        .map_err(|_| "JavaScript value handle registry is empty".to_string())
+        .map_err(|_| "JavaScript value handle registry is empty".into())
 }
 
-fn value_for_handle<'js>(ctx: &Ctx<'js>, handle: u64) -> Result<Value<'js>, String> {
+fn value_for_handle<'js>(ctx: &Ctx<'js>, handle: u64) -> Result<Value<'js>, BoundaryError> {
     if handle == 0 {
-        return Err("invalid JavaScript value handle 0".to_string());
+        return Err("invalid JavaScript value handle 0".into());
     }
     let live: Array = ctx
         .globals()
         .get("__thaw_value_handle_live")
         .map_err(|_| "JavaScript value handle liveness registry is empty".to_string())?;
     if !live.get::<bool>((handle - 1) as usize).unwrap_or(false) {
-        return Err(format!("released JavaScript value handle {handle}"));
+        return Err(format!("released JavaScript value handle {handle}").into());
     }
     let value: Value = handle_array(ctx)?
         .get((handle - 1) as usize)
@@ -1398,7 +1558,7 @@ fn value_for_handle<'js>(ctx: &Ctx<'js>, handle: u64) -> Result<Value<'js>, Stri
     Ok(value)
 }
 
-fn object_for_handle<'js>(ctx: &Ctx<'js>, handle: u64) -> Result<Object<'js>, String> {
+fn object_for_handle<'js>(ctx: &Ctx<'js>, handle: u64) -> Result<Object<'js>, BoundaryError> {
     let value = value_for_handle(ctx, handle)?;
     value
         .as_object()
@@ -1417,7 +1577,7 @@ fn object_for_handle<'js>(ctx: &Ctx<'js>, handle: u64) -> Result<Object<'js>, St
             format!(
                 "JavaScript value handle {handle} has non-object type {:?}",
                 value.type_of()
-            )
+            ).into()
         })
 }
 
@@ -1431,7 +1591,7 @@ fn object_for_handle<'js>(ctx: &Ctx<'js>, handle: u64) -> Result<Object<'js>, St
 /// is then called -- both previously failed with "JavaScript value handle N
 /// has non-object type String". Note `Reflect.get` is *not* a substitute:
 /// QuickJS's own implementation rejects non-object targets too.
-fn boxed_object_for_handle<'js>(ctx: &Ctx<'js>, handle: u64) -> Result<Object<'js>, String> {
+fn boxed_object_for_handle<'js>(ctx: &Ctx<'js>, handle: u64) -> Result<Object<'js>, BoundaryError> {
     let value = value_for_handle(ctx, handle)?;
     if value.is_null() || value.is_undefined() {
         return Err("\u{1}TypeError\u{1}Cannot convert undefined or null to object".into());
@@ -1450,7 +1610,7 @@ fn boxed_object_for_handle<'js>(ctx: &Ctx<'js>, handle: u64) -> Result<Object<'j
         format!(
             "JavaScript value handle {handle} has non-object type {:?}",
             boxed.type_of()
-        )
+        ).into()
     })
 }
 
@@ -1468,7 +1628,7 @@ fn boxed_object_for_handle<'js>(ctx: &Ctx<'js>, handle: u64) -> Result<Object<'j
 /// bootstrapped the registry first -- previously failed with "JavaScript
 /// value handle registry is empty" even though this was really the very
 /// first legitimate retain.
-fn retain_value<'js>(ctx: &Ctx<'js>, value: Value<'js>) -> Result<u64, String> {
+fn retain_value<'js>(ctx: &Ctx<'js>, value: Value<'js>) -> Result<u64, BoundaryError> {
     let globals = ctx.globals();
     let handles: Array = match globals.get("__thaw_value_handles") {
         Ok(handles) => handles,
@@ -1533,7 +1693,7 @@ pub extern "C" fn thaw_js_intern_native_object(
     layout: *const c_char,
     candidate_handle: u64,
 ) -> ThawHandleResult {
-    let result = with_active_or_context(|ctx| -> Result<u64, String> {
+    let result = with_active_or_context(|ctx| -> Result<u64, BoundaryError> {
         if pointer.is_null() || layout.is_null() {
             return Err("native object identity requires pointer and layout".into());
         }
@@ -1557,7 +1717,7 @@ pub extern "C" fn thaw_js_intern_native_object(
     let _ = thaw_js_release_handle(candidate_handle);
     match result {
         Ok(value) => ThawHandleResult { value, error: std::ptr::null() },
-        Err(error) => ThawHandleResult { value: 0, error: thaw_arena::owned_string(error) },
+        Err(error) => ThawHandleResult { value: 0, error: owned_exception_error(error) },
     }
 }
 
@@ -1569,7 +1729,7 @@ pub extern "C" fn thaw_js_lookup_native_object(
     pointer: *const c_void,
     layout: *const c_char,
 ) -> ThawHandleResult {
-    let result = with_active_or_context(|ctx| -> Result<u64, String> {
+    let result = with_active_or_context(|ctx| -> Result<u64, BoundaryError> {
         if pointer.is_null() || layout.is_null() {
             return Err("native object lookup requires pointer and layout".into());
         }
@@ -1583,7 +1743,7 @@ pub extern "C" fn thaw_js_lookup_native_object(
     });
     match result {
         Ok(value) => ThawHandleResult { value, error: std::ptr::null() },
-        Err(error) => ThawHandleResult { value: 0, error: thaw_arena::owned_string(error) },
+        Err(error) => ThawHandleResult { value: 0, error: owned_exception_error(error) },
     }
 }
 
@@ -1594,7 +1754,7 @@ pub extern "C" fn thaw_js_native_object_pointer(
     handle: u64,
     expected_layout: *const c_char,
 ) -> ThawHandleResult {
-    let result = with_active_or_context(|ctx| -> Result<u64, String> {
+    let result = with_active_or_context(|ctx| -> Result<u64, BoundaryError> {
         if expected_layout.is_null() {
             return Err("native object receiver requires a layout".into());
         }
@@ -1611,7 +1771,7 @@ pub extern "C" fn thaw_js_native_object_pointer(
     });
     match result {
         Ok(value) => ThawHandleResult { value, error: std::ptr::null() },
-        Err(error) => ThawHandleResult { value: 0, error: thaw_arena::owned_string(error) },
+        Err(error) => ThawHandleResult { value: 0, error: owned_exception_error(error) },
     }
 }
 
@@ -1635,7 +1795,7 @@ fn invoke_raw<'js>(
     target: Function<'js>,
     args_json: &str,
     graph_args: bool,
-) -> Result<Value<'js>, String> {
+) -> Result<Value<'js>, BoundaryError> {
     let args_array = decode_argument_array(&ctx, args_json, graph_args)?;
     let mut call_args = Args::new_unsized(ctx.clone());
     for index in 0..args_array.len() {
@@ -1644,7 +1804,7 @@ fn invoke_raw<'js>(
     }
     target.call_arg(call_args).map_err(|error| match error {
         rquickjs::Error::Exception => describe_tagged_exception(&ctx),
-        error => error.to_string(),
+        error => error.to_string().into(),
     })
 }
 
@@ -1662,7 +1822,7 @@ unsafe fn invoke_mixed<'js>(
     args_json: &str,
     handles: *const u8,
     graph_args: bool,
-) -> Result<Value<'js>, String> {
+) -> Result<Value<'js>, BoundaryError> {
     let arguments = decode_argument_array(&ctx, args_json, graph_args)?;
     let mut call_args = Args::new_unsized(ctx.clone());
     for index in 0..arguments.len() {
@@ -1683,16 +1843,16 @@ unsafe fn invoke_mixed<'js>(
     // function value, not a call by name), same fix.
     target.call_arg(call_args).map_err(|error| match error {
         rquickjs::Error::Exception => describe_tagged_exception(&ctx),
-        error => error.to_string(),
+        error => error.to_string().into(),
     })
 }
 
 /// "JavaScript value handle N is not callable", plus what the handle actually holds.
-fn not_callable_message(ctx: &Ctx<'_>, handle: u64) -> String {
+fn not_callable_message(ctx: &Ctx<'_>, handle: u64) -> BoundaryError {
     let held = value_for_handle(ctx, handle)
         .map(|value| format!("{:?}", value.type_of()))
         .unwrap_or_else(|_| "unknown".to_string());
-    format!("JavaScript value handle {handle} is not callable (holds {held})")
+    format!("JavaScript value handle {handle} is not callable (holds {held})").into()
 }
 
 /// Calls a retained function with JSON arguments followed by retained values.
@@ -1723,7 +1883,7 @@ unsafe fn thaw_js_call_handle_mixed_result_impl(
         },
         Err(error) => ThawResult {
             value: std::ptr::null(),
-            error: thaw_arena::owned_string(error),
+            error: owned_exception_error(error),
         },
     }
 }
@@ -1751,11 +1911,11 @@ unsafe fn thaw_js_call_handle_mixed_native_json_result_impl(
             let parse: Function = json.get("parse").map_err(|error| error.to_string())?;
             let decode: Function = ctx.globals().get("__thaw_json_graph_decode_owned")
                 .map_err(|error| error.to_string())?;
-            Ok((target, parse, decode))
+            Ok::<_, BoundaryError>((target, parse, decode))
         })?;
         let value: Value = decode.call((graph_json.as_str(),)).map_err(|error| match error {
             rquickjs::Error::Exception => describe_tagged_exception(&ctx),
-            error => error.to_string(),
+            error => error.to_string().into(),
         })?;
         let space: Value = parse.call((space_json.as_str(),))
             .map_err(|error| error.to_string())?;
@@ -1768,7 +1928,7 @@ unsafe fn thaw_js_call_handle_mixed_native_json_result_impl(
         }
         let result = target.call_arg(call_args).map_err(|error| match error {
             rquickjs::Error::Exception => describe_tagged_exception(&ctx),
-            error => error.to_string(),
+            error => error.to_string().into(),
         })?;
         resolve_value_wire_impl(ctx, result, &format!("JavaScript value #{handle}"), true, graph_result)
     });
@@ -1779,7 +1939,7 @@ unsafe fn thaw_js_call_handle_mixed_native_json_result_impl(
         },
         Err(error) => ThawResult {
             value: std::ptr::null(),
-            error: thaw_arena::owned_string(error),
+            error: owned_exception_error(error),
         },
     }
 }
@@ -1857,7 +2017,7 @@ unsafe fn thaw_js_call_handle_mixed_handle_impl(
         },
         Err(error) => ThawHandleResult {
             value: 0,
-            error: thaw_arena::owned_string(error),
+            error: owned_exception_error(error),
         },
     }
 }
@@ -1874,11 +2034,11 @@ pub extern "C" fn thaw_js_construct_handle_graph_args_result(handle: u64, args_j
 
 fn thaw_js_construct_handle_impl(handle: u64, args_json: *const c_char, graph_args: bool) -> ThawHandleResult {
     let args_json = to_str(args_json);
-    match with_active_or_context(|ctx| {
+    match with_active_or_context(|ctx| -> Result<u64, BoundaryError> {
         let constructor = before_graph_decode(&ctx, &args_json, graph_args, || {
             value_for_handle(&ctx, handle)?
                 .into_constructor()
-                .ok_or_else(|| format!("JavaScript value handle {handle} is not a constructor"))
+                .ok_or_else(|| BoundaryError::from(format!("JavaScript value handle {handle} is not a constructor")))
         })?;
         let arguments = decode_argument_array(&ctx, &args_json, graph_args)?;
         let mut args = Args::new_unsized(ctx.clone());
@@ -1896,7 +2056,7 @@ fn thaw_js_construct_handle_impl(handle: u64, args_json: *const c_char, graph_ar
             .construct_args(args)
             .map_err(|error| match error {
                 rquickjs::Error::Exception => describe_tagged_exception(&ctx),
-                error => error.to_string(),
+                error => error.to_string().into(),
             })?;
         retain_value(&ctx, value)
     }) {
@@ -1906,7 +2066,7 @@ fn thaw_js_construct_handle_impl(handle: u64, args_json: *const c_char, graph_ar
         },
         Err(error) => ThawHandleResult {
             value: 0,
-            error: thaw_arena::owned_string(error),
+            error: owned_exception_error(error),
         },
     }
 }
@@ -1970,6 +2130,7 @@ struct PrivateNapiSymbolOps {
     register: Persistent<Function<'static>>,
     live: Persistent<Function<'static>>,
     pin: Persistent<Function<'static>>,
+    get: Persistent<Function<'static>>,
 }
 
 unsafe impl<'js> rquickjs::JsLifetime<'js> for PrivateNapiSymbolOps {
@@ -1978,6 +2139,7 @@ unsafe impl<'js> rquickjs::JsLifetime<'js> for PrivateNapiSymbolOps {
 
 fn install_private_napi_symbol_ops<'js>(
     ctx: Ctx<'js>, register: Function<'js>, live: Function<'js>, pin: Function<'js>,
+    get: Function<'js>,
 ) -> rquickjs::Result<()> {
     if ctx.userdata::<PrivateNapiSymbolOps>().is_some() {
         return Err(rquickjs::Error::new_from_js_message(
@@ -1987,6 +2149,7 @@ fn install_private_napi_symbol_ops<'js>(
         register: Persistent::save(&ctx, register),
         live: Persistent::save(&ctx, live),
         pin: Persistent::save(&ctx, pin),
+        get: Persistent::save(&ctx, get),
     };
     ctx.store_userdata(ops).map(|_| ()).map_err(|_| rquickjs::Error::new_from_js_message(
         "native Symbol bridge", "Function", "Cannot install Symbol bridge"))
@@ -2213,7 +2376,7 @@ fn handle_registry_identity_ignores_later_object_is_override() {
         let original: Function = object.get("is").expect("Object.is intrinsic");
         let spoof: Function = ctx.eval("() => true").expect("spoof comparator");
         object.set("is", spoof).expect("override Object.is");
-        let retained = (|| -> Result<Vec<u64>, String> {
+        let retained = (|| -> Result<Vec<u64>, BoundaryError> {
             let mut handles = Vec::new();
             for index in 0..values.len() {
                 handles.push(retain_value(&ctx, values.get(index)
@@ -2357,7 +2520,7 @@ unsafe fn take_owned_string(value: *const c_char) -> String {
     if value.is_null() {
         String::new()
     } else {
-        let text = unsafe { CStr::from_ptr(value) }.to_string_lossy().into_owned();
+        let text = unsafe { thaw_arena::NativeStr::from_ptr(value) }.to_string_lossy().into_owned();
         unsafe { thaw_arena::destroy_string(value.cast_mut()) };
         text
     }
@@ -2419,7 +2582,7 @@ fn register_native_callback(
     let adapter = adapter as usize;
     let closure = closure as usize;
     let finish = finish as usize;
-    let result: Result<u64, String> = with_active_or_context(|ctx| {
+    let result: Result<u64, BoundaryError> = with_active_or_context(|ctx| {
         unsafe extern "C" {
             fn thaw_closure_alias_resolve(closure: *const u8) -> *const u8;
         }
@@ -2497,7 +2660,8 @@ fn register_native_callback(
             std::sync::atomic::AtomicU64::new(0);
         let id = NEXT_NATIVE_CALLBACK_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let root = thaw_arena::ArenaRoot::new(closure);
-        let raw = Function::new(ctx.clone(), move |ctx: Ctx<'_>, args_json: String| -> String {
+        install_native_exception_bridge(&ctx).map_err(|error| error.to_string())?;
+        let raw = Function::new(ctx.clone(), move |ctx: Ctx<'_>, args_json: String| -> rquickjs::Result<String> {
             let _keep_alive = &root;
             let args_json = CString::new(args_json).unwrap_or_default();
             // Enters the same "currently active `Ctx`" guard `install_
@@ -2532,10 +2696,17 @@ fn register_native_callback(
                 unsafe { thaw_json_discard_graph_wire(args_json.as_ptr()) };
             }
             if finish == 0 {
-                unsafe { take_owned_string(result) }
+                let packet = thaw_arena::take_owned_exception(result);
+                let text = unsafe { take_owned_string(result) };
+                if let Some(packet) = packet {
+                    let tagged = text.strip_prefix('\u{2}').unwrap_or(&text);
+                    let error = reconstitute_exception_packet(&ctx, tagged, packet)?;
+                    return Err(ctx.throw(error));
+                }
+                Ok(text)
             } else {
                 native_promise_mark_handled(result.cast::<c_void>().cast_mut());
-                format!("promise:{:x}", result as usize)
+                Ok(format!("promise:{:x}", result as usize))
             }
         })
         .map_err(|error| error.to_string())?;
@@ -2545,26 +2716,32 @@ fn register_native_callback(
             .map_err(|error| error.to_string())?;
         let poll_name = format!("__thaw_native_callback_poll_{id}");
         if finish != 0 {
-            let poll = Function::new(ctx.clone(), move |ctx: Ctx<'_>, ticket: String| -> String {
+            let poll = Function::new(ctx.clone(), move |ctx: Ctx<'_>, ticket: String| -> rquickjs::Result<String> {
                 let _active = ActiveNapiContext::enter(&ctx);
                 let Some(address) = ticket.strip_prefix("promise:") else {
-                    return "error:invalid native Promise ticket".to_string();
+                    return Ok("error:invalid native Promise ticket".to_string());
                 };
                 let Ok(address) = usize::from_str_radix(address, 16) else {
-                    return "error:invalid native Promise address".to_string();
+                    return Ok("error:invalid native Promise address".to_string());
                 };
                 let promise = address as *const c_void;
                 // The finisher consumes settled promises. Check first so a
                 // rejection cannot look pending and be consumed repeatedly.
                 let state = native_promise_state(promise);
                 if state == 0 {
-                    return String::new();
+                    return Ok(String::new());
                 }
                 let finish_fn: NativeCallbackAdapter = unsafe { std::mem::transmute(finish) };
                 let result = unsafe { finish_fn(promise, std::ptr::null()) };
                 if state == 2 {
-                    return if result.is_null() {
-                        "error:native Promise rejected".to_string()
+                    if result.is_null() {
+                        return Ok("error:native Promise rejected".to_string());
+                    }
+                    if let Some(packet) = thaw_arena::take_owned_exception(result) {
+                        let text = unsafe { take_owned_string(result) };
+                        let tagged = text.strip_prefix('\u{2}').unwrap_or(&text);
+                        let error = reconstitute_exception_packet(&ctx, tagged, packet)?;
+                        return Err(ctx.throw(error));
                     } else {
                         // Keep the *full* tagged exception (`\u{1}name\u{1}
                         // message[\u{5}properties]`), not just the message:
@@ -2573,13 +2750,14 @@ fn register_native_callback(
                         // (real trigger: a rejected `ctx.throw(418, ...)`,
                         // whose `.status`/`.expose` koa's error handler
                         // needs).
-                        format!("error:{}", to_str(result))
-                    };
+                        let tagged = unsafe { take_owned_string(result) };
+                        return Ok(format!("error:{tagged}"));
+                    }
                 }
                 if result.is_null() {
-                    return String::new();
+                    return Ok(String::new());
                 }
-                unsafe { take_owned_string(result) }
+                Ok(unsafe { take_owned_string(result) })
             })
             .map_err(|error| error.to_string())?;
             ctx.globals()
@@ -2651,7 +2829,9 @@ fn register_native_callback(
              if (result.slice(0, 8) !== 'promise:') return {graph_mode} ? globalThis.__thaw_json_graph_decode_owned(result) : JSON.parse(result, globalThis.__thaw_json_date_reviver); \
              return new Promise(function(resolve, reject) {{ \
              function check() {{ \
-             var settled = ({method_mode} ? poll : globalThis['{poll_name}'])(result); \
+             var settled; \
+             try {{ settled = ({method_mode} ? poll : globalThis['{poll_name}'])(result); }} \
+             catch (nativeError) {{ return reject(nativeError); }} \
              if (!settled) return setTimeout(check, 0); \
              if (settled.slice(0, 6) === 'error:') return reject(globalThis.__thaw_error_from_tagged(settled.slice(6))); \
              if ({void_result}) return resolve(undefined); \
@@ -2705,7 +2885,7 @@ fn register_native_callback(
         },
         Err(error) => ThawHandleResult {
             value: 0,
-            error: thaw_arena::owned_string(error),
+            error: owned_exception_error(error),
         },
     }
 }
@@ -2742,7 +2922,7 @@ pub extern "C" fn thaw_js_call_handle_with_this_graph_result(
 ) -> ThawCallWithExceptionResult {
     enum Outcome { Value(u64), Exception(u64, bool) }
     let args_json = to_str(args_json);
-    let result: Result<Outcome, String> = with_active_or_context(|ctx| {
+    let result: Result<Outcome, BoundaryError> = with_active_or_context(|ctx| {
         let target = before_graph_decode(&ctx, &args_json, true, || {
             Function::from_value(value_for_handle(&ctx, handle)?)
                 .map_err(|_| not_callable_message(&ctx, handle))
@@ -2764,7 +2944,7 @@ pub extern "C" fn thaw_js_call_handle_with_this_graph_result(
                 return retain_value(&ctx, thrown)
                     .map(|handle| Outcome::Exception(handle, object_like));
             }
-            Err(error) => return Err(error.to_string()),
+            Err(error) => return Err(error.to_string().into()),
         };
         retain_value(&ctx, returned).map(Outcome::Value)
     });
@@ -2779,7 +2959,7 @@ pub extern "C" fn thaw_js_call_handle_with_this_graph_result(
         },
         Err(error) => ThawCallWithExceptionResult {
             value: 0, exception_handle: 0, exception_object_like: 0,
-            error: thaw_arena::owned_string(error),
+            error: owned_exception_error(error),
         },
     }
 }
@@ -2788,7 +2968,7 @@ fn thaw_js_call_handle_handle_impl(
     handle: u64, args_json: *const c_char, defer_resolution: bool, graph_args: bool,
 ) -> ThawHandleResult {
     let args_json = to_str(args_json);
-    let result: Result<u64, String> = with_active_or_context(|ctx| {
+    let result: Result<u64, BoundaryError> = with_active_or_context(|ctx| {
         let target = before_graph_decode(&ctx, &args_json, graph_args, || {
             Function::from_value(value_for_handle(&ctx, handle)?)
                 .map_err(|_| not_callable_message(&ctx, handle))
@@ -2808,7 +2988,7 @@ fn thaw_js_call_handle_handle_impl(
         },
         Err(error) => ThawHandleResult {
             value: 0,
-            error: thaw_arena::owned_string(error),
+            error: owned_exception_error(error),
         },
     }
 }
@@ -2821,7 +3001,7 @@ fn thaw_js_call_handle_value_result_impl(handle: u64, argument: u64, graph_resul
         // See `invoke_raw`'s doc comment -- same call convention, same fix.
         let value: Value = target.call((argument,)).map_err(|error| match error {
             rquickjs::Error::Exception => describe_tagged_exception(&ctx),
-            error => error.to_string(),
+            error => error.to_string().into(),
         })?;
         resolve_value_wire_impl(ctx, value, &format!("JavaScript value #{handle}"), true, graph_result)
     });
@@ -2832,7 +3012,7 @@ fn thaw_js_call_handle_value_result_impl(handle: u64, argument: u64, graph_resul
         },
         Err(error) => ThawResult {
             value: std::ptr::null(),
-            error: thaw_arena::owned_string(error),
+            error: owned_exception_error(error),
         },
     }
 }
@@ -2926,7 +3106,7 @@ pub extern "C" fn thaw_js_property_predicate_json_key_result(
     handle: u64, key_json: *const c_char, operation: u8,
 ) -> ThawHandleResult {
     let key_json = to_str(key_json);
-    let result: Result<u64, String> = with_active_or_context(|ctx| {
+    let result: Result<u64, BoundaryError> = with_active_or_context(|ctx| {
         let object = object_for_handle(&ctx, handle)?;
         if operation == 3 {
             let predicate: Function = ctx.globals()
@@ -2935,7 +3115,7 @@ pub extern "C" fn thaw_js_property_predicate_json_key_result(
             let result: bool = predicate.call((object, key_json.as_str()))
                 .map_err(|error| match error {
                     rquickjs::Error::Exception => describe_tagged_exception(&ctx),
-                    error => error.to_string(),
+                    error => error.to_string().into(),
                 })?;
             return Ok(u64::from(result));
         }
@@ -2944,12 +3124,12 @@ pub extern "C" fn thaw_js_property_predicate_json_key_result(
         predicate.call::<_, bool>((object, key_json.as_str(), operation, true))
             .map(u64::from).map_err(|error| match error {
                 rquickjs::Error::Exception => describe_tagged_exception(&ctx),
-                error => error.to_string(),
+                error => error.to_string().into(),
             })
     });
     match result {
         Ok(value) => ThawHandleResult { value, error: std::ptr::null() },
-        Err(error) => ThawHandleResult { value: 0, error: thaw_arena::owned_string(error) },
+        Err(error) => ThawHandleResult { value: 0, error: owned_exception_error(error) },
     }
 }
 
@@ -2959,7 +3139,7 @@ pub extern "C" fn thaw_js_get_property_result(
     name: *const c_char,
 ) -> ThawHandleResult {
     let name = to_str(name);
-    let result: Result<u64, String> = with_active_or_context(|ctx| {
+    let result: Result<u64, BoundaryError> = with_active_or_context(|ctx| {
         let object = boxed_object_for_handle(&ctx, handle)?;
         // See `invoke_raw`'s doc comment -- a getter can throw too.
         let key = dynamic_property_key(&ctx, &name)?;
@@ -2967,7 +3147,7 @@ pub extern "C" fn thaw_js_get_property_result(
             .map_err(|error| error.to_string())?;
         let value = object.get(key).map_err(|error| match error {
             rquickjs::Error::Exception => describe_tagged_exception(&ctx),
-            error => error.to_string(),
+            error => error.to_string().into(),
         })?;
         retain_value(&ctx, value)
     });
@@ -2978,7 +3158,7 @@ pub extern "C" fn thaw_js_get_property_result(
         },
         Err(error) => ThawHandleResult {
             value: 0,
-            error: thaw_arena::owned_string(error),
+            error: owned_exception_error(error),
         },
     }
 }
@@ -2992,7 +3172,7 @@ pub extern "C" fn thaw_js_get_property_json_key_result(
     key_json: *const c_char,
 ) -> ThawHandleResult {
     let key_json = to_str(key_json);
-    let result: Result<u64, String> = with_active_or_context(|ctx| {
+    let result: Result<u64, BoundaryError> = with_active_or_context(|ctx| {
         let object = boxed_object_for_handle(&ctx, handle)?;
         let json: Object = ctx.globals().get("JSON").map_err(|error| error.to_string())?;
         let parse: Function = json.get("parse").map_err(|error| error.to_string())?;
@@ -3004,7 +3184,7 @@ pub extern "C" fn thaw_js_get_property_json_key_result(
             .map_err(|error| error.to_string())?;
         let value = object.get(key).map_err(|error| match error {
             rquickjs::Error::Exception => describe_tagged_exception(&ctx),
-            error => error.to_string(),
+            error => error.to_string().into(),
         })?;
         retain_value(&ctx, value)
     });
@@ -3012,7 +3192,7 @@ pub extern "C" fn thaw_js_get_property_json_key_result(
         Ok(value) => ThawHandleResult { value, error: std::ptr::null() },
         Err(error) => ThawHandleResult {
             value: 0,
-            error: thaw_arena::owned_string(error),
+            error: owned_exception_error(error),
         },
     }
 }
@@ -3022,20 +3202,20 @@ pub extern "C" fn thaw_js_get_property_json_key_result(
 pub extern "C" fn thaw_js_get_property_key_handle_result(
     handle: u64, key_handle: u64,
 ) -> ThawHandleResult {
-    let result: Result<u64, String> = with_active_or_context(|ctx| {
+    let result: Result<u64, BoundaryError> = with_active_or_context(|ctx| {
         let object = object_for_handle(&ctx, handle)?;
         let key_value = value_for_handle(&ctx, key_handle)?;
         let key = rquickjs::Atom::from_value(ctx.clone(), &key_value)
             .map_err(|error| error.to_string())?;
         let value = object.get(key).map_err(|error| match error {
             rquickjs::Error::Exception => describe_tagged_exception(&ctx),
-            error => error.to_string(),
+            error => error.to_string().into(),
         })?;
         retain_value(&ctx, value)
     });
     match result {
         Ok(value) => ThawHandleResult { value, error: std::ptr::null() },
-        Err(error) => ThawHandleResult { value: 0, error: thaw_arena::owned_string(error) },
+        Err(error) => ThawHandleResult { value: 0, error: owned_exception_error(error) },
     }
 }
 
@@ -3047,7 +3227,7 @@ fn property_read_with_exception_result(
     handle: u64, key_json: Option<String>, key_handle: u64,
 ) -> ThawCallWithExceptionResult {
     enum Outcome { Value(u64), Exception(u64, bool) }
-    let result: Result<Outcome, String> = with_active_or_context(|ctx| {
+    let result: Result<Outcome, BoundaryError> = with_active_or_context(|ctx| {
         let object = if key_json.is_some() {
             boxed_object_for_handle(&ctx, handle)?
         } else {
@@ -3069,7 +3249,7 @@ fn property_read_with_exception_result(
                 let object_like = thrown.is_object() || thrown.is_function();
                 retain_value(&ctx, thrown).map(|handle| Outcome::Exception(handle, object_like))
             }
-            Err(error) => Err(error.to_string()),
+            Err(error) => Err(error.to_string().into()),
         }
     });
     match result {
@@ -3083,7 +3263,7 @@ fn property_read_with_exception_result(
         },
         Err(error) => ThawCallWithExceptionResult {
             value: 0, exception_handle: 0, exception_object_like: 0,
-            error: thaw_arena::owned_string(error),
+            error: owned_exception_error(error),
         },
     }
 }
@@ -3106,20 +3286,20 @@ pub extern "C" fn thaw_js_get_property_key_handle_with_exception_result(
 pub extern "C" fn thaw_js_property_predicate_key_handle_result(
     handle: u64, key_handle: u64, operation: u8,
 ) -> ThawHandleResult {
-    let result: Result<u64, String> = with_active_or_context(|ctx| {
+    let result: Result<u64, BoundaryError> = with_active_or_context(|ctx| {
         let object = object_for_handle(&ctx, handle)?;
         let key = value_for_handle(&ctx, key_handle)?;
         let predicate: Function = ctx.globals().get("__thaw_json_host_key_predicate")
             .map_err(|error| error.to_string())?;
         let value: bool = predicate.call((object, key, operation, false)).map_err(|error| match error {
             rquickjs::Error::Exception => describe_tagged_exception(&ctx),
-            error => error.to_string(),
+            error => error.to_string().into(),
         })?;
         Ok(u64::from(value))
     });
     match result {
         Ok(value) => ThawHandleResult { value, error: std::ptr::null() },
-        Err(error) => ThawHandleResult { value: 0, error: thaw_arena::owned_string(error) },
+        Err(error) => ThawHandleResult { value: 0, error: owned_exception_error(error) },
     }
 }
 
@@ -3128,7 +3308,7 @@ pub extern "C" fn thaw_js_set_property_key_handle_graph_result(
     handle: u64, key_handle: u64, graph_json: *const c_char, receiver_data: u8,
 ) -> ThawHandleResult {
     let graph_json = to_str(graph_json);
-    let result: Result<u64, String> = with_active_or_context(|ctx| {
+    let result: Result<u64, BoundaryError> = with_active_or_context(|ctx| {
         let (object, key, decode, set) = before_graph_decode(&ctx, &graph_json, true, || {
             let object = object_for_handle(&ctx, handle)?;
             let key = value_for_handle(&ctx, key_handle)?;
@@ -3140,22 +3320,22 @@ pub extern "C" fn thaw_js_set_property_key_handle_graph_result(
                 "__thaw_json_host_set_property"
             })
                 .map_err(|error| error.to_string())?;
-            Ok((object, key, decode, set))
+            Ok::<_, BoundaryError>((object, key, decode, set))
         })?;
         let value: Value = decode.call((graph_json.as_str(),)).map_err(|error| match error {
             rquickjs::Error::Exception => describe_tagged_exception(&ctx),
-            error => error.to_string(),
+            error => error.to_string().into(),
         })?;
         let written: bool = set.call((object, key, value)).map_err(|error| match error {
             rquickjs::Error::Exception => describe_tagged_exception(&ctx),
-            error => error.to_string(),
+            error => error.to_string().into(),
         })?;
         if !written { return Err("\u{1}TypeError\u{1}Cannot assign to read only property".into()); }
         Ok(1)
     });
     match result {
         Ok(value) => ThawHandleResult { value, error: std::ptr::null() },
-        Err(error) => ThawHandleResult { value: 0, error: thaw_arena::owned_string(error) },
+        Err(error) => ThawHandleResult { value: 0, error: owned_exception_error(error) },
     }
 }
 
@@ -3164,7 +3344,7 @@ pub extern "C" fn thaw_js_define_data_property_key_handle_graph_result(
     handle: u64, key_handle: u64, graph_json: *const c_char, attributes: u32,
 ) -> ThawHandleResult {
     let graph_json = to_str(graph_json);
-    let result: Result<u64, String> = with_active_or_context(|ctx| {
+    let result: Result<u64, BoundaryError> = with_active_or_context(|ctx| {
         let (object, key, decode, define) = before_graph_decode(&ctx, &graph_json, true, || {
             let object = object_for_handle(&ctx, handle)?;
             let key = value_for_handle(&ctx, key_handle)?;
@@ -3172,21 +3352,21 @@ pub extern "C" fn thaw_js_define_data_property_key_handle_graph_result(
                 .map_err(|error| error.to_string())?;
             let define: Function = ctx.globals().get("__thaw_json_host_define_data_property")
                 .map_err(|error| error.to_string())?;
-            Ok((object, key, decode, define))
+            Ok::<_, BoundaryError>((object, key, decode, define))
         })?;
         let value: Value = decode.call((graph_json.as_str(),)).map_err(|error| match error {
             rquickjs::Error::Exception => describe_tagged_exception(&ctx),
-            error => error.to_string(),
+            error => error.to_string().into(),
         })?;
         let defined: bool = define.call((object, key, value, attributes)).map_err(|error| match error {
             rquickjs::Error::Exception => describe_tagged_exception(&ctx),
-            error => error.to_string(),
+            error => error.to_string().into(),
         })?;
         Ok(u64::from(defined))
     });
     match result {
         Ok(value) => ThawHandleResult { value, error: std::ptr::null() },
-        Err(error) => ThawHandleResult { value: 0, error: thaw_arena::owned_string(error) },
+        Err(error) => ThawHandleResult { value: 0, error: owned_exception_error(error) },
     }
 }
 
@@ -3210,7 +3390,7 @@ pub extern "C" fn thaw_js_define_callback_property_key_handle_result(
     getter_root: u64, setter_root: u64, method_root: u64,
 ) -> ThawHandleResult {
     let roots = NativeGraphCallbackRoots([getter_root, setter_root, method_root]);
-    let result: Result<u64, String> = with_active_or_context(move |ctx| {
+    let result: Result<u64, BoundaryError> = with_active_or_context(move |ctx| {
         let object = object_for_handle(&ctx, handle)?;
         let key = value_for_handle(&ctx, key_handle)?;
         let define: Function = ctx.globals().get("__thaw_json_host_define_callback_property")
@@ -3238,13 +3418,13 @@ pub extern "C" fn thaw_js_define_callback_property_key_handle_result(
         let defined: bool = define.call((object, key, getter_id, setter_id,
             method_id, attributes, invoke)).map_err(|error| match error {
             rquickjs::Error::Exception => describe_tagged_exception(&ctx),
-            error => error.to_string(),
+            error => error.to_string().into(),
         })?;
         Ok(u64::from(defined))
     });
     match result {
         Ok(value) => ThawHandleResult { value, error: std::ptr::null() },
-        Err(error) => ThawHandleResult { value: 0, error: thaw_arena::owned_string(error) },
+        Err(error) => ThawHandleResult { value: 0, error: owned_exception_error(error) },
     }
 }
 
@@ -3252,20 +3432,20 @@ pub extern "C" fn thaw_js_define_callback_property_key_handle_result(
 pub extern "C" fn thaw_js_strict_equal_handles_result(
     left_handle: u64, right_handle: u64,
 ) -> ThawHandleResult {
-    let result: Result<u64, String> = with_active_or_context(|ctx| {
+    let result: Result<u64, BoundaryError> = with_active_or_context(|ctx| {
         let left = value_for_handle(&ctx, left_handle)?;
         let right = value_for_handle(&ctx, right_handle)?;
         let compare: Function = ctx.globals().get("__thaw_json_host_strict_handles_equal")
             .map_err(|error| error.to_string())?;
         let equal: bool = compare.call((left, right)).map_err(|error| match error {
             rquickjs::Error::Exception => describe_tagged_exception(&ctx),
-            error => error.to_string(),
+            error => error.to_string().into(),
         })?;
         Ok(u64::from(equal))
     });
     match result {
         Ok(value) => ThawHandleResult { value, error: std::ptr::null() },
-        Err(error) => ThawHandleResult { value: 0, error: thaw_arena::owned_string(error) },
+        Err(error) => ThawHandleResult { value: 0, error: owned_exception_error(error) },
     }
 }
 
@@ -3276,19 +3456,19 @@ pub extern "C" fn thaw_js_strict_equal_handle_scalar_result(
     handle: u64, kind: u8, number: f64, text: *const c_char,
 ) -> ThawHandleResult {
     let text = to_str(text);
-    let result: Result<u64, String> = with_active_or_context(|ctx| {
+    let result: Result<u64, BoundaryError> = with_active_or_context(|ctx| {
         let left = value_for_handle(&ctx, handle)?;
         let compare: Function = ctx.globals().get("__thaw_json_host_strict_scalar_equal")
             .map_err(|error| error.to_string())?;
         let equal: bool = compare.call((left, kind, number, text.as_str())).map_err(|error| match error {
             rquickjs::Error::Exception => describe_tagged_exception(&ctx),
-            error => error.to_string(),
+            error => error.to_string().into(),
         })?;
         Ok(u64::from(equal))
     });
     match result {
         Ok(value) => ThawHandleResult { value, error: std::ptr::null() },
-        Err(error) => ThawHandleResult { value: 0, error: thaw_arena::owned_string(error) },
+        Err(error) => ThawHandleResult { value: 0, error: owned_exception_error(error) },
     }
 }
 
@@ -3296,13 +3476,13 @@ pub extern "C" fn thaw_js_strict_equal_handle_scalar_result(
 /// `instanceof` or user-mutated constructor is consulted.
 #[no_mangle]
 pub extern "C" fn thaw_js_handle_is_promise_result(handle: u64) -> ThawHandleResult {
-    let result = with_active_or_context(|ctx| {
+    let result = with_active_or_context(|ctx| -> Result<u64, BoundaryError> {
         let value = value_for_handle(&ctx, handle)?;
-        Ok::<u64, String>(u64::from(value.as_promise().is_some()))
+        Ok(u64::from(value.as_promise().is_some()))
     });
     match result {
         Ok(value) => ThawHandleResult { value, error: std::ptr::null() },
-        Err(error) => ThawHandleResult { value: 0, error: thaw_arena::owned_string(error) },
+        Err(error) => ThawHandleResult { value: 0, error: owned_exception_error(error) },
     }
 }
 
@@ -3313,7 +3493,7 @@ pub extern "C" fn thaw_js_handle_is_promise_result(handle: u64) -> ThawHandleRes
 pub extern "C" fn thaw_js_graph_native_pair_matches_result(
     handle: u64, native_handle: u64, kind: u8,
 ) -> ThawHandleResult {
-    let result = with_active_or_context(|ctx| {
+    let result = with_active_or_context(|ctx| -> Result<u64, BoundaryError> {
         let value = value_for_handle(&ctx, handle)?;
         let verify: Function = ctx.globals()
             .get("__thaw_json_graph_native_pair_matches")
@@ -3321,19 +3501,35 @@ pub extern "C" fn thaw_js_graph_native_pair_matches_result(
         let matches: bool = verify.call((value, native_handle.to_string(), kind))
             .map_err(|error| match error {
                 rquickjs::Error::Exception => describe_tagged_exception(&ctx),
-                error => error.to_string(),
+                error => error.to_string().into(),
             })?;
-        Ok::<u64, String>(u64::from(matches))
+        Ok::<u64, BoundaryError>(u64::from(matches))
     });
     match result {
         Ok(value) => ThawHandleResult { value, error: std::ptr::null() },
-        Err(error) => ThawHandleResult { value: 0, error: thaw_arena::owned_string(error) },
+        Err(error) => ThawHandleResult { value: 0, error: owned_exception_error(error) },
     }
+}
+
+/// The private packet ID associated with a captured carrier Error, or 0 for any other value.
+#[no_mangle]
+pub extern "C" fn thaw_js_exception_native_token(handle: u64) -> u64 {
+    with_active_or_context(|ctx| -> Result<u64, BoundaryError> {
+        let value = value_for_handle(&ctx, handle)?;
+        let bridge = ctx.userdata::<NativeExceptionBridge>()
+            .ok_or("native exception bridge is unavailable")?;
+        let token_of = bridge.token_of.clone();
+        drop(bridge);
+        token_of.restore(&ctx).map_err(|error| BoundaryError::from(error.to_string()))?
+            .call::<_, String>((value,)).map_err(|error| BoundaryError::from(error.to_string()))?
+            .parse().map_err(|error: std::num::ParseIntError| BoundaryError::from(error.to_string()))
+    })
+    .unwrap_or(0)
 }
 
 #[no_mangle]
 pub extern "C" fn thaw_js_host_query_result(handle: u64, operation: u8) -> ThawResult {
-    let result: Result<String, String> = with_active_or_context(|ctx| {
+    let result: Result<String, BoundaryError> = with_active_or_context(|ctx| {
         let value = value_for_handle(&ctx, handle)?;
         // Callback-origin validation must not consult the user-replaceable
         // global Host query function. JS_IsFunction also accepts callable
@@ -3348,13 +3544,13 @@ pub extern "C" fn thaw_js_host_query_result(handle: u64, operation: u8) -> ThawR
                 .ok_or("native object identity bridge is unavailable")?;
             let pointer_of = bridge.object_pointer.clone();
             drop(bridge);
-            return pointer_of.call((value, String::new())).map_err(|error| error.to_string());
+            return pointer_of.call((value, String::new())).map_err(|error| error.to_string().into());
         }
         let query: Function = ctx.globals().get("__thaw_json_host_query")
             .map_err(|error| error.to_string())?;
         query.call((value, operation)).map_err(|error| match error {
             rquickjs::Error::Exception => describe_tagged_exception(&ctx),
-            error => error.to_string(),
+            error => error.to_string().into(),
         })
     });
     match result {
@@ -3363,7 +3559,7 @@ pub extern "C" fn thaw_js_host_query_result(handle: u64, operation: u8) -> ThawR
         },
         Err(error) => ThawResult {
             value: std::ptr::null(),
-            error: thaw_arena::owned_string(error),
+            error: owned_exception_error(error),
         },
     }
 }
@@ -3376,56 +3572,90 @@ pub struct ThawStringCoercionResult {
     pub error: *const c_char,
 }
 
-#[no_mangle]
-pub extern "C" fn thaw_js_abstract_to_string_units_result(
-    handle: u64,
-    array_element: u8,
-) -> ThawStringCoercionResult {
-    enum Outcome { Units(String), Exception(u64, bool) }
-    let result: Result<Outcome, String> = with_active_or_context(|ctx| {
-        let value = value_for_handle(&ctx, handle)?;
-        if array_element != 0 && (value.is_null() || value.is_undefined()) {
-            return Ok(Outcome::Units("[]".into()));
+fn abstract_to_string_units_of<'js>(
+    ctx: &Ctx<'js>, value: Value<'js>, array_element: u8,
+) -> Result<StringUnitsOutcome, BoundaryError> {
+    if array_element != 0 && (value.is_null() || value.is_undefined()) {
+        return Ok(StringUnitsOutcome::Units("[]".into()));
+    }
+    let coerce: Function = ctx.globals()
+        .get("__thaw_json_host_abstract_to_string_units")
+        .map_err(|error| BoundaryError::from(error.to_string()))?;
+    match coerce.call::<_, String>((value,)) {
+        Ok(units) => Ok(StringUnitsOutcome::Units(units)),
+        Err(rquickjs::Error::Exception) => {
+            let thrown = ctx.catch();
+            let object_like = thrown.is_object() || thrown.is_function();
+            retain_value(ctx, thrown).map(|handle| StringUnitsOutcome::Exception(handle, object_like))
         }
-        let coerce: Function = ctx.globals()
-            .get("__thaw_json_host_abstract_to_string_units")
-            .map_err(|error| error.to_string())?;
-        match coerce.call::<_, String>((value,)) {
-            Ok(units) => Ok(Outcome::Units(units)),
-            Err(rquickjs::Error::Exception) => {
-                let thrown = ctx.catch();
-                let object_like = thrown.is_object() || thrown.is_function();
-                retain_value(&ctx, thrown).map(|handle| Outcome::Exception(handle, object_like))
-            }
-            Err(error) => Err(error.to_string()),
-        }
-    });
+        Err(error) => Err(error.to_string().into()),
+    }
+}
+
+enum StringUnitsOutcome { Units(String), Exception(u64, bool) }
+
+fn string_coercion_result(result: Result<StringUnitsOutcome, BoundaryError>) -> ThawStringCoercionResult {
     match result {
-        Ok(Outcome::Units(units)) => ThawStringCoercionResult {
+        Ok(StringUnitsOutcome::Units(units)) => ThawStringCoercionResult {
             units: thaw_arena::owned_string(units),
             exception_handle: 0, exception_object_like: 0,
             error: std::ptr::null(),
         },
-        Ok(Outcome::Exception(exception_handle, object_like)) => ThawStringCoercionResult {
+        Ok(StringUnitsOutcome::Exception(exception_handle, object_like)) => ThawStringCoercionResult {
             units: std::ptr::null(), exception_handle,
             exception_object_like: u8::from(object_like), error: std::ptr::null(),
         },
         Err(error) => ThawStringCoercionResult {
             units: std::ptr::null(), exception_handle: 0, exception_object_like: 0,
-            error: thaw_arena::owned_string(error),
+            error: owned_exception_error(error),
         },
     }
 }
 
 #[no_mangle]
+pub extern "C" fn thaw_js_abstract_to_string_units_result(
+    handle: u64,
+    array_element: u8,
+) -> ThawStringCoercionResult {
+    string_coercion_result(with_active_or_context(|ctx| {
+        let value = value_for_handle(&ctx, handle)?;
+        abstract_to_string_units_of(&ctx, value, array_element)
+    }))
+}
+
+/// ToString of a native-graph Symbol identified by its owner and stable ID:
+/// resolves the engine's own Symbol through the private per-addon cache, so a
+/// Symbol coerced to a string throws the engine's real TypeError.
+#[no_mangle]
+pub extern "C" fn thaw_js_napi_symbol_abstract_to_string_units_result(
+    owner: u64,
+    id: u64,
+) -> ThawStringCoercionResult {
+    string_coercion_result(with_active_or_context(|ctx| -> Result<StringUnitsOutcome, BoundaryError> {
+        if owner == 0 || id == 0 { return Err("invalid native Symbol owner".into()); }
+        let ops = ctx.userdata::<PrivateNapiSymbolOps>()
+            .ok_or_else(|| "native Symbol bridge is not installed".to_string())?;
+        let get = ops.get.clone();
+        drop(ops);
+        let get = get.restore(&ctx).map_err(|error| error.to_string())?;
+        let value: Value = get.call((owner.to_string(), id.to_string()))
+            .map_err(|error| error.to_string())?;
+        if !value.is_symbol() {
+            return Err("native Symbol bridge did not return a Symbol".into());
+        }
+        abstract_to_string_units_of(&ctx, value, 0)
+    }))
+}
+
+#[no_mangle]
 pub extern "C" fn thaw_js_host_date_set_result(handle: u64, timestamp: f64) -> ThawResult {
-    let result: Result<String, String> = with_active_or_context(|ctx| {
+    let result: Result<String, BoundaryError> = with_active_or_context(|ctx| {
         let value = value_for_handle(&ctx, handle)?;
         let setter: Function = ctx.globals().get("__thaw_json_host_date_set")
             .map_err(|error| error.to_string())?;
         setter.call((value, timestamp)).map_err(|error| match error {
             rquickjs::Error::Exception => describe_tagged_exception(&ctx),
-            error => error.to_string(),
+            error => error.to_string().into(),
         })
     });
     match result {
@@ -3434,7 +3664,7 @@ pub extern "C" fn thaw_js_host_date_set_result(handle: u64, timestamp: f64) -> T
         },
         Err(error) => ThawResult {
             value: std::ptr::null(),
-            error: thaw_arena::owned_string(error),
+            error: owned_exception_error(error),
         },
     }
 }
@@ -3447,7 +3677,7 @@ fn thaw_js_set_property_graph_impl(
 ) -> ThawHandleResult {
     let key_json = to_str(key_json);
     let graph_json = to_str(graph_json);
-    let result: Result<u64, String> = with_active_or_context(|ctx| {
+    let result: Result<u64, BoundaryError> = with_active_or_context(|ctx| {
         let (object, key, decode, set) = before_graph_decode(&ctx, &graph_json, true, || {
             let object = object_for_handle(&ctx, handle)?;
             let json: Object = ctx.globals().get("JSON").map_err(|error| error.to_string())?;
@@ -3462,15 +3692,15 @@ fn thaw_js_set_property_graph_impl(
                 "__thaw_json_host_set_property"
             })
                 .map_err(|error| error.to_string())?;
-            Ok((object, key, decode, set))
+            Ok::<_, BoundaryError>((object, key, decode, set))
         })?;
         let value: Value = decode.call((graph_json.as_str(),)).map_err(|error| match error {
             rquickjs::Error::Exception => describe_tagged_exception(&ctx),
-            error => error.to_string(),
+            error => error.to_string().into(),
         })?;
         let written: bool = set.call((object, key, value)).map_err(|error| match error {
             rquickjs::Error::Exception => describe_tagged_exception(&ctx),
-            error => error.to_string(),
+            error => error.to_string().into(),
         })?;
         if !written { return Err("\u{1}TypeError\u{1}Cannot assign to read only property".into()); }
         Ok(1)
@@ -3478,7 +3708,7 @@ fn thaw_js_set_property_graph_impl(
     match result {
         Ok(value) => ThawHandleResult { value, error: std::ptr::null() },
         Err(error) => ThawHandleResult {
-            value: 0, error: thaw_arena::owned_string(error),
+            value: 0, error: owned_exception_error(error),
         },
     }
 }
@@ -3498,8 +3728,8 @@ fn property_write_with_exception_result(
     handle: u64, key_json: Option<String>, key_handle: u64,
     graph_json: String, receiver_data: bool,
 ) -> ThawCallWithExceptionResult {
-    enum Outcome { Written, Exception(u64, bool) }
-    let result: Result<Outcome, String> = with_active_or_context(|ctx| {
+    enum Outcome { Written, Rejected, Exception(u64, bool) }
+    let result: Result<Outcome, BoundaryError> = with_active_or_context(|ctx| {
         let (object, key, decode, set) = before_graph_decode(&ctx, &graph_json, true, || {
             let object = object_for_handle(&ctx, handle)?;
             let key: Value = if let Some(key_json) = key_json.as_ref() {
@@ -3516,7 +3746,7 @@ fn property_write_with_exception_result(
             } else {
                 "__thaw_json_host_set_property"
             }).map_err(|error| error.to_string())?;
-            Ok((object, key, decode, set))
+            Ok::<_, BoundaryError>((object, key, decode, set))
         })?;
         let value: Value = match decode.call((graph_json.as_str(),)) {
             Ok(value) => value,
@@ -3526,10 +3756,14 @@ fn property_write_with_exception_result(
                 return retain_value(&ctx, thrown)
                     .map(|handle| Outcome::Exception(handle, object_like));
             }
-            Err(error) => return Err(error.to_string()),
+            Err(error) => return Err(error.to_string().into()),
         };
         match set.call::<_, bool>((object, key, value)) {
             Ok(true) => Ok(Outcome::Written),
+            // Ordinary [[Set]] through a receiver (Reflect.set / a Proxy set
+            // trap) reports a rejected write as `false`; only a strict
+            // assignment turns it into a TypeError.
+            Ok(false) if receiver_data => Ok(Outcome::Rejected),
             Ok(false) => Err("\u{1}TypeError\u{1}Cannot assign to read only property".into()),
             Err(rquickjs::Error::Exception) => {
                 let thrown = ctx.catch();
@@ -3537,12 +3771,16 @@ fn property_write_with_exception_result(
                 retain_value(&ctx, thrown)
                     .map(|handle| Outcome::Exception(handle, object_like))
             }
-            Err(error) => Err(error.to_string()),
+            Err(error) => Err(error.to_string().into()),
         }
     });
     match result {
         Ok(Outcome::Written) => ThawCallWithExceptionResult {
             value: 1, exception_handle: 0, exception_object_like: 0,
+            error: std::ptr::null(),
+        },
+        Ok(Outcome::Rejected) => ThawCallWithExceptionResult {
+            value: 0, exception_handle: 0, exception_object_like: 0,
             error: std::ptr::null(),
         },
         Ok(Outcome::Exception(exception_handle, object_like)) => ThawCallWithExceptionResult {
@@ -3551,7 +3789,7 @@ fn property_write_with_exception_result(
         },
         Err(error) => ThawCallWithExceptionResult {
             value: 0, exception_handle: 0, exception_object_like: 0,
-            error: thaw_arena::owned_string(error),
+            error: owned_exception_error(error),
         },
     }
 }
@@ -3582,13 +3820,13 @@ pub extern "C" fn thaw_js_set_property_key_handle_graph_with_exception_result(
 
 #[no_mangle]
 pub extern "C" fn thaw_js_host_enumerate_result(handle: u64, operation: u8) -> ThawResult {
-    let result: Result<String, String> = with_active_or_context(|ctx| {
+    let result: Result<String, BoundaryError> = with_active_or_context(|ctx| {
         let value = value_for_handle(&ctx, handle)?;
         let enumerate: Function = ctx.globals().get("__thaw_json_host_enumerate")
             .map_err(|error| error.to_string())?;
         enumerate.call((value, operation)).map_err(|error| match error {
             rquickjs::Error::Exception => describe_tagged_exception(&ctx),
-            error => error.to_string(),
+            error => error.to_string().into(),
         })
     });
     match result {
@@ -3605,7 +3843,7 @@ pub extern "C" fn thaw_js_host_enumerate_result(handle: u64, operation: u8) -> T
         }
         Err(error) => ThawResult {
             value: std::ptr::null(),
-            error: thaw_arena::owned_string(error),
+            error: owned_exception_error(error),
         },
     }
 }
@@ -3614,54 +3852,54 @@ pub extern "C" fn thaw_js_host_enumerate_result(handle: u64, operation: u8) -> T
 pub extern "C" fn thaw_js_host_property_names_result(
     handle: u64, key_mode: i32, key_filter: u32, key_conversion: i32,
 ) -> ThawResult {
-    let result: Result<String, String> = with_active_or_context(|ctx| {
+    let result: Result<String, BoundaryError> = with_active_or_context(|ctx| {
         let value = value_for_handle(&ctx, handle)?;
         let enumerate: Function = ctx.globals().get("__thaw_json_host_property_names")
             .map_err(|error| error.to_string())?;
         enumerate.call((value, key_mode, key_filter, key_conversion)).map_err(|error| match error {
             rquickjs::Error::Exception => describe_tagged_exception(&ctx),
-            error => error.to_string(),
+            error => error.to_string().into(),
         })
     });
     match result {
         Ok(value) => ThawResult { value: thaw_arena::owned_string(value), error: std::ptr::null() },
-        Err(error) => ThawResult { value: std::ptr::null(), error: thaw_arena::owned_string(error) },
+        Err(error) => ThawResult { value: std::ptr::null(), error: owned_exception_error(error) },
     }
 }
 
 #[no_mangle]
 pub extern "C" fn thaw_js_get_prototype_handle_result(handle: u64) -> ThawHandleResult {
-    let result: Result<u64, String> = with_active_or_context(|ctx| {
+    let result: Result<u64, BoundaryError> = with_active_or_context(|ctx| {
         let value = value_for_handle(&ctx, handle)?;
         let method: Function = ctx.globals().get("__thaw_json_host_get_prototype")
             .map_err(|error| error.to_string())?;
         let prototype: Value = method.call((value,)).map_err(|error| match error {
             rquickjs::Error::Exception => describe_tagged_exception(&ctx),
-            error => error.to_string(),
+            error => error.to_string().into(),
         })?;
         retain_value(&ctx, prototype)
     });
     match result {
         Ok(value) => ThawHandleResult { value, error: std::ptr::null() },
-        Err(error) => ThawHandleResult { value: 0, error: thaw_arena::owned_string(error) },
+        Err(error) => ThawHandleResult { value: 0, error: owned_exception_error(error) },
     }
 }
 
 #[no_mangle]
 pub extern "C" fn thaw_js_string_from_utf16_units_result(units_json: *const c_char) -> ThawHandleResult {
     let units_json = to_str(units_json);
-    let result: Result<u64, String> = with_active_or_context(|ctx| {
+    let result: Result<u64, BoundaryError> = with_active_or_context(|ctx| {
         let make: Function = ctx.globals().get("__thaw_json_host_utf16_string")
             .map_err(|error| error.to_string())?;
         let value: Value = make.call((units_json.as_str(),)).map_err(|error| match error {
             rquickjs::Error::Exception => describe_tagged_exception(&ctx),
-            error => error.to_string(),
+            error => error.to_string().into(),
         })?;
         retain_value(&ctx, value)
     });
     match result {
         Ok(value) => ThawHandleResult { value, error: std::ptr::null() },
-        Err(error) => ThawHandleResult { value: 0, error: thaw_arena::owned_string(error) },
+        Err(error) => ThawHandleResult { value: 0, error: owned_exception_error(error) },
     }
 }
 
@@ -3669,13 +3907,13 @@ pub extern "C" fn thaw_js_string_from_utf16_units_result(units_json: *const c_ch
 pub extern "C" fn thaw_js_native_symbol_handle_result(
     native_handle: u64,
 ) -> ThawHandleResult {
-    let result: Result<u64, String> = with_active_or_context(|ctx| {
+    let result: Result<u64, BoundaryError> = with_active_or_context(|ctx| {
         let make: Function = ctx.globals().get("__thaw_json_host_native_symbol")
             .map_err(|error| error.to_string())?;
         let value: Value = make.call((native_handle.to_string(),))
             .map_err(|error| match error {
                 rquickjs::Error::Exception => describe_tagged_exception(&ctx),
-                error => error.to_string(),
+                error => error.to_string().into(),
             })?;
         // Native-created Symbols need an independent native root while a JS
         // Symbol identity is live. A JS-origin Symbol already has a weak
@@ -3686,20 +3924,20 @@ pub extern "C" fn thaw_js_native_symbol_handle_result(
         let needs_pin: bool = needs_pin.call((native_handle.to_string(),))
             .map_err(|error| match error {
                 rquickjs::Error::Exception => describe_tagged_exception(&ctx),
-                error => error.to_string(),
+                error => error.to_string().into(),
             })?;
         if needs_pin {
             pin_native_graph_symbol(ctx.clone(), native_handle.to_string())
                 .map_err(|error| match error {
                     rquickjs::Error::Exception => describe_tagged_exception(&ctx),
-                    error => error.to_string(),
+                    error => error.to_string().into(),
                 })?;
         }
         retain_value(&ctx, value)
     });
     match result {
         Ok(value) => ThawHandleResult { value, error: std::ptr::null() },
-        Err(error) => ThawHandleResult { value: 0, error: thaw_arena::owned_string(error) },
+        Err(error) => ThawHandleResult { value: 0, error: owned_exception_error(error) },
     }
 }
 
@@ -3708,7 +3946,7 @@ pub extern "C" fn thaw_js_set_prototype_graph_result(
     handle: u64, prototype_graph: *const c_char,
 ) -> ThawHandleResult {
     let prototype_graph = to_str(prototype_graph);
-    let result: Result<u64, String> = with_active_or_context(|ctx| {
+    let result: Result<u64, BoundaryError> = with_active_or_context(|ctx| {
         let object = before_graph_decode(&ctx, &prototype_graph, true,
             || value_for_handle(&ctx, handle))?;
         let arguments = decode_argument_array(&ctx, &prototype_graph, true)?;
@@ -3717,20 +3955,20 @@ pub extern "C" fn thaw_js_set_prototype_graph_result(
             .map_err(|error| error.to_string())?;
         let changed: bool = method.call((object, prototype)).map_err(|error| match error {
             rquickjs::Error::Exception => describe_tagged_exception(&ctx),
-            error => error.to_string(),
+            error => error.to_string().into(),
         })?;
         Ok(u64::from(changed))
     });
     match result {
         Ok(value) => ThawHandleResult { value, error: std::ptr::null() },
-        Err(error) => ThawHandleResult { value: 0, error: thaw_arena::owned_string(error) },
+        Err(error) => ThawHandleResult { value: 0, error: owned_exception_error(error) },
     }
 }
 
 #[no_mangle]
 pub extern "C" fn thaw_js_instanceof_graph_result(arguments_graph: *const c_char) -> ThawHandleResult {
     let arguments_graph = to_str(arguments_graph);
-    let result: Result<u64, String> = with_active_or_context(|ctx| {
+    let result: Result<u64, BoundaryError> = with_active_or_context(|ctx| {
         let arguments = decode_argument_array(&ctx, &arguments_graph, true)?;
         let object: Value = arguments.get(0).map_err(|error| error.to_string())?;
         let constructor: Value = arguments.get(1).map_err(|error| error.to_string())?;
@@ -3738,13 +3976,13 @@ pub extern "C" fn thaw_js_instanceof_graph_result(arguments_graph: *const c_char
             .map_err(|error| error.to_string())?;
         let answer: bool = method.call((object, constructor)).map_err(|error| match error {
             rquickjs::Error::Exception => describe_tagged_exception(&ctx),
-            error => error.to_string(),
+            error => error.to_string().into(),
         })?;
         Ok(u64::from(answer))
     });
     match result {
         Ok(value) => ThawHandleResult { value, error: std::ptr::null() },
-        Err(error) => ThawHandleResult { value: 0, error: thaw_arena::owned_string(error) },
+        Err(error) => ThawHandleResult { value: 0, error: owned_exception_error(error) },
     }
 }
 
@@ -3752,27 +3990,27 @@ pub extern "C" fn thaw_js_instanceof_graph_result(arguments_graph: *const c_char
 pub extern "C" fn thaw_js_instanceof_handles_result(
     object_handle: u64, constructor_handle: u64,
 ) -> ThawHandleResult {
-    let result: Result<u64, String> = with_active_or_context(|ctx| {
+    let result: Result<u64, BoundaryError> = with_active_or_context(|ctx| {
         let object = value_for_handle(&ctx, object_handle)?;
         let constructor = value_for_handle(&ctx, constructor_handle)?;
         let method: Function = ctx.globals().get("__thaw_json_host_instanceof")
             .map_err(|error| error.to_string())?;
         let answer: bool = method.call((object, constructor)).map_err(|error| match error {
             rquickjs::Error::Exception => describe_tagged_exception(&ctx),
-            error => error.to_string(),
+            error => error.to_string().into(),
         })?;
         Ok(u64::from(answer))
     });
     match result {
         Ok(value) => ThawHandleResult { value, error: std::ptr::null() },
-        Err(error) => ThawHandleResult { value: 0, error: thaw_arena::owned_string(error) },
+        Err(error) => ThawHandleResult { value: 0, error: owned_exception_error(error) },
     }
 }
 
 #[no_mangle]
 pub extern "C" fn thaw_js_retain_json_result(value_json: *const c_char) -> ThawHandleResult {
     let value_json = to_str(value_json);
-    let result = with_active_or_context(|ctx| -> Result<u64, String> {
+    let result = with_active_or_context(|ctx| -> Result<u64, BoundaryError> {
         let json: Object = ctx.globals().get("JSON").map_err(|error| error.to_string())?;
         let parse: Function = json.get("parse").map_err(|error| error.to_string())?;
         let reviver: Function = ctx
@@ -3791,7 +4029,7 @@ pub extern "C" fn thaw_js_retain_json_result(value_json: *const c_char) -> ThawH
         },
         Err(error) => ThawHandleResult {
             value: 0,
-            error: thaw_arena::owned_string(error),
+            error: owned_exception_error(error),
         },
     }
 }
@@ -3804,20 +4042,20 @@ pub extern "C" fn thaw_js_retain_json_result(value_json: *const c_char) -> ThawH
 #[no_mangle]
 pub extern "C" fn thaw_js_retain_graph_result(graph_json: *const c_char) -> ThawHandleResult {
     let graph_json = to_str(graph_json);
-    let result = with_active_or_context(|ctx| -> Result<u64, String> {
+    let result = with_active_or_context(|ctx| -> Result<u64, BoundaryError> {
         let decode: Function = before_graph_decode(&ctx, &graph_json, true, || {
             ctx.globals().get("__thaw_json_graph_decode_owned")
                 .map_err(|error| error.to_string())
         })?;
         let value: Value = decode.call((graph_json.as_str(),)).map_err(|error| match error {
             rquickjs::Error::Exception => describe_tagged_exception(&ctx),
-            error => error.to_string(),
+            error => error.to_string().into(),
         })?;
         retain_value(&ctx, value)
     });
     match result {
         Ok(value) => ThawHandleResult { value, error: std::ptr::null() },
-        Err(error) => ThawHandleResult { value: 0, error: thaw_arena::owned_string(error) },
+        Err(error) => ThawHandleResult { value: 0, error: owned_exception_error(error) },
     }
 }
 
@@ -3828,7 +4066,7 @@ pub extern "C" fn thaw_js_set_property_result(
     value_handle: u64,
 ) -> ThawHandleResult {
     let name = to_str(name);
-    let result: Result<u64, String> = with_active_or_context(|ctx| {
+    let result: Result<u64, BoundaryError> = with_active_or_context(|ctx| {
         let object = object_for_handle(&ctx, handle)?;
         let value = value_for_handle(&ctx, value_handle)?;
         // See `invoke_raw`'s doc comment -- a setter can throw too.
@@ -3839,7 +4077,7 @@ pub extern "C" fn thaw_js_set_property_result(
             .set(key, value)
             .map_err(|error| match error {
                 rquickjs::Error::Exception => describe_tagged_exception(&ctx),
-                error => error.to_string(),
+                error => error.to_string().into(),
             })?;
         Ok(1)
     });
@@ -3850,7 +4088,7 @@ pub extern "C" fn thaw_js_set_property_result(
         },
         Err(error) => ThawHandleResult {
             value: 0,
-            error: thaw_arena::owned_string(error),
+            error: owned_exception_error(error),
         },
     }
 }
@@ -3863,7 +4101,7 @@ fn set_property_json_result_impl(
 ) -> ThawResult {
     let name = to_str(name);
     let args_json = to_str(args_json);
-    let result = with_active_or_context(|ctx| -> Result<String, String> {
+    let result = with_active_or_context(|ctx| -> Result<String, BoundaryError> {
         let object = before_graph_decode(&ctx, &args_json, graph_result, || {
             object_for_handle(&ctx, handle)
         })?;
@@ -3877,7 +4115,7 @@ fn set_property_json_result_impl(
             .map_err(|error| error.to_string())?;
         object.set(key, value.clone()).map_err(|error| match error {
             rquickjs::Error::Exception => describe_tagged_exception(&ctx),
-            error => error.to_string(),
+            error => error.to_string().into(),
         })?;
         // Same substitution as `resolve_value_impl`'s own, and for the
         // same reason: a genuinely `undefined` assigned value (e.g. one
@@ -3907,7 +4145,7 @@ fn set_property_json_result_impl(
         },
         Err(error) => ThawResult {
             value: std::ptr::null(),
-            error: thaw_arena::owned_string(error),
+            error: owned_exception_error(error),
         },
     }
 }
@@ -3946,19 +4184,19 @@ pub extern "C" fn thaw_js_has_property_result(
 pub extern "C" fn thaw_js_host_object_integrity_result(
     handle: u64, freeze: u8,
 ) -> ThawHandleResult {
-    let result: Result<u64, String> = with_active_or_context(|ctx| {
+    let result: Result<u64, BoundaryError> = with_active_or_context(|ctx| {
         let object = object_for_handle(&ctx, handle)?;
         let integrity: Function = ctx.globals().get("__thaw_json_host_object_integrity")
             .map_err(|error| error.to_string())?;
         let done: bool = integrity.call((object, freeze != 0)).map_err(|error| match error {
             rquickjs::Error::Exception => describe_tagged_exception(&ctx),
-            error => error.to_string(),
+            error => error.to_string().into(),
         })?;
         Ok(u64::from(done))
     });
     match result {
         Ok(value) => ThawHandleResult { value, error: std::ptr::null() },
-        Err(error) => ThawHandleResult { value: 0, error: thaw_arena::owned_string(error) },
+        Err(error) => ThawHandleResult { value: 0, error: owned_exception_error(error) },
     }
 }
 
@@ -3968,7 +4206,7 @@ fn dynamic_property_predicate(
     delete: bool,
 ) -> ThawHandleResult {
     let name = to_str(name);
-    let result: Result<u64, String> = with_active_or_context(|ctx| {
+    let result: Result<u64, BoundaryError> = with_active_or_context(|ctx| {
         let object = object_for_handle(&ctx, handle)?;
         let key = dynamic_property_key(&ctx, &name)?;
         let reflect: Object = ctx
@@ -3976,20 +4214,20 @@ fn dynamic_property_predicate(
             .get("Reflect")
             .map_err(|error| match error {
                 rquickjs::Error::Exception => describe_tagged_exception(&ctx),
-                error => error.to_string(),
+                error => error.to_string().into(),
             })?;
         let operation: Function = reflect
             .get(if delete { "deleteProperty" } else { "has" })
             .map_err(|error| match error {
                 rquickjs::Error::Exception => describe_tagged_exception(&ctx),
-                error => error.to_string(),
+                error => error.to_string().into(),
             })?;
         operation
             .call::<_, bool>((object, key))
             .map(u64::from)
             .map_err(|error| match error {
                 rquickjs::Error::Exception => describe_tagged_exception(&ctx),
-                error => error.to_string(),
+                error => error.to_string().into(),
             })
     });
     match result {
@@ -3999,22 +4237,22 @@ fn dynamic_property_predicate(
         },
         Err(error) => ThawHandleResult {
             value: 0,
-            error: thaw_arena::owned_string(error),
+            error: owned_exception_error(error),
         },
     }
 }
 
-fn dynamic_property_key<'js>(ctx: &Ctx<'js>, name: &str) -> Result<Value<'js>, String> {
+fn dynamic_property_key<'js>(ctx: &Ctx<'js>, name: &str) -> Result<Value<'js>, BoundaryError> {
     ctx.globals()
         .get::<_, Function>("__thaw_property_key")
         .and_then(|resolve| resolve.call((name,)))
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string().into())
 }
 
 // A member call captures its property before arguments and invokes it later.
 fn invoke_selected_method<'js>(
     ctx: &Ctx<'js>, receiver: u64, selected: u64, args_json: &str,
-) -> Result<Value<'js>, String> {
+) -> Result<Value<'js>, BoundaryError> {
     let arguments = decode_argument_array(ctx, args_json, true)?;
     // The graph decoder owns transferred leases even if the receiver has
     // since become invalid. Keep Call(this) on the original value.
@@ -4030,7 +4268,7 @@ fn invoke_selected_method<'js>(
     }
     method.call_arg(call_args).map_err(|error| match error {
         rquickjs::Error::Exception => describe_tagged_exception(ctx),
-        error => error.to_string(),
+        error => error.to_string().into(),
     })
 }
 
@@ -4046,7 +4284,7 @@ pub extern "C" fn thaw_js_call_selected_method_graph_result(
     });
     match result {
         Ok(value) => ThawResult { value: thaw_arena::owned_string(value), error: std::ptr::null() },
-        Err(error) => ThawResult { value: std::ptr::null(), error: thaw_arena::owned_string(error) },
+        Err(error) => ThawResult { value: std::ptr::null(), error: owned_exception_error(error) },
     }
 }
 
@@ -4056,7 +4294,7 @@ pub extern "C" fn thaw_js_call_selected_method_handle_graph_args_result(
 ) -> ThawHandleResult {
     let name = to_str(name);
     let args_json = to_str(args_json);
-    let result: Result<u64, String> = with_active_or_context(|ctx| {
+    let result: Result<u64, BoundaryError> = with_active_or_context(|ctx| {
         let value = invoke_selected_method(&ctx, receiver, selected, &args_json)?;
         let value = if defer_resolution { value } else {
             resolve_promise_value(&ctx, value, &format!("JavaScript method `{name}`"), true)?
@@ -4065,7 +4303,7 @@ pub extern "C" fn thaw_js_call_selected_method_handle_graph_args_result(
     });
     match result {
         Ok(value) => ThawHandleResult { value, error: std::ptr::null() },
-        Err(error) => ThawHandleResult { value: 0, error: thaw_arena::owned_string(error) },
+        Err(error) => ThawHandleResult { value: 0, error: owned_exception_error(error) },
     }
 }
 
@@ -4075,7 +4313,7 @@ fn invoke_method<'js>(
     name: &str,
     args_json: &str,
     graph_args: bool,
-) -> Result<Value<'js>, String> {
+) -> Result<Value<'js>, BoundaryError> {
     // `boxed_object_for_handle`, not `object_for_handle`: a method call on a
     // primitive receiver (`"abc".trim()`, a `JsValue` whose runtime value is
     // a string) needs the same auto-boxing `value.method()` gets in JS.
@@ -4085,9 +4323,9 @@ fn invoke_method<'js>(
         // transferred graph is decoded.
         let method: Function = object.get(name).map_err(|error| match error {
             rquickjs::Error::Exception => describe_tagged_exception(ctx),
-            error => error.to_string(),
+            error => error.to_string().into(),
         })?;
-        Ok((object, method))
+        Ok::<_, BoundaryError>((object, method))
     })?;
     let arguments = decode_argument_array(ctx, args_json, graph_args)?;
     let mut call_args = Args::new_unsized(ctx.clone());
@@ -4100,7 +4338,7 @@ fn invoke_method<'js>(
     }
     method.call_arg(call_args).map_err(|error| match error {
         rquickjs::Error::Exception => describe_tagged_exception(ctx),
-        error => error.to_string(),
+        error => error.to_string().into(),
     })
 }
 
@@ -4123,7 +4361,7 @@ fn thaw_js_call_method_result_impl(
         },
         Err(error) => ThawResult {
             value: std::ptr::null(),
-            error: thaw_arena::owned_string(error),
+            error: owned_exception_error(error),
         },
     }
 }
@@ -4165,7 +4403,7 @@ fn thaw_js_call_method_handle_impl(
 ) -> ThawHandleResult {
     let name = to_str(name);
     let args_json = to_str(args_json);
-    let result: Result<u64, String> = with_active_or_context(|ctx| {
+    let result: Result<u64, BoundaryError> = with_active_or_context(|ctx| {
         let value = invoke_method(&ctx, handle, &name, &args_json, graph_args)?;
         let value = if chain_intermediate {
             value
@@ -4186,7 +4424,7 @@ fn thaw_js_call_method_handle_impl(
         },
         Err(error) => ThawHandleResult {
             value: 0,
-            error: thaw_arena::owned_string(error),
+            error: owned_exception_error(error),
         },
     }
 }
@@ -4203,7 +4441,7 @@ fn thaw_js_resolve_handle_result_impl(handle: u64, graph_result: bool) -> ThawRe
         },
         Err(error) => ThawResult {
             value: std::ptr::null(),
-            error: thaw_arena::owned_string(error),
+            error: owned_exception_error(error),
         },
     }
 }
@@ -4227,7 +4465,7 @@ pub extern "C" fn thaw_js_resolve_handle_handle_result(handle: u64) -> ThawHandl
         },
         Err(error) => ThawHandleResult {
             value: 0,
-            error: thaw_arena::owned_string(error),
+            error: owned_exception_error(error),
         },
     }
 }
@@ -4258,7 +4496,7 @@ fn call_handle_result_impl(handle: u64, args_json: *const c_char, graph_result: 
         },
         Err(reason) => ThawResult {
             value: std::ptr::null(),
-            error: thaw_arena::owned_string(reason),
+            error: owned_exception_error(reason),
         },
     }
 }
@@ -4298,7 +4536,7 @@ pub extern "C" fn thaw_js_call_handle_with_this_graph_wire_result(
         }
         let result: Value = target.call_arg(call_args).map_err(|error| match error {
             rquickjs::Error::Exception => describe_tagged_exception(&ctx),
-            error => error.to_string(),
+            error => error.to_string().into(),
         })?;
         resolve_value_graph_impl(ctx, result,
             &format!("JavaScript value #{handle}"), true)
@@ -4308,7 +4546,7 @@ pub extern "C" fn thaw_js_call_handle_with_this_graph_wire_result(
             value: thaw_arena::owned_string(text), error: std::ptr::null(),
         },
         Err(reason) => ThawResult {
-            value: std::ptr::null(), error: thaw_arena::owned_string(reason),
+            value: std::ptr::null(), error: owned_exception_error(reason),
         },
     }
 }
@@ -4331,8 +4569,21 @@ fn describe_exception(ctx: &Ctx<'_>) -> String {
     format!("{exc:?}")
 }
 
-fn describe_tagged_exception(ctx: &Ctx<'_>) -> String {
+fn native_exception_packet<'js>(
+    ctx: &Ctx<'js>,
+    exception: &Value<'js>,
+) -> Option<std::rc::Rc<thaw_arena::exception::ExceptionPacket>> {
+    let bridge = ctx.userdata::<NativeExceptionBridge>()?;
+    let token = bridge.token_of.clone().restore(ctx).ok()?.call::<_, String>((exception.clone(),)).ok()?.parse().ok()?;
+    thaw_arena::exception::packet(token)
+}
+
+fn describe_tagged_exception(ctx: &Ctx<'_>) -> BoundaryError {
     let exc = ctx.catch();
+    let _ = install_native_exception_bridge(ctx);
+    // Authenticate the exact Error object before asking it for any user-controlled
+    // message/name/property values. The WeakMap entry is private Rust userdata.
+    let packet = native_exception_packet(ctx, &exc);
     let properties = error_property_json(ctx, &exc);
     let mut body = if let Some(obj) = exc.as_object() {
         if let Ok(message) = obj.get::<_, String>("message") {
@@ -4354,7 +4605,7 @@ fn describe_tagged_exception(ctx: &Ctx<'_>) -> String {
         body.push(ERROR_PROPERTIES_MARKER);
         body.push_str(&properties);
     }
-    body
+    BoundaryError { text: body, packet }
 }
 
 /// Marker separating an exception's message from its own extra properties
@@ -4381,13 +4632,14 @@ fn error_property_json<'js>(ctx: &Ctx<'js>, exc: &Value<'js>) -> Option<String> 
     Some(encoded)
 }
 
-fn describe_host_exception(ctx: &Ctx<'_>, label: &str) -> String {
+fn describe_host_exception(ctx: &Ctx<'_>, label: &str) -> BoundaryError {
     // A napi callback reference surfaces the JS error to the addon verbatim (it becomes the
     // pending napi exception), so it carries no `label threw:` decoration.
     let decorate = |message: &str| {
         if label.starts_with("__thaw_napi_reference_") { message.to_string() } else { format!("`{label}` threw: {message}") }
     };
     let exc = ctx.catch();
+    let packet = native_exception_packet(ctx, &exc);
     let properties = error_property_json(ctx, &exc);
     let mut body = if let Some(obj) = exc.as_object() {
         if let Ok(message) = obj.get::<_, String>("message") {
@@ -4417,11 +4669,12 @@ fn describe_host_exception(ctx: &Ctx<'_>, label: &str) -> String {
         body.push(ERROR_PROPERTIES_MARKER);
         body.push_str(&properties);
     }
-    body
+    BoundaryError { text: body, packet }
 }
 
-fn describe_promise_exception<'js>(ctx: &Ctx<'js>, label: &str, preserve_error: bool) -> String {
+fn describe_promise_exception<'js>(ctx: &Ctx<'js>, label: &str, preserve_error: bool) -> BoundaryError {
     let exc = ctx.catch();
+    let packet = native_exception_packet(ctx, &exc);
     let properties = error_property_json(ctx, &exc);
     let mut body = if let Some(obj) = exc.as_object() {
         if let Ok(message) = obj.get::<_, String>("message") {
@@ -4459,7 +4712,7 @@ fn describe_promise_exception<'js>(ctx: &Ctx<'js>, label: &str, preserve_error: 
         body.push(ERROR_PROPERTIES_MARKER);
         body.push_str(&properties);
     }
-    body
+    BoundaryError { text: body, packet }
 }
 
 fn describe_exception_with_stack(ctx: &Ctx<'_>) -> String {
@@ -4527,8 +4780,8 @@ pub unsafe extern "C" fn thaw_js_call_handle_mixed_exact_consuming_result(
         // registered one-shot grant owns any transferred graph leases here.
         unsafe { thaw_json_discard_graph_wire(args_json) };
     }
-    let result: Result<Outcome, String> = match &acquired {
-        Err(error) => Err(error.clone()),
+    let result: Result<Outcome, BoundaryError> = match &acquired {
+        Err(error) => Err(error.clone().into()),
         Ok(values) => {
             let args_json_ptr = args_json;
             let args_json = to_str(args_json);
@@ -4552,7 +4805,7 @@ pub unsafe extern "C" fn thaw_js_call_handle_mixed_exact_consuming_result(
                         return retain_value(&ctx, thrown)
                             .map(|value| Outcome::Exception(value, object_like));
                     }
-                    Err(error) => return Err(error.to_string()),
+                    Err(error) => return Err(error.to_string().into()),
                 };
                 let mut call_args = Args::new_unsized(ctx.clone());
                 for index in 0..arguments.len() {
@@ -4564,7 +4817,7 @@ pub unsafe extern "C" fn thaw_js_call_handle_mixed_exact_consuming_result(
                             return retain_value(&ctx, thrown)
                                 .map(|value| Outcome::Exception(value, object_like));
                         }
-                        Err(error) => return Err(error.to_string()),
+                        Err(error) => return Err(error.to_string().into()),
                     };
                     call_args.push_arg(argument)
                         .map_err(|error| error.to_string())?;
@@ -4581,7 +4834,7 @@ pub unsafe extern "C" fn thaw_js_call_handle_mixed_exact_consuming_result(
                         retain_value(&ctx, thrown)
                             .map(|value| Outcome::Exception(value, object_like))
                     }
-                    Err(error) => Err(error.to_string()),
+                    Err(error) => Err(error.to_string().into()),
                 }
             })
         }
@@ -4601,7 +4854,7 @@ pub unsafe extern "C" fn thaw_js_call_handle_mixed_exact_consuming_result(
         },
         Err(error) => ThawCallWithExceptionResult {
             value: 0, exception_handle: 0, exception_object_like: 0,
-            error: thaw_arena::owned_string(error),
+            error: owned_exception_error(error),
         },
     }
 }
@@ -4726,7 +4979,7 @@ pub extern "C" fn thaw_js_to_iterator_exact_result(
     source_handle: u64,
 ) -> ThawCallWithExceptionResult {
     enum Outcome { Value(u64), Exception(u64, bool) }
-    let result: Result<Outcome, String> = with_active_or_context(|ctx| {
+    let result: Result<Outcome, BoundaryError> = with_active_or_context(|ctx| {
         let source = value_for_handle(&ctx, source_handle)?;
         let to_iterator: Function = ctx.globals().get("__thaw_to_iterator")
             .map_err(|error| error.to_string())?;
@@ -4738,7 +4991,7 @@ pub extern "C" fn thaw_js_to_iterator_exact_result(
                 retain_value(&ctx, thrown)
                     .map(|handle| Outcome::Exception(handle, object_like))
             }
-            Err(error) => Err(error.to_string()),
+            Err(error) => Err(error.to_string().into()),
         }
     });
     match result {
@@ -4752,7 +5005,7 @@ pub extern "C" fn thaw_js_to_iterator_exact_result(
         },
         Err(error) => ThawCallWithExceptionResult {
             value: 0, exception_handle: 0, exception_object_like: 0,
-            error: thaw_arena::owned_string(error),
+            error: owned_exception_error(error),
         },
     }
 }
@@ -4765,7 +5018,7 @@ pub extern "C" fn thaw_js_iterator_step_exact_result(
     iterator_handle: u64, mode: u8, error_text: *const c_char,
 ) -> ThawCallWithExceptionResult {
     enum Outcome { Value(u64), Exception(u64, bool) }
-    let result: Result<Outcome, String> = with_active_or_context(|ctx| {
+    let result: Result<Outcome, BoundaryError> = with_active_or_context(|ctx| {
         if mode > 2 { return Err("Invalid iterator step mode".into()); }
         let iterator = value_for_handle(&ctx, iterator_handle)?;
         let step: Function = ctx.globals().get("__thaw_iterator_step_exact")
@@ -4779,7 +5032,7 @@ pub extern "C" fn thaw_js_iterator_step_exact_result(
                 retain_value(&ctx, thrown)
                     .map(|handle| Outcome::Exception(handle, object_like))
             }
-            Err(error) => Err(error.to_string()),
+            Err(error) => Err(error.to_string().into()),
         }
     });
     match result {
@@ -4793,7 +5046,7 @@ pub extern "C" fn thaw_js_iterator_step_exact_result(
         },
         Err(error) => ThawCallWithExceptionResult {
             value: 0, exception_handle: 0, exception_object_like: 0,
-            error: thaw_arena::owned_string(error),
+            error: owned_exception_error(error),
         },
     }
 }
@@ -4804,7 +5057,7 @@ pub extern "C" fn thaw_js_iterator_step_exact_result(
 /// values, so a thrown Promise remains the original rejection value.
 #[no_mangle]
 pub extern "C" fn thaw_js_capture_handle_graph_result(handle: u64) -> ThawResult {
-    let result: Result<String, String> = with_active_or_context(|ctx| {
+    let result: Result<String, BoundaryError> = with_active_or_context(|ctx| {
         let value = value_for_handle(&ctx, handle)?;
         let encode: Function = ctx.globals().get("__thaw_json_graph_encode_js")
             .map_err(|error| error.to_string())?;
@@ -4814,7 +5067,7 @@ pub extern "C" fn thaw_js_capture_handle_graph_result(handle: u64) -> ThawResult
             encode.call((value, 0, true, false))
         }.map_err(|error| match error {
             rquickjs::Error::Exception => describe_tagged_exception(&ctx),
-            error => error.to_string(),
+            error => error.to_string().into(),
         })
     });
     match result {
@@ -4829,7 +5082,7 @@ pub extern "C" fn thaw_js_capture_handle_graph_result(handle: u64) -> ThawResult
                 ThawResult { value, error: std::ptr::null() }
             }
         }
-        Err(error) => ThawResult { value: std::ptr::null(), error: thaw_arena::owned_string(error) },
+        Err(error) => ThawResult { value: std::ptr::null(), error: owned_exception_error(error) },
     }
 }
 

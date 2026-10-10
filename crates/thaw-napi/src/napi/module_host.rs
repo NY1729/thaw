@@ -2219,7 +2219,11 @@ extern "C" fn release_napi_graph_reference(token: u64) -> u8 {
             .find(|env| !env.finalized
                 && env.graph_reference_tokens.contains(&(reference as usize)))
             .map(|env| (&**env as *const Env).cast_mut())
-    }).ok().flatten();
+    }).ok().flatten().or_else(|| STANDALONE_GRAPH_OWNERS.try_with(|owners| {
+        owners.borrow().values().map(|env| *env as *mut Env)
+            .find(|env| unsafe { env.as_ref() }.is_some_and(|env|
+                !env.finalized && env.graph_reference_tokens.contains(&(reference as usize))))
+    }).ok().flatten());
     let Some(env) = env else { return 0; };
     if unsafe { (*env).native_graph_pins } == 0 { return 0; }
     // Consume provenance before invoking the N-API deletion path, which may
@@ -3353,7 +3357,7 @@ unsafe fn qjs_call_function(
         owner.alloc(Value::Array(items))
     };
     let guard = CallbackGraphArguments { env, value: arguments };
-    let encoded = napi_result_graph_for_env(env, arguments, true);
+    let encoded = napi_arguments_graph_for_env(env, arguments);
     drop(guard);
     let Ok(encoded) = encoded else {
         return record_status(env, NAPI_GENERIC_FAILURE);
@@ -3744,7 +3748,7 @@ unsafe fn qjs_construct_function(
         owner.alloc(Value::Array(args.iter().copied().map(Some).collect()))
     };
     let guard = CallbackGraphArguments { env, value: arguments };
-    let encoded = napi_result_graph_for_env(env, arguments, true);
+    let encoded = napi_arguments_graph_for_env(env, arguments);
     drop(guard);
     let Ok(encoded) = encoded else { return record_status(env, NAPI_GENERIC_FAILURE) };
     let Ok(encoded) = CString::new(encoded) else { return record_status(env, NAPI_INVALID_ARG) };
@@ -3806,7 +3810,7 @@ unsafe fn qjs_set_prototype(env: NapiEnv, handle: u64, prototype: NapiValue) -> 
         owner.alloc(Value::Array(vec![Some(prototype)]))
     };
     let guard = CallbackGraphArguments { env, value: arguments };
-    let encoded = napi_result_graph_for_env(env, arguments, true);
+    let encoded = napi_arguments_graph_for_env(env, arguments);
     drop(guard);
     let Ok(encoded) = encoded else { return record_status(env, NAPI_GENERIC_FAILURE) };
     let Ok(encoded) = CString::new(encoded) else { return record_status(env, NAPI_INVALID_ARG) };
@@ -3828,7 +3832,7 @@ unsafe fn qjs_instanceof(env: NapiEnv, object: NapiValue, constructor: NapiValue
         owner.alloc(Value::Array(vec![Some(object), Some(constructor)]))
     };
     let guard = CallbackGraphArguments { env, value: arguments };
-    let encoded = napi_result_graph_for_env(env, arguments, true);
+    let encoded = napi_arguments_graph_for_env(env, arguments);
     drop(guard);
     let Ok(encoded) = encoded else { return record_status(env, NAPI_GENERIC_FAILURE) };
     let Ok(encoded) = CString::new(encoded) else { return record_status(env, NAPI_INVALID_ARG) };
@@ -4378,6 +4382,9 @@ struct NapiResultGraph {
     leases: GraphLeases,
     preserve_undefined: bool,
     temporaries: GraphTemporaries,
+    // Elements of a call-argument packet are each transferred to the callee,
+    // so they get the same live-object treatment as a directly sent root.
+    argument_roots: std::collections::HashSet<usize>,
 }
 
 // Property reads made while walking a graph may allocate private primitive
@@ -4508,6 +4515,7 @@ impl NapiResultGraph {
             } else if let Some((_array_keys, values)) = array {
                 if owner_env.as_ref().is_some_and(|owner|
                     owner.live_constructor_returns.contains(&(value as usize))
+                    || owner.proxy_live_counts.contains_key(&(value as usize))
                     || owner.accessors.keys().any(|(object, _)| *object == value as usize)) {
                     let reference = retain_napi_graph_handle(value as u64);
                     if reference == 0 {
@@ -4546,10 +4554,18 @@ impl NapiResultGraph {
                 }
                 serde_json::json!({"a": items, "p": properties})
             } else if matches!(value_ref(value), Ok(Value::Object(_))) {
-                let has_accessor = owner_env.as_ref().is_some_and(|owner|
+                // An accessor-bearing object transferred directly stays live
+                // so JavaScript reaches its native getters. Nested inside
+                // another snapshot it is read like any other child: the
+                // getters run once, with the object itself as receiver.
+                let has_accessor = (self.nodes.is_empty() || self.argument_roots.contains(&(value as usize))) && owner_env.as_ref().is_some_and(|owner|
                     owner.accessors.keys().any(|(object, _)| *object == value as usize));
+                // An object JavaScript currently holds through a graph Proxy
+                // keeps its native identity when it crosses back, rather
+                // than being snapshotted into an unrelated copy.
                 let explicit_live = owner_env.as_ref().is_some_and(|owner|
-                    owner.live_constructor_returns.contains(&(value as usize)));
+                    owner.live_constructor_returns.contains(&(value as usize))
+                    || owner.proxy_live_counts.contains_key(&(value as usize)));
                 if is_native_instance(value as usize) || has_accessor || explicit_live {
                     let reference = retain_napi_graph_handle(value as u64);
                     if reference == 0 { return Err("cannot retain live native addon graph object".into()); }
@@ -4650,7 +4666,21 @@ unsafe fn napi_result_graph_for_env(env: NapiEnv, value: NapiValue, preserve_und
     NapiResultGraph { env, wrapper_kinds, ids: HashMap::new(),
         pending: Vec::new(), nodes: Vec::new(),
         leases: GraphLeases { host: Vec::new(), napi: Vec::new() }, preserve_undefined,
-        temporaries: GraphTemporaries { entries: Vec::new() } }.encode(value)
+        temporaries: GraphTemporaries { entries: Vec::new() },
+        argument_roots: std::collections::HashSet::new() }.encode(value)
+}
+
+unsafe fn napi_arguments_graph_for_env(env: NapiEnv, arguments: NapiValue) -> Result<String, String> {
+    let _dispatch = ForeignCallbackGuard::new();
+    let wrapper_kinds = env_mut(env).map_err(|_| "invalid native addon environment")?.graph_wrappers.clone();
+    let argument_roots = match value_ref(arguments) {
+        Ok(Value::Array(items)) => items.iter().flatten().map(|item| *item as usize).collect(),
+        _ => std::collections::HashSet::new(),
+    };
+    NapiResultGraph { env, wrapper_kinds, ids: HashMap::new(),
+        pending: Vec::new(), nodes: Vec::new(),
+        leases: GraphLeases { host: Vec::new(), napi: Vec::new() }, preserve_undefined: true,
+        temporaries: GraphTemporaries { entries: Vec::new() }, argument_roots }.encode(arguments)
 }
 
 unsafe fn napi_result_graph(value: NapiValue, preserve_undefined: bool) -> Result<String, String> {
@@ -4664,7 +4694,8 @@ unsafe fn napi_result_graph(value: NapiValue, preserve_undefined: bool) -> Resul
     let env = owner_env_for_value(value)?;
     NapiResultGraph { env, wrapper_kinds, ids: HashMap::new(), pending: Vec::new(),
         nodes: Vec::new(), leases: GraphLeases { host: Vec::new(), napi: Vec::new() },
-        preserve_undefined, temporaries: GraphTemporaries { entries: Vec::new() } }.encode(value)
+        preserve_undefined, temporaries: GraphTemporaries { entries: Vec::new() },
+        argument_roots: std::collections::HashSet::new() }.encode(value)
 }
 
 unsafe fn encode_napi_result(value: NapiValue, preserve_undefined: bool, graph_result: bool) -> Result<String, String> {
@@ -4688,12 +4719,8 @@ fn buffer_json(bytes: &[u8], typed: bool) -> JsonValue {
 }
 
 fn is_native_instance(value: usize) -> bool {
-    HOST.with(|host| {
-        host.borrow()
-            .module_envs
-            .iter()
-            .any(|env| !env.finalized && env.instances.contains_key(&value))
-    })
+    registered_envs().into_iter().any(|env| unsafe { env.as_ref() }
+        .is_some_and(|env| !env.finalized && env.instances.contains_key(&value)))
 }
 
 unsafe fn json_from_value(value: NapiValue) -> Result<JsonValue, String> {
@@ -5591,7 +5618,7 @@ unsafe extern "C" fn thaw_compiled_callback(_env: NapiEnv, info: NapiCallbackInf
                 env.alloc(Value::Array(info.args.iter().copied().map(Some).collect()))
             };
             let arguments_guard = CallbackGraphArguments { env: _env, value: arguments };
-            let encoded = napi_result_graph_for_env(_env, arguments, true);
+            let encoded = napi_arguments_graph_for_env(_env, arguments);
             drop(arguments_guard);
             let Ok(encoded) = encoded else { return ptr::null_mut(); };
             let Ok(encoded) = CString::new(encoded) else { return ptr::null_mut(); };
@@ -6025,6 +6052,47 @@ mod native_graph_pin_tests {
         drop(env);
     }
 
+    #[test]
+    fn graph_release_finds_caller_owned_standalone_environment() {
+        let mut env = Box::new(Env::new());
+        let owner = next_graph_owner_id().unwrap();
+        env.graph_owner_id = owner;
+        let value = env.alloc(Value::Object(HashMap::new()));
+        STANDALONE_GRAPH_OWNERS.with(|owners| {
+            owners.borrow_mut().insert(owner, (&mut *env as *mut Env) as usize);
+        });
+
+        let token = retain_napi_graph_handle(value as u64);
+        assert_ne!(token, 0);
+        assert_eq!(env.native_graph_pins, 1);
+        assert_eq!(release_napi_graph_reference(token), 1);
+        assert_eq!(env.native_graph_pins, 0);
+        STANDALONE_GRAPH_OWNERS.with(|owners| { owners.borrow_mut().remove(&owner); });
+    }
+
+    #[test]
+    fn standalone_owned_graph_decode_releases_its_pin() {
+        unsafe { thaw_json_register_napi_handle_operations(
+            retain_napi_graph_handle, release_napi_graph_reference,
+        ); }
+        let mut env = Box::new(Env::new());
+        let owner = next_graph_owner_id().unwrap();
+        env.graph_owner_id = owner;
+        let value = env.alloc(Value::Object(HashMap::new()));
+        env.instances.insert(value as usize, 0);
+        let env_ptr = &mut *env as NapiEnv;
+        STANDALONE_GRAPH_OWNERS.with(|owners| {
+            owners.borrow_mut().insert(owner, (&mut *env as *mut Env) as usize);
+        });
+
+        let wire = unsafe { napi_result_graph_for_env(env_ptr, value, true) }.unwrap();
+        assert_eq!(unsafe { (*env_ptr).native_graph_pins }, 1);
+        assert_eq!(unsafe { NapiGraphInput::parse(&wire).decode(env_ptr) }.unwrap(), value);
+        assert_eq!(unsafe { (*env_ptr).native_graph_pins }, 0);
+        STANDALONE_GRAPH_OWNERS.with(|owners| { owners.borrow_mut().remove(&owner); });
+        drop(env);
+    }
+
     unsafe extern "C" fn finalize_graph_value(_: NapiEnv, data: *mut c_void, _: *mut c_void) {
         FINALIZATIONS.with(|count| count.set(count.get() + 1));
         // The handle must already be marked finalized before user callbacks.
@@ -6042,12 +6110,17 @@ mod native_graph_pin_tests {
             unsafe { *(context as *mut usize) += 1; }
         }
         let mut env = Box::new(Env::new());
-        env.graph_owner_id = next_graph_owner_id().unwrap();
+        let owner = next_graph_owner_id().unwrap();
+        env.graph_owner_id = owner;
         let instance = env.alloc(Value::Object(HashMap::new()));
         env.instances.insert(instance as usize, 0);
-        let symbol = env.alloc(Value::Symbol { id: 1, description: "second".into() });
+        // A Symbol is a valid graph value now; an external has no wire form,
+        // so its encoding is the producer-side failure this test needs.
+        let symbol = env.alloc(Value::External(ptr::null_mut()));
         let env_ptr = &mut *env as NapiEnv;
-        HOST.with(|host| host.borrow_mut().module_envs.push(env));
+        STANDALONE_GRAPH_OWNERS.with(|owners| {
+            owners.borrow_mut().insert(owner, (&mut *env as *mut Env) as usize);
+        });
         let mut called = 0usize;
         let bridge = Arc::new(ThawCallbackBridge {
             callback: ThawCallback::EventGraph(unexpected_callback),
@@ -6063,7 +6136,7 @@ mod native_graph_pin_tests {
         assert_eq!(called, 0);
         assert_eq!(unsafe { (*env_ptr).native_graph_pins }, 0);
         assert!(unsafe { (*env_ptr).exception.is_some() });
-        let env = HOST.with(|host| host.borrow_mut().module_envs.pop().unwrap());
+        STANDALONE_GRAPH_OWNERS.with(|owners| { owners.borrow_mut().remove(&owner); });
         drop(env);
     }
 
@@ -6546,15 +6619,20 @@ mod typed_native_graph_value_tests {
         let graph: JsonValue = serde_json::from_str(&wire).unwrap();
         let props = graph["nodes"][0]["p"].as_array().unwrap();
         // The `nsy` token carries the native handle as a decimal string (see the encoder and decoder).
-        assert!(props.iter().any(|part| part[0]["nsy"] == (symbol as u64)
+        let symbol_text = (symbol as u64).to_string();
+        assert!(props.iter().any(|part| part[0]["nsy"].as_str() == Some(symbol_text.as_str())
             && part[2] == NAPI_WRITABLE));
         assert!(props.iter().any(|part| part[0] == "0" && part[2] == NAPI_ENUMERABLE));
         let decoded = unsafe { NapiGraphInput::parse(&wire).decode(env_ptr) }.unwrap();
         assert!(matches!(unsafe { value_ref(decoded) }, Ok(Value::Array(values))
             if values.len() == 2 && values[0].is_some() && values[1].is_none()));
-        assert_eq!(unsafe { (*env_ptr).host_properties.get(&(decoded as usize))
-            .and_then(|properties| properties.get(&PropertyKey::Symbol(symbol_id))) },
-            Some(&extra));
+        // A plain object value is snapshotted, so the decoded array carries a
+        // structural copy of it under the same Symbol key, not `extra` itself.
+        let copied = unsafe { (*env_ptr).host_properties.get(&(decoded as usize))
+            .and_then(|properties| properties.get(&PropertyKey::Symbol(symbol_id))) }
+            .copied().expect("decoded Symbol-keyed property");
+        assert_ne!(copied, extra);
+        assert!(matches!(unsafe { value_ref(copied) }, Ok(Value::Object(fields)) if fields.is_empty()));
         assert_eq!(unsafe { (*env_ptr).property_attributes.get(
             &(decoded as usize, PropertyKey::String("0".into()))) }, Some(&NAPI_ENUMERABLE));
         assert_eq!(unsafe { (*env_ptr).native_graph_pins }, 0);

@@ -9943,6 +9943,12 @@ fn worker_source_reader_removes_only_the_leading_bom() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+/// A Proxy `getOwnPropertyDescriptor` trap may return an accessor descriptor.
+/// The engine converts the trap result with `js_obj_to_desc`, which reports
+/// accessors through the HAS_GET/HAS_SET field flags; the descriptor consumers
+/// (`Reflect.getOwnPropertyDescriptor`, the invariant checks) test the
+/// JS_PROP_GETSET type bit. Before the vendored QuickJS fix the result came back
+/// as a data descriptor.
 #[test]
 fn proxy_get_own_property_descriptor_trap_keeps_accessor_descriptors() {
     assert_eq!(
@@ -10018,4 +10024,46 @@ fn proxy_define_property_trap_checks_nonconfigurable_writable_invariant() {
         call("proxyDefineInvariant", "[]"),
         serde_json::to_string("true:true:true:1:true").unwrap()
     );
+}
+
+#[test]
+fn projected_native_method_identity_survives_freeze_and_seal() {
+    assert_eq!(load(r#"
+      globalThis.projectedMethodIntegrity = function () {
+        let other;
+        const methodImpl = function () { return true; };
+        const make = () => {
+          let state = 0, flags = 7;
+          return __thaw_object_with_native_getters(
+            ['method'], [true], [true], [false], [true],
+            function () { return methodImpl; }, function () {},
+            () => state === 0, () => state >= 2, () => state === 3,
+            (_, next) => { state = next; return true; },
+            () => flags, (_, next) => { flags = next; return true; },
+            () => true, () => true);
+        };
+        const frozen = make();
+        other = make();
+        const method = frozen.method;
+        const before = frozen.method === method
+          && Object.getOwnPropertyDescriptor(frozen, 'method').value === method
+          && method.call(other) === true;
+        Object.freeze(frozen);
+        const sameFrozenValueAccepted = Reflect.defineProperty(frozen, 'method', { value: method });
+        const distinctFrozenValueRejected = !Reflect.defineProperty(
+          frozen, 'method', { value: function () { return false; } });
+        const afterFreeze = frozen.method === method
+          && Object.getOwnPropertyDescriptor(frozen, 'method').value === method
+          && method.call(other) === true;
+        const sealed = make();
+        const sealedMethod = sealed.method;
+        Object.seal(sealed);
+        const afterSeal = sealed.method === sealedMethod
+          && Object.getOwnPropertyDescriptor(sealed, 'method').value === sealedMethod;
+        Object.freeze(sealed);
+        return [before, afterFreeze, afterSeal, sealed.method === sealedMethod,
+          sameFrozenValueAccepted, distinctFrozenValueRejected];
+      };
+    "#), 1);
+    assert_eq!(call("projectedMethodIntegrity", "[]"), "[true,true,true,true,true,true]");
 }

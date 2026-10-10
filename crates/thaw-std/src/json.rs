@@ -42,7 +42,7 @@
 
 use std::cell::{Cell, RefCell, UnsafeCell};
 use std::collections::{HashMap, HashSet};
-use std::ffi::CString;
+use std::ffi::{c_void, CString};
 use std::os::raw::c_char;
 use std::rc::Rc;
 use thaw_arena::NativeStr as CStr;
@@ -142,6 +142,59 @@ thread_local! {
     // `None` is a boundary while a trusted Host/NAPI callback executes.
     // User reentry without its own decode scope must not join the caller's ledger.
     static TYPED_DECODE_SCOPES: RefCell<Vec<Option<TypedDecodeScope>>> = const { RefCell::new(Vec::new()) };
+    // Identity serials handed to the JS realm with each graph-encoded container, so a JS shadow
+    // of a native object still compares `===` to the native original it came from.
+    static GRAPH_ORIGIN_SERIALS: RefCell<(u64, HashMap<usize, (u64, GraphOriginRef)>)> =
+        RefCell::new((0, HashMap::new()));
+}
+
+enum GraphOriginRef {
+    Array(std::rc::Weak<SharedValue<Vec<Value>>>),
+    Object(std::rc::Weak<SharedValue<indexmap::IndexMap<Vec<u8>, Value>>>),
+}
+
+impl GraphOriginRef {
+    fn is_alive_for(&self, value: &Value) -> bool {
+        match (self, value) {
+            (GraphOriginRef::Array(weak), Value::Array(rc)) => std::ptr::eq(weak.as_ptr(), Rc::as_ptr(rc)) && weak.strong_count() > 0,
+            (GraphOriginRef::Object(weak), Value::Object(rc)) => std::ptr::eq(weak.as_ptr(), Rc::as_ptr(rc)) && weak.strong_count() > 0,
+            _ => false,
+        }
+    }
+}
+
+/// A never-reused serial for a plain native container, or 0 for anything else (hosts, branded
+/// wrappers, leased N-API objects). The weak reference pins the allocation, so its address
+/// cannot be recycled while the entry exists.
+fn graph_origin_serial(value: &Value) -> u64 {
+    if is_branded_wrapper(value) {
+        return 0;
+    }
+    let (address, weak) = match value {
+        Value::Array(rc) => (Rc::as_ptr(rc) as usize, GraphOriginRef::Array(Rc::downgrade(rc))),
+        Value::Object(rc) if rc.napi_lease.borrow().is_none() => {
+            (Rc::as_ptr(rc) as usize, GraphOriginRef::Object(Rc::downgrade(rc)))
+        }
+        _ => return 0,
+    };
+    GRAPH_ORIGIN_SERIALS.with(|table| {
+        let (next, entries) = &mut *table.borrow_mut();
+        if let Some((serial, existing)) = entries.get(&address) {
+            if existing.is_alive_for(value) {
+                return *serial;
+            }
+        }
+        // ponytail: sweeps dead entries only when the table doubles; fine until profiling says otherwise
+        if entries.len() >= 4096 && entries.len().is_power_of_two() {
+            entries.retain(|_, (_, entry)| match entry {
+                GraphOriginRef::Array(weak) => weak.strong_count() > 0,
+                GraphOriginRef::Object(weak) => weak.strong_count() > 0,
+            });
+        }
+        *next += 1;
+        entries.insert(address, (*next, weak));
+        *next
+    })
 }
 
 #[derive(Default)]
@@ -1326,6 +1379,37 @@ thread_local! {
     // address while a Host release callback reenters this thread.
     static NEXT_ARENA_OWNED_JSON_ROOT: Cell<u64> = const { Cell::new(0) };
     static ARENA_OWNED_JSON_ROOTS: RefCell<HashMap<usize, (usize, bool, u64)>> = RefCell::new(HashMap::new());
+    static EXCEPTION_JSON_ROOT_PINS: RefCell<HashMap<usize, (usize, bool)>> = RefCell::new(HashMap::new());
+}
+
+struct ExceptionJsonRootLease(usize);
+
+impl Drop for ExceptionJsonRootLease {
+    fn drop(&mut self) {
+        let destroy = EXCEPTION_JSON_ROOT_PINS.with(|pins| {
+            let mut pins = pins.borrow_mut();
+            let Some((count, requested)) = pins.get_mut(&self.0) else { return false; };
+            *count -= 1;
+            if *count == 0 {
+                let requested = *requested;
+                pins.remove(&self.0);
+                requested
+            } else { false }
+        });
+        if destroy { unsafe { thaw_json_destroy(self.0 as *mut Value) }; }
+    }
+}
+
+/// Keeps a tracked Box<Value> alive independently of tracing arena resets.
+fn exception_json_root_lease(value: *const Value) -> Option<Box<dyn std::any::Any>> {
+    let key = value as usize;
+    if !ARENA_OWNED_JSON_ROOTS.with(|roots| roots.borrow().contains_key(&key)) { return None; }
+    EXCEPTION_JSON_ROOT_PINS.with(|pins| {
+        let mut pins = pins.borrow_mut();
+        let entry = pins.entry(key).or_insert((0, false));
+        entry.0 = entry.0.checked_add(1)?;
+        Some(Box::new(ExceptionJsonRootLease(key)) as Box<dyn std::any::Any>)
+    })
 }
 
 fn untrack_arena_owned_json_root(value: *mut Value) {
@@ -1335,14 +1419,39 @@ fn untrack_arena_owned_json_root(value: *mut Value) {
     }
 }
 
+/// Consume a JSON Box while preserving its address if an exception packet
+/// still publishes that pointer. The packet's native slot remains valid and
+/// observes the consumed value as null until its lease is released.
+unsafe fn consume_owned_json_value(value: *mut Value) -> Value {
+    untrack_typed_decode_child(value);
+    untrack_arena_owned_json_root(value);
+    *unsafe { Box::from_raw(value) }
+}
+
+fn exception_json_root_is_pinned(value: *const Value) -> bool {
+    EXCEPTION_JSON_ROOT_PINS.with(|pins| {
+        pins.borrow().get(&(value as usize)).is_some_and(|(count, _)| *count != 0)
+    })
+}
+
 fn reset_arena_owned_json_roots(tracing: bool) {
     let dead = ARENA_OWNED_JSON_ROOTS.with(|roots| {
         roots
             .borrow()
             .iter()
             .filter_map(|(&value, &(token, was_traced, serial))| {
-                (!tracing || !was_traced || thaw_arena::was_reclaimed(token))
-                    .then_some((value, serial))
+                let reclaimed = !tracing || !was_traced || thaw_arena::was_reclaimed(token);
+                if !reclaimed { return None; }
+                EXCEPTION_JSON_ROOT_PINS.with(|pins| {
+                    let mut pins = pins.borrow_mut();
+                    if let Some((count, requested)) = pins.get_mut(&value) {
+                        if *count != 0 {
+                            *requested = true;
+                            return None;
+                        }
+                    }
+                    Some((value, serial))
+                })
             })
             .collect::<Vec<_>>()
     });
@@ -1406,6 +1515,13 @@ pub extern "C" fn thaw_json_track_arena_owned_root(value: *mut Value) -> *mut Va
         thaw_arena::replace_reference(value as usize, 0, token as usize);
     }
     value
+}
+
+/// Exposes the arena token which keeps a tracked Box<Value> alive so runtime
+/// exception carriers can pin the same reachability node.
+pub fn arena_owned_json_root_token(value: *const Value) -> Option<usize> {
+    if value.is_null() { return None; }
+    ARENA_OWNED_JSON_ROOTS.with(|roots| roots.borrow().get(&(value as usize)).map(|entry| entry.0))
 }
 
 fn leak(value: Value) -> *mut Value {
@@ -2294,6 +2410,14 @@ fn release_isolated_json_cycles(root: &Value) {
 #[no_mangle]
 pub unsafe extern "C" fn thaw_json_destroy(value: *mut Value) {
     if !value.is_null() {
+        let pinned = EXCEPTION_JSON_ROOT_PINS.with(|pins| {
+            let mut pins = pins.borrow_mut();
+            let Some((count, requested)) = pins.get_mut(&(value as usize)) else { return false; };
+            if *count == 0 { return false; }
+            *requested = true;
+            true
+        });
+        if pinned { return; }
         // Dropping the last Host/NAPI lease may invoke a reentrant release
         // callback. Destruction is cleanup: preserve the operation's prior
         // Host error and discard any error reported only by that callback.
@@ -2761,7 +2885,19 @@ pub extern "C" fn thaw_json_graph_encode(value: *const Value) -> *const c_char {
         }
         write_json_string(reference.to_string().as_bytes(), &mut out);
     }
-    out.extend_from_slice(b"]}");
+    out.push(b']');
+    let origins: Vec<u64> = nodes.iter().map(graph_origin_serial).collect();
+    if origins.iter().any(|serial| *serial != 0) {
+        out.extend_from_slice(b",\"origins\":[");
+        for (index, serial) in origins.iter().enumerate() {
+            if index != 0 {
+                out.push(b',');
+            }
+            out.extend_from_slice(serial.to_string().as_bytes());
+        }
+        out.push(b']');
+    }
+    out.push(b'}');
     let wire = CString::new(out)
         .expect("JSON graph envelope contains no raw NUL")
         .into_raw();
@@ -3364,11 +3500,372 @@ pub extern "C" fn thaw_json_stringify_public(value: *mut Value) -> *const c_char
 ///
 /// # Safety
 ///
-/// `message` must point to a valid NUL-terminated string.
+/// `message` is an opaque pending-exception owner unless it exactly aliases
+/// the independently supplied `native_text` channel, which proves it is text.
 pub unsafe extern "C" fn thaw_json_callback_error(message: *const c_char) -> *const c_char {
     CString::new(format!("\u{2}{}", to_str(message)))
         .unwrap_or_default()
         .into_raw()
+}
+
+/// Like `thaw_json_callback_error`, but binds the complete thrown-value packet to this exact
+/// owned result pointer. The packet has no public token or text representation; the QuickJS
+/// callback transfers it directly to a private Error guardian before consuming the string.
+///
+/// # Safety
+///
+/// `message` must point to a valid NUL-terminated string.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_json_callback_error_tuple(
+    message: *const c_char,
+    tag: i64,
+    number: f64,
+    bigint: i64,
+    boolean: u8,
+    object: *const c_void,
+    native: *const c_void,
+    native_text: *const c_char,
+    aggregate: *const c_void,
+) -> *const c_char {
+    let mut roots = Vec::new();
+    let mut owned_bytes = Vec::new();
+    let mut copied_strings = std::collections::HashMap::new();
+    for pointer in [object, native, aggregate] {
+        if !pointer.is_null() && thaw_arena::contains_allocation(pointer as usize) {
+            roots.push(thaw_arena::ArenaRoot::new(pointer as usize));
+        }
+    }
+    let mut leases = Vec::new();
+    for value in [object, aggregate] {
+        if !value.is_null() {
+            if let Some(token) = arena_owned_json_root_token(value.cast()) {
+                roots.push(thaw_arena::ArenaRoot::new(token));
+            }
+            if let Some(lease) = exception_json_root_lease(value.cast()) {
+                leases.push(lease);
+            }
+        }
+    }
+    let copy_string = |pointer: *const c_char, roots: &mut Vec<thaw_arena::ArenaRoot>,
+                       copied: &mut std::collections::HashMap<usize, usize>,
+                       owned: &mut Vec<Box<[u8]>>| -> usize {
+        if pointer.is_null() { return 0; }
+        if let Some(&copy) = copied.get(&(pointer as usize)) { return copy; }
+        if thaw_arena::contains_allocation(pointer as usize) {
+            roots.push(thaw_arena::ArenaRoot::new(pointer as usize));
+        }
+        let bytes = unsafe { thaw_arena::NativeStr::from_ptr(pointer) }.to_bytes();
+        let mut copy = bytes.to_vec();
+        copy.push(0);
+        let boxed = copy.into_boxed_slice();
+        let address = boxed.as_ptr() as usize;
+        thaw_arena::register_exception_bytes(address as *const c_char, bytes.len());
+        copied.insert(pointer as usize, address);
+        owned.push(boxed);
+        address
+    };
+    // The pending slot can be an opaque owner for every typed tag. Only an
+    // exact alias with the producer-proven native-text channel authorizes a
+    // C-string read; tag 7 is specifically the tracked Box<Value> throw path.
+    let pending_is_text = !message.is_null() && message == native_text;
+    let pending = if !pending_is_text {
+        if !message.is_null() && thaw_arena::contains_allocation(message as usize) {
+            roots.push(thaw_arena::ArenaRoot::new(message as usize));
+        }
+        message as usize
+    } else {
+        copy_string(message, &mut roots, &mut copied_strings, &mut owned_bytes)
+    };
+    let native_text = copy_string(native_text, &mut roots, &mut copied_strings, &mut owned_bytes);
+    let packet = thaw_arena::exception::ExceptionPacket {
+        id: 0, pending, native_text, object: object as usize, native: native as usize,
+        aggregate: aggregate as usize, tag, number: number.to_bits(), bigint: bigint as u64,
+        boolean: u64::from(boolean), _roots: roots, _owned_bytes: owned_bytes,
+        _leases: leases,
+    };
+    let Some((_, packet)) = thaw_arena::exception::register_packet(packet) else {
+        return CString::new("native exception packet registration failed")
+            .unwrap_or_default().into_raw();
+    };
+    let text = if !pending_is_text {
+        "\u{2}[native exception value]".to_owned()
+    } else {
+        format!("\u{2}{}", to_str(message))
+    };
+    let pointer = thaw_arena::owned_string(text.as_bytes());
+    if thaw_arena::bind_owned_exception(pointer, packet) {
+        pointer
+    } else {
+        unsafe { drop(CString::from_raw(pointer)); }
+        CString::new("native exception packet binding failed")
+            .unwrap_or_default().into_raw()
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn callback_exception_packet_uses_exact_owned_pointer_and_keeps_all_channels() {
+    let message = thaw_arena::owned_string(b"text\0with-nul");
+    let native_text = thaw_arena::owned_string(b"native\0provenance");
+    let object = thaw_arena::thaw_arena_alloc(8, 8);
+    let native = thaw_arena::thaw_arena_alloc(8, 8);
+    let aggregate = thaw_arena::thaw_arena_alloc(8, 8);
+    let result = unsafe {
+        thaw_json_callback_error_tuple(
+            message, 4, f64::NAN, -23, 1, object.cast(), native.cast(),
+            native_text, aggregate.cast(),
+        )
+    };
+    let token = unsafe { thaw_exception_native_token(result) };
+    assert_ne!(token, 0);
+    assert_eq!(unsafe { thaw_exception_native_token(result) }, token);
+    assert_eq!(thaw_exception_token_is_live(token), 1);
+    assert_eq!(thaw_arena::exception::field(token, 0), Some(4));
+    assert_eq!(thaw_arena::exception::field(token, 1), Some(f64::NAN.to_bits()));
+    assert_eq!(thaw_arena::exception::field(token, 2), Some((-23i64) as u64));
+    assert_eq!(thaw_arena::exception::field(token, 3), Some(1));
+    assert_eq!(thaw_arena::exception::field(token, 4), Some(object as u64));
+    assert_eq!(thaw_arena::exception::field(token, 5), Some(native as u64));
+    assert_eq!(thaw_arena::exception::field(token, 7), Some(
+        thaw_arena::exception::packet(token).unwrap().native_text as u64));
+    assert_eq!(thaw_arena::exception::field(token, 8), Some(aggregate as u64));
+    let packet = thaw_arena::exception::packet(token).unwrap();
+    assert_eq!(unsafe { thaw_arena::NativeStr::from_ptr(packet.pending as *const c_char) }.to_bytes(),
+        b"text\0with-nul");
+    assert_eq!(unsafe { thaw_arena::NativeStr::from_ptr(packet.native_text as *const c_char) }.to_bytes(),
+        b"native\0provenance");
+    drop(packet);
+
+    let lookalike = thaw_arena::owned_string(unsafe { thaw_arena::NativeStr::from_ptr(result) }.to_bytes());
+    assert_eq!(unsafe { thaw_exception_native_token(lookalike) }, 0);
+    unsafe {
+        thaw_arena::destroy_string(message);
+        thaw_arena::destroy_string(native_text);
+        thaw_arena::destroy_string(result);
+        thaw_arena::destroy_string(lookalike);
+    }
+    assert_eq!(thaw_exception_token_is_live(token), 0);
+}
+
+#[cfg(test)]
+#[test]
+fn callback_exception_packet_keeps_original_quickjs_value_without_reading_it_as_text() {
+    // Use the real tracked Box<Value> owner shape. Its pointer is deliberately
+    // opaque: the callback producer must never interpret it as a C string.
+    std::thread::spawn(|| {
+        thaw_arena::thaw_arena_enable_tracing();
+        let original = thaw_json_track_arena_owned_root(leak(Value::Number(serde_json::Number::from(73))));
+        let native_text = thaw_arena::owned_string(b"native text");
+        let result = unsafe {
+            thaw_json_callback_error_tuple(
+                original.cast(), 7, 0.0, 0, 0, original.cast(), std::ptr::null(),
+                native_text, std::ptr::null(),
+            )
+        };
+        let token = unsafe { thaw_exception_native_token(result) };
+        assert_ne!(token, 0);
+        let packet = thaw_arena::exception::packet(token).unwrap();
+        assert_eq!(packet.pending, original as usize);
+        assert_eq!(packet.object, original as usize);
+        assert!(ARENA_OWNED_JSON_ROOTS.with(|roots| roots.borrow().contains_key(&(original as usize))));
+
+        // A reset requests release, but the published packet lease keeps the
+        // tracked Box alive until this exact owner is dropped.
+        reset_arena_owned_json_roots(false);
+        assert!(ARENA_OWNED_JSON_ROOTS.with(|roots| roots.borrow().contains_key(&(original as usize))));
+        drop(packet);
+        unsafe { thaw_arena::destroy_string(result) };
+        assert!(!ARENA_OWNED_JSON_ROOTS.with(|roots| roots.borrow().contains_key(&(original as usize))));
+        unsafe { thaw_arena::destroy_string(native_text) };
+    }).join().expect("opaque tracked Box payload remains owned without text reads");
+}
+
+#[cfg(test)]
+#[test]
+fn native_snapshot_preserves_text_alias_and_rebuilds_after_arena_reset() {
+    let text = thaw_arena::owned_string(b"first\0second");
+    let result = unsafe {
+        thaw_json_callback_error_tuple(
+            text, 4, 0.0, 0, 0, std::ptr::null(), std::ptr::null(), text, std::ptr::null(),
+        )
+    };
+    let token = unsafe { thaw_exception_native_token(result) };
+    assert_ne!(token, 0);
+    let mut snapshot = [0_u64; 9];
+    assert_eq!(unsafe { thaw_exception_native_snapshot(token, snapshot.as_mut_ptr()) }, 1);
+    assert_eq!(snapshot[6], snapshot[7], "pending/native-text alias must survive materialization");
+    assert_ne!(snapshot[6], thaw_arena::exception::packet(token).unwrap().pending as u64);
+    assert_eq!(unsafe { thaw_arena::NativeStr::from_ptr(snapshot[6] as *const c_char) }.to_bytes(), b"first\0second");
+
+    // The JS Error guardian still owns the source packet across a request
+    // reset; another catch rematerializes fresh invocation-managed storage.
+    thaw_arena::thaw_arena_reset();
+    snapshot.fill(0);
+    assert_eq!(unsafe { thaw_exception_native_snapshot(token, snapshot.as_mut_ptr()) }, 1);
+    assert_eq!(snapshot[6], snapshot[7]);
+    assert_eq!(unsafe { thaw_arena::NativeStr::from_ptr(snapshot[6] as *const c_char) }.to_bytes(), b"first\0second");
+    unsafe {
+        thaw_arena::destroy_string(text);
+        thaw_arena::destroy_string(result);
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn native_snapshot_object_kept_by_captured_catch_cell_survives_real_reset() {
+    // Keep tracing/reset hooks private to this test thread.
+    std::thread::spawn(|| {
+        thaw_arena::thaw_arena_enable_tracing();
+        let source = CString::new(r#"{"answer":73}"#).unwrap();
+        let original = thaw_json_track_arena_owned_root(thaw_json_parse(source.as_ptr()));
+        let native_text = thaw_arena::owned_string(b"opaque native text");
+        let result = unsafe {
+            thaw_json_callback_error_tuple(
+                original.cast(), 7, 0.0, 0, 0, original.cast(), std::ptr::null(),
+                native_text, std::ptr::null(),
+            )
+        };
+        let token = unsafe { thaw_exception_native_token(result) };
+        assert_ne!(token, 0);
+        let mut snapshot = [0_u64; 9];
+        assert_eq!(unsafe { thaw_exception_native_snapshot(token, snapshot.as_mut_ptr()) }, 1);
+        let captured_value = snapshot[4] as usize;
+        assert_ne!(captured_value, 0);
+
+        // A generated captured catch binding is an arena cell containing the
+        // restored Box<Value> pointer. Make the same edge a real tracing root.
+        let cell = thaw_arena::thaw_arena_alloc(
+            std::mem::size_of::<usize>(), std::mem::align_of::<usize>(),
+        ).cast::<usize>();
+        assert!(!cell.is_null());
+        unsafe { cell.write(captured_value) };
+        let capture_root = thaw_arena::ArenaRoot::new(cell as usize);
+        let packet = thaw_arena::take_owned_exception(result).unwrap();
+        drop(packet); // The native catch cell now owns the restored value independently.
+        unsafe {
+            thaw_arena::destroy_string(result);
+            thaw_arena::destroy_string(native_text);
+        }
+
+        thaw_arena::thaw_arena_reset();
+        let restored = unsafe { cell.read() as *mut Value };
+        let answer = CString::new("answer").unwrap();
+        let observed = thaw_json_get(restored, answer.as_ptr());
+        assert_eq!(thaw_json_as_number(observed), 73.0);
+        unsafe { thaw_json_destroy(observed) };
+        assert!(ARENA_OWNED_JSON_ROOTS.with(|roots| roots.borrow().contains_key(&(restored as usize))));
+
+        drop(capture_root);
+        thaw_arena::thaw_arena_reset();
+        assert!(!ARENA_OWNED_JSON_ROOTS.with(|roots| roots.borrow().contains_key(&(restored as usize))));
+    }).join().expect("captured catch cell reset control");
+}
+
+#[cfg(test)]
+#[test]
+fn callback_exception_packet_keeps_tracked_box_until_opaque_pending_owner_drops() {
+    // A tag-zero Promise may carry an opaque Box<Value> in the pending slot.
+    // Its actual tracked lease must outlive an arena reset while the packet
+    // remains attached to the exact returned error pointer.
+    let original = thaw_json_track_arena_owned_root(leak(Value::Null));
+    let native_text = thaw_arena::owned_string(b"diagnostic");
+    let result = unsafe {
+        thaw_json_callback_error_tuple(
+            original.cast(), 0, 0.0, 0, 0, original.cast(), std::ptr::null(),
+            native_text, std::ptr::null(),
+        )
+    };
+    let token = unsafe { thaw_exception_native_token(result) };
+    assert_ne!(token, 0);
+    assert_eq!(thaw_arena::exception::packet(token).unwrap().pending, original as usize);
+
+    let missing = CString::new("missing").unwrap();
+    let child = unsafe { thaw_json_take(original, missing.as_ptr()) };
+    assert!(matches!(unsafe { &*original }, Value::Null));
+    unsafe { thaw_json_destroy(child) };
+    reset_arena_owned_json_roots(false);
+    assert!(ARENA_OWNED_JSON_ROOTS.with(|roots| roots.borrow().contains_key(&(original as usize))));
+    unsafe { thaw_arena::destroy_string(result) };
+    assert!(!ARENA_OWNED_JSON_ROOTS.with(|roots| roots.borrow().contains_key(&(original as usize))));
+    unsafe { thaw_arena::destroy_string(native_text) };
+}
+
+/// The private packet ID associated with this exact owned error pointer, or 0.
+///
+/// # Safety
+///
+/// This function compares the exact owned-result pointer only and never dereferences `text`.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_exception_native_token(text: *const c_char) -> u64 {
+    // Any pending-value tag may travel through the public JS Error carrier.
+    // The private exact-pointer association, never its display text or current
+    // native tag, authenticates this lookup.
+    if text.is_null() {
+        return 0;
+    }
+    thaw_arena::owned_exception(text).map_or(0, |packet| packet.id)
+}
+
+#[no_mangle]
+pub extern "C" fn thaw_exception_token_is_live(id: u64) -> u8 {
+    u8::from(thaw_arena::exception::is_live(id))
+}
+
+/// Pins a validated exception packet until the next arena reset so native catch slots
+/// cannot outlive its copied strings or tracked JSON payloads.
+/// One live packet field as raw bits: 0 tag, 1 number, 2 bigint, 3 boolean, 4 object,
+/// 5 native descriptor, 6 pending text bytes, 7 native-text bytes, 8 aggregate errors.
+/// Materializes the packet into a native catch's ordinary traced ownership.
+/// This is deliberately one operation so aliases between pointer channels
+/// stay exact, while the packet itself remains owned by its QuickJS guardian.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_exception_native_snapshot(id: u64, output: *mut u64) -> u8 {
+    if output.is_null() { return 0; }
+    let Some(packet) = thaw_arena::exception::packet(id) else { return 0; };
+    let mut fields = [
+        packet.tag as u64, packet.number, packet.bigint, packet.boolean,
+        packet.object as u64, packet.native as u64, packet.pending as u64,
+        packet.native_text as u64, packet.aggregate as u64,
+    ];
+    let mut aliases = std::collections::HashMap::<usize, usize>::new();
+    let mut clones = Vec::<*mut Value>::new();
+    for index in [4usize, 5, 6, 7, 8] {
+        let source = fields[index] as usize;
+        if source == 0 { continue; }
+        if let Some(&snapshot) = aliases.get(&source) {
+            fields[index] = snapshot as u64;
+            continue;
+        }
+        let snapshot = if packet._owned_bytes.iter().any(|bytes| bytes.as_ptr() as usize == source) {
+            let bytes = unsafe { thaw_arena::NativeStr::from_ptr(source as *const c_char) }.to_bytes();
+            thaw_arena::arena_string(bytes) as usize
+        } else if ARENA_OWNED_JSON_ROOTS.with(|roots| roots.borrow().contains_key(&source)) {
+            let clone = unsafe { thaw_json_share(source as *const Value) };
+            if clone.is_null() {
+                for clone in clones.drain(..) { unsafe { thaw_json_destroy(clone) }; }
+                return 0;
+            }
+            let tracked = thaw_json_track_arena_owned_root(clone);
+            if tracked.is_null() {
+                for clone in clones.drain(..) { unsafe { thaw_json_destroy(clone) }; }
+                return 0;
+            }
+            clones.push(tracked);
+            tracked as usize
+        } else {
+            source
+        };
+        if snapshot == 0 {
+            for clone in clones.drain(..) { unsafe { thaw_json_destroy(clone) }; }
+            return 0;
+        }
+        aliases.insert(source, snapshot);
+        fields[index] = snapshot as u64;
+    }
+    for (index, field) in fields.into_iter().enumerate() {
+        unsafe { output.add(index).write(field) };
+    }
+    1
 }
 
 /// `String(NaN)`/`String(Infinity)`/`String(-Infinity)`, and the same
@@ -4334,9 +4831,15 @@ fn json_has_own_value(value: &Value, key: &[u8]) -> bool {
 /// `value` must be a pointer returned by this module and must not be used again.
 #[no_mangle]
 pub unsafe extern "C" fn thaw_json_take(value: *mut Value, key: *const c_char) -> *mut Value {
-    untrack_typed_decode_child(value);
-    untrack_arena_owned_json_root(value);
-    let value = unsafe { Box::from_raw(value) };
+    if exception_json_root_is_pinned(value) {
+        let result = unsafe { value.as_ref() }
+            .and_then(|value| value.as_object())
+            .and_then(|fields| fields.get(to_key(key).as_slice()).cloned())
+            .unwrap_or_else(napi_undefined_value);
+        unsafe { thaw_json_destroy(value) };
+        return leak(result);
+    }
+    let value = unsafe { consume_owned_json_value(value) };
     let result = value
         .as_object_mut()
         .and_then(|fields| fields.shift_remove(to_key(key).as_slice()))
@@ -7064,9 +7567,13 @@ pub unsafe extern "C" fn thaw_json_object_set_json_owned(
     key: *const c_char,
     value: *mut Value,
 ) {
-    untrack_typed_decode_child(value);
-    untrack_arena_owned_json_root(value);
-    object_insert(object, key, *unsafe { Box::from_raw(value) });
+    if exception_json_root_is_pinned(value) {
+        let copy = unsafe { value.as_ref() }.cloned().unwrap_or(Value::Null);
+        object_insert(object, key, copy);
+        unsafe { thaw_json_destroy(value) };
+    } else {
+        object_insert(object, key, unsafe { consume_owned_json_value(value) });
+    }
 }
 
 #[no_mangle]
@@ -7170,6 +7677,18 @@ pub unsafe extern "C" fn thaw_json_object_assign(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exception_owned_json_root_survives_reset_until_packet_lease_drops() {
+        let value = thaw_json_track_arena_owned_root(leak(Value::Null));
+        let lease = exception_json_root_lease(value).expect("tracked root lease");
+        reset_arena_owned_json_roots(false);
+        assert!(ARENA_OWNED_JSON_ROOTS.with(|roots| roots.borrow().contains_key(&(value as usize))));
+        unsafe { thaw_json_destroy(value) };
+        assert!(ARENA_OWNED_JSON_ROOTS.with(|roots| roots.borrow().contains_key(&(value as usize))));
+        drop(lease);
+        assert!(!ARENA_OWNED_JSON_ROOTS.with(|roots| roots.borrow().contains_key(&(value as usize))));
+    }
 
     thread_local! {
         static HOST_RELEASES: Cell<usize> = const { Cell::new(0) };

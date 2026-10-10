@@ -17,6 +17,7 @@ use bumpalo::Bump;
 mod strings;
 pub use strings::*;
 pub mod error_wire;
+pub mod exception;
 
 thread_local! {
     static ARENA: RefCell<Bump> = RefCell::new(Bump::new());

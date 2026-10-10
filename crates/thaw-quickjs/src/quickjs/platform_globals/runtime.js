@@ -47,9 +47,21 @@
         globalThis.__thaw_same_native_callback(left, right)) return true;
     return decode(left, leftKind) == decode(right, rightKind);
   };
+  // Graph-decoded containers remember the serial of the native container they shadow.
+  const thawOriginSerials = new WeakMap();
+  const thawOriginSerialGet = WeakMap.prototype.get;
+  const thawOriginSerialSet = WeakMap.prototype.set;
+  const thawProjectedReceivers = new WeakSet();
+  const thawProjectedReceiverHas = WeakSet.prototype.has;
+  const thawProjectedReceiverAdd = WeakSet.prototype.add;
+  const thawSameOrigin = (left, right) => {
+    const serial = thawDateApply(thawOriginSerialGet, thawOriginSerials, [left]);
+    return serial !== undefined && serial === thawDateApply(thawOriginSerialGet, thawOriginSerials, [right]);
+  };
   globalThis.__thaw_strict_equal_dynamic = (left, right, leftKind, rightKind) =>
     ((leftKind === 3 || rightKind === 3) &&
-      globalThis.__thaw_same_native_callback(left, right)) || left === right;
+      globalThis.__thaw_same_native_callback(left, right)) || left === right
+      || ((typeof left === 'object' || typeof left === 'function') && thawSameOrigin(left, right));
   globalThis.__thaw_strict_equal_bigint_dynamic = (digits, value) =>
     typeof value === 'bigint' && value === BigInt(digits);
   globalThis.__thaw_strict_equal_number_dynamic = (text, value) =>
@@ -230,8 +242,7 @@
   const thawHostNativeSymbolID = symbol =>
     thawGraphApply(thawGraphWeakMapGet, thawHostNativeSymbolIDs, [symbol])
       ?? thawGraphApply(thawGraphMapGet, thawHostRegisteredSymbolIDs, [symbol]);
-  thawGraphDefineProperty(globalThis, '__thaw_json_host_native_symbol', {
-    value: handle => {
+  const thawHostNativeSymbolMake = handle => {
       const metadata = thawHostNativeSymbolMetadata(handle);
       const id = metadata.id;
       if (metadata.jsOrigin) {
@@ -265,7 +276,9 @@
           [symbol, { id, entry }]);
       }
       return symbol;
-    }, configurable: false, writable: false,
+    };
+  thawGraphDefineProperty(globalThis, '__thaw_json_host_native_symbol', {
+    value: thawHostNativeSymbolMake, configurable: false, writable: false,
   });
   thawGraphDefineProperty(globalThis, '__thaw_json_host_object_integrity', {
     value: (object, freeze) => {
@@ -854,6 +867,14 @@
         throw new thawGraphTypeError('Cannot synchronize native array length attributes');
     };
     var fallbackGetters = thawNapiSafeMap(), fallbackSetters = thawNapiSafeMap();
+    var sourceFunctions = thawNapiSafeMap();
+    var sourceFunction = function(source) {
+      var cacheKey = thawGraphStringify(source), cached = sourceFunctions.get(cacheKey);
+      if (cached !== undefined) return cached;
+      var decoded = thawGraphDescriptorSource(source);
+      if (typeof decoded === 'function') sourceFunctions.set(cacheKey, decoded);
+      return decoded;
+    };
     var descriptor = function(name) {
       if (arrayKind.value && name === 'length') {
         syncArrayLength();
@@ -861,8 +882,11 @@
       }
       var meta = graphProperty('descriptor_graph', [name]);
       if (!meta) { var stale = thawNapiReflectGetOwnPropertyDescriptor(target, name); if (stale && stale.configurable) thawNapiReflectDeleteProperty(target, name); fallbackGetters.delete(name); fallbackSetters.delete(name); return undefined; }
-      var getter = meta.getter_source ? thawGraphDescriptorSource(meta.getter_source) : undefined;
-      var setter = meta.setter_source ? thawGraphDescriptorSource(meta.setter_source) : undefined;
+      // A native accessor function must keep one identity across descriptor reads:
+      // a nonconfigurable accessor materialized on the Proxy target may not change
+      // its getter or setter later.
+      var getter = meta.getter_source ? sourceFunction(meta.getter_source) : undefined;
+      var setter = meta.setter_source ? sourceFunction(meta.setter_source) : undefined;
       if (meta.accessor && meta.getter && !getter) {
         getter = fallbackGetters.get(name);
         if (!getter) { getter = function() { return read(name, this); }; fallbackGetters.set(name, getter); }
@@ -870,6 +894,16 @@
       if (meta.accessor && meta.setter && !setter) {
         setter = fallbackSetters.get(name);
         if (!setter) { setter = function(value) { graphProperty('set_graph', [name, value, this]); }; fallbackSetters.set(name, setter); }
+      }
+      // Proxy invariant: a nonconfigurable accessor already materialized on the
+      // target keeps its exact getter/setter. The native accessor can no longer
+      // change either (it is nonconfigurable natively too), so reuse them.
+      if (meta.accessor) {
+        var current = thawNapiReflectGetOwnPropertyDescriptor(target, name);
+        if (current && !current.configurable && !thawGraphOwn(current, 'value')) {
+          getter = meta.getter ? current.get : undefined;
+          setter = meta.setter ? current.set : undefined;
+        }
       }
       var desc = meta.accessor ? { configurable: !!meta.configurable, enumerable: !!meta.enumerable, get: getter, set: setter } : { configurable: !!meta.configurable, enumerable: !!meta.enumerable, writable: !!meta.writable, value: read(name) };
       if (!meta.configurable) { if (!thawNapiReflectDefineProperty(target, name, desc)) throw new thawGraphTypeError('Cannot materialize native descriptor'); return thawNapiReflectGetOwnPropertyDescriptor(target, name); }
@@ -959,11 +993,26 @@
       const state = thawGraphNapiSymbolState(owner);
       return !!state && state.symbolPin(id, pin);
     };
+  const thawNapiSymbolGet = (owner, id) => {
+      const state = thawGraphNapiSymbolState(owner);
+      const symbol = state && state.symbolForNative(id);
+      if (typeof symbol === 'symbol') return symbol;
+      // Stable graph IDs are not native N-API handles. Resolve through the
+      // existing owner-checked operation and invoke the captured materializer
+      // so coercion sees the actual native Symbol and its description.
+      const resolved = thawGraphParse(thawGraphNapiBridgeHandle('symbol_handle',
+        id, '', '[]'));
+      if (!resolved || resolved.__thaw_error__ || !resolved.value
+        || typeof resolved.value !== 'string'
+        || thawGraphNapiOwnerOfHandle(resolved.value) !== thawGraphString(owner))
+        throw new thawGraphTypeError('Native Symbol owner is unavailable');
+      return thawHostNativeSymbolMake(resolved.value);
+    };
   // Register the owner operations once with Rust userdata, then remove every
   // bootstrap capability from the realm before user code can run. The native
   // positive root remains owned by the captured finalizer callback only.
   globalThis.__thaw_napi_graph_symbol_install(
-    thawNapiSymbolRegister, thawNapiSymbolLive, thawNapiSymbolPin);
+    thawNapiSymbolRegister, thawNapiSymbolLive, thawNapiSymbolPin, thawNapiSymbolGet);
   for (const name of ['__thaw_napi_graph_symbol_install',
     '__thaw_napi_graph_symbol_pin', '__thaw_napi_graph_symbol_unpin']) {
     if (!thawNapiBootstrapDeleteProperty(globalThis, name))
@@ -1461,19 +1510,8 @@
         // The engine supplies the actual new.target. Carry it in the same
         // owned graph as the arguments; no mutable side channel may be
         // overwritten by a reentrant constructor/prototype getter.
-        // QuickJS's GetFunctionRealm walks through a Proxy to its target.
-        // This temporary Proxy suppresses only the probe's prototype Get;
-        // the native constructor below performs the one observable Get on
-        // the real newTarget. Object construction then yields the fallback
-        // Object.prototype belonging to newTarget's actual realm.
-        const realmProbe = new thawGraphProxy(newTarget, {
-          get(target, key, receiver) {
-            return key === 'prototype' ? undefined
-              : thawGraphReflectGet(target, key, receiver);
-          },
-        });
         const realmObject = thawNapiReflectConstruct(thawNapiIntrinsicObject,
-          [], realmProbe);
+          [], newTarget);
         const fallback = thawNapiReflectGetPrototypeOf(realmObject);
         const values = [newTarget, fallback];
         for (let index = 0; index < args.length; index++)
@@ -1736,6 +1774,14 @@
         return thawGraphNumber(token.nf);
       throw new thawGraphTypeError('Invalid native JSON graph token');
     };
+    if (thawGraphArrayIsArray(graph.origins)) {
+      thawGraphApply(thawGraphArrayForEach, graph.origins, [(serial, index) => {
+        const node = graph.nodes[index];
+        if (thawGraphNumberIsSafeInteger(serial) && serial > 0 && node
+          && (own(node, 'a') || own(node, 'o')))
+          thawDateApply(thawOriginSerialSet, thawOriginSerials, [nodes[index], serial]);
+      }]);
+    }
     thawGraphApply(thawGraphArrayForEach, graph.nodes, [(node, index) => {
       if (own(node, 'a')) {
         thawGraphApply(thawGraphArrayForEach, node.a, [(token, slot) => {
@@ -1838,7 +1884,7 @@
     return response;
   };
   thawGraphDefineProperty(globalThis, '__thaw_object_with_native_getters', {
-    value: (keys, readable, writable, accessors, ...callbacks) => {
+    value: (keys, readable, writable, accessors, methods, ...callbacks) => {
       const target = {};
       const positions = new thawGraphMapConstructor();
       for (let i = 0; i < keys.length; i++) {
@@ -1861,6 +1907,15 @@
       const stateReceiver = thawGraphObjectCreate(null);
       let wrapper;
       const read = index => thawGraphApply(callbacks[index * 2], wrapper, []);
+      // A receiver-aware method reads as one stable function per wrapper. Each call rebinds to
+      // the call's own receiver when that is another projected owner (`m.call(otherView)`).
+      const methodFunctions = [];
+      const method = index => methodFunctions[index] ??= thawGraphDefineProperty(function (...args) {
+        const receiver = thawGraphApply(thawProjectedReceiverHas, thawProjectedReceivers, [this])
+          ? this : wrapper;
+        return thawGraphApply(thawGraphApply(callbacks[index * 2], receiver, []), undefined, args);
+      }, 'name', { value: keys[index], configurable: true });
+      const value = index => methods[index] ? method(index) : read(index);
       const write = (index, value) => thawGraphApply(callbacks[index * 2 + 1], wrapper, [value]);
       const defineWrite = (index, value, requested) =>
         thawGraphApply(defineWrites[index], wrapper, [value, requested]);
@@ -1894,7 +1949,7 @@
           } else if (current.configurable || current.writable) {
             const writableNow = !!(bits & 1) && !nativeFrozen;
             const update = { configurable, enumerable, writable: writableNow };
-            if (!writableNow || !configurable) update.value = read(i);
+            if (!writableNow || !configurable) update.value = value(i);
             thawGraphReflectDefineProperty(target, key, update);
           }
         }
@@ -1910,7 +1965,7 @@
           if (index === undefined) return thawGraphReflectGet(target, key, receiver);
           if (accessors[index]) return thawGraphReflectGet(target, key, receiver);
           const descriptor = thawGraphReflectGetOwnPropertyDescriptor(target, key);
-          return descriptor.configurable || descriptor.writable ? read(index) : descriptor.value;
+          return descriptor.configurable || descriptor.writable ? value(index) : descriptor.value;
         },
         set(_target, key, value, receiver) {
           sync();
@@ -1934,7 +1989,7 @@
           const descriptor = thawGraphReflectGetOwnPropertyDescriptor(target, key);
           const index = thawGraphApply(thawGraphMapGet, positions, [key]);
           if (index === undefined || accessors[index] || !descriptor) return descriptor;
-          return { value: descriptor.configurable || descriptor.writable ? read(index) : descriptor.value,
+          return { value: descriptor.configurable || descriptor.writable ? value(index) : descriptor.value,
             writable: descriptor.writable, enumerable: descriptor.enumerable,
             configurable: descriptor.configurable };
         },
@@ -1974,7 +2029,7 @@
             // write. Configurable non-writable fields accept a new value via
             // DefineOwnProperty, unlike ordinary assignment.
             if (!(current & 1) && !(current & 4)) {
-              if (!thawGraphObjectIs(descriptor.value, read(index))) return false;
+              if (!thawGraphObjectIs(descriptor.value, value(index))) return false;
             } else {
               if (!defineWrite(index, descriptor.value, requested)) return false;
             }
@@ -1982,7 +2037,7 @@
           // A fixed field can coerce the written value. Once the target
           // becomes non-configurable and non-writable, Proxy invariants need
           // its actual stored value, including for an attributes-only update.
-          if (!accessors[index]) updated.value = read(index);
+          if (!accessors[index]) updated.value = value(index);
           if (!thawGraphApply(setFlags, stateReceiver, [key, requested])) return false;
           if (!thawGraphReflectDefineProperty(target, key, updated)) return false;
           if (thawGraphObjectIsFrozen(target)) thawGraphApply(setState, stateReceiver, [3]);
@@ -1993,6 +2048,7 @@
       let hasAccessor = false;
       for (let i = 0; i < keys.length; i++) if (accessors[i]) hasAccessor = true;
       if (!hasAccessor && accessors[keys.length] !== true) thawGraphApply(thawNapiWeakSetAdd, thawNativeWrapperSet, [wrapper]);
+      thawGraphApply(thawProjectedReceiverAdd, thawProjectedReceivers, [wrapper]);
       return wrapper;
     },
     writable: false, configurable: false,
@@ -2188,7 +2244,7 @@
       ? chain.slice(1).split('\u001f')[0] : chain.split('$')[0];
     return { name, display, original, suffix: body.slice(cursor) };
   };
-  globalThis.__thaw_error_from_tagged = function (raw) {
+  const thawErrorFromTagged = function (raw) {
     const frame = globalThis.__thaw_error_frame_parts(raw);
     if (frame) {
       const error = new Error(frame.original === null ? frame.display : frame.original);
@@ -2230,6 +2286,9 @@
       } catch (ignored) {}
     }
     return error;
+  };
+  globalThis.__thaw_error_from_tagged = function (raw) {
+    return thawErrorFromTagged(raw);
   };
   globalThis.__thaw_is_buffer_dynamic_value = value => Buffer.isBuffer(value);
   const timers = new Map();

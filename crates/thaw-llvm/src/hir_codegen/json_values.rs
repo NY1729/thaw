@@ -96,6 +96,12 @@ impl<'ctx> HirCompiler<'ctx> {
         handle: BasicValueEnum<'ctx>,
         consume_handle: bool,
     ) -> Result<(), String> {
+        // Query before the capture below can consume the handle.
+        let parked = self.builder.build_call(
+            self.module.get_function("thaw_js_exception_native_token").unwrap(),
+            &[handle.into()], "original_exception_native_token",
+        ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+            .ok_or("exception native token returned no value")?.into_int_value();
         let original = self.compile_original_quickjs_exception_handle(handle, consume_handle)?;
         self.builder.build_store(self.pending_exception().as_pointer_value(), original)
             .map_err(|error| error.to_string())?;
@@ -119,6 +125,8 @@ impl<'ctx> HirCompiler<'ctx> {
             self.pending_exception_aggregate_errors().as_pointer_value(),
             self.context.ptr_type(AddressSpace::default()).const_null(),
         ).map_err(|error| error.to_string())?;
+        // A native throw that round-tripped through JavaScript gets its original value back.
+        self.compile_apply_parked_native_throw(parked)?;
         self.branch_on_pending_exception()
     }
 

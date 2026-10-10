@@ -1630,6 +1630,20 @@ fn threadsafe_function_serializes_multiple_producers() {
     assert!(probe.finalized.load(Ordering::Acquire));
 }
 
+// These tests drive an Env that is not registered with the Host, so the drain
+// loop cannot see its queued work and would return before a slow worker pushes
+// the completion. Wait for that completion event first.
+fn wait_for_ready_completion() {
+    let owner = std::thread::current().id();
+    for _ in 0..5_000 {
+        let ready = ready_events().lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+            .iter().any(|event| unsafe { event.owner() == owner });
+        if ready { return; }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    panic!("async completion was never queued");
+}
+
 #[test]
 fn async_work_executes_on_a_worker_and_completes_on_the_draining_thread() {
     let _guard = lock_async_test();
@@ -1658,6 +1672,7 @@ fn async_work_executes_on_a_worker_and_completes_on_the_draining_thread() {
         assert_eq!(napi_queue_async_work(&mut env, work), NAPI_OK);
         assert_eq!(napi_queue_async_work(&mut env, work), NAPI_GENERIC_FAILURE);
     }
+    wait_for_ready_completion();
     assert_eq!(thaw_napi_run_async_work(), 1);
 
     let probe = unsafe { Box::from_raw(probe_ptr) };
@@ -1774,6 +1789,7 @@ fn native_promise_can_settle_on_the_final_async_completion() {
         );
         assert_eq!(napi_queue_async_work(&mut env, work), NAPI_OK);
     }
+    wait_for_ready_completion();
     assert!(matches!(wait_for_promise(promise), Ok(value) if unsafe {
         matches!(value_ref(value), Ok(Value::Undefined))
     }));
@@ -1784,6 +1800,9 @@ fn native_promise_can_settle_on_the_final_async_completion() {
 
 #[test]
 fn async_creation_validates_resources_names_and_callback_environment() {
+    // It creates and finalizes threadsafe functions, which move the
+    // process-wide counters the other async tests observe.
+    let _guard = lock_async_test();
     unsafe {
         let mut env = Env::new();
         let env_ptr: NapiEnv = &mut env;

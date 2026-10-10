@@ -3021,6 +3021,22 @@ fn generated_native_text_and_promise_forwarding_preserve_diagnostic_provenance()
 }
 
 #[test]
+fn trusted_promise_rejection_text_copy_preserves_embedded_nul_bytes() {
+    let bytes = b"before\0after";
+    let text = thaw_arena::arena_string(bytes).cast::<u8>();
+    let promise = thaw_promise_new();
+    assert_eq!(unsafe {
+        thaw_promise_reject_typed_with_native_text(
+            promise, text, 0, 0.0, 0, false, std::ptr::null(), text,
+        )
+    }, 1);
+    assert_eq!(unsafe { (*promise).rejection_text.as_deref() }, Some(bytes.as_slice()));
+    let copy = unsafe { thaw_promise_exception_native_text_copy(promise) };
+    assert_eq!(unsafe { thaw_arena::NativeStr::from_ptr(copy.cast()) }.to_bytes(), bytes);
+    unsafe { thaw_promise_destroy(promise) };
+}
+
+#[test]
 fn finally_adopt_snapshots_original_native_text_before_source_destruction() {
     let source = thaw_promise_new();
     let returned = thaw_promise_new();

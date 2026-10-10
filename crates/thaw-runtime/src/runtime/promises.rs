@@ -313,7 +313,7 @@ pub unsafe extern "C" fn thaw_promise_reject_native_text(promise: *mut ThawPromi
 
 fn reject_native_text(promise: *mut ThawPromise, error: *const u8) -> u8 {
     let text = (!error.is_null())
-        .then(|| unsafe { CStr::from_ptr(error.cast()).to_bytes().to_vec() });
+        .then(|| unsafe { thaw_arena::NativeStr::from_ptr(error.cast()) }.to_bytes().to_vec());
     if settle_promise(promise, error, true, std::ptr::null()) == 0 { return 0; }
     unsafe { (*promise).rejection_text = text; }
     1
@@ -367,7 +367,9 @@ pub unsafe extern "C" fn thaw_promise_reject_typed_with_native_text(
         promise, error, tag, f64_value, i64_value, bool_value, object,
     ) };
     if settled != 0 && !error.is_null() && error == native_text {
-        unsafe { (*promise).rejection_text = Some(CStr::from_ptr(error.cast()).to_bytes().to_vec()); }
+        unsafe { (*promise).rejection_text = Some(
+            thaw_arena::NativeStr::from_ptr(error.cast()).to_bytes().to_vec(),
+        ); }
     }
     settled
 }

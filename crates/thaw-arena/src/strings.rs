@@ -4,9 +4,55 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::{c_char, CStr, CString};
 use std::sync::{Mutex, OnceLock};
+use std::rc::Rc;
 
 thread_local! {
     static LENGTHS: RefCell<HashMap<usize, (usize, bool)>> = RefCell::new(HashMap::new());
+    static OWNED_EXCEPTIONS: RefCell<HashMap<usize, Rc<crate::exception::ExceptionPacket>>> = RefCell::new(HashMap::new());
+}
+
+/// Binds a private exception packet to one trusted owned result string.
+/// The address is the authority; its bytes are never parsed for a token.
+pub fn bind_owned_exception(
+    pointer: *const c_char,
+    packet: Rc<crate::exception::ExceptionPacket>,
+) -> bool {
+    if pointer.is_null() { return false; }
+    OWNED_EXCEPTIONS.with(|entries| {
+        let mut entries = entries.borrow_mut();
+        if entries.contains_key(&(pointer as usize)) { return false; }
+        entries.insert(pointer as usize, packet);
+        true
+    })
+}
+
+/// Transfers the packet bound to the exact owned callback result pointer.
+pub fn take_owned_exception(pointer: *const c_char) -> Option<Rc<crate::exception::ExceptionPacket>> {
+    if pointer.is_null() { return None; }
+    OWNED_EXCEPTIONS.with(|entries| entries.borrow_mut().remove(&(pointer as usize)))
+}
+
+/// Borrows the authenticated packet associated with an owned result pointer.
+pub fn owned_exception(pointer: *const c_char) -> Option<Rc<crate::exception::ExceptionPacket>> {
+    if pointer.is_null() { return None; }
+    OWNED_EXCEPTIONS.with(|entries| entries.borrow().get(&(pointer as usize)).cloned())
+}
+
+/// Registers bytes owned by a native exception packet so embedded NULs remain data.
+pub fn register_exception_bytes(pointer: *const c_char, length: usize) {
+    if !pointer.is_null() {
+        LENGTHS.with(|lengths| {
+            // Exception packet bytes live in a Rust-owned Box, not the resettable arena.
+            // Keep their embedded-NUL length metadata until the packet releases them.
+            lengths.borrow_mut().insert(pointer as usize, (length, true));
+        });
+    }
+}
+
+pub fn unregister_exception_bytes(pointer: *const c_char) {
+    if !pointer.is_null() {
+        LENGTHS.with(|lengths| { lengths.borrow_mut().remove(&(pointer as usize)); });
+    }
 }
 
 fn owned_lengths() -> &'static Mutex<HashMap<usize, usize>> {
@@ -184,6 +230,8 @@ pub unsafe fn destroy_string(pointer: *const c_char) {
     if pointer.is_null() {
         return;
     }
+    let exception = OWNED_EXCEPTIONS.with(|entries| entries.borrow_mut().remove(&(pointer as usize)));
+    drop(exception);
     graph_transfers()
         .lock()
         .unwrap()
@@ -403,6 +451,18 @@ pub fn utf16_map_segments(units: &[u16], mut map: impl FnMut(&str, &mut Vec<u16>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exception_byte_lengths_survive_arena_reset_until_packet_release() {
+        let bytes = b"before\0after";
+        let pointer = crate::owned_string(bytes);
+        register_exception_bytes(pointer, bytes.len());
+        crate::thaw_arena_reset();
+        assert_eq!(unsafe { NativeStr::from_ptr(pointer) }.to_bytes(), bytes);
+        unregister_exception_bytes(pointer);
+        unsafe { crate::destroy_string(pointer) };
+    }
+
     #[test]
     fn wtf8_preserves_lone_surrogates_and_embedded_nul() {
         let units = [0xd800, 0, 0xdc00, 0xd83d, 0xde00];
