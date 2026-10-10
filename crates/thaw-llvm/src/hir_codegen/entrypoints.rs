@@ -1257,10 +1257,12 @@ impl<'ctx> HirCompiler<'ctx> {
             // The N-API pin barrier may depend on ordinary QuickJS function
             // finalizers. Collect once while addon Envs are still live; the
             // normal event-loop and N-API poll path below drains their jobs.
-            self.builder.build_call(
-                self.module.get_function("thaw_js_collect_garbage").unwrap(), &[],
-                "collect_terminal_graph_roots",
-            ).unwrap();
+            if self.uses_quickjs {
+                self.builder.build_call(
+                    self.module.get_function("thaw_js_collect_garbage").unwrap(), &[],
+                    "collect_terminal_graph_roots",
+                ).unwrap();
+            }
             self.builder.build_unconditional_branch(poll).unwrap();
             self.builder.position_at_end(poll);
             // A live unreferenced handle can keep the phase barrier closed.
@@ -1275,10 +1277,12 @@ impl<'ctx> HirCompiler<'ctx> {
             ).unwrap();
             self.report_napi_shutdown_errors(failure, shutdown_error_seen);
             self.drive_terminal_work(failure, quickjs_failure, false);
-            self.builder.build_call(
-                self.module.get_function("thaw_js_collect_garbage").unwrap(), &[],
-                "collect_terminal_work_garbage",
-            ).unwrap();
+            if self.uses_quickjs {
+                self.builder.build_call(
+                    self.module.get_function("thaw_js_collect_garbage").unwrap(), &[],
+                    "collect_terminal_work_garbage",
+                ).unwrap();
+            }
             let ready = self.builder.build_call(
                 self.module.get_function("thaw_napi_poll_shutdown").unwrap(), &[],
                 "confirm_napi_shutdown",
@@ -1288,14 +1292,18 @@ impl<'ctx> HirCompiler<'ctx> {
             ).unwrap();
             let new_errors = self.report_napi_shutdown_errors(failure, shutdown_error_seen);
             let new_work = self.drive_terminal_work(failure, quickjs_failure, false);
-            self.builder.build_call(
-                self.module.get_function("thaw_js_collect_garbage").unwrap(), &[],
-                "collect_terminal_work_garbage_again",
-            ).unwrap();
-            let pending_after_gc = self.builder.build_call(
-                self.module.get_function("thaw_js_terminal_work_pending").unwrap(), &[],
-                "shutdown_work_pending_after_gc",
-            ).unwrap().try_as_basic_value().basic().unwrap().into_int_value();
+            let pending_after_gc = if self.uses_quickjs {
+                self.builder.build_call(
+                    self.module.get_function("thaw_js_collect_garbage").unwrap(), &[],
+                    "collect_terminal_work_garbage_again",
+                ).unwrap();
+                self.builder.build_call(
+                    self.module.get_function("thaw_js_terminal_work_pending").unwrap(), &[],
+                    "shutdown_work_pending_after_gc",
+                ).unwrap().try_as_basic_value().basic().unwrap().into_int_value()
+            } else {
+                self.context.i8_type().const_zero()
+            };
             let pending_after_gc = self.builder.build_int_compare(
                 IntPredicate::NE, pending_after_gc, pending_after_gc.get_type().const_zero(),
                 "shutdown_more_work_after_gc",

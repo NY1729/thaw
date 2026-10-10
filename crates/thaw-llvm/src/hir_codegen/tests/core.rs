@@ -3162,6 +3162,41 @@ fn main_cleanup_keeps_process_reporting_and_addons_live_on_init_failure() {
 }
 
 #[test]
+fn napi_only_terminal_cleanup_does_not_reference_quickjs_symbols() {
+    let module = thaw_parser::parse_typescript("function main(): void {}").unwrap();
+    let program = thaw_hir::lower_module(&module).unwrap();
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "napi_only_terminal_cleanup");
+    compiler.uses_napi = true;
+    compiler.uses_quickjs = false;
+    compiler.uses_quickjs_handles = false;
+    compiler.compile_program(&program).unwrap();
+    let ir = compiler.print_to_string();
+
+    assert!(
+        !ir.lines().any(|line| line.contains("call void @thaw_js_collect_garbage(")),
+        "N-API-only code must not require the QuickJS archive for terminal GC: {ir}"
+    );
+    assert!(
+        !ir.lines()
+            .any(|line| line.contains("call i8 @thaw_js_terminal_work_pending(")),
+        "N-API-only code must not require the QuickJS terminal-work query: {ir}"
+    );
+    for call in [
+        "call i8 @thaw_napi_begin_shutdown(",
+        "call i8 @thaw_napi_poll_shutdown(",
+        "call i8 @thaw_napi_finish_shutdown(",
+        "call i64 @thaw_runtime_run_until_idle(",
+    ] {
+        assert!(ir.contains(call), "expected N-API/native shutdown call {call}: {ir}");
+    }
+    let begin = ir.find("call i8 @thaw_napi_begin_shutdown(").unwrap();
+    let poll = ir.find("call i8 @thaw_napi_poll_shutdown(").unwrap();
+    let finish = ir.find("call i8 @thaw_napi_finish_shutdown(").unwrap();
+    assert!(begin < poll && poll < finish, "N-API shutdown order changed: {ir}");
+}
+
+#[test]
 fn terminal_rejection_listener_jobs_finish_before_process_exit() {
     let source = r#"
         function main(): void {
