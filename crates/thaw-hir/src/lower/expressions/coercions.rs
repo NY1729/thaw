@@ -2094,6 +2094,29 @@ impl<'a> FnLowerer<'a> {
         self.coerce_primitive_to_number_impl(value, false)
     }
 
+    fn dynamic_value_to_number(
+        &mut self,
+        value: HirExpr,
+        helper_name: &str,
+    ) -> Result<HirExpr, String> {
+        // Keep numeric conversion on the live QuickJS value: JSON graph
+        // projection drops symbol-keyed Symbol.toPrimitive methods.
+        let value = self.coerce_to_declared(&HirType::Json, value)?;
+        let argument = self.coerce_to_declared(
+            &HirType::Json,
+            HirExpr::ArrayLit(vec![value]),
+        )?;
+        let helper = HirExpr::Call(
+            Box::new(HirExpr::Var("getDynamicValue".into())),
+            vec![HirExpr::Lit(HirLit::Str(helper_name.into()))],
+        );
+        let result = HirExpr::Call(
+            Box::new(HirExpr::Var("callDynamicValue".into())),
+            vec![helper, argument],
+        );
+        Ok(HirExpr::JsonAsNumber(Box::new(result)))
+    }
+
     // Binary `+` needs to build its numeric branch even when a different
     // runtime branch concatenates a string. Keep BigInt/Symbol failures local
     // to that branch; ordinary numeric coercions retain their existing ABI.
@@ -2131,10 +2154,7 @@ impl<'a> FnLowerer<'a> {
                 vec![HirExpr::TypedClosure(HirType::Str, Box::new(value))],
             )),
             HirType::Json => Ok(HirExpr::JsonAsNumber(Box::new(value))),
-            HirType::JsValue => Ok(HirExpr::JsonAsNumber(Box::new(HirExpr::Call(
-                Box::new(HirExpr::Var("readDynamicValue".to_string())),
-                vec![value],
-            )))),
+            HirType::JsValue => self.dynamic_value_to_number(value, "__thaw_unary_plus"),
             HirType::Object(fields) => {
                 // Only the private Date layout follows Date valueOf
                 // semantics. A user object with a timestamp property

@@ -2108,8 +2108,42 @@ fn to_spliced_saves_length_after_arguments_before_numeric_conversion() {
                 return 0;
             }
             console.log(argumentsFirst.toSpliced(argument(), 0).join(","));
+
+            const deleteValues = [1, 2];
+            let startCalls = 0;
+            let deleteCalls = 0;
+            const deleteStart = {
+                [Symbol.toPrimitive](hint: string): number {
+                    startCalls++;
+                    deleteValues.push(3);
+                    return 0;
+                },
+            };
+            const deleteCount = {
+                [Symbol.toPrimitive](hint: string): number {
+                    deleteCalls++;
+                    deleteValues.push(4);
+                    return 0;
+                },
+            };
+            console.log(
+                deleteValues.toSpliced(deleteStart, deleteCount).join(","),
+                deleteValues.join(","),
+                startCalls,
+                deleteCalls,
+            );
+
+            loadScript("globalThis.toSplicedBigInt = 1n;");
+            const big: JsValue = getDynamicValue("toSplicedBigInt");
+            console.log(Number(big));
+            try {
+                [1, 2].toSpliced(big, 0);
+                console.log("missing TypeError");
+            } catch (error) {
+                console.log(error instanceof TypeError);
+            }
         }
     "#;
     assert_eq!(compile_and_run(source, "to_spliced_length_order"),
-        "1,2 1,2,3\n1,2\n1,2,3\n");
+        "1,2 1,2,3\n1,2\n1,2,3\n1,2 1,2,3,4 1 1\n1\ntrue\n");
 }
