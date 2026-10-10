@@ -1,3 +1,5 @@
+use std::cell::RefCell;
+use std::collections::HashSet;
 use std::ffi::CString;
 use std::io::{Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
@@ -1664,16 +1666,43 @@ fn sweep_idle_connections() -> Option<Instant> {
     next
 }
 
+thread_local! {
+    // `active_servers` is a Rust heap registry, not an arena root. Keep its
+    // state pointers alive only while present in that registry. The registry
+    // address scopes private test registries independently and ArenaRoot's
+    // !Send marker keeps each pin on the thread that drives its event loop.
+    static ACTIVE_SERVER_ROOTS: RefCell<Vec<((usize, usize), thaw_arena::ArenaRoot)>> =
+        const { RefCell::new(Vec::new()) };
+}
+
 fn register_server(state: *const ServerState) {
     register_server_in(active_servers(), state);
 }
 
 fn register_server_in(servers: &Mutex<Vec<usize>>, state: *const ServerState) {
+    let registry = servers as *const Mutex<Vec<usize>> as usize;
     let address = state as usize;
+    ACTIVE_SERVER_ROOTS.with(|roots| {
+        let mut roots = roots.borrow_mut();
+        if !roots
+            .iter()
+            .any(|((owner, state), _)| *owner == registry && *state == address)
+        {
+            roots.push(((registry, address), thaw_arena::ArenaRoot::new(address)));
+        }
+    });
     let mut servers = servers.lock().unwrap();
     if !servers.contains(&address) {
         servers.push(address);
     }
+}
+
+fn release_inactive_server_roots(registry: usize, active: &HashSet<usize>) {
+    ACTIVE_SERVER_ROOTS.with(|roots| {
+        roots
+            .borrow_mut()
+            .retain(|((owner, state), _)| *owner != registry || active.contains(state));
+    });
 }
 
 /// Keeps a short timer promise alive so the event loop's `poll` never
@@ -1733,7 +1762,12 @@ fn dispatch_server_events(servers: &Mutex<Vec<usize>>) -> (bool, bool) {
     // registers a server in this same list. Snapshot the stable
     // ServerState pointers, then invoke user code without the list
     // lock. A callback can also reopen the very server being closed.
+    let registry = servers as *const Mutex<Vec<usize>> as usize;
     let snapshot = servers.lock().unwrap().clone();
+    let _dispatch_roots = snapshot
+        .iter()
+        .map(|&address| thaw_arena::ArenaRoot::new(address))
+        .collect::<Vec<_>>();
     for &address in &snapshot {
         let state = unsafe { &*(address as *const ServerState) };
         if state.pending_listening.swap(false, Ordering::AcqRel) {
@@ -1778,15 +1812,29 @@ fn dispatch_server_events(servers: &Mutex<Vec<usize>>) -> (bool, bool) {
                 && state.connections.load(Ordering::Acquire) == 0
                 && state.close_requested.load(Ordering::Acquire))
     });
-    (current.is_empty(), pending_event)
+    let active = current.iter().copied().collect::<HashSet<_>>();
+    let empty = current.is_empty();
+    drop(current);
+    release_inactive_server_roots(registry, &active);
+    (empty, pending_event)
 }
 
 fn emit_event(listeners: &Mutex<Vec<EventListener>>) {
-    let callbacks = {
+    let owner = listeners as *const Mutex<Vec<EventListener>> as usize;
+    let (callbacks, _delivery_roots) = {
         let mut listeners = listeners.lock().unwrap();
         let callbacks = listeners.clone();
+        // Keep every callback in the complete delivery snapshot rooted before
+        // removing once records: an earlier callback may trigger an arena reset.
+        let roots = callbacks
+            .iter()
+            .map(|listener| thaw_arena::ArenaRoot::new(listener.callback))
+            .collect::<Vec<_>>();
+        for listener in callbacks.iter().filter(|listener| listener.once) {
+            thaw_arena::replace_reference(owner, listener.callback, 0);
+        }
         listeners.retain(|listener| !listener.once);
-        callbacks
+        (callbacks, roots)
     };
     for listener in callbacks {
         let callback = listener.callback as *const c_void;
@@ -1801,10 +1849,13 @@ fn emit_event(listeners: &Mutex<Vec<EventListener>>) {
 
 fn add_event_listener(listeners: &Mutex<Vec<EventListener>>, callback: *const c_void, once: bool) {
     if !callback.is_null() {
+        let address = callback as usize;
         listeners.lock().unwrap().push(EventListener {
-            callback: callback as usize,
+            callback: address,
             once,
         });
+        let owner = listeners as *const Mutex<Vec<EventListener>> as usize;
+        thaw_arena::replace_reference(owner, 0, address);
     }
 }
 
@@ -1826,6 +1877,10 @@ struct NativeServerError {
 
 fn emit_error(listeners: &Mutex<Vec<EventListener>>, error: &ServerError) {
     let callbacks = listeners.lock().unwrap().clone();
+    let _delivery_roots = callbacks
+        .iter()
+        .map(|listener| thaw_arena::ArenaRoot::new(listener.callback))
+        .collect::<Vec<_>>();
     if callbacks.is_empty() {
         eprintln!(
             "Unhandled 'error' event: {} ({})",
@@ -2779,7 +2834,7 @@ pub extern "C" fn createServer(callback: *const c_void) -> *const c_void {
         code: server_on_error as *const c_void,
         context: state.cast(),
     }));
-    Box::into_raw(Box::new(Server {
+    let server = Box::into_raw(Box::new(Server {
         listen,
         listen_with_callback,
         listen_many,
@@ -2787,8 +2842,39 @@ pub extern "C" fn createServer(callback: *const c_void) -> *const c_void {
         close_with_callback,
         on,
         on_error,
-    }))
-    .cast()
+    }));
+    let state_address = state as usize;
+    thaw_arena::replace_reference(server as usize, 0, state_address);
+    for closure in [
+        listen,
+        listen_with_callback,
+        listen_many,
+        close,
+        close_with_callback,
+        on,
+        on_error,
+    ] {
+        thaw_arena::replace_reference(closure as usize, 0, state_address);
+    }
+    thaw_arena::replace_reference(state_address, 0, callback as usize);
+    unsafe {
+        thaw_arena::replace_reference(
+            state_address,
+            0,
+            &(*state).listening_listeners as *const Mutex<Vec<EventListener>> as usize,
+        );
+        thaw_arena::replace_reference(
+            state_address,
+            0,
+            &(*state).close_listeners as *const Mutex<Vec<EventListener>> as usize,
+        );
+        thaw_arena::replace_reference(
+            state_address,
+            0,
+            &(*state).error_listeners as *const Mutex<Vec<EventListener>> as usize,
+        );
+    }
+    server.cast()
 }
 
 #[cfg(test)]
@@ -2829,6 +2915,302 @@ mod tests {
             pending_errors: Mutex::new(Vec::new()),
             close_requested: AtomicBool::new(false),
         })
+    }
+
+    fn allocate_test_server_callback() -> *mut u8 {
+        let callback = thaw_arena::thaw_arena_alloc(8, std::mem::align_of::<usize>());
+        assert!(!callback.is_null());
+        unsafe { callback.write_bytes(0, 8) };
+        callback
+    }
+
+    fn assert_test_callback_reclaimed(callback: usize) {
+        assert!(!thaw_arena::contains_allocation(callback));
+    }
+
+    fn assert_test_callback_live(callback: usize) {
+        assert!(thaw_arena::contains_allocation(callback));
+    }
+
+    fn allocate_test_event_callback(code: *const c_void, context: *mut c_void) -> *const c_void {
+        let callback = thaw_arena::thaw_arena_alloc(
+            std::mem::size_of::<NativeClosure>(),
+            std::mem::align_of::<NativeClosure>(),
+        )
+        .cast::<NativeClosure>();
+        assert!(!callback.is_null());
+        unsafe { callback.write(NativeClosure { code, context }) };
+        callback.cast()
+    }
+
+    #[test]
+    fn server_box_owner_keeps_primary_handler_until_server_handle_drops() {
+        std::thread::spawn(|| {
+            thaw_arena::thaw_arena_enable_tracing();
+            let callback = allocate_test_server_callback();
+            let server = createServer(callback.cast());
+            let owner = thaw_arena::ArenaRoot::new(server as usize);
+
+            thaw_arena::thaw_arena_reset();
+            assert_test_callback_live(callback as usize);
+
+            drop(owner);
+            thaw_arena::thaw_arena_reset();
+            assert_test_callback_reclaimed(callback as usize);
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    fn extracted_server_method_keeps_primary_handler_until_method_drops() {
+        std::thread::spawn(|| {
+            thaw_arena::thaw_arena_enable_tracing();
+            let callback = allocate_test_server_callback();
+            let server = createServer(callback.cast()).cast::<Server>();
+            let method = unsafe { (*server).on };
+            let owner = thaw_arena::ArenaRoot::new(method as usize);
+
+            thaw_arena::thaw_arena_reset();
+            assert_test_callback_live(callback as usize);
+
+            drop(owner);
+            thaw_arena::thaw_arena_reset();
+            assert_test_callback_reclaimed(callback as usize);
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    fn active_server_registry_root_releases_after_closed_server_drains() {
+        std::thread::spawn(|| {
+            thaw_arena::thaw_arena_enable_tracing();
+            let callback = allocate_test_server_callback();
+            let server = createServer(callback.cast()).cast::<Server>();
+            let state = unsafe { &*((*(*server).listen).context as *const ServerState) };
+            let servers = Mutex::new(Vec::new());
+            register_server_in(&servers, state);
+
+            thaw_arena::thaw_arena_reset();
+            assert_test_callback_live(callback as usize);
+
+            state.closed.store(true, Ordering::Release);
+            assert_eq!(dispatch_server_events(&servers), (true, false));
+            thaw_arena::thaw_arena_reset();
+            assert_test_callback_reclaimed(callback as usize);
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    fn generated_server_owner_survives_close_and_can_relisten() {
+        std::thread::spawn(|| {
+            thaw_arena::thaw_arena_enable_tracing();
+            let callback = allocate_test_server_callback();
+            let server_box = createServer(callback.cast());
+            let server = server_box.cast::<Server>();
+            let state = unsafe { &*((*(*server).listen).context as *const ServerState) };
+            let owner = thaw_arena::ArenaRoot::new(server_box as usize);
+            let servers = Mutex::new(Vec::new());
+            register_server_in(&servers, state);
+
+            thaw_arena::thaw_arena_reset();
+            assert_test_callback_live(callback as usize);
+
+            state.closed.store(true, Ordering::Release);
+            assert_eq!(dispatch_server_events(&servers), (true, false));
+            thaw_arena::thaw_arena_reset();
+            assert_test_callback_live(callback as usize);
+
+            state.closed.store(false, Ordering::Release);
+            register_server_in(&servers, state);
+            thaw_arena::thaw_arena_reset();
+            assert_test_callback_live(callback as usize);
+
+            drop(owner);
+            state.closed.store(true, Ordering::Release);
+            assert_eq!(dispatch_server_events(&servers), (true, false));
+            thaw_arena::thaw_arena_reset();
+            assert_test_callback_reclaimed(callback as usize);
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    fn active_server_roots_are_pruned_per_registry() {
+        std::thread::spawn(|| {
+            thaw_arena::thaw_arena_enable_tracing();
+            let first_callback = allocate_test_server_callback();
+            let first_server = createServer(first_callback.cast()).cast::<Server>();
+            let first_state =
+                unsafe { &*((*(*first_server).listen).context as *const ServerState) };
+            let first_registry = Mutex::new(Vec::new());
+            register_server_in(&first_registry, first_state);
+            thaw_arena::thaw_arena_reset();
+            assert_test_callback_live(first_callback as usize);
+
+            let second_callback = allocate_test_server_callback();
+            let second_server = createServer(second_callback.cast()).cast::<Server>();
+            let second_state =
+                unsafe { &*((*(*second_server).listen).context as *const ServerState) };
+            let second_registry = Mutex::new(Vec::new());
+            register_server_in(&second_registry, second_state);
+            thaw_arena::thaw_arena_reset();
+            assert_test_callback_live(first_callback as usize);
+            assert_test_callback_live(second_callback as usize);
+
+            first_state.closed.store(true, Ordering::Release);
+            assert_eq!(dispatch_server_events(&first_registry), (true, false));
+            thaw_arena::thaw_arena_reset();
+            assert_test_callback_reclaimed(first_callback as usize);
+            assert_test_callback_live(second_callback as usize);
+
+            second_state.closed.store(true, Ordering::Release);
+            assert_eq!(dispatch_server_events(&second_registry), (true, false));
+            thaw_arena::thaw_arena_reset();
+            assert_test_callback_reclaimed(second_callback as usize);
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    fn server_event_snapshot_roots_once_duplicates_through_reentry() {
+        struct Probe {
+            first: AtomicUsize,
+            later: AtomicUsize,
+            first_calls: AtomicUsize,
+            later_calls: AtomicUsize,
+            first_live_during_reset: AtomicBool,
+            later_live_during_reset: AtomicBool,
+            error: AtomicUsize,
+            error_calls: AtomicUsize,
+            error_live_during_reset: AtomicBool,
+        }
+        unsafe extern "C" fn first_callback(environment: *const c_void) {
+            let callback = &*(environment as *const NativeClosure);
+            let probe = &*(callback.context as *const Probe);
+            if probe.first_calls.fetch_add(1, Ordering::AcqRel) == 0 {
+                thaw_arena::thaw_arena_reset();
+                probe.first_live_during_reset.store(
+                    thaw_arena::contains_allocation(probe.first.load(Ordering::Acquire)),
+                    Ordering::Release,
+                );
+                probe.later_live_during_reset.store(
+                    thaw_arena::contains_allocation(probe.later.load(Ordering::Acquire)),
+                    Ordering::Release,
+                );
+            }
+        }
+        unsafe extern "C" fn later_callback(environment: *const c_void) {
+            let callback = &*(environment as *const NativeClosure);
+            let probe = &*(callback.context as *const Probe);
+            probe.later_calls.fetch_add(1, Ordering::AcqRel);
+        }
+        unsafe extern "C" fn error_callback(
+            environment: *const c_void,
+            _error: *const NativeServerError,
+        ) {
+            let callback = &*(environment as *const NativeClosure);
+            let probe = &*(callback.context as *const Probe);
+            probe.error_calls.fetch_add(1, Ordering::AcqRel);
+            thaw_arena::thaw_arena_reset();
+            probe.error_live_during_reset.store(
+                thaw_arena::contains_allocation(probe.error.load(Ordering::Acquire)),
+                Ordering::Release,
+            );
+        }
+
+        std::thread::spawn(|| {
+            thaw_arena::thaw_arena_enable_tracing();
+            let primary = allocate_test_server_callback();
+            let primary_setup_root = thaw_arena::ArenaRoot::new(primary as usize);
+            let server_box = createServer(primary.cast());
+            let server = server_box.cast::<Server>();
+            let state = unsafe { &*((*(*server).listen).context as *const ServerState) };
+            let server_setup_root = thaw_arena::ArenaRoot::new(server_box as usize);
+            // Move event closures into distinct arena generations while the
+            // temporary roots keep the factory graph alive during setup.
+            thaw_arena::thaw_arena_reset();
+            let probe = Probe {
+                first: AtomicUsize::new(0),
+                later: AtomicUsize::new(0),
+                first_calls: AtomicUsize::new(0),
+                later_calls: AtomicUsize::new(0),
+                first_live_during_reset: AtomicBool::new(false),
+                later_live_during_reset: AtomicBool::new(false),
+                error: AtomicUsize::new(0),
+                error_calls: AtomicUsize::new(0),
+                error_live_during_reset: AtomicBool::new(false),
+            };
+            let first = allocate_test_event_callback(
+                first_callback as *const c_void,
+                (&probe as *const Probe).cast_mut().cast(),
+            );
+            probe.first.store(first as usize, Ordering::Release);
+            add_event_listener(&state.listening_listeners, first, true);
+            add_event_listener(&state.listening_listeners, first, false);
+            let servers = Mutex::new(Vec::new());
+            register_server_in(&servers, state);
+            drop(server_setup_root);
+            drop(primary_setup_root);
+
+            thaw_arena::thaw_arena_reset();
+            assert_test_callback_live(primary as usize);
+            assert_test_callback_live(first as usize);
+
+            let later = allocate_test_event_callback(
+                later_callback as *const c_void,
+                (&probe as *const Probe).cast_mut().cast(),
+            );
+            probe.later.store(later as usize, Ordering::Release);
+            add_event_listener(&state.listening_listeners, later, true);
+            thaw_arena::thaw_arena_reset();
+            assert_test_callback_live(primary as usize);
+            assert_test_callback_live(first as usize);
+            assert_test_callback_live(later as usize);
+
+            state.pending_listening.store(true, Ordering::Release);
+            assert_eq!(dispatch_server_events(&servers), (false, false));
+            assert_eq!(probe.first_calls.load(Ordering::Acquire), 2);
+            assert_eq!(probe.later_calls.load(Ordering::Acquire), 1);
+            assert!(probe.first_live_during_reset.load(Ordering::Acquire));
+            assert!(probe.later_live_during_reset.load(Ordering::Acquire));
+
+            thaw_arena::thaw_arena_reset();
+            assert_test_callback_live(primary as usize);
+            assert_test_callback_live(first as usize);
+            assert_test_callback_reclaimed(later as usize);
+
+            let error = allocate_test_event_callback(
+                error_callback as *const c_void,
+                (&probe as *const Probe).cast_mut().cast(),
+            );
+            probe.error.store(error as usize, Ordering::Release);
+            add_event_listener(&state.error_listeners, error, false);
+            state.pending_errors.lock().unwrap().push(ServerError {
+                message: "owner probe".into(),
+                code: "OWNER_PROBE".into(),
+                port: 0.0,
+            });
+            assert_eq!(dispatch_server_events(&servers), (false, false));
+            assert_eq!(probe.error_calls.load(Ordering::Acquire), 1);
+            assert!(probe.error_live_during_reset.load(Ordering::Acquire));
+            thaw_arena::thaw_arena_reset();
+            assert_test_callback_live(error as usize);
+
+            state.closed.store(true, Ordering::Release);
+            assert_eq!(dispatch_server_events(&servers), (true, false));
+            thaw_arena::thaw_arena_reset();
+            assert_test_callback_reclaimed(primary as usize);
+            assert_test_callback_reclaimed(first as usize);
+            assert_test_callback_reclaimed(error as usize);
+        })
+        .join()
+        .unwrap();
     }
 
     // Unrun regression: both listening and error callbacks can register a
