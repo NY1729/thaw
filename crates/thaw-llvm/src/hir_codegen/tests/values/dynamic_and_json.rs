@@ -22,6 +22,84 @@ fn compiles_native_null_literals() {
     );
 }
 
+#[test]
+fn dynamic_method_argument_consumes_fresh_object_projection() {
+    let source = r#"
+        function boom(): boolean { throw "later argument"; }
+        function main(): void {
+            const values: JsValue = [];
+            values.push({ok: true});
+            console.log(values[0].ok);
+            values[0].extra = 2;
+            console.log(values[0].extra);
+            loadScript("globalThis.borrowedLive = {ok: true};");
+            const borrowed: JsValue = getDynamicValue("borrowedLive");
+            values.push(borrowed);
+            borrowed.ok = false;
+            console.log(values[1].ok);
+            try {
+                values.push({bad: true}, boom());
+            } catch (error) {
+                console.log(values.length);
+            }
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "dynamic_method_owned_json_argument"), "true\n2\nfalse\n2\n");
+}
+
+#[test]
+fn dynamic_method_argument_host_alias_survives_await() {
+    let source = r#"
+        async function main(): Promise<void> {
+            const values: JsValue = [];
+            values.push({ok: true});
+            const alias: JsValue = values[0];
+            await sleep(1);
+            alias.ok = false;
+            console.log(values[0].ok);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "dynamic_method_host_alias_after_await"), "false\n");
+}
+
+#[test]
+fn dynamic_method_owned_json_argument_ir_clones_then_destroys() {
+    let source = r#"
+        function main(): void {
+            const values: JsValue = [];
+            values.push({ok: true});
+        }
+    "#;
+    let module = thaw_parser::parse_typescript(source).unwrap();
+    let program = thaw_hir::lower_module(&module).unwrap();
+    assert!(format!("{program:#?}").contains("__thaw_json_argument_array"));
+    let context = inkwell::context::Context::create();
+    let mut compiler = crate::hir_codegen::HirCompiler::new(&context, "owned_dynamic_argument_ir");
+    compiler.compile_program(&program).unwrap();
+    let ir = compiler.print_to_string();
+    let ir = ir.to_string();
+    assert!(ir.contains("owned_dynamic_argument_array_failed"));
+    let lines: Vec<_> = ir.lines().collect();
+    let array = lines.iter().position(|line| line.contains("owned_dynamic_argument_array = call"))
+        .expect("owned argument sink missing");
+    let producer = lines.iter().enumerate().skip(array)
+        .find(|(_, line)| line.contains("consumed_dynamic_json = call"))
+        .map(|(index, _)| index)
+        .expect("owned host Box producer missing");
+    let release = lines.iter().enumerate().skip(producer)
+        .find(|(_, line)| line.contains("@thaw_js_release_handle"))
+        .map(|(index, _)| index).expect("projection handle release missing");
+    let push = lines.iter().enumerate().skip(release)
+        .find(|(_, line)| line.contains("@thaw_json_array_push_json") && line.contains("%consumed_dynamic_json"))
+        .map(|(index, _)| index).expect("owned argument clone push missing");
+    let destroy = lines.iter().enumerate().skip(push)
+        .find(|(_, line)| line.contains("call void @thaw_json_destroy") && line.contains("%consumed_dynamic_json"))
+        .map(|(index, _)| index).expect("owned argument Box destroy missing");
+    assert!(producer < release && release < push && push < destroy,
+        "projection handle release, graph clone, and owned Box destruction must occur in order");
+    assert!(push < destroy, "owned Json Box must be destroyed after cloning into the argument graph");
+}
+
 /// `String`/`Number`/`Boolean` referenced *bare* (not called) used to
 /// fail to compile ("unknown variable `String`") -- only their
 /// call-position coercion form (`String(x)`) was recognized at all.

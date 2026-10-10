@@ -1065,7 +1065,13 @@ impl<'a> FnLowerer<'a> {
                         || matches!(&value, HirExpr::Var(name)
                             if self.fresh_object_bindings.contains(name)));
                     let projected = self.lower_fixed_object_as_dynamic_accessor_object(value, fields, false, live)?;
-                    return self.coerce_to_declared(&HirType::Json, projected);
+                    // A projected object lookup yields a newly retained JS
+                    // handle. The consuming Json conversion applies the
+                    // runtime's copy-or-live policy and releases that handle.
+                    return Ok(HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_json_from_consumed_dynamic".into())),
+                        vec![projected],
+                    ));
                 }
             }
             if json_convertible_native_type(&actual) {

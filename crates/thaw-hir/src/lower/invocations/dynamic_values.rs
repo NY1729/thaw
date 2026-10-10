@@ -382,6 +382,11 @@ impl<'a> FnLowerer<'a> {
             .iter()
             .map(|argument| {
                 let value = match argument.expr.as_ref() {
+                    // Preserve a fixed native object until the Json coercion
+                    // can mark its acquired live projection as owned. Forcing
+                    // JsValue here first would route through the generic
+                    // borrowed-handle wrapper and erase that provenance.
+                    Expr::Object(_) => self.lower_expr(&argument.expr)?,
                     Expr::Arrow(arrow) => {
                         let expected_return = if arrow.is_async {
                             HirType::Promise(Box::new(HirType::JsValue))
@@ -402,7 +407,17 @@ impl<'a> FnLowerer<'a> {
                 self.coerce_to_declared(&HirType::Json, value)
             })
             .collect::<Result<Vec<_>, String>>()?;
-        let array = self.coerce_to_declared(&HirType::Json, HirExpr::ArrayLit(json_args))?;
+        // Preserve the exact owned producer at this ABI boundary. The
+        // generated Array<Json> wrapper otherwise hides which temporary Box
+        // must be dropped after cloning into the call graph.
+        let array = if json_args.iter().any(Self::is_owned_consumed_dynamic_json) {
+            HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_json_argument_array".into())),
+                json_args,
+            )
+        } else {
+            self.coerce_to_declared(&HirType::Json, HirExpr::ArrayLit(json_args))?
+        };
         let call = HirExpr::Call(
             Box::new(HirExpr::Var(intrinsic.to_string())),
             vec![receiver, HirExpr::Lit(HirLit::Str(property.to_string())), array],
@@ -412,6 +427,15 @@ impl<'a> FnLowerer<'a> {
         } else {
             Ok(call)
         }
+    }
+
+    fn is_owned_consumed_dynamic_json(expr: &HirExpr) -> bool {
+        matches!(expr,
+            HirExpr::Call(callee, args)
+                if matches!(callee.as_ref(), HirExpr::Var(name)
+                    if name == "__thaw_json_from_consumed_dynamic")
+                    && args.len() == 1
+        )
     }
 
     /// Lowers `receiver.property` (a plain property *read*, no call at
