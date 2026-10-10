@@ -805,6 +805,17 @@ impl<'a> FnLowerer<'a> {
                 }
                 _ => return Err("unsupported dynamic object literal property".into()),
             };
+            let mut adapted_callback = false;
+            let callback = match callback {
+                Some(callback) => {
+                    let callback_type = self.infer_expr_type(&callback)?;
+                    let (callback, adapted_type) =
+                        self.adapt_callable_result_for_live_projection(callback, callback_type.clone())?;
+                    adapted_callback = adapted_type != callback_type;
+                    Some(callback)
+                }
+                None => None,
+            };
             let key_name = format!("__thaw_dynamic_object_key_{}", self.next_binding);
             self.next_binding += 1;
             self.scope.insert(key_name.clone(), HirType::Str);
@@ -826,7 +837,7 @@ impl<'a> FnLowerer<'a> {
             }
             if let Some(callback) = callback {
                 callbacks.push(HirExpr::Call(
-                    Box::new(HirExpr::Var(if live_json {
+                    Box::new(HirExpr::Var(if live_json || adapted_callback {
                         "registerNativeCallbackGraph".into()
                     } else {
                         "registerNativeCallback".into()
@@ -3866,7 +3877,7 @@ impl<'a> FnLowerer<'a> {
     /// An unsafe prefix receiver may enumerate or return its synthetic
     /// marker. Keep that layout on the established snapshot path until a
     /// full concrete receiver shape can be recovered at allocation time.
-    fn fixed_object_supports_live_projection(ty: &HirType) -> bool {
+    pub(super) fn fixed_object_supports_live_projection(ty: &HirType) -> bool {
         match ty {
             HirType::Object(fields) => !fields.iter().any(|(name, _)|
                     name.starts_with("__thaw_class_identity_\u{1e}"))
@@ -3885,6 +3896,136 @@ impl<'a> FnLowerer<'a> {
             HirType::Union(members) | HirType::Tuple(members) =>
                 members.iter().all(Self::fixed_object_supports_live_projection),
             _ => true,
+        }
+    }
+
+    /// Whether a fixed object needs the live accessor bridge to preserve a
+    /// getter at any depth reachable through ordinary object/function/promise
+    /// fields. Arrays and union wrappers are intentionally left on the existing
+    /// snapshot path until their projection semantics are explicit.
+    pub(super) fn fixed_object_needs_live_projection(fields: &[(Symbol, HirType)]) -> bool {
+        fn needs(ty: &HirType) -> bool {
+            match ty {
+                HirType::Object(fields) => fields.iter().any(|(name, field)| {
+                    is_hidden_accessor_field(name)
+                        || (!is_hidden_accessor_field(name) && needs(field))
+                }),
+                HirType::Function(_, result) => needs(result),
+                HirType::Promise(result) => needs(result),
+                _ => false,
+            }
+        }
+        fields.iter().any(|(name, field)| {
+            is_hidden_accessor_field(name)
+                || (!is_hidden_accessor_field(name) && needs(field))
+        })
+    }
+
+    /// Keep callable result objects live across the QuickJS callback boundary.
+    /// The projected handle is consumed into Json; callers use graph callbacks
+    /// so decode releases the temporary graph lease after rebuilding the value.
+    pub(super) fn adapt_callable_result_for_live_projection(
+        &mut self,
+        callable: HirExpr,
+        callable_type: HirType,
+    ) -> Result<(HirExpr, HirType), String> {
+        let HirType::Function(params, result_type) = callable_type.clone() else {
+            return Ok((callable, callable_type));
+        };
+        if !Self::callback_result_needs_live_projection(result_type.as_ref()) {
+            return Ok((callable, callable_type));
+        }
+        let callable_name = format!("__thaw_live_result_callback_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(callable_name.clone(), callable_type.clone());
+        let mut arguments = Vec::with_capacity(params.len());
+        let mut wrapper_params = Vec::with_capacity(params.len());
+        for (index, ty) in params.iter().enumerate() {
+            let name = format!("__thaw_live_result_arg_{}_{}", index, self.next_binding);
+            self.scope.insert(name.clone(), ty.clone());
+            arguments.push(HirExpr::Var(name.clone()));
+            wrapper_params.push(HirParam { name, ty: ty.clone() });
+        }
+        let call = HirExpr::Call(Box::new(HirExpr::Var(callable_name.clone())), arguments);
+        let Some((body, projected_result_type)) =
+            self.project_live_callback_result(call, result_type.as_ref())?
+        else {
+            return Ok((callable, callable_type));
+        };
+        let wrapper = HirExpr::Lambda(
+            vec![HirParam { name: callable_name.clone(), ty: callable_type.clone() }],
+            wrapper_params,
+            projected_result_type.clone(),
+            Box::new(body),
+        );
+        let wrapper_type = HirType::Function(params, Box::new(projected_result_type));
+        let aliased = HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_closure_alias".into())),
+            vec![wrapper, HirExpr::Var(callable_name.clone())],
+        );
+        let wrapped = self.wrap_call_argument_bindings(
+            aliased,
+            &[(callable_name, callable_type, callable)],
+        )?;
+        Ok((wrapped, wrapper_type))
+    }
+
+    fn callback_result_needs_live_projection(result_type: &HirType) -> bool {
+        match result_type {
+            HirType::Object(fields) => {
+                Self::fixed_object_needs_live_projection(fields)
+                    && Self::fixed_object_supports_live_projection(result_type)
+            }
+            HirType::Promise(inner) => Self::callback_result_needs_live_projection(inner),
+            _ => false,
+        }
+    }
+
+    /// Projects only callback results whose declared fixed-object shape can
+    /// preserve a getter lazily using the existing native-object bridge.
+    fn project_live_callback_result(
+        &mut self,
+        value: HirExpr,
+        result_type: &HirType,
+    ) -> Result<Option<(HirExpr, HirType)>, String> {
+        match result_type {
+            HirType::Object(fields)
+                if Self::fixed_object_needs_live_projection(fields)
+                    && Self::fixed_object_supports_live_projection(result_type) =>
+            {
+                let projected = self.lower_fixed_object_as_dynamic_accessor_object(
+                    value, fields, false, true,
+                )?;
+                let json = HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_json_from_consumed_dynamic".into())),
+                    vec![projected],
+                );
+                Ok(Some((json, HirType::Json)))
+            }
+            HirType::Promise(inner) => {
+                let parameter = format!("__thaw_live_result_promise_value_{}", self.next_binding);
+                self.next_binding += 1;
+                self.scope.insert(parameter.clone(), inner.as_ref().clone());
+                let Some((body, projected_type)) = self.project_live_callback_result(
+                    HirExpr::Var(parameter.clone()), inner,
+                )? else {
+                    return Ok(None);
+                };
+                let callback = HirExpr::Lambda(
+                    Vec::new(),
+                    vec![HirParam { name: parameter, ty: inner.as_ref().clone() }],
+                    projected_type.clone(),
+                    Box::new(body),
+                );
+                Ok(Some((
+                    HirExpr::PromiseThen(
+                        Box::new(value), Box::new(callback), inner.as_ref().clone(),
+                        projected_type.clone(), false, false,
+                    ),
+                    HirType::Promise(Box::new(projected_type)),
+                )))
+            }
+            _ => Ok(None),
         }
     }
 
@@ -3959,6 +4100,24 @@ impl<'a> FnLowerer<'a> {
                     read = bound;
                     read_type = bound_type;
                     is_method = true;
+                }
+                let original_read_type = read_type.clone();
+                let (adapted_read, adapted_type) = self.adapt_callable_result_for_live_projection(
+                    read, read_type.clone(),
+                )?;
+                if adapted_type != original_read_type {
+                    let callback = HirExpr::Call(
+                        Box::new(HirExpr::Var("registerNativeCallbackGraph".into())),
+                        vec![HirExpr::TypedClosure(adapted_type, Box::new(adapted_read))],
+                    );
+                    read = HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_json_from_consumed_dynamic".into())),
+                        vec![callback],
+                    );
+                    read_type = HirType::Json;
+                } else {
+                    read = adapted_read;
+                    read_type = adapted_type;
                 }
                 let callback = HirExpr::Lambda(
                     Vec::new(),

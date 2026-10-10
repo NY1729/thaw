@@ -467,19 +467,28 @@ impl<'a> FnLowerer<'a> {
         if callable_abi_compatible(declared, &inferred) {
             return Ok(value);
         }
-        if *declared == HirType::JsValue && matches!(inferred, HirType::Function(_, _) | HirType::CallableFunction(..) | HirType::FunctionWithThis(_, _)) {
+        if *declared == HirType::JsValue
+            && matches!(inferred, HirType::Function(_, _) | HirType::CallableFunction(..) | HirType::FunctionWithThis(_, _))
+        {
+            let (callback, callback_type) = if matches!(inferred, HirType::Function(_, _)) {
+                self.adapt_callable_result_for_live_projection(value, inferred.clone())?
+            } else {
+                (value, inferred.clone())
+            };
+            let graph_callback = callback_type != inferred;
             return Ok(HirExpr::Call(
-                Box::new(HirExpr::Var("registerNativeCallback".to_string())),
-                vec![HirExpr::TypedClosure(inferred, Box::new(value))],
+                Box::new(HirExpr::Var(if graph_callback {
+                    "registerNativeCallbackGraph".to_string()
+                } else {
+                    "registerNativeCallback".to_string()
+                })),
+                vec![HirExpr::TypedClosure(callback_type, Box::new(callback))],
             ));
         }
         if *declared == HirType::JsValue
             && matches!(
-                self.infer_expr_type(&value)?,
-                HirType::Array(_)
-                    | HirType::Tuple(_)
-                    | HirType::Object(_)
-                    | HirType::Dictionary(_)
+                inferred,
+                HirType::Array(_) | HirType::Tuple(_) | HirType::Object(_) | HirType::Dictionary(_)
             )
         {
             let json = self.coerce_to_declared(&HirType::Json, value)?;
@@ -843,10 +852,28 @@ impl<'a> FnLowerer<'a> {
                 let absent = self.coerce_to_declared(
                     &HirType::Json, HirExpr::Lit(HirLit::Undefined),
                 )?;
-                let present = HirExpr::JsValueAsJson(Box::new(HirExpr::Call(
-                    Box::new(HirExpr::Var("registerNativeCallback".to_string())),
-                    vec![HirExpr::TypedClosure(actual.clone(), Box::new(bound.clone()))],
-                )));
+                let (callback, callback_type) = if matches!(actual, HirType::Function(_, _)) {
+                    self.adapt_callable_result_for_live_projection(bound.clone(), actual.clone())?
+                } else {
+                    (bound.clone(), actual.clone())
+                };
+                let graph_callback = callback_type != actual;
+                let registered = HirExpr::Call(
+                    Box::new(HirExpr::Var(if graph_callback {
+                        "registerNativeCallbackGraph".to_string()
+                    } else {
+                        "registerNativeCallback".to_string()
+                    })),
+                    vec![HirExpr::TypedClosure(callback_type, Box::new(callback))],
+                );
+                let present = if graph_callback {
+                    HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_json_from_consumed_dynamic".into())),
+                        vec![registered],
+                    )
+                } else {
+                    HirExpr::JsValueAsJson(Box::new(registered))
+                };
                 let result = HirExpr::Conditional(
                     Box::new(Self::function_pointer_is_undefined(bound, &actual)),
                     Box::new(absent), Box::new(present), HirType::Json,
