@@ -2247,7 +2247,7 @@ fn native_promise_exception_descriptor_survives_all_cleanup_handoffs() {
     let guard_name = format!("__thaw_callback_pending_guard_{guard_suffix}");
     let registration = main_resume.lines().position(|line| line == quickjs_registration).unwrap();
     let quickjs_call = main_resume.lines().position(|line|
-        line.contains("call ") && line.contains("@thaw_js_call_graph_result(")
+        line.contains("call ") && line.contains("@thaw_js_call_handle_mixed_exact_resolved_consuming_result(")
     ).unwrap_or_else(|| panic!("QuickJS dynamic call using the callback was not emitted:\n{main_resume}"));
     assert!(registration < quickjs_call,
         "guarded native callback must be registered before the QuickJS call:\n{main_resume}");
