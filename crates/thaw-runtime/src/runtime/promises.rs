@@ -224,27 +224,29 @@ pub unsafe extern "C" fn thaw_promise_subscribe(
     resume: PromiseResumeFn,
     frame: *mut u8,
 ) -> u8 {
+    unsafe { subscribe_with_roots(promise, resume, frame, Vec::new()) }
+}
+
+unsafe fn subscribe_with_roots(
+    promise: *mut ThawPromise,
+    resume: PromiseResumeFn,
+    frame: *mut u8,
+    payload_roots: Vec<thaw_arena::ArenaRoot>,
+) -> u8 {
     let Some(promise) = (unsafe { promise.as_mut() }) else {
         return 0;
     };
     unsafe { thaw_promise_mark_handled(promise) };
+    let subscription = PromiseSubscription {
+        resume,
+        frame,
+        _frame_root: thaw_arena::ArenaRoot::new(frame as usize),
+        _payload_roots: payload_roots,
+    };
     if let Some(result) = promise.result {
-        enqueue_continuation(
-            PromiseSubscription {
-                resume,
-                frame,
-                _frame_root: thaw_arena::ArenaRoot::new(frame as usize),
-            },
-            result,
-        );
+        enqueue_continuation(subscription, result);
     } else {
-        promise
-            .subscribers
-            .push(PromiseSubscription {
-                resume,
-                frame,
-                _frame_root: thaw_arena::ArenaRoot::new(frame as usize),
-            });
+        promise.subscribers.push(subscription);
     }
     1
 }
@@ -706,13 +708,18 @@ unsafe fn promise_chain_with_handlers(
         reject_native_text(output, PROMISE_ALL_INVALID_ERROR.as_ptr());
         return output;
     }
+    let payload_roots = fulfilled
+        .iter()
+        .chain(rejected.iter())
+        .map(|(_, context)| thaw_arena::ArenaRoot::new(*context as usize))
+        .collect();
     let state = Box::into_raw(Box::new(PromiseChainState {
         output,
         input,
         fulfilled,
         rejected,
     }));
-    thaw_promise_subscribe(input, resume_promise_chain, state.cast());
+    unsafe { subscribe_with_roots(input, resume_promise_chain, state.cast(), payload_roots) };
     output
 }
 
@@ -798,7 +805,8 @@ pub unsafe extern "C" fn thaw_promise_finally(
         callback,
         context,
     }));
-    thaw_promise_subscribe(input, resume_promise_finally, state.cast());
+    let payload_roots = vec![thaw_arena::ArenaRoot::new(context as usize)];
+    unsafe { subscribe_with_roots(input, resume_promise_finally, state.cast(), payload_roots) };
     output
 }
 
@@ -1660,6 +1668,12 @@ pub unsafe extern "C" fn thaw_promise_all_settled(
         unsafe { consume_distinct_promise_inputs(promises, len) };
         return output;
     }
+    unsafe {
+        allocation.cast::<u8>().write_bytes(0, allocation_size);
+        if len != 0 {
+            objects.write_bytes(0, objects_size);
+        }
+    }
     let result_handle = wrap_array_handle(unsafe { allocation.add(1) }.cast());
     if result_handle.is_null() {
         reject_native_text(output, PROMISE_ALL_INVALID_ERROR.as_ptr());
@@ -1698,6 +1712,8 @@ pub unsafe extern "C" fn thaw_promise_all_settled(
             grouped.push((promise, vec![index]));
         }
     }
+    let result_slot_root = thaw_arena::ArenaRoot::new(result_slot as usize);
+    let objects_root = thaw_arena::ArenaRoot::new(objects as usize);
     let state = Box::into_raw(Box::new(PromiseAllSettledState {
         output,
         remaining: grouped.len(),
@@ -1714,8 +1730,20 @@ pub unsafe extern "C" fn thaw_promise_all_settled(
             promise,
             indices,
         }));
-        unsafe { thaw_promise_subscribe(promise, resume_promise_all_settled_child, child.cast()) };
+        let payload_roots = vec![
+            thaw_arena::ArenaRoot::new(result_slot as usize),
+            thaw_arena::ArenaRoot::new(objects as usize),
+        ];
+        unsafe {
+            subscribe_with_roots(
+                promise,
+                resume_promise_all_settled_child,
+                child.cast(),
+                payload_roots,
+            )
+        };
     }
+    drop((result_slot_root, objects_root));
     output
 }
 

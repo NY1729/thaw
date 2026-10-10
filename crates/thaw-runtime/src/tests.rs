@@ -1518,6 +1518,345 @@ fn promise_all_settled_fulfills_when_every_input_rejects() {
     unsafe { thaw_promise_destroy(settled) };
 }
 
+struct ArenaCaptureProbe {
+    payload: *mut u64,
+    live_value: u64,
+    observed: bool,
+}
+
+fn allocated_probe_payload(value: u64) -> *mut u64 {
+    let pointer = thaw_arena::thaw_arena_alloc(size_of::<u64>(), align_of::<u64>()).cast::<u64>();
+    assert!(!pointer.is_null());
+    unsafe { pointer.write(value) };
+    pointer
+}
+
+fn allocated_capture_probe(payload: *mut u64) -> *mut ArenaCaptureProbe {
+    let pointer = thaw_arena::thaw_arena_alloc(
+        size_of::<ArenaCaptureProbe>(),
+        align_of::<ArenaCaptureProbe>(),
+    )
+    .cast::<ArenaCaptureProbe>();
+    assert!(!pointer.is_null());
+    unsafe {
+        pointer.write(ArenaCaptureProbe {
+            payload,
+            live_value: 0,
+            observed: false,
+        })
+    };
+    pointer
+}
+
+fn assert_live_arena_pointer<T>(pointer: *const T) {
+    assert!(thaw_arena::contains_allocation(pointer as usize));
+    assert!(!thaw_arena::was_reclaimed(pointer as usize));
+}
+
+fn run_in_fresh_tracing_thread(test: impl FnOnce() + Send + 'static) {
+    std::thread::spawn(move || {
+        thaw_arena::thaw_arena_enable_tracing();
+        assert!(thaw_arena::is_tracing());
+        test();
+    })
+    .join()
+    .unwrap();
+}
+
+extern "C" fn observe_chain_capture(
+    context: *mut u8,
+    output: *mut ThawPromise,
+    _input: *mut ThawPromise,
+    result: *const u8,
+) {
+    let context = context.cast::<ArenaCaptureProbe>();
+    if thaw_arena::contains_allocation(context as usize)
+        && !thaw_arena::was_reclaimed(context as usize)
+    {
+        assert_live_arena_pointer(context);
+        let probe = unsafe { &mut *context };
+        if thaw_arena::contains_allocation(probe.payload as usize)
+            && !thaw_arena::was_reclaimed(probe.payload as usize)
+        {
+            assert_live_arena_pointer(probe.payload);
+            probe.live_value = unsafe { probe.payload.read() };
+            probe.observed = true;
+        }
+    }
+    thaw_promise_resolve(output, result);
+}
+
+extern "C" fn observe_finally_capture(
+    context: *mut u8,
+    output: *mut ThawPromise,
+    _input: *mut ThawPromise,
+    result: *const u8,
+    _rejected: u8,
+) {
+    let context = context.cast::<ArenaCaptureProbe>();
+    if thaw_arena::contains_allocation(context as usize)
+        && !thaw_arena::was_reclaimed(context as usize)
+    {
+        assert_live_arena_pointer(context);
+        let probe = unsafe { &mut *context };
+        if thaw_arena::contains_allocation(probe.payload as usize)
+            && !thaw_arena::was_reclaimed(probe.payload as usize)
+        {
+            assert_live_arena_pointer(probe.payload);
+            probe.live_value = unsafe { probe.payload.read() };
+            probe.observed = true;
+        }
+    }
+    thaw_promise_resolve(output, result);
+}
+
+#[test]
+fn pending_chain_and_finally_contexts_retain_captured_arena_values() {
+    run_in_fresh_tracing_thread(|| {
+        let chain_payload = allocated_probe_payload(101);
+        let chain_context = allocated_capture_probe(chain_payload);
+        let input = thaw_promise_new();
+        let chained =
+            unsafe { thaw_promise_chain(input, observe_chain_capture, chain_context.cast(), 0) };
+        thaw_arena::thaw_arena_reset();
+        assert_live_arena_pointer(chain_context);
+        assert_live_arena_pointer(chain_payload);
+        let result = 11u64;
+        assert_eq!(
+            thaw_promise_resolve(input, (&result as *const u64).cast()),
+            1
+        );
+        assert_live_arena_pointer(chain_context);
+        assert_eq!(thaw_runtime_poll_one(), 1);
+        assert_live_arena_pointer(chain_context);
+        assert!(unsafe { (*chain_context).observed });
+        assert_live_arena_pointer(chain_context);
+        assert_eq!(unsafe { (*chain_context).live_value }, 101);
+        thaw_arena::thaw_arena_reset();
+        assert!(thaw_arena::was_reclaimed(chain_payload as usize));
+        assert!(thaw_arena::was_reclaimed(chain_context as usize));
+        unsafe { thaw_promise_destroy(chained) };
+
+        let fulfilled_payload = allocated_probe_payload(151);
+        let rejected_payload = allocated_probe_payload(152);
+        let fulfilled_context = allocated_capture_probe(fulfilled_payload);
+        let rejected_context = allocated_capture_probe(rejected_payload);
+        let input = thaw_promise_new();
+        let chained = unsafe {
+            thaw_promise_chain_both(
+                input,
+                Some(observe_chain_capture),
+                fulfilled_context.cast(),
+                observe_chain_capture,
+                rejected_context.cast(),
+            )
+        };
+        thaw_arena::thaw_arena_reset();
+        assert_live_arena_pointer(fulfilled_context);
+        assert_live_arena_pointer(rejected_context);
+        assert_live_arena_pointer(fulfilled_payload);
+        assert_live_arena_pointer(rejected_payload);
+        assert_eq!(
+            thaw_promise_resolve(input, (&result as *const u64).cast()),
+            1
+        );
+        assert_live_arena_pointer(fulfilled_context);
+        assert_live_arena_pointer(rejected_context);
+        assert_eq!(thaw_runtime_poll_one(), 1);
+        assert_live_arena_pointer(fulfilled_context);
+        assert!(unsafe { (*fulfilled_context).observed });
+        assert_live_arena_pointer(fulfilled_context);
+        assert_eq!(unsafe { (*fulfilled_context).live_value }, 151);
+        assert_live_arena_pointer(rejected_context);
+        assert!(!unsafe { (*rejected_context).observed });
+        thaw_arena::thaw_arena_reset();
+        assert!(thaw_arena::was_reclaimed(fulfilled_payload as usize));
+        assert!(thaw_arena::was_reclaimed(rejected_payload as usize));
+        assert!(thaw_arena::was_reclaimed(fulfilled_context as usize));
+        assert!(thaw_arena::was_reclaimed(rejected_context as usize));
+        unsafe { thaw_promise_destroy(chained) };
+
+        let finally_payload = allocated_probe_payload(202);
+        let finally_context = allocated_capture_probe(finally_payload);
+        let input = thaw_promise_new();
+        let finalized =
+            unsafe { thaw_promise_finally(input, observe_finally_capture, finally_context.cast()) };
+        thaw_arena::thaw_arena_reset();
+        assert_live_arena_pointer(finally_context);
+        assert_live_arena_pointer(finally_payload);
+        assert_eq!(
+            thaw_promise_resolve(input, (&result as *const u64).cast()),
+            1
+        );
+        assert_live_arena_pointer(finally_context);
+        assert_eq!(thaw_runtime_poll_one(), 1);
+        assert_live_arena_pointer(finally_context);
+        assert!(unsafe { (*finally_context).observed });
+        assert_live_arena_pointer(finally_context);
+        assert_eq!(unsafe { (*finally_context).live_value }, 202);
+        thaw_arena::thaw_arena_reset();
+        assert!(thaw_arena::was_reclaimed(finally_payload as usize));
+        assert!(thaw_arena::was_reclaimed(finally_context as usize));
+        unsafe { thaw_promise_destroy(finalized) };
+    });
+}
+
+#[test]
+fn pending_all_settled_children_keep_result_buffers_until_output_transfer() {
+    run_in_fresh_tracing_thread(|| {
+        let first = thaw_promise_new();
+        let second = thaw_promise_new();
+        let children = [first, second];
+        let settled = unsafe {
+            thaw_promise_all_settled(children.as_ptr(), children.len(), size_of::<u64>())
+        };
+        let child_frame = unsafe {
+            (&(*first).subscribers)[0]
+                .frame
+                .cast::<PromiseAllSettledChild>()
+        };
+        let state = unsafe { (*child_frame).state };
+        let result_slot = unsafe { (*state).result_slot };
+        let objects = unsafe { (*state).objects };
+
+        thaw_arena::thaw_arena_reset();
+        assert!(!thaw_arena::was_reclaimed(result_slot as usize));
+        assert!(!thaw_arena::was_reclaimed(objects as usize));
+
+        let first_value = 303u64;
+        assert_eq!(
+            thaw_promise_resolve(first, (&first_value as *const u64).cast()),
+            1
+        );
+        assert_eq!(thaw_runtime_poll_one(), 1);
+        thaw_arena::thaw_arena_reset();
+        assert!(!thaw_arena::was_reclaimed(result_slot as usize));
+        assert!(!thaw_arena::was_reclaimed(objects as usize));
+        assert_live_arena_pointer(objects);
+        assert_eq!(
+            unsafe { objects.add(size_of::<u64>()).cast::<u64>().read() },
+            303
+        );
+
+        let second_value = 304u64;
+        assert_eq!(
+            thaw_promise_resolve(second, (&second_value as *const u64).cast()),
+            1
+        );
+        assert_eq!(thaw_runtime_poll_one(), 1);
+        assert_eq!(thaw_promise_state(settled), 1);
+        unsafe { thaw_promise_destroy(settled) };
+        thaw_arena::thaw_arena_reset();
+        assert!(thaw_arena::was_reclaimed(result_slot as usize));
+        assert!(thaw_arena::was_reclaimed(objects as usize));
+    });
+}
+
+struct ReadyResultProbe {
+    live_during_reentrant_reset: bool,
+    value: Option<u64>,
+}
+
+extern "C" fn observe_ready_result(frame: *mut u8, result: *const u8) {
+    let frame = unsafe { &mut *frame.cast::<ReadyResultProbe>() };
+    let result = result.cast::<u64>();
+    if thaw_arena::contains_allocation(result as usize)
+        && !thaw_arena::was_reclaimed(result as usize)
+    {
+        assert_live_arena_pointer(result);
+        thaw_arena::thaw_arena_reset();
+        frame.live_during_reentrant_reset = !thaw_arena::was_reclaimed(result as usize);
+        if frame.live_during_reentrant_reset {
+            frame.value = Some(unsafe { result.read() });
+        }
+    }
+}
+
+#[test]
+fn queued_result_is_rooted_through_reentrant_reset_and_released_on_purge() {
+    run_in_fresh_tracing_thread(|| {
+        let promise = thaw_promise_new();
+        let payload = allocated_probe_payload(404);
+        assert_eq!(thaw_promise_resolve(promise, payload.cast()), 1);
+        thaw_arena::forget_references(promise as usize);
+        let mut probe = Box::new(ReadyResultProbe {
+            live_during_reentrant_reset: false,
+            value: None,
+        });
+        assert_eq!(
+            unsafe {
+                thaw_promise_subscribe(
+                    promise,
+                    observe_ready_result,
+                    (&mut *probe as *mut ReadyResultProbe).cast(),
+                )
+            },
+            1
+        );
+        thaw_arena::forget_references(promise as usize);
+        thaw_arena::thaw_arena_reset();
+        assert!(!thaw_arena::was_reclaimed(payload as usize));
+        assert_live_arena_pointer(payload);
+        assert_eq!(thaw_runtime_poll_one(), 1);
+        assert!(probe.live_during_reentrant_reset);
+        assert_eq!(probe.value, Some(404));
+        thaw_arena::thaw_arena_reset();
+        assert!(thaw_arena::was_reclaimed(payload as usize));
+        unsafe { thaw_promise_destroy(promise) };
+
+        let promise = thaw_promise_new();
+        let cancelled_payload = allocated_probe_payload(505);
+        assert_eq!(thaw_promise_resolve(promise, cancelled_payload.cast()), 1);
+        thaw_arena::forget_references(promise as usize);
+        let mut cancelled_probe = ReadyResultProbe {
+            live_during_reentrant_reset: false,
+            value: None,
+        };
+        assert_eq!(
+            unsafe {
+                thaw_promise_subscribe(
+                    promise,
+                    observe_ready_result,
+                    (&mut cancelled_probe as *mut ReadyResultProbe).cast(),
+                )
+            },
+            1
+        );
+        thaw_arena::forget_references(promise as usize);
+        purge_pending_async_state();
+        thaw_arena::thaw_arena_reset();
+        assert!(thaw_arena::was_reclaimed(cancelled_payload as usize));
+        unsafe { thaw_promise_destroy(promise) };
+
+        let cancelled_payload = allocated_probe_payload(606);
+        let cancelled_context = allocated_capture_probe(cancelled_payload);
+        let input = thaw_promise_new();
+        let output = unsafe {
+            thaw_promise_chain(input, observe_chain_capture, cancelled_context.cast(), 0)
+        };
+        thaw_arena::thaw_arena_reset();
+        assert_live_arena_pointer(cancelled_payload);
+        assert_live_arena_pointer(cancelled_context);
+        let result = 17u64;
+        assert_eq!(
+            thaw_promise_resolve(input, (&result as *const u64).cast()),
+            1
+        );
+        thaw_arena::forget_references(input as usize);
+        thaw_arena::thaw_arena_reset();
+        assert_live_arena_pointer(cancelled_payload);
+        assert_live_arena_pointer(cancelled_context);
+        purge_pending_async_state();
+        thaw_arena::thaw_arena_reset();
+        assert!(thaw_arena::was_reclaimed(cancelled_payload as usize));
+        assert!(thaw_arena::was_reclaimed(cancelled_context as usize));
+        unsafe {
+            thaw_promise_destroy(input);
+            thaw_promise_destroy(output);
+        }
+    });
+}
+
 #[test]
 fn promise_all_deduplicates_repeated_handles() {
     let child = thaw_promise_new();
