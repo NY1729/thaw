@@ -134,12 +134,19 @@ struct PromiseSubscription {
     resume: PromiseResumeFn,
     frame: *mut u8,
     // Rust subscriber and ready queues are invisible to the arena scanner.
-    // Pin a suspended arena frame until its resume callback returns.
+    // Pin a suspended arena frame and callback payloads until resume returns.
     _frame_root: thaw_arena::ArenaRoot,
+    _payload_roots: Vec<thaw_arena::ArenaRoot>,
+}
+
+struct ReadyContinuation {
+    subscription: PromiseSubscription,
+    result: *const u8,
+    _result_root: thaw_arena::ArenaRoot,
 }
 
 thread_local! {
-    static READY_CONTINUATIONS: RefCell<VecDeque<(PromiseSubscription, *const u8)>> =
+    static READY_CONTINUATIONS: RefCell<VecDeque<ReadyContinuation>> =
         const { RefCell::new(VecDeque::new()) };
     static TIMERS: RefCell<Vec<PromiseTimer>> = const { RefCell::new(Vec::new()) };
     static FD_WAITS: RefCell<Vec<PromiseFdWait>> = const { RefCell::new(Vec::new()) };
@@ -451,7 +458,13 @@ pub extern "C" fn thaw_runtime_run_one_event() -> bool {
 }
 
 fn enqueue_continuation(subscription: PromiseSubscription, result: *const u8) {
-    READY_CONTINUATIONS.with(|ready| ready.borrow_mut().push_back((subscription, result)));
+    READY_CONTINUATIONS.with(|ready| {
+        ready.borrow_mut().push_back(ReadyContinuation {
+            subscription,
+            result,
+            _result_root: thaw_arena::ArenaRoot::new(result as usize),
+        });
+    });
 }
 
 fn promote_due_timers() {
@@ -497,7 +510,7 @@ pub extern "C" fn thaw_runtime_poll_one() -> u8 {
     promote_due_timers();
     let io_events = poll_fd_waits(Some(Duration::ZERO));
     let next = READY_CONTINUATIONS.with(|ready| ready.borrow_mut().pop_front());
-    let Some((subscription, result)) = next else {
+    let Some(continuation) = next else {
         report_registered_unhandled_rejections();
         // A rejection listener can enqueue a continuation or another rejection.
         // Recheck after dispatch so an idle drain does not stop before that work.
@@ -514,7 +527,8 @@ pub extern "C" fn thaw_runtime_poll_one() -> u8 {
                 || reporting_work,
         );
     };
-    (subscription.resume)(subscription.frame, result);
+    (continuation.subscription.resume)(continuation.subscription.frame, continuation.result);
+    drop(continuation);
     1
 }
 
