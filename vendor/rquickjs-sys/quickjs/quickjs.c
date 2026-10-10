@@ -51308,6 +51308,11 @@ static int js_proxy_get_own_property(JSContext *ctx, JSPropertyDescriptor *pdesc
         JS_FreeValue(ctx, trap_result_obj);
         if (res < 0)
             return -1;
+        /* js_obj_to_desc() reports accessor fields as JS_PROP_HAS_GET/SET;
+           the property-descriptor consumers (Object.getOwnPropertyDescriptor,
+           the invariant checks below) test the JS_PROP_GETSET type bit. */
+        if (result_desc.flags & (JS_PROP_HAS_GET | JS_PROP_HAS_SET))
+            result_desc.flags |= JS_PROP_GETSET;
 
         if (target_desc_ret) {
             /* convert result_desc.flags to defineProperty flags */
@@ -51425,15 +51430,21 @@ static int js_proxy_define_own_property(JSContext *ctx, JSValueConst obj,
             }
         } else if (flags & JS_PROP_HAS_VALUE) {
             if ((desc.flags & (JS_PROP_CONFIGURABLE | JS_PROP_WRITABLE)) ==
-                JS_PROP_WRITABLE && !(flags & JS_PROP_WRITABLE)) {
-                /* missing-proxy-check feature */
+                JS_PROP_WRITABLE &&
+                (flags & (JS_PROP_HAS_WRITABLE | JS_PROP_WRITABLE)) ==
+                JS_PROP_HAS_WRITABLE) {
+                /* missing-proxy-check feature; a value-only request that
+                   does not mention writable is valid (ES2024 10.5.6 17.c) */
                 goto fail1;
             } else if ((desc.flags & (JS_PROP_CONFIGURABLE | JS_PROP_WRITABLE)) == 0 &&
                 !js_same_value(ctx, val, desc.value)) {
                 goto fail1;
             }
         }
-        if (flags & JS_PROP_HAS_WRITABLE) {
+        if ((flags & (JS_PROP_HAS_WRITABLE | JS_PROP_WRITABLE)) ==
+            JS_PROP_HAS_WRITABLE) {
+            /* ES2024 10.5.6 step 17.c: only a request for writable:false
+               conflicts with a nonconfigurable writable target property. */
             if ((desc.flags & (JS_PROP_GETSET | JS_PROP_CONFIGURABLE |
                                JS_PROP_WRITABLE)) == JS_PROP_WRITABLE) {
                 /* proxy-missing-checks */
