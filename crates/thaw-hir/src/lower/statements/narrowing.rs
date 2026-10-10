@@ -306,14 +306,54 @@ impl<'a> FnLowerer<'a> {
         let record = self.lower_trusted_error_fields(vec![
             ("__thaw_class_identity_\u{1e}SuppressedError\u{1f}Error".into(),
                 HirExpr::Lit(HirLit::Bool(true))),
-            ("message".into(), HirExpr::Lit(HirLit::Str(String::new()))),
+            ("message".into(), HirExpr::Lit(HirLit::Str(
+                "An error was suppressed during disposal".into(),
+            ))),
             ("name".into(), HirExpr::Lit(HirLit::Str("SuppressedError".into()))),
             ("error".into(), error),
             ("suppressed".into(), suppressed),
         ], HirExpr::Lit(HirLit::Bool(false)), None)?;
-        Ok(HirExpr::UnionInject(Box::new(HirExpr::TypedClosure(
-            HirType::Object(Vec::new()), Box::new(record),
-        )), 6, members))
+        let record_type = self.infer_expr_type(&record)?;
+        let HirType::Object(_) = &record_type else {
+            return Err("trusted SuppressedError record must have a fixed object layout".into());
+        };
+        let owner = self.bind_local("__thaw_suppressed_error_owner", record_type.clone());
+        let property = |name: &str| HirExpr::PropAccess(
+            Box::new(HirExpr::Var(owner.clone())), record_type.clone(), name.into(),
+        );
+        let message = self.coerce_to_declared(&HirType::Json, property("message"))?;
+        let name = self.coerce_to_declared(&HirType::Json, property("name"))?;
+        let error = self.caught_carrier_as_json(property("error"))?;
+        let suppressed = self.caught_carrier_as_json(property("suppressed"))?;
+        let snapshot = HirExpr::JsonObjectLit(vec![
+            ("message".into(), message),
+            ("name".into(), name),
+            ("error".into(), error),
+            ("suppressed".into(), suppressed),
+        ], HirType::Json);
+        let describer = HirExpr::Lambda(
+            vec![HirParam { name: owner.clone(), ty: record_type.clone() }],
+            Vec::new(), HirType::Json, Box::new(snapshot),
+        );
+        let layout = HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_register_native_object_layout".into())),
+            vec![
+                HirExpr::Var(owner.clone()),
+                HirExpr::Lit(HirLit::Bool(false)),
+            ],
+        );
+        let register_describer = HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_register_native_exception_describer".into())),
+            vec![HirExpr::Var(owner.clone()), describer],
+        );
+        let carrier = HirExpr::UnionInject(Box::new(HirExpr::TypedClosure(
+            HirType::Object(Vec::new()), Box::new(HirExpr::Var(owner.clone())),
+        )), 6, members);
+        let result = HirExpr::EvalThen(
+            Box::new(HirExpr::EvalThen(Box::new(layout), Box::new(register_describer))),
+            Box::new(carrier),
+        );
+        self.wrap_call_argument_bindings(result, &[(owner, record_type, record)])
     }
 
     /// Dispose every resource even if an earlier disposer throws. When an
