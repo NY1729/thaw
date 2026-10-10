@@ -1645,7 +1645,11 @@ impl<'ctx> HirCompiler<'ctx> {
         let result = self
             .builder
             .build_call(
-                self.module.get_function("thaw_json_stringify").unwrap(),
+                self.module.get_function(if graph_wire {
+                    "thaw_json_graph_encode"
+                } else {
+                    "thaw_json_stringify"
+                }).unwrap(),
                 &[result_json.into()],
                 "native_promise_result_string",
             )

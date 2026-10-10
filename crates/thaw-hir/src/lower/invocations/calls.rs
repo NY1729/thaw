@@ -1106,6 +1106,35 @@ impl<'a> FnLowerer<'a> {
             );
         }
 
+        // Native callbacks crossing into QuickJS need a live projection for
+        // accessor-bearing results. Keep the original native function ABI
+        // behind the wrapper; the graph callback marshaller sees its owned
+        // Json (or Promise<Json>) result.
+        if matches!(callee_name.as_str(), "registerNativeCallback" | "registerNativeCallbackGraph")
+            && !self.scope.contains_key(&callee_name)
+            && !self.signatures.contains_key(&callee_name)
+        {
+            if call.type_args.is_some() || call.args.len() != 1 || call.args[0].spread.is_some() {
+                return Err("registerNativeCallback expects one non-spread callback".into());
+            }
+            let callback = self.lower_expr(&call.args[0].expr)?;
+            let callback_type = self.infer_expr_type(&callback)?;
+            let original_callback_type = callback_type.clone();
+            let requested_graph = callee_name == "registerNativeCallbackGraph";
+            let (callback, callback_type) = self.adapt_callable_result_for_live_projection(
+                callback, callback_type,
+            )?;
+            let graph_callback = requested_graph || callback_type != original_callback_type;
+            return Ok(HirExpr::Call(
+                Box::new(HirExpr::Var(if graph_callback {
+                    "registerNativeCallbackGraph".into()
+                } else {
+                    "registerNativeCallback".into()
+                })),
+                vec![HirExpr::TypedClosure(callback_type, Box::new(callback))],
+            ));
+        }
+
         // `eval(code)` -- an AOT compiler can't evaluate in the compiled
         // scope, so this is lowered to the QuickJS realm's own global
         // `eval` (`callDynamic("eval", [code])`), i.e. the semantics of

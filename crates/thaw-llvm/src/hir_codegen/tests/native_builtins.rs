@@ -11736,6 +11736,96 @@ fn non_graph_native_callback_results_preserve_nested_callable_fields_sync_and_as
 }
 
 #[test]
+fn callback_returned_accessor_objects_stay_lazy_sync_and_async() {
+    let source = r#"
+        declare function __thaw_typed_js_636f6e73756d65446f6e65(callback: JsValue): string;
+        declare function __thaw_typed_js_636f6e73756d6556616c7565(callback: JsValue): string;
+        declare function __thaw_typed_js_636f6e73756d654173796e63446f6e65(callback: JsValue): Promise<string>;
+        declare function __thaw_typed_js_636f6e73756d654173796e6356616c7565(callback: JsValue): Promise<string>;
+
+        async function main(): Promise<void> {
+            loadScript("globalThis.consumeDone = callback => { const result = callback(); const step = result.next(); if (!step.done) void step.value; return [result.next === result.next, result.reads()].join(':'); }; globalThis.consumeValue = callback => { const result = callback(); const step = result.next(); if (!step.done) void step.value; return [result.next === result.next, result.reads()].join(':'); }; globalThis.consumeAsyncDone = async callback => { const result = await callback(); const step = result.next(); if (!step.done) void step.value; return [result.next === result.next, result.reads()].join(':'); }; globalThis.consumeAsyncValue = async callback => { const result = await callback(); const step = result.next(); if (!step.done) void step.value; return [result.next === result.next, result.reads()].join(':'); };");
+            let syncDoneReads = 0;
+            const syncDone: JsValue = registerNativeCallback(() => ({
+                next() { return { get value(): number { syncDoneReads++; return 9; }, done: true }; },
+                reads() { return syncDoneReads; }
+            }));
+            console.log(__thaw_typed_js_636f6e73756d65446f6e65(syncDone));
+            releaseDynamicValue(syncDone);
+
+            let syncValueReads = 0;
+            const syncValue: JsValue = registerNativeCallback(() => ({
+                next() { return { get value(): number { syncValueReads++; return 9; }, done: false }; },
+                reads() { return syncValueReads; }
+            }));
+            console.log(__thaw_typed_js_636f6e73756d6556616c7565(syncValue));
+            releaseDynamicValue(syncValue);
+
+            let asyncDoneReads = 0;
+            const asyncDone: JsValue = registerNativeCallback(async () => {
+                await sleep(0);
+                return {
+                    next() { return { get value(): number { asyncDoneReads++; return 9; }, done: true }; },
+                    reads() { return asyncDoneReads; }
+                };
+            });
+            console.log(await __thaw_typed_js_636f6e73756d654173796e63446f6e65(asyncDone));
+            releaseDynamicValue(asyncDone);
+
+            let asyncValueReads = 0;
+            const asyncValue: JsValue = registerNativeCallback(async () => {
+                await sleep(0);
+                return {
+                    next() { return { get value(): number { asyncValueReads++; return 9; }, done: false }; },
+                    reads() { return asyncValueReads; }
+                };
+            });
+            console.log(await __thaw_typed_js_636f6e73756d654173796e6356616c7565(asyncValue));
+            releaseDynamicValue(asyncValue);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "callback_returned_accessor_objects_stay_lazy"),
+        "true:0\ntrue:1\ntrue:0\ntrue:1\n"
+    );
+}
+
+#[test]
+fn adapted_callback_identity_is_shared_across_registration_modes() {
+    let source = r#"
+        function main(): void {
+            loadScript("globalThis.runFirstPair = () => { const a = globalThis.__callbackFirstA; const b = globalThis.__callbackFirstB; const same = a === b; a(); b(); return same; }; globalThis.runSecondPair = () => { const a = globalThis.__callbackSecondA; const b = globalThis.__callbackSecondB; const same = a === b; a(); b(); return same; };");
+            const global: JsValue = getDynamicValue("globalThis");
+            let firstReads = 0;
+            const first = () => ({ get value(): number { firstReads++; return 1; } });
+            const ordinaryFirst: JsValue = registerNativeCallback(first);
+            const graphSecond: JsValue = registerNativeCallbackGraph(first);
+            setDynamicProperty(global, "__callbackFirstA", ordinaryFirst);
+            setDynamicProperty(global, "__callbackFirstB", graphSecond);
+            console.log(Number(callDynamic("runFirstPair", JSON.parse("[]"))), firstReads);
+
+            let secondReads = 0;
+            const second = () => ({ get value(): number { secondReads++; return 2; } });
+            const graphFirst: JsValue = registerNativeCallbackGraph(second);
+            const ordinarySecond: JsValue = registerNativeCallback(second);
+            setDynamicProperty(global, "__callbackSecondA", graphFirst);
+            setDynamicProperty(global, "__callbackSecondB", ordinarySecond);
+            console.log(Number(callDynamic("runSecondPair", JSON.parse("[]"))), secondReads);
+
+            releaseDynamicValue(ordinaryFirst);
+            releaseDynamicValue(graphSecond);
+            releaseDynamicValue(graphFirst);
+            releaseDynamicValue(ordinarySecond);
+            releaseDynamicValue(global);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "adapted_callback_cross_registration_identity"),
+        "1 0\n1 0\n"
+    );
+}
+
+#[test]
 fn array_from_length_mapper_receives_explicit_this_arg() {
     let source = r#"
         function main(): void {
