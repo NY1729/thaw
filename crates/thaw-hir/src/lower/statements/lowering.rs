@@ -538,8 +538,9 @@ impl<'a> FnLowerer<'a> {
         &mut self,
         iterator: HirExpr,
         iterator_name: Symbol,
+        value_type: HirType,
+        capture_completion: bool,
     ) -> Result<(HirExpr, HirType), String> {
-        let value_type = HirType::Json;
         let result_name = format!("{iterator_name}_result");
         let control = format!("{iterator_name}_control");
         let error = format!("{iterator_name}_error");
@@ -574,24 +575,40 @@ impl<'a> FnLowerer<'a> {
                 HirExpr::Lit(HirLit::I64(match name {
                     "next" => 0, "return" => 1, "throw" => 2,
                     _ => unreachable!(),
-                })), HirExpr::Var(error.clone())],
+                } + if capture_completion { 3 } else { 0 })),
+                HirExpr::Var(error.clone())],
         );
-        let result_statements = |name: Symbol, call: HirExpr| {
-            vec![
-                HirStmt::Let(name.clone(), HirType::Json, call),
-                HirStmt::If(
-                    HirExpr::JsonAsBool(Box::new(HirExpr::JsonGet(
-                        Box::new(HirExpr::Var(name.clone())),
-                        "done".into(),
-                    ))),
-                    vec![HirStmt::Return(Some(HirExpr::ArrayLit(Vec::new())))],
-                    Vec::new(),
-                ),
-                HirStmt::Return(Some(HirExpr::ArrayLit(vec![HirExpr::JsonGet(
-                    Box::new(HirExpr::Var(name)),
-                    "value".into(),
-                )]))),
-            ]
+        let result_statements = |lowerer: &mut FnLowerer<'_>, name: Symbol, call: HirExpr|
+            -> Result<Vec<HirStmt>, String> {
+            let result = HirExpr::Var(name.clone());
+            let done = HirExpr::JsonAsBool(Box::new(HirExpr::JsonGet(
+                Box::new(result.clone()),
+                "done".into(),
+            )));
+            let yielded_value = lowerer.coerce_to_declared(
+                &value_type,
+                HirExpr::JsonGet(Box::new(result.clone()), "value".into()),
+            )?;
+            let completed = if capture_completion {
+                let completed_value = lowerer.coerce_to_declared(
+                    &value_type,
+                    HirExpr::JsonGet(Box::new(result), "value".into()),
+                )?;
+                vec![
+                    HirStmt::Expr(HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_array_push".into())),
+                        vec![HirExpr::Var(returns.clone()), completed_value],
+                    )),
+                    HirStmt::Return(Some(HirExpr::ArrayLit(Vec::new()))),
+                ]
+            } else {
+                vec![HirStmt::Return(Some(HirExpr::ArrayLit(Vec::new())))]
+            };
+            Ok(vec![
+                HirStmt::Let(name, HirType::Json, call),
+                HirStmt::If(done, completed, Vec::new()),
+                HirStmt::Return(Some(HirExpr::ArrayLit(vec![yielded_value]))),
+            ])
         };
         let mut producer_body = Vec::new();
         let throw_call = call_method("throw");
@@ -601,7 +618,7 @@ impl<'a> FnLowerer<'a> {
                 Box::new(HirExpr::Var(control.clone())),
                 Box::new(HirExpr::Lit(HirLit::I64(2))),
             ),
-            result_statements(format!("{result_name}_throw"), throw_call),
+            result_statements(self, format!("{result_name}_throw"), throw_call)?,
             Vec::new(),
         ));
         let return_call = call_method("return");
@@ -611,11 +628,11 @@ impl<'a> FnLowerer<'a> {
                 Box::new(HirExpr::Var(control.clone())),
                 Box::new(HirExpr::Lit(HirLit::I64(1))),
             ),
-            result_statements(format!("{result_name}_return"), return_call),
+            result_statements(self, format!("{result_name}_return"), return_call)?,
             Vec::new(),
         ));
         let next_call = call_method("next");
-        producer_body.extend(result_statements(result_name, next_call));
+        producer_body.extend(result_statements(self, result_name, next_call)?);
         let producer = HirExpr::Lambda(
             vec![HirParam {
                 name: iterator_name.clone(),
@@ -856,6 +873,17 @@ impl<'a> FnLowerer<'a> {
                     value = producer;
                     value_type = producer_type;
                 }
+            } else if value_type == HirType::JsValue {
+                let iterator = HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_to_iterator_exact".into())),
+                    vec![value],
+                );
+                let name = format!("__thaw_iterator_{}", self.next_binding);
+                self.next_binding += 1;
+                let (producer, producer_type) =
+                    self.dynamic_iterator_adapter(iterator, name, element.clone(), true)?;
+                value = producer;
+                value_type = producer_type;
             }
             let HirType::Function(params, result) = &value_type else {
                 return Err(format!(
@@ -1938,7 +1966,12 @@ impl<'a> FnLowerer<'a> {
                         let name = format!("__thaw_iterator_{}", self.next_binding);
                         self.next_binding += 1;
                         let (producer, producer_type) =
-                            self.dynamic_iterator_adapter(values.clone(), name)?;
+                            self.dynamic_iterator_adapter(
+                                values.clone(),
+                                name,
+                                HirType::Json,
+                                false,
+                            )?;
                         values = producer;
                         values_type = producer_type;
                     }

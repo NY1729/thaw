@@ -108,10 +108,14 @@
   });
   thawBootstrapDefineProperty(globalThis, '__thaw_iterator_step_exact', {
     value: (iterator, mode, error) => {
+      const captureCompletion = mode >= 3;
+      if (captureCompletion) mode -= 3;
       const method = iterator[mode === 2 ? 'throw' : mode === 1 ? 'return' : 'next'];
-      // IteratorClose permits an absent return method. Its result must be an
-      // object, but close does not inspect that object's done or value fields.
-      if (mode === 1 && method == null) return { done: true };
+      // IteratorClose permits an absent return method. ForOf doesn't inspect
+      // its value; yield* preserves it as the delegate completion.
+      if (mode === 1 && method == null) {
+        return captureCompletion ? { done: true, value: undefined } : { done: true };
+      }
       if (typeof method !== 'function') throw new TypeError('Iterator method is not callable');
       const step = mode === 2
         ? thawDateApply(method, iterator, [error])
@@ -119,9 +123,11 @@
       if (step === null || (typeof step !== 'object' && typeof step !== 'function')) {
         throw new TypeError('Iterator result is not an object');
       }
-      if (mode === 1) return { done: true };
+      if (mode === 1 && !captureCompletion) return { done: true };
       const done = !!step.done;
-      return done ? { done: true } : { done: false, value: step.value };
+      return done
+        ? (captureCompletion ? { done: true, value: step.value } : { done: true })
+        : { done: false, value: step.value };
     }, enumerable: false, configurable: false, writable: false,
   });
   globalThis.__thaw_json_stringify_replacer = (value, space, replacer) =>

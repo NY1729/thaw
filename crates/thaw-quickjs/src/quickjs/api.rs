@@ -5096,7 +5096,7 @@ pub extern "C" fn thaw_js_iterator_step_exact_result(
 ) -> ThawCallWithExceptionResult {
     enum Outcome { Value(u64), Exception(u64, bool) }
     let result: Result<Outcome, BoundaryError> = with_active_or_context(|ctx| {
-        if mode > 2 { return Err("Invalid iterator step mode".into()); }
+        if mode > 5 { return Err("Invalid iterator step mode".into()); }
         let iterator = value_for_handle(&ctx, iterator_handle)?;
         let step: Function = ctx.globals().get("__thaw_iterator_step_exact")
             .map_err(|error| error.to_string())?;
