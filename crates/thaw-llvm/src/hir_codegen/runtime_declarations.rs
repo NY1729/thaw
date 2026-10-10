@@ -2599,6 +2599,11 @@ impl<'ctx> HirCompiler<'ctx> {
             Some(Linkage::External),
         );
         self.module.add_function(
+            "thaw_js_collect_garbage",
+            self.context.void_type().fn_type(&[], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
             "thaw_js_terminal_work_pending",
             self.context.i8_type().fn_type(&[], false),
             Some(Linkage::External),

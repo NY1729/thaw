@@ -10067,3 +10067,22 @@ fn projected_native_method_identity_survives_freeze_and_seal() {
     "#), 1);
     assert_eq!(call("projectedMethodIntegrity", "[]"), "[true,true,true,true,true,true]");
 }
+
+#[test]
+fn collect_garbage_does_not_create_a_context_and_uses_an_existing_one() {
+    std::thread::spawn(|| {
+        assert!(JS.with(|cell| cell.borrow().is_none()));
+        thaw_js_collect_garbage();
+        assert_eq!(thaw_js_terminal_work_pending(), 0);
+        assert!(JS.with(|cell| cell.borrow().is_none()));
+
+        with_context(|ctx| {
+            ctx.eval::<(), _>("globalThis.gcScopefix = 41; Promise.resolve().then(() => {});").unwrap();
+        });
+        thaw_js_collect_garbage();
+        assert_eq!(thaw_js_terminal_work_pending(), 1);
+        assert_eq!(with_context(|ctx| ctx.eval::<i32, _>("gcScopefix + 1").unwrap()), 42);
+    })
+    .join()
+    .unwrap();
+}

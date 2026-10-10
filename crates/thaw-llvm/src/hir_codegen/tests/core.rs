@@ -3130,6 +3130,10 @@ fn main_cleanup_keeps_process_reporting_and_addons_live_on_init_failure() {
     let begin = ir.find("terminal_begin_shutdown:").unwrap();
     let finish = ir.find("finish_napi_shutdown").unwrap();
     assert!(ordinary < begin && begin < finish, "{ir}");
+    let terminal_js = ir.find("terminal_quickjs_jobs = call i32 @thaw_js_run_event_loop").unwrap();
+    let late_gc = ir[terminal_js..].find("call void @thaw_js_collect_garbage()").unwrap() + terminal_js;
+    let confirm = ir.find("confirm_napi_shutdown = call i8 @thaw_napi_poll_shutdown").unwrap();
+    assert!(terminal_js < late_gc && late_gc < confirm, "GC must follow terminal JS work before the owner barrier is confirmed: {ir}");
     assert!(ir.contains("take_shutdown_error") && ir.contains("terminal_promise_notifications"), "{ir}");
     // The owned report texts are produced and released through
     // `thaw_cstring_destroy` (the earlier named destroy_* blocks no longer exist).

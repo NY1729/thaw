@@ -1170,11 +1170,24 @@ pub extern "C" fn thaw_js_run_event_loop() -> i32 {
     })
 }
 
+/// Run one ordinary QuickJS collection turn while the context and any N-API
+/// environments are still alive. Terminal shutdown uses this before polling
+/// the N-API owner barrier so unreachable callback roots can release normally.
+#[no_mangle]
+pub extern "C" fn thaw_js_collect_garbage() {
+    if JS.try_with(|cell| cell.borrow().is_some()).unwrap_or(false) {
+        with_context(|ctx| ctx.run_gc());
+    }
+}
+
 /// Reports queued work independently of `thaw_js_run_event_loop`'s exit
 /// status. A failed job can leave later jobs queued, while `exitCode` can
 /// remain nonzero after all work is complete.
 #[no_mangle]
 pub extern "C" fn thaw_js_terminal_work_pending() -> u8 {
+    if !JS.try_with(|cell| cell.borrow().is_some()).unwrap_or(false) {
+        return 0;
+    }
     with_context(|ctx| {
         let runtime = unsafe { rquickjs::qjs::JS_GetRuntime(ctx.as_raw().as_ptr()) };
         let jobs = unsafe { rquickjs::qjs::JS_IsJobPending(runtime) };
