@@ -2604,21 +2604,7 @@ impl<'a> FnLowerer<'a> {
                         if matches!(value_type, HirType::Optional(_) | HirType::Nullable(_) | HirType::Nullish(_) | HirType::Object(_)) {
                             self.coerce_primitive_to_number(value)?
                         } else if value_type == HirType::JsValue {
-                            // Keep unary-plus coercion on the original JS value.
-                            let value = self.coerce_to_declared(&HirType::Json, value)?;
-                            let argument = self.coerce_to_declared(
-                                &HirType::Json,
-                                HirExpr::ArrayLit(vec![value]),
-                            )?;
-                            let helper = HirExpr::Call(
-                                Box::new(HirExpr::Var("getDynamicValue".into())),
-                                vec![HirExpr::Lit(HirLit::Str("__thaw_unary_plus".into()))],
-                            );
-                            let result = HirExpr::Call(
-                                Box::new(HirExpr::Var("callDynamicValue".into())),
-                                vec![helper, argument],
-                            );
-                            HirExpr::JsonAsNumber(Box::new(result))
+                            self.dynamic_value_to_number(value, "__thaw_unary_plus")?
                         } else {
                             self.expect_type(&HirType::F64, &value, "unary plus")?;
                             value

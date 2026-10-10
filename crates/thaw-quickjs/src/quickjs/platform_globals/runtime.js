@@ -138,6 +138,11 @@
   const thawGraphRegExpConstructor = RegExp;
   const thawGraphBigInt = BigInt;
   const thawGraphNumber = Number;
+  thawBootstrapDefineProperty(globalThis, '__thaw_number_constructor', {
+    value: value => thawGraphNumber(value),
+    configurable: false,
+    writable: false,
+  });
   const thawGraphNumberIsFinite = Number.isFinite;
   const thawGraphNumberIsNaN = Number.isNaN;
   const thawGraphNumberIsInteger = Number.isInteger;

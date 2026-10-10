@@ -567,10 +567,7 @@ impl<'a> FnLowerer<'a> {
                 ));
             }
             if callee_name == "Number" && ty == HirType::JsValue {
-                return Ok(HirExpr::JsonAsNumber(Box::new(HirExpr::Call(
-                    Box::new(HirExpr::Var("readDynamicValue".to_string())),
-                    vec![value],
-                ))));
+                return self.dynamic_value_to_number(value, "__thaw_number_constructor");
             }
             if callee_name == "Number"
                 && matches!(ty, HirType::Optional(_) | HirType::Nullable(_) | HirType::Nullish(_)

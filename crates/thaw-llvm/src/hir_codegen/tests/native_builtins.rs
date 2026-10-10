@@ -9886,9 +9886,13 @@ fn object_literal_to_primitive_is_consulted_by_coercions() {
                 },
             };
             console.log(+obj, `${obj}`, numberCalls, stringCalls);
-            loadScript("globalThis.dynamicUnaryCalls = 0; globalThis.dynamicUnaryObject = { [Symbol.toPrimitive](hint) { dynamicUnaryCalls++; if (hint !== 'number') throw new Error('wrong hint'); return 9; } }; globalThis.unaryPlusBigInt = 1n; globalThis.unaryPlusSymbol = Symbol('value');");
+            loadScript("globalThis.dynamicUnaryCalls = 0; globalThis.dynamicUnaryObject = { [Symbol.toPrimitive](hint) { dynamicUnaryCalls++; if (hint !== 'number') throw new Error('wrong hint'); return 9; } }; globalThis.numberConstructorCalls = 0; globalThis.numberConstructorObject = { [Symbol.toPrimitive](hint) { numberConstructorCalls++; if (hint !== 'number') throw new Error('wrong Number hint'); return 12; } }; globalThis.unaryPlusBigInt = 1n; globalThis.numberConstructorBigInt = 1n; globalThis.unaryPlusSymbol = Symbol('value');");
             const dynamicObject: JsValue = getDynamicValue("dynamicUnaryObject");
             console.log(+dynamicObject, Number(getDynamicValue("dynamicUnaryCalls")));
+            const numberObject: JsValue = getDynamicValue("numberConstructorObject");
+            console.log(Number(numberObject), Number(getDynamicValue("numberConstructorCalls")));
+            const numberBigInt: JsValue = getDynamicValue("numberConstructorBigInt");
+            console.log(Number(numberBigInt));
             const big: JsValue = getDynamicValue("unaryPlusBigInt");
             const symbol: JsValue = getDynamicValue("unaryPlusSymbol");
             try { console.log(+big); } catch (error) { console.log(error instanceof TypeError); }
@@ -9897,7 +9901,7 @@ fn object_literal_to_primitive_is_consulted_by_coercions() {
     "#;
     assert_eq!(
         compile_and_run(source, "object_literal_to_primitive_coercion"),
-        "5 obj(5) 1 1\n9 1\ntrue\ntrue\n"
+        "5 obj(5) 1 1\n9 1\n12 1\n1\ntrue\ntrue\n"
     );
 }
 
