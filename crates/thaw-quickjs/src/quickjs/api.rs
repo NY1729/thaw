@@ -582,7 +582,7 @@ fn load_impl(ctx: Ctx<'_>, source: &str) -> Result<(), String> {
         loop {
             drain_next_tick_queue(&ctx).map_err(|error| match error {
                 rquickjs::Error::Exception => describe_exception_with_stack(&ctx),
-                error => error.to_string().into(),
+                error => error.to_string(),
             })?;
             if !ctx.execute_pending_job() {
                 break;
@@ -604,13 +604,13 @@ pub fn eval_json(source: &str) -> Result<Option<String>, String> {
             .eval::<Value<'_>, _>(source)
             .map_err(|error| match error {
                 rquickjs::Error::Exception => describe_exception(&ctx),
-                error => error.to_string().into(),
+                error => error.to_string(),
             })?;
         ctx.json_stringify(value)
             .map(|value| value.map(|value| value.to_string().unwrap_or_default()))
             .map_err(|error| match error {
                 rquickjs::Error::Exception => describe_exception(&ctx),
-                error => error.to_string().into(),
+                error => error.to_string(),
             })
     })
 }

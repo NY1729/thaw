@@ -136,6 +136,8 @@ impl Drop for HostLease {
     }
 }
 
+type GraphOriginSerials = (u64, HashMap<usize, (u64, GraphOriginRef)>);
+
 thread_local! {
     static HOST_OPERATIONS: Cell<Option<HostOperations>> = const { Cell::new(None) };
     static HOST_ERROR: RefCell<Option<String>> = const { RefCell::new(None) };
@@ -144,7 +146,7 @@ thread_local! {
     static TYPED_DECODE_SCOPES: RefCell<Vec<Option<TypedDecodeScope>>> = const { RefCell::new(Vec::new()) };
     // Identity serials handed to the JS realm with each graph-encoded container, so a JS shadow
     // of a native object still compares `===` to the native original it came from.
-    static GRAPH_ORIGIN_SERIALS: RefCell<(u64, HashMap<usize, (u64, GraphOriginRef)>)> =
+    static GRAPH_ORIGIN_SERIALS: RefCell<GraphOriginSerials> =
         RefCell::new((0, HashMap::new()));
 }
 
