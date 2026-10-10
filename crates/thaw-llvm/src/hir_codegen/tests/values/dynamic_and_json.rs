@@ -1882,6 +1882,25 @@ fn typed_js_array_length_getter_errors_reach_native_catch() {
     );
 }
 
+#[test]
+fn typed_js_bytes_decode_live_buffer_and_plain_data_wrapper() {
+    let source = r#"
+        declare function __thaw_typed_js_627974654172726179(): Uint8Array;
+        declare function __thaw_typed_js_6279746557726170706572(): Uint8Array;
+        function main(): void {
+            loadScript("globalThis.byteArray = () => Buffer.from('hello'); globalThis.byteWrapper = () => ({type: 'Buffer', data: [104,101,108,108,111]});");
+            const live = __thaw_typed_js_627974654172726179();
+            const wrapped = __thaw_typed_js_6279746557726170706572();
+            console.log(live.length, live[0], live[4]);
+            console.log(wrapped.length, wrapped[0], wrapped[4]);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "typed_js_bytes_live_buffer_and_plain_wrapper"),
+        "5 104 111\n5 104 111\n"
+    );
+}
+
 
 #[test]
 fn tuple_union_promise_scalar_cleanup_does_not_double_destroy_json() {
