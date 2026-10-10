@@ -11706,6 +11706,36 @@ fn iterator_yield_delegate_preserves_done_value() {
     );
 }
 #[test]
+fn non_graph_native_callback_results_preserve_nested_callable_fields_sync_and_async() {
+    let source = r#"
+        declare function __thaw_typed_js_636f6e73756d6553796e63(callback: JsValue): string;
+        declare function __thaw_typed_js_636f6e73756d654173796e63(callback: JsValue): Promise<string>;
+
+        async function main(): Promise<void> {
+            loadScript("globalThis.consumeSync = callback => { const result = callback(); const next = result.next; return [typeof next, next === result.next, next(), next()].join(':'); }; globalThis.consumeAsync = async callback => { const result = await callback(); const next = result.next; return [typeof next, next === result.next, next(), next()].join(':'); };");
+            let syncCalls = 0;
+            const syncCallback: JsValue = registerNativeCallback(() => ({
+                next() { syncCalls++; return syncCalls; }
+            }));
+            console.log(__thaw_typed_js_636f6e73756d6553796e63(syncCallback));
+            releaseDynamicValue(syncCallback);
+
+            let asyncCalls = 0;
+            const asyncCallback: JsValue = registerNativeCallback(async (): Promise<{ next: () => number }> => {
+                await sleep(0);
+                return { next() { asyncCalls++; return asyncCalls; } };
+            });
+            console.log(await __thaw_typed_js_636f6e73756d654173796e63(asyncCallback));
+            releaseDynamicValue(asyncCallback);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "nested_native_callback_result_functions"),
+        "function:true:1:2\nfunction:true:1:2\n"
+    );
+}
+
+#[test]
 fn array_from_length_mapper_receives_explicit_this_arg() {
     let source = r#"
         function main(): void {

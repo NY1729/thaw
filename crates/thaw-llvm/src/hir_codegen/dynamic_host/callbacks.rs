@@ -1140,7 +1140,7 @@ impl<'ctx> HirCompiler<'ctx> {
             self.builder.build_unreachable().map_err(|error| error.to_string())?;
             self.builder.position_at_end(resume);
             let guarded = self.compile_host_callback_pending_guard(adapter, true)?;
-            let finish = self.compile_native_promise_callback_finisher(resolved)?;
+            let finish = self.compile_native_promise_callback_finisher(resolved, graph_wire)?;
             return Ok((
                 guarded,
                 closure,
@@ -1257,12 +1257,20 @@ impl<'ctx> HirCompiler<'ctx> {
                     let method = self.compile_dynamic_value_placeholder_unchecked(method_handle.into())?;
                     self.compile_json_array_push_owned(result_json, method)?;
                 } else {
-                    self.compile_json_array_push_native_with_undefined(
+                    let outer_compiling_quickjs_dynamic_arguments =
+                        self.compiling_quickjs_dynamic_arguments;
+                    if !graph_wire {
+                        self.compiling_quickjs_dynamic_arguments = true;
+                    }
+                    let pushed = self.compile_json_array_push_native_with_undefined(
                         result_json,
                         result,
                         ret,
                         true,
-                    )?;
+                    );
+                    self.compiling_quickjs_dynamic_arguments =
+                        outer_compiling_quickjs_dynamic_arguments;
+                    pushed?;
                 }
                 self.builder
                     .build_call(
@@ -1471,6 +1479,7 @@ impl<'ctx> HirCompiler<'ctx> {
     fn compile_native_promise_callback_finisher(
         &mut self,
         resolved: &HirType,
+        graph_wire: bool,
     ) -> Result<PointerValue<'ctx>, String> {
         let name = format!("__thaw_native_promise_finish_{}", self.next_lambda);
         self.next_lambda += 1;
@@ -1608,7 +1617,16 @@ impl<'ctx> HirCompiler<'ctx> {
             // this same function's synchronous counterpart above -- a
             // resolved `Promise<Optional<Json>>`/`Promise<Nullish<Json>>`
             // value needs the same real-`undefined`-vs-`null` distinction.
-            self.compile_json_array_push_native_with_undefined(array, value, resolved, true)?;
+            let outer_compiling_quickjs_dynamic_arguments =
+                self.compiling_quickjs_dynamic_arguments;
+            if !graph_wire {
+                self.compiling_quickjs_dynamic_arguments = true;
+            }
+            let pushed =
+                self.compile_json_array_push_native_with_undefined(array, value, resolved, true);
+            self.compiling_quickjs_dynamic_arguments =
+                outer_compiling_quickjs_dynamic_arguments;
+            pushed?;
             self.builder
                 .build_call(
                     self.module.get_function("thaw_json_index").unwrap(),
