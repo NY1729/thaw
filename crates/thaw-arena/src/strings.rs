@@ -3,8 +3,8 @@ use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::{c_char, CStr, CString};
-use std::sync::{Mutex, OnceLock};
 use std::rc::Rc;
+use std::sync::{Mutex, OnceLock};
 
 thread_local! {
     static LENGTHS: RefCell<HashMap<usize, (usize, bool)>> = RefCell::new(HashMap::new());
@@ -17,24 +17,34 @@ pub fn bind_owned_exception(
     pointer: *const c_char,
     packet: Rc<crate::exception::ExceptionPacket>,
 ) -> bool {
-    if pointer.is_null() { return false; }
+    if pointer.is_null() {
+        return false;
+    }
     OWNED_EXCEPTIONS.with(|entries| {
         let mut entries = entries.borrow_mut();
-        if entries.contains_key(&(pointer as usize)) { return false; }
+        if entries.contains_key(&(pointer as usize)) {
+            return false;
+        }
         entries.insert(pointer as usize, packet);
         true
     })
 }
 
 /// Transfers the packet bound to the exact owned callback result pointer.
-pub fn take_owned_exception(pointer: *const c_char) -> Option<Rc<crate::exception::ExceptionPacket>> {
-    if pointer.is_null() { return None; }
+pub fn take_owned_exception(
+    pointer: *const c_char,
+) -> Option<Rc<crate::exception::ExceptionPacket>> {
+    if pointer.is_null() {
+        return None;
+    }
     OWNED_EXCEPTIONS.with(|entries| entries.borrow_mut().remove(&(pointer as usize)))
 }
 
 /// Borrows the authenticated packet associated with an owned result pointer.
 pub fn owned_exception(pointer: *const c_char) -> Option<Rc<crate::exception::ExceptionPacket>> {
-    if pointer.is_null() { return None; }
+    if pointer.is_null() {
+        return None;
+    }
     OWNED_EXCEPTIONS.with(|entries| entries.borrow().get(&(pointer as usize)).cloned())
 }
 
@@ -44,14 +54,18 @@ pub fn register_exception_bytes(pointer: *const c_char, length: usize) {
         LENGTHS.with(|lengths| {
             // Exception packet bytes live in a Rust-owned Box, not the resettable arena.
             // Keep their embedded-NUL length metadata until the packet releases them.
-            lengths.borrow_mut().insert(pointer as usize, (length, true));
+            lengths
+                .borrow_mut()
+                .insert(pointer as usize, (length, true));
         });
     }
 }
 
 pub fn unregister_exception_bytes(pointer: *const c_char) {
     if !pointer.is_null() {
-        LENGTHS.with(|lengths| { lengths.borrow_mut().remove(&(pointer as usize)); });
+        LENGTHS.with(|lengths| {
+            lengths.borrow_mut().remove(&(pointer as usize));
+        });
     }
 }
 
@@ -230,7 +244,8 @@ pub unsafe fn destroy_string(pointer: *const c_char) {
     if pointer.is_null() {
         return;
     }
-    let exception = OWNED_EXCEPTIONS.with(|entries| entries.borrow_mut().remove(&(pointer as usize)));
+    let exception =
+        OWNED_EXCEPTIONS.with(|entries| entries.borrow_mut().remove(&(pointer as usize)));
     drop(exception);
     graph_transfers()
         .lock()

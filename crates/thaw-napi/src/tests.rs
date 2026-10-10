@@ -1643,7 +1643,8 @@ fn private_napi_argument_graph_preserves_origin_and_aliases() {
     let graph = r#"{"root":{"r":0},"nodes":[{"a":[{"r":1},{"r":2},{"u":1},{"r":3},{"r":2}]},{"d":0},{"o":[["timestamp",{"v":0}]]},{"o":[["$__thaw_napi_undefined$",{"v":true}]]}],"leases":[]}"#;
     let input = NapiGraphInput::parse(graph);
     let args =
-        unsafe { parse_napi_arguments(&mut env as NapiEnv, graph, true, true, Some(&input)) }.unwrap();
+        unsafe { parse_napi_arguments(&mut env as NapiEnv, graph, true, true, Some(&input)) }
+            .unwrap();
     assert!(matches!(unsafe { value_ref(args[0]) }, Ok(Value::Date(time)) if *time == 0.0));
     assert!(matches!(
         unsafe { value_ref(args[1]) },
@@ -4354,22 +4355,41 @@ fn graph_owned_native_symbol_coercion_throws_engine_type_error_before_exposure()
     assert!(ensure_graph_owner_id(&mut env));
     let description = env.alloc(Value::String("unexposed".into()));
     let mut symbol = ptr::null_mut();
-    assert_eq!(unsafe { napi_create_symbol(&mut env, description, &mut symbol) }, NAPI_OK);
+    assert_eq!(
+        unsafe { napi_create_symbol(&mut env, description, &mut symbol) },
+        NAPI_OK
+    );
 
     // The native graph bridge must use its captured Symbol intrinsic and the
     // actual native Symbol descriptor, even when user code replaces Symbol.
-    assert_eq!(thaw_quickjs::thaw_js_load(
-        c"globalThis.__savedNapiSymbol = Symbol; globalThis.Symbol = () => 17;".as_ptr()), 1);
+    assert_eq!(
+        thaw_quickjs::thaw_js_load(
+            c"globalThis.__savedNapiSymbol = Symbol; globalThis.Symbol = () => 17;".as_ptr()
+        ),
+        1
+    );
 
     let mut output = ptr::null_mut();
-    assert_eq!(unsafe { napi_coerce_to_string(&mut env, symbol, &mut output) }, NAPI_PENDING_EXCEPTION);
+    assert_eq!(
+        unsafe { napi_coerce_to_string(&mut env, symbol, &mut output) },
+        NAPI_PENDING_EXCEPTION
+    );
     let mut exception = ptr::null_mut();
-    assert_eq!(unsafe { napi_get_and_clear_last_exception(&mut env, &mut exception) }, NAPI_OK);
+    assert_eq!(
+        unsafe { napi_get_and_clear_last_exception(&mut env, &mut exception) },
+        NAPI_OK
+    );
     let handle = unsafe { qjs_handle(exception) }.expect("engine TypeError handle");
-    assert!(unsafe { qjs_query(handle, 2) }.unwrap().starts_with("TypeError:"));
+    assert!(unsafe { qjs_query(handle, 2) }
+        .unwrap()
+        .starts_with("TypeError:"));
     assert_eq!(thaw_quickjs::thaw_js_release_handle(handle), 1);
-    assert_eq!(thaw_quickjs::thaw_js_load(
-        c"globalThis.Symbol = __savedNapiSymbol; delete globalThis.__savedNapiSymbol;".as_ptr()), 1);
+    assert_eq!(
+        thaw_quickjs::thaw_js_load(
+            c"globalThis.Symbol = __savedNapiSymbol; delete globalThis.__savedNapiSymbol;".as_ptr()
+        ),
+        1
+    );
 }
 
 // Unrun: QuickJS getter/setter failures reached through N-API retain the

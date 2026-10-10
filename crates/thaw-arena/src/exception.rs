@@ -1,7 +1,7 @@
 //! Runtime-owned payloads for native exceptions crossing a JavaScript frame.
+use std::any::Any;
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::any::Any;
 use std::rc::{Rc, Weak};
 
 /// Exact pending exception channels captured when a native callback publishes an error.
@@ -51,7 +51,10 @@ impl Drop for ExceptionPacket {
         }
         let _ = PACKETS.try_with(|packets| {
             let mut packets = packets.borrow_mut();
-            if packets.get(&self.id).is_some_and(|entry| entry.strong_count() == 0) {
+            if packets
+                .get(&self.id)
+                .is_some_and(|entry| entry.strong_count() == 0)
+            {
                 packets.remove(&self.id);
             }
         });
@@ -59,7 +62,9 @@ impl Drop for ExceptionPacket {
 }
 
 pub fn packet(id: u64) -> Option<Rc<ExceptionPacket>> {
-    if id == 0 { return None; }
+    if id == 0 {
+        return None;
+    }
     PACKETS.with(|packets| packets.borrow().get(&id).and_then(Weak::upgrade))
 }
 
@@ -89,9 +94,18 @@ mod tests {
     use super::*;
     fn sample() -> ExceptionPacket {
         ExceptionPacket {
-            id: 0, pending: 11, native_text: 12, object: 13, native: 14, aggregate: 15,
-            tag: 4, number: f64::NAN.to_bits(), bigint: (-7i64) as u64, boolean: 1,
-            _roots: Vec::new(), _owned_bytes: Vec::new(),
+            id: 0,
+            pending: 11,
+            native_text: 12,
+            object: 13,
+            native: 14,
+            aggregate: 15,
+            tag: 4,
+            number: f64::NAN.to_bits(),
+            bigint: (-7i64) as u64,
+            boolean: 1,
+            _roots: Vec::new(),
+            _owned_bytes: Vec::new(),
             _leases: Vec::new(),
         }
     }
@@ -118,5 +132,4 @@ mod tests {
         assert!(!is_live(id));
         assert_eq!(field(id, 0), None);
     }
-
 }
