@@ -441,18 +441,20 @@ impl<'a> FnLowerer<'a> {
                 // method above does, since there's no fixed method list
                 // to have missed from.
                 //
-                // Deliberately `JsValue` only, not `Json` too: a `Json`-
-                // typed receiver has already been JSON-decoded, and
-                // `lower_expr_with_expected_type`'s `JsValue` hint (which
-                // `lower_dynamic_value_method_call` uses on its own
-                // receiver) doesn't reach into a plain member-access
-                // chain to undo that -- attempting it crashes at LLVM
-                // verification (a `Json` pointer handed to a native call
-                // expecting a real handle) rather than erroring cleanly.
-                // See `[[project_npm_interop_gaps_19]]` for the deeper,
-                // left-open gap this traces back to (js-yaml's `load():
-                // unknown` losing a real `Date`'s identity the moment
-                // it's classified `Json`).
+                // A Json `.includes()` receiver is routed separately below:
+                // it may carry a borrowed handle or be an ordinary decoded
+                // value, and the helper handles both without handing a Json
+                // pointer to an API that requires a live handle.
+                if property == "includes"
+                    && receiver_type == Some(HirType::Json)
+                    && !call.args.iter().any(|argument| argument.spread.is_some())
+                {
+                    return self.lower_json_includes_method_call(
+                        member,
+                        &call.args,
+                        expected_return_hint.as_ref(),
+                    );
+                }
                 if matches!(receiver_type, Some(HirType::JsValue)) {
                     return self.lower_dynamic_value_method_call(
                         &member.obj,
@@ -2766,5 +2768,68 @@ impl<'a> FnLowerer<'a> {
         Ok(matches!(ty, HirType::Object(_)).then(|| {
             (HirExpr::Lit(HirLit::Bool(false)), HirExpr::Lit(HirLit::Undefined))
         }))
+    }
+}
+
+impl<'a> FnLowerer<'a> {
+    /// A Json-typed `.includes` receiver can either be an ordinary decoded
+    /// value or a live QuickJS handle carried through the JSON bridge. Reuse
+    /// the selected-method path in both cases: preserve an existing handle
+    /// when present, otherwise materialize the captured Json value as a live
+    /// value before normal JavaScript property lookup and invocation.
+    fn lower_json_includes_method_call(
+        &mut self,
+        member: &MemberExpr,
+        args: &[swc_ecma_ast::ExprOrSpread],
+        expected: Option<&HirType>,
+    ) -> Result<HirExpr, String> {
+        let receiver = self.lower_expr(&member.obj)?;
+        let receiver_type = self.infer_expr_type(&receiver)?;
+        if receiver_type != HirType::Json {
+            return Err(format!("dynamic `.includes()` expected Json receiver, got {receiver_type:?}"));
+        }
+        let json_name = format!("__thaw_dynamic_includes_json_{}", self.next_binding);
+        self.next_binding += 1;
+        let handle_name = format!("__thaw_dynamic_includes_handle_{}", self.next_binding);
+        self.next_binding += 1;
+        let live_name = format!("__thaw_dynamic_includes_receiver_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(json_name.clone(), HirType::Json);
+        self.scope.insert(handle_name.clone(), HirType::I64);
+        self.scope.insert(live_name.clone(), HirType::JsValue);
+        let json = HirExpr::Var(json_name.clone());
+        let handle = HirExpr::Var(handle_name.clone());
+        let borrowed_handle = HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_json_borrowed_handle_id".into())),
+            vec![json.clone()],
+        );
+        let live = HirExpr::Conditional(
+            Box::new(HirExpr::BinOp(
+                BinOp::EqEqEq,
+                Box::new(handle.clone()),
+                Box::new(HirExpr::Lit(HirLit::I64(0))),
+            )),
+            Box::new(HirExpr::Call(
+                Box::new(HirExpr::Var("retainDynamicJson".into())),
+                vec![json.clone()],
+            )),
+            Box::new(HirExpr::JsonAsNative(Box::new(json), HirType::JsValue)),
+            HirType::JsValue,
+        );
+        let receiver_ident = swc_ecma_ast::Ident::new_no_ctxt(live_name.clone().into(), member.span);
+        let result = self.lower_dynamic_value_method_call(
+            &Expr::Ident(receiver_ident),
+            "includes",
+            args,
+            expected,
+        )?;
+        self.wrap_call_argument_bindings(
+            result,
+            &[
+                (json_name, HirType::Json, receiver),
+                (handle_name, HirType::I64, borrowed_handle),
+                (live_name, HirType::JsValue, live),
+            ],
+        )
     }
 }
