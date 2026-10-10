@@ -11683,6 +11683,30 @@ fn iterator_yield_delegate_preserves_done_value() {
             console.log(iterator.next().value);
             console.log(iterator.next().value);
             console.log(iterator.next().done);
+            loadScript("globalThis.dynamicYieldSource = { [Symbol.iterator]() { let step = 0; return { next() { step++; return step === 1 ? { value: 2, done: false } : { value: 7, done: true }; } }; } }; globalThis.dynamicForOfDoneValueReads = 0; globalThis.dynamicEmptySource = { [Symbol.iterator]() { return { next() { return { get value() { dynamicForOfDoneValueReads++; return 99; }, done: true }; } }; } };");
+            const dynamicYieldSource: JsValue = getDynamicValue("dynamicYieldSource");
+            function* dynamicOuter(): Generator<number> {
+                const completion = yield* dynamicYieldSource;
+                yield completion;
+            }
+            const dynamicIterator = dynamicOuter();
+            console.log(dynamicIterator.next().value);
+            console.log(dynamicIterator.next().value);
+            console.log(dynamicIterator.next().done);
+            const dynamicEmpty: JsValue = getDynamicValue("dynamicEmptySource");
+            for (const value of dynamicEmpty) { console.log(value); }
+            console.log(Number(getDynamicValue("dynamicForOfDoneValueReads")));
+            loadScript("globalThis.dynamicReturnSource = { [Symbol.iterator]() { let step = 0; return { next() { step++; return step === 1 ? { value: 3, done: false } : { value: 7, done: true }; }, return() { return { value: 4, done: false }; } }; } };");
+            const dynamicReturnSource: JsValue = getDynamicValue("dynamicReturnSource");
+            function* dynamicReturnOuter(): Generator<number> {
+                const completion = yield* dynamicReturnSource;
+                yield completion;
+            }
+            const dynamicReturnIterator = dynamicReturnOuter();
+            console.log(dynamicReturnIterator.next().value);
+            console.log(dynamicReturnIterator.return(99).value);
+            console.log(dynamicReturnIterator.next().value);
+            console.log(dynamicReturnIterator.next().done);
             let reads = 0;
             const empty = {
                 [Symbol.iterator]() {
@@ -11702,7 +11726,7 @@ fn iterator_yield_delegate_preserves_done_value() {
     "#;
     assert_eq!(
         compile_and_run(source, "iterator_yield_delegate_done_value"),
-        "2\n7\ntrue\n0\n"
+        "2\n7\ntrue\n2\n7\ntrue\n0\n3\n4\n7\ntrue\n0\n"
     );
 }
 #[test]
