@@ -1344,23 +1344,38 @@ fn number_is_nan_inspects_a_json_valued_operand_at_runtime() {
 }
 
 #[test]
-fn a_json_valued_array_method_call_keeps_its_native_builtin_error() {
-    let module = thaw_parser::parse_typescript(
-        r#"function main(): boolean {
-            const data = JSON.parse("[1, 2, 3]");
-            return data.includes(2);
+fn json_and_jsvalue_includes_use_selected_javascript_methods() {
+    let json_program = lower(
+        r#"function main(value: Json, needle: any): boolean {
+            return value.includes(needle);
         }"#,
-    )
-    .unwrap();
-    // `Json` receivers now support `includes`/`indexOf`/`lastIndexOf` at run time
-    // (par-next-c3), so the old "requires ... Json" compile error became a
-    // successful lowering through the Json search helpers; the original intent
-    // (no undeclared/unknown function leaks out of the dynamic path) is kept.
-    let program = lower_module(&module).expect("Json receiver array search lowers");
+    );
+    let json_body = format!("{:?}", json_program.functions);
+    assert!(json_body.contains("__thaw_call_selected_dynamic_method"), "{json_body}");
+    assert!(json_body.contains("__thaw_json_borrowed_handle_id"), "{json_body}");
+    assert!(json_body.contains("retainDynamicJson"), "{json_body}");
+    assert!(!json_body.contains("__thaw_json_search"), "{json_body}");
+
+    let jsvalue_program = lower(
+        r#"function main(value: JsValue, needle: any): boolean {
+            return value.includes(needle);
+        }"#,
+    );
+    let jsvalue_body = format!("{:?}", jsvalue_program.functions);
+    assert!(jsvalue_body.contains("__thaw_call_selected_dynamic_method"), "{jsvalue_body}");
+}
+
+#[test]
+fn known_string_and_homogeneous_array_includes_keep_native_lowering() {
+    let program = lower(
+        r#"function main(text: string, values: number[]): boolean {
+            return text.includes("needle") || values.includes(42);
+        }"#,
+    );
     let body = format!("{:?}", program.functions);
-    assert!(body.contains("__thaw_json_search"), "{body}");
-    assert!(!body.contains("undeclared"), "{body}");
-    assert!(!body.contains("unknown function"), "{body}");
+    assert!(body.contains("__thaw_string_includes"), "{body}");
+    assert!(body.contains("__thaw_number_array_includes"), "{body}");
+    assert!(!body.contains("__thaw_call_selected_dynamic_method"), "{body}");
 }
 
 #[test]
