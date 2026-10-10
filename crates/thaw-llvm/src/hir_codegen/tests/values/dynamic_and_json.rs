@@ -1855,6 +1855,33 @@ fn decodes_object_and_array_union_members_in_typed_js_tuple() {
         "{\"value\":4} 17\n[1,2] 18\n");
 }
 
+#[test]
+fn typed_js_array_length_getter_errors_reach_native_catch() {
+    let source = r#"
+        declare function __thaw_typed_js_6e756d4172726179(): number[];
+        declare function __thaw_typed_js_627974654172726179(): Uint8Array;
+        function main(): void {
+            loadScript("globalThis.numArray = () => new Proxy([1, 2], { get(target, key, receiver) { if (key === 'length') throw new Error('length failed'); return Reflect.get(target, key, receiver); } }); globalThis.byteArray = () => ({type: 'Buffer', data: new Proxy([1, 2], { get(target, key, receiver) { if (key === 'length') throw new Error('bytes length failed'); return Reflect.get(target, key, receiver); } })});");
+            try {
+                const values = __thaw_typed_js_6e756d4172726179();
+                console.log(values.length);
+            } catch (error) {
+                console.log(error.message);
+            }
+            try {
+                const values = __thaw_typed_js_627974654172726179();
+                console.log(values.length);
+            } catch (error) {
+                console.log(error.message);
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "typed_js_array_length_getter_error"),
+        "length failed\nbytes length failed\n"
+    );
+}
+
 
 #[test]
 fn tuple_union_promise_scalar_cleanup_does_not_double_destroy_json() {
@@ -1933,6 +1960,18 @@ fn union_json_cleanup_ir_keeps_one_owner_for_selected_member() {
             .filter_map(|line| line.split_once(" = call ").map(|(name, _)| name.trim().to_string()))
             .collect()
     }
+    fn typed_result_decode_ids(ir: &str, callee: &str) -> Vec<String> {
+        owned_result_ids(ir, callee)
+            .into_iter()
+            .filter(|decoded| {
+                let tracked = tracked_root_id(ir, decoded);
+                ir.lines().any(|line| {
+                    line.contains("@thaw_json_typed_decode_scope_own(")
+                        && line.contains(&format!("@thaw_json_typed_decode_scope_own(ptr {tracked})"))
+                })
+            })
+            .collect()
+    }
     fn tuple_slot_ids(ir: &str) -> Vec<String> {
         ir.lines()
             .filter(|line| line.contains(" = getelementptr") && line.contains("json_tuple_slot"))
@@ -1956,6 +1995,27 @@ fn union_json_cleanup_ir_keeps_one_owner_for_selected_member() {
         }
         sites
     }
+    fn block_has_call(ir: &str, block_prefix: &str, call: &str) -> bool {
+        let mut block = String::new();
+        ir.lines().any(|line| {
+            if !line.chars().next().is_some_and(char::is_whitespace) {
+                if let Some((label, _)) = line.split_once(':') {
+                    block = label.to_string();
+                }
+            }
+            block.starts_with(block_prefix) && line.contains(call)
+        })
+    }
+    fn tracked_root_id(ir: &str, owned: &str) -> String {
+        let argument = format!("@thaw_json_track_arena_owned_root(ptr {owned})");
+        let roots: Vec<_> = ir
+            .lines()
+            .filter(|line| line.contains(" = call ") && line.contains(&argument))
+            .filter_map(|line| line.split_once(" = call ").map(|(name, _)| name.trim().to_string()))
+            .collect();
+        assert_eq!(roots.len(), 1, "owner {owned}: {ir}");
+        roots[0].clone()
+    }
     fn assert_one_normal_destroy(ir: &str, owned: &str, failure: &str, after: usize) {
         let sites = destroy_sites(ir, owned);
         // The host-error/invalid-graph edge and the normal edge are
@@ -1965,6 +2025,33 @@ fn union_json_cleanup_ir_keeps_one_owner_for_selected_member() {
             "owner {owned}: {ir}");
         let normal = sites.iter().find(|(_, block)| !block.starts_with(failure)).unwrap();
         assert!(normal.0 > after, "owner {owned}: {ir}");
+    }
+    fn assert_transferred_root_destroy(
+        ir: &str,
+        owned: &str,
+        failure: &str,
+        after: usize,
+        has_host_error_cleanup: bool,
+    ) {
+        let decoded = destroy_sites(ir, owned);
+        assert_eq!(decoded.len(), 1, "decoded owner {owned}: {ir}");
+        assert!(decoded[0].1.starts_with(failure), "decoded owner {owned}: {ir}");
+        let tracked = tracked_root_id(ir, owned);
+        let transferred = destroy_sites(ir, &tracked);
+        assert_eq!(transferred.len(), 1, "tracked owner {tracked}: {ir}");
+        assert!(!transferred[0].1.starts_with(failure), "tracked owner {tracked}: {ir}");
+        assert!(transferred[0].0 > after, "tracked owner {tracked}: {ir}");
+        if has_host_error_cleanup {
+            let owns_tracked_root = ir.lines().any(|line| {
+                line.contains("@thaw_json_typed_decode_scope_own(")
+                    && line.contains(&format!("@thaw_json_typed_decode_scope_own(ptr {tracked})"))
+            });
+            assert!(owns_tracked_root, "tracked owner {tracked}: {ir}");
+            assert!(
+                block_has_call(ir, "typed_decode_failed", "@thaw_json_typed_decode_scope_end(i8 1)"),
+                "tracked owner {tracked}: {ir}"
+            );
+        }
     }
     fn tuple_store_line(ir: &str, slot: &str) -> usize {
         ir.lines().position(|line| line.trim_start().starts_with("store ")
@@ -2030,21 +2117,33 @@ fn union_json_cleanup_ir_keeps_one_owner_for_selected_member() {
             "dynamic_result_field_json"),
     ] {
         let decoded = ir(source);
-        let roots = owned_result_ids(&decoded, "@thaw_json_graph_decode(");
+        let roots = typed_result_decode_ids(&decoded, "@thaw_json_graph_decode(");
         assert_eq!(roots.len(), 1, "{decoded}");
         let output = decoded.lines().position(|line| line.contains(produced)).expect(&decoded);
-        assert_one_normal_destroy(&decoded, &roots[0], "quickjs_graph_invalid", output);
+        assert_transferred_root_destroy(
+            &decoded,
+            &roots[0],
+            "quickjs_graph_invalid",
+            output,
+            produced == "dynamic_number_array_result",
+        );
     }
     // The top-level typed-result Union is also an owned JSON wrapper.
     let top_level = ir(r#"
         declare function __thaw_typed_js_746f70556e696f6e(): number | string;
         function main(): void { const value = __thaw_typed_js_746f70556e696f6e(); console.log(value); }
     "#);
-    let top_level_owned = owned_result_ids(&top_level, "@thaw_json_graph_decode(");
+    let top_level_owned = typed_result_decode_ids(&top_level, "@thaw_json_graph_decode(");
     assert_eq!(top_level_owned.len(), 1, "{top_level}");
     let union_loaded = top_level.lines().position(|line| line.contains("dynamic_union_value = load"))
         .expect(&top_level);
-    assert_one_normal_destroy(&top_level, &top_level_owned[0], "quickjs_graph_invalid", union_loaded);
+    assert_transferred_root_destroy(
+        &top_level,
+        &top_level_owned[0],
+        "quickjs_graph_invalid",
+        union_loaded,
+        false,
+    );
 }
 
 /// Native values crossed into `any` or a typed QuickJS call must retain

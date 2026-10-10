@@ -7575,6 +7575,34 @@ fn json_array_or_buffer_data(value: &Value) -> Option<&Vec<Value>> {
 
 #[no_mangle]
 pub extern "C" fn thaw_json_to_number_array(value: *mut Value) -> *mut u8 {
+    if let Some(Value::Host(lease)) = unsafe { value.as_ref() } {
+        let length = thaw_json_array_length(value);
+        if HOST_ERROR.with(|error| error.borrow().is_some()) {
+            return std::ptr::null_mut();
+        }
+        let mut values = Vec::new();
+        if values.try_reserve_exact(length as usize).is_err() {
+            set_host_error("Unable to allocate host array".into());
+            return std::ptr::null_mut();
+        }
+        for index in 0..length as usize {
+            let key = index.to_string();
+            let element = host_get_property(lease, key.as_bytes());
+            if HOST_ERROR.with(|error| error.borrow().is_some()) {
+                return std::ptr::null_mut();
+            }
+            values.push(element.as_f64().unwrap_or(0.0));
+        }
+        let output = thaw_arena::thaw_arena_alloc(8 + values.len() * 8, 8);
+        if output.is_null() {
+            return output;
+        }
+        unsafe { (output as *mut i64).write(length) };
+        for (index, value) in values.iter().enumerate() {
+            unsafe { (output.add(8 + index * 8) as *mut f64).write(*value) };
+        }
+        return output;
+    }
     let values = unsafe { value.as_ref() }
         .and_then(json_array_or_buffer_data)
         .cloned()
@@ -7594,9 +7622,28 @@ pub extern "C" fn thaw_json_to_number_array(value: *mut Value) -> *mut u8 {
 
 #[no_mangle]
 pub extern "C" fn thaw_json_array_length(value: *mut Value) -> i64 {
-    unsafe { value.as_ref() }
-        .and_then(json_array_or_buffer_data)
-        .map_or(0, |values| values.len() as i64)
+    let Some(value) = (unsafe { value.as_ref() }) else {
+        return 0;
+    };
+    if let Value::Host(lease) = value {
+        if host_query(lease, 4).as_deref() != Some("1") {
+            return 0;
+        }
+        let length = host_get_property(lease, b"length");
+        let Some(length) = length.as_f64() else {
+            set_host_error("Invalid host array length".into());
+            return 0;
+        };
+        if !length.is_finite()
+            || length.fract() != 0.0
+            || !(0.0..=u32::MAX as f64).contains(&length)
+        {
+            set_host_error("Invalid host array length".into());
+            return 0;
+        }
+        return length as i64;
+    }
+    json_array_or_buffer_data(value).map_or(0, |values| values.len() as i64)
 }
 
 /// Appends every element of `other` (a Json array) to `array`: the spread of a
@@ -7871,6 +7918,173 @@ mod tests {
         static NAPI_RELEASES: Cell<usize> = const { Cell::new(0) };
         static TRACKED_REENTRANT_ROOTS: Cell<(usize, usize)> = const { Cell::new((0, 0)) };
         static TRACKED_RELEASE_REENTERED: Cell<bool> = const { Cell::new(false) };
+        static HOST_ARRAY_TEST_LENGTH: Cell<f64> = const { Cell::new(5.0) };
+        static HOST_ARRAY_TEST_FAIL_GET: Cell<bool> = const { Cell::new(false) };
+        static HOST_ARRAY_TEST_FAIL_INDEX: Cell<i32> = const { Cell::new(-1) };
+        static HOST_ARRAY_TEST_GETS: Cell<usize> = const { Cell::new(0) };
+    }
+
+    extern "C" fn host_array_test_retain(_: u64) -> u8 {
+        1
+    }
+
+    extern "C" fn host_array_test_release(_: u64) -> u8 {
+        1
+    }
+
+    extern "C" fn host_array_test_query(handle: u64, operation: u8) -> HostTextResult {
+        let value = match (handle, operation) {
+            (1, 4) => b"1".as_slice(),
+            (1, 0) => b"object".as_slice(),
+            (1, 7) => b"0".as_slice(),
+            (2, 0) => b"number".as_slice(),
+            (2, 10) => {
+                return HostTextResult {
+                    value: thaw_arena::owned_string(
+                        HOST_ARRAY_TEST_LENGTH
+                            .with(Cell::get)
+                            .to_string()
+                            .as_bytes(),
+                    ),
+                    error: std::ptr::null(),
+                };
+            }
+            (3, 0) => b"number".as_slice(),
+            (3, 10) => b"12".as_slice(),
+            (4, 0) => b"number".as_slice(),
+            (4, 10) => b"27".as_slice(),
+            (other, 4) if other != 1 => b"0".as_slice(),
+            _ => b"object".as_slice(),
+        };
+        HostTextResult {
+            value: thaw_arena::owned_string(value),
+            error: std::ptr::null(),
+        }
+    }
+
+    extern "C" fn host_array_test_get(handle: u64, key: *const c_char) -> HostHandleResult {
+        HOST_ARRAY_TEST_GETS.with(|count| count.set(count.get() + 1));
+        if HOST_ARRAY_TEST_FAIL_GET.with(Cell::get) {
+            return HostHandleResult {
+                value: 0,
+                error: thaw_arena::owned_string(b"length getter failed"),
+            };
+        }
+        let key = to_str(key);
+        let failed_index = HOST_ARRAY_TEST_FAIL_INDEX.with(Cell::get);
+        if (key == r#""0""# && failed_index == 0) || (key == r#""1""# && failed_index == 1) {
+            return HostHandleResult {
+                value: 0,
+                error: thaw_arena::owned_string(b"index getter failed"),
+            };
+        }
+        let value = match key.as_str() {
+            r#""length""# if handle == 1 => 2,
+            r#""0""# if handle == 1 => 3,
+            r#""1""# if handle == 1 => 4,
+            _ => 0,
+        };
+        HostHandleResult {
+            value,
+            error: std::ptr::null(),
+        }
+    }
+
+    fn install_host_array_test_operations() {
+        HOST_OPERATIONS.with(|slot| {
+            slot.set(Some(HostOperations {
+                retain: host_array_test_retain,
+                release: host_array_test_release,
+                get: host_array_test_get,
+                query: host_array_test_query,
+                date_set: unused_typed_scope_date,
+                set: unused_typed_scope_set,
+                predicate: unused_typed_scope_predicate,
+                enumerate: unused_typed_scope_text,
+            }))
+        });
+    }
+
+    fn host_array_test_value(handle: u64) -> *mut Value {
+        leak(Value::Host(Rc::new(HostLease {
+            handle,
+            release: host_array_test_release,
+        })))
+    }
+
+    fn host_array_test_length(handle: u64) -> i64 {
+        let value = host_array_test_value(handle);
+        let length = thaw_json_array_length(value);
+        unsafe { thaw_json_destroy(value) };
+        length
+    }
+
+    #[test]
+    fn host_array_length_reads_length_property_and_propagates_getter_errors() {
+        std::thread::spawn(|| {
+            install_host_array_test_operations();
+            HOST_ARRAY_TEST_LENGTH.with(|length| length.set(5.0));
+            HOST_ARRAY_TEST_FAIL_GET.with(|fail| fail.set(false));
+            HOST_ARRAY_TEST_GETS.with(|count| count.set(0));
+            assert_eq!(host_array_test_length(1), 5);
+            assert_eq!(HOST_ARRAY_TEST_GETS.with(Cell::get), 1);
+            assert!(thaw_json_take_host_error().is_null());
+
+            HOST_ARRAY_TEST_FAIL_GET.with(|fail| fail.set(true));
+            assert_eq!(host_array_test_length(1), 0);
+            let error = thaw_json_take_host_error();
+            assert_eq!(to_str(error), "length getter failed");
+            unsafe { thaw_arena::destroy_string(error.cast_mut()) };
+
+            HOST_ARRAY_TEST_FAIL_GET.with(|fail| fail.set(false));
+            HOST_ARRAY_TEST_LENGTH.with(|length| length.set(1.5));
+            assert_eq!(host_array_test_length(1), 0);
+            let error = thaw_json_take_host_error();
+            assert_eq!(to_str(error), "Invalid host array length");
+            unsafe { thaw_arena::destroy_string(error.cast_mut()) };
+
+            HOST_ARRAY_TEST_LENGTH.with(|length| length.set(5.0));
+            let gets = HOST_ARRAY_TEST_GETS.with(Cell::get);
+            assert_eq!(host_array_test_length(3), 0);
+            assert_eq!(HOST_ARRAY_TEST_GETS.with(Cell::get), gets);
+            assert!(thaw_json_take_host_error().is_null());
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    fn number_array_conversion_reads_host_array_elements() {
+        std::thread::spawn(|| {
+            install_host_array_test_operations();
+            HOST_ARRAY_TEST_LENGTH.with(|length| length.set(2.0));
+            HOST_ARRAY_TEST_FAIL_GET.with(|fail| fail.set(false));
+            HOST_ARRAY_TEST_FAIL_INDEX.with(|index| index.set(-1));
+            HOST_ARRAY_TEST_GETS.with(|count| count.set(0));
+            let value = host_array_test_value(1);
+            let native = thaw_json_to_number_array(value);
+            assert!(!native.is_null());
+            assert_eq!(HOST_ARRAY_TEST_GETS.with(Cell::get), 3);
+            unsafe {
+                assert_eq!((native as *const i64).read(), 2);
+                assert_eq!((native.add(8) as *const f64).read(), 12.0);
+                assert_eq!((native.add(16) as *const f64).read(), 27.0);
+                thaw_json_destroy(value);
+            }
+            assert!(thaw_json_take_host_error().is_null());
+
+            HOST_ARRAY_TEST_FAIL_INDEX.with(|index| index.set(0));
+            let value = host_array_test_value(1);
+            assert!(thaw_json_to_number_array(value).is_null());
+            let error = thaw_json_take_host_error();
+            assert_eq!(to_str(error), "index getter failed");
+            unsafe {
+                thaw_arena::destroy_string(error.cast_mut());
+                thaw_json_destroy(value);
+            }
+        })
+        .join()
+        .unwrap();
     }
 
     extern "C" fn retain_test_napi_handle(handle: u64) -> u64 {

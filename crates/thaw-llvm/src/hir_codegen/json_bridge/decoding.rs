@@ -510,6 +510,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .basic()
             .ok_or("thaw_json_array_length returned no value")?
             .into_int_value();
+        self.compile_check_json_host_error(length.into(), None)?;
         let element_bytes = array_element_storage_bytes(element)?;
         let allocation_size = self.checked_array_allocation_size(
             length, element_bytes, "json_native_array")?;
