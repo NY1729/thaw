@@ -8780,6 +8780,113 @@ fn compiles_escape_and_error_statics() {
     );
 }
 
+#[test]
+fn caught_quickjs_error_console_reads_message_once_without_calling_to_string() {
+    let source = r#"
+        declare function __thaw_typed_js_7468726f77436f6e736f6c654572726f72(): void;
+        declare function __thaw_typed_js_636f6e736f6c654572726f72436f756e7473(): string;
+        function main(): void {
+            loadScript("globalThis.consoleMessageReads = 0; globalThis.consoleStringCalls = 0; const error = new Error('ignored'); Object.defineProperty(error, 'message', { configurable: true, get() { consoleMessageReads++; return 'caught message'; } }); error.toString = () => { consoleStringCalls++; return 'wrong text'; }; globalThis.throwConsoleError = () => { throw error; }; globalThis.consoleErrorCounts = () => consoleMessageReads + ':' + consoleStringCalls;");
+            try { __thaw_typed_js_7468726f77436f6e736f6c654572726f72(); }
+            catch (error) { console.log(error); }
+            console.log(__thaw_typed_js_636f6e736f6c654572726f72436f756e7473());
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "caught_quickjs_error_console_message_once"),
+        "caught message\n1:0\n"
+    );
+}
+
+#[test]
+fn caught_quickjs_error_console_propagates_message_getter_failure_without_partial_output() {
+    let source = r#"
+        declare function __thaw_typed_js_7468726f77436f6e736f6c654572726f72(): void;
+        declare function __thaw_typed_js_636f6e736f6c654572726f725265616473(): number;
+        function main(): void {
+            loadScript("globalThis.consoleMessageReads = 0; const error = new Error('not printed'); Object.defineProperty(error, 'message', { configurable: true, get() { consoleMessageReads++; throw new Error('message getter failed'); } }); globalThis.throwConsoleError = () => { throw error; }; globalThis.consoleErrorReads = () => consoleMessageReads;");
+            try {
+                try { __thaw_typed_js_7468726f77436f6e736f6c654572726f72(); }
+                catch (error) { console.log(error); }
+            } catch (messageError) {
+                console.log(messageError);
+            }
+            console.log(__thaw_typed_js_636f6e736f6c654572726f725265616473());
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "caught_quickjs_error_console_getter_failure"),
+        "message getter failed\n1\n"
+    );
+}
+
+#[test]
+fn caught_quickjs_plain_strings_and_fake_errors_keep_their_value_format() {
+    let source = r#"
+        declare function __thaw_typed_js_7468726f77507265666978537472696e67(): void;
+        declare function __thaw_typed_js_7468726f7746616b654572726f72(): void;
+        function main(): void {
+            loadScript("globalThis.throwPrefixString = () => { throw 'prefix:' + String.fromCharCode(31) + '@@iterator'; }; globalThis.throwFakeError = () => { throw { name: 'Error', message: 'fake' }; }");
+            try { __thaw_typed_js_7468726f77507265666978537472696e67(); }
+            catch (error) { console.log(error); }
+            try { __thaw_typed_js_7468726f7746616b654572726f72(); }
+            catch (error) { console.log(error); }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "caught_quickjs_plain_string_and_fake_error"),
+        "prefix:\u{1f}@@iterator\n{ name: 'Error', message: 'fake' }\n"
+    );
+}
+
+#[test]
+fn caught_quickjs_proxy_prototype_trap_propagates_without_partial_output() {
+    let source = r#"
+        declare function __thaw_typed_js_7468726f7750726f746f7479706554726170(): void;
+        function main(): void {
+            loadScript("const error = new Proxy(new Error('hidden'), { getPrototypeOf() { throw new Error('prototype trap failed'); } }); globalThis.throwPrototypeTrap = () => { throw error; };");
+            try {
+                try { __thaw_typed_js_7468726f7750726f746f7479706554726170(); }
+                catch (error) { console.log(error); }
+            } catch (predicateError) {
+                console.log(predicateError);
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "caught_quickjs_error_prototype_trap"),
+        "prototype trap failed\n"
+    );
+}
+
+#[test]
+fn napi_caught_json_console_does_not_enable_quickjs() {
+    let source = r#"
+        declare function __thaw_typed_napi_6e61706963616c6c(): number;
+        function main(): void {
+            try { __thaw_typed_napi_6e61706963616c6c(); }
+            catch (error) { console.log(error); }
+        }
+    "#;
+    let module = thaw_parser::parse_typescript(source).unwrap();
+    let program = thaw_hir::lower_module(&module).unwrap();
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "napi_caught_json_console");
+    compiler.compile_program(&program).unwrap();
+    let ir = compiler.print_to_string();
+    assert!(compiler.uses_napi(), "{ir}");
+    assert!(!compiler.uses_quickjs(), "{ir}");
+    assert!(ir.contains("thaw_json_is_host_error_family"), "{ir}");
+    assert!(
+        !ir.lines().any(|line| {
+            line.split_ascii_whitespace().any(|word| word == "call")
+                && line.contains("@thaw_js_call_graph_result(")
+        }),
+        "N-API-only console emitted a QuickJS graph-call instruction:\n{ir}"
+    );
+    assert!(!ir.contains("thaw_js_register_callback_host_operations"), "{ir}");
+}
+
 /// `Reflect.defineProperty`/`getOwnPropertyDescriptor`/`isExtensible`/
 /// `preventExtensions`/`setPrototypeOf` and
 /// `Object.getOwnPropertyDescriptors`/`defineProperties`.

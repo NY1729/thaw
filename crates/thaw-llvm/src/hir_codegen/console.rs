@@ -444,13 +444,19 @@ impl<'ctx> HirCompiler<'ctx> {
         ).map_err(|error| error.to_string())?
             .try_as_basic_value().basic()
             .ok_or("JSON console formatter returned no value")?.into_pointer_value();
-        self.compile_console_text(text, newline, "console_structured", descriptor)?;
         if generated {
             self.builder.build_call(
                 self.module.get_function("thaw_json_destroy").unwrap(),
                 &[json.into()], "destroy_console_json_root",
             ).map_err(|error| error.to_string())?;
         }
+        let text = self.compile_check_json_host_error(text.into(), Some("thaw_cstring_destroy"))?
+            .into_pointer_value();
+        self.compile_console_text(text, newline, "console_structured", descriptor)?;
+        self.builder.build_call(
+            self.module.get_function("thaw_cstring_destroy").unwrap(),
+            &[text.into()], "destroy_console_json_format",
+        ).map_err(|error| error.to_string())?;
         if let Some(failed) = rollback {
             let done = self.builder.get_insert_block().ok_or("console log lost its success block")?;
             self.builder.position_at_end(failed);
@@ -559,6 +565,8 @@ impl<'ctx> HirCompiler<'ctx> {
         if elements.is_empty() {
             return Err("console.log cannot print an empty union".into());
         }
+        let is_caught_carrier =
+            HirType::Union(elements.to_vec()) == thaw_hir::caught_exception_carrier_type();
         let tag = self
             .builder
             .build_extract_value(value, 0, "console_union_tag")
@@ -599,7 +607,9 @@ impl<'ctx> HirCompiler<'ctx> {
             }
             self.builder.position_at_end(matched);
             let member_value = self.unpack_union_payload(payload, member)?;
-            self.compile_console_union_member(member_value, member, newline, descriptor)?;
+            self.compile_console_union_member(
+                member_value, member, is_caught_carrier, newline, descriptor,
+            )?;
             self.builder
                 .build_unconditional_branch(merge)
                 .map_err(|error| error.to_string())?;
@@ -618,6 +628,7 @@ impl<'ctx> HirCompiler<'ctx> {
         &mut self,
         value: BasicValueEnum<'ctx>,
         member: &HirType,
+        is_caught_carrier: bool,
         newline: bool,
         descriptor: u64,
     ) -> Result<(), String> {
@@ -719,6 +730,11 @@ impl<'ctx> HirCompiler<'ctx> {
                     json.into_pointer_value(), &HirType::Json, newline, descriptor,
                 )?;
             }
+            HirType::Json if is_caught_carrier => {
+                self.compile_console_caught_json(
+                    value.into_pointer_value(), newline, descriptor,
+                )?;
+            }
             HirType::Object(_)
             | HirType::Json
             | HirType::Dictionary(_)
@@ -763,6 +779,102 @@ impl<'ctx> HirCompiler<'ctx> {
             }
             other => return Err(format!("console.log cannot print union member {other:?}")),
         }
+        Ok(())
+    }
+
+    fn compile_console_caught_json(
+        &mut self,
+        json: PointerValue<'ctx>,
+        newline: bool,
+        descriptor: u64,
+    ) -> Result<(), String> {
+        let is_error = self
+            .builder
+            .build_call(
+                self.module.get_function("thaw_json_is_host_error_family").unwrap(),
+                &[json.into()],
+                "console_caught_error_family",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("host Error-family query returned no value")?;
+        let is_error = self.compile_check_json_host_error(is_error, None)?.into_int_value();
+
+        let function = self.current_function();
+        let render = self.context.append_basic_block(function, "console_caught_error_message");
+        let inspect = self.context.append_basic_block(function, "console_caught_json_value");
+        let merge = self.context.append_basic_block(function, "console_caught_json_done");
+        let is_error = self
+            .builder
+            .build_int_compare(
+                IntPredicate::NE,
+                is_error,
+                self.context.i8_type().const_zero(),
+                "console_caught_is_error",
+            )
+            .map_err(|error| error.to_string())?;
+        self.builder
+            .build_conditional_branch(is_error, render, inspect)
+            .map_err(|error| error.to_string())?;
+
+        self.builder.position_at_end(render);
+        let key = self
+            .builder
+            .build_global_string_ptr("message", "console_caught_message_key")
+            .map_err(|error| error.to_string())?;
+        let message = self
+            .builder
+            .build_call(
+                self.module.get_function("thaw_json_get").unwrap(),
+                &[json.into(), key.as_pointer_value().into()],
+                "console_caught_message",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("thaw_json_get returned no caught Error message")?;
+        let message = self.compile_check_json_host_error(message, Some("thaw_json_destroy"))?;
+        let text = self
+            .builder
+            .build_call(
+                self.module.get_function("thaw_json_as_string").unwrap(),
+                &[message.into()],
+                "console_caught_message_text",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("thaw_json_as_string returned no caught Error message text")?
+            .into_pointer_value();
+        self.builder
+            .build_call(
+                self.module.get_function("thaw_json_destroy").unwrap(),
+                &[message.into()],
+                "destroy_console_caught_message",
+            )
+            .map_err(|error| error.to_string())?;
+        let text = self.compile_check_json_host_error(text.into(), Some("thaw_cstring_destroy"))?
+            .into_pointer_value();
+        self.compile_console_text(text, newline, "console_caught_error_message_write", descriptor)?;
+        self.builder
+            .build_call(
+                self.module.get_function("thaw_cstring_destroy").unwrap(),
+                &[text.into()],
+                "destroy_console_caught_error_message_text",
+            )
+            .map_err(|error| error.to_string())?;
+        self.builder
+            .build_unconditional_branch(merge)
+            .map_err(|error| error.to_string())?;
+
+        self.builder.position_at_end(inspect);
+        self.compile_console_structured(json, &HirType::Json, newline, descriptor)?;
+        self.builder
+            .build_unconditional_branch(merge)
+            .map_err(|error| error.to_string())?;
+
+        self.builder.position_at_end(merge);
         Ok(())
     }
 
