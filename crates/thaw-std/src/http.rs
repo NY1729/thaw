@@ -384,6 +384,23 @@ struct ServerResponse {
     end_bytes: *const NativeClosure,
 }
 
+#[derive(Clone)]
+struct RequestListener {
+    callback: usize,
+    _root: Option<thaw_arena::ArenaRoot>,
+}
+
+impl RequestListener {
+    fn new(callback: usize) -> Self {
+        let root =
+            thaw_arena::contains_allocation(callback).then(|| thaw_arena::ArenaRoot::new(callback));
+        Self {
+            callback,
+            _root: root,
+        }
+    }
+}
+
 /// Everything one in-flight request/response needs that must outlive a
 /// single turn of the event loop. A synchronous handler runs start to
 /// finish inside `run_server_callback` and this could all be stack
@@ -455,15 +472,16 @@ struct RequestContext {
     /// `_body_string`, for the same reason.
     _body_hex: Option<CString>,
     /// `request.on("data", cb)` callbacks, in registration order. Each is
-    /// a raw closure pointer (`*const c_void` as `usize`), invoked once
+    /// a closure pointer and an owner pin when it belongs to the arena,
+    /// invoked once
     /// per chunk by `sync_request_body_buffer`/
     /// `deliver_request_body_listeners` (real connections)
     /// or never at all (one-shot helpers, which have no body).
-    request_data_listeners: Vec<usize>,
+    request_data_listeners: Vec<RequestListener>,
     /// `request.on("end", cb)` callbacks, fired once the body is
     /// complete (or immediately, for the always-bodyless one-shot
     /// helpers).
-    request_end_listeners: Vec<usize>,
+    request_end_listeners: Vec<RequestListener>,
     /// Set once `deliver_request_body_events` (the one-shot-helper path
     /// only) has run, so a listener registered late doesn't get a
     /// second replay and a re-entrant `on(...)` during delivery is a
@@ -878,8 +896,12 @@ unsafe extern "C" fn request_add_listener(
     }
     let context = request_context(environment);
     match string_from_ptr(event).as_str() {
-        "data" => context.request_data_listeners.push(callback as usize),
-        "end" => context.request_end_listeners.push(callback as usize),
+        "data" => context
+            .request_data_listeners
+            .push(RequestListener::new(callback as usize)),
+        "end" => context
+            .request_end_listeners
+            .push(RequestListener::new(callback as usize)),
         _ => {}
     }
     true
@@ -900,8 +922,8 @@ fn deliver_request_body_events(context: &mut RequestContext) {
     }
     context.body_events_delivered = true;
     let end_listeners = std::mem::take(&mut context.request_end_listeners);
-    for callback in end_listeners {
-        let callback = callback as *const c_void;
+    for listener in end_listeners {
+        let callback = listener.callback as *const c_void;
         unsafe {
             type Callback = unsafe extern "C" fn(*const c_void);
             let code = *(callback as *const *const c_void);
@@ -1009,8 +1031,8 @@ fn deliver_request_body_listeners(body_complete: bool, context_ptr: *mut Request
     };
     if !new_bytes.is_empty() && !data_listeners.is_empty() {
         let chunk = native_bytes_from_slice(&new_bytes);
-        for callback in data_listeners {
-            let callback = callback as *const c_void;
+        for listener in data_listeners {
+            let callback = listener.callback as *const c_void;
             unsafe {
                 type Callback = unsafe extern "C" fn(*const c_void, *mut u8);
                 let code = *(callback as *const *const c_void);
@@ -1022,8 +1044,8 @@ fn deliver_request_body_listeners(body_complete: bool, context_ptr: *mut Request
     if body_complete {
         // Data callbacks may register an end listener for this same body.
         let end_listeners = unsafe { std::mem::take(&mut (*context_ptr).request_end_listeners) };
-        for callback in end_listeners {
-            let callback = callback as *const c_void;
+        for listener in end_listeners {
+            let callback = listener.callback as *const c_void;
             unsafe {
                 type Callback = unsafe extern "C" fn(*const c_void);
                 let code = *(callback as *const *const c_void);
@@ -3034,6 +3056,251 @@ mod tests {
         drain_pending_context_frees();
     }
 
+    #[test]
+    fn arena_request_listener_is_rooted_until_context_drop() {
+        std::thread::spawn(|| {
+            unsafe extern "C" fn on_data(environment: *const c_void, _chunk: *mut u8) {
+                let closure = &*(environment as *const NativeClosure);
+                (*(closure.context as *const AtomicUsize)).fetch_add(1, Ordering::AcqRel);
+            }
+            thaw_arena::thaw_arena_enable_tracing();
+            let calls = AtomicUsize::new(0);
+            let callback = thaw_arena::thaw_arena_alloc(
+                std::mem::size_of::<NativeClosure>(),
+                std::mem::align_of::<NativeClosure>(),
+            )
+            .cast::<NativeClosure>();
+            assert!(!callback.is_null());
+            unsafe {
+                callback.write(NativeClosure {
+                    code: on_data as *const c_void,
+                    context: &calls as *const AtomicUsize as *mut c_void,
+                })
+            };
+            let context_ptr = Box::into_raw(RequestContext::new(
+                "POST",
+                "/",
+                b"a",
+                &[],
+                std::ptr::null_mut(),
+            ));
+            assert!(unsafe {
+                request_add_listener(
+                    (*context_ptr).request.on.cast(),
+                    c"data".as_ptr(),
+                    callback.cast(),
+                )
+            });
+            thaw_arena::thaw_arena_reset();
+            assert!(thaw_arena::contains_allocation(callback as usize));
+            assert!(!thaw_arena::was_reclaimed(callback as usize));
+            unsafe { (*context_ptr)._raw_body.push(b'b') };
+            deliver_request_body_listeners(false, context_ptr);
+            assert_eq!(calls.load(Ordering::Acquire), 1);
+            unsafe { drop(Box::from_raw(context_ptr)) };
+            thaw_arena::thaw_arena_reset();
+            assert!(thaw_arena::was_reclaimed(callback as usize));
+
+            let foreign_calls = AtomicUsize::new(0);
+            let foreign = NativeClosure {
+                code: on_data as *const c_void,
+                context: &foreign_calls as *const AtomicUsize as *mut c_void,
+            };
+            let context_ptr = Box::into_raw(RequestContext::new(
+                "POST",
+                "/",
+                b"x",
+                &[],
+                std::ptr::null_mut(),
+            ));
+            assert!(unsafe {
+                request_add_listener(
+                    (*context_ptr).request.on.cast(),
+                    c"data".as_ptr(),
+                    (&foreign as *const NativeClosure).cast(),
+                )
+            });
+            thaw_arena::thaw_arena_reset();
+            deliver_request_body_listeners(false, context_ptr);
+            assert_eq!(foreign_calls.load(Ordering::Acquire), 1);
+            unsafe { drop(Box::from_raw(context_ptr)) };
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    fn arena_end_listener_releases_its_root_after_once_delivery() {
+        std::thread::spawn(|| {
+            unsafe extern "C" fn on_end(environment: *const c_void) {
+                let closure = &*(environment as *const NativeClosure);
+                (*(closure.context as *const AtomicUsize)).fetch_add(1, Ordering::AcqRel);
+            }
+            thaw_arena::thaw_arena_enable_tracing();
+            let calls = AtomicUsize::new(0);
+            let callback = thaw_arena::thaw_arena_alloc(
+                std::mem::size_of::<NativeClosure>(),
+                std::mem::align_of::<NativeClosure>(),
+            )
+            .cast::<NativeClosure>();
+            assert!(!callback.is_null());
+            unsafe {
+                callback.write(NativeClosure {
+                    code: on_end as *const c_void,
+                    context: &calls as *const AtomicUsize as *mut c_void,
+                })
+            };
+            let context_ptr = Box::into_raw(RequestContext::new(
+                "POST",
+                "/",
+                b"",
+                &[],
+                std::ptr::null_mut(),
+            ));
+            assert!(unsafe {
+                request_add_listener(
+                    (*context_ptr).request.on.cast(),
+                    c"end".as_ptr(),
+                    callback.cast(),
+                )
+            });
+            thaw_arena::thaw_arena_reset();
+            assert!(thaw_arena::contains_allocation(callback as usize));
+            assert!(!thaw_arena::was_reclaimed(callback as usize));
+            deliver_request_body_events(unsafe { &mut *context_ptr });
+            assert_eq!(calls.load(Ordering::Acquire), 1);
+            thaw_arena::thaw_arena_reset();
+            assert!(thaw_arena::was_reclaimed(callback as usize));
+            deliver_request_body_events(unsafe { &mut *context_ptr });
+            assert_eq!(calls.load(Ordering::Acquire), 1);
+            unsafe { drop(Box::from_raw(context_ptr)) };
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    fn arena_data_listener_snapshot_and_deferred_free_keep_roots() {
+        struct Probe {
+            context: *mut RequestContext,
+            second: *const c_void,
+            first_calls: AtomicUsize,
+            second_calls: AtomicUsize,
+            registered: AtomicBool,
+            first_retained: AtomicBool,
+            second_retained: AtomicBool,
+        }
+        unsafe extern "C" fn second(environment: *const c_void, _chunk: *mut u8) {
+            let closure = &*(environment as *const NativeClosure);
+            (*(closure.context as *const Probe))
+                .second_calls
+                .fetch_add(1, Ordering::AcqRel);
+        }
+        unsafe extern "C" fn first(environment: *const c_void, _chunk: *mut u8) {
+            let closure = &*(environment as *const NativeClosure);
+            let probe = &*(closure.context as *const Probe);
+            if probe.first_calls.fetch_add(1, Ordering::AcqRel) == 0 {
+                probe.registered.store(
+                    request_add_listener(
+                        (*probe.context).request.on.cast(),
+                        c"data".as_ptr(),
+                        probe.second,
+                    ),
+                    Ordering::Release,
+                );
+                PENDING_CONTEXT_FREE.with(|list| list.borrow_mut().push(probe.context));
+                drain_pending_context_frees();
+                let still_in_delivery = (*probe.context).delivery_depth > 0;
+                thaw_arena::thaw_arena_reset();
+                probe.first_retained.store(
+                    still_in_delivery
+                        && thaw_arena::contains_allocation(environment as usize)
+                        && !thaw_arena::was_reclaimed(environment as usize),
+                    Ordering::Release,
+                );
+                probe.second_retained.store(
+                    thaw_arena::contains_allocation(probe.second as usize)
+                        && !thaw_arena::was_reclaimed(probe.second as usize),
+                    Ordering::Release,
+                );
+            }
+        }
+        std::thread::spawn(|| {
+            thaw_arena::thaw_arena_enable_tracing();
+            let first_callback = thaw_arena::thaw_arena_alloc(
+                std::mem::size_of::<NativeClosure>(),
+                std::mem::align_of::<NativeClosure>(),
+            )
+            .cast::<NativeClosure>();
+            assert!(!first_callback.is_null());
+            unsafe {
+                first_callback.write(NativeClosure {
+                    code: first as *const c_void,
+                    context: std::ptr::null_mut(),
+                });
+            }
+            let context_ptr = Box::into_raw(RequestContext::new(
+                "POST",
+                "/",
+                b"a",
+                &[],
+                std::ptr::null_mut(),
+            ));
+            assert!(unsafe {
+                request_add_listener(
+                    (*context_ptr).request.on.cast(),
+                    c"data".as_ptr(),
+                    first_callback.cast(),
+                )
+            });
+            thaw_arena::thaw_arena_reset();
+            assert!(thaw_arena::contains_allocation(first_callback as usize));
+            assert!(!thaw_arena::was_reclaimed(first_callback as usize));
+
+            let second_callback = thaw_arena::thaw_arena_alloc(
+                std::mem::size_of::<NativeClosure>(),
+                std::mem::align_of::<NativeClosure>(),
+            )
+            .cast::<NativeClosure>();
+            assert!(!second_callback.is_null());
+            let probe = Probe {
+                context: context_ptr,
+                second: second_callback.cast(),
+                first_calls: AtomicUsize::new(0),
+                second_calls: AtomicUsize::new(0),
+                registered: AtomicBool::new(false),
+                first_retained: AtomicBool::new(false),
+                second_retained: AtomicBool::new(false),
+            };
+            unsafe {
+                first_callback.write(NativeClosure {
+                    code: first as *const c_void,
+                    context: &probe as *const Probe as *mut c_void,
+                });
+                second_callback.write(NativeClosure {
+                    code: second as *const c_void,
+                    context: &probe as *const Probe as *mut c_void,
+                });
+            }
+            deliver_request_body_listeners(false, context_ptr);
+            assert_eq!(probe.first_calls.load(Ordering::Acquire), 1);
+            assert_eq!(probe.second_calls.load(Ordering::Acquire), 0);
+            assert!(probe.registered.load(Ordering::Acquire));
+            assert!(probe.first_retained.load(Ordering::Acquire));
+            assert!(probe.second_retained.load(Ordering::Acquire));
+            unsafe { (*context_ptr)._raw_body.push(b'b') };
+            deliver_request_body_listeners(false, context_ptr);
+            assert_eq!(probe.first_calls.load(Ordering::Acquire), 2);
+            assert_eq!(probe.second_calls.load(Ordering::Acquire), 1);
+            drain_pending_context_frees();
+            thaw_arena::thaw_arena_reset();
+            assert!(thaw_arena::was_reclaimed(first_callback as usize));
+            assert!(thaw_arena::was_reclaimed(second_callback as usize));
+        })
+        .join()
+        .unwrap();
+    }
+
     // Unrun regression: a body listener may register another listener and
     // finish the response. The new listener only sees a later chunk; no
     // borrowed Vec slice or listener iterator survives the first callback.
@@ -3088,7 +3355,9 @@ mod tests {
         unsafe {
             (*context_ptr)
                 .request_data_listeners
-                .push((&first_callback as *const NativeClosure) as usize)
+                .push(RequestListener::new(
+                    (&first_callback as *const NativeClosure) as usize,
+                ))
         };
         deliver_request_body_listeners(false, context_ptr);
         assert_eq!(FIRST.with(|calls| calls.get()), 1);
@@ -3107,14 +3376,28 @@ mod tests {
     // Nested loop cleanup must keep both live until delivery unwinds.
     #[test]
     fn connection_retirement_waits_for_ready_stack() {
-        unsafe extern "C" fn end_in_data(environment: *const c_void, _chunk: *mut u8) {
-            let context = (*(environment as *const NativeClosure)).context as *mut RequestContext;
-            assert!(response_end(
-                (*context).response.end.cast(),
-                c"done".as_ptr()
-            ));
-            drain_pending_context_frees();
+        struct Probe {
+            context: *mut RequestContext,
+            response_ended: AtomicBool,
+            listener_retained: AtomicBool,
         }
+        unsafe extern "C" fn end_in_data(environment: *const c_void, _chunk: *mut u8) {
+            let closure = &*(environment as *const NativeClosure);
+            let probe = &*(closure.context as *const Probe);
+            let context = probe.context;
+            probe.response_ended.store(
+                response_end((*context).response.end.cast(), c"done".as_ptr()),
+                Ordering::Release,
+            );
+            drain_pending_context_frees();
+            thaw_arena::thaw_arena_reset();
+            probe.listener_retained.store(
+                thaw_arena::contains_allocation(environment as usize)
+                    && !thaw_arena::was_reclaimed(environment as usize),
+                Ordering::Release,
+            );
+        }
+        thaw_arena::thaw_arena_enable_tracing();
         let server = Box::new(ServerState {
             callback: 0,
             closed: AtomicBool::new(false),
@@ -3160,15 +3443,28 @@ mod tests {
             (*context).resumable = true;
             (*connection).response_ctx = context;
         }
-        let callback = NativeClosure {
-            code: end_in_data as *const c_void,
-            context: context.cast(),
+        let probe = Probe {
+            context,
+            response_ended: AtomicBool::new(false),
+            listener_retained: AtomicBool::new(false),
         };
+        let callback = thaw_arena::thaw_arena_alloc(
+            std::mem::size_of::<NativeClosure>(),
+            std::mem::align_of::<NativeClosure>(),
+        )
+        .cast::<NativeClosure>();
+        assert!(!callback.is_null());
         unsafe {
-            (*context)
-                .request_data_listeners
-                .push((&callback as *const NativeClosure) as usize)
-        };
+            callback.write(NativeClosure {
+                code: end_in_data as *const c_void,
+                context: &probe as *const Probe as *mut c_void,
+            });
+            assert!(request_add_listener(
+                (*context).request.on.cast(),
+                c"data".as_ptr(),
+                callback.cast(),
+            ));
+        }
         {
             let _ready = unsafe { ConnectionReadyLease::new(connection) };
             deliver_request_body_listeners(false, context);
@@ -3181,6 +3477,10 @@ mod tests {
             assert_eq!(server.connections.load(Ordering::Acquire), 0);
         }
         drain_pending_context_frees();
+        assert!(probe.response_ended.load(Ordering::Acquire));
+        assert!(probe.listener_retained.load(Ordering::Acquire));
+        thaw_arena::thaw_arena_reset();
+        assert!(thaw_arena::was_reclaimed(callback as usize));
     }
 
     // Unrun regression: a peer can finish sending and still receive delayed chunks.
