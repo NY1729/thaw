@@ -290,17 +290,20 @@ impl<'ctx> HirCompiler<'ctx> {
             if let HirStmt::Let(name, _, _) = stmt {
                 let declared_in_loop = !self.loop_promotion_scopes.is_empty()
                     && !self.loop_promotion_scopes.iter().any(|scope| scope.variables.contains(name));
-                // A `JsValue` capture claims its QuickJS handle only when the capture actually
-                // executes, so it keeps the lazy, first-capture promotion.
-                let hir_ty = self.variable_hir_types.get(name).cloned()
-                    .filter(|ty| *ty != HirType::JsValue);
+                let hir_ty = self.variable_hir_types.get(name).cloned();
                 if let (true, Some(hir_ty)) = (declared_in_loop, hir_ty) {
                     let captured = thaw_hir::closure_captured_names_in_while(
                         &HirExpr::Lit(HirLit::Bool(false)),
                         &stmts[index + 1..],
                     );
                     if captured.contains(name) {
-                        if let Err(error) = self.promote_variable_to_arena_cell(name, &hir_ty) {
+                        let promotion = if hir_ty == HirType::JsValue {
+                            // Allocate per iteration before cleanup branches; retain only on capture.
+                            self.prepromote_variable_to_arena_cell(name, &hir_ty)
+                        } else {
+                            self.promote_variable_to_arena_cell(name, &hir_ty)
+                        };
+                        if let Err(error) = promotion {
                             self.stack_promise_slots = entry_map;
                             return Err(error);
                         }

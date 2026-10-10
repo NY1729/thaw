@@ -8140,6 +8140,29 @@ fn compiles_using_bindings_in_for_of() {
 }
 
 #[test]
+fn escaped_using_for_of_captures_keep_distinct_iteration_values() {
+    let source = r#"
+        function make(name: string) {
+            return {
+                name,
+                [Symbol.dispose]() { console.log("dispose " + name); }
+            };
+        }
+        function main(): void {
+            const escaped: (() => string)[] = [];
+            for (using resource of [make("a"), make("b"), make("c")]) {
+                escaped.push(() => String(resource.name));
+            }
+            for (const read of escaped) console.log("escaped " + read());
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "escaped_using_for_of_captures"),
+        "dispose a\ndispose b\ndispose c\nescaped a\nescaped b\nescaped c\n"
+    );
+}
+
+#[test]
 fn compiles_await_using_bindings_in_for_await_of() {
     let source = r#"
         function make(name: string) {
