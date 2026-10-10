@@ -10654,6 +10654,36 @@ fn date_constructor_uses_live_value_without_snapshot_or_user_date_globals() {
 }
 
 #[test]
+fn typed_quickjs_date_results_authenticate_and_preserve_timestamp() {
+    let source = r#"
+        declare function __thaw_typed_js_706f736974697665(): Date;
+        declare function __thaw_typed_js_6e65676174697665(): Date;
+        declare function __thaw_typed_js_696e76616c6964(): Date;
+        declare function __thaw_typed_js_706c61696e(): Date;
+        declare function __thaw_typed_js_666f72676564(): Date;
+        function main(): void {
+            loadScript("globalThis.positive = () => new Date(1704067200500); globalThis.negative = () => new Date(-86400000); globalThis.invalid = () => new Date(NaN); globalThis.plain = () => ({ timestamp: 17 }); globalThis.forged = () => ({ ['__thaw_class_identity_' + String.fromCharCode(30) + 'Date']: true, timestamp: 19 });");
+            const positive: Date = __thaw_typed_js_706f736974697665();
+            const negative: Date = __thaw_typed_js_6e65676174697665();
+            const invalid: Date = __thaw_typed_js_696e76616c6964();
+            console.log(positive instanceof Date, positive.getTime());
+            console.log(negative instanceof Date, negative.getTime());
+            console.log(invalid instanceof Date, Number.isNaN(invalid.getTime()));
+            try { __thaw_typed_js_706c61696e(); console.log("missed plain object"); }
+            catch (_) { console.log("rejected plain object"); }
+            try { __thaw_typed_js_666f72676564(); console.log("missed forged marker"); }
+            catch (_) { console.log("rejected forged marker"); }
+            const record: { timestamp: number } = { timestamp: 23 };
+            console.log(record.timestamp, record instanceof Date);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "typed_quickjs_date_results"),
+        "true 1704067200500\ntrue -86400000\ntrue true\nrejected plain object\nrejected forged marker\n23 false\n"
+    );
+}
+
+#[test]
 fn graph_callback_argument_conversion_failure_preserves_exception_and_skips_body() {
     let source = r#"
         let entered = 0;

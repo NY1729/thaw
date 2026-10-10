@@ -7,6 +7,84 @@ impl<'ctx> HirCompiler<'ctx> {
         let HirType::Object(fields) = ty else {
             return Err("dynamic result requires an object type".to_string());
         };
+        // Date is represented across the JSON bridge by its authenticated
+        // runtime identity and timestamp, not by enumerable JS properties.
+        // Decode it through the Date helper before allocating the native
+        // result so a host-side conversion error cannot leave arena garbage.
+        if matches!(fields.as_slice(),
+            [(marker, HirType::Bool), (timestamp, HirType::F64)]
+                if marker == "__thaw_class_identity_\u{1e}Date" && timestamp == "timestamp")
+        {
+            let timestamp = self
+                .builder
+                .build_call(
+                    self.module.get_function("thaw_json_date_timestamp").unwrap(),
+                    &[json.into()],
+                    "decoded_date_timestamp",
+                )
+                .map_err(|error| error.to_string())?
+                .try_as_basic_value()
+                .basic()
+                .ok_or("thaw_json_date_timestamp returned no value")?
+                .into_float_value();
+            self.compile_check_json_host_error(json, None)?;
+
+            let object = self
+                .builder
+                .build_call(
+                    self.module.get_function("thaw_arena_alloc").unwrap(),
+                    &[
+                        self.context
+                            .i64_type()
+                            .const_int(object_storage_bytes(fields)?, false)
+                            .into(),
+                        self.context.i64_type().const_int(8, false).into(),
+                    ],
+                    "dynamic_result_date_object",
+                )
+                .map_err(|error| error.to_string())?
+                .try_as_basic_value()
+                .basic()
+                .unwrap()
+                .into_pointer_value();
+            let values: [BasicValueEnum<'ctx>; 2] = [
+                self.context.bool_type().const_int(1, false).into(),
+                timestamp.into(),
+            ];
+            for (index, value) in values.into_iter().enumerate() {
+                let offset = self
+                    .context
+                    .i64_type()
+                    .const_int(object_field_offset(fields, index)?, false);
+                let pointer = unsafe {
+                    self.builder
+                        .build_in_bounds_gep(
+                            self.context.i8_type(),
+                            object,
+                            &[offset],
+                            "decoded_date_field",
+                        )
+                        .map_err(|error| error.to_string())?
+                };
+                self.builder
+                    .build_store(pointer, value)
+                    .map_err(|error| error.to_string())?;
+            }
+            let marker = self
+                .builder
+                .build_global_string_ptr(&fields[0].0, "decoded_date_identity")
+                .map_err(|error| error.to_string())?;
+            self.builder
+                .build_call(
+                    self.module
+                        .get_function("thaw_object_set_class_identity")
+                        .unwrap(),
+                    &[object.into(), marker.as_pointer_value().into()],
+                    "register_decoded_date_identity",
+                )
+                .map_err(|error| error.to_string())?;
+            return Ok(object.into());
+        }
         let object = self
             .builder
             .build_call(
@@ -75,20 +153,6 @@ impl<'ctx> HirCompiler<'ctx> {
                 .build_store(pointer, field)
                 .map_err(|error| error.to_string())?;
             self.compile_destroy_decoded_owned_json(field_json, field_ty)?;
-        }
-        // A Date returned from dynamic code is a genuine native Date: record its identity so
-        // later `instanceof`/method receivers and marshaling accept it as one.
-        if matches!(fields.as_slice(),
-            [(marker, HirType::Bool), (timestamp, HirType::F64)]
-                if marker == "__thaw_class_identity_\u{1e}Date" && timestamp == "timestamp")
-        {
-            let marker = self.builder.build_global_string_ptr(&fields[0].0, "decoded_date_identity")
-                .map_err(|error| error.to_string())?;
-            self.builder.build_call(
-                self.module.get_function("thaw_object_set_class_identity").unwrap(),
-                &[object.into(), marker.as_pointer_value().into()],
-                "register_decoded_date_identity",
-            ).map_err(|error| error.to_string())?;
         }
         Ok(object.into())
     }
