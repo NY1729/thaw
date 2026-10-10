@@ -974,6 +974,46 @@ thread_local! {
     static WASM_JS_VALUES: RefCell<(u32, HashMap<u32, WasmJsValue>)> = RefCell::new((1, HashMap::new()));
 }
 
+/// Drops the main-thread QuickJS realm after generated `main` has drained
+/// terminal work and released retained handles. Move the pair out of the TLS
+/// borrow first, then clear other persistent owners while its runtime is still
+/// active so no `Persistent` or cloned `Ctx` outlives the Runtime.
+#[no_mangle]
+pub extern "C" fn thaw_js_shutdown_context() -> u8 {
+    let Ok(Some((runtime, context))) = JS.try_with(|slot| slot.borrow_mut().take()) else {
+        return 0;
+    };
+
+    context.with(|ctx| {
+        let _active = ActiveNapiContext::enter(&ctx);
+        let unhandled = UNHANDLED_JS_REJECTIONS
+            .try_with(|pending| std::mem::take(&mut *pending.borrow_mut()))
+            .unwrap_or_default();
+        drop(unhandled);
+
+        #[cfg(feature = "wasm")]
+        {
+            let imports = WASM_JS_IMPORTS
+                .try_with(|imports| std::mem::take(&mut imports.borrow_mut().1))
+                .unwrap_or_default();
+            drop(imports);
+            let values = WASM_JS_VALUES
+                .try_with(|values| std::mem::take(&mut values.borrow_mut().1))
+                .unwrap_or_default();
+            drop(values);
+            let exceptions = WASM_JS_EXCEPTIONS
+                .try_with(|exceptions| std::mem::take(&mut exceptions.borrow_mut().1))
+                .unwrap_or_default();
+            drop(exceptions);
+        }
+    });
+
+    // `Context` drops before `Runtime`; both are outside the JS RefCell borrow.
+    drop(context);
+    drop(runtime);
+    1
+}
+
 #[cfg(all(test, unix))]
 #[test]
 fn fs_metadata_wire_preserves_integer_fields_and_nanoseconds() {

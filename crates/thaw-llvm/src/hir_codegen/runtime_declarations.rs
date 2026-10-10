@@ -2716,6 +2716,11 @@ impl<'ctx> HirCompiler<'ctx> {
             self.context.i64_type().fn_type(&[], false),
             Some(Linkage::External),
         );
+        self.module.add_function(
+            "thaw_js_shutdown_context",
+            i8_type.fn_type(&[], false),
+            Some(Linkage::External),
+        );
         let handle_result_type = self
             .context
             .struct_type(&[self.context.i64_type().into(), i8_ptr.into()], false);

@@ -1331,6 +1331,12 @@ impl<'ctx> HirCompiler<'ctx> {
             self.builder.build_conditional_branch(released_handles, wait, finished).unwrap();
         }
         self.builder.position_at_end(finished);
+        if self.uses_quickjs {
+            self.builder.build_call(
+                self.module.get_function("thaw_js_shutdown_context").unwrap(), &[],
+                "shutdown_quickjs_context",
+            ).unwrap();
+        }
         let process_failure = self.builder.build_load(
             self.context.bool_type(), failure, "terminal_failure_status",
         ).unwrap().into_int_value();

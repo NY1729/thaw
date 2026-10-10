@@ -3197,6 +3197,32 @@ fn napi_only_terminal_cleanup_does_not_reference_quickjs_symbols() {
 }
 
 #[test]
+fn terminal_quickjs_shutdown_is_emitted_only_for_quickjs_programs() {
+    for (name, source, expect_quickjs_shutdown) in [
+        (
+            "terminal_quickjs_shutdown",
+            "function main(): void { const value: JsValue = getDynamicValue(\"value\"); }",
+            true,
+        ),
+        ("terminal_native_no_quickjs_shutdown", "function main(): void {}", false),
+    ] {
+        let module = thaw_parser::parse_typescript(source).unwrap();
+        let program = thaw_hir::lower_module(&module).unwrap();
+        let context = Context::create();
+        let mut compiler = HirCompiler::new(&context, name);
+        compiler.compile_program(&program).unwrap();
+        let ir = compiler.print_to_string();
+        let shutdown = ir.find("call i8 @thaw_js_shutdown_context()");
+        assert_eq!(shutdown.is_some(), expect_quickjs_shutdown, "{ir}");
+        if let Some(shutdown) = shutdown {
+            let release = ir.find("call i64 @thaw_js_release_all_handles()").expect(&ir);
+            let returned = ir[shutdown..].find("ret i32").expect(&ir) + shutdown;
+            assert!(release < shutdown && shutdown < returned, "{ir}");
+        }
+    }
+}
+
+#[test]
 fn terminal_rejection_listener_jobs_finish_before_process_exit() {
     let source = r#"
         function main(): void {

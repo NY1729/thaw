@@ -3047,10 +3047,11 @@ pub extern "C" fn thaw_js_retain_handle(handle: u64) -> u8 {
 
 #[no_mangle]
 pub extern "C" fn thaw_js_release_handle(handle: u64) -> u8 {
-    // A handle released from a thread-local destructor (e.g. an `Env` dropped at thread exit)
-    // runs after the QuickJS thread-locals are gone; the realm died with them, so there is
-    // nothing left to release.
-    if JS.try_with(|_| ()).is_err() || ACTIVE_NAPI_CONTEXT.try_with(|_| ()).is_err() {
+    // A handle released after terminal realm shutdown or from a thread-local
+    // destructor runs after its realm is gone; there is nothing left to release.
+    if !JS.try_with(|slot| slot.borrow().is_some()).unwrap_or(false)
+        || ACTIVE_NAPI_CONTEXT.try_with(|_| ()).is_err()
+    {
         return 0;
     }
     with_active_or_context(|ctx| release_handle_in_context(&ctx, handle))
@@ -3086,6 +3087,22 @@ fn release_handle_in_context(ctx: &Ctx<'_>, handle: u64) -> u8 {
         NATIVE_CALLBACK_HANDLES.with(|cache| cache.borrow_mut().retain(|_, cached| *cached != handle));
     }
     u8::from(cleared)
+}
+
+#[cfg(test)]
+#[test]
+fn explicit_quickjs_shutdown_is_idempotent_and_closed_releases_do_not_reopen_it() {
+    std::thread::spawn(|| {
+        let name = std::ffi::CString::new("Object").unwrap();
+        let handle = thaw_js_get_global(name.as_ptr());
+        assert_ne!(handle, 0, "Object should be retained before shutdown");
+        assert_eq!(thaw_js_shutdown_context(), 1);
+        assert_eq!(thaw_js_shutdown_context(), 0, "shutdown is idempotent");
+        assert_eq!(thaw_js_release_handle(handle), 0, "closed realms have no live handles");
+        assert!(JS.try_with(|slot| slot.borrow().is_none()).unwrap());
+    })
+    .join()
+    .expect("explicit QuickJS shutdown");
 }
 
 #[no_mangle]
