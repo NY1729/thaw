@@ -4816,3 +4816,165 @@ fn arena_promise_slot_rejects_untracked_same_pointer_as_a_noop() {
     }
     thaw_arena::thaw_arena_reset();
 }
+
+fn allocated_promise_slot_with_root() -> (*mut u8, *mut *mut ThawPromise, thaw_arena::ArenaRoot) {
+    let owner = unsafe {
+        thaw_arena::thaw_arena_alloc(
+            size_of::<*mut ThawPromise>(),
+            align_of::<*mut ThawPromise>(),
+        )
+    };
+    assert!(!owner.is_null());
+    let slot = owner.cast::<*mut ThawPromise>();
+    unsafe { slot.write(std::ptr::null_mut()) };
+    let root = thaw_arena::ArenaRoot::new(owner as usize);
+    (owner, slot, root)
+}
+
+#[test]
+fn pending_timer_promise_survives_arena_reset_and_retires_after_slot_clear() {
+    run_in_fresh_tracing_thread(|| {
+        let (owner, slot, owner_root) = allocated_promise_slot_with_root();
+        let promise = thaw_sleep_ms(60_000);
+        assert_eq!(
+            unsafe { thaw_promise_arena_slot_replace(owner, slot, promise) },
+            1
+        );
+        unsafe { thaw_promise_destroy(promise) };
+        ACTIVE_PROMISES.with(|active| assert!(active.borrow().contains(&promise)));
+        assert_eq!(unsafe { (*promise).internal_references }, 1);
+        assert!(TIMERS.with(|timers| timers.borrow().iter().any(|timer| timer.promise == promise)));
+
+        thaw_arena::thaw_arena_reset();
+        assert_live_arena_pointer(owner);
+        assert_eq!(unsafe { slot.read() }, promise);
+        ACTIVE_PROMISES.with(|active| assert!(active.borrow().contains(&promise)));
+        assert!(TIMERS.with(|timers| timers.borrow().iter().any(|timer| timer.promise == promise)));
+
+        TIMERS.with(|timers| {
+            let mut timers = timers.borrow_mut();
+            let timer = timers
+                .iter_mut()
+                .find(|timer| timer.promise == promise)
+                .unwrap();
+            timer.deadline = std::time::Instant::now();
+        });
+        promote_due_timers();
+        assert_eq!(unsafe { thaw_promise_state(promise) }, 1);
+        assert!(TIMERS.with(|timers| !timers.borrow().iter().any(|timer| timer.promise == promise)));
+        ACTIVE_PROMISES.with(|active| assert!(active.borrow().contains(&promise)));
+
+        assert_eq!(
+            unsafe { thaw_promise_arena_slot_replace(owner, slot, std::ptr::null_mut()) },
+            1
+        );
+        ACTIVE_PROMISES.with(|active| assert!(!active.borrow().contains(&promise)));
+        drop(owner_root);
+        thaw_arena::thaw_arena_reset();
+        assert!(thaw_arena::was_reclaimed(owner as usize));
+    });
+}
+
+#[test]
+fn pending_fd_wait_promise_survives_reset_and_destroy_removes_stale_waits() {
+    run_in_fresh_tracing_thread(|| {
+        let mut fds = [0; 2];
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        let (owner, slot, owner_root) = allocated_promise_slot_with_root();
+        let promise = thaw_runtime_wait_fd(fds[0], THAW_FD_READABLE);
+        assert_eq!(
+            unsafe { thaw_promise_arena_slot_replace(owner, slot, promise) },
+            1
+        );
+        unsafe { thaw_promise_destroy(promise) };
+        thaw_arena::thaw_arena_reset();
+        assert_live_arena_pointer(owner);
+        assert_eq!(unsafe { slot.read() }, promise);
+        ACTIVE_PROMISES.with(|active| assert!(active.borrow().contains(&promise)));
+        assert!(FD_WAITS.with(|waits| waits.borrow().iter().any(|wait| wait.promise == promise)));
+
+        assert_eq!(
+            unsafe { libc::write(fds[1], b"ready".as_ptr().cast(), 5) },
+            5
+        );
+        assert_eq!(thaw_runtime_poll_one(), 1);
+        assert_eq!(unsafe { thaw_promise_state(promise) }, 1);
+        assert!(FD_WAITS.with(|waits| !waits.borrow().iter().any(|wait| wait.promise == promise)));
+        ACTIVE_PROMISES.with(|active| assert!(active.borrow().contains(&promise)));
+        assert_eq!(
+            unsafe { thaw_promise_arena_slot_replace(owner, slot, std::ptr::null_mut()) },
+            1
+        );
+        ACTIVE_PROMISES.with(|active| assert!(!active.borrow().contains(&promise)));
+        drop(owner_root);
+        thaw_arena::thaw_arena_reset();
+        assert!(thaw_arena::was_reclaimed(owner as usize));
+        unsafe {
+            libc::close(fds[0]);
+            libc::close(fds[1]);
+        }
+
+        let mut stale_fds = [0; 2];
+        assert_eq!(unsafe { libc::pipe(stale_fds.as_mut_ptr()) }, 0);
+        let (stale_owner, stale_slot, stale_owner_root) = allocated_promise_slot_with_root();
+        let stale = thaw_runtime_wait_fd(stale_fds[0], THAW_FD_READABLE);
+        assert_eq!(
+            unsafe { thaw_promise_arena_slot_replace(stale_owner, stale_slot, stale) },
+            1
+        );
+        unsafe { thaw_promise_destroy(stale) };
+        assert_eq!(
+            unsafe {
+                thaw_promise_arena_slot_replace(stale_owner, stale_slot, std::ptr::null_mut())
+            },
+            1
+        );
+        ACTIVE_PROMISES.with(|active| assert!(!active.borrow().contains(&stale)));
+        assert!(FD_WAITS.with(|waits| !waits.borrow().iter().any(|wait| wait.promise == stale)));
+        assert_eq!(
+            unsafe { libc::write(stale_fds[1], b"x".as_ptr().cast(), 1) },
+            1
+        );
+        assert_eq!(thaw_runtime_poll_one(), 0);
+        drop(stale_owner_root);
+        thaw_arena::thaw_arena_reset();
+        assert!(thaw_arena::was_reclaimed(stale_owner as usize));
+        unsafe {
+            libc::close(stale_fds[0]);
+            libc::close(stale_fds[1]);
+        }
+    });
+}
+
+#[test]
+fn promise_slot_retains_settled_arena_result_until_owner_is_released() {
+    run_in_fresh_tracing_thread(|| {
+        let (owner, slot, owner_root) = allocated_promise_slot_with_root();
+        let promise = thaw_promise_new();
+        assert_eq!(
+            unsafe { thaw_promise_arena_slot_replace(owner, slot, promise) },
+            1
+        );
+        unsafe { thaw_promise_destroy(promise) };
+        let payload = allocated_probe_payload(707);
+        assert_eq!(thaw_promise_resolve(promise, payload.cast()), 1);
+        ACTIVE_PROMISES.with(|active| assert!(active.borrow().contains(&promise)));
+
+        thaw_arena::thaw_arena_reset();
+        assert_live_arena_pointer(owner);
+        assert_live_arena_pointer(payload);
+        assert_eq!(unsafe { slot.read() }, promise);
+        ACTIVE_PROMISES.with(|active| assert!(active.borrow().contains(&promise)));
+        assert_eq!(unsafe { payload.read() }, 707);
+
+        assert_eq!(
+            unsafe { thaw_promise_arena_slot_replace(owner, slot, std::ptr::null_mut()) },
+            1
+        );
+        ACTIVE_PROMISES.with(|active| assert!(!active.borrow().contains(&promise)));
+        drop(owner_root);
+        thaw_arena::thaw_arena_reset();
+        assert!(thaw_arena::was_reclaimed(owner as usize));
+        assert!(thaw_arena::was_reclaimed(payload as usize));
+    });
+}
