@@ -2053,7 +2053,8 @@
     },
     writable: false, configurable: false,
   });
-  globalThis.__thaw_object_from_operations = (kinds, keys, values, ...callbacks) => {
+  globalThis.__thaw_object_from_operations = (kinds, keysText, keyKinds, values, ...callbacks) => {
+    const keys = thawGraphParse(keysText);
     const object = {};
     let callback = 0;
     for (let i = 0; i < kinds.length; i++) {
@@ -2069,7 +2070,7 @@
         }
         continue;
       }
-      const key = keys[i];
+      const key = keyKinds[i] ? globalThis.__thaw_property_key(keys[i]) : keys[i];
       if (kind === 'data') {
         Object.defineProperty(object, key, {
           value: values[i], writable: true, enumerable: true, configurable: true,

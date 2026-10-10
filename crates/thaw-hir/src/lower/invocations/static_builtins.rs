@@ -860,7 +860,10 @@ impl<'a> FnLowerer<'a> {
                                 "`Object.getOwnPropertySymbols` expects exactly one argument".into()
                             );
                         };
-                        if self.infer_expr_type(target)? == HirType::JsValue {
+                        if matches!(
+                            self.infer_expr_type(target)?,
+                            HirType::JsValue | HirType::Json
+                        ) {
                             let call_arguments = self.coerce_to_declared(
                                 &HirType::Json,
                                 HirExpr::ArrayLit(vec![target.clone()]),

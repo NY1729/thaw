@@ -11681,6 +11681,48 @@ fn exact_iterator_catch_preserves_thrown_identity() {
 }
 
 #[test]
+fn symbol_iterator_builder_key_preserves_lookalike_string_property() {
+    let source = r#"
+        function main(): void {
+            const iterable: any = {
+                "__thaw_symbol_iterator": 17,
+                "\u001f@@iterator": 29,
+                [Symbol.iterator]() {
+                    let done = false;
+                    return { next(): { value: number; done: boolean } {
+                        const result = { value: 23, done };
+                        done = true;
+                        return result;
+                    } };
+                }
+            };
+            let sum = 0;
+            let count = 0;
+            for (const value of iterable) {
+                sum += value;
+                count++;
+            }
+            console.log(iterable["__thaw_symbol_iterator"]);
+            console.log(iterable["\u001f@@iterator"]);
+            console.log(Object.keys(iterable).length);
+            console.log(Object.getOwnPropertySymbols(iterable).length);
+            console.log(count, sum);
+            console.log(localSymbolMethod({ iterator: "own" }));
+        }
+        function localSymbolMethod(Symbol: { iterator: string }): number {
+            const value: any = {
+                [Symbol.iterator]() { return 31; }
+            };
+            return value.own();
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "symbol_iterator_builder_string_collision"),
+        "17\n29\n2\n1\n1 23\n31\n"
+    );
+}
+
+#[test]
 fn callback_annotated_with_a_subset_of_fields_writes_through_to_the_supplied_object() {
     // The annotation names `c` and `a` only (not a prefix, different order); the callback is
     // lowered at the supplied layout, so its writes reach the original object.
