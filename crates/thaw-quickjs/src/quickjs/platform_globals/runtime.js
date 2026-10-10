@@ -7,6 +7,12 @@
   const thawBootstrapIteratorKey = Symbol.iterator;
   const thawHostErrorPrototype = Error.prototype;
   const thawHostIsPrototypeOf = Object.prototype.isPrototypeOf;
+  // Keep unary plus on opaque values in the QuickJS realm so its ToNumber
+  // operation performs ToPrimitive(number) once and rejects BigInt/Symbol.
+  thawBootstrapDefineProperty(globalThis, '__thaw_unary_plus', {
+    value: value => +value,
+    configurable: false, writable: false,
+  });
   Object.defineProperty(globalThis, '__thaw_date_from_live_value', {
     value: value => thawDateApply(thawDateGetTime, new thawDateConstructor(value), []),
     configurable: false, writable: false,

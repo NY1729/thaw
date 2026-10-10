@@ -9875,19 +9875,29 @@ fn compiles_well_known_symbols() {
 fn object_literal_to_primitive_is_consulted_by_coercions() {
     let source = r#"
         function main(): void {
+            let numberCalls = 0;
+            let stringCalls = 0;
             const obj = {
                 value: 5,
                 [Symbol.toPrimitive](hint: string): any {
-                    if (hint === "number") return this.value;
+                    if (hint === "number") { numberCalls++; return this.value; }
+                    stringCalls++;
                     return `obj(${this.value})`;
                 },
             };
-            console.log(+obj, `${obj}`);
+            console.log(+obj, `${obj}`, numberCalls, stringCalls);
+            loadScript("globalThis.dynamicUnaryCalls = 0; globalThis.dynamicUnaryObject = { [Symbol.toPrimitive](hint) { dynamicUnaryCalls++; if (hint !== 'number') throw new Error('wrong hint'); return 9; } }; globalThis.unaryPlusBigInt = 1n; globalThis.unaryPlusSymbol = Symbol('value');");
+            const dynamicObject: JsValue = getDynamicValue("dynamicUnaryObject");
+            console.log(+dynamicObject, Number(getDynamicValue("dynamicUnaryCalls")));
+            const big: JsValue = getDynamicValue("unaryPlusBigInt");
+            const symbol: JsValue = getDynamicValue("unaryPlusSymbol");
+            try { console.log(+big); } catch (error) { console.log(error instanceof TypeError); }
+            try { console.log(+symbol); } catch (error) { console.log(error instanceof TypeError); }
         }
     "#;
     assert_eq!(
         compile_and_run(source, "object_literal_to_primitive_coercion"),
-        "5 obj(5)\n"
+        "5 obj(5) 1 1\n9 1\ntrue\ntrue\n"
     );
 }
 
