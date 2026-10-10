@@ -2847,23 +2847,66 @@ impl<'ctx> HirCompiler<'ctx> {
             HirType::Json => Ok(json),
             HirType::Dictionary(_) => Ok(json),
             HirType::Bytes => {
+                let is_buffer = self.builder.build_call(
+                    self.module.get_function("thaw_json_is_buffer").unwrap(),
+                    &[json.into()],
+                    "dynamic_bytes_is_buffer",
+                ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                    .ok_or("thaw_json_is_buffer returned no value")?.into_int_value();
+                self.compile_check_json_host_error(json, None)?;
+                let is_buffer = self.builder.build_int_compare(
+                    IntPredicate::NE,
+                    is_buffer,
+                    self.context.i8_type().const_zero(),
+                    "dynamic_bytes_buffer_present",
+                ).map_err(|error| error.to_string())?;
+                let function = self.current_function();
+                let buffer_block = self.context.append_basic_block(function, "dynamic_bytes_buffer");
+                let wrapper_block = self.context.append_basic_block(function, "dynamic_bytes_wrapper");
+                let done_block = self.context.append_basic_block(function, "dynamic_bytes_done");
+                self.builder.build_conditional_branch(is_buffer, buffer_block, wrapper_block)
+                    .map_err(|error| error.to_string())?;
+
+                self.builder.position_at_end(buffer_block);
+                let buffer_result = self.builder.build_call(
+                    self.module.get_function("thaw_json_to_number_array").unwrap(),
+                    &[json.into()],
+                    "dynamic_bytes_buffer_result",
+                ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                    .ok_or("thaw_json_to_number_array returned no value")?.into_pointer_value();
+                self.compile_check_json_host_error(buffer_result.into(), None)?;
+                let buffer_end = self.builder.get_insert_block().unwrap();
+                self.builder.build_unconditional_branch(done_block).map_err(|error| error.to_string())?;
+
+                self.builder.position_at_end(wrapper_block);
                 let key = self.builder.build_global_string_ptr("data", "bytes_result_data_key").map_err(|error| error.to_string())?;
                 let data = self.builder.build_call(
                     self.module.get_function("thaw_json_get").unwrap(),
                     &[json.into(), key.as_pointer_value().into()],
                     "dynamic_bytes_data",
-                ).map_err(|error| error.to_string())?.try_as_basic_value().basic().unwrap();
+                ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                    .ok_or("thaw_json_get returned no value")?;
                 self.compile_check_json_host_error(data, Some("thaw_json_destroy"))?;
-                let result = self.builder.build_call(
+                let wrapper_result = self.builder.build_call(
                     self.module.get_function("thaw_json_to_number_array").unwrap(),
                     &[data.into()],
-                    "dynamic_bytes_result",
-                ).map_err(|error| error.to_string())?.try_as_basic_value().basic().ok_or("thaw_json_to_number_array returned no value")?.into_pointer_value();
+                    "dynamic_bytes_wrapper_result",
+                ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                    .ok_or("thaw_json_to_number_array returned no value")?.into_pointer_value();
                 self.compile_check_json_host_error(data, Some("thaw_json_destroy"))?;
-                let wrapped = self.compile_array_wrap(result)?;
                 self.builder.build_call(self.module.get_function("thaw_json_destroy").unwrap(),
                     &[data.into()], "destroy_dynamic_bytes_data")
                     .map_err(|error| error.to_string())?;
+                let wrapper_end = self.builder.get_insert_block().unwrap();
+                self.builder.build_unconditional_branch(done_block).map_err(|error| error.to_string())?;
+
+                self.builder.position_at_end(done_block);
+                let result = self.builder.build_phi(
+                    self.context.ptr_type(AddressSpace::default()),
+                    "dynamic_bytes_result",
+                ).map_err(|error| error.to_string())?;
+                result.add_incoming(&[(&buffer_result, buffer_end), (&wrapper_result, wrapper_end)]);
+                let wrapped = self.compile_array_wrap(result.as_basic_value().into_pointer_value())?;
                 self.compile_destroy_typed_input_if_detached(json, ty, None)?;
                 Ok(wrapped.into())
             }

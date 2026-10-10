@@ -7628,10 +7628,22 @@ pub extern "C" fn thaw_json_array_length(value: *mut Value) -> i64 {
         return 0;
     };
     if let Value::Host(lease) = value {
-        if host_query(lease, 4).as_deref() != Some("1") {
+        let is_array = host_query(lease, 4);
+        if HOST_ERROR.with(|error| error.borrow().is_some()) {
             return 0;
         }
+        if is_array.as_deref() != Some("1") {
+            let is_buffer = host_query(lease, 11);
+            if HOST_ERROR.with(|error| error.borrow().is_some())
+                || is_buffer.as_deref() != Some("1")
+            {
+                return 0;
+            }
+        }
         let length = host_get_property(lease, b"length");
+        if HOST_ERROR.with(|error| error.borrow().is_some()) {
+            return 0;
+        }
         let Some(length) = length.as_f64() else {
             set_host_error("Invalid host array length".into());
             return 0;
@@ -7937,6 +7949,7 @@ mod tests {
     extern "C" fn host_array_test_query(handle: u64, operation: u8) -> HostTextResult {
         let value = match (handle, operation) {
             (1, 4) => b"1".as_slice(),
+            (5, 11) => b"1".as_slice(),
             (1, 0) => b"object".as_slice(),
             (1, 7) => b"0".as_slice(),
             (2, 0) => b"number".as_slice(),
@@ -7981,9 +7994,9 @@ mod tests {
             };
         }
         let value = match key.as_str() {
-            r#""length""# if handle == 1 => 2,
-            r#""0""# if handle == 1 => 3,
-            r#""1""# if handle == 1 => 4,
+            r#""length""# if handle == 1 || handle == 5 => 2,
+            r#""0""# if handle == 1 || handle == 5 => 3,
+            r#""1""# if handle == 1 || handle == 5 => 4,
             _ => 0,
         };
         HostHandleResult {
@@ -8050,6 +8063,40 @@ mod tests {
             assert_eq!(host_array_test_length(3), 0);
             assert_eq!(HOST_ARRAY_TEST_GETS.with(Cell::get), gets);
             assert!(thaw_json_take_host_error().is_null());
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    fn host_buffer_length_reads_length_property_and_propagates_getter_errors() {
+        std::thread::spawn(|| {
+            install_host_array_test_operations();
+            HOST_ARRAY_TEST_LENGTH.with(|length| length.set(2.0));
+            HOST_ARRAY_TEST_FAIL_GET.with(|fail| fail.set(false));
+            HOST_ARRAY_TEST_FAIL_INDEX.with(|index| index.set(-1));
+            HOST_ARRAY_TEST_GETS.with(|count| count.set(0));
+            assert_eq!(host_array_test_length(5), 2);
+            assert_eq!(HOST_ARRAY_TEST_GETS.with(Cell::get), 1);
+            assert!(thaw_json_take_host_error().is_null());
+
+            HOST_ARRAY_TEST_FAIL_GET.with(|fail| fail.set(true));
+            assert_eq!(host_array_test_length(5), 0);
+            let error = thaw_json_take_host_error();
+            assert_eq!(to_str(error), "length getter failed");
+            unsafe { thaw_arena::destroy_string(error.cast_mut()) };
+
+            HOST_ARRAY_TEST_FAIL_GET.with(|fail| fail.set(false));
+            HOST_ARRAY_TEST_GETS.with(|count| count.set(0));
+            HOST_ARRAY_TEST_FAIL_INDEX.with(|index| index.set(1));
+            let value = host_array_test_value(5);
+            assert!(thaw_json_to_number_array(value).is_null());
+            let error = thaw_json_take_host_error();
+            assert_eq!(to_str(error), "index getter failed");
+            unsafe {
+                thaw_arena::destroy_string(error.cast_mut());
+                thaw_json_destroy(value);
+            }
         })
         .join()
         .unwrap();
