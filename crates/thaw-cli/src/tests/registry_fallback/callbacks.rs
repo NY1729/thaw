@@ -1308,7 +1308,8 @@ fn a_thrown_js_errors_own_properties_survive_a_native_callback_boundary() {
     .unwrap();
     std::fs::write(
         thrower.join("bundle.js"),
-        "module.exports.boom = function() { var e = new Error('teapot'); e.status = 418; e.expose = true; throw e; };\n",
+        "var original;\n\
+         module.exports.boom = function() { original = new Error('teapot'); original.status = 418; original.expose = true; globalThis.__identityOriginal = original; throw original; };\n",
     )
     .unwrap();
     std::fs::write(
@@ -1318,7 +1319,7 @@ fn a_thrown_js_errors_own_properties_survive_a_native_callback_boundary() {
     .unwrap();
     std::fs::write(
         handler.join("bundle.js"),
-        "module.exports.handle = async function(cb) { try { await cb(); return 'ok'; } catch (e) { return 'err:' + e.status + ':' + e.expose; } };\n",
+        "module.exports.handle = async function(cb) { try { await cb(); return 'ok'; } catch (e) { const status = e.status; const same = e === globalThis.__identityOriginal; globalThis.__identityOriginal.status = 419; return 'err:' + status + ':' + e.expose + ':' + same + ':' + e.status; } };\n",
     )
     .unwrap();
     let entry = dir.join("main.ts");
@@ -1343,7 +1344,7 @@ async function main(): Promise<void> {
         "{}",
         String::from_utf8_lossy(&result.stderr)
     );
-    assert_eq!(String::from_utf8_lossy(&result.stdout), "err:418:true\n");
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "err:418:true:true:419\n");
     let _ = std::fs::remove_dir_all(dir);
 }
 

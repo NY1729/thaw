@@ -2519,6 +2519,21 @@ pub unsafe extern "C" fn thaw_json_borrowed_handle_id(value: *const Value) -> u6
         .unwrap_or(0)
 }
 
+/// Returns a borrowed handle only for a live, tracked Box<Value> root.
+/// The membership check uses the pointer as an integer key and does not dereference it.
+///
+/// # Safety
+///
+/// `value` may be null or any pointer value; it is dereferenced only after the
+/// arena-owned-root table confirms that it names a tracked live Box<Value>.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_json_borrowed_tracked_handle_id(value: *const Value) -> u64 {
+    if arena_owned_json_root_token(value).is_none() {
+        return 0;
+    }
+    unsafe { thaw_json_borrowed_handle_id(value) }
+}
+
 /// Reads the internal dynamic-value handle marker without allocating a child JSON value.
 ///
 /// # Safety
@@ -8128,6 +8143,31 @@ mod tests {
             handle,
             release: host_array_test_release,
         })))
+    }
+
+    #[test]
+    fn borrowed_tracked_handle_lookup_checks_root_membership_before_deref() {
+        std::thread::spawn(|| {
+            let invalid = 0x10usize as *const Value;
+            assert_eq!(unsafe { thaw_json_borrowed_tracked_handle_id(invalid) }, 0);
+
+            let untracked = host_array_test_value(8);
+            assert_eq!(
+                unsafe { thaw_json_borrowed_tracked_handle_id(untracked) },
+                0
+            );
+            unsafe { thaw_json_destroy(untracked) };
+
+            let tracked = thaw_json_track_arena_owned_root(host_array_test_value(9));
+            assert_eq!(unsafe { thaw_json_borrowed_tracked_handle_id(tracked) }, 9);
+            unsafe { thaw_json_destroy(tracked) };
+
+            let forged = thaw_json_track_arena_owned_root(parse(r#"{"__thaw_js_handle_id__":9}"#));
+            assert_eq!(unsafe { thaw_json_borrowed_tracked_handle_id(forged) }, 0);
+            unsafe { thaw_json_destroy(forged) };
+        })
+        .join()
+        .unwrap();
     }
 
     fn host_array_test_length(handle: u64) -> i64 {

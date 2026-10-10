@@ -141,11 +141,35 @@ fn install_native_exception_bridge(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
         "native exception bridge", "Function", "Cannot install exception bridge"))
 }
 
+unsafe extern "C" {
+    fn thaw_json_borrowed_tracked_handle_id(value: *const c_void) -> u64;
+}
+
 fn reconstitute_exception_packet<'js>(
     ctx: &Ctx<'js>,
     text: &str,
     packet: std::rc::Rc<thaw_arena::exception::ExceptionPacket>,
 ) -> rquickjs::Result<Value<'js>> {
+    // A pure-JS thrown object is already present in the handle registry. Recover
+    // it only when the packet's Box is a currently tracked native Json root;
+    // never dereference the opaque packet pointer before that membership check.
+    // The packet stays alive until `value_for_handle` clones the engine value.
+    if packet.tag == 7
+        && packet.object != 0
+        && packet.pending == packet.object
+        && packet.native == 0
+        && packet.aggregate == 0
+        && packet.native_text == 0
+    {
+        let handle = unsafe {
+            thaw_json_borrowed_tracked_handle_id(packet.object as *const c_void)
+        };
+        if handle != 0 {
+            if let Ok(original) = value_for_handle(ctx, handle) {
+                return Ok(original);
+            }
+        }
+    }
     let bridge = ctx.userdata::<NativeExceptionBridge>()
         .ok_or_else(|| rquickjs::Error::new_from_js_message(
             "native exception bridge", "Function", "Exception bridge is unavailable"))?;
