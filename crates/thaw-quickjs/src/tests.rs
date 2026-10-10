@@ -10000,7 +10000,8 @@ fn proxy_get_own_property_descriptor_trap_keeps_accessor_descriptors() {
 #[test]
 fn proxy_define_property_trap_checks_nonconfigurable_writable_invariant() {
     assert_eq!(
-        load(r#"
+        load(
+            r#"
         globalThis.proxyDefineInvariant = function () {
           const target = {};
           Object.defineProperty(target, 'fixed', {
@@ -10017,7 +10018,8 @@ fn proxy_define_property_trap_checks_nonconfigurable_writable_invariant() {
           return [valueOnly, writableTrue, writableFalseThrows,
             target.fixed, Object.getOwnPropertyDescriptor(target, 'fixed').writable].join(':');
         };
-        "#),
+        "#
+        ),
         1
     );
     assert_eq!(
@@ -10028,7 +10030,9 @@ fn proxy_define_property_trap_checks_nonconfigurable_writable_invariant() {
 
 #[test]
 fn projected_native_method_identity_survives_freeze_and_seal() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
       globalThis.projectedMethodIntegrity = function () {
         let other;
         const methodImpl = function () { return true; };
@@ -10064,8 +10068,14 @@ fn projected_native_method_identity_survives_freeze_and_seal() {
         return [before, afterFreeze, afterSeal, sealed.method === sealedMethod,
           sameFrozenValueAccepted, distinctFrozenValueRejected];
       };
-    "#), 1);
-    assert_eq!(call("projectedMethodIntegrity", "[]"), "[true,true,true,true,true,true]");
+    "#
+        ),
+        1
+    );
+    assert_eq!(
+        call("projectedMethodIntegrity", "[]"),
+        "[true,true,true,true,true,true]"
+    );
 }
 
 #[test]
@@ -10077,11 +10087,15 @@ fn collect_garbage_does_not_create_a_context_and_uses_an_existing_one() {
         assert!(JS.with(|cell| cell.borrow().is_none()));
 
         with_context(|ctx| {
-            ctx.eval::<(), _>("globalThis.gcScopefix = 41; Promise.resolve().then(() => {});").unwrap();
+            ctx.eval::<(), _>("globalThis.gcScopefix = 41; Promise.resolve().then(() => {});")
+                .unwrap();
         });
         thaw_js_collect_garbage();
         assert_eq!(thaw_js_terminal_work_pending(), 1);
-        assert_eq!(with_context(|ctx| ctx.eval::<i32, _>("gcScopefix + 1").unwrap()), 42);
+        assert_eq!(
+            with_context(|ctx| ctx.eval::<i32, _>("gcScopefix + 1").unwrap()),
+            42
+        );
     })
     .join()
     .unwrap();
