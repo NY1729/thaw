@@ -226,11 +226,58 @@ impl<'a> FnLowerer<'a> {
 
     fn static_object_property_name(&self, property: &PropName) -> Option<String> {
         literal_property_name(property).or_else(|| match property {
-            PropName::Computed(computed) => well_known_symbol_from_expr(&computed.expr)
-                .map(well_known_symbol_key)
-                .or_else(|| self.static_property_name(&computed.expr)),
+            PropName::Computed(computed) => {
+                if well_known_symbol_from_expr(&computed.expr).is_some()
+                    && self.builtin_symbol_member_name(&computed.expr).is_none()
+                {
+                    None
+                } else {
+                    self.builtin_symbol_member_name(&computed.expr)
+                        .map(|name| {
+                            if name == "iterator" {
+                                "__thaw_symbol_iterator".to_string()
+                            } else {
+                                well_known_symbol_key(name)
+                            }
+                        })
+                        .or_else(|| self.static_property_name(&computed.expr))
+                }
+            }
             _ => None,
         })
+    }
+
+    pub(super) fn builtin_symbol_member_name(&self, expression: &Expr) -> Option<&'static str> {
+        let name = well_known_symbol_from_expr(expression)?;
+        // `Symbol.iterator` is a compiler intrinsic only when the identifier resolves
+        // to the ambient builtin. Check both lexical bindings and module declarations;
+        // otherwise preserve ordinary user values named `Symbol`.
+        let binding = self.resolve_binding("Symbol");
+        if self.scope.contains_key(&binding)
+            || self.signatures.contains_key(&binding)
+            || self.interfaces.get(&binding).is_some_and(|ty| {
+                matches!(ty, HirType::Object(fields)
+                    if fields.first().is_some_and(|(name, _)| name.starts_with("__thaw_class_identity_\u{1e}")))
+            })
+        {
+            return None;
+        }
+        Some(name)
+    }
+
+    fn is_compiler_symbol_property(&self, property: &PropName) -> bool {
+        matches!(property, PropName::Computed(computed)
+            if self.builtin_symbol_member_name(&computed.expr).is_some())
+    }
+
+    fn dynamic_operation_property_name(&self, property: &PropName) -> Option<String> {
+        match property {
+            PropName::Computed(computed) => self
+                .builtin_symbol_member_name(&computed.expr)
+                .map(well_known_symbol_key)
+                .or_else(|| self.static_object_property_name(property)),
+            _ => self.static_object_property_name(property),
+        }
     }
 
     fn lower_object_method(
@@ -646,6 +693,7 @@ impl<'a> FnLowerer<'a> {
         let mut bindings = Vec::new();
         let mut kinds = Vec::new();
         let mut keys = Vec::new();
+        let mut key_kinds = Vec::new();
         let mut values = Vec::new();
         let mut callbacks = Vec::new();
         for property in &obj_lit.props {
@@ -658,15 +706,23 @@ impl<'a> FnLowerer<'a> {
                 bindings.push((name.clone(), HirType::Json, value));
                 kinds.push(HirExpr::Lit(HirLit::Str("spread".into())));
                 keys.push(HirExpr::Lit(HirLit::Str(String::new())));
+                key_kinds.push(HirExpr::Lit(HirLit::Bool(false)));
                 values.push(HirExpr::Var(name));
                 continue;
             }
             let PropOrSpread::Prop(property) = property else {
                 unreachable!()
             };
+            let is_symbol_key = match property.as_ref() {
+                Prop::KeyValue(KeyValueProp { key, .. }) => self.is_compiler_symbol_property(key),
+                Prop::Method(property) => self.is_compiler_symbol_property(&property.key),
+                Prop::Getter(property) => self.is_compiler_symbol_property(&property.key),
+                Prop::Setter(property) => self.is_compiler_symbol_property(&property.key),
+                _ => false,
+            };
             let (kind, key, value, callback) = match property.as_ref() {
                 Prop::KeyValue(KeyValueProp { key, value }) => {
-                    let key = match self.static_object_property_name(key) {
+                    let key = match self.dynamic_operation_property_name(key) {
                         Some(key) => HirExpr::Lit(HirLit::Str(key)),
                         None => {
                             let PropName::Computed(computed) = key else {
@@ -691,7 +747,7 @@ impl<'a> FnLowerer<'a> {
                     )
                 }
                 Prop::Method(method) => {
-                    let key = match self.static_object_property_name(&method.key) {
+                    let key = match self.dynamic_operation_property_name(&method.key) {
                         Some(key) => HirExpr::Lit(HirLit::Str(key)),
                         None => {
                             let PropName::Computed(computed) = &method.key else {
@@ -710,7 +766,7 @@ impl<'a> FnLowerer<'a> {
                     ("method", key, None, Some(callback))
                 }
                 Prop::Getter(getter) => {
-                    let key = match self.static_object_property_name(&getter.key) {
+                    let key = match self.dynamic_operation_property_name(&getter.key) {
                         Some(key) => HirExpr::Lit(HirLit::Str(key)),
                         None => {
                             let PropName::Computed(computed) = &getter.key else {
@@ -729,7 +785,7 @@ impl<'a> FnLowerer<'a> {
                     ("getter", key, None, Some(callback))
                 }
                 Prop::Setter(setter) => {
-                    let key = match self.static_object_property_name(&setter.key) {
+                    let key = match self.dynamic_operation_property_name(&setter.key) {
                         Some(key) => HirExpr::Lit(HirLit::Str(key)),
                         None => {
                             let PropName::Computed(computed) = &setter.key else {
@@ -755,6 +811,7 @@ impl<'a> FnLowerer<'a> {
             bindings.push((key_name.clone(), HirType::Str, key));
             kinds.push(HirExpr::Lit(HirLit::Str(kind.into())));
             keys.push(HirExpr::Var(key_name));
+            key_kinds.push(HirExpr::Lit(HirLit::Bool(is_symbol_key)));
             if let Some(value) = value {
                 let value_name = format!("__thaw_dynamic_object_value_{}", self.next_binding);
                 self.next_binding += 1;
@@ -779,11 +836,23 @@ impl<'a> FnLowerer<'a> {
             }
         }
         let kinds = self.coerce_to_declared(&HirType::Json, HirExpr::ArrayLit(kinds))?;
+        // Keep raw key strings out of the graph reviver: it upgrades
+        // well-known-symbol sentinels in scalar strings before the separate
+        // key-kind metadata can distinguish literal strings from Symbols.
+        // JSON text starts with `[` and is parsed by the captured native
+        // parser in the operation builder, so key contents stay ordinary
+        // strings throughout this metadata hop.
         let keys = self.coerce_to_declared(&HirType::Json, HirExpr::ArrayLit(keys))?;
+        let keys = HirExpr::Call(
+            Box::new(HirExpr::Var("JSON.stringify".into())),
+            vec![keys],
+        );
+        let keys = self.coerce_to_declared(&HirType::Json, keys)?;
+        let key_kinds = self.coerce_to_declared(&HirType::Json, HirExpr::ArrayLit(key_kinds))?;
         let values = self.coerce_to_declared(&HirType::Json, HirExpr::ArrayLit(values))?;
         let arguments = self.coerce_to_declared(
             &HirType::Json,
-            HirExpr::ArrayLit(vec![kinds, keys, values]),
+            HirExpr::ArrayLit(vec![kinds, keys, key_kinds, values]),
         )?;
         if live_json {
             // Bind the ordinary property values and encode the metadata before
@@ -1220,15 +1289,19 @@ impl<'a> FnLowerer<'a> {
                         Prop::KeyValue(KeyValueProp {
                             key: PropName::Computed(computed),
                             ..
-                        }) => self.static_property_name(&computed.expr).is_none(),
+                        }) => self.static_object_property_name(&PropName::Computed(computed.clone())).is_none()
+                            || self.is_compiler_symbol_property(&PropName::Computed(computed.clone())),
                         Prop::Method(property) => {
-                            self.static_object_property_name(&property.key).is_none()
+                            self.is_compiler_symbol_property(&property.key)
+                                || self.static_object_property_name(&property.key).is_none()
                         }
                         Prop::Getter(property) => {
-                            self.static_object_property_name(&property.key).is_none()
+                            self.is_compiler_symbol_property(&property.key)
+                                || self.static_object_property_name(&property.key).is_none()
                         }
                         Prop::Setter(property) => {
-                            self.static_object_property_name(&property.key).is_none()
+                            self.is_compiler_symbol_property(&property.key)
+                                || self.static_object_property_name(&property.key).is_none()
                         }
                         _ => false,
                     },
@@ -2319,20 +2392,14 @@ impl<'a> FnLowerer<'a> {
         // sentinel string a computed access/call can dispatch on. These are
         // not registered symbols (`Symbol.for`), so no runtime symbol is
         // created.
-        if let Expr::Ident(receiver) = member.obj.as_ref() {
-            if receiver.sym == *"Symbol" {
-                if let MemberProp::Ident(property) = &member.prop {
-                    if well_known_symbol_name(property.sym.as_ref()).is_some() {
-                        return Ok(HirExpr::Lit(HirLit::Str(well_known_symbol_key(
-                            property.sym.as_ref(),
-                        ))));
-                    }
-                }
-            }
+        if let Some(symbol) = self
+            .builtin_symbol_member_name(&Expr::Member(member.clone()))
+        {
+            return Ok(HirExpr::Lit(HirLit::Str(well_known_symbol_key(symbol))));
         }
         // `obj[Symbol.toStringTag]` -- a compile-time tag per receiver type.
         if let MemberProp::Computed(computed) = &member.prop {
-            if well_known_symbol_from_expr(&computed.expr) == Some("toStringTag") {
+            if self.builtin_symbol_member_name(&computed.expr) == Some("toStringTag") {
                 let receiver = self.lower_expr(&member.obj)?;
                 let receiver_type = self.infer_expr_type(&receiver)?;
                 // A user class's own `get [Symbol.toStringTag]()` (mangled
@@ -4540,12 +4607,6 @@ fn well_known_symbol_from_expr(expr: &Expr) -> Option<&'static str> {
                 return None;
             };
             well_known_symbol_name(property.sym.as_ref())
-        }
-        // `Symbol.iterator` in a computed key is normalized by thaw's
-        // iterator-protocol support into this internal string before
-        // lowering.
-        Expr::Lit(swc_ecma_ast::Lit::Str(value)) => {
-            well_known_symbol_name(value.value.to_string_lossy().strip_prefix("__thaw_symbol_")?)
         }
         _ => None,
     }

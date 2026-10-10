@@ -1021,7 +1021,7 @@ impl<'a> FnLowerer<'a> {
         // models natively.
         if let Expr::Member(member) = callee_expr.as_ref() {
             if let MemberProp::Computed(computed) = &member.prop {
-                if let Some(symbol) = well_known_symbol_from_expr(&computed.expr) {
+                if let Some(symbol) = self.builtin_symbol_member_name(&computed.expr) {
                     return self.lower_well_known_symbol_call(member, symbol, call);
                 }
             }

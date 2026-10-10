@@ -350,7 +350,7 @@ fn normalize_static_computed_class_members(module: &Module) -> Module {
             collector
                 .names
                 .into_iter()
-                .filter(|name| self.constants.contains_key(name))
+                .filter(|name| name == "Symbol" || self.constants.contains_key(name))
                 .collect()
         }
 
@@ -420,6 +420,12 @@ fn normalize_static_computed_class_members(module: &Module) -> Module {
                 computed.visit_mut_children_with(self);
                 return;
             }
+            if matches!(computed.expr.as_ref(), Expr::Member(member)
+                if matches!(member.obj.as_ref(), Expr::Ident(object) if object.sym == "Symbol")
+                    && matches!(&member.prop, MemberProp::Ident(property) if property.sym == "iterator"))
+            {
+                return;
+            }
             let Some(value) = static_class_member_name(&computed.expr, &|name| {
                 self.constants.get(name).cloned()
             }) else {
@@ -440,6 +446,12 @@ fn normalize_static_computed_class_members(module: &Module) -> Module {
             };
             if self.expression_is_shadowed(&computed.expr) {
                 computed.visit_mut_children_with(self);
+                return;
+            }
+            if matches!(computed.expr.as_ref(), Expr::Member(member)
+                if matches!(member.obj.as_ref(), Expr::Ident(object) if object.sym == "Symbol")
+                    && matches!(&member.prop, MemberProp::Ident(property) if property.sym == "iterator"))
+            {
                 return;
             }
             let Some(value) = static_class_member_name(&computed.expr, &|name| {
