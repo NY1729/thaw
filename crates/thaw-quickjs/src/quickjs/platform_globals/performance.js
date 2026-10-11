@@ -305,11 +305,11 @@
         } else if (input instanceof ArrayBuffer) {
           output = input.slice(0);
         } else if (ArrayBuffer.isView(input)) {
+          const buffer = clone(input.buffer);
           if (input instanceof DataView) {
-            output = new DataView(input.buffer.slice(input.byteOffset,
-              input.byteOffset + input.byteLength));
+            output = new DataView(buffer, input.byteOffset, input.byteLength);
           } else {
-            output = new input.constructor(input);
+            output = new input.constructor(buffer, input.byteOffset, input.length);
           }
         } else {
           output = Array.isArray(input) ? new Array(input.length) : {};

@@ -1336,6 +1336,77 @@ fn structured_clone_preserves_sparse_array_length_and_graph() {
 }
 
 #[test]
+fn structured_clone_preserves_shared_view_backing_buffer() {
+    std::thread::spawn(|| {
+        assert_eq!(
+            load(
+                r#"
+      function sharedViewClone() {
+        const input = new ArrayBuffer(8);
+        const sourceBytes = new Uint8Array(input);
+        sourceBytes.set([10, 11, 12, 13, 14, 15, 16, 17]);
+        const u8 = new Uint8Array(input, 2, 4);
+        const u16 = new Uint16Array(input, 2, 2);
+        const dataView = new DataView(input, 3, 2);
+        const emptyBytes = new Uint8Array(input, 8, 0);
+        const emptyView = new DataView(input, 8, 0);
+        const viewsFirst = structuredClone({
+          u8, u16, dataView, emptyBytes, emptyView, again: u8,
+          buffer: input, bufferAgain: input
+        });
+        const bufferFirst = structuredClone({
+          buffer: input, u8, u16, dataView, emptyBytes, emptyView,
+          again: input
+        });
+        const copiedBytes = new Uint8Array(viewsFirst.buffer);
+        const viewsAlias = viewsFirst.u8.buffer === viewsFirst.buffer
+          && viewsFirst.u16.buffer === viewsFirst.buffer
+          && viewsFirst.dataView.buffer === viewsFirst.buffer
+          && viewsFirst.emptyBytes.buffer === viewsFirst.buffer
+          && viewsFirst.emptyView.buffer === viewsFirst.buffer;
+        const viewsFirstShape = viewsFirst.buffer !== input
+          && viewsFirst.buffer.byteLength === 8
+          && viewsFirst.bufferAgain === viewsFirst.buffer
+          && viewsFirst.again === viewsFirst.u8
+          && ArrayBuffer.isView(viewsFirst.u8) && viewsFirst.u8 instanceof Uint8Array
+          && viewsFirst.u8.byteOffset === 2 && viewsFirst.u8.length === 4
+          && viewsFirst.u16 instanceof Uint16Array
+          && viewsFirst.u16.byteOffset === 2 && viewsFirst.u16.length === 2
+          && viewsFirst.dataView instanceof DataView
+          && viewsFirst.dataView.byteOffset === 3 && viewsFirst.dataView.byteLength === 2
+          && viewsFirst.emptyBytes.byteOffset === 8 && viewsFirst.emptyBytes.length === 0
+          && viewsFirst.emptyView.byteOffset === 8 && viewsFirst.emptyView.byteLength === 0;
+        const bufferFirstAliases = bufferFirst.u8.buffer === bufferFirst.buffer
+          && bufferFirst.u16.buffer === bufferFirst.buffer
+          && bufferFirst.dataView.buffer === bufferFirst.buffer
+          && bufferFirst.emptyBytes.buffer === bufferFirst.buffer
+          && bufferFirst.emptyView.buffer === bufferFirst.buffer
+          && bufferFirst.again === bufferFirst.buffer;
+        const outsideBytes = copiedBytes[0] === 10 && copiedBytes[1] === 11
+          && copiedBytes[6] === 16 && copiedBytes[7] === 17;
+        viewsFirst.dataView.setUint8(0, 99);
+        const sharedMutation = viewsFirst.u8[1] === 99
+          && new Uint8Array(viewsFirst.u16.buffer)[3] === 99
+          && copiedBytes[3] === 99 && sourceBytes[3] === 13;
+        sourceBytes[3] = 77;
+        const isolatedMutation = copiedBytes[3] === 99 && sourceBytes[3] === 77;
+        return [viewsAlias, viewsFirstShape, bufferFirstAliases,
+                outsideBytes, sharedMutation, isolatedMutation];
+      }
+    "#
+            ),
+            1
+        );
+        assert_eq!(
+            call("sharedViewClone", "[]"),
+            "[true,true,true,true,true,true]"
+        );
+    })
+    .join()
+    .unwrap();
+}
+
+#[test]
 fn worker_encoder_rejects_symbol_values() {
     std::thread::spawn(|| {
         assert_eq!(
