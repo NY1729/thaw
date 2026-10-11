@@ -2721,6 +2721,240 @@ module.exports = function() {
     let _ = fs::remove_dir_all(&empty_node_modules);
 }
 
+
+#[test]
+fn http2_goaway_cutoff_graceful_drain_and_server_settings_are_wire_safe() {
+    use std::ffi::{CStr, CString};
+
+    let dir = temp_registry("builtin_http2_protocol_boundaries");
+    fs::write(
+        dir.join("index.js"),
+        r#"var http2 = require('node:http2');
+module.exports = function() {
+  var server = new http2.ServerHttp2Session(999960, 'tcp'), sent = [], admitted = [];
+  server._send = function(frame) { sent.push(Buffer.from(frame)); return true; };
+  server.on('stream', function(stream) { admitted.push(stream.id); });
+  server._deliverHeaders(1, 4, Buffer.from([0x83]));
+  var first = server._streams.get(1);
+  first._markClosed();
+  server._deliverHeaders(3, 4, Buffer.from([0x83]));
+  server.goaway(0, undefined, Buffer.from('opaque'));
+  var goaway = sent[sent.length - 1];
+  server.goaway(0, 99);
+  var cutoff = [goaway[9] * 0x1000000 + (goaway[10] << 16) + (goaway[11] << 8) + goaway[12], goaway.subarray(17).toString(), sent[sent.length - 1][12]];
+  server._deliverHeaders(5, 4, Buffer.from([0x83]));
+  var closeSession = new http2.ServerHttp2Session(0, 'tcp'), closeSent = [];
+  closeSession._send = function(frame) { closeSent.push(Buffer.from(frame)); return true; };
+  var active = new http2.ServerHttp2Stream(closeSession, 1), closed = 0;
+  closeSession._streams.set(1, active);
+  closeSession.close(function(error) { if (!error) closed++; });
+  var held = [closeSession.destroyed, active.closed, closeSent[0][3]];
+  active._markClosed();
+  var settings = new http2.ServerHttp2Session(0, 'tcp'), settingsWire = [];
+  settings._send = function(frame) { settingsWire.push(Buffer.from(frame)); return true; };
+  settings._buffer = Buffer.from('PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n');
+  settings._parse();
+  settings.settings({ enablePush: true, initialWindowSize: 0 });
+  var emitted = settingsWire.map(function(frame) { return http2.getUnpackedSettings(frame.subarray(9)); });
+  return Promise.resolve().then(function() { return Promise.resolve().then(function() { return [admitted, cutoff, [held, closeSession.destroyed, closed], emitted.map(function(value) { return [value.enablePush === undefined, value.initialWindowSize]; }), settings.localSettings.enablePush]; }); });
+};"#,
+    )
+    .unwrap();
+    let empty_node_modules = temp_registry("builtin_http2_protocol_boundaries_modules");
+    let (bundle, _, file_count, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(file_count, 3);
+    let script = [
+        "globalThis.module = { exports: {} }; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) { throw new Error(name); };",
+        &bundle,
+        "globalThis.exerciseHttp2ProtocolBoundaries = module.exports;",
+    ]
+    .join("\n");
+    let source = CString::new(script).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let function = CString::new("exerciseHttp2ProtocolBoundaries").unwrap();
+    let arguments = CString::new("[]").unwrap();
+    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(result, "[[1,3],[3,\"opaque\",3],[[false,false,7],true,1],[[true,65535],[true,0]],false]");
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+}
+
+
+#[test]
+fn http2_goaway_admission_drain_reentry_and_hpack_boundaries() {
+    use std::ffi::{CStr, CString};
+
+    let dir = temp_registry("builtin_http2_goaway_boundaries");
+    fs::write(
+        dir.join("index.js"),
+        r#"var http2 = require('node:http2');
+module.exports = function() {
+  function check(value, message) { if (!value) throw new Error(message); }
+  function payloadCutoff(value) { return value[9] * 0x1000000 + (value[10] << 16) + (value[11] << 8) + value[12]; }
+  function safeDestroy(session) { var destroy = session.destroy; session.destroy = function(error) { this._handle = 0; return destroy.call(this, error); }; }
+  function twoTurns(fn) { return Promise.resolve().then(function() { return Promise.resolve().then(fn); }); }
+  function gotGoaway(session) { session._frame(7, 0, 0, Buffer.alloc(8)); }
+
+  var received = new http2.ClientHttp2Session(99101, 'tcp'), receivedFrames = [];
+  received._send = function(value) { receivedFrames.push(Buffer.from(value)); return true; };
+  gotGoaway(received);
+  var receivedId = received._nextStream, receivedSize = received._streams.size, receivedError;
+  try { received.request({ ':path': '/after-goaway' }); } catch (error) { receivedError = error.code; }
+  check(receivedError === 'ERR_HTTP2_GOAWAY_SESSION' && receivedFrames.length === 0 && received._nextStream === receivedId && received._streams.size === receivedSize, 'received GOAWAY admitted a request');
+
+  var fromHeader = new http2.ClientHttp2Session(99102, 'tcp'), headerFrames = [];
+  fromHeader._send = function(value) { headerFrames.push(Buffer.from(value)); return true; };
+  var headerGetter = {};
+  Object.defineProperty(headerGetter, 'x-trigger', { enumerable: true, get: function() { gotGoaway(fromHeader); return 'v'; } });
+  var headerId = fromHeader._nextStream, headerSize = fromHeader._streams.size, headerError;
+  try { fromHeader.request(headerGetter); } catch (error) { headerError = error.code; }
+  check(headerError === 'ERR_HTTP2_GOAWAY_SESSION' && headerFrames.length === 0 && fromHeader._nextStream === headerId && fromHeader._streams.size === headerSize, 'header getter admitted a request after GOAWAY');
+
+  var fromOptions = new http2.ClientHttp2Session(99103, 'tcp'), optionFrames = [];
+  fromOptions._send = function(value) { optionFrames.push(Buffer.from(value)); return true; };
+  var options = {};
+  Object.defineProperty(options, 'endStream', { get: function() { gotGoaway(fromOptions); return true; } });
+  var optionsId = fromOptions._nextStream, optionsSize = fromOptions._streams.size, optionsError;
+  try { fromOptions.request({ ':path': '/' }, options); } catch (error) { optionsError = error.code; }
+  check(optionsError === 'ERR_HTTP2_GOAWAY_SESSION' && optionFrames.length === 0 && fromOptions._nextStream === optionsId && fromOptions._streams.size === optionsSize, 'options getter admitted a request after GOAWAY');
+
+  var direct = new http2.ClientHttp2Session(99104, 'tcp'), directFrames = [];
+  direct._send = function(value) { directFrames.push(Buffer.from(value)); return true; };
+  direct.goaway();
+  var stillUsable = direct.request({ ':path': '/allowed-after-local-goaway' });
+  check(stillUsable.id === 1 && directFrames.filter(function(value) { return value[3] === 1; }).length === 1, 'direct GOAWAY closed local request admission');
+
+  var invalid = new http2.ServerHttp2Session(0, 'tcp'), invalidFrames = [];
+  invalid._send = function(value) { invalidFrames.push(Buffer.from(value)); return true; };
+  [NaN, Infinity, -1, 1.5, 2147483648].forEach(function(id) { var rejected = false; try { invalid.goaway(0, id); } catch (error) { rejected = error instanceof RangeError; } check(rejected && invalid._sentGoawayLastStreamId === undefined && invalidFrames.length === 0, 'invalid GOAWAY cutoff changed session state'); });
+  invalid.goaway(0, 0);
+  check(payloadCutoff(invalidFrames[0]) === 0 && invalid._sentGoawayLastStreamId === 0, 'explicit zero cutoff was not preserved');
+
+  var nested = new http2.ServerHttp2Session(0, 'tcp'), nestedWire = [], nestedEmitted = [];
+  nested._lastRemoteStreamId = 3;
+  nested.on('stream', function(stream) { nestedEmitted.push(stream.id); });
+  nested._send = function(value) { nestedWire.push(payloadCutoff(value)); if (nestedWire.length === 1) { nested.goaway(0, 1); nested._deliverHeaders(3, 4, Buffer.from([0x83])); } return true; };
+  nested.goaway();
+  check(nestedWire.join(',') === '3,1' && nested._sentGoawayLastStreamId === 1 && nestedEmitted.length === 0, 'nested GOAWAY increased or bypassed the cutoff');
+  var converting = new http2.ServerHttp2Session(0, 'tcp'), convertingWire = [];
+  converting._lastRemoteStreamId = 3;
+  converting._send = function(value) { convertingWire.push(payloadCutoff(value)); return true; };
+  var opaque = {};
+  Object.defineProperty(opaque, 'length', { get: function() { converting.goaway(0, 1); return 0; } });
+  converting.goaway(0, undefined, opaque);
+  check(convertingWire.join(',') === '1,1' && converting._sentGoawayLastStreamId === 1, 'opaque conversion reentry raised the sent cutoff');
+  var snapshot = new http2.ServerHttp2Session(0, 'tcp'), snapshotWire = [], snapshotEmitted = [];
+  snapshot._lastRemoteStreamId = 1;
+  snapshot._send = function(value) { snapshotWire.push(payloadCutoff(value)); return true; };
+  snapshot.on('stream', function(stream) { snapshotEmitted.push(stream.id); });
+  var snapshotOpaque = {};
+  Object.defineProperty(snapshotOpaque, 'length', { get: function() { snapshot._deliverHeaders(3, 4, Buffer.from([0x83])); return 0; } });
+  snapshot.goaway(0, undefined, snapshotOpaque);
+  check(snapshotWire[0] === 3 && snapshot._sentGoawayLastStreamId === 3 && snapshotEmitted.join(',') === '3', 'default GOAWAY cutoff missed a peer stream admitted during opaque conversion');
+
+  var reentrant = new http2.ServerHttp2Session(0, 'tcp'), reentrantEmitted = [];
+  reentrant._lastRemoteStreamId = 1;
+  reentrant.on('stream', function(stream) { reentrantEmitted.push(stream.id); });
+  reentrant._send = function(value) { if (value[3] === 7) reentrant._deliverHeaders(3, 4, Buffer.from([0x83])); return true; };
+  reentrant.goaway();
+  check(reentrantEmitted.length === 0 && reentrant._streams.size === 0, 'peer HEADERS reentry bypassed published GOAWAY cutoff');
+
+  var hpack = new http2.ServerHttp2Session(0, 'tcp'), hpackEmitted = [], existing = new http2.ServerHttp2Stream(hpack, 1);
+  hpack._send = function() { return true; };
+  hpack._sentGoawayLastStreamId = 1;
+  hpack._streams.set(1, existing);
+  existing.on('response', function(headers) { hpackEmitted.push(headers['x-test']); });
+  var inserted = Buffer.from([0x40, 0x06].concat(Array.from(Buffer.from('x-test')), [0x01, 0x76]));
+  hpack._deliverHeaders(3, 4, inserted);
+  hpack._deliverHeaders(1, 4, Buffer.from([0xbe]));
+  check(!hpack._streams.has(3) && hpackEmitted[0] === 'v', 'refused HEADERS did not preserve HPACK state for an existing stream');
+
+  var natural = new http2.ServerHttp2Session(99105, 'tcp'), naturalWire = [], naturalDone = 0;
+  natural._send = function(value) { naturalWire.push(Buffer.from(value)); return true; };
+  safeDestroy(natural);
+  var upload = new http2.ServerHttp2Stream(natural, 1);
+  natural._streams.set(1, upload);
+  natural.close(function(error) { if (!error) naturalDone++; });
+  natural.close(function(error) { if (!error) naturalDone++; });
+  check(!natural.destroyed && naturalWire.filter(function(value) { return value[3] === 7; }).length === 1, 'close did not wait for the active stream or repeated close sent another GOAWAY');
+  upload.write('upload');
+  upload.end();
+  natural._frame(0, 1, 1, Buffer.from('response'));
+
+  var afterReceived = new http2.ServerHttp2Session(99106, 'tcp'), afterWire = [], afterDone = 0;
+  afterReceived._send = function(value) { afterWire.push(Buffer.from(value)); return true; };
+  safeDestroy(afterReceived);
+  var remoteReset = new http2.ServerHttp2Stream(afterReceived, 1);
+  afterReceived._streams.set(1, remoteReset);
+  gotGoaway(afterReceived);
+  afterReceived.close(function(error) { if (!error) afterDone++; });
+  afterReceived._frame(3, 0, 1, Buffer.alloc(4));
+
+  var localResetSession = new http2.ServerHttp2Session(99107, 'tcp');
+  localResetSession._send = function() { return true; };
+  safeDestroy(localResetSession);
+  var localReset = new http2.ServerHttp2Stream(localResetSession, 1);
+  localResetSession._streams.set(1, localReset);
+  localResetSession.close();
+  localReset.close();
+
+  var throwing = new http2.ServerHttp2Session(99108, 'tcp'), throwingClosed = 0, marker = new Error('finish marker');
+  throwing._send = function() { return true; };
+  safeDestroy(throwing);
+  var finalStream = new http2.ServerHttp2Stream(throwing, 1);
+  throwing._streams.set(1, finalStream);
+  finalStream.readableEnded = true;
+  finalStream.on('finish', function() { throw marker; });
+  throwing.close(function(error) { if (!error) throwingClosed++; });
+  var caughtFinish = false;
+  try { finalStream.end(); } catch (error) { caughtFinish = error === marker; }
+
+  var failed = new http2.ServerHttp2Session(99109, 'tcp'), failedWrites = 0, failedAcks = 0, failedCloses = 0, sendError = new Error('goaway write failed');
+  failed._send = function(value) { if (value[3] === 7) { failed._sendError = sendError; return false; } return true; };
+  safeDestroy(failed);
+  failed.settings({}, function(error) { if (error) failedAcks++; });
+  failed._sendWindow = 0;
+  var queued = new http2.ServerHttp2Stream(failed, 1);
+  failed._streams.set(1, queued);
+  queued.write('queued', function(error) { if (error) failedWrites++; });
+  failed.on('error', function() { throw new Error('session error listener threw'); });
+  var caughtDestroy = false;
+  try { failed.close(function(error) { if (error) failedCloses++; }); } catch (error) { caughtDestroy = error.message === 'session error listener threw'; }
+
+  return twoTurns(function() {
+    check(natural.destroyed && naturalDone === 2 && upload.writableEnded && upload.readableEnded && naturalWire.filter(function(value) { return value[3] === 0; }).length >= 2, 'natural close did not drain writable and readable stream sides');
+    check(afterReceived.destroyed && afterDone === 1 && afterWire.filter(function(value) { return value[3] === 7; }).length === 1, 'close after received GOAWAY did not drain after remote reset');
+    check(localResetSession.destroyed && localReset.closed, 'local reset did not trigger graceful drain');
+    check(caughtFinish && throwing.destroyed && throwingClosed === 1, 'throwing finish listener skipped graceful cleanup');
+    check(caughtDestroy && failed.destroyed && failedWrites === 1 && failedAcks === 1 && failedCloses === 1, 'failed GOAWAY did not settle queued callbacks through throwing listener');
+    return true;
+  });
+};"#,
+    )
+    .unwrap();
+    let empty_node_modules = temp_registry("builtin_http2_goaway_boundaries_modules");
+    let (bundle, _, file_count, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(file_count, 3);
+    let script = [
+        "globalThis.module = { exports: {} }; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) { throw new Error(name); };",
+        &bundle,
+        "globalThis.exerciseHttp2GoawayBoundaries = module.exports;",
+    ]
+    .join("\n");
+    let source = CString::new(script).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let function = CString::new("exerciseHttp2GoawayBoundaries").unwrap();
+    let arguments = CString::new("[]").unwrap();
+    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(result, "true");
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+}
+
 #[test]
 fn path_join_skips_empty_segments_before_normalizing() {
     use std::ffi::{CStr, CString};
