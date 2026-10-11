@@ -719,6 +719,99 @@ fn process_exposes_time_cwd_and_event_helpers() {
     );
 }
 
+#[test]
+fn process_event_listeners_receive_process_as_receiver() {
+    std::thread::spawn(|| {
+        assert_eq!(
+            load(
+                r#"
+      function processListenerReceiverCases() {
+        const normalEvent = 'thaw:receiver:normal';
+        const onceEvent = 'thaw:receiver:once';
+        const arrowEvent = 'thaw:receiver:arrow';
+        const hostileEvent = 'thaw:receiver:hostile';
+        const throwingEvent = 'thaw:receiver:throwing';
+        let normalThis = false, normalArgs = false, normalError = false;
+        let onceThis = false, onceArgs = false, arrowThis = false;
+        let hostileThis = false, hostileArgs = false, hostileError = false;
+        let throwIdentity = false;
+        const normal = function(left, right) {
+          normalThis = this === process;
+          normalArgs = left === 'left' && right === 7;
+          this.off(normalEvent, normal);
+        };
+        const once = function(left, right) {
+          onceThis = this === process;
+          onceArgs = left === 'once' && right === 8;
+        };
+        let arrow;
+        const owner = {
+          installAndEmit() {
+            arrow = () => { arrowThis = this === owner; };
+            process.on(arrowEvent, arrow);
+            process.emit(arrowEvent);
+          }
+        };
+        const hostile = function(value) {
+          hostileThis = this === process;
+          hostileArgs = value === 'hostile';
+          this.off(hostileEvent, hostile);
+        };
+        hostile.call = () => { throw new Error('listener .call used'); };
+        hostile.apply = () => { throw new Error('listener .apply used'); };
+        const sentinel = new Error('listener sentinel');
+        const throwing = function() { throw sentinel; };
+        let normalFirst = false, normalSecond = false;
+        let onceFirst = false, onceSecond = false, onceCount = -1;
+        let hostileEmit = false, hostileCount = -1;
+        try {
+          process.on(normalEvent, normal);
+          try { normalFirst = process.emit(normalEvent, 'left', 7); }
+          catch (_) { normalError = true; }
+          try { normalSecond = process.emit(normalEvent, 'again'); }
+          catch (_) { normalError = true; }
+
+          process.once(onceEvent, once);
+          onceFirst = process.emit(onceEvent, 'once', 8);
+          onceSecond = process.emit(onceEvent, 'again');
+          onceCount = process.listenerCount(onceEvent);
+
+          owner.installAndEmit();
+
+          process.on(hostileEvent, hostile);
+          try { hostileEmit = process.emit(hostileEvent, 'hostile'); }
+          catch (_) { hostileError = true; }
+          hostileCount = process.listenerCount(hostileEvent);
+
+          process.on(throwingEvent, throwing);
+          try { process.emit(throwingEvent); }
+          catch (error) { throwIdentity = error === sentinel; }
+          return [normalFirst, !normalError, normalThis, normalArgs,
+                  process.listenerCount(normalEvent), !normalSecond,
+                  onceFirst, onceThis, onceArgs, !onceSecond, onceCount,
+                  arrowThis, hostileEmit, !hostileError, hostileThis, hostileArgs,
+                  hostileCount, throwIdentity];
+        } finally {
+          process.off(normalEvent, normal);
+          process.off(onceEvent, once);
+          process.off(arrowEvent, arrow);
+          process.off(hostileEvent, hostile);
+          process.off(throwingEvent, throwing);
+        }
+      }
+    "#
+            ),
+            1
+        );
+        assert_eq!(
+            call("processListenerReceiverCases", "[]"),
+            "[true,true,true,true,0,true,true,true,true,true,0,true,true,true,true,true,0,true]"
+        );
+    })
+    .join()
+    .unwrap();
+}
+
 /// `process.report.getReport().header.glibcVersionRuntime` -- real
 /// Node's own way of telling a glibc build apart from a musl one at
 /// runtime, which some native-addon loaders check directly instead of
