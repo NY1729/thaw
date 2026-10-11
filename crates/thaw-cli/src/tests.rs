@@ -50,12 +50,31 @@ fn compatibility_commands_are_bounded_by_a_timeout() {
     .unwrap_err()
     .contains("timed out"));
     assert!(start.elapsed() < Duration::from_secs(2));
-    assert!(command_output_with_timeout(
-        Command::new("sh").args(["-c", "sleep 1"]),
-        Duration::from_millis(10),
+    let partial = command_output_with_timeout(
+        Command::new("sh").args([
+            "-c",
+            "printf 'partial-stdout-marker\\n'; printf 'partial-stderr-marker\\n' >&2; sleep 5",
+        ]),
+        Duration::from_secs(1),
     )
-    .unwrap_err()
-    .contains("timed out"));
+    .unwrap_err();
+    assert!(partial.contains("timed out"));
+    assert!(partial.contains("partial-stdout-marker"));
+    assert!(partial.contains("partial-stderr-marker"));
+
+    let large_tail = command_output_with_timeout(
+        Command::new("sh").args([
+            "-c",
+            "head -c 16384 /dev/zero | tr '\\000' x; printf 'stdout-tail-marker\\n'; head -c 16384 /dev/zero | tr '\\000' y >&2; printf 'stderr-tail-marker\\n' >&2; sleep 5",
+        ]),
+        Duration::from_secs(1),
+    )
+    .unwrap_err();
+    assert!(large_tail.contains("stdout (truncated to last 8192 bytes)"));
+    assert!(large_tail.contains("stderr (truncated to last 8192 bytes)"));
+    assert!(large_tail.contains("stdout-tail-marker"));
+    assert!(large_tail.contains("stderr-tail-marker"));
+    assert!(large_tail.len() < 20_000);
 }
 
 /// `thaw completeness`'s composite index must stay consistent with the
