@@ -975,16 +975,20 @@ thread_local! {
 }
 
 /// Drops the main-thread QuickJS realm after generated `main` has drained
-/// terminal work and released retained handles. Move the pair out of the TLS
-/// borrow first, then clear other persistent owners while its runtime is still
-/// active so no `Persistent` or cloned `Ctx` outlives the Runtime.
+/// terminal work and released retained handles. Clear persistent owners and
+/// drain their callbacks while the realm remains installed; refuse teardown
+/// while any native graph release obligation is still outstanding.
 #[no_mangle]
 pub extern "C" fn thaw_js_shutdown_context() -> u8 {
-    let Ok(Some((runtime, context))) = JS.try_with(|slot| slot.borrow_mut().take()) else {
+    if ENGINE_ENTRY_DEPTH.try_with(Cell::get).unwrap_or(usize::MAX) != 0
+        || NATIVE_GRAPH_RELEASES_DRAINING.try_with(Cell::get).unwrap_or(true)
+        || ACTIVE_NAPI_CONTEXT.try_with(|active| !active.get().is_null()).unwrap_or(true)
+        || !JS.try_with(|slot| slot.try_borrow_mut().is_ok_and(|slot| slot.is_some())).unwrap_or(false)
+    {
         return 0;
-    };
+    }
 
-    context.with(|ctx| {
+    with_context(|ctx| {
         let _active = ActiveNapiContext::enter(&ctx);
         let unhandled = UNHANDLED_JS_REJECTIONS
             .try_with(|pending| std::mem::take(&mut *pending.borrow_mut()))
@@ -1008,10 +1012,23 @@ pub extern "C" fn thaw_js_shutdown_context() -> u8 {
         }
     });
 
-    // `Context` drops before `Runtime`; both are outside the JS RefCell borrow.
+    if native_graph_releases_pending() { return 0; }
+
+    // Shutdown owns the outer engine boundary through Context and Runtime destruction.
+    let _entry = EngineEntryGuard::enter();
+    struct RealmClosingGuard(bool);
+    impl Drop for RealmClosingGuard {
+        fn drop(&mut self) {
+            let _ = REALM_CLOSING.try_with(|closing| closing.set(self.0));
+        }
+    }
+    let _closing = RealmClosingGuard(REALM_CLOSING.with(|closing| closing.replace(true)));
+    let Ok(Some((runtime, context))) = JS.try_with(|slot| {
+        slot.try_borrow_mut().ok().and_then(|mut slot| slot.take())
+    }) else { return 0; };
     drop(context);
     drop(runtime);
-    1
+    if native_graph_releases_pending() { 0 } else { 1 }
 }
 
 #[cfg(all(test, unix))]

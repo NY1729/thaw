@@ -2172,6 +2172,8 @@ fn release_dynamic_value_for_js(ctx: Ctx<'_>, handle: u64) -> u8 {
     thaw_js_release_handle(handle)
 }
 
+// Numeric native pins are detached into the outer-boundary release queue
+// when their Symbol owner is removed or the userdata is cleared.
 struct NativeSymbolRoots(std::cell::RefCell<std::collections::HashMap<u64, NativeGraphCallbackRoots>>);
 
 struct PrivateNapiSymbolOps {
@@ -2233,7 +2235,7 @@ fn pin_native_graph_symbol(ctx: Ctx<'_>, id: String) -> rquickjs::Result<bool> {
         .and_then(|token| token.parse::<u64>().ok()).filter(|token| *token != 0)
         .ok_or_else(|| rquickjs::Error::new_from_js_message(
             "native bridge", "Symbol", "Cannot retain native Symbol"))?;
-    let root = NativeGraphCallbackRoots([token, 0, 0]);
+    let root = NativeGraphCallbackRoots::new([token, 0, 0]);
     let roots = ctx.userdata::<NativeSymbolRoots>()
         .ok_or_else(|| rquickjs::Error::new_from_js_message(
             "native bridge", "Symbol", "Missing Symbol root owner"))?;
@@ -2242,8 +2244,7 @@ fn pin_native_graph_symbol(ctx: Ctx<'_>, id: String) -> rquickjs::Result<bool> {
         let mut entries = roots.0.borrow_mut();
         entries.entry(id).or_insert_with(|| redundant.take().expect("new Symbol root is present"));
     }
-    // Releasing an extra positive reference may reenter QuickJS. Never do it
-    // while the userdata RefCell is borrowed.
+    // Drop only detaches the extra pin, but keep userdata borrows out of it.
     drop(roots);
     drop(redundant);
     Ok(true)
@@ -2258,8 +2259,7 @@ fn unpin_native_graph_symbol(ctx: Ctx<'_>, id: String) -> rquickjs::Result<bool>
             "String", "native Symbol ID", "Invalid native Symbol ID"))?;
     let Some(roots) = ctx.userdata::<NativeSymbolRoots>() else { return Ok(false); };
     let root = roots.0.borrow_mut().remove(&id);
-    // The positive-reference destructor can reenter QuickJS/N-API. Keep the
-    // userdata RefCell free while it runs.
+    // Drop only detaches the pin; keep the userdata RefCell free while it runs.
     drop(roots);
     let removed = root.is_some();
     drop(root);
@@ -2348,7 +2348,7 @@ fn make_native_graph_invoker<'js>(
         .and_then(|token| token.parse::<u64>().ok()).filter(|token| *token != 0)
         .ok_or_else(|| rquickjs::Error::new_from_js_message(
             "native bridge", "Function", "Cannot retain native Function"))?;
-    let roots = NativeGraphCallbackRoots([token, 0, 0]);
+    let roots = NativeGraphCallbackRoots::new([token, 0, 0]);
     Function::new(ctx.clone(), move |ctx: Ctx<'_>, graph: String, construct: bool| {
         let _keep_native_function = &roots;
         let Some(callback) = NAPI_BRIDGE.lock().unwrap().as_ref().map(|bridge| bridge.2) else {
@@ -3435,17 +3435,74 @@ pub extern "C" fn thaw_js_define_data_property_key_handle_graph_result(
     }
 }
 
-struct NativeGraphCallbackRoots([u64; 3]);
+struct PendingNativeGraphRelease {
+    token: u64,
+    callback: Option<NapiBridgeLeaseRelease>,
+}
+
+struct NativeGraphCallbackRoots {
+    tokens: [u64; 3],
+    callback: Option<NapiBridgeLeaseRelease>,
+}
+
+impl NativeGraphCallbackRoots {
+    fn new(tokens: [u64; 3]) -> Self {
+        let count = tokens.iter().filter(|token| **token != 0).count();
+        NATIVE_GRAPH_RELEASES_OUTSTANDING.with(|outstanding| {
+            outstanding.set(outstanding.get().saturating_add(count));
+        });
+        let callback = NAPI_BRIDGE.lock().unwrap().as_ref().map(|bridge| bridge.6);
+        Self { tokens, callback }
+    }
+}
 
 impl Drop for NativeGraphCallbackRoots {
     fn drop(&mut self) {
-        let release = NAPI_BRIDGE.lock().unwrap().as_ref().map(|bridge| bridge.6);
-        if let Some(release) = release {
-            for token in self.0.iter().copied().filter(|token| *token != 0) {
-                release(token);
-            }
-        }
+        let _ = PENDING_NATIVE_GRAPH_RELEASES.try_with(|pending| {
+            let Ok(mut pending) = pending.try_borrow_mut() else { return; };
+            pending.extend(self.tokens.iter().copied().filter(|token| *token != 0)
+                .map(|token| PendingNativeGraphRelease { token, callback: self.callback }));
+        });
     }
+}
+
+#[cfg(test)]
+static TEST_NATIVE_GRAPH_RELEASE_CALLS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(test)]
+extern "C" fn test_native_graph_release(token: u64) -> u8 {
+    if token != 71 { return 0; }
+    if TEST_NATIVE_GRAPH_RELEASE_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+        drain_native_graph_release_queue();
+        0
+    } else {
+        1
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn native_graph_root_drop_queues_duplicates_and_retries_failed_batch() {
+    std::thread::spawn(|| {
+        use std::sync::atomic::Ordering;
+        TEST_NATIVE_GRAPH_RELEASE_CALLS.store(0, Ordering::SeqCst);
+        let mut roots = NativeGraphCallbackRoots::new([71, 71, 0]);
+        roots.callback = Some(test_native_graph_release);
+        drop(roots);
+
+        assert_eq!(NATIVE_GRAPH_RELEASES_OUTSTANDING.with(Cell::get), 2);
+        assert_eq!(PENDING_NATIVE_GRAPH_RELEASES.with(|pending| pending.borrow().len()), 2);
+        drain_native_graph_release_queue();
+        assert_eq!(NATIVE_GRAPH_RELEASES_OUTSTANDING.with(Cell::get), 2);
+        assert_eq!(PENDING_NATIVE_GRAPH_RELEASES.with(|pending| pending.borrow().len()), 2);
+        assert_eq!(TEST_NATIVE_GRAPH_RELEASE_CALLS.load(Ordering::SeqCst), 1);
+
+        drain_native_graph_release_queue();
+        assert_eq!(NATIVE_GRAPH_RELEASES_OUTSTANDING.with(Cell::get), 0);
+        assert!(PENDING_NATIVE_GRAPH_RELEASES.with(|pending| pending.borrow().is_empty()));
+        assert_eq!(TEST_NATIVE_GRAPH_RELEASE_CALLS.load(Ordering::SeqCst), 3);
+    }).join().unwrap();
 }
 
 #[no_mangle]
@@ -3454,7 +3511,7 @@ pub extern "C" fn thaw_js_define_callback_property_key_handle_result(
     method_id: u64, attributes: u32,
     getter_root: u64, setter_root: u64, method_root: u64,
 ) -> ThawHandleResult {
-    let roots = NativeGraphCallbackRoots([getter_root, setter_root, method_root]);
+    let roots = NativeGraphCallbackRoots::new([getter_root, setter_root, method_root]);
     let result: Result<u64, BoundaryError> = with_active_or_context(move |ctx| {
         let object = object_for_handle(&ctx, handle)?;
         let key = value_for_handle(&ctx, key_handle)?;
