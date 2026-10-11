@@ -2971,6 +2971,184 @@ fn event_target_dispatches_listeners_and_cancellation() {
 }
 
 #[test]
+fn event_target_capture_passive_and_reentrant_dispatch_contracts() {
+    assert_eq!(load(r#"
+      function eventTargetCaptureRecords() {
+        const target = new EventTarget(), calls = [], callback = () => calls.push('same');
+        target.addEventListener('x', callback);
+        target.addEventListener('x', callback, { capture: true });
+        target.addEventListener('x', callback, { capture: true, once: true });
+        target.dispatchEvent(new Event('x')); target.dispatchEvent(new Event('x'));
+        target.removeEventListener('x', callback, true);
+        const afterCaptureRemove = target.__thawListeners.get('x').length;
+        target.removeEventListener('x', callback, { capture: false });
+        const afterAll = target.__thawListeners.get('x').length;
+        const object = { handleEvent() { calls.push('object'); } };
+        target.addEventListener('x', object, false); target.addEventListener('x', object, true);
+        target.removeEventListener('x', object, { capture: true });
+        const onceTarget = new EventTarget(), onceCalls = [];
+        const onceCallback = () => onceCalls.push('same');
+        onceTarget.addEventListener('once', onceCallback, false);
+        onceTarget.addEventListener('once', onceCallback, { capture: true, once: true });
+        onceTarget.dispatchEvent(new Event('once'));
+        const afterCaptureOnce = onceTarget.__thawListeners.get('once').length;
+        onceTarget.dispatchEvent(new Event('once'));
+        return [calls.join(','), afterCaptureRemove, afterAll, target.__thawListeners.get('x').length,
+          onceCalls.join(','), afterCaptureOnce, onceTarget.__thawListeners.get('once').length];
+      }
+      function eventTargetOptionsReentry() {
+        const target = new EventTarget(), callback = () => {}, signal = new AbortController().signal;
+        let reads = 0;
+        target.addEventListener('x', callback, {
+          get capture() { reads++; target.addEventListener('x', callback); return false; },
+          get once() { reads++; return true; }, get passive() { reads++; return true; },
+          get signal() { reads++; return signal; }
+        });
+        let removeRead = 0, removeForbiddenReads = 0;
+        target.removeEventListener('x', callback, { get capture() { removeRead++; return false; },
+          get once() { removeForbiddenReads++; throw new Error('unexpected once read'); },
+          get passive() { removeForbiddenReads++; throw new Error('unexpected passive read'); },
+          get signal() { removeForbiddenReads++; throw new Error('unexpected signal read'); } });
+        const sentinel = {}, inner = () => {};
+        let identity = false;
+        try { target.addEventListener('x', inner, { get capture() { target.addEventListener('x', inner); throw sentinel; } }); }
+        catch (error) { identity = error === sentinel; }
+        const getterReads = [], getterCounts = [];
+        for (const key of ['capture', 'once', 'passive', 'signal']) {
+          const callback = () => {}, controller = new AbortController();
+          const options = {};
+          Object.defineProperty(options, key, { get() {
+            getterReads.push(key);
+            target.addEventListener('reentry-' + key, callback);
+            return key === 'signal' ? controller.signal : key === 'once';
+          } });
+          target.addEventListener('reentry-' + key, callback, options);
+          controller.abort();
+          getterCounts.push(target.__thawListeners.get('reentry-' + key).length);
+        }
+        const readded = () => {};
+        const readdOptions = { get capture() {
+          target.removeEventListener('readd', readded);
+          target.addEventListener('readd', readded);
+          return false;
+        } };
+        target.addEventListener('readd', readded, readdOptions);
+        return [reads, target.__thawListeners.get('x').length, removeRead, removeForbiddenReads, identity,
+          getterReads.join(','), getterCounts.join(','), target.__thawListeners.get('readd').length];
+      }
+      function eventTargetPassiveAndRedispatch() {
+        const target = new EventTarget(), other = new EventTarget();
+        const passive = new Event('x', { cancelable: true }), calls = [];
+        target.addEventListener('x', event => event.preventDefault(), { passive: true });
+        target.addEventListener('x', event => {
+          try { target.dispatchEvent(event); } catch (error) { calls.push(error.name); }
+          try { other.dispatchEvent(event); } catch (error) { calls.push(error.name); }
+          calls.push(event.currentTarget === target);
+        });
+        const passiveResult = target.dispatchEvent(passive);
+        const active = new Event('x', { cancelable: true });
+        const activeTarget = new EventTarget();
+        activeTarget.addEventListener('x', event => event.preventDefault());
+        const activeResult = activeTarget.dispatchEvent(active);
+        const bothTarget = new EventTarget(), both = new Event('x', { cancelable: true });
+        bothTarget.addEventListener('x', event => event.preventDefault(), { passive: true });
+        bothTarget.addEventListener('x', event => event.preventDefault());
+        bothTarget.addEventListener('x', event => event.preventDefault(), { passive: false });
+        const bothResult = bothTarget.dispatchEvent(both);
+        const noncancelable = new Event('x');
+        bothTarget.dispatchEvent(noncancelable);
+        const duplicateTarget = new EventTarget(), duplicateEvent = new Event('x', { cancelable: true });
+        const duplicate = event => event.preventDefault();
+        duplicateTarget.addEventListener('x', duplicate, { passive: true });
+        duplicateTarget.addEventListener('x', duplicate, { passive: false });
+        duplicateTarget.dispatchEvent(duplicateEvent);
+        const reusable = other.dispatchEvent(passive);
+        const outerActive = new Event('outer-active', { cancelable: true });
+        const nestedPassiveTarget = new EventTarget(), activeOuterTarget = new EventTarget();
+        nestedPassiveTarget.addEventListener('inner-passive', () => outerActive.preventDefault(), { passive: true });
+        activeOuterTarget.addEventListener('outer-active', () => nestedPassiveTarget.dispatchEvent(new Event('inner-passive')));
+        activeOuterTarget.dispatchEvent(outerActive);
+        return [passive.defaultPrevented, passiveResult, active.defaultPrevented, activeResult,
+          calls.join(','), reusable, passive.target === other, both.defaultPrevented, bothResult,
+          noncancelable.defaultPrevented, duplicateEvent.defaultPrevented, outerActive.defaultPrevented];
+      }
+      function eventTargetThrowCleanup() {
+        const target = new EventTarget(), errors = [false, undefined, {}], results = [];
+        for (const sentinel of errors) {
+          const event = new Event('x');
+          const listener = () => { throw sentinel; };
+          target.addEventListener('x', listener);
+          try { target.dispatchEvent(event); } catch (error) {
+            results.push(error === sentinel && event.currentTarget === null);
+          }
+          target.removeEventListener('x', listener);
+          results.push(target.dispatchEvent(event));
+        }
+        const typed = new Event('x'), typeError = {};
+        Object.defineProperty(typed, 'type', { configurable: true, get() { throw typeError; } });
+        try { target.dispatchEvent(typed); } catch (error) { results.push(error === typeError); }
+        delete typed.type;
+        results.push(target.dispatchEvent(typed));
+        const innerTarget = new EventTarget(), outerTarget = new EventTarget();
+        const outer = new Event('outer', { cancelable: true });
+        outerTarget.addEventListener('outer', () => {
+          innerTarget.addEventListener('inner', () => outer.preventDefault(), { passive: false });
+          innerTarget.dispatchEvent(new Event('inner'));
+        }, { passive: true });
+        outerTarget.dispatchEvent(outer);
+        const passiveTarget = new EventTarget(), passiveEvent = new Event('throw-passive', { cancelable: true });
+        const passiveError = {}, passiveListener = () => { throw passiveError; };
+        passiveTarget.addEventListener('throw-passive', passiveListener, { passive: true });
+        try { passiveTarget.dispatchEvent(passiveEvent); } catch (error) {
+          results.push(error === passiveError && passiveEvent.currentTarget === null);
+        }
+        passiveTarget.removeEventListener('throw-passive', passiveListener);
+        results.push(passiveTarget.dispatchEvent(passiveEvent));
+
+        const cleanupResults = [false, undefined].map(original => {
+          const cleanupTarget = new EventTarget(), cleanupEvent = new Event('cleanup');
+          const currentTargetError = {}, immediateStopError = undefined;
+          const cleanupListener = () => {
+            Object.defineProperty(cleanupEvent, 'currentTarget', { configurable: true,
+              set(value) { if (value === null) throw currentTargetError; } });
+            Object.defineProperty(cleanupEvent, '__thawImmediateStopped', { configurable: true,
+              set(value) { if (value === false) throw immediateStopError; } });
+            throw original;
+          };
+          cleanupTarget.addEventListener('cleanup', cleanupListener);
+          let originalPreserved = false;
+          try { cleanupTarget.dispatchEvent(cleanupEvent); }
+          catch (error) { originalPreserved = error === original; }
+          Object.defineProperty(cleanupEvent, 'currentTarget', { configurable: true, writable: true, value: null });
+          Object.defineProperty(cleanupEvent, '__thawImmediateStopped', { configurable: true, writable: true, value: false });
+          cleanupTarget.removeEventListener('cleanup', cleanupListener);
+          return [originalPreserved, cleanupTarget.dispatchEvent(cleanupEvent)];
+        });
+
+        const cleanupOnlyTarget = new EventTarget(), cleanupOnlyEvent = new Event('cleanup-only');
+        const cleanupOnlyError = {}, cleanupOnlyListener = () => {
+          Object.defineProperty(cleanupOnlyEvent, 'currentTarget', { configurable: true,
+            set(value) { if (value === null) throw cleanupOnlyError; } });
+        };
+        cleanupOnlyTarget.addEventListener('cleanup-only', cleanupOnlyListener);
+        let cleanupOnlyPropagated = false;
+        try { cleanupOnlyTarget.dispatchEvent(cleanupOnlyEvent); }
+        catch (error) { cleanupOnlyPropagated = error === cleanupOnlyError; }
+        Object.defineProperty(cleanupOnlyEvent, 'currentTarget', { configurable: true, writable: true, value: null });
+        cleanupOnlyTarget.removeEventListener('cleanup-only', cleanupOnlyListener);
+        const reusedAfterCleanupOnly = cleanupOnlyTarget.dispatchEvent(cleanupOnlyEvent);
+        return [results.every(Boolean), outer.defaultPrevented,
+          cleanupResults.every(result => result[0] && result[1]),
+          cleanupOnlyPropagated, reusedAfterCleanupOnly];
+      }
+    "#), 1);
+    assert_eq!(call("eventTargetCaptureRecords", "[]"), r#"["same,same,same,same",1,0,1,"same,same,same",1,1]"#);
+    assert_eq!(call("eventTargetOptionsReentry", "[]"), r#"[4,1,1,0,true,"capture,once,passive,signal","1,1,1,1",1]"#);
+    assert_eq!(call("eventTargetPassiveAndRedispatch", "[]"), r#"[false,true,true,false,"InvalidStateError,InvalidStateError,true",true,true,true,false,false,false,true]"#);
+    assert_eq!(call("eventTargetThrowCleanup", "[]"), "[true,false,true,true,true]");
+}
+
+#[test]
 fn abort_controller_dispatches_once_and_timeout_aborts() {
     assert_eq!(
             load(
@@ -3001,6 +3179,210 @@ fn abort_controller_dispatches_once_and_timeout_aborts() {
         call("abortSignals", "[]"),
         r#"["property,once",true,"reason","reason",true,"TimeoutError",23,true,"combined","pre","AbortError",20,true]"#
     );
+}
+
+#[test]
+fn event_target_signal_option_contracts() {
+    assert_eq!(load(r#"
+      function eventTargetSignalBrands() {
+        const target = new EventTarget(), fake = Object.create(AbortSignal.prototype);
+        const proxied = new Proxy(new AbortController().signal, {});
+        const invalid = [fake, proxied, {}, target].map(signal => {
+          try { target.addEventListener('x', () => {}, { signal }); return false; }
+          catch (error) { return error instanceof TypeError; }
+        });
+        let nullCallbackInvalid = false;
+        try { target.addEventListener('x', null, { signal: {} }); }
+        catch (error) { nullCallbackInvalid = error instanceof TypeError; }
+        const pre = AbortSignal.abort(); target.addEventListener('x', () => {}, { signal: pre });
+        const live = new AbortController(); let calls = 0;
+        target.addEventListener('x', () => calls++, { signal: live.signal });
+        live.abort(); target.dispatchEvent(new Event('x'));
+        const subclass = new (class extends AbortSignal {})();
+        target.addEventListener('x', () => calls++, { signal: subclass });
+        const reentrant = new AbortController();
+        target.addEventListener('x', () => calls++, { get signal() {
+          reentrant.abort(); return reentrant.signal;
+        } });
+        const getterError = {}; let getterIdentity = false;
+        try { target.addEventListener('x', () => {}, { get signal() { throw getterError; } }); }
+        catch (error) { getterIdentity = error === getterError; }
+        const ordinaryTarget = new EventTarget(), ordinary = () => {};
+        ordinaryTarget.addEventListener('x', ordinary, null);
+        ordinaryTarget.addEventListener('x', ordinary, undefined);
+        const memberTarget = new EventTarget(), memberCallback = () => {};
+        memberTarget.addEventListener('x', memberCallback, { signal: null });
+        memberTarget.addEventListener('x', memberCallback, { signal: undefined });
+        return [invalid.every(Boolean) && nullCallbackInvalid, target.__thawListeners.get('x').length, calls,
+          getterIdentity, subclass instanceof AbortSignal, ordinaryTarget.__thawListeners.get('x').length,
+          memberTarget.__thawListeners.get('x').length];
+      }
+      function eventTargetSignalExactRecords() {
+        const target = new EventTarget(), a = new AbortController(), b = new AbortController();
+        const calls = [], callback = () => calls.push('call');
+        target.addEventListener('x', callback, { signal: a.signal });
+        target.addEventListener('x', callback, { capture: true, signal: b.signal });
+        target.removeEventListener('x', callback, false); a.abort();
+        target.dispatchEvent(new Event('x'));
+        const remaining = target.__thawListeners.get('x').length;
+        let onceCalls = 0;
+        target.addEventListener('y', () => onceCalls++, { once: true, signal: b.signal });
+        target.dispatchEvent(new Event('y')); b.abort();
+        const duplicateTarget = new EventTarget(), first = new AbortController(), second = new AbortController();
+        let duplicateCalls = 0;
+        const duplicate = event => { duplicateCalls++; event.preventDefault(); };
+        duplicateTarget.addEventListener('z', duplicate, { signal: first.signal, passive: true });
+        duplicateTarget.addEventListener('z', duplicate, { signal: second.signal, once: true, passive: false });
+        const duplicateCountBeforeAbort = duplicateTarget.__thawListeners.get('z').length;
+        second.abort();
+        const firstBindingSurvivesDuplicateAbort = duplicateTarget.__thawListeners.get('z').length === 1;
+        const duplicateEvent = new Event('z', { cancelable: true });
+        duplicateTarget.dispatchEvent(duplicateEvent); duplicateTarget.dispatchEvent(duplicateEvent);
+        const originalOptionsSurviveDuplicate = duplicateCalls === 2 && !duplicateEvent.defaultPrevented;
+        first.abort();
+        const duplicateCountAfterAbort = duplicateTarget.__thawListeners.get('z').length;
+        const old = new AbortController(), fresh = new AbortController();
+        target.addEventListener('q', duplicate, { signal: old.signal });
+        target.removeEventListener('q', duplicate);
+        target.addEventListener('q', duplicate, { signal: fresh.signal });
+        old.abort(); const freshRecordSurvives = target.__thawListeners.get('q').length === 1;
+        fresh.abort();
+        return [calls.join(','), remaining, onceCalls, target.__thawListeners.get('y').length,
+          duplicateCountBeforeAbort, firstBindingSurvivesDuplicateAbort, originalOptionsSurviveDuplicate,
+          duplicateCountAfterAbort, freshRecordSurvives, target.__thawListeners.get('q').length];
+      }
+      function eventTargetSignalPublicInterference() {
+        const cases = [
+          signal => signal.addEventListener('abort', event => event.stopImmediatePropagation()),
+          signal => signal.onabort = () => { throw undefined; },
+          signal => signal.addEventListener('abort', () => { throw false; }),
+          (signal, target, calls) => {
+            signal.addEventListener = () => { calls.count++; };
+            signal.removeEventListener = () => { calls.count++; };
+            Object.defineProperty(signal, 'aborted', { get() { calls.count++; return false; } });
+            target.removeEventListener = () => { calls.count++; };
+          }
+        ];
+        const results = cases.map((setup, index) => {
+          const controller = new AbortController(), target = new EventTarget();
+          const listener = () => {}, replacementCalls = { count: 0 };
+          setup(controller.signal, target, replacementCalls);
+          target.addEventListener('x', listener, { signal: controller.signal });
+          let caught = false, value;
+          try { controller.abort(); } catch (error) { caught = true; value = error; }
+          return [target.__thawListeners.get('x').length, caught,
+            index < 3 ? index === 0 || value === (index === 1 ? undefined : false) : true,
+            replacementCalls.count];
+        });
+        return results;
+      }
+      function eventTargetSignalDependentOrder() {
+        const root = new AbortController(), other = new AbortController();
+        const combined = AbortSignal.any([root.signal, other.signal]);
+        const left = AbortSignal.any([combined]), right = AbortSignal.any([root.signal]);
+        const diamond = AbortSignal.any([left, right]);
+        const dependents = [combined, left, right, diamond], targets = dependents.map(() => new EventTarget());
+        const order = [], calls = [0, 0, 0, 0], reason = {};
+        const rootTarget = new EventTarget();
+        rootTarget.addEventListener('x', () => order.push('root-target'), { signal: root.signal });
+        dependents.forEach((signal, index) => {
+          targets[index].addEventListener('x', () => calls[index]++, { signal });
+          signal.addEventListener('abort', () => {
+            order.push('dependent-' + index + '-' + (targets[index].__thawListeners.get('x').length === 0));
+          });
+        });
+        root.signal.addEventListener('abort', () => {
+          order.push(dependents.every(signal => signal.aborted && signal.reason === reason)
+            ? 'published' : 'bad');
+          rootTarget.dispatchEvent(new Event('x'));
+          targets.forEach(target => target.dispatchEvent(new Event('x')));
+          other.abort('reentered'); root.abort('again');
+          rootTarget.addEventListener('late', () => {}, { signal: root.signal });
+        });
+        root.abort(reason);
+        const listsCleared = rootTarget.__thawListeners.get('x').length === 0
+          && targets.every(target => target.__thawListeners.get('x').length === 0);
+        const throwResults = [false, undefined].map(sentinel => {
+          const throwingRoot = new AbortController(), otherRoot = new AbortController();
+          const child = AbortSignal.any([throwingRoot.signal, otherRoot.signal]);
+          const later = AbortSignal.any([child]), targets = [new EventTarget(), new EventTarget()];
+          targets[0].addEventListener('x', () => {}, { signal: child });
+          targets[1].addEventListener('x', () => {}, { signal: later });
+          throwingRoot.signal.addEventListener('abort', () => {
+            otherRoot.abort(); throwingRoot.abort(); throw sentinel;
+          });
+          let identity = false;
+          try { throwingRoot.abort(); } catch (error) { identity = error === sentinel; }
+          return identity && child.aborted && later.aborted
+            && targets.every(target => target.__thawListeners.get('x').length === 0);
+        });
+        return [order.join(','), calls.join(','), listsCleared, throwResults.every(Boolean)];
+      }
+      function eventTargetSignalObserverCleanup() {
+        const rootController = new AbortController(), dependent = AbortSignal.any([rootController.signal]);
+        const target = new EventTarget(), listener = () => {};
+        target.addEventListener('x', listener, { signal: dependent });
+        const before = target.__thawListeners.get('x').length;
+        rootController.abort('done');
+        const algorithmOnlyCleanup = target.__thawListeners.get('x').length === 0 && dependent.aborted;
+
+        const explicitRoot = new AbortController(), explicitDep = AbortSignal.any([explicitRoot.signal]);
+        const explicitTarget = new EventTarget(), explicit = () => {};
+        explicitTarget.addEventListener('x', explicit, { signal: explicitDep });
+        explicitTarget.removeEventListener('x', explicit); explicitRoot.abort();
+        const explicitCleanup = explicitTarget.__thawListeners.get('x').length === 0;
+
+        const onceRoot = new AbortController(), onceDep = AbortSignal.any([onceRoot.signal]);
+        const onceTarget = new EventTarget(); let onceRemovedBeforeCall = false;
+        onceTarget.addEventListener('x', () => {
+          onceRemovedBeforeCall = onceTarget.__thawListeners.get('x').length === 0;
+        }, { once: true, signal: onceDep });
+        onceTarget.dispatchEvent(new Event('x')); onceRoot.abort();
+
+        const captureRoot = new AbortController(), captureDep = AbortSignal.any([captureRoot.signal]);
+        const captureTarget = new EventTarget(), captureListener = () => {};
+        captureTarget.addEventListener('x', captureListener, { signal: captureDep });
+        captureTarget.addEventListener('x', captureListener, { signal: captureDep, capture: true });
+        EventTarget.prototype.removeEventListener.call(captureTarget, 'x', captureListener, false);
+        const afterCaptureRemove = captureTarget.__thawListeners.get('x').length;
+        captureRoot.abort();
+
+        const baseRoot = new AbortController(), combined = AbortSignal.any([baseRoot.signal]);
+        const watcher = new AbortController(); let baseCalls = 0;
+        const baseListener = () => baseCalls++;
+        EventTarget.prototype.addEventListener.call(combined, 'abort', baseListener, { signal: watcher.signal });
+        EventTarget.prototype.addEventListener.call(combined, 'abort', baseListener,
+          { capture: true, once: true, signal: watcher.signal });
+        const afterBaseAdd = combined.__thawListeners.get('abort').length;
+        EventTarget.prototype.removeEventListener.call(combined, 'abort', baseListener, false);
+        const afterBaseCaptureRemove = combined.__thawListeners.get('abort').length;
+        EventTarget.prototype.dispatchEvent.call(combined, new Event('abort'));
+        const afterBaseOnceDispatch = combined.__thawListeners.get('abort').length;
+        watcher.abort(); baseRoot.abort();
+        const baseMethodsCleanup = combined.__thawListeners.get('abort').length === 0;
+        return [before, algorithmOnlyCleanup, explicitCleanup, onceRemovedBeforeCall,
+          onceTarget.__thawListeners.get('x').length, afterCaptureRemove,
+          captureTarget.__thawListeners.get('x').length, afterBaseAdd, afterBaseCaptureRemove,
+          afterBaseOnceDispatch, baseCalls, baseMethodsCleanup];
+      }
+      async function messageChannelSignalCleanup() {
+        const channel = new MessageChannel(), controller = new AbortController();
+        let signaled = 0, ordinary = 0;
+        try {
+          channel.port2.addEventListener('message', () => signaled++, { signal: controller.signal });
+          channel.port2.addEventListener('message', () => ordinary++);
+          channel.port2.start(); controller.abort(); channel.port1.postMessage('ready');
+          await Promise.resolve(); await Promise.resolve();
+          return [signaled, ordinary];
+        } finally { channel.port1.close(); channel.port2.close(); }
+      }
+    "#), 1);
+    assert_eq!(call("eventTargetSignalBrands", "[]"), "[true,1,0,true,true,1,1]");
+    assert_eq!(call("eventTargetSignalExactRecords", "[]"), r#"["call",1,1,0,1,true,true,0,true,0]"#);
+    assert_eq!(call("eventTargetSignalPublicInterference", "[]"), "[[0,false,true,0],[0,true,true,0],[0,true,true,0],[0,false,true,0]]");
+    assert_eq!(call("eventTargetSignalDependentOrder", "[]"), r#"["published,dependent-0-true,dependent-1-true,dependent-2-true,dependent-3-true","1,1,1,1",true,true]"#);
+    assert_eq!(call("eventTargetSignalObserverCleanup", "[]"), "[1,true,true,true,0,1,0,2,1,0,1,true]");
+    assert_eq!(call("messageChannelSignalCleanup", "[]"), "[0,1]");
 }
 
 #[test]
@@ -3196,6 +3578,15 @@ fn abort_signal_any_brands_and_observer_bookkeeping() {
         observed.removeEventListener('abort', reentrantOnce);
         const afterOnceRemoval = observed.__thawListeners.get('abort').length;
 
+        const captureReentry = () => {};
+        observed.addEventListener('abort', captureReentry, { get capture() {
+          observed.addEventListener('abort', captureReentry, true);
+          return false;
+        } });
+        const distinctCaptureReentry = observed.__thawListeners.get('abort').length;
+        observed.removeEventListener('abort', captureReentry);
+        observed.removeEventListener('abort', captureReentry, true);
+
         const onceThrow = { marker: 'once getter' };
         const throwReentrant = () => {};
         let onceThrowIdentity = false;
@@ -3239,7 +3630,8 @@ fn abort_signal_any_brands_and_observer_bookkeeping() {
           accepted instanceof AbortSignal, emptyRemainsLive,
           combinedEvents === 1,
           afterTypeReentry === 1, afterTypeRemoval === 0,
-          onceGetterCalls === 1, afterOnceReentry === 2, afterOnceRemoval === 0,
+          onceGetterCalls === 1, afterOnceReentry === 1, afterOnceRemoval === 0,
+          distinctCaptureReentry === 2,
           onceThrowIdentity, afterThrowReentry === 1, afterThrowRemoval === 0,
           objectDuplicateCount === 1, objectRemovalCount === 0,
           replacedHandler, clearedHandler, abortCountUnaffected, settledOnce,
@@ -3247,7 +3639,7 @@ fn abort_signal_any_brands_and_observer_bookkeeping() {
       }
     "#), 1);
     assert_eq!(call("abortAnyBrandsAndObservers", "[]"),
-        "[true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true]");
+        "[true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true]");
 }
 
 #[test]

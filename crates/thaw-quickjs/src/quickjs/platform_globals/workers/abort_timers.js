@@ -22,6 +22,10 @@
     const removeEventListener = EventTarget.prototype.removeEventListener;
     const weakSet = WeakMap.prototype.set;
     const mapGet = Map.prototype.get;
+    const arrayIndexOf = Array.prototype.indexOf;
+    const arraySplice = Array.prototype.splice;
+    const arraySlice = Array.prototype.slice;
+    const arrayPush = Array.prototype.push;
     const rootsOf = state => {
       if (!state.dependent) return [state.signal];
       const roots = [];
@@ -55,11 +59,37 @@
       try {
         const listeners = dispatchApply(mapGet, signal.__thawListeners, ['abort']);
         state.observers = (listeners ? listeners.length : 0)
-          + (typeof state.onabortValue === 'function' ? 1 : 0);
+          + (typeof state.onabortValue === 'function' ? 1 : 0)
+          + state.abortAlgorithms.length;
         updateRetention(signal, state);
       } catch (_) {
         // Observer bookkeeping must not replace an EventTarget operation's result or throw.
       }
+    };
+    const addAbortAlgorithm = (state, algorithm) => {
+      dispatchApply(arrayPush, state.abortAlgorithms, [algorithm]);
+      reconcileObservers(state.signal, state);
+    };
+    const removeAbortAlgorithm = (state, algorithm) => {
+      const index = dispatchApply(arrayIndexOf, state.abortAlgorithms, [algorithm]);
+      if (index === -1) return;
+      dispatchApply(arraySplice, state.abortAlgorithms, [index, 1]);
+      reconcileObservers(state.signal, state);
+    };
+    const runAbortAlgorithms = state => {
+      const algorithms = dispatchApply(arraySlice, state.abortAlgorithms, []);
+      state.abortAlgorithms = [];
+      reconcileObservers(state.signal, state);
+      for (const algorithm of algorithms) dispatchApply(algorithm, undefined, []);
+    };
+    eventListenerSignalBridge = {
+      stateOf,
+      add: addAbortAlgorithm,
+      remove: removeAbortAlgorithm,
+      listenersChanged(target) {
+        const state = stateOf(target);
+        if (state) reconcileObservers(target, state);
+      },
     };
     const detachSources = (signal, state) => {
       if (!state.dependent) return;
@@ -131,7 +161,10 @@
       let thrown = false;
       let firstError;
       for (const target of [signal, ...dependentSignals]) {
-        try { fireAbortEvent(target); }
+        try {
+          runAbortAlgorithms(stateOf(target));
+          fireAbortEvent(target);
+        }
         catch (error) { if (!thrown) { thrown = true; firstError = error; } }
       }
       if (thrown) throw firstError;
@@ -144,7 +177,7 @@
         weakSet.call(SignalState, this, {
           signal: this, aborted: false, reason: undefined,
           dependent: false, sources: [], dependents: [], finalizerToken: null,
-          observers: 0, onabortValue: null,
+          observers: 0, onabortValue: null, abortAlgorithms: [],
         });
       }
       get onabort() {
