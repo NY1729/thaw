@@ -245,8 +245,9 @@ unsafe extern "C" fn thaw_napi_call_typed_bridge(
     args: *const c_char,
 ) -> *const c_char {
     let _dispatch = ForeignCallbackGuard::new();
+    let input = NapiGraphInput::empty_dispatch();
     let result = text(name).and_then(|name| text(args).and_then(|args| {
-        let value = call_value_impl(&name, &args, true, false, None)?;
+        let value = call_value_impl(&name, &args, true, false, Some(&input))?;
         quickjs_bridge_value(value).and_then(|wire| serde_json::to_string(&quickjs_wire_result("value", wire)).map_err(|error| error.to_string()))
     }));
     let result = result.unwrap_or_else(|error| serde_json::json!({ "__thaw_error__": error }).to_string());
@@ -340,6 +341,7 @@ unsafe extern "C" fn thaw_napi_handle_bridge(
     args: *const c_char,
 ) -> *const c_char {
     let _dispatch = ForeignCallbackGuard::new();
+    let dispatch_input = NapiGraphInput::empty_dispatch();
     let result = (|| -> Result<serde_json::Value, String> {
         let operation = text(operation)?;
         let target = text(target)?;
@@ -414,6 +416,7 @@ unsafe extern "C" fn thaw_napi_handle_bridge(
                 .map_err(|_| "invalid native addon handle")?;
             let env = live_graph_owner_env(handle)
                 .ok_or("native addon handle is no longer live")?;
+            dispatch_input.ensure_dispatch_scope(env)?;
             let count = unsafe { (*env).proxy_live_counts.get(&(handle as usize)).copied().unwrap_or(0) };
             if count > 1 {
                 unsafe { (*env).proxy_live_counts.insert(handle as usize, count - 1); }
@@ -429,6 +432,7 @@ unsafe extern "C" fn thaw_napi_handle_bridge(
                 .map_err(|_| "invalid native addon handle")?;
             let env = live_graph_owner_env(handle)
                 .ok_or("native addon handle is no longer live")?;
+            dispatch_input.ensure_dispatch_scope(env)?;
             let owner = unsafe { &mut *env };
             let count = owner.proxy_live_counts.get(&(handle as usize)).copied().unwrap_or(0);
             owner.proxy_live_counts.insert(handle as usize, count.checked_add(1)
@@ -439,6 +443,9 @@ unsafe extern "C" fn thaw_napi_handle_bridge(
         if operation == "retain_graph_handle" {
             let handle = target.parse::<u64>()
                 .map_err(|_| "invalid native graph handle")?;
+            let env = live_graph_owner_env(handle)
+                .ok_or("native graph handle is no longer live")?;
+            dispatch_input.ensure_dispatch_scope(env)?;
             let reference = retain_napi_graph_handle(handle);
             if reference == 0 { return Err("native graph handle is no longer live".into()); }
             return Ok(serde_json::json!({ "kind": "value", "value": reference.to_string() }));
@@ -496,6 +503,7 @@ unsafe extern "C" fn thaw_napi_handle_bridge(
                     .ok_or_else(|| "unknown QuickJS reference".to_string())?;
                 Ok::<_, String>((&**env as *const Env, env.quickjs_references[&reference]))
             })?;
+            dispatch_input.ensure_dispatch_scope(env as NapiEnv)?;
             // The outer dispatch guard pins the owner through this encode;
             // no HOST borrow survives a future accessor callback.
             return Ok(quickjs_wire_result("value", quickjs_reference_wire(env as NapiEnv, value, true)?));
@@ -503,12 +511,14 @@ unsafe extern "C" fn thaw_napi_handle_bridge(
         if operation == "sync_handle" {
             let handle = target.parse::<u64>().map_err(|_| "invalid native binary handle")?;
             let env = module_env_for_handle(handle)?;
+            dispatch_input.ensure_dispatch_scope(env)?;
             let wire = quickjs_reference_wire(env, handle as NapiValue, true)?;
             return Ok(quickjs_wire_result("value", wire));
         }
         if operation == "promise_state" {
             let handle = target.parse::<u64>().map_err(|_| "invalid native Promise handle")?;
-            let _ = module_env_for_handle(handle)?;
+            let env = module_env_for_handle(handle)?;
+            dispatch_input.ensure_dispatch_scope(env)?;
             thaw_napi_poll_async_work();
             let state = match value_ref(handle as NapiValue).map_err(|_| "invalid native Promise")? {
                 Value::Promise(state) => Rc::clone(state),
@@ -531,7 +541,7 @@ unsafe extern "C" fn thaw_napi_handle_bridge(
         }
         let handle = if operation == "construct" {
             let target = CString::new(target).map_err(|_| "export contains NUL")?;
-            get_export_result(target.as_ptr())?
+            get_export_result_with_input(target.as_ptr(), Some(&dispatch_input), false)?
         } else {
             target
                 .parse::<u64>()
@@ -539,6 +549,10 @@ unsafe extern "C" fn thaw_napi_handle_bridge(
         };
         if handle == 0 {
             return Err("unknown native addon export".into());
+        }
+        let dispatch_env = module_env_for_handle(handle)?;
+        if operation != "symbol" {
+            dispatch_input.ensure_dispatch_scope(dispatch_env)?;
         }
         if operation == "array_kind_graph" {
             let _ = module_env_for_handle(handle)?;
@@ -806,6 +820,9 @@ unsafe extern "C" fn thaw_napi_handle_bridge(
             "construct" => {
                 let value = construct_handle_impl(handle, args, true, false);
                 if value.error.is_null() {
+                    if !is_native_instance(value.value as usize) {
+                        dispatch_input.escape_result(value.value as NapiValue)?;
+                    }
                     Ok(serde_json::json!({ "kind": "handle", "value": value.value.to_string() }))
                 } else {
                     let error = thaw_arena::NativeStr::from_ptr(value.error)
@@ -896,7 +913,7 @@ unsafe extern "C" fn thaw_napi_handle_bridge(
                 let env = module_env_for_handle(handle)?;
                 let receiver = name.parse::<u64>().map_err(|_| "invalid native receiver")?;
                 if module_env_for_handle(receiver)? != env { return Err("native method receiver belongs to another environment".into()); }
-                let values = module_arguments(env, args, true, false, None)?;
+                let values = module_arguments(env, args, true, false, Some(&dispatch_input))?;
                 let function = match value_ref(handle as NapiValue).map_err(|_| "invalid native method")? {
                     Value::Function(function) => function.clone(),
                     _ => return Err("captured native property is not callable".into()),
@@ -968,7 +985,7 @@ unsafe extern "C" fn thaw_napi_handle_bridge(
             }
             "call" => {
                 let name = CString::new(name).map_err(|_| "method contains NUL")?;
-                let value = call_method_value_impl(handle, name.as_ptr(), args, true, false, None)?;
+                let value = call_method_value_impl(handle, name.as_ptr(), args, true, false, Some(&dispatch_input))?;
                 Ok(quickjs_wire_result("value", quickjs_bridge_value(value)?))
             }
             "set_symbol" => {
@@ -976,7 +993,7 @@ unsafe extern "C" fn thaw_napi_handle_bridge(
                 let id = name.parse::<u64>().map_err(|_| "invalid native Symbol ID")?;
                 let symbol = env_mut(env).map_err(|_| "invalid native addon environment")?
                     .symbols.get(&id).copied().ok_or("unknown native Symbol")?;
-                let values = module_arguments(env, args, true, false, None)?;
+                let values = module_arguments(env, args, true, false, Some(&dispatch_input))?;
                 let [value] = values.as_slice() else { return Err("native property setter expects exactly one value".into()); };
                 let status = napi_set_property(env, handle as NapiValue, symbol, *value);
                 take_env_exception(env)?;
@@ -1595,13 +1612,14 @@ fn value_from_json_with_undefined(
                 if let Some(value) = env.quickjs_references.get(&reference) {
                     return Ok(*value);
                 }
-                let bridge = Arc::new(ThawCallbackBridge {
+                let bridge = Rc::new(ThawCallbackBridge {
                     callback: ThawCallback::QuickJs(thaw_quickjs::thaw_js_call_reference),
                     context: reference as usize,
+                    _context_root: None,
                 });
                 let function = env.alloc(Value::Function(Function {
                     callback: thaw_compiled_callback,
-                    data: Arc::as_ptr(&bridge) as *mut c_void,
+                    data: Rc::as_ptr(&bridge) as *mut c_void,
                     properties: HashMap::new(),
                     _thaw_bridge: Some(bridge), _accessor_owner: None,
                 }));
@@ -2307,6 +2325,18 @@ fn inbound_graph_handles(
 }
 
 impl NapiGraphInput {
+    fn empty_dispatch() -> Self {
+        Self {
+            parsed: Ok(JsonValue::Null),
+            leases: std::cell::RefCell::new(Some(GraphLeases {
+                host: Vec::new(), napi: Vec::new(),
+            })),
+            dispatch_scope: std::cell::RefCell::new(None),
+            malformed_lease: false,
+            _dispatch: ForeignCallbackGuard::new(),
+        }
+    }
+
     fn parse(text: &str) -> Self {
         let parsed: Result<JsonValue, String> = serde_json::from_str(text)
             .map_err(|error| format!("invalid native graph JSON: {error}"));
@@ -2697,7 +2727,56 @@ unsafe fn parse_napi_graph_value(env: NapiEnv, text: &str) -> Result<NapiValue, 
 }
 
 unsafe fn graph_input_for_args(args: *const c_char, graph_args: bool) -> Option<NapiGraphInput> {
-    graph_args.then(|| text(args).ok().map(|text| NapiGraphInput::parse(&text))).flatten()
+    Some(if graph_args {
+        text(args).map(|text| NapiGraphInput::parse(&text))
+            .unwrap_or_else(|_| NapiGraphInput::empty_dispatch())
+    } else {
+        NapiGraphInput::empty_dispatch()
+    })
+}
+
+fn callback_context_root(context: usize) -> Option<thaw_arena::ArenaRoot> {
+    thaw_arena::contains_allocation(context).then(|| thaw_arena::ArenaRoot::new(context))
+}
+
+type CompiledCallbackKey = (usize, usize, usize, bool);
+
+fn cached_compiled_callback(env: NapiEnv, key: CompiledCallbackKey) -> Option<NapiValue> {
+    let entry = HOST.with(|host| host.borrow().compiled_callbacks.get(&key).copied())?;
+    let valid = key.0 == env as usize && unsafe { env.as_ref() }.is_some_and(|owner| {
+        !owner.finalizing
+            && !owner.finalized
+            && !owner.shutdown_requested
+            && owner.graph_owner_id == entry.2
+            && owner.values.contains(&entry.0)
+            && !owner.finalized_handles.contains(&(entry.0 as usize))
+            && owner.value_generations.get(&(entry.0 as usize)) == Some(&entry.1)
+    });
+    if valid {
+        Some(entry.0)
+    } else {
+        HOST.with(|host| {
+            let mut host = host.borrow_mut();
+            if host.compiled_callbacks.get(&key) == Some(&entry) {
+                host.compiled_callbacks.remove(&key);
+            }
+        });
+        None
+    }
+}
+
+fn cache_compiled_callback(env: NapiEnv, key: CompiledCallbackKey, value: NapiValue) {
+    let Some(owner) = (unsafe { env.as_ref() }) else { return; };
+    let Some(generation) = owner.value_generations.get(&(value as usize)).copied() else { return; };
+    let owner_id = owner.graph_owner_id;
+    if key.0 != env as usize || owner_id == 0 || owner.finalizing
+        || owner.finalized || owner.shutdown_requested
+    {
+        return;
+    }
+    HOST.with(|host| {
+        host.borrow_mut().compiled_callbacks.insert(key, (value, generation, owner_id));
+    });
 }
 
 unsafe fn release_unconsumed_napi_callback_graph(text: &str) {
@@ -3966,6 +4045,9 @@ unsafe fn parse_napi_arguments(
         return arguments.iter().map(|value|
             value.ok_or("native argument graph contains a hole".into())).collect();
     }
+    if let Some(input) = graph_input {
+        input.ensure_dispatch_scope(env)?;
+    }
     let parsed: JsonValue = serde_json::from_str(text)
         .map_err(|error| format!("invalid argument JSON: {error}"))?;
     let arguments = parsed.as_array().ok_or("native arguments must be an array")?;
@@ -4824,6 +4906,9 @@ unsafe fn call_impl(
     graph_input: Option<&NapiGraphInput>,
 ) -> Result<String, String> {
     let _dispatch = ForeignCallbackGuard::new();
+    let local_input = (!graph_result && graph_input.is_none())
+        .then(NapiGraphInput::empty_dispatch);
+    let graph_input = graph_input.or(local_input.as_ref());
     let result = wait_for_promise(call_value_impl(
         name, args_json, preserve_undefined, graph_result, graph_input,
     )?)?;
@@ -4890,8 +4975,9 @@ pub unsafe extern "C" fn thaw_napi_call_result(
     name: *const c_char,
     args: *const c_char,
 ) -> ThawResult {
+    let graph_input = graph_input_for_args(args, false);
     text_result(text(name).and_then(|name| {
-        text(args).and_then(|args| call_impl(&name, &args, false, false, None))
+        text(args).and_then(|args| call_impl(&name, &args, false, false, graph_input.as_ref()))
     }))
 }
 
@@ -4911,14 +4997,16 @@ pub unsafe extern "C" fn thaw_napi_call_typed_result(
     name: *const c_char,
     args: *const c_char,
 ) -> ThawResult {
+    let graph_input = graph_input_for_args(args, false);
     text_result(text(name).and_then(|name| {
-        text(args).and_then(|args| call_impl(&name, &args, true, false, None))
+        text(args).and_then(|args| call_impl(&name, &args, true, false, graph_input.as_ref()))
     }))
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn thaw_napi_get_export(name: *const c_char) -> u64 {
-    get_export_result(name).unwrap_or(0)
+    let input = NapiGraphInput::empty_dispatch();
+    get_export_result_with_input(name, Some(&input), true).unwrap_or(0)
 }
 
 #[no_mangle]
@@ -4934,19 +5022,29 @@ pub unsafe extern "C" fn thaw_napi_call_typed_graph_result(
 
 #[no_mangle]
 pub unsafe extern "C" fn thaw_napi_get_export_typed_result(name: *const c_char) -> ThawNapiHandleResult {
-    match get_export_result(name) {
+    let input = NapiGraphInput::empty_dispatch();
+    match get_export_result_with_input(name, Some(&input), true) {
         Ok(value) => returned_handle(value),
         Err(error) => handle_error(error),
     }
 }
 
-unsafe fn get_export_result(name: *const c_char) -> Result<u64, String> {
+unsafe fn get_export_result_with_input(
+    name: *const c_char,
+    input: Option<&NapiGraphInput>,
+    escape_result: bool,
+) -> Result<u64, String> {
     let name = text(name)?;
     if let Some(value) = HOST.with(|host| {
         let host = host.borrow();
         let key = host.qualified_key(&name, |key| host.exports.contains_key(key))?;
         host.exports.get(&key).map(|(_, value)| *value as u64)
     }) {
+        let env = module_env_for_handle(value)?;
+        if let Some(input) = input {
+            input.ensure_dispatch_scope(env)?;
+            if escape_result { input.escape_result(value as NapiValue)?; }
+        }
         return Ok(value);
     }
     let (first, parts) = if let Some((package, path)) = name.split_once("::") {
@@ -4965,8 +5063,11 @@ unsafe fn get_export_result(name: *const c_char) -> Result<u64, String> {
     }) else {
         return Ok(0);
     };
+    let env = module_env_for_handle(value)?;
+    if let Some(input) = input { input.ensure_dispatch_scope(env)?; }
     for part in parts {
         let env = module_env_for_handle(value)?;
+        if let Some(input) = input { input.ensure_dispatch_scope(env)?; }
         let property = CString::new(part).map_err(|_| "native addon export contains NUL")?;
         let mut next = ptr::null_mut();
         let status = napi_get_named_property(env, value as NapiValue, property.as_ptr(), &mut next);
@@ -4978,6 +5079,9 @@ unsafe fn get_export_result(name: *const c_char) -> Result<u64, String> {
             return Ok(0);
         }
         value = next as u64;
+    }
+    if escape_result {
+        if let Some(input) = input { input.escape_result(value as NapiValue)?; }
     }
     Ok(value)
 }
@@ -5074,7 +5178,9 @@ unsafe fn call_export_handle_impl(
     let graph_input = graph_input_for_args(args, graph_args);
     let result = (|| -> Result<u64, String> {
         let name = text(name)?;
-        let callable = get_export_result(CString::new(name.as_str()).unwrap().as_ptr())?;
+        let callable = get_export_result_with_input(
+            CString::new(name.as_str()).unwrap().as_ptr(), graph_input.as_ref(), false,
+        )?;
         if callable == 0 {
             return Err("unknown native addon export".into());
         }
@@ -5142,7 +5248,9 @@ unsafe fn call_export_with_functions(
         return Err("native addon function argument list is null".into());
     }
     let name = text(name)?;
-    let callable = get_export_result(CString::new(name.as_str()).unwrap().as_ptr())?;
+    let callable = get_export_result_with_input(
+        CString::new(name.as_str()).unwrap().as_ptr(), graph_input, false,
+    )?;
     let env = module_env_for_handle(callable)?;
     let mut values = module_arguments(env, args, true, graph_args, graph_input)?;
     let functions = if function_count == 0 {
@@ -5169,29 +5277,24 @@ unsafe fn call_export_with_functions(
                 },
                 graph_args,
             );
-            if let Some(value) =
-                HOST.with(|host| host.borrow().compiled_callbacks.get(&callback_key).copied())
-            {
+            if let Some(value) = cached_compiled_callback(env, callback_key) {
                 value
             } else {
-                let bridge = Arc::new(ThawCallbackBridge {
+                let bridge = Rc::new(ThawCallbackBridge {
                     callback: if graph_args { ThawCallback::ValueGraph(callback) }
                         else { ThawCallback::Value(callback) },
                     context: function.context as usize,
+                    _context_root: callback_context_root(function.context as usize),
                 });
                 let value = env_mut(env)
                     .map_err(|_| "invalid native addon environment")?
                     .alloc(Value::Function(Function {
                         callback: thaw_compiled_callback,
-                        data: Arc::as_ptr(&bridge) as *mut c_void,
+                        data: Rc::as_ptr(&bridge) as *mut c_void,
                         properties: HashMap::new(),
                         _thaw_bridge: Some(bridge), _accessor_owner: None,
                     }));
-                HOST.with(|host| {
-                    host.borrow_mut()
-                        .compiled_callbacks
-                        .insert(callback_key, value);
-                });
+                cache_compiled_callback(env, callback_key, value);
                 value
             }
         } else {
@@ -5280,7 +5383,8 @@ pub unsafe extern "C" fn thaw_napi_call_handle_typed_result(
     args: *const c_char,
 ) -> ThawResult {
     let _dispatch = ForeignCallbackGuard::new();
-    let result = call_function_handle(callable, args, true, false, None).and_then(|value| {
+    let graph_input = graph_input_for_args(args, false);
+    let result = call_function_handle(callable, args, true, false, graph_input.as_ref()).and_then(|value| {
         serde_json::to_string(&json_from_value_with_undefined(value, true)?)
             .map_err(|error| error.to_string())
     });
@@ -5511,8 +5615,10 @@ unsafe fn get_property_impl(
     property: *const c_char,
     preserve_undefined: bool, graph_result: bool,
 ) -> ThawResult {
+    let input = NapiGraphInput::empty_dispatch();
     let result = (|| -> Result<String, String> {
         let env = module_env_for_handle(receiver)?;
+        input.ensure_dispatch_scope(env)?;
         let property_name = text(property)?;
         let property_name_c =
             CString::new(property_name.clone()).map_err(|_| "property contains NUL")?;
@@ -5881,17 +5987,17 @@ unsafe fn call_with_callback_impl(
             graph_result,
         );
         let mut values = module_arguments(env_ptr, args, false, graph_result, graph_input.as_ref())?;
-        let cached_callback =
-            HOST.with(|host| host.borrow().compiled_callbacks.get(&callback_key).copied());
+        let cached_callback = cached_compiled_callback(env_ptr, callback_key);
         let mut created_callback = None;
         let callback_value = if let Some(callback) = cached_callback {
             callback
         } else {
-            let bridge = Arc::new(ThawCallbackBridge {
+            let bridge = Rc::new(ThawCallbackBridge {
                 callback: if graph_result { ThawCallback::EventGraph(callback) } else { ThawCallback::Event(callback) },
                 context: context as usize,
+                _context_root: callback_context_root(context as usize),
             });
-            let bridge_data = Arc::as_ptr(&bridge) as *mut c_void;
+            let bridge_data = Rc::as_ptr(&bridge) as *mut c_void;
             let value = env_mut(env_ptr)
                 .map_err(|_| "invalid native addon environment")?
                 .alloc(Value::Function(Function {
@@ -5930,11 +6036,7 @@ unsafe fn call_with_callback_impl(
             || host_threadsafe_state(false)
         {
             if let Some(callback) = created_callback {
-                HOST.with(|host| {
-                    host.borrow_mut()
-                        .compiled_callbacks
-                        .insert(callback_key, callback);
-                });
+                cache_compiled_callback(env_ptr, callback_key, callback);
             }
         } else {
             HOST.with(|host| { host.borrow_mut().compiled_callbacks.remove(&callback_key); });
@@ -5982,6 +6084,9 @@ unsafe fn call_method_with_callback_impl(
     let result = (|| -> Result<String, String> {
         thaw_napi_poll_async_work();
         let env = module_env_for_handle(receiver)?;
+        if let Some(input) = graph_input.as_ref() {
+            input.ensure_dispatch_scope(env)?;
+        }
         let method_name = text(method)?;
         let mut callable = ptr::null_mut();
         let method_name_c = CString::new(method_name.clone()).map_err(|_| "method contains NUL")?;
@@ -6013,27 +6118,23 @@ unsafe fn call_method_with_callback_impl(
             graph_result,
         );
         let mut values = module_arguments(env, args, true, graph_result, graph_input.as_ref())?;
-        let cached_callback =
-            HOST.with(|host| host.borrow().compiled_callbacks.get(&callback_key).copied());
+        let cached_callback = cached_compiled_callback(env, callback_key);
         let callback_value = if let Some(callback) = cached_callback {
             callback
         } else {
-            let bridge = Arc::new(ThawCallbackBridge {
+            let bridge = Rc::new(ThawCallbackBridge {
                 callback: if graph_result { ThawCallback::EventGraph(callback) } else { ThawCallback::Event(callback) },
                 context: context as usize,
+                _context_root: callback_context_root(context as usize),
             });
-            let bridge_data = Arc::as_ptr(&bridge) as *mut c_void;
+            let bridge_data = Rc::as_ptr(&bridge) as *mut c_void;
             let value = (*env).alloc(Value::Function(Function {
                 callback: thaw_compiled_callback,
                 data: bridge_data,
                 properties: HashMap::new(),
                 _thaw_bridge: Some(bridge), _accessor_owner: None,
             }));
-            HOST.with(|host| {
-                host.borrow_mut()
-                    .compiled_callbacks
-                    .insert(callback_key, value);
-            });
+            cache_compiled_callback(env, callback_key, value);
             value
         };
         values.push(callback_value);
@@ -6222,15 +6323,16 @@ mod native_graph_pin_tests {
             owners.borrow_mut().insert(owner, (&mut *env as *mut Env) as usize);
         });
         let mut called = 0usize;
-        let bridge = Arc::new(ThawCallbackBridge {
+        let bridge = Rc::new(ThawCallbackBridge {
             callback: ThawCallback::EventGraph(unexpected_callback),
             context: (&mut called as *mut usize) as usize,
+            _context_root: None,
         });
         let mut info = CallbackInfo {
             args: vec![instance, symbol],
             this_arg: ptr::null_mut(),
             new_target: ptr::null_mut(),
-            data: Arc::as_ptr(&bridge) as *mut c_void,
+            data: Rc::as_ptr(&bridge) as *mut c_void,
         };
         assert!(unsafe { thaw_compiled_callback(env_ptr, &mut info) }.is_null());
         assert_eq!(called, 0);

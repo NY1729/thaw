@@ -432,7 +432,7 @@ fn compiles_and_runs_a_napi_addon_with_async_work() {
         #include <stdio.h>
         #include <stdlib.h>
         typedef void* napi_env; typedef void* napi_value; typedef void* napi_callback_info;
-        typedef void* napi_async_work;
+        typedef void* napi_async_work; typedef void* napi_ref; typedef void* napi_handle_scope;
         typedef int napi_status;
         extern napi_status napi_get_cb_info(napi_env, napi_callback_info, size_t*, napi_value*, napi_value*, void**);
         extern napi_status napi_get_value_double(napi_env, napi_value, double*);
@@ -445,7 +445,12 @@ fn compiles_and_runs_a_napi_addon_with_async_work() {
         extern napi_status napi_queue_async_work(napi_env, napi_async_work);
         extern napi_status napi_delete_async_work(napi_env, napi_async_work);
         extern napi_status napi_call_function(napi_env, napi_value, napi_value, size_t, const napi_value*, napi_value*);
-        struct async_data { napi_env env; napi_async_work work; napi_value callback; int answer; };
+        extern napi_status napi_create_reference(napi_env, napi_value, unsigned int, napi_ref*);
+        extern napi_status napi_get_reference_value(napi_env, napi_ref, napi_value*);
+        extern napi_status napi_delete_reference(napi_env, napi_ref);
+        extern napi_status napi_open_handle_scope(napi_env, napi_handle_scope*);
+        extern napi_status napi_close_handle_scope(napi_env, napi_handle_scope);
+        struct async_data { napi_env env; napi_async_work work; napi_ref callback_ref; int answer; };
         static napi_value add(napi_env env, napi_callback_info info) {
             size_t argc = 2; napi_value argv[2]; double a, b; napi_value result;
             napi_get_cb_info(env, info, &argc, argv, 0, 0);
@@ -461,19 +466,30 @@ fn compiles_and_runs_a_napi_addon_with_async_work() {
         static void complete_async(napi_env env, napi_status status, void* raw) {
             struct async_data* data = raw;
             printf("async %d status %d\n", data->answer, status);
-            napi_value args[2], ignored;
-            napi_get_undefined(env, &args[0]);
-            napi_create_double(env, data->answer, &args[1]);
-            napi_call_function(env, args[0], data->callback, 2, args, &ignored);
-            napi_call_function(env, args[0], data->callback, 2, args, &ignored);
+            napi_handle_scope scope = 0;
+            napi_value callback = 0, args[2], ignored;
+            napi_status callback_status = napi_open_handle_scope(env, &scope);
+            if (callback_status == 0) callback_status = napi_get_reference_value(env, data->callback_ref, &callback);
+            if (callback_status == 0) callback_status = napi_get_undefined(env, &args[0]);
+            if (callback_status == 0) callback_status = napi_create_double(env, data->answer, &args[1]);
+            if (callback_status == 0) callback_status = napi_call_function(env, args[0], callback, 2, args, &ignored);
+            if (callback_status == 0) callback_status = napi_call_function(env, args[0], callback, 2, args, &ignored);
+            if (callback_status != 0) fprintf(stderr, "async callback N-API status %d\n", callback_status);
+            if (data->callback_ref) napi_delete_reference(env, data->callback_ref);
+            if (scope) napi_close_handle_scope(env, scope);
             napi_delete_async_work(env, data->work);
             free(data);
         }
         static napi_value schedule(napi_env env, napi_callback_info info) {
             struct async_data* data = calloc(1, sizeof(*data));
             size_t argc = 1;
-            napi_value result;
-            napi_get_cb_info(env, info, &argc, &data->callback, 0, 0);
+            napi_value callback, result;
+            if (napi_get_cb_info(env, info, &argc, &callback, 0, 0) != 0 ||
+                napi_create_reference(env, callback, 1, &data->callback_ref) != 0) {
+                fprintf(stderr, "async callback reference creation failed\n");
+                free(data);
+                return 0;
+            }
             data->env = env;
             napi_create_async_work(env, 0, 0, execute_async, complete_async, data, &data->work);
             napi_queue_async_work(env, data->work);

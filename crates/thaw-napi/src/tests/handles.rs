@@ -1238,7 +1238,7 @@ fn run_script_without_quickjs_accepts_json_only() {
         let mut result = ptr::null_mut();
         assert_eq!(napi_run_script(env_ptr, script, &mut result), NAPI_OK);
         assert_eq!(
-            json_from_value(result).unwrap(),
+            json_from_value_with_undefined_for_env(env_ptr, result, false).unwrap(),
             serde_json::json!({"answer": 42.0})
         );
 

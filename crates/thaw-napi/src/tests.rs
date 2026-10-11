@@ -10,6 +10,7 @@ static EXTERNAL_STRING_FINALIZED: AtomicUsize = AtomicUsize::new(0);
 static PLAIN_EXTERNAL_FINALIZED: AtomicUsize = AtomicUsize::new(0);
 static HELD_ASYNC_CLEANUP: AtomicUsize = AtomicUsize::new(0);
 static POSTED_FINALIZER_RAN: AtomicBool = AtomicBool::new(false);
+#[cfg(feature = "quickjs")]
 static RELEASED_HANDLE_FINALIZED: AtomicUsize = AtomicUsize::new(0);
 #[cfg(target_os = "linux")]
 static UV_TIMER_FIRED: AtomicBool = AtomicBool::new(false);
@@ -24,15 +25,16 @@ fn quickjs_reference_throw_sets_napi_exception_without_spoofing_returned_object(
     let mut env = Env::new();
     let this_arg = env.alloc(Value::Undefined);
     for (reference, throws) in [(746291201_usize, false), (746291202, true)] {
-        let bridge = Arc::new(ThawCallbackBridge {
+        let bridge = Rc::new(ThawCallbackBridge {
             callback: ThawCallback::QuickJs(thaw_quickjs::thaw_js_call_reference),
             context: reference,
+            _context_root: None,
         });
         let mut info = CallbackInfo {
             args: vec![],
             this_arg,
             new_target: ptr::null_mut(),
-            data: Arc::as_ptr(&bridge) as *mut c_void,
+            data: Rc::as_ptr(&bridge) as *mut c_void,
         };
         let result = unsafe { thaw_compiled_callback(&mut env as NapiEnv, &mut info) };
         if throws {
@@ -328,14 +330,14 @@ fn package_qualified_exports_survive_opposite_load_orders() {
         });
         unsafe {
             assert_eq!(
-                get_export_result(c"first-test::Client".as_ptr()).unwrap(),
+                thaw_napi_get_export(c"first-test::Client".as_ptr()),
                 first_client as u64
             );
             assert_eq!(
-                get_export_result(c"second-test::Client".as_ptr()).unwrap(),
+                thaw_napi_get_export(c"second-test::Client".as_ptr()),
                 second_client as u64
             );
-            assert_eq!(get_export_result(c"Client".as_ptr()).unwrap(), 0);
+            assert_eq!(thaw_napi_get_export(c"Client".as_ptr()), 0);
         }
         HOST.with(|host| {
             let mut host = host.borrow_mut();
@@ -531,6 +533,7 @@ unsafe extern "C" fn plain_external_finalize(_env: NapiEnv, data: *mut c_void, h
     PLAIN_EXTERNAL_FINALIZED.fetch_add(total, Ordering::AcqRel);
 }
 
+#[cfg(feature = "quickjs")]
 unsafe extern "C" fn released_handle_finalize(
     _env: NapiEnv,
     _data: *mut c_void,
@@ -539,6 +542,7 @@ unsafe extern "C" fn released_handle_finalize(
     RELEASED_HANDLE_FINALIZED.fetch_add(1, Ordering::AcqRel);
 }
 
+#[cfg(feature = "quickjs")]
 #[test]
 fn released_handle_waits_for_strong_napi_reference() {
     RELEASED_HANDLE_FINALIZED.store(0, Ordering::Release);
@@ -777,8 +781,8 @@ fn loads_and_calls_a_real_napi_addon() {
         assert_eq!(CStr::from_ptr(result.value).to_str().unwrap(), "84.0");
         let result = thaw_napi_call_result(c"finalized".as_ptr(), c"[]".as_ptr());
         assert!(result.error.is_null());
-        // Calls reuse the addon's environment; values are finalized with it.
-        assert_eq!(CStr::from_ptr(result.value).to_str().unwrap(), "0.0");
+        // Dispatch-owned wrappers finalize after result serialization completes.
+        assert_eq!(CStr::from_ptr(result.value).to_str().unwrap(), "1.0");
         let typed = thaw_napi_call_typed_result(
             c"isUndefined".as_ptr(),
             c"[{\"$__thaw_napi_undefined$\":true}]".as_ptr(),
@@ -1619,15 +1623,16 @@ fn private_napi_event_graph_keeps_user_marker_objects_ordinary() {
     )])));
     let real_date = env.alloc(Value::Date(0.0));
     let mut output: Option<(JsonValue, JsonValue)> = None;
-    let bridge = Arc::new(ThawCallbackBridge {
+    let bridge = Rc::new(ThawCallbackBridge {
         callback: ThawCallback::EventGraph(capture),
         context: (&mut output as *mut Option<(JsonValue, JsonValue)>) as usize,
+        _context_root: None,
     });
     let mut info = CallbackInfo {
         args: vec![ordinary_date, real_date],
         this_arg: ptr::null_mut(),
         new_target: ptr::null_mut(),
-        data: Arc::as_ptr(&bridge) as *mut c_void,
+        data: Rc::as_ptr(&bridge) as *mut c_void,
     };
     unsafe {
         thaw_compiled_callback(&mut *env as NapiEnv, &mut info);
@@ -1682,15 +1687,16 @@ fn private_napi_value_callback_graph_preserves_arguments_and_result() {
         zero,
     )])));
     let mut output: Option<JsonValue> = None;
-    let bridge = Arc::new(ThawCallbackBridge {
+    let bridge = Rc::new(ThawCallbackBridge {
         callback: ThawCallback::ValueGraph(callback),
         context: (&mut output as *mut Option<JsonValue>) as usize,
+        _context_root: None,
     });
     let mut info = CallbackInfo {
         args: vec![ordinary_date],
         this_arg: ptr::null_mut(),
         new_target: ptr::null_mut(),
-        data: Arc::as_ptr(&bridge) as *mut c_void,
+        data: Rc::as_ptr(&bridge) as *mut c_void,
     };
     let result = unsafe { thaw_compiled_callback(&mut env as NapiEnv, &mut info) };
     assert!(matches!(unsafe { value_ref(result) }, Ok(Value::Undefined)));
@@ -1993,15 +1999,16 @@ fn graph_callback_reentry_has_no_synthetic_root_or_nested_shutdown() {
     }
     let mut env = Env::new();
     let argument = env.alloc(Value::Number(7.0));
-    let bridge = Arc::new(ThawCallbackBridge {
+    let bridge = Rc::new(ThawCallbackBridge {
         callback: ThawCallback::ValueGraph(callback),
         context: (&mut env as *mut Env) as usize,
+        _context_root: None,
     });
     let mut info = CallbackInfo {
         args: vec![argument],
         this_arg: ptr::null_mut(),
         new_target: ptr::null_mut(),
-        data: Arc::as_ptr(&bridge) as *mut c_void,
+        data: Rc::as_ptr(&bridge) as *mut c_void,
     };
     let result = unsafe { thaw_compiled_callback(&mut env, &mut info) };
     assert!(matches!(unsafe { value_ref(result) }, Ok(Value::Undefined)));
@@ -2017,15 +2024,16 @@ fn graph_callback_encode_error_releases_synthetic_root() {
     }
     let mut env = Env::new();
     let external = env.alloc(Value::External(ptr::null_mut()));
-    let bridge = Arc::new(ThawCallbackBridge {
+    let bridge = Rc::new(ThawCallbackBridge {
         callback: ThawCallback::ValueGraph(unexpected_callback),
         context: 0,
+        _context_root: None,
     });
     let mut info = CallbackInfo {
         args: vec![external],
         this_arg: ptr::null_mut(),
         new_target: ptr::null_mut(),
-        data: Arc::as_ptr(&bridge) as *mut c_void,
+        data: Rc::as_ptr(&bridge) as *mut c_void,
     };
     assert!(unsafe { thaw_compiled_callback(&mut env, &mut info) }.is_null());
     assert!(!CALLED.load(std::sync::atomic::Ordering::SeqCst));
@@ -2040,15 +2048,16 @@ fn value_callback_reentry_cannot_begin_shutdown() {
         CString::new("null").unwrap().into_raw()
     }
     let mut env = Env::new();
-    let bridge = Arc::new(ThawCallbackBridge {
+    let bridge = Rc::new(ThawCallbackBridge {
         callback: ThawCallback::Value(callback),
         context: 0,
+        _context_root: None,
     });
     let mut info = CallbackInfo {
         args: Vec::new(),
         this_arg: ptr::null_mut(),
         new_target: ptr::null_mut(),
-        data: Arc::as_ptr(&bridge) as *mut c_void,
+        data: Rc::as_ptr(&bridge) as *mut c_void,
     };
     let result = unsafe { thaw_compiled_callback(&mut env, &mut info) };
     assert!(matches!(unsafe { value_ref(result) }, Ok(Value::Null)));
@@ -4708,4 +4717,572 @@ fn native_function_proxy_construct_preserves_derived_new_target() {
         .with(|host| host.borrow_mut().module_envs.pop())
         .unwrap();
     drop(owned);
+}
+
+#[cfg(feature = "quickjs")]
+mod napi_dispatch_owner_scope_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct TemporaryValues {
+        object: NapiValue,
+        child: NapiValue,
+    }
+
+    impl Default for TemporaryValues {
+        fn default() -> Self {
+            Self {
+                object: ptr::null_mut(),
+                child: ptr::null_mut(),
+            }
+        }
+    }
+
+    struct CallbackCapture {
+        value: NapiValue,
+        reference: *mut Reference,
+        repeated_value: NapiValue,
+    }
+
+    impl Default for CallbackCapture {
+        fn default() -> Self {
+            Self {
+                value: ptr::null_mut(),
+                reference: ptr::null_mut(),
+                repeated_value: ptr::null_mut(),
+            }
+        }
+    }
+
+    struct CachedCallbackCapture {
+        value: NapiValue,
+        generation: u64,
+        live_function: bool,
+        escape_status: NapiStatus,
+    }
+
+    impl Default for CachedCallbackCapture {
+        fn default() -> Self {
+            Self {
+                value: ptr::null_mut(),
+                generation: 0,
+                live_function: false,
+                escape_status: NAPI_OK,
+            }
+        }
+    }
+
+    fn with_tracing_thread(body: impl FnOnce() + Send + 'static) {
+        std::thread::spawn(move || {
+            thaw_arena::thaw_arena_enable_tracing();
+            assert!(thaw_arena::is_tracing());
+            body();
+        })
+        .join()
+        .expect("N-API ownership test thread panicked");
+    }
+
+    fn new_host_env() -> NapiEnv {
+        let mut env = Box::new(Env::new());
+        env.host_managed = true;
+        env.graph_owner_id = next_graph_owner_id().unwrap();
+        let env_ptr: NapiEnv = &mut *env;
+        HOST.with(|host| host.borrow_mut().module_envs.push(env));
+        env_ptr
+    }
+
+    unsafe fn install_export(env: NapiEnv, name: &str, callback: NapiCallback, data: *mut c_void) {
+        let function = Function {
+            callback,
+            data,
+            properties: HashMap::new(),
+            _thaw_bridge: None,
+            _accessor_owner: None,
+        };
+        let value = env_mut(env)
+            .unwrap()
+            .alloc(Value::Function(function.clone()));
+        HOST.with(|host| {
+            let mut host = host.borrow_mut();
+            host.functions.insert(name.to_owned(), function);
+            host.exports.insert(name.to_owned(), (env as usize, value));
+        });
+    }
+
+    unsafe fn retire_cached_callback(env: NapiEnv, value: NapiValue, generation: u64) {
+        let mut payloads = Vec::new();
+        let mut accessors = Vec::new();
+        let mut quickjs_releases = Vec::new();
+        let mut callbacks = ScopedFinalizeCallbacks::default();
+        retire_scoped_value(
+            &mut *env,
+            value,
+            generation,
+            &mut payloads,
+            &mut accessors,
+            &mut quickjs_releases,
+            &mut callbacks,
+        );
+        drop(payloads);
+        drop(accessors);
+        callbacks.run(env);
+    }
+
+    unsafe extern "C" fn returns_temporary_object(
+        env: NapiEnv,
+        info: NapiCallbackInfo,
+    ) -> NapiValue {
+        let probe = (*info).data.cast::<TemporaryValues>();
+        let owner = env_mut(env).unwrap();
+        let child = owner.alloc(Value::Number(23.0));
+        let object = owner.alloc(Value::Object(HashMap::from([(
+            PropertyKey::String("value".into()),
+            child,
+        )])));
+        (*probe).child = child;
+        (*probe).object = object;
+        object
+    }
+
+    unsafe extern "C" fn throws_after_temporary_object(
+        env: NapiEnv,
+        info: NapiCallbackInfo,
+    ) -> NapiValue {
+        let probe = (*info).data.cast::<TemporaryValues>();
+        let owner = env_mut(env).unwrap();
+        let child = owner.alloc(Value::Number(29.0));
+        let object = owner.alloc(Value::Object(HashMap::from([(
+            PropertyKey::String("value".into()),
+            child,
+        )])));
+        (*probe).child = child;
+        (*probe).object = object;
+        let error = alloc_error(owner, "TypeError", "dispatch scope failure".into(), None);
+        owner.exception = Some(error);
+        ptr::null_mut()
+    }
+
+    unsafe extern "C" fn returns_native_instance(
+        env: NapiEnv,
+        info: NapiCallbackInfo,
+    ) -> NapiValue {
+        let owner = env_mut(env).unwrap();
+        let value = owner.alloc(Value::Object(HashMap::new()));
+        owner.instances.insert(value as usize, 0);
+        (*(*info).data.cast::<TemporaryValues>()).object = value;
+        value
+    }
+
+    unsafe extern "C" fn capture_callback_reference(
+        env: NapiEnv,
+        info: NapiCallbackInfo,
+    ) -> NapiValue {
+        let probe = (*info).data.cast::<CallbackCapture>();
+        let Some(value) = (*info).args.first().copied() else {
+            return ptr::null_mut();
+        };
+        if (*probe).reference.is_null() {
+            (*probe).value = value;
+            let status = napi_create_reference(env, value, 1, &mut (*probe).reference);
+            if status != NAPI_OK {
+                record_status(env, status);
+                return ptr::null_mut();
+            }
+        } else {
+            (*probe).repeated_value = value;
+        }
+        env_mut(env).unwrap().alloc(Value::Number(0.0))
+    }
+
+    unsafe extern "C" fn record_callback_value(env: NapiEnv, info: NapiCallbackInfo) -> NapiValue {
+        if let Some(value) = (*info).args.first().copied() {
+            let (generation, live_function, outer_scope) = {
+                let owner = env_mut(env).unwrap();
+                let live_function = owner.values.contains(&value)
+                    && matches!(value_ref(value), Ok(Value::Function(_)));
+                (
+                    owner
+                        .value_generations
+                        .get(&(value as usize))
+                        .copied()
+                        .unwrap_or(0),
+                    live_function,
+                    (owner.active_handle_scopes.len() > 1)
+                        .then(|| owner.active_handle_scopes.last().copied())
+                        .flatten(),
+                )
+            };
+            let probe = &mut *(*info).data.cast::<CachedCallbackCapture>();
+            probe.live_function = live_function;
+            probe.value = value;
+            probe.generation = generation;
+            if let Some(scope) = outer_scope {
+                let mut escaped = ptr::null_mut();
+                probe.escape_status = napi_escape_handle(env, scope.cast(), value, &mut escaped);
+            }
+        }
+        env_mut(env).unwrap().alloc(Value::Number(0.0))
+    }
+
+    unsafe extern "C" fn invoke_arena_callback(
+        context: *mut c_void,
+        _args: *const c_char,
+    ) -> *const c_char {
+        if !context.is_null() {
+            (&*context.cast::<AtomicUsize>()).fetch_add(1, Ordering::SeqCst);
+        }
+        c"null".as_ptr()
+    }
+
+    unsafe extern "C" fn unused_arena_callback(
+        _context: *mut c_void,
+        _args: *const c_char,
+    ) -> *const c_char {
+        c"null".as_ptr()
+    }
+
+    #[test]
+    fn non_graph_dispatch_serializes_before_retiring_success_and_error_temporaries() {
+        with_tracing_thread(|| unsafe {
+            let mut success_probe = Box::<TemporaryValues>::default();
+            let mut error_probe = Box::<TemporaryValues>::default();
+            let env = new_host_env();
+            install_export(
+                env,
+                "napi-owner-scope::success",
+                returns_temporary_object,
+                (&mut *success_probe as *mut TemporaryValues).cast(),
+            );
+            install_export(
+                env,
+                "napi-owner-scope::error",
+                throws_after_temporary_object,
+                (&mut *error_probe as *mut TemporaryValues).cast(),
+            );
+            let success =
+                thaw_napi_call_typed_result(c"napi-owner-scope::success".as_ptr(), c"[]".as_ptr());
+            assert!(success.error.is_null());
+            assert_eq!(
+                CStr::from_ptr(success.value).to_str().unwrap(),
+                r#"{"value":23.0}"#
+            );
+            thaw_arena::destroy_string(success.value);
+            assert!(!(*env).values.contains(&success_probe.object));
+            assert!(!(*env).values.contains(&success_probe.child));
+
+            let failure =
+                thaw_napi_call_typed_result(c"napi-owner-scope::error".as_ptr(), c"[]".as_ptr());
+            assert!(failure.value.is_null());
+            let message = CStr::from_ptr(failure.error).to_string_lossy().into_owned();
+            assert!(message.contains("dispatch scope failure"), "{message}");
+            thaw_arena::destroy_string(failure.error);
+            assert!(!(*env).values.contains(&error_probe.object));
+            assert!(!(*env).values.contains(&error_probe.child));
+
+            let mut instance_probe = Box::<TemporaryValues>::default();
+            install_export(
+                env,
+                "napi-owner-scope::instance",
+                returns_native_instance,
+                (&mut *instance_probe as *mut TemporaryValues).cast(),
+            );
+            let returned = thaw_napi_call_export_handle_typed_result(
+                c"napi-owner-scope::instance".as_ptr(),
+                c"[]".as_ptr(),
+            );
+            assert!(returned.error.is_null());
+            assert_eq!(returned.value as usize, instance_probe.object as usize);
+            assert!(value_ref(instance_probe.object).is_ok());
+            assert!((*env)
+                .escaped_native_handles
+                .contains(&(instance_probe.object as usize)));
+            assert!((*env).references.iter().any(|reference| {
+                !reference.deleted
+                    && reference.count > 0
+                    && reference.value == instance_probe.object
+            }));
+        });
+    }
+
+    #[test]
+    fn compiled_callback_context_tracks_function_clone_and_positive_reference_lifetime() {
+        with_tracing_thread(|| unsafe {
+            let context = thaw_arena::thaw_arena_alloc(
+                std::mem::size_of::<AtomicUsize>(),
+                std::mem::align_of::<AtomicUsize>(),
+            )
+            .cast::<AtomicUsize>();
+            assert!(!context.is_null());
+            context.write(AtomicUsize::new(0));
+            let mut probe = Box::<CallbackCapture>::default();
+            let env = new_host_env();
+            install_export(
+                env,
+                "napi-owner-scope::capture",
+                capture_callback_reference,
+                (&mut *probe as *mut CallbackCapture).cast(),
+            );
+            let argument = ThawNativeFunctionArgument {
+                index: 0,
+                callback: Some(invoke_arena_callback),
+                context: context.cast(),
+            };
+            let result = thaw_napi_call_with_functions_typed_result(
+                c"napi-owner-scope::capture".as_ptr(),
+                c"[null]".as_ptr(),
+                &argument,
+                1,
+            );
+            assert!(result.error.is_null());
+            assert_eq!(CStr::from_ptr(result.value).to_str().unwrap(), "0.0");
+            thaw_arena::destroy_string(result.value);
+            assert!(!probe.value.is_null());
+            assert!(!probe.reference.is_null());
+            assert!((*env).active_handle_scopes.is_empty());
+            assert!((*env).values.contains(&probe.value));
+
+            let repeated = thaw_napi_call_with_functions_typed_result(
+                c"napi-owner-scope::capture".as_ptr(),
+                c"[null]".as_ptr(),
+                &argument,
+                1,
+            );
+            assert!(repeated.error.is_null());
+            thaw_arena::destroy_string(repeated.value);
+            assert_eq!(probe.repeated_value, probe.value);
+
+            let mut owner_scope = ptr::null_mut();
+            assert_eq!(
+                open_handle_scope(env, &mut owner_scope, HandleScopeKind::Normal),
+                NAPI_OK
+            );
+            let mut function = ptr::null_mut();
+            assert_eq!(
+                napi_get_reference_value(env, probe.reference, &mut function),
+                NAPI_OK
+            );
+            assert_eq!(function, probe.value);
+            let function_clone = match value_ref(function).unwrap() {
+                Value::Function(function) => function.clone(),
+                _ => panic!("compiled callback was not a function"),
+            };
+            thaw_arena::thaw_arena_reset();
+            assert!(!thaw_arena::was_reclaimed(context as usize));
+
+            let this_arg = (*env).alloc(Value::Undefined);
+            let mut callback_result = ptr::null_mut();
+            assert_eq!(
+                napi_call_function(
+                    env,
+                    this_arg,
+                    function,
+                    0,
+                    ptr::null(),
+                    &mut callback_result
+                ),
+                NAPI_OK,
+            );
+            assert_eq!(context.as_ref().unwrap().load(Ordering::SeqCst), 1);
+            assert_eq!(
+                close_handle_scope(env, owner_scope, HandleScopeKind::Normal),
+                NAPI_OK
+            );
+
+            assert!(HOST.with(|host| {
+                host.borrow()
+                    .compiled_callbacks
+                    .keys()
+                    .any(|key| key.0 == env as usize)
+            }));
+            Env::disable_dispatch(env, true);
+            assert!(!HOST.with(|host| {
+                host.borrow()
+                    .compiled_callbacks
+                    .keys()
+                    .any(|key| key.0 == env as usize)
+            }));
+
+            assert_eq!(napi_delete_reference(env, probe.reference), NAPI_OK);
+            assert!(!(*env).values.contains(&probe.value));
+            thaw_arena::thaw_arena_reset();
+            assert!(!thaw_arena::was_reclaimed(context as usize));
+            drop(function_clone);
+            thaw_arena::thaw_arena_reset();
+            assert!(thaw_arena::was_reclaimed(context as usize));
+        });
+    }
+
+    #[test]
+    fn compiled_callback_cache_misses_retired_generations() {
+        with_tracing_thread(|| unsafe {
+            let mut probe = Box::<CachedCallbackCapture>::default();
+            let env = new_host_env();
+            let mut outer_scope = ptr::null_mut();
+            assert_eq!(
+                open_handle_scope(env, &mut outer_scope, HandleScopeKind::Normal),
+                NAPI_OK
+            );
+            install_export(
+                env,
+                "napi-owner-scope::cache",
+                record_callback_value,
+                (&mut *probe as *mut CachedCallbackCapture).cast(),
+            );
+            let argument = ThawNativeFunctionArgument {
+                index: 0,
+                callback: Some(unused_arena_callback),
+                context: ptr::null_mut(),
+            };
+            let first_result = thaw_napi_call_with_functions_typed_result(
+                c"napi-owner-scope::cache".as_ptr(),
+                c"[null]".as_ptr(),
+                &argument,
+                1,
+            );
+            assert!(first_result.error.is_null());
+            thaw_arena::destroy_string(first_result.value);
+            let first = probe.value;
+            let first_generation = probe.generation;
+            assert!(!first.is_null());
+            assert_ne!(first_generation, 0);
+            assert_eq!(probe.escape_status, NAPI_OK);
+
+            // Retire the factory-created callback without constructing cache
+            // entries manually, leaving its weak-cache key to test shutdown.
+            let generation = (*env)
+                .value_generations
+                .get(&(first as usize))
+                .copied()
+                .expect("cached callback generation disappeared before retirement");
+            retire_cached_callback(env, first, generation);
+            assert!(!(*env).values.contains(&first));
+
+            let second_result = thaw_napi_call_with_functions_typed_result(
+                c"napi-owner-scope::cache".as_ptr(),
+                c"[null]".as_ptr(),
+                &argument,
+                1,
+            );
+            assert!(second_result.error.is_null());
+            thaw_arena::destroy_string(second_result.value);
+            assert!(probe.generation > first_generation);
+            assert!(
+                probe.live_function,
+                "cache returned a retired callback handle"
+            );
+            assert_eq!(probe.escape_status, NAPI_OK);
+            assert_eq!(
+                close_handle_scope(env, outer_scope, HandleScopeKind::Normal),
+                NAPI_OK
+            );
+        });
+    }
+
+    unsafe extern "C" fn return_first_argument(_env: NapiEnv, info: NapiCallbackInfo) -> NapiValue {
+        (*info).args.first().copied().unwrap_or(ptr::null_mut())
+    }
+
+    #[test]
+    fn shutdown_drops_retired_callback_cache_entries() {
+        with_tracing_thread(|| unsafe {
+            let mut probe = Box::<CachedCallbackCapture>::default();
+            let env = new_host_env();
+            let mut outer_scope = ptr::null_mut();
+            assert_eq!(
+                open_handle_scope(env, &mut outer_scope, HandleScopeKind::Normal),
+                NAPI_OK
+            );
+            install_export(
+                env,
+                "napi-owner-scope::shutdown-cache",
+                record_callback_value,
+                (&mut *probe as *mut CachedCallbackCapture).cast(),
+            );
+            let argument = ThawNativeFunctionArgument {
+                index: 0,
+                callback: Some(unused_arena_callback),
+                context: ptr::null_mut(),
+            };
+            let result = thaw_napi_call_with_functions_typed_result(
+                c"napi-owner-scope::shutdown-cache".as_ptr(),
+                c"[null]".as_ptr(),
+                &argument,
+                1,
+            );
+            assert!(result.error.is_null());
+            thaw_arena::destroy_string(result.value);
+
+            let callback = probe.value;
+            let generation = probe.generation;
+            assert!(generation > 0);
+            assert!((*env).values.contains(&callback));
+            assert_eq!(probe.escape_status, NAPI_OK);
+            assert!(HOST.with(|host| {
+                host.borrow()
+                    .compiled_callbacks
+                    .keys()
+                    .any(|key| key.0 == env as usize)
+            }));
+
+            retire_cached_callback(env, callback, generation);
+            assert!(!(*env).values.contains(&callback));
+            assert!(HOST.with(|host| {
+                host.borrow()
+                    .compiled_callbacks
+                    .keys()
+                    .any(|key| key.0 == env as usize)
+            }));
+
+            Env::disable_dispatch(env, true);
+            assert!(!HOST.with(|host| {
+                host.borrow()
+                    .compiled_callbacks
+                    .keys()
+                    .any(|key| key.0 == env as usize)
+            }));
+            assert_eq!(
+                close_handle_scope(env, outer_scope, HandleScopeKind::Normal),
+                NAPI_OK
+            );
+        });
+    }
+
+    #[test]
+    fn non_graph_json_lease_named_fields_remain_data() {
+        with_tracing_thread(|| unsafe {
+            let env = new_host_env();
+            let marker = (*env).alloc(Value::Object(HashMap::new()));
+            let token = retain_napi_graph_handle(marker as u64);
+            assert_ne!(token, 0);
+            install_export(
+                env,
+                "napi-owner-scope::lease-data",
+                return_first_argument,
+                ptr::null_mut(),
+            );
+
+            let args = CString::new(format!(
+                r#"[{{"leases":["ordinary data"],"napiLeases":["{token}"]}}]"#
+            ))
+            .unwrap();
+            let result = thaw_napi_call_typed_result(
+                c"napi-owner-scope::lease-data".as_ptr(),
+                args.as_ptr(),
+            );
+            assert!(result.error.is_null());
+            let value: JsonValue =
+                serde_json::from_str(CStr::from_ptr(result.value).to_str().unwrap()).unwrap();
+            thaw_arena::destroy_string(result.value);
+            assert_eq!(value["leases"][0], "ordinary data");
+            assert_eq!(value["napiLeases"][0], token.to_string());
+            assert!((*env).graph_reference_tokens.contains(&(token as usize)));
+            let mut retained = ptr::null_mut();
+            assert_eq!(
+                napi_get_reference_value(env, token as *mut Reference, &mut retained),
+                NAPI_OK
+            );
+            assert_eq!(retained, marker);
+            assert_eq!(release_napi_graph_reference(token), 1);
+        });
+    }
 }
