@@ -430,7 +430,7 @@ pub struct Function {
     callback: NapiCallback,
     data: *mut c_void,
     properties: HashMap<PropertyKey, NapiValue>,
-    _thaw_bridge: Option<Arc<ThawCallbackBridge>>,
+    _thaw_bridge: Option<Rc<ThawCallbackBridge>>,
     // A reflected native accessor remains callable after its property is
     // replaced or deleted. Its copied descriptor also pins JS callback roots.
     _accessor_owner: Option<Arc<Accessor>>,
@@ -458,6 +458,7 @@ impl From<&str> for PropertyKey {
 struct ThawCallbackBridge {
     callback: ThawCallback,
     context: usize,
+    _context_root: Option<thaw_arena::ArenaRoot>,
 }
 
 #[derive(Clone, Copy)]
@@ -1282,7 +1283,6 @@ fn scope_external_roots(env: NapiEnv, host_managed: bool) -> Option<Vec<NapiValu
                 roots.push(*value);
             }
         }
-        roots.extend(host.compiled_callbacks.values().copied());
         let symbols = unsafe { env.as_ref()? };
         for function in host.functions.values() {
             for (name, value) in &function.properties {
@@ -1798,7 +1798,7 @@ impl Env {
                     host.functions.remove(&name);
                 }
                 host.compiled_callbacks
-                    .retain(|_, value| !(*env).values.contains(value));
+                    .retain(|(owner, _, _, _), _| *owner != env as usize);
             });
         }
     }
@@ -2038,7 +2038,7 @@ struct Host {
     functions: HashMap<String, Function>,
     exports: HashMap<String, (usize, NapiValue)>,
     qualified_packages: HashSet<String>,
-    compiled_callbacks: HashMap<(usize, usize, usize, bool), NapiValue>,
+    compiled_callbacks: HashMap<CompiledCallbackKey, (NapiValue, u64, u64)>,
     libraries: Vec<*mut c_void>,
     // Each thread-local Host owns its own loop; Worker's callback context must
     // never run callbacks from the process-global uv_default_loop.
