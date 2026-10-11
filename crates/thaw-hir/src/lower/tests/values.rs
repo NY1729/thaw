@@ -242,6 +242,10 @@ fn string_split_defaults_undefined_separator_and_limit_lazily() {
             function separator(): undefined { return undefined; }
             function limit(): number { return 0; }
             function effects(): string[] { return receiver().split(separator(), limit()); }
+            declare function opaqueReceiver(): string;
+            declare function opaqueSeparator(): JsValue;
+            declare function opaqueLimit(): JsValue;
+            function opaqueEffects(): string[] { return opaqueReceiver().split(opaqueSeparator(), opaqueLimit()); }
         "#,
     );
 
@@ -263,6 +267,17 @@ fn string_split_defaults_undefined_separator_and_limit_lazily() {
             }
             HirExpr::Block(statements) => for statement in statements { visit_stmt(statement, visit); },
             HirExpr::BinOp(_, left, right) => { visit_expr(left, visit); visit_expr(right, visit); }
+            HirExpr::ArrayLit(values) | HirExpr::DynamicCall(_, values) => {
+                for value in values { visit_expr(value, visit); }
+            }
+            HirExpr::JsValueAsJson(value) | HirExpr::JsonAsNumber(value)
+            | HirExpr::JsonAsString(value) | HirExpr::JsonAsBool(value)
+            | HirExpr::TypedIndex(value, _, _) | HirExpr::JsonIndex(value, _)
+            | HirExpr::Await(value) => visit_expr(value, visit),
+            HirExpr::EvalThen(first, second) | HirExpr::JsonKey(first, second) => {
+                visit_expr(first, visit);
+                visit_expr(second, visit);
+            }
             _ => {}
         }
     }
@@ -283,6 +298,20 @@ fn string_split_defaults_undefined_separator_and_limit_lazily() {
             if matches!(node, HirExpr::Call(callee, _) if matches!(callee.as_ref(), HirExpr::Var(name) if name == target)) {
                 found = true;
             }
+        });
+        found
+    }
+    fn has_var(expr: &HirExpr, target: &str) -> bool {
+        let mut found = false;
+        visit_expr(expr, &mut |node| {
+            if matches!(node, HirExpr::Var(name) if name == target) { found = true; }
+        });
+        found
+    }
+    fn has_literal(expr: &HirExpr, value: &str) -> bool {
+        let mut found = false;
+        visit_expr(expr, &mut |node| {
+            if matches!(node, HirExpr::Lit(HirLit::Str(text)) if text == value) { found = true; }
         });
         found
     }
@@ -376,6 +405,76 @@ fn string_split_defaults_undefined_separator_and_limit_lazily() {
         && producers.iter().filter(|(_, source)| has_call(source, "separator")).count() == 1
         && producers.iter().filter(|(_, source)| has_call(source, "limit")).count() == 1,
         "receiver and source arguments must each be staged once in order: {producers:?}");
+
+    let opaque_effects = function(&program, "opaqueEffects");
+    let mut opaque_producers = Vec::new();
+    for statement in &opaque_effects.body {
+        visit_stmt(statement, &mut |node| {
+            if let HirExpr::Call(callee, arguments) = node {
+                if let HirExpr::Lambda(_, parameters, _, _) = callee.as_ref() {
+                    if let (Some(parameter), Some(source)) = (parameters.first(), arguments.first()) {
+                        if parameter.name.starts_with("__thaw_split_receiver_")
+                            || parameter.name.starts_with("__thaw_native_arg_")
+                        {
+                            opaque_producers.push((parameter.name.as_str(), source));
+                        }
+                    }
+                }
+            }
+        });
+    }
+    let opaque_receiver = opaque_producers.iter().position(|(_, source)| has_call(source, "opaqueReceiver"));
+    let opaque_separator = opaque_producers.iter().position(|(_, source)| has_call(source, "opaqueSeparator"));
+    let opaque_limit = opaque_producers.iter().position(|(_, source)| has_call(source, "opaqueLimit"));
+    assert!(opaque_receiver.is_some() && opaque_separator.is_some() && opaque_limit.is_some()
+        && opaque_receiver.unwrap() < opaque_separator.unwrap()
+        && opaque_separator.unwrap() < opaque_limit.unwrap()
+        && opaque_producers.iter().filter(|(_, source)| has_call(source, "opaqueReceiver")).count() == 1
+        && opaque_producers.iter().filter(|(_, source)| has_call(source, "opaqueSeparator")).count() == 1
+        && opaque_producers.iter().filter(|(_, source)| has_call(source, "opaqueLimit")).count() == 1,
+        "opaque receiver and raw argument producers must each run once, in source order: {opaque_producers:?}");
+    let raw_separator = opaque_producers[opaque_separator.unwrap()].0;
+    let raw_limit = opaque_producers[opaque_limit.unwrap()].0;
+    let defined_branch = conditionals(opaque_effects).into_iter().find_map(|node| match node {
+        HirExpr::Conditional(_, _, no, HirType::Array(item))
+            if **item == HirType::Str
+                && has_call(no, "__thaw_string_split")
+                && has_call(no, "__thaw_js_handle_to_string")
+                && has_call(no, "callDynamicValue") => Some(no.as_ref()),
+        _ => None,
+    }).expect("opaque defined-separator branch");
+    let HirExpr::Call(limit_lambda, limit_arguments) = defined_branch else {
+        panic!("limit conversion must be the outer defined-branch binding: {defined_branch:?}");
+    };
+    let HirExpr::Lambda(_, limit_parameters, _, separator_binding) = limit_lambda.as_ref() else {
+        panic!("expected limit conversion binding lambda: {defined_branch:?}");
+    };
+    let limit_parameter = limit_parameters.first().expect("limit binding parameter");
+    let limit_conversion = limit_arguments.first().expect("limit conversion argument");
+    assert!(has_call(limit_conversion, "callDynamicValue")
+        && has_call(limit_conversion, "getDynamicValue")
+        && has_literal(limit_conversion, "__thaw_unary_plus")
+        && has_var(limit_conversion, raw_limit),
+        "the saved limit must use its live unary-plus conversion before separator conversion: {limit_conversion:?}");
+    let HirExpr::Call(separator_lambda, separator_arguments) = separator_binding.as_ref() else {
+        panic!("separator conversion must be nested after limit conversion: {separator_binding:?}");
+    };
+    let HirExpr::Lambda(_, separator_parameters, _, split_call) = separator_lambda.as_ref() else {
+        panic!("expected separator conversion binding lambda: {separator_binding:?}");
+    };
+    let separator_parameter = separator_parameters.first().expect("separator binding parameter");
+    let separator_conversion = separator_arguments.first().expect("separator conversion argument");
+    assert!(matches!(separator_conversion,
+        HirExpr::Call(callee, arguments)
+            if matches!(callee.as_ref(), HirExpr::Var(name) if name == "__thaw_js_handle_to_string")
+                && arguments.first().is_some_and(|value| has_var(value, raw_separator))
+    ), "the saved separator must use its live string conversion after numeric conversion: {separator_conversion:?}");
+    assert!(matches!(split_call.as_ref(), HirExpr::Call(callee, arguments)
+        if matches!(callee.as_ref(), HirExpr::Var(name) if name == "__thaw_string_split")
+            && arguments.len() == 3
+            && matches!(&arguments[1], HirExpr::Var(name) if name == &separator_parameter.name)
+            && matches!(&arguments[2], HirExpr::Var(name) if name == &limit_parameter.name)
+    ), "the native split call must receive both converted bindings, including at zero limit: {split_call:?}");
 }
 
 #[test]
