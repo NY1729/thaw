@@ -172,6 +172,19 @@ fn querystring_builtin_runs_through_bundled_commonjs_require() {
              \x20 if (querystring.encode(values) !== expected) throw new Error('querystring encode alias');\n\
              \x20 var encoded = querystring.stringify({ n: NaN, p: Infinity, m: -Infinity, finite: 2 }, ';', ':', { encodeURIComponent: function(value) { return '[' + value + ']'; } });\n\
              \x20 if (encoded !== '[n]:[];[p]:[];[m]:[];[finite]:[2]') throw new Error('querystring custom encoder');\n\
+             \x20 var tolerant = [['%41%ZZ', 'A%ZZ'], ['%41%', 'A%'], ['%41%2', 'A%2'], ['%C3%A9%ZZ', '\\u00e9%ZZ'], ['%E2%82%ZZ', '\\ufffd%ZZ'], ['%FF%41', '\\ufffdA'], ['%EF%BB%BF%ZZ', '\\ufeff%ZZ']];\n\
+             \x20 tolerant.forEach(function(test) { if (querystring.unescape(test[0]) !== test[1]) throw new Error('querystring tolerant UTF8'); });\n\
+             \x20 if (querystring.unescape('a+b', true) !== 'a+b' || querystring.unescape('%41+%ZZ') !== 'A+%ZZ' || querystring.unescape('%41+%ZZ', true) !== 'A %ZZ') throw new Error('querystring direct unescape spaces');\n\
+             \x20 var malformed = querystring.parse('%41%ZZ=%C3%A9%ZZ&x=%FF%41'); if (malformed['A%ZZ'] !== '\\u00e9%ZZ' || malformed.x !== '\\ufffdA') throw new Error('querystring malformed parse');\n\
+             \x20 if (querystring.parse('q=two+words&literal=%2B', '&', '=', { decodeURIComponent: decodeURIComponent }).q !== 'two words' || querystring.parse('literal=%2B').literal !== '+') throw new Error('querystring custom plus');\n\
+             \x20 var decoderInputs = []; var encodedSpaces = querystring.parse('a+b=c+d', '&', '=', { decodeURIComponent: function(text) { decoderInputs.push(text); return text; } }); if (decoderInputs[0] !== 'a%20b' || decoderInputs[1] !== 'c%20d' || encodedSpaces['a%20b'] !== 'c%20d') throw new Error('querystring custom decoder input');\n\
+             \x20 var customFallback = querystring.parse('q=%41%ZZ+end', '&', '=', { decodeURIComponent: function() { throw new URIError('decode'); } }); if (customFallback.q !== 'A%ZZ end') throw new Error('querystring custom fallback');\n\
+             \x20 var empties = querystring.parse('&a=1&&a=2&'); if (Object.getPrototypeOf(empties) !== null || Object.prototype.hasOwnProperty.call(empties, '') || empties.a.length !== 2 || empties.a[0] !== '1' || empties.a[1] !== '2') throw new Error('querystring empty fields');\n\
+             \x20 var explicitEmpty = querystring.parse('=value&='); if (!Array.isArray(explicitEmpty['']) || explicitEmpty[''][0] !== 'value' || explicitEmpty[''][1] !== '') throw new Error('querystring explicit empty key');\n\
+             \x20 if (Object.keys(querystring.parse('&&a=1', '&', '=', { maxKeys: 2 })).length !== 0 || querystring.parse('&&a=1', '&', '=', { maxKeys: 3 }).a !== '1') throw new Error('querystring empty pair quota');\n\
+             \x20 var unlimited = querystring.decode('&&a=1&', '&', '=', { maxKeys: 0 }); if (unlimited.a !== '1' || Object.prototype.hasOwnProperty.call(unlimited, '')) throw new Error('querystring decode alias');\n\
+             \x20 var customSeparator = querystring.parse(';;a:1;;', ';', ':'); if (customSeparator.a !== '1' || Object.prototype.hasOwnProperty.call(customSeparator, '')) throw new Error('querystring custom separator empties');\n\
+             \x20 if (querystring.unescape('%41\\u00e9%ZZ') !== 'A\\ufffd%ZZ' || querystring.unescape('%00').charCodeAt(0) !== 0) throw new Error('querystring low-byte fallback');\n\
              \x20 return querystring.stringify({ a: [1, 2], space: 'two words' }) + ':' + JSON.stringify(querystring.parse('x=1&x=2'));\n\
              };",
         )

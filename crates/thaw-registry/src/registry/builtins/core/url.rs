@@ -45,8 +45,18 @@ pub(super) fn source(name: &str) -> Option<&'static str> {
         ),
         "querystring" => Some(
             "function escape(value) { return encodeURIComponent(String(value)); }\n\
-             function unescape(value) {\n\
-             \x20\x20try { return decodeURIComponent(String(value).replace(/\\+/g, ' ')); } catch (_) { return String(value); }\n\
+             function unescape(value, decodeSpaces) {\n\
+             \x20\x20var source = String(value);\n\
+             \x20\x20try { return decodeURIComponent(source); } catch (_) {\n\
+             \x20\x20\x20\x20var bytes = new Uint8Array(source.length), length = 0;\n\
+             \x20\x20\x20\x20function hex(code) { return code >= 48 && code <= 57 ? code - 48 : code >= 65 && code <= 70 ? code - 55 : code >= 97 && code <= 102 ? code - 87 : -1; }\n\
+             \x20\x20\x20\x20for (var index = 0; index < source.length; index++) {\n\
+             \x20\x20\x20\x20\x20\x20var code = source.charCodeAt(index);\n\
+             \x20\x20\x20\x20\x20\x20if (code === 37 && index + 2 < source.length) { var high = hex(source.charCodeAt(index + 1)), low = hex(source.charCodeAt(index + 2)); if (high >= 0 && low >= 0) { bytes[length++] = high * 16 + low; index += 2; continue; } }\n\
+             \x20\x20\x20\x20\x20\x20bytes[length++] = code === 43 && decodeSpaces ? 32 : code;\n\
+             \x20\x20\x20\x20}\n\
+             \x20\x20\x20\x20return new TextDecoder('utf-8', { ignoreBOM: true }).decode(bytes.subarray(0, length));\n\
+             \x20\x20}\n\
              }\n\
              function primitive(value) {\n\
              \x20\x20if (typeof value === 'number' && !Number.isFinite(value)) return '';\n\
@@ -70,14 +80,16 @@ pub(super) fn source(name: &str) -> Option<&'static str> {
              \x20\x20var source = String(text);\n\
              \x20\x20separator = separator === undefined ? '&' : String(separator);\n\
              \x20\x20assignment = assignment === undefined ? '=' : String(assignment);\n\
-             \x20\x20var decoder = options && typeof options.decodeURIComponent === 'function' ? options.decodeURIComponent : unescape;\n\
+             \x20\x20var decoder = options && typeof options.decodeURIComponent === 'function' ? options.decodeURIComponent : unescape, customDecoder = decoder !== unescape;\n\
+             \x20\x20function decodePart(value) { var source = String(value).replace(/\\+/g, customDecoder ? '%20' : ' '); try { return decoder(source); } catch (_) { return unescape(source, true); } }\n\
              \x20\x20var maxKeys = options && options.maxKeys !== undefined ? Number(options.maxKeys) : 1000;\n\
              \x20\x20var fields = source === '' ? [] : source.split(separator);\n\
              \x20\x20if (maxKeys > 0) fields = fields.slice(0, maxKeys);\n\
              \x20\x20fields.forEach(function(field) {\n\
+             \x20\x20\x20\x20if (field === '') return;\n\
              \x20\x20\x20\x20var index = field.indexOf(assignment);\n\
-             \x20\x20\x20\x20var key = decoder(index < 0 ? field : field.substring(0, index));\n\
-             \x20\x20\x20\x20var value = decoder(index < 0 ? '' : field.substring(index + assignment.length));\n\
+             \x20\x20\x20\x20var key = decodePart(index < 0 ? field : field.substring(0, index));\n\
+             \x20\x20\x20\x20var value = decodePart(index < 0 ? '' : field.substring(index + assignment.length));\n\
              \x20\x20\x20\x20if (!Object.prototype.hasOwnProperty.call(result, key)) result[key] = value;\n\
              \x20\x20\x20\x20else if (Array.isArray(result[key])) result[key].push(value);\n\
              \x20\x20\x20\x20else result[key] = [result[key], value];\n\
