@@ -115,6 +115,8 @@ impl<'a> FnLowerer<'a> {
             promise_catch_bindings: HashSet::new(),
             promise_catch_parameter: None,
             loop_depth: 0,
+            source_break_depths: Vec::new(),
+            source_continue_depths: Vec::new(),
             labels: Vec::new(),
             super_initializer: None,
             class_static_context: false,
