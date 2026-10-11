@@ -24,7 +24,7 @@ pub(super) fn source(name: &str) -> Option<&'static str> {
              StringDecoder.prototype.write = function(value) {\n\
              \x20\x20var input = globalThis.Buffer.from(value); var combined = this._pending.length ? globalThis.Buffer.concat([this._pending, input]) : input; var complete = combined.length;\n\
              \x20\x20if (this.encoding === 'utf8' || this.encoding === 'utf') complete = utf8CompleteLength(combined);\n\
-             \x20\x20else if (this.encoding === 'utf16le' || this.encoding === 'ucs2') complete -= complete % 2;\n\
+             \x20\x20else if (this.encoding === 'utf16le' || this.encoding === 'ucs2') { complete -= complete % 2; if (complete >= 2) { var unit = combined[complete - 2] | combined[complete - 1] << 8; if (unit >= 55296 && unit <= 56319) complete -= 2; } }\n\
              \x20\x20else if (this.encoding === 'base64' || this.encoding === 'base64url') complete -= complete % 3;\n\
              \x20\x20this._pending = globalThis.Buffer.from(combined.subarray(complete)); this.lastNeed = this._pending.length; this.lastTotal = complete === combined.length ? 0 : this.lastNeed + 1;\n\
              \x20\x20return combined.subarray(0, complete).toString(this.encoding);\n\
