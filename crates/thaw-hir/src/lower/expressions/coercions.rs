@@ -1405,6 +1405,8 @@ impl<'a> FnLowerer<'a> {
     fn lower_strict_equality(&mut self, lhs: HirExpr, rhs: HirExpr) -> Result<HirExpr, String> {
         let lhs_type = self.infer_expr_type(&lhs)?;
         let rhs_type = self.infer_expr_type(&rhs)?;
+        let source_lhs_type = lhs_type.clone();
+        let source_rhs_type = rhs_type.clone();
         // The sparse-array index check needs the original TypedIndex shape.
         // Its helper binds the index expression first and then the undefined
         // operand, so it remains a separate source-order-preserving path.
@@ -1437,11 +1439,100 @@ impl<'a> FnLowerer<'a> {
         self.scope.insert(rhs_name.clone(), rhs_type.clone());
         let left = HirExpr::Var(lhs_name.clone());
         let right = HirExpr::Var(rhs_name.clone());
+        let caught_identity = Self::caught_object_identity(&left, &lhs_type, &right, &rhs_type)
+            .or_else(|| Self::caught_object_identity(&right, &rhs_type, &left, &lhs_type));
+        let carrier_type = crate::caught_exception_carrier_type();
+        let carrier_members = match &carrier_type {
+            HirType::Union(members) => members.clone(),
+            _ => unreachable!("caught exception carrier must remain a union"),
+        };
+        let native_exception_test = |value: &HirExpr, ty: &HirType| {
+            (ty == &carrier_type).then(|| {
+                HirExpr::BinOp(
+                    BinOp::EqEqEq,
+                    Box::new(HirExpr::UnionTag(
+                        Box::new(value.clone()),
+                        carrier_members.clone(),
+                    )),
+                    Box::new(HirExpr::Lit(HirLit::F64(9.0))),
+                )
+            })
+        };
+        let lhs_native_test = native_exception_test(&left, &lhs_type);
+        let rhs_native_test = native_exception_test(&right, &rhs_type);
+        let native_exception_guard = match (lhs_native_test, rhs_native_test) {
+            (Some(lhs), Some(rhs)) => Some(Self::strict_if(
+                lhs,
+                HirExpr::Lit(HirLit::Bool(true)),
+                rhs,
+            )),
+            (Some(test), None) | (None, Some(test)) => Some(test),
+            (None, None) => None,
+        };
+        // Native exception values have no general Json identity projection.
+        // Keep the established native-function owner comparison for this
+        // active carrier member, and make other native-vs-typed comparisons
+        // false without attempting a lossy or throwing Json conversion.
+        let native_exception_result = if lhs_type == carrier_type && rhs_type == carrier_type {
+            // Compare both original carrier operands in the native union
+            // path. Its active NativeException member reaches
+            // thaw_exception_native_same, which compares provenance owner
+            // identity instead of a lossy Json projection.
+            Some(HirExpr::UnionIsEqual(
+                Box::new(left.clone()),
+                Box::new(right.clone()),
+                carrier_members.clone(),
+            ))
+        } else if lhs_type == carrier_type
+            && Self::contains_function_value(&rhs_type)
+        {
+            Some(self.function_present_pair(
+                HirExpr::UnionValue(Box::new(left.clone()), 9, carrier_members.clone()),
+                &HirType::NativeException,
+                right.clone(),
+                &rhs_type,
+                true,
+            )?)
+        } else if rhs_type == carrier_type && Self::contains_function_value(&lhs_type) {
+            Some(self.function_present_pair(
+                left.clone(),
+                &lhs_type,
+                HirExpr::UnionValue(Box::new(right.clone()), 9, carrier_members.clone()),
+                &HirType::NativeException,
+                true,
+            )?)
+        } else {
+            None
+        };
+        // Preserve the carrier's native allocation identity before adapting it.
+        // All other strict comparisons must compare its active original value,
+        // not the tagged carrier record itself.
+        let (left, right, lhs_type, rhs_type) = if caught_identity.is_some() {
+            (left, right, lhs_type, rhs_type)
+        } else {
+            let mut left_type = lhs_type;
+            let mut right_type = rhs_type;
+            let left = if left_type == carrier_type {
+                left_type = HirType::Json;
+                self.caught_carrier_as_json(left)?
+            } else {
+                left
+            };
+            let right = if right_type == carrier_type {
+                right_type = HirType::Json;
+                self.caught_carrier_as_json(right)?
+            } else {
+                right
+            };
+            (left, right, left_type, right_type)
+        };
         let tagged_function_pair = Self::contains_function_value(&lhs_type)
             || Self::contains_function_value(&rhs_type);
         let left_for_observable_absence = left.clone();
         let right_for_observable_absence = right.clone();
-        let base = if tagged_function_pair {
+        let base = if let Some(identity) = caught_identity {
+            identity
+        } else if tagged_function_pair {
             self.function_present_pair(left.clone(), &lhs_type, right.clone(), &rhs_type, true)?
         } else if let Some(result) =
             self.lower_optional_undefined_equality(left.clone(), right.clone())? {
@@ -1471,10 +1562,6 @@ impl<'a> FnLowerer<'a> {
         } else if matches!(&rhs_type, HirType::Function(_, _) | HirType::CallableFunction(..))
             && lhs_type == HirType::Undefined {
             Self::function_pointer_is_undefined(right, &rhs_type)
-        } else if let Some(identity) = Self::caught_object_identity(&left, &lhs_type, &right, &rhs_type)
-            .or_else(|| Self::caught_object_identity(&right, &rhs_type, &left, &lhs_type))
-        {
-            identity
         } else if lhs_type == rhs_type
             || Self::strict_reference_type(&lhs_type) && Self::strict_reference_type(&rhs_type)
         {
@@ -1510,7 +1597,21 @@ impl<'a> FnLowerer<'a> {
                   (right_status_name, HirType::F64, right_status_expr)],
             )?
         } else { base };
-        self.wrap_call_argument_bindings(result, &[(lhs_name, lhs_type, lhs), (rhs_name, rhs_type, rhs)])
+        // Keep native-exception dispatch outside observable-absence checks too:
+        // those checks may inspect the Json projection of the normal branch.
+        let result = if let Some(guard) = native_exception_guard {
+            Self::strict_if(
+                guard,
+                native_exception_result.unwrap_or(HirExpr::Lit(HirLit::Bool(false))),
+                result,
+            )
+        } else {
+            result
+        };
+        self.wrap_call_argument_bindings(result, &[
+            (lhs_name, source_lhs_type, lhs),
+            (rhs_name, source_rhs_type, rhs),
+        ])
     }
 
     /// `caught === original` for a thrown native object: the carrier keeps the owner pointer of the

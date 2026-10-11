@@ -368,6 +368,10 @@ pub struct HirCompiler<'ctx> {
     /// bindings. A resume reloads the pointer rather than sharing a value slot.
     for_iteration_frame_slots: HashMap<String, PointerValue<'ctx>>,
     global_variables: HashMap<String, (PointerValue<'ctx>, BasicTypeEnum<'ctx>, HirType)>,
+    /// Canonical closure globals for capture-free named function references.
+    /// Store the emitted pointer because LLVM globals share a symbol namespace
+    /// with functions and may be uniquified when a source function collides.
+    function_ref_closures: HashMap<String, Vec<(FunctionType<'ctx>, PointerValue<'ctx>)>>,
     module_exception_roots: Vec<PointerValue<'ctx>>,
     function_return_types: HashMap<String, HirType>,
     ffi_signatures: HashMap<String, FfiSignature>,
@@ -595,6 +599,7 @@ impl<'ctx> HirCompiler<'ctx> {
             stack_promise_slots: HashMap::new(),
             for_iteration_frame_slots: HashMap::new(),
             global_variables: HashMap::new(),
+            function_ref_closures: HashMap::new(),
             module_exception_roots: Vec::new(),
             function_return_types: HashMap::new(),
             ffi_signatures: HashMap::new(),

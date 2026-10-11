@@ -32,6 +32,7 @@ impl<'ctx> HirCompiler<'ctx> {
         };
         self.uses_quickjs = true;
         self.uses_quickjs_handles = true;
+        self.compile_register_js_callback_host_operations()?;
         let source = self.compile_expr(source)?.into_int_value();
         let result = self.builder.build_call(
             self.module.get_function("thaw_js_to_iterator_exact_result").unwrap(),
