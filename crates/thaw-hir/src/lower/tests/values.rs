@@ -31,6 +31,203 @@ fn an_any_annotated_copy_of_a_caught_error_keeps_the_string_error_type() {
 }
 
 #[test]
+fn string_normalize_defaults_undefined_forms_lazily() {
+    let program = lower(
+        r#"
+            function omitted(text: string): string { return text.normalize(); }
+            function explicit(text: string): string { return text.normalize(undefined); }
+            function optional(text: string, form?: string): string { return text.normalize(form); }
+            function unionForm(text: string, form: string | undefined): string { return text.normalize(form); }
+            function dynamic(text: string, form: any): string { return text.normalize(form); }
+            function supplied(text: string, form: string): string { return text.normalize(form); }
+            function nullForm(text: string): string { return text.normalize(null); }
+            function literalUndefined(text: string): string { return text.normalize('undefined'); }
+            function receiver(): string { return 'é'; }
+            function missingForm(): undefined { return undefined; }
+            function effectOrder(): string { return receiver().normalize(missingForm()); }
+        "#,
+    );
+
+    fn function<'a>(program: &'a HirProgram, name: &str) -> &'a HirFunction {
+        program.functions.iter().find(|function| function.name == name).unwrap()
+    }
+    fn form_source<'a>(expression: &'a HirExpr) -> Option<&'a HirExpr> {
+        match expression {
+            HirExpr::Call(callee, arguments) => {
+                if let HirExpr::Lambda(_, parameters, _, body) = callee.as_ref() {
+                    if parameters.iter().any(|parameter| parameter.name.starts_with("__thaw_normalize_form_")) {
+                        return arguments.first();
+                    }
+                    if let Some(source) = form_source(body) {
+                        return Some(source);
+                    }
+                }
+                arguments.iter().find_map(form_source)
+            }
+            HirExpr::Lambda(_, _, _, body) => form_source(body),
+            HirExpr::Block(statements) => statements.iter().find_map(|statement| match statement {
+                HirStmt::Expr(value) | HirStmt::Return(Some(value)) | HirStmt::Throw(value) => form_source(value),
+                HirStmt::Let(_, _, value) => form_source(value),
+                HirStmt::If(condition, yes, no) => form_source(condition)
+                    .or_else(|| yes.iter().find_map(|statement| form_source_statement(statement)))
+                    .or_else(|| no.iter().find_map(|statement| form_source_statement(statement))),
+                _ => None,
+            }),
+            HirExpr::Conditional(_, yes, no, _) => form_source(yes).or_else(|| form_source(no)),
+            _ => None,
+        }
+    }
+    fn form_source_statement(statement: &HirStmt) -> Option<&HirExpr> {
+        match statement {
+            HirStmt::Expr(value) | HirStmt::Return(Some(value)) | HirStmt::Throw(value) => form_source(value),
+            HirStmt::Let(_, _, value) => form_source(value),
+            HirStmt::If(condition, yes, no) => form_source(condition)
+                .or_else(|| yes.iter().find_map(form_source_statement))
+                .or_else(|| no.iter().find_map(form_source_statement)),
+            _ => None,
+        }
+    }
+    fn form<'a>(program: &'a HirProgram, name: &str) -> &'a HirExpr {
+        let body = &function(program, name).body;
+        body.iter().find_map(form_source_statement).expect("normalize form binding")
+    }
+    fn nfc_literal(expression: &HirExpr) -> bool {
+        matches!(expression, HirExpr::Lit(HirLit::Str(value)) if value == "NFC")
+    }
+    fn contains_optional_none(expression: &HirExpr) -> bool {
+        match expression {
+            HirExpr::OptionalIsNone(_, _) => true,
+            HirExpr::Call(callee, arguments) => contains_optional_none(callee)
+                || arguments.iter().any(contains_optional_none),
+            HirExpr::Lambda(_, _, _, body) | HirExpr::TypedClosure(_, body) => contains_optional_none(body),
+            HirExpr::Conditional(test, yes, no, _) => contains_optional_none(test)
+                || contains_optional_none(yes) || contains_optional_none(no),
+            _ => false,
+        }
+    }
+    fn contains_call(expression: &HirExpr, target: &str) -> bool {
+        match expression {
+            HirExpr::Call(callee, arguments) => matches!(callee.as_ref(), HirExpr::Var(name) if name == target)
+                || contains_call(callee, target) || arguments.iter().any(|argument| contains_call(argument, target)),
+            HirExpr::Lambda(_, _, _, body) | HirExpr::TypedClosure(_, body) => contains_call(body, target),
+            HirExpr::Conditional(test, yes, no, _) => contains_call(test, target)
+                || contains_call(yes, target) || contains_call(no, target),
+            HirExpr::Block(statements) => statements.iter().any(|statement| match statement {
+                HirStmt::Expr(value) | HirStmt::Return(Some(value)) | HirStmt::Throw(value) => contains_call(value, target),
+                HirStmt::Let(_, _, value) => contains_call(value, target),
+                HirStmt::If(condition, yes, no) => contains_call(condition, target)
+                    || yes.iter().any(|statement| contains_call_statement(statement, target))
+                    || no.iter().any(|statement| contains_call_statement(statement, target)),
+                _ => false,
+            }),
+            _ => false,
+        }
+    }
+    fn contains_call_statement(statement: &HirStmt, target: &str) -> bool {
+        match statement {
+            HirStmt::Expr(value) | HirStmt::Return(Some(value)) | HirStmt::Throw(value) => contains_call(value, target),
+            HirStmt::Let(_, _, value) => contains_call(value, target),
+            HirStmt::If(condition, yes, no) => contains_call(condition, target)
+                || yes.iter().any(|statement| contains_call_statement(statement, target))
+                || no.iter().any(|statement| contains_call_statement(statement, target)),
+            _ => false,
+        }
+    }
+    fn contains_throw_message(expression: &HirExpr, expected: &str) -> bool {
+        match expression {
+            HirExpr::Lambda(_, _, _, body) | HirExpr::TypedClosure(_, body) => contains_throw_message(body, expected),
+            HirExpr::Block(statements) => statements.iter().any(|statement| match statement {
+                HirStmt::Throw(HirExpr::Lit(HirLit::Str(message))) => message == expected,
+                HirStmt::Expr(value) | HirStmt::Return(Some(value)) | HirStmt::Throw(value)
+                | HirStmt::Let(_, _, value) => contains_throw_message(value, expected),
+                HirStmt::If(condition, yes, no) => contains_throw_message(condition, expected)
+                    || yes.iter().any(|statement| contains_throw_statement(statement, expected))
+                    || no.iter().any(|statement| contains_throw_statement(statement, expected)),
+                _ => false,
+            }),
+            HirExpr::Call(callee, arguments) => contains_throw_message(callee, expected)
+                || arguments.iter().any(|argument| contains_throw_message(argument, expected)),
+            HirExpr::Conditional(test, yes, no, _) => contains_throw_message(test, expected)
+                || contains_throw_message(yes, expected) || contains_throw_message(no, expected),
+            _ => false,
+        }
+    }
+    fn contains_throw_statement(statement: &HirStmt, expected: &str) -> bool {
+        match statement {
+            HirStmt::Throw(HirExpr::Lit(HirLit::Str(message))) => message == expected,
+            HirStmt::Expr(value) | HirStmt::Return(Some(value)) | HirStmt::Throw(value)
+            | HirStmt::Let(_, _, value) => contains_throw_message(value, expected),
+            HirStmt::If(condition, yes, no) => contains_throw_message(condition, expected)
+                || yes.iter().any(|statement| contains_throw_statement(statement, expected))
+                || no.iter().any(|statement| contains_throw_statement(statement, expected)),
+            _ => false,
+        }
+    }
+    fn binding_sources<'a>(expression: &'a HirExpr, sources: &mut Vec<(String, &'a HirExpr)>) {
+        if let HirExpr::Call(callee, arguments) = expression {
+            if let HirExpr::Lambda(_, parameters, _, body) = callee.as_ref() {
+                if let (Some(parameter), Some(source)) = (parameters.first(), arguments.first()) {
+                    if parameter.name.starts_with("__thaw_normalize_receiver_")
+                        || parameter.name.starts_with("__thaw_native_arg_")
+                    {
+                        sources.push((parameter.name.clone(), source));
+                    }
+                }
+                binding_sources(body, sources);
+            }
+        }
+    }
+    fn call_targets(expression: &HirExpr, target: &str) -> bool {
+        matches!(expression, HirExpr::Call(callee, _)
+            if matches!(callee.as_ref(), HirExpr::Var(name) | HirExpr::FunctionRef(name, _, _) if name == target))
+    }
+
+    assert!(nfc_literal(form(&program, "omitted")));
+    assert!(matches!(form(&program, "explicit"),
+        HirExpr::Conditional(test, yes, _, HirType::Str)
+            if matches!(test.as_ref(), HirExpr::Lit(HirLit::Bool(true))) && nfc_literal(yes)));
+    for name in ["optional", "unionForm"] {
+        assert!(matches!(form(&program, name),
+            HirExpr::Conditional(test, yes, no, HirType::Str)
+                if contains_optional_none(test) && nfc_literal(yes) && !nfc_literal(no)),
+            "{name} must select NFC for an absent Optional and retain supplied-form conversion");
+    }
+    assert!(matches!(form(&program, "dynamic"),
+        HirExpr::Conditional(test, yes, no, HirType::Str)
+            if matches!(test.as_ref(), HirExpr::Call(callee, _)
+                if matches!(callee.as_ref(), HirExpr::Var(name) if name == "__thaw_json_is_undefined" || name == "__thaw_is_undefined_dynamic_value"))
+                && nfc_literal(yes) && !nfc_literal(no)));
+    for name in ["supplied", "nullForm", "literalUndefined"] {
+        assert!(matches!(form(&program, name),
+            HirExpr::Conditional(test, yes, no, HirType::Str)
+                if matches!(test.as_ref(), HirExpr::Lit(HirLit::Bool(false)))
+                    && nfc_literal(yes) && !nfc_literal(no)),
+            "{name} must keep the supplied invalid or explicit form path");
+    }
+
+    let effect = function(&program, "effectOrder");
+    let mut sources = Vec::new();
+    effect.body.iter().for_each(|statement| match statement {
+        HirStmt::Return(Some(value)) | HirStmt::Expr(value) => binding_sources(value, &mut sources),
+        _ => {}
+    });
+    let receiver = sources.iter().position(|(_, source)| call_targets(source, "receiver"));
+    let form_call = sources.iter().position(|(_, source)| call_targets(source, "missingForm"));
+    let receiver_count = sources.iter().filter(|(_, source)| call_targets(source, "receiver")).count();
+    let form_count = sources.iter().filter(|(_, source)| call_targets(source, "missingForm")).count();
+    assert!(receiver_count == 1 && form_count == 1
+        && receiver.is_some() && form_call.is_some_and(|form| form > receiver.unwrap()),
+        "receiver and undefined form producers must each be staged once, receiver first: {sources:?}");
+    let normalize_body = &function(&program, "optional").body;
+    assert!(normalize_body.iter().any(|statement| match statement {
+        HirStmt::Return(Some(value)) | HirStmt::Expr(value) => contains_call(value, "__thaw_string_normalize")
+            && contains_call(value, "__thaw_string_is_null")
+            && contains_throw_message(value, "The normalization form should be one of NFC, NFD, NFKC, NFKD."),
+        _ => false,
+    }), "the runtime normalize call and invalid-form error path must remain: {normalize_body:?}");
+}
+
+#[test]
 fn rejects_writes_not_representable_by_every_union_array_member() {
     for operation in [
         "value[0] = 1",
