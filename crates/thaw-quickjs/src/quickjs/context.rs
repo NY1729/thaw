@@ -2939,11 +2939,21 @@ fn ensure_context() {
                 ctx.globals()
                     .set("__thaw_clone_unsupported_bootstrap", clone_unsupported_bootstrap)
                     .expect("failed to install clone brand bootstrap");
+                let clone_error_bootstrap = Function::new(
+                    ctx.clone(),
+                    |value: Value<'_>| value.is_error(),
+                )
+                .expect("failed to create clone Error brand bootstrap");
+                ctx.globals()
+                    .set("__thaw_clone_error_bootstrap", clone_error_bootstrap)
+                    .expect("failed to install clone Error brand bootstrap");
                 let platform_result = ctx.eval::<(), _>(PLATFORM_GLOBALS);
                 ctx.globals().remove("__thaw_async_context_bootstrap")
                     .expect("failed to remove async context bootstrap");
                 ctx.globals().remove("__thaw_clone_unsupported_bootstrap")
                     .expect("failed to remove clone brand bootstrap");
+                ctx.globals().remove("__thaw_clone_error_bootstrap")
+                    .expect("failed to remove clone Error brand bootstrap");
                 platform_result.expect("failed to install JavaScript platform globals");
                 install_native_exception_bridge(&ctx)
                     .expect("failed to install native exception carrier bridge");

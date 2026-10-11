@@ -1291,6 +1291,194 @@ fn structured_clone_copies_cycles_and_builtins() {
 }
 
 #[test]
+fn structured_clone_preserves_error_brand_and_data_cause() {
+    std::thread::spawn(|| {
+        assert_eq!(
+            load(
+                r#"
+      function cloneErrorCases() {
+        const nested = { value: 1 };
+        const source = new TypeError('boom', { cause: nested });
+        source.cause.self = source;
+        source.extra = 'ignored';
+        const graph = { error: source, again: source };
+        const copy = structuredClone(graph);
+        const cycleAndAlias = copy.error instanceof TypeError && copy.error !== source
+          && copy.again === copy.error && copy.error.message === 'boom'
+          && copy.error.name === 'TypeError' && copy.error.cause !== source.cause
+          && copy.error.cause.value === 1 && copy.error.cause.self === copy.error
+          && !Object.prototype.hasOwnProperty.call(copy.error, 'extra');
+        nested.value = 9;
+        const causeSnapshot = copy.error.cause.value === 1 && source.cause.value === 9;
+        const types = [Error, EvalError, RangeError, ReferenceError, SyntaxError, TypeError, URIError];
+        const typeCopies = types.every(Constructor => {
+          const original = new Constructor('message');
+          const cloned = structuredClone(original);
+          return cloned instanceof Constructor && cloned !== original
+            && cloned.message === 'message';
+        });
+        const custom = new Error('custom'); custom.name = 'CustomError';
+        const customCopy = structuredClone(custom);
+        const customFallback = customCopy instanceof Error && !(customCopy instanceof TypeError)
+          && customCopy.name === 'Error' && customCopy.message === 'custom';
+        const spoof = structuredClone({ name: 'TypeError', message: 'plain' });
+        const spoofPlain = !(spoof instanceof Error) && spoof.name === 'TypeError'
+          && spoof.message === 'plain';
+        const altered = new TypeError('altered'); altered.name = 'TypeError';
+        const originalPrototype = Object.getPrototypeOf(altered);
+        let alteredWorks;
+        try {
+          Object.setPrototypeOf(altered, null);
+          const alteredCopy = structuredClone(altered);
+          alteredWorks = alteredCopy instanceof TypeError && alteredCopy.message === 'altered';
+        } finally { Object.setPrototypeOf(altered, originalPrototype); }
+        let messageReads = 0, causeReads = 0;
+        const accessorError = new Error();
+        Object.defineProperties(accessorError, {
+          message: { configurable: true, get() { messageReads++; throw new Error('message getter'); } },
+          cause: { configurable: true, get() { causeReads++; throw new Error('cause getter'); } }
+        });
+        const accessorCopy = structuredClone(accessorError);
+        const accessorsIgnored = messageReads === 0 && causeReads === 0
+          && accessorCopy instanceof Error && accessorCopy.message === ''
+          && !Object.prototype.hasOwnProperty.call(accessorCopy, 'cause');
+        const nameSentinel = new Error('name sentinel');
+        const named = new Error();
+        Object.defineProperty(named, 'name', { get() { throw nameSentinel; } });
+        let namePropagated = false;
+        try { structuredClone(named); } catch (error) { namePropagated = error === nameSentinel; }
+        const messageSentinel = new Error('conversion sentinel');
+        const badMessage = new Error();
+        Object.defineProperty(badMessage, 'message', {
+          value: { toString() { throw messageSentinel; } }, configurable: true
+        });
+        let messagePropagated = false;
+        try { structuredClone(badMessage); } catch (error) { messagePropagated = error === messageSentinel; }
+        const symbolMessage = new Error();
+        Object.defineProperty(symbolMessage, 'message', {
+          value: Symbol('message'), configurable: true
+        });
+        let symbolMessageRejected = false;
+        try { structuredClone(symbolMessage); }
+        catch (error) { symbolMessageRejected = error instanceof TypeError; }
+        const rejects = value => {
+          try { structuredClone(value); return false; }
+          catch (error) { return error instanceof DOMException && error.name === 'DataCloneError'; }
+        };
+        const causeRejects = rejects(new Error('function cause', { cause() {} }))
+          && rejects(new Error('symbol cause', { cause: Symbol('cause') }));
+        return [cycleAndAlias, causeSnapshot, typeCopies, customFallback, spoofPlain,
+                alteredWorks, accessorsIgnored, namePropagated, messagePropagated,
+                causeRejects, symbolMessageRejected];
+      }
+    "#
+            ),
+            1
+        );
+        assert_eq!(
+            call("cloneErrorCases", "[]"),
+            "[true,true,true,true,true,true,true,true,true,true,true]"
+        );
+    })
+    .join()
+    .unwrap();
+}
+
+#[test]
+fn structured_clone_preserves_boxed_primitive_payloads() {
+    std::thread::spawn(|| {
+        assert_eq!(
+            load(
+                r#"
+      function cloneBoxedPrimitiveCases() {
+        const numberValueOf = Number.prototype.valueOf;
+        const stringValueOf = String.prototype.valueOf;
+        const booleanValueOf = Boolean.prototype.valueOf;
+        const bigIntValueOf = BigInt.prototype.valueOf;
+        const symbolValueOf = Symbol.prototype.valueOf;
+        const replacements = {
+          Number: globalThis.Number, String: globalThis.String,
+          Boolean: globalThis.Boolean, BigInt: globalThis.BigInt, Symbol: globalThis.Symbol,
+          objectValueOf: Object.prototype.valueOf,
+          numberValueOf: Number.prototype.valueOf, stringValueOf: String.prototype.valueOf,
+          booleanValueOf: Boolean.prototype.valueOf, bigIntValueOf: BigInt.prototype.valueOf,
+          symbolValueOf: Symbol.prototype.valueOf
+        };
+        const values = {
+          number: Object(7), boolean: Object(false), string: Object('text'), bigint: Object(9n),
+          zero: Object(0), nan: Object(NaN), infinity: Object(Infinity),
+          negativeZero: Object(-0), empty: Object('')
+        };
+        values.again = values.number;
+        const alteredNumber = Object(12); Object.setPrototypeOf(alteredNumber, null);
+        const tagged = Object(13); tagged[Symbol.toStringTag] = 'PlainObject';
+        const spoofed = { value: 15 }; spoofed[Symbol.toStringTag] = 'Number';
+        const ordinary = new (class BoxLike { constructor() { this.value = 14; } })();
+        let copiedUnderOverrides;
+        try {
+          Object.prototype.valueOf = function() { throw new Error('replaced Object valueOf'); };
+          Number.prototype.valueOf = String.prototype.valueOf = Boolean.prototype.valueOf =
+            BigInt.prototype.valueOf = Symbol.prototype.valueOf =
+              function() { throw new Error('replaced boxed valueOf'); };
+          globalThis.Number = globalThis.String = globalThis.Boolean =
+            globalThis.BigInt = globalThis.Symbol = function() { throw new Error('replaced constructor'); };
+          copiedUnderOverrides = [structuredClone(values.number), structuredClone(values.boolean),
+            structuredClone(values.string), structuredClone(values.bigint)];
+        } finally {
+          globalThis.Number = replacements.Number;
+          globalThis.String = replacements.String; globalThis.Boolean = replacements.Boolean;
+          globalThis.BigInt = replacements.BigInt; globalThis.Symbol = replacements.Symbol;
+          Object.prototype.valueOf = replacements.objectValueOf;
+          Number.prototype.valueOf = replacements.numberValueOf;
+          String.prototype.valueOf = replacements.stringValueOf;
+          Boolean.prototype.valueOf = replacements.booleanValueOf;
+          BigInt.prototype.valueOf = replacements.bigIntValueOf;
+          Symbol.prototype.valueOf = replacements.symbolValueOf;
+        }
+        const copy = structuredClone({ values, alteredNumber, tagged, spoofed, ordinary });
+        const copied = copy.values;
+        const payloads = copied.number instanceof Number && numberValueOf.call(copied.number) === 7
+          && copied.boolean instanceof Boolean && booleanValueOf.call(copied.boolean) === false
+          && copied.string instanceof String && stringValueOf.call(copied.string) === 'text'
+          && copied.bigint instanceof Object && bigIntValueOf.call(copied.bigint) === 9n
+          && Number.isNaN(numberValueOf.call(copied.nan))
+          && numberValueOf.call(copied.zero) === 0
+          && numberValueOf.call(copied.infinity) === Infinity
+          && Object.is(numberValueOf.call(copied.negativeZero), -0)
+          && stringValueOf.call(copied.empty) === '';
+        const identity = copied.again === copied.number && copied.number !== values.number
+          && numberValueOf.call(values.number) === 7;
+        const alteredWorks = copy.alteredNumber instanceof Number
+          && numberValueOf.call(copy.alteredNumber) === 12;
+        const otherObjects = copy.tagged instanceof Number
+          && numberValueOf.call(copy.tagged) === 13
+          && !(copy.ordinary instanceof Number) && copy.ordinary.value === 14
+          && !(copy.spoofed instanceof Number) && copy.spoofed.value === 15;
+        const capturedConstructors = numberValueOf.call(copiedUnderOverrides[0]) === 7
+          && booleanValueOf.call(copiedUnderOverrides[1]) === false
+          && stringValueOf.call(copiedUnderOverrides[2]) === 'text'
+          && bigIntValueOf.call(copiedUnderOverrides[3]) === 9n;
+        const rejects = value => {
+          try { structuredClone(value); return false; }
+          catch (error) { return error instanceof DOMException && error.name === 'DataCloneError'; }
+        };
+        return [payloads, identity, alteredWorks, otherObjects, capturedConstructors,
+                rejects(Object(Symbol('root'))), rejects({ nested: Object(Symbol('nested')) })];
+      }
+    "#
+            ),
+            1
+        );
+        assert_eq!(
+            call("cloneBoxedPrimitiveCases", "[]"),
+            "[true,true,true,true,true,true,true]"
+        );
+    })
+    .join()
+    .unwrap();
+}
+
+#[test]
 fn structured_clone_preserves_sparse_array_length_and_graph() {
     std::thread::spawn(|| {
         assert_eq!(

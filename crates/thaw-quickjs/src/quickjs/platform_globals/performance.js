@@ -1,9 +1,71 @@
   const cloneUnsupportedBootstrap = globalThis.__thaw_clone_unsupported_bootstrap;
+  const cloneErrorBootstrap = globalThis.__thaw_clone_error_bootstrap;
   const cloneReflectApply = Reflect.apply;
+  const cloneObject = Object;
+  const cloneString = String;
+  const cloneDefineProperty = Object.defineProperty;
+  const cloneGetOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
+  const cloneHasOwnProperty = Object.prototype.hasOwnProperty;
   const cloneWeakMapHas = WeakMap.prototype.has;
   const cloneWeakSetHas = WeakSet.prototype.has;
+  const cloneMapGet = Map.prototype.get;
   const cloneTypeErrorPrototype = TypeError.prototype;
   const cloneObjectIsPrototypeOf = Object.prototype.isPrototypeOf;
+  const cloneNumberConstructor = Number;
+  const cloneStringConstructor = String;
+  const cloneBooleanConstructor = Boolean;
+  const cloneErrorConstructors = new Map([
+    ['Error', Error], ['EvalError', EvalError], ['RangeError', RangeError],
+    ['ReferenceError', ReferenceError], ['SyntaxError', SyntaxError],
+    ['TypeError', TypeError], ['URIError', URIError],
+  ]);
+  const cloneNumberValueOf = Number.prototype.valueOf;
+  const cloneStringValueOf = String.prototype.valueOf;
+  const cloneBooleanValueOf = Boolean.prototype.valueOf;
+  const cloneBigIntValueOf = BigInt.prototype.valueOf;
+  const cloneSymbolValueOf = Symbol.prototype.valueOf;
+  const cloneProbeTypeErrorPrototype = TypeError.prototype;
+  const cloneBoxProbes = [
+    ['Number', cloneNumberValueOf], ['String', cloneStringValueOf],
+    ['Boolean', cloneBooleanValueOf], ['BigInt', cloneBigIntValueOf],
+    ['Symbol', cloneSymbolValueOf],
+  ];
+  const isCloneProbeTypeError = error =>
+    error !== null && (typeof error === 'object' || typeof error === 'function')
+    && cloneReflectApply(cloneObjectIsPrototypeOf, cloneProbeTypeErrorPrototype, [error]);
+  const inspectCloneBox = input => {
+    for (const [kind, valueOf] of cloneBoxProbes) {
+      try {
+        return { kind, value: cloneReflectApply(valueOf, input, []) };
+      } catch (error) {
+        if (!isCloneProbeTypeError(error)) throw error;
+      }
+    }
+    return null;
+  };
+  const makeCloneError = input => {
+    const name = input.name;
+    const Constructor = cloneReflectApply(cloneMapGet, cloneErrorConstructors, [name])
+      || cloneReflectApply(cloneMapGet, cloneErrorConstructors, ['Error']);
+    const messageDescriptor = cloneGetOwnPropertyDescriptor(input, 'message');
+    const hasMessage = messageDescriptor
+      && cloneReflectApply(cloneHasOwnProperty, messageDescriptor, ['value']);
+    if (hasMessage && typeof messageDescriptor.value === 'symbol') {
+      const TypeErrorConstructor = cloneReflectApply(cloneMapGet, cloneErrorConstructors, ['TypeError']);
+      throw new TypeErrorConstructor('Cannot convert a Symbol value to a string');
+    }
+    const output = hasMessage
+      ? new Constructor(cloneString(messageDescriptor.value))
+      : new Constructor();
+    const stackDescriptor = cloneGetOwnPropertyDescriptor(input, 'stack');
+    if (stackDescriptor && cloneReflectApply(cloneHasOwnProperty, stackDescriptor, ['value'])
+        && typeof stackDescriptor.value === 'string') {
+      cloneDefineProperty(output, 'stack', {
+        value: stackDescriptor.value, writable: true, configurable: true,
+      });
+    }
+    return output;
+  };
   const cloneWeakProbeKey = {};
   const cloneHasWeakBrand = (has, value) => {
     try { cloneReflectApply(has, value, [cloneWeakProbeKey]); return true; }
@@ -276,6 +338,33 @@
           return input;
         }
         if (seen.has(input)) return seen.get(input);
+        if (cloneErrorBootstrap(input)) {
+          const output = makeCloneError(input);
+          seen.set(input, output);
+          const causeDescriptor = cloneGetOwnPropertyDescriptor(input, 'cause');
+          if (causeDescriptor
+              && cloneReflectApply(cloneHasOwnProperty, causeDescriptor, ['value'])) {
+            cloneDefineProperty(output, 'cause', {
+              value: clone(causeDescriptor.value), writable: true, configurable: true,
+            });
+          }
+          return output;
+        }
+        const boxed = inspectCloneBox(input);
+        if (boxed) {
+          if (boxed.kind === 'Symbol') {
+            throw new DOMException('value cannot be structured-cloned', 'DataCloneError');
+          }
+          const output = boxed.kind === 'Number'
+            ? new cloneNumberConstructor(boxed.value)
+            : boxed.kind === 'String'
+              ? new cloneStringConstructor(boxed.value)
+              : boxed.kind === 'Boolean'
+                ? new cloneBooleanConstructor(boxed.value)
+                : cloneObject(boxed.value);
+          seen.set(input, output);
+          return output;
+        }
         if (typeof globalThis.MessagePort === 'function'
             && input instanceof globalThis.MessagePort) {
           if (!transfer.has(input)) {
