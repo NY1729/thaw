@@ -3755,3 +3755,91 @@ module.exports = function() {
     let _ = fs::remove_dir_all(&empty_node_modules);
     assert_eq!(result, "true");
 }
+
+#[test]
+fn tls_alpn_buffer_protocol_lists_are_framed_before_native_calls() {
+    use std::ffi::{CStr, CString};
+    let dir = temp_registry("builtin_tls_alpn_buffer");
+    fs::write(dir.join("index.js"), r#"
+var tls = require('node:tls');
+function check(value, message) { if (!value) throw new Error(message); }
+module.exports = function() {
+  var originalConnect = globalThis.__thaw_tls_connect_with_options;
+  var originalServer = globalThis.__thaw_tls_server_listen_with_options;
+  var originalBasic = globalThis.__thaw_tls_server_listen;
+  var originalWithCa = globalThis.__thaw_tls_server_listen_with_ca;
+  var originalQueue = globalThis.queueMicrotask;
+  var connectCalls = [], serverCalls = [], queued = [];
+  function drainQueue() { while (queued.length) queued.shift()(); }
+  function connect(options, spec) {
+    var socket = new tls.TLSSocket(); socket.on('error', function() {}); socket.on('close', function() {});
+    socket.connect(Object.assign({ host: '127.0.0.1', port: 443 }, options));
+    check(connectCalls[connectCalls.length - 1][6] === '1|' + spec, 'client ALPN bytes');
+    drainQueue(); check(socket._handle === 0, 'client failure did not allocate handle');
+    return socket;
+  }
+  function listen(protocols, spec, requestCert) {
+    var server = tls.createServer({ cert: 'cert', key: 'key', ca: 'ca', requestCert: Boolean(requestCert), ALPNProtocols: protocols });
+    server.on('error', function() {}); server.listen({ host: '127.0.0.1', port: 443 });
+    check(serverCalls[serverCalls.length - 1][6] === spec, 'server ALPN bytes');
+    check(globalThis.__thaw_tls_server_listen === originalBasic && globalThis.__thaw_tls_server_listen_with_ca === originalWithCa, 'server bridge restored');
+    drainQueue(); check(server._handle === 0 && !server.listening, 'server failure allocated no handle');
+  }
+  function invalidClient(bytes) {
+    var before = connectCalls.length, socket = new tls.TLSSocket(), caught;
+    try { socket.connect({ host: '127.0.0.1', port: 443, ALPNProtocols: Buffer.from(bytes) }, function() {}); } catch (error) { caught = error; }
+    check(caught instanceof RangeError && connectCalls.length === before && !socket.connecting && socket._handle === 0 && !(socket._events.secureConnect || []).length, 'invalid client list rejected before state/native call');
+  }
+  function invalidServer(bytes, requestCert) {
+    var before = serverCalls.length, server = tls.createServer({ cert: 'cert', key: 'key', ca: 'ca', requestCert: Boolean(requestCert), ALPNProtocols: Buffer.from(bytes) }), caught;
+    server.on('error', function() {});
+    try { server.listen({ host: '127.0.0.1', port: 443 }); } catch (error) { caught = error; }
+    check(caught instanceof RangeError && serverCalls.length === before && !server.listening && server._handle === 0, 'invalid server list rejected before state/native call');
+    check(globalThis.__thaw_tls_server_listen === originalBasic && globalThis.__thaw_tls_server_listen_with_ca === originalWithCa, 'invalid server leaves bridge intact');
+  }
+  try {
+    globalThis.__thaw_tls_connect_with_options = function() { connectCalls.push(Array.prototype.slice.call(arguments)); return 'err:finite client failure'; };
+    globalThis.__thaw_tls_server_listen_with_options = function() { serverCalls.push(Array.prototype.slice.call(arguments)); return 'err:finite server failure'; };
+    globalThis.queueMicrotask = function(callback) { queued.push(callback); };
+    var protocols = Buffer.from([0xff, 2, 104, 50, 8, 104, 116, 116, 112, 47, 49, 46, 49, 0xaa]).subarray(1, 13);
+    var spec = '6832,687474702f312e31';
+    connect({ ALPNProtocols: protocols }, spec);
+    listen(protocols, spec);
+    listen(protocols, spec, true);
+    connect({ ALPNProtocols: ['h2', 'http/1.1'] }, spec);
+    listen(['h2', 'http/1.1'], spec);
+    connect({ ALPNProtocols: Buffer.alloc(0) }, '');
+    listen(Buffer.alloc(0), '');
+    connect({ ALPNProtocols: Buffer.from([2, 0xff, 0x80]) }, 'ff80');
+    listen(Buffer.from([2, 0xff, 0x80]), 'ff80');
+    connect({}, '');
+    listen(undefined, '');
+    [[0], [2, 97], [1, 97, 2, 98]].forEach(function(bytes) { invalidClient(bytes); invalidServer(bytes, false); invalidServer(bytes, true); });
+    check(connectCalls.length === 5 && serverCalls.length === 6, 'malformed lists never reach native entrances');
+  } finally {
+    globalThis.__thaw_tls_connect_with_options = originalConnect;
+    globalThis.__thaw_tls_server_listen_with_options = originalServer;
+    globalThis.__thaw_tls_server_listen = originalBasic;
+    globalThis.__thaw_tls_server_listen_with_ca = originalWithCa;
+    globalThis.queueMicrotask = originalQueue;
+  }
+  return true;
+};
+"#).unwrap();
+    let empty_node_modules = temp_registry("builtin_tls_alpn_buffer_modules");
+    let (bundle, _, _, _) = bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    let source = CString::new(format!(
+        "globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseTlsAlpnBuffer = module.exports;"
+    )).unwrap();
+    let load_result = thaw_quickjs::thaw_js_load(source.as_ptr());
+    if load_result != 1 {
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&empty_node_modules);
+        assert_eq!(load_result, 1);
+    }
+    let result = thaw_quickjs::thaw_js_call(c"exerciseTlsAlpnBuffer".as_ptr(), c"[]".as_ptr());
+    let result = unsafe { CStr::from_ptr(result) }.to_string_lossy().into_owned();
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+    assert_eq!(result, "true");
+}
