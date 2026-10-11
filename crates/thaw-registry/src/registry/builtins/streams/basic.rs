@@ -29,7 +29,7 @@ pub(super) fn source(name: &str) -> Option<&'static str> {
              \x20\x20this._pending = globalThis.Buffer.from(combined.subarray(complete)); this.lastNeed = this._pending.length; this.lastTotal = complete === combined.length ? 0 : this.lastNeed + 1;\n\
              \x20\x20return combined.subarray(0, complete).toString(this.encoding);\n\
              };\n\
-             StringDecoder.prototype.text = function(value, offset) { return this.write(globalThis.Buffer.from(value).subarray(offset || 0)); };\n\
+             StringDecoder.prototype.text = function(value, offset) { this._pending = globalThis.Buffer.alloc(0); this.lastNeed = 0; this.lastTotal = 0; return this.write(globalThis.Buffer.from(value).subarray(offset || 0)); };\n\
              StringDecoder.prototype.end = function(value) { var output = value === undefined ? '' : this.write(value); if (this._pending.length) output += this._pending.toString(this.encoding); this._pending = globalThis.Buffer.alloc(0); this.lastNeed = 0; this.lastTotal = 0; return output; };\n\
              module.exports = { StringDecoder: StringDecoder };\n\
              module.exports.default = module.exports; module.exports.__esModule = true;\n",

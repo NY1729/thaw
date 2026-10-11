@@ -1743,6 +1743,16 @@ fn string_decoder_preserves_multibyte_boundaries() {
              \x20 var utf16 = new StringDecoder('utf16le'); var wide = Buffer.from('A雪', 'utf16le'); var utf16Parts = [utf16.write(wide.subarray(0, 3)), utf16.end(wide.subarray(3))];\n\
              \x20 var base64 = new StringDecoder('base64'); var hello = Buffer.from('hello'); var encoded = base64.write(hello.subarray(0, 2)) + base64.write(hello.subarray(2)) + base64.end();\n\
              \x20 var incomplete = new StringDecoder(); var replacement = incomplete.end(Buffer.from([0xe9]));\n\
+             \x20 function check(value, message) { if (!value) throw new Error(message); }\n\
+             \x20 var reset8 = new StringDecoder('utf8'); reset8.write(Buffer.from([0xe2])); check(reset8.text(Buffer.from([0xff, 0x41]), 1) === 'A' && reset8.end() === '', 'utf8 text reset and offset');\n\
+             \x20 check(reset8.text(Buffer.from([0x42]), 0) === 'B' && reset8.end() === '', 'repeated text reset');\n\
+             \x20 var empty8 = new StringDecoder('utf8'); empty8.write(Buffer.from([0xe2])); check(empty8.text(Buffer.from([9]), 1) === '' && empty8.lastNeed === 0 && empty8.lastTotal === 0 && empty8._pending.length === 0, 'text at input end clears old state');\n\
+             \x20 var fresh8 = new StringDecoder('utf8'); fresh8.write(Buffer.from([0xe2])); check(fresh8.text(Buffer.from([0, 0xe2]), 1) === '' && fresh8.write(Buffer.from([0x82, 0xac])) === '€' && fresh8.end() === '', 'text keeps new pending bytes');\n\
+             \x20 var split8 = new StringDecoder('utf8'); check(split8.write(Buffer.from([0xe2])) === '' && split8.write(Buffer.from([0x82, 0xac])) === '€', 'consecutive writes still combine');\n\
+             \x20 var reset16 = new StringDecoder('utf16le'); reset16.write(Buffer.from([0xff])); check(reset16.text(Buffer.from([0xee, 0x41, 0]), 1) === 'A' && reset16.end() === '', 'utf16 text reset and offset');\n\
+             \x20 var fresh16 = new StringDecoder('utf16le'); check(fresh16.text(Buffer.from([0xee, 0x41]), 1) === '' && fresh16.end(Buffer.from([0])) === 'A', 'utf16 keeps new odd byte');\n\
+             \x20 var reset64 = new StringDecoder('base64'); reset64.write(Buffer.from([0xff, 0xfe])); var text64 = reset64.text(Buffer.from([0, 1, 2, 3, 4]), 1) + reset64.end(); check(text64 === Buffer.from([1, 2, 3, 4]).toString('base64'), 'base64 text reset and offset');\n\
+             \x20 var reset64url = new StringDecoder('base64url'); reset64url.write(Buffer.from([0xff])); var text64url = reset64url.text(Buffer.from([0, 5, 6, 7]), 1) + reset64url.end(); check(text64url === Buffer.from([5, 6, 7]).toString('base64url'), 'base64url text reset and offset');\n\
              \x20 return [utf8Parts, utf16Parts, encoded, replacement, utf8.lastNeed, utf8.encoding];\n\
              };",
         )
