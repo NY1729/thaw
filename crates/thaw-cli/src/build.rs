@@ -20,12 +20,25 @@ fn build(
     )
 }
 
+fn path_builtin_name(name: &str) -> Option<&'static str> {
+    match name {
+        "path" | "node:path" => Some("node:path"),
+        "path/posix" | "node:path/posix" => Some("node:path/posix"),
+        "path/win32" | "node:path/win32" => Some("node:path/win32"),
+        _ => None,
+    }
+}
+
 fn registry_import_meta_resolutions(
     registry_dir: &Path,
     packages: &[String],
 ) -> std::collections::HashMap<String, String> {
     let mut resolutions = std::collections::HashMap::new();
     for specifier in packages {
+        if let Some(builtin) = path_builtin_name(specifier) {
+            resolutions.insert(specifier.clone(), builtin.to_string());
+            continue;
+        }
         if specifier.starts_with("node:") {
             resolutions.insert(specifier.clone(), specifier.clone());
             continue;
@@ -316,7 +329,11 @@ fn build_with_native_mode(
     runtime_packages.extend(use_packages.iter().cloned());
     static_packages.extend(use_packages.iter().cloned());
     for (specifier, location) in &external_specifiers {
-        let package = if specifier.starts_with("node:") {
+        let package = if let Some(builtin) = path_builtin_name(specifier) {
+            thaw_registry::resolve_builtin(builtin)
+                .map_err(|error| format!("{location}: {error}"))?;
+            specifier.clone()
+        } else if specifier.starts_with("node:") {
             thaw_registry::resolve_builtin(specifier)
                 .map_err(|error| format!("{location}: {error}"))?;
             specifier.clone()
@@ -422,6 +439,7 @@ fn build_with_native_mode(
     let mut native_addons = resolved_packages
         .iter()
         .filter(|package| runtime_packages.contains(*package))
+        .filter(|package| path_builtin_name(package).is_none())
         .filter_map(|package| thaw_registry::resolve(registry_dir, package).ok()?.native_addon)
         .collect::<Vec<_>>();
     native_addons.sort();
