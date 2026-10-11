@@ -24,6 +24,27 @@ impl<'ctx> HirCompiler<'ctx> {
         self.compile_original_quickjs_exception_handle(value, true)
     }
 
+    fn compile_dynamic_property_exact(
+        &mut self, args: &[HirExpr],
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let [receiver, key] = args else {
+            return Err("getDynamicProperty expects a receiver and property key".into());
+        };
+        self.uses_quickjs = true;
+        self.uses_quickjs_handles = true;
+        // A getter may enter native callbacks and graph capture on this first
+        // property read, so publish the host operations before evaluating it.
+        self.compile_register_js_callback_host_operations()?;
+        let receiver = self.compile_expr(receiver)?.into_int_value();
+        let key = self.compile_expr(key)?.into_pointer_value();
+        let result = self.builder.build_call(
+            self.module.get_function("thaw_js_get_property_exact_result").unwrap(),
+            &[receiver.into(), key.into()], "dynamic_property_exact",
+        ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+            .ok_or("exact property read returned no result")?.into_struct_value();
+        self.compile_exact_iterator_handle_result(result, "property_read")
+    }
+
     fn compile_to_iterator_exact(
         &mut self, args: &[HirExpr],
     ) -> Result<BasicValueEnum<'ctx>, String> {
@@ -88,9 +109,7 @@ impl<'ctx> HirCompiler<'ctx> {
             "callDynamicValueHandle" => self.compile_call_dynamic_value_handle(args),
             "callDynamicValueWithValue" => self.compile_call_dynamic_value_with_value(args),
             "releaseDynamicValue" => self.compile_release_dynamic_value(args),
-            "getDynamicProperty" => {
-                self.compile_dynamic_handle_operation("thaw_js_get_property_result", args)
-            }
+            "getDynamicProperty" => self.compile_dynamic_property_exact(args),
             "deleteDynamicProperty" => self.compile_dynamic_property_predicate(
                 "thaw_js_delete_property_result",
                 args,
