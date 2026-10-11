@@ -812,11 +812,95 @@ fn poll_host_workers() -> String {
     })
 }
 
+fn parse_child_options(options_json: &str) -> io::Result<serde_json::Value> {
+    let options: serde_json::Value = serde_json::from_str(options_json)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid child options JSON"))?;
+    if !options.is_object() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "child options must be an object",
+        ));
+    }
+    Ok(options)
+}
+
+fn requested_child_id(options: &serde_json::Value, key: &str) -> io::Result<Option<i32>> {
+    match options.get(key) {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::Number(value)) => value
+            .as_i64()
+            .and_then(|value| i32::try_from(value).ok())
+            .map(Some)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "credential must be int32")),
+        Some(_) => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "credential must be int32",
+        )),
+    }
+}
+
+fn child_spawn_error_code(error: &io::Error) -> &'static str {
+    #[cfg(unix)]
+    if error.raw_os_error() == Some(libc::EPERM) {
+        return "EPERM";
+    }
+    #[cfg(unix)]
+    if error.raw_os_error() == Some(libc::EACCES) {
+        return "EACCES";
+    }
+    if error.kind() == io::ErrorKind::NotFound {
+        "ENOENT"
+    } else if error.kind() == io::ErrorKind::PermissionDenied {
+        "EACCES"
+    } else if error.kind() == io::ErrorKind::InvalidInput {
+        "EINVAL"
+    } else if error.kind() == io::ErrorKind::Unsupported {
+        "ENOTSUP"
+    } else {
+        "UNKNOWN"
+    }
+}
+
+#[cfg(all(unix, any(target_os = "vxworks", target_os = "espidf", target_os = "horizon", target_os = "vita")))]
+type ChildPlatformId = u16;
+#[cfg(all(unix, target_os = "nto"))]
+type ChildPlatformId = i32;
+#[cfg(all(unix, not(any(target_os = "vxworks", target_os = "espidf", target_os = "horizon", target_os = "vita", target_os = "nto"))))]
+type ChildPlatformId = u32;
+
+#[cfg(all(unix, not(target_os = "l4re")))]
+fn platform_child_id(value: i32) -> ChildPlatformId {
+    value as ChildPlatformId
+}
+
 fn configure_child_command(
     command: &str,
     arguments: &[String],
     options: &serde_json::Value,
-) -> Command {
+) -> io::Result<Command> {
+    if !options.is_object() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "child options must be an object",
+        ));
+    }
+    let uid = requested_child_id(options, "uid")?;
+    let gid = requested_child_id(options, "gid")?;
+    #[cfg(not(unix))]
+    if uid.is_some() || gid.is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "child credentials are unsupported on this platform",
+        ));
+    }
+    #[cfg(all(unix, target_os = "l4re"))]
+    if uid.is_some() || gid.is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "child credentials are unsupported on this platform",
+        ));
+    }
+
     let mut child = Command::new(command);
     child.args(arguments);
     if let Some(cwd) = options.get("cwd").and_then(|value| value.as_str()) {
@@ -827,6 +911,25 @@ fn configure_child_command(
         for (name, value) in environment {
             if let Some(value) = value.as_str() {
                 child.env(name, value);
+            }
+        }
+    }
+    #[cfg(all(unix, not(target_os = "l4re")))]
+    {
+        if let Some(gid) = gid {
+            child.gid(platform_child_id(gid));
+        }
+        if let Some(uid) = uid {
+            child.uid(platform_child_id(uid));
+        }
+        #[cfg(not(any(target_os = "vxworks", target_os = "espidf", target_os = "horizon", target_os = "vita")))]
+        if gid.is_some() && uid.is_none() {
+            // Match libuv's gid-only supplementary-group clearing; permission failure is ignored.
+            unsafe {
+                child.pre_exec(|| {
+                    let _ = libc::setgroups(0, std::ptr::null());
+                    Ok(())
+                });
             }
         }
     }
@@ -848,17 +951,38 @@ fn configure_child_command(
             });
         }
     }
-    child
+    Ok(child)
 }
 
 fn run_host_child(
     command: String,
     arguments: Vec<String>,
-    options: serde_json::Value,
+    options_json: String,
     commands: Receiver<HostChildCommand>,
     events: Sender<HostChildEvent>,
 ) {
-    let mut process = configure_child_command(&command, &arguments, &options);
+    let options = match parse_child_options(&options_json) {
+        Ok(options) => options,
+        Err(error) => {
+            let _ = events.send(HostChildEvent::Error {
+                message: error.to_string(),
+                code: child_spawn_error_code(&error).to_string(),
+            });
+            let _ = events.send(HostChildEvent::Exit { code: None, signal: None });
+            return;
+        }
+    };
+    let mut process = match configure_child_command(&command, &arguments, &options) {
+        Ok(process) => process,
+        Err(error) => {
+            let _ = events.send(HostChildEvent::Error {
+                message: error.to_string(),
+                code: child_spawn_error_code(&error).to_string(),
+            });
+            let _ = events.send(HostChildEvent::Exit { code: None, signal: None });
+            return;
+        }
+    };
     process
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -866,16 +990,9 @@ fn run_host_child(
     let mut process = match process.spawn() {
         Ok(process) => process,
         Err(error) => {
-            let code = if error.kind() == io::ErrorKind::NotFound {
-                "ENOENT"
-            } else if error.kind() == io::ErrorKind::PermissionDenied {
-                "EACCES"
-            } else {
-                "UNKNOWN"
-            };
             let _ = events.send(HostChildEvent::Error {
                 message: error.to_string(),
-                code: code.to_string(),
+                code: child_spawn_error_code(&error).to_string(),
             });
             let _ = events.send(HostChildEvent::Exit {
                 code: None,
@@ -968,11 +1085,10 @@ fn run_host_child(
 
 fn spawn_host_child(command: String, arguments_json: String, options_json: String) -> u32 {
     let arguments: Vec<String> = serde_json::from_str(&arguments_json).unwrap_or_default();
-    let options: serde_json::Value = serde_json::from_str(&options_json).unwrap_or_default();
     let (command_sender, command_receiver) = mpsc::channel();
     let (event_sender, event_receiver) = mpsc::channel();
     let thread = std::thread::spawn(move || {
-        run_host_child(command, arguments, options, command_receiver, event_sender);
+        run_host_child(command, arguments, options_json, command_receiver, event_sender);
     });
     HOST_CHILDREN.with(|table| {
         let mut table = table.borrow_mut();
@@ -1135,8 +1251,24 @@ fn poll_host_children() -> String {
 
 fn run_child_process(command: String, arguments_json: String, options_json: String) -> String {
     let arguments: Vec<String> = serde_json::from_str(&arguments_json).unwrap_or_default();
-    let options: serde_json::Value = serde_json::from_str(&options_json).unwrap_or_default();
-    let mut child = configure_child_command(&command, &arguments, &options);
+    let options = match parse_child_options(&options_json) {
+        Ok(options) => options,
+        Err(error) => return serde_json::json!({
+            "error": error.to_string(),
+            "code": child_spawn_error_code(&error),
+            "errno": error.raw_os_error(),
+            "path": command,
+        }).to_string(),
+    };
+    let mut child = match configure_child_command(&command, &arguments, &options) {
+        Ok(child) => child,
+        Err(error) => return serde_json::json!({
+            "error": error.to_string(),
+            "code": child_spawn_error_code(&error),
+            "errno": error.raw_os_error(),
+            "path": command,
+        }).to_string(),
+    };
     child.stdout(Stdio::piped()).stderr(Stdio::piped());
     let input = options
         .get("input")
@@ -1149,16 +1281,9 @@ fn run_child_process(command: String, arguments_json: String, options_json: Stri
     let mut child = match spawned {
         Ok(child) => child,
         Err(error) => {
-            let code = if error.kind() == io::ErrorKind::NotFound {
-                "ENOENT"
-            } else if error.kind() == io::ErrorKind::PermissionDenied {
-                "EACCES"
-            } else {
-                "UNKNOWN"
-            };
             return serde_json::json!({
                 "error": error.to_string(),
-                "code": code,
+                "code": child_spawn_error_code(&error),
                 "errno": error.raw_os_error(),
                 "path": command,
             })
@@ -1464,4 +1589,269 @@ fn sync_input_epipe_kills_direct_child() {
     )).unwrap();
     assert_eq!(record["code"], "EPIPE");
     assert!(record["pid"].as_u64().is_some());
+}
+
+#[cfg(test)]
+mod process_credential_tests {
+    use super::*;
+
+    #[test]
+    fn native_credential_options_accept_int32_and_reject_malformed_values() {
+        for source in [
+            r#"{}"#,
+            r#"{"uid":null}"#,
+            r#"{"gid":null}"#,
+            r#"{"uid":0,"gid":0}"#,
+            r#"{"uid":-2147483648,"gid":2147483647}"#,
+            r#"{"uid":-1}"#,
+        ] {
+            parse_child_options(source).unwrap();
+        }
+        #[cfg(all(unix, not(target_os = "l4re")))]
+        for source in [
+            r#"{"uid":0,"gid":0}"#,
+            r#"{"uid":-2147483648,"gid":2147483647}"#,
+            r#"{"uid":-1}"#,
+        ] {
+            let options = parse_child_options(source).unwrap();
+            assert!(configure_child_command("credential-helper", &[], &options).is_ok());
+        }
+        for source in [
+            "not json",
+            "null",
+            "[]",
+            r#"{"uid":"1"}"#,
+            r#"{"gid":true}"#,
+            r#"{"uid":1.5}"#,
+            r#"{"uid":2147483648}"#,
+            r#"{"gid":-2147483649}"#,
+            r#"{"uid":9223372036854775808}"#,
+        ] {
+            let error = parse_child_options(source)
+                .and_then(|options| configure_child_command("credential-helper", &[], &options).map(|_| options))
+                .unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidInput, "{source}");
+            assert_eq!(child_spawn_error_code(&error), "EINVAL");
+        }
+    }
+
+    #[cfg(all(unix, not(target_os = "l4re")))]
+    #[test]
+    fn signed_int32_ids_keep_the_standard_platform_cast_and_request_presence() {
+        assert_eq!(platform_child_id(-1), (-1_i32 as ChildPlatformId));
+        assert_eq!(platform_child_id(i32::MIN), (i32::MIN as ChildPlatformId));
+        for source in [r#"{"uid":-1}"#, r#"{"gid":-2147483648}"#] {
+            let options = parse_child_options(source).unwrap();
+            assert!(configure_child_command("credential-helper", &[], &options).is_ok());
+        }
+    }
+
+    #[cfg(all(unix, not(any(target_os = "vxworks", target_os = "espidf", target_os = "horizon", target_os = "vita", target_os = "nto", target_os = "l4re"))))]
+    #[test]
+    fn unsigned_32_bit_ids_match_native_cast_boundaries() {
+        assert_eq!(platform_child_id(-1), u32::MAX);
+        assert_eq!(platform_child_id(i32::MIN), 2_147_483_648);
+    }
+
+    #[test]
+    fn async_invalid_native_options_queue_error_then_terminal_exit_only() {
+        let (commands, command_receiver) = mpsc::channel();
+        let (events_sender, events_receiver) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            run_host_child("/path/not/started".into(), Vec::new(), "[]".into(), command_receiver, events_sender);
+        });
+        match events_receiver.recv_timeout(Duration::from_secs(2)).unwrap() {
+            HostChildEvent::Error { code, .. } => assert_eq!(code, "EINVAL"),
+            _ => panic!("expected startup Error event"),
+        }
+        assert!(matches!(events_receiver.recv_timeout(Duration::from_secs(2)).unwrap(), HostChildEvent::Exit { code: None, signal: None }));
+        assert!(events_receiver.try_recv().is_err());
+        worker.join().unwrap();
+    }
+
+    #[cfg(all(unix, not(any(target_os = "vxworks", target_os = "espidf", target_os = "horizon", target_os = "vita", target_os = "l4re"))))]
+    fn identity_helper_command() -> (String, Vec<String>, serde_json::Map<String, serde_json::Value>) {
+        let executable = std::env::current_exe().expect("test executable path");
+        let mut path = executable.as_path();
+        while let Some(parent) = path.parent() {
+            use std::os::unix::fs::PermissionsExt;
+            let metadata = std::fs::metadata(path).expect("helper path metadata");
+            let mode = metadata.permissions().mode();
+            assert_ne!(mode & 0o001, 0, "helper path is not traversable by dropped identity: {path:?}");
+            path = parent;
+        }
+        use std::os::unix::fs::PermissionsExt;
+        assert_ne!(std::fs::metadata(&executable).unwrap().permissions().mode() & 0o001, 0, "test executable must be world executable");
+        let args = vec!["--exact".into(), "process_credential_tests::identity_helper_test_mode".into(), "--nocapture".into()];
+        let mut env = serde_json::Map::new();
+        env.insert("THAW_PROCESS_CREDENTIAL_HELPER".into(), serde_json::Value::String("1".into()));
+        (executable.to_string_lossy().into_owned(), args, env)
+    }
+
+    #[cfg(all(unix, not(any(target_os = "vxworks", target_os = "espidf", target_os = "horizon", target_os = "vita", target_os = "l4re"))))]
+    #[test]
+    fn identity_helper_test_mode() {
+        if std::env::var_os("THAW_PROCESS_CREDENTIAL_HELPER").is_none() {
+            return;
+        }
+        let group_count = unsafe { libc::getgroups(0, std::ptr::null_mut()) };
+        println!("THAW_CREDENTIAL_IDENTITY={},{},{},{},{}", unsafe { libc::getuid() }, unsafe { libc::geteuid() }, unsafe { libc::getgid() }, unsafe { libc::getegid() }, group_count.max(0));
+    }
+
+    #[cfg(all(unix, not(any(target_os = "vxworks", target_os = "espidf", target_os = "horizon", target_os = "vita", target_os = "l4re"))))]
+    fn run_identity(options: serde_json::Value) -> serde_json::Value {
+        let (command, arguments, mut env) = identity_helper_command();
+        if let Some(extra) = options.get("env").and_then(serde_json::Value::as_object) {
+            env.extend(extra.clone());
+        }
+        let mut options = options;
+        options["env"] = serde_json::Value::Object(env);
+        serde_json::from_str(&run_child_process(command, serde_json::to_string(&arguments).unwrap(), options.to_string())).unwrap()
+    }
+
+    #[cfg(all(unix, not(any(target_os = "vxworks", target_os = "espidf", target_os = "horizon", target_os = "vita", target_os = "l4re"))))]
+    fn identity_from_record(record: &serde_json::Value) -> [u32; 5] {
+        assert_eq!(record["status"], 0, "{record}");
+        let stdout = hex_decode(record["stdout"].as_str().unwrap());
+        let output = String::from_utf8(stdout).unwrap();
+        let identity = output.lines().find_map(|line| line.strip_prefix("THAW_CREDENTIAL_IDENTITY=")).expect("identity helper marker");
+        let values: Vec<u32> = identity.split(',').map(|part| part.parse().unwrap()).collect();
+        values.try_into().unwrap()
+    }
+
+    #[cfg(all(unix, not(any(target_os = "vxworks", target_os = "espidf", target_os = "horizon", target_os = "vita", target_os = "nto", target_os = "l4re"))))]
+    #[test]
+    fn root_credentials_change_child_only_and_gid_only_clears_groups() {
+        let euid = unsafe { libc::geteuid() };
+        if euid != 0 {
+            eprintln!("SKIP: changed-credential fixture requires root");
+            return;
+        }
+        let before = (unsafe { libc::getuid() }, unsafe { libc::geteuid() }, unsafe { libc::getgid() }, unsafe { libc::getegid() });
+        let mut nonempty_groups = Vec::<libc::gid_t>::new();
+        let count = unsafe { libc::getgroups(0, std::ptr::null_mut()) };
+        if count > 0 {
+            nonempty_groups.resize(count as usize, 0);
+            unsafe { libc::getgroups(count, nonempty_groups.as_mut_ptr()); }
+        }
+        let uid_only = identity_from_record(&run_identity(serde_json::json!({"uid": 65534})));
+        assert_eq!(&uid_only[..4], &[65534, 65534, before.2, before.3]);
+        let gid_only = identity_from_record(&run_identity(serde_json::json!({"gid": 65534})));
+        assert_eq!(&gid_only[..4], &[before.0, before.1, 65534, 65534]);
+        if !nonempty_groups.is_empty() {
+            assert_eq!(gid_only[4], 0, "gid-only credential request must clear inherited supplementary groups");
+        } else {
+            eprintln!("SKIP: gid-only group-clear assertion requires nonempty inherited groups");
+        }
+        let both = identity_from_record(&run_identity(serde_json::json!({"uid": 65534, "gid": 65534})));
+        assert_eq!(&both[..4], &[65534, 65534, 65534, 65534]);
+        let omitted = identity_from_record(&run_identity(serde_json::json!({})));
+        assert_eq!(&omitted[..4], &[before.0, before.1, before.2, before.3]);
+        assert_eq!((unsafe { libc::getuid() }, unsafe { libc::geteuid() }, unsafe { libc::getgid() }, unsafe { libc::getegid() }), before);
+    }
+
+    #[cfg(all(unix, not(any(target_os = "vxworks", target_os = "espidf", target_os = "horizon", target_os = "vita", target_os = "nto", target_os = "l4re"))))]
+    #[test]
+    fn unprivileged_uid_zero_fails_before_helper_execution() {
+        if unsafe { libc::geteuid() } == 0 {
+            eprintln!("SKIP: EPERM fixture requires an unprivileged test process");
+            return;
+        }
+        let record = run_identity(serde_json::json!({"uid": 0}));
+        assert_eq!(record["code"], "EPERM");
+        assert!(record["stdout"].as_str().unwrap_or_default().is_empty());
+    }
+
+    #[cfg(all(unix, target_os = "linux"))]
+    #[test]
+    fn linux_negative_uid_is_a_real_request_and_fails_before_helper_execution() {
+        let record = run_identity(serde_json::json!({"uid": -1}));
+        assert!(record.get("error").is_some(), "uid=-1 must reach the OS credential operation: {record}");
+        assert!(record["stdout"].as_str().unwrap_or_default().is_empty(), "credential failure must precede helper execution");
+    }
+
+    #[cfg(all(test, unix, not(any(target_os = "vxworks", target_os = "espidf", target_os = "horizon", target_os = "vita", target_os = "l4re"))))]
+    #[test]
+    fn successful_async_identity_helper_delivers_spawn_output_exit_and_releases_handle() {
+        let parent = (unsafe { libc::getuid() }, unsafe { libc::geteuid() }, unsafe { libc::getgid() }, unsafe { libc::getegid() });
+        let (uid, gid) = if parent.1 == 0 {
+            (65_534, 65_534)
+        } else if parent.0 == parent.1 && parent.2 == parent.3 {
+            (parent.0, parent.2)
+        } else {
+            eprintln!("SKIP: async credential identity fixture requires matching real/effective IDs or root");
+            return;
+        };
+        let (command, arguments, env) = identity_helper_command();
+        let options = serde_json::json!({
+            "uid": uid,
+            "gid": gid,
+            "env": env
+        }).to_string();
+        let handle = spawn_host_child(command, serde_json::to_string(&arguments).unwrap(), options);
+        assert!(send_host_child_stdin(handle, String::new(), true));
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let mut events = Vec::new();
+        let mut stdout = Vec::new();
+        loop {
+            for event in serde_json::from_str::<Vec<serde_json::Value>>(&poll_host_children()).unwrap() {
+                if event["type"] == "stdout" {
+                    stdout.extend(hex_decode(event["value"].as_str().unwrap()));
+                }
+                events.push(event);
+            }
+            if !host_children_active() {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "credential child did not finish within two seconds");
+            std::thread::yield_now();
+        }
+        assert_eq!(events.first().unwrap()["type"], "spawn");
+        assert_eq!(events.last().unwrap()["type"], "exit");
+        assert_eq!(events.last().unwrap()["code"], 0);
+        let output = String::from_utf8(stdout).unwrap();
+        let identity = output.lines().find_map(|line| line.strip_prefix("THAW_CREDENTIAL_IDENTITY=")).expect("async identity helper output");
+        let observed: Vec<u32> = identity.split(',').map(|part| part.parse().unwrap()).collect();
+        assert_eq!(&observed[..4], &[uid as u32, uid as u32, gid as u32, gid as u32], "async command must apply both requested credentials");
+        assert_eq!((unsafe { libc::getuid() }, unsafe { libc::geteuid() }, unsafe { libc::getgid() }, unsafe { libc::getegid() }), parent, "credential application must not mutate the parent");
+        assert!(!events.iter().any(|event| event["type"] == "error"));
+        assert!(!host_children_active(), "terminal poll must release the child handle");
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn non_unix_credentials_fail_before_command_lookup() {
+        let options = parse_child_options(r#"{"uid":0}"#).unwrap();
+        let error = configure_child_command("/missing/credential-command", &[], &options).unwrap_err();
+        assert_eq!(child_spawn_error_code(&error), "ENOTSUP");
+        let record: serde_json::Value = serde_json::from_str(&run_child_process(
+            "/missing/credential-command".into(), "[]".into(), r#"{"gid":0}"#.into(),
+        )).unwrap();
+        assert_eq!(record["code"], "ENOTSUP");
+        let omitted: serde_json::Value = serde_json::from_str(&run_child_process(
+            "/missing/credential-command".into(), "[]".into(), "{}".into(),
+        )).unwrap();
+        assert_eq!(omitted["code"], "ENOENT");
+        let (commands, command_receiver) = mpsc::channel();
+        let (events_sender, events_receiver) = mpsc::channel();
+        let worker = std::thread::spawn(move || run_host_child(
+            "/missing/credential-command".into(), Vec::new(), r#"{"gid":0}"#.into(), command_receiver, events_sender,
+        ));
+        match events_receiver.recv_timeout(Duration::from_secs(2)).unwrap() {
+            HostChildEvent::Error { code, .. } => assert_eq!(code, "ENOTSUP"),
+            _ => panic!("expected unsupported-platform startup Error"),
+        }
+        assert!(matches!(events_receiver.recv_timeout(Duration::from_secs(2)).unwrap(), HostChildEvent::Exit { code: None, signal: None }));
+        assert!(events_receiver.try_recv().is_err());
+        worker.join().unwrap();
+        drop(commands);
+    }
+
+    #[cfg(all(unix, target_os = "l4re"))]
+    #[test]
+    fn l4re_credentials_fail_closed_when_std_cannot_apply_them() {
+        let options = parse_child_options(r#"{"uid":0}"#).unwrap();
+        let error = configure_child_command("/missing/credential-command", &[], &options).unwrap_err();
+        assert_eq!(child_spawn_error_code(&error), "ENOTSUP");
+    }
 }

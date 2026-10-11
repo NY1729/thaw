@@ -3690,3 +3690,160 @@ module.exports = async function () {
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
 }
+
+#[test]
+fn child_process_credentials_forward_and_validate_in_embedded_runtime() {
+    use std::ffi::{CStr, CString};
+
+    let dir = temp_registry("builtin_child_process_credentials_capture");
+    fs::write(
+        dir.join("index.js"),
+        r#"var childProcess = require('node:child_process');
+module.exports = function () {
+  var host = globalThis, calls = [];
+  var previous = {
+    sync: host.__thaw_child_process_sync,
+    spawn: host.__thaw_child_process_spawn,
+    stdin: host.__thaw_child_process_stdin,
+    poll: host.__thaw_child_process_poll
+  };
+  try {
+    host.__thaw_child_process_sync = function(command, args, options) {
+      calls.push({ kind: 'sync', command: command, args: JSON.parse(args), options: JSON.parse(options) });
+      return JSON.stringify({ pid: 0, stdout: '', stderr: '', status: 0 });
+    };
+    host.__thaw_child_process_spawn = function(command, args, options) {
+      calls.push({ kind: 'spawn', command: command, args: JSON.parse(args), options: JSON.parse(options) });
+      return calls.length;
+    };
+    host.__thaw_child_process_stdin = function() {};
+    host.__thaw_child_process_poll = function() { return '[]'; };
+    var accepted = [0, 123, -1, -2147483648, 2147483647];
+    var firstSync = childProcess.spawnSync('cmd', { uid: accepted[0] });
+    if (!firstSync || firstSync.status !== 0 || !firstSync.stdout || firstSync.stdout.length !== 0) throw new Error('spawnSync return shape');
+    accepted.slice(1).forEach(function(uid) { childProcess.spawnSync('cmd', { uid: uid }); });
+    accepted.forEach(function(gid) { childProcess.spawn('cmd', { gid: gid }); });
+    childProcess.spawnSync('cmd', ['arg'], { uid: 0, shell: true });
+    childProcess.spawn('cmd', { gid: 0 });
+    var fileSyncOutput = childProcess.execFileSync('cmd', { uid: 0 });
+    var execSyncOutput = childProcess.execSync('cmd', { gid: 0 });
+    if (!fileSyncOutput || fileSyncOutput.length !== 0 || !execSyncOutput || execSyncOutput.length !== 0) throw new Error('synchronous wrapper return shape');
+    childProcess.execFile('cmd', { uid: 0 });
+    childProcess.exec('cmd', { gid: 0 });
+    childProcess.fork('/tmp/entry.js', { uid: 123, gid: -1, execPath: '/bin/echo' });
+    var syncCalls = calls.filter(function(call) { return call.kind === 'sync'; });
+    var spawnCalls = calls.filter(function(call) { return call.kind === 'spawn'; });
+    if (syncCalls.length !== 8 || spawnCalls.length !== 9) throw new Error('wrapper call coverage');
+    calls.forEach(function(call) {
+      if (call.options.uid !== undefined && accepted.indexOf(call.options.uid) < 0) throw new Error('uid int32 forwarding');
+      if (call.options.gid !== undefined && accepted.indexOf(call.options.gid) < 0) throw new Error('gid int32 forwarding');
+    });
+    if (calls[0].options.uid !== 0 || calls[0].options.gid !== undefined || calls[5].options.uid !== undefined || calls[5].options.gid !== 0) throw new Error('uid-only/gid-only forwarding');
+    if (calls[10].options.uid !== 0 || calls[10].args[0] !== '-c') throw new Error('shell option forwarding');
+    var forkCall = calls[calls.length - 1];
+    if (forkCall.options.uid !== 123 || forkCall.options.gid !== -1 || forkCall.options.detached !== false || !forkCall.args.length) throw new Error('fork option forwarding');
+    var beforeInvalid = calls.length;
+    var invalid = ['123', true, new Number(1), 1.5, NaN, Infinity, -2147483649, 2147483648];
+    ['uid', 'gid'].forEach(function(field) {
+      invalid.forEach(function(value) {
+        var caught;
+        try { childProcess.spawnSync('must-not-reach-native', (function() { var options = {}; options[field] = value; return options; })()); }
+        catch (error) { caught = error; }
+        if (!(caught instanceof TypeError) || caught.code !== 'ERR_INVALID_ARG_TYPE' || caught.message.indexOf('options.' + field) < 0) throw new Error('public int32 validation for ' + field);
+      });
+    });
+    if (calls.length !== beforeInvalid) throw new Error('invalid values reached the native hook');
+    var beforeNullish = calls.length;
+    ['uid', 'gid'].forEach(function(field) {
+      var nullOptions = {}, undefinedOptions = {};
+      nullOptions[field] = null;
+      undefinedOptions[field] = undefined;
+      childProcess.spawnSync('nullish', nullOptions);
+      childProcess.spawnSync('nullish', undefinedOptions);
+    });
+    if (calls.length !== beforeNullish + 4) throw new Error('nullish wrapper calls missing');
+    calls.slice(beforeNullish).forEach(function(call) {
+      if (call.options.uid !== undefined || call.options.gid !== undefined) throw new Error('nullish credential was serialized');
+    });
+    return true;
+  } finally {
+    host.__thaw_child_process_sync = previous.sync;
+    host.__thaw_child_process_spawn = previous.spawn;
+    host.__thaw_child_process_stdin = previous.stdin;
+    host.__thaw_child_process_poll = previous.poll;
+  }
+};"#,
+    ).unwrap();
+    let empty_node_modules = temp_registry("builtin_child_process_credentials_capture_modules");
+    let (bundle, _, _, _) = bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseChildProcessCredentialCapture = module.exports;");
+    let source = CString::new(script).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let result = thaw_quickjs::thaw_js_call(c"exerciseChildProcessCredentialCapture".as_ptr(), c"[]".as_ptr());
+    let result = unsafe { CStr::from_ptr(result) }.to_string_lossy().into_owned();
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+    assert_eq!(result, "true");
+}
+
+#[test]
+fn child_process_credentials_async_startup_failure_completes_callback_and_promise_once() {
+    use std::ffi::{CStr, CString};
+
+    let dir = temp_registry("builtin_child_process_credentials_async_error");
+    fs::write(
+        dir.join("index.js"),
+        r#"var childProcess = require('node:child_process'), util = require('node:util');
+module.exports = async function () {
+  var host = globalThis, nextHandle = 50, pending = [];
+  var previous = {
+    spawn: host.__thaw_child_process_spawn,
+    stdin: host.__thaw_child_process_stdin,
+    poll: host.__thaw_child_process_poll,
+    active: host.__thaw_child_process_active
+  };
+  try {
+    host.__thaw_child_process_spawn = function() { var handle = nextHandle++; pending.push(handle); return handle; };
+    host.__thaw_child_process_stdin = function() {};
+    host.__thaw_child_process_active = function() { return pending.length !== 0; };
+    host.__thaw_child_process_poll = function() {
+      var handle = pending.shift();
+      return handle === undefined ? '[]' : JSON.stringify([
+        { handle: handle, type: 'error', message: 'credential denied', code: 'EPERM' },
+        { handle: handle, type: 'exit', code: null, signal: null }
+      ]);
+    };
+    var callbackCount = 0;
+    await new Promise(function(resolve, reject) {
+      childProcess.execFile('cmd', { uid: 0 }, function(error, stdout, stderr) {
+        callbackCount++;
+        if (!error || error.code !== 'EPERM' || stdout !== '' || stderr !== '') { reject(new Error('execFile startup error')); return; }
+        resolve();
+      });
+    });
+    if (callbackCount !== 1) throw new Error('callback completion count');
+    var promiseError;
+    try { await util.promisify(childProcess.execFile)('cmd', { gid: 0 }); }
+    catch (error) { promiseError = error; }
+    if (!promiseError || promiseError.code !== 'EPERM' || promiseError.stdout !== '' || promiseError.stderr !== '') throw new Error('promisified startup error');
+    if (pending.length !== 0) throw new Error('startup event handles were not consumed');
+    return true;
+  } finally {
+    host.__thaw_child_process_spawn = previous.spawn;
+    host.__thaw_child_process_stdin = previous.stdin;
+    host.__thaw_child_process_poll = previous.poll;
+    host.__thaw_child_process_active = previous.active;
+  }
+};"#,
+    ).unwrap();
+    let empty_node_modules = temp_registry("builtin_child_process_credentials_async_error_modules");
+    let (bundle, _, _, _) = bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseChildProcessCredentialStartupFailure = module.exports;");
+    let source = CString::new(script).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let result = thaw_quickjs::thaw_js_call(c"exerciseChildProcessCredentialStartupFailure".as_ptr(), c"[]".as_ptr());
+    let result = unsafe { CStr::from_ptr(result) }.to_string_lossy().into_owned();
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+    assert_eq!(result, "true");
+}
