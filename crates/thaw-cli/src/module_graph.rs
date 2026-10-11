@@ -660,31 +660,21 @@ impl VisitMut for RenameReferences<'_> {
                 }
             }
         }
-        // `a instanceof B`'s right operand is a bare class-identifier
-        // *type* reference, not an ordinary value read. A *local* class
-        // (declared in this module, or imported from a relative module in
-        // this same program) is renamed like any other declaration
-        // reference, so thaw-hir's own `instanceof` lowering can find that
-        // class's constructor signature under its real, rewritten name
-        // (real bug: `class User {} ... u instanceof User` failed "not a
-        // known class" because the operand was left bare while the class
-        // itself was renamed to `__thawmod0_User`). An *external*
-        // (npm/registry) imported name has no such declaration in the
-        // program; it stays exactly as written so the shim's own bare
-        // ambient stub still matches (real trigger: a real npm-exported
-        // `class YAMLException extends Error {}`, imported as a value
-        // elsewhere in the same file -- see `[[project_npm_interop_gaps_
-        // 19]]`). Visits the left operand normally either way. A
-        // non-identifier right operand (a member expression) is still
-        // left completely untouched, as before.
+        // A bare external class identifier in `a instanceof B` retains its
+        // ambient name so the shim's native class fastpath can resolve it.
+        // Local classes use their ordinary renamed declaration reference.
+        // A non-identifier RHS is an ordinary value expression (for example
+        // `assert.AssertionError`), so visit it normally to rewrite imported
+        // objects, computed keys, and nested/call references while leaving
+        // noncomputed property names alone.
         if let Expr::Bin(binary) = expr {
             if binary.op == thaw_parser::ast::BinaryOp::InstanceOf {
                 binary.left.visit_mut_with(self);
-                let rename_right = matches!(
+                let bare_external_class = matches!(
                     binary.right.as_ref(),
-                    Expr::Ident(ident) if !self.external_bindings.contains(ident.sym.as_ref())
+                    Expr::Ident(ident) if self.external_bindings.contains(ident.sym.as_ref())
                 );
-                if rename_right {
+                if !bare_external_class {
                     binary.right.visit_mut_with(self);
                 }
                 return;

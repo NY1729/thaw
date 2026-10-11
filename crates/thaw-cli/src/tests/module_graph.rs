@@ -1340,3 +1340,171 @@ fn lambda_trace_sync_failure_posts_an_error_before_reentering_handler() {
     let _ = child.wait();
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[test]
+fn renames_instanceof_value_rhs_and_preserves_external_class_identifiers() {
+    use swc_ecma_visit::{Visit, VisitWith};
+
+    let dir = std::env::temp_dir()
+        .join(format!("thaw-instanceof-value-rhs-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("local.ts"), "export class LocalError {}\n").unwrap();
+    let entry = dir.join("main.ts");
+    let source = r#"
+        import assert, { ExternalError as ImportedError, Holder, key as importedKey, makeConstructor, ExternalError } from "assert-fixture";
+        import alias from "assert-fixture";
+        import * as namespace from "assert-fixture";
+        import { LocalError } from "./local";
+        class LocalDeclaredError {}
+        const value: any = {};
+        function references(): boolean {
+            value instanceof assert.AssertionError;
+            value instanceof alias.AssertionError;
+            value instanceof namespace.ExternalError;
+            value instanceof Holder.AssertionError;
+            value instanceof assert[importedKey];
+            value instanceof assert["AssertionError"];
+            value instanceof makeConstructor();
+            value instanceof LocalError;
+            value instanceof LocalDeclaredError;
+            value instanceof ImportedError;
+            value instanceof ExternalError;
+            function shadow(assert: any): boolean {
+                return value instanceof assert.AssertionError;
+            }
+            return true;
+        }
+    "#;
+    std::fs::write(&entry, source).unwrap();
+    let external_exports = std::collections::HashMap::from([(
+        "assert-fixture".to_string(),
+        std::collections::HashMap::from([
+            ("default".to_string(), "__thaw_test_default_value".to_string()),
+            ("Holder".to_string(), "__thaw_test_holder".to_string()),
+            ("key".to_string(), "__thaw_test_key".to_string()),
+            (
+                "makeConstructor".to_string(),
+                "__thaw_test_make_constructor".to_string(),
+            ),
+            ("ExternalError".to_string(), "__thaw_test_external_error".to_string()),
+        ]),
+    )]);
+    let module = module_graph::bundle(
+        &entry,
+        source,
+        &external_exports,
+        &Default::default(),
+        &Default::default(),
+        &Default::default(),
+    )
+    .unwrap();
+
+    struct InstanceofRhs(Vec<thaw_parser::ast::Expr>);
+    impl Visit for InstanceofRhs {
+        fn visit_bin_expr(&mut self, binary: &thaw_parser::ast::BinExpr) {
+            if binary.op == thaw_parser::ast::BinaryOp::InstanceOf {
+                self.0.push(*binary.right.clone());
+            }
+            binary.visit_children_with(self);
+        }
+    }
+    let mut rhs = InstanceofRhs(Vec::new());
+    module.visit_with(&mut rhs);
+
+    use thaw_parser::ast::{Callee, Expr, Lit, MemberProp};
+    fn ident(expression: &Expr, expected: &str) -> bool {
+        matches!(expression, Expr::Ident(value) if value.sym == expected)
+    }
+    fn dot_member(expression: &Expr, object: &str, property: &str) -> bool {
+        matches!(expression, Expr::Member(member)
+            if ident(&member.obj, object)
+                && matches!(&member.prop, MemberProp::Ident(name) if name.sym == property))
+    }
+    fn computed_member_ident(expression: &Expr, object: &str, key: &str) -> bool {
+        matches!(expression, Expr::Member(member)
+            if ident(&member.obj, object)
+                && matches!(&member.prop, MemberProp::Computed(computed)
+                    if ident(&computed.expr, key)))
+    }
+
+    assert_eq!(
+        rhs.0.len(),
+        12,
+        "expected every authored instanceof RHS in order: {:#?}",
+        rhs.0
+    );
+    assert!(
+        dot_member(&rhs.0[0], "__thaw_test_default_value", "AssertionError"),
+        "default import member target: {:#?}",
+        rhs.0[0]
+    );
+    assert!(
+        dot_member(&rhs.0[1], "__thaw_test_default_value", "AssertionError"),
+        "default alias member target: {:#?}",
+        rhs.0[1]
+    );
+    assert!(
+        ident(&rhs.0[2], "__thaw_test_external_error"),
+        "namespace export member target: {:#?}",
+        rhs.0[2]
+    );
+    assert!(
+        dot_member(&rhs.0[3], "__thaw_test_holder", "AssertionError"),
+        "named holder member target: {:#?}",
+        rhs.0[3]
+    );
+    assert!(
+        computed_member_ident(&rhs.0[4], "__thaw_test_default_value", "__thaw_test_key"),
+        "computed imported key target: {:#?}",
+        rhs.0[4]
+    );
+    assert!(matches!(&rhs.0[5], Expr::Member(member)
+        if ident(&member.obj, "__thaw_test_default_value")
+            && matches!(&member.prop, MemberProp::Computed(computed)
+                if matches!(computed.expr.as_ref(), Expr::Lit(Lit::Str(value)) if value.value.to_string_lossy() == "AssertionError"))), "computed string member target: {:#?}", rhs.0[5]);
+    assert!(matches!(&rhs.0[6], Expr::Call(call)
+        if matches!(&call.callee, Callee::Expr(callee) if ident(callee, "__thaw_test_make_constructor"))
+            && call.args.is_empty()), "RHS call target: {:#?}", rhs.0[6]);
+
+    struct ClassIds(Vec<String>);
+    impl Visit for ClassIds {
+        fn visit_class_decl(&mut self, declaration: &thaw_parser::ast::ClassDecl) {
+            self.0.push(declaration.ident.sym.to_string());
+            declaration.visit_children_with(self);
+        }
+    }
+    let mut classes = ClassIds(Vec::new());
+    module.visit_with(&mut classes);
+    let relative_class = classes.0.iter()
+        .find(|name| name.ends_with("LocalError") && !name.ends_with("LocalDeclaredError"))
+        .expect("bundled relative LocalError class declaration");
+    let same_module_class = classes.0.iter()
+        .find(|name| name.ends_with("LocalDeclaredError"))
+        .expect("bundled same-module LocalDeclaredError class declaration");
+    assert!(
+        ident(&rhs.0[7], relative_class),
+        "relative class RHS must target its bundled declaration {relative_class}: {:#?}",
+        rhs.0[7]
+    );
+    assert!(
+        ident(&rhs.0[8], same_module_class),
+        "same-module class RHS must target its bundled declaration {same_module_class}: {:#?}",
+        rhs.0[8]
+    );
+    assert!(
+        ident(&rhs.0[9], "ImportedError"),
+        "bare external alias must retain ImportedError: {:#?}",
+        rhs.0[9]
+    );
+    assert!(
+        ident(&rhs.0[10], "ExternalError"),
+        "bare external name must retain ExternalError: {:#?}",
+        rhs.0[10]
+    );
+    assert!(
+        dot_member(&rhs.0[11], "assert", "AssertionError"),
+        "shadowed parameter member must retain local assert: {:#?}",
+        rhs.0[11]
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
