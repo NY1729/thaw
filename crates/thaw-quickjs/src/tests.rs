@@ -157,6 +157,43 @@ fn minimal_host_keeps_gzip_and_rejects_brotli() {
 }
 
 #[test]
+fn gzip_decompression_reads_concatenated_members_through_installed_bridge() {
+    let first = compress_bytes("gzip", b"first").unwrap();
+    let empty = compress_bytes("gzip", b"").unwrap();
+    let second = compress_bytes("gzip", b"second").unwrap();
+    let mut joined = first.clone();
+    joined.extend_from_slice(&empty);
+    joined.extend_from_slice(&second);
+
+    assert_eq!(decompress_bytes("gzip", &first).unwrap(), b"first");
+    assert_eq!(decompress_bytes("gzip", &joined).unwrap(), b"firstsecond");
+
+    let mut corrupt_second = second;
+    let crc_byte = corrupt_second.len() - 8;
+    corrupt_second[crc_byte] ^= 1;
+    let mut joined_corrupt = first;
+    joined_corrupt.extend_from_slice(&corrupt_second);
+    assert!(decompress_bytes("gzip", &joined_corrupt).is_err());
+
+    let input_hex = hex_encode(&joined);
+    let expected_hex = hex_encode(b"firstsecond");
+    std::thread::spawn(move || {
+        assert_eq!(
+            load(&format!(
+                "function concatenateGzipMembers() {{ return __thaw_zlib_hex('decompress', 'gzip', '{input_hex}'); }}"
+            )),
+            1
+        );
+        assert_eq!(
+            call("concatenateGzipMembers", "[]"),
+            serde_json::to_string(&expected_hex).unwrap()
+        );
+    })
+    .join()
+    .unwrap();
+}
+
+#[test]
 fn loads_and_calls_a_simple_function() {
     assert_eq!(load("function add(a, b) { return a + b; }"), 1);
     assert_eq!(call("add", "[2, 3]"), "5");

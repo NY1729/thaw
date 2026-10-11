@@ -30,14 +30,14 @@ fn compress_bytes(format: &str, value: &[u8]) -> io::Result<Vec<u8>> {
 }
 
 fn decompress_bytes(format: &str, value: &[u8]) -> io::Result<Vec<u8>> {
-    use flate2::read::{DeflateDecoder, GzDecoder, ZlibDecoder};
+    use flate2::read::{DeflateDecoder, MultiGzDecoder, ZlibDecoder};
     let mut output = Vec::new();
     match format {
         #[cfg(feature = "brotli")]
         "brotli" => brotli::Decompressor::new(value, 4096).read_to_end(&mut output)?,
         #[cfg(not(feature = "brotli"))]
         "brotli" => return Err(io::Error::new(io::ErrorKind::Unsupported, "Brotli support is not linked")),
-        "gzip" => GzDecoder::new(value).read_to_end(&mut output)?,
+        "gzip" => MultiGzDecoder::new(value).read_to_end(&mut output)?,
         "deflateRaw" => DeflateDecoder::new(value).read_to_end(&mut output)?,
         _ => ZlibDecoder::new(value).read_to_end(&mut output)?,
     };
