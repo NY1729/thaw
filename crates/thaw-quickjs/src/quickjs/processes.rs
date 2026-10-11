@@ -1167,39 +1167,233 @@ fn run_child_process(command: String, arguments_json: String, options_json: Stri
     };
     let pid = child.id();
     if let Some(input) = input {
-        if let Some(mut stdin) = child.stdin.take() {
-            if let Err(error) = stdin.write_all(&input) {
-                return serde_json::json!({
-                    "error": error.to_string(),
-                    "code": "EPIPE",
-                    "pid": pid,
-                })
-                .to_string();
-            }
-        }
-    }
-    match child.wait_with_output() {
-        Ok(output) => {
-            #[cfg(unix)]
-            let signal = output.status.signal();
-            #[cfg(not(unix))]
-            let signal: Option<i32> = None;
+        let failure = |error: &io::Error, code: &str| {
             serde_json::json!({
+                "error": error.to_string(),
+                "code": code,
                 "pid": pid,
-                "status": output.status.code(),
-                "signal": signal,
-                "stdout": hex_encode(&output.stdout),
-                "stderr": hex_encode(&output.stderr),
             })
             .to_string()
+        };
+        let stop_child = |child: &mut std::process::Child| {
+            let _ = child.kill();
+            let _ = child.wait();
+        };
+        let capture_cleanup_failed =
+            |thread: std::thread::JoinHandle<io::Result<Vec<u8>>>| {
+                thread.join().map_or(true, |result| result.is_err())
+            };
+        let include_cleanup_failure = |error: io::Error, failed: bool| {
+            if failed {
+                io::Error::other(format!("{error}; output capture cleanup failed"))
+            } else {
+                error
+            }
+        };
+        let Some(stdout) = child.stdout.take() else {
+            let error = io::Error::other("missing child stdout pipe");
+            stop_child(&mut child);
+            return failure(&error, "UNKNOWN");
+        };
+        let Some(stderr) = child.stderr.take() else {
+            let error = io::Error::other("missing child stderr pipe");
+            stop_child(&mut child);
+            return failure(&error, "UNKNOWN");
+        };
+        let mut stdout_thread = Some(match std::thread::Builder::new().spawn(move || {
+            let mut output = Vec::new();
+            let mut stdout = stdout;
+            stdout.read_to_end(&mut output)?;
+            Ok::<_, io::Error>(output)
+        }) {
+            Ok(thread) => thread,
+            Err(error) => {
+                stop_child(&mut child);
+                return failure(&error, "UNKNOWN");
+            }
+        });
+        let mut stderr_thread = Some(match std::thread::Builder::new().spawn(move || {
+            let mut output = Vec::new();
+            let mut stderr = stderr;
+            stderr.read_to_end(&mut output)?;
+            Ok::<_, io::Error>(output)
+        }) {
+            Ok(thread) => thread,
+            Err(error) => {
+                stop_child(&mut child);
+                let error = include_cleanup_failure(
+                    error,
+                    capture_cleanup_failed(stdout_thread.take().unwrap()),
+                );
+                return failure(&error, "UNKNOWN");
+            }
+        });
+        let Some(stdin) = child.stdin.take() else {
+            let error = io::Error::other("missing child stdin pipe");
+            stop_child(&mut child);
+            let stdout_failed = capture_cleanup_failed(stdout_thread.take().unwrap());
+            let stderr_failed = capture_cleanup_failed(stderr_thread.take().unwrap());
+            let error = include_cleanup_failure(error, stdout_failed || stderr_failed);
+            return failure(&error, "UNKNOWN");
+        };
+        let (writer_result_sender, writer_result_receiver) = mpsc::sync_channel(1);
+        let writer_thread = match std::thread::Builder::new().spawn(move || {
+            let mut stdin = stdin;
+            let result = stdin.write_all(&input);
+            drop(stdin);
+            let _ = writer_result_sender.send(result);
+        }) {
+            Ok(thread) => thread,
+            Err(error) => {
+                stop_child(&mut child);
+                let stdout_failed = capture_cleanup_failed(stdout_thread.take().unwrap());
+                let stderr_failed = capture_cleanup_failed(stderr_thread.take().unwrap());
+                let error = include_cleanup_failure(error, stdout_failed || stderr_failed);
+                return failure(&error, "UNKNOWN");
+            }
+        };
+
+        let mut writer_result = None;
+        let mut status = None;
+        let mut supervisor_error = None;
+        let mut stdout = None;
+        let mut stderr = None;
+        loop {
+            if writer_result.is_none() {
+                match writer_result_receiver.try_recv() {
+                    Ok(result) => {
+                        writer_result = Some(result);
+                        if writer_result.as_ref().is_some_and(Result::is_err) {
+                            break;
+                        }
+                    }
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        supervisor_error = Some(io::Error::other(
+                            "stdin writer result channel disconnected",
+                        ));
+                        break;
+                    }
+                    Err(mpsc::TryRecvError::Empty) => {}
+                }
+            }
+            if stdout.is_none()
+                && stdout_thread
+                    .as_ref()
+                    .is_some_and(std::thread::JoinHandle::is_finished)
+            {
+                let result = stdout_thread.take().unwrap().join()
+                    .map_err(|_| io::Error::other("stdout capture thread panicked"))
+                    .and_then(|result| result);
+                match result {
+                    Ok(output) => stdout = Some(output),
+                    Err(error) => {
+                        supervisor_error = Some(error);
+                        break;
+                    }
+                }
+            }
+            if stderr.is_none()
+                && stderr_thread
+                    .as_ref()
+                    .is_some_and(std::thread::JoinHandle::is_finished)
+            {
+                let result = stderr_thread.take().unwrap().join()
+                    .map_err(|_| io::Error::other("stderr capture thread panicked"))
+                    .and_then(|result| result);
+                match result {
+                    Ok(output) => stderr = Some(output),
+                    Err(error) => {
+                        supervisor_error = Some(error);
+                        break;
+                    }
+                }
+            }
+            if status.is_none() {
+                match child.try_wait() {
+                    Ok(Some(exit_status)) => status = Some(exit_status),
+                    Ok(None) => {}
+                    Err(error) => {
+                        supervisor_error = Some(error);
+                        break;
+                    }
+                }
+            }
+            if status.is_some() && writer_result.is_some() && stdout.is_some() && stderr.is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(2));
         }
-        Err(error) => serde_json::json!({
+
+        let write_error = writer_result.and_then(Result::err);
+        if write_error.is_some() || supervisor_error.is_some() {
+            stop_child(&mut child);
+        }
+        let writer_join = writer_thread.join();
+        let stdout_result = stdout_thread
+            .take()
+            .map(|thread| {
+                thread
+                    .join()
+                    .map_err(|_| io::Error::other("stdout capture thread panicked"))
+                    .and_then(|result| result)
+            })
+            .unwrap_or_else(|| stdout.ok_or_else(|| io::Error::other("stdout capture result unavailable")));
+        let stderr_result = stderr_thread
+            .take()
+            .map(|thread| {
+                thread
+                    .join()
+                    .map_err(|_| io::Error::other("stderr capture thread panicked"))
+                    .and_then(|result| result)
+            })
+            .unwrap_or_else(|| stderr.ok_or_else(|| io::Error::other("stderr capture result unavailable")));
+
+        if let Some(error) = write_error {
+            return failure(&error, "EPIPE");
+        }
+        if let Some(error) = supervisor_error {
+            return failure(&error, "UNKNOWN");
+        }
+        if writer_join.is_err() {
+            return failure(&io::Error::other("stdin writer thread panicked"), "UNKNOWN");
+        }
+        let stdout = match stdout_result {
+            Ok(output) => output,
+            Err(error) => return failure(&error, "UNKNOWN"),
+        };
+        let stderr = match stderr_result {
+            Ok(output) => output,
+            Err(error) => return failure(&error, "UNKNOWN"),
+        };
+        let Some(status) = status else {
+            return failure(&io::Error::other("child status unavailable"), "UNKNOWN");
+        };
+        Ok(std::process::Output { status, stdout, stderr })
+    } else {
+        child.wait_with_output()
+    }
+    .map(|output| {
+        #[cfg(unix)]
+        let signal = output.status.signal();
+        #[cfg(not(unix))]
+        let signal: Option<i32> = None;
+        serde_json::json!({
+            "pid": pid,
+            "status": output.status.code(),
+            "signal": signal,
+            "stdout": hex_encode(&output.stdout),
+            "stderr": hex_encode(&output.stderr),
+        })
+        .to_string()
+    })
+    .unwrap_or_else(|error| {
+        serde_json::json!({
             "error": error.to_string(),
             "code": "UNKNOWN",
             "pid": pid,
         })
-        .to_string(),
-    }
+        .to_string()
+    })
 }
 
 
@@ -1239,4 +1433,35 @@ fn host_worker_late_ref_keeps_queued_terminal_events_alive_until_poll() {
     assert!(events.contains("queued"));
     assert!(events.contains("\"type\":\"exit\""));
     assert!(!host_workers_active());
+}
+
+#[cfg(all(test, unix))]
+#[test]
+fn sync_input_and_both_output_pipes_make_progress() {
+    let input = vec![b'x'; 256 * 1024];
+    let record: serde_json::Value = serde_json::from_str(&run_child_process(
+        "/bin/sh".into(),
+        serde_json::json!(["-c", "exec 3>&2; dd if=/dev/zero bs=4096 count=64 2>/dev/null; dd if=/dev/zero bs=4096 count=64 1>&3 2>/dev/null; exec 3>&-; cat"]).to_string(),
+        serde_json::json!({"input": hex_encode(&input)}).to_string(),
+    )).unwrap();
+    assert_eq!(record["status"], 0);
+    assert!(record.get("error").is_none());
+    let stdout = hex_decode(record["stdout"].as_str().unwrap());
+    let stderr = hex_decode(record["stderr"].as_str().unwrap());
+    assert_eq!(stdout.len(), 512 * 1024);
+    assert!(stdout[..256 * 1024].iter().all(|byte| *byte == 0));
+    assert_eq!(&stdout[256 * 1024..], input.as_slice());
+    assert_eq!(stderr, vec![0; 256 * 1024]);
+}
+
+#[cfg(all(test, unix))]
+#[test]
+fn sync_input_epipe_kills_direct_child() {
+    let record: serde_json::Value = serde_json::from_str(&run_child_process(
+        "/bin/sh".into(),
+        serde_json::json!(["-c", "exec 0<&-; exec sleep 30"]).to_string(),
+        serde_json::json!({"input": hex_encode(&vec![b'x'; 4 * 1024 * 1024])}).to_string(),
+    )).unwrap();
+    assert_eq!(record["code"], "EPIPE");
+    assert!(record["pid"].as_u64().is_some());
 }
