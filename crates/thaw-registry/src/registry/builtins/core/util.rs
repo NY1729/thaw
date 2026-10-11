@@ -42,9 +42,11 @@ pub(super) fn source(name: &str) -> Option<&'static str> {
              function inherits(constructor, superConstructor) { if (constructor === undefined || superConstructor === undefined) throw new TypeError('constructors are required'); constructor.super_ = superConstructor; Object.setPrototypeOf(constructor.prototype, superConstructor.prototype); }\n\
              var promisifyCustom = Symbol.for('nodejs.util.promisify.custom');\n\
              function promisify(original) {\n\
-             \x20\x20if (typeof original !== 'function') throw new TypeError('original must be a function'); if (original[promisifyCustom]) return original[promisifyCustom];\n\
-             \x20\x20function wrapped() { var self = this; var args = Array.prototype.slice.call(arguments); return new Promise(function(resolve, reject) { args.push(function(error) { if (error) reject(error); else { var values = Array.prototype.slice.call(arguments, 1); resolve(values.length > 1 ? values : values[0]); } }); original.apply(self, args); }); }\n\
-             \x20\x20Object.setPrototypeOf(wrapped, Object.getPrototypeOf(original)); return wrapped;\n\
+             \x20\x20if (typeof original !== 'function') throw new TypeError('original must be a function');\n\
+             \x20\x20if (original[promisifyCustom]) { var custom = original[promisifyCustom]; if (typeof custom !== 'function') { var error = new TypeError('util.promisify.custom must be a function'); error.code = 'ERR_INVALID_ARG_TYPE'; throw error; } Object.defineProperty(custom, promisifyCustom, { value: custom, enumerable: false, writable: false, configurable: true }); return custom; }\n\
+             \x20\x20function wrapped() { var self = this; var args = Array.prototype.slice.call(arguments); return new Promise(function(resolve, reject) { args.push(function(error, value) { if (error) reject(error); else resolve(value); }); original.apply(self, args); }); }\n\
+             \x20\x20Object.setPrototypeOf(wrapped, Object.getPrototypeOf(original));\n\
+             \x20\x20Object.defineProperty(wrapped, promisifyCustom, { value: wrapped, enumerable: false, writable: false, configurable: true }); return wrapped;\n\
              }\n\
              promisify.custom = promisifyCustom;\n\
              function callbackifyError(reason) { var error = new Error('Promise was rejected with falsy value'); error.code = 'ERR_FALSY_VALUE_REJECTION'; error.reason = reason; return error; }\n\
