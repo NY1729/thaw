@@ -1803,7 +1803,7 @@ fn timer_modules_share_the_runtime_queue_and_support_abort() {
              module.exports = async function () {\n\
              \x20 var immediate = await new Promise(function(resolve) { timers.setImmediate(resolve, 'immediate'); });\n\
              \x20 var delayed = await promises.setTimeout(0, 'delayed'); await promises.scheduler.yield();\n\
-             \x20 var controller = new AbortController(); controller.abort('cancelled'); var reason; try { await promises.setTimeout(1, 'wrong', { signal: controller.signal }); } catch (error) { reason = error; }\n\
+             \x20 var controller = new AbortController(); controller.abort('cancelled'); var reason; try { await promises.setTimeout(1, 'wrong', { signal: controller.signal }); } catch (error) { reason = [error.name, error.code, error.cause]; }\n\
              \x20 var interval = promises.setInterval(0, 'tick'); var first = await interval.next(); var second = await interval.next(); var ended = await interval.return();\n\
              \x20 return [immediate, delayed, reason, first.value, first.done, second.value, ended.done];\n\
              };",
@@ -1828,7 +1828,7 @@ fn timer_modules_share_the_runtime_queue_and_support_abort() {
     let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
     assert_eq!(
         result,
-        r#"["immediate","delayed","cancelled","tick",false,"tick",true]"#
+        r#"["immediate","delayed",["AbortError","ABORT_ERR","cancelled"],"tick",false,"tick",true]"#
     );
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
@@ -1849,10 +1849,10 @@ module.exports = async function() {
     setImmediate: globalThis.setImmediate, clearImmediate: globalThis.clearImmediate,
     setInterval: globalThis.setInterval, clearInterval: globalThis.clearInterval
   };
-  var records = [], cleared = [], failNextInterval = false, iterators = [], signals = [];
+  var records = [], cleared = [], failNextInterval = false, nextIntervalFailure, iterators = [], signals = [];
   function wrapSchedule(name) {
     globalThis[name] = function(callback) {
-      if (name === 'setInterval' && failNextInterval) { failNextInterval = false; throw new Error('start failed'); }
+      if (name === 'setInterval' && failNextInterval) { failNextInterval = false; throw nextIntervalFailure; }
       var args = Array.prototype.slice.call(arguments);
       var handle = original[name].apply(globalThis, args);
       records.push({ name: name, callback: callback, handle: handle });
@@ -1903,6 +1903,7 @@ module.exports = async function() {
   }
   function trackIterator(iterator) { iterators.push(iterator); return iterator; }
   function check(value, message) { if (!value) throw new Error(message); }
+  function abortInfo(error, cause) { return error instanceof Error && error.name === 'AbortError' && error.code === 'ABORT_ERR' && error.cause === cause; }
   try {
     wrapSchedule('setTimeout'); wrapClear('clearTimeout');
     wrapSchedule('setImmediate'); wrapClear('clearImmediate');
@@ -1977,13 +1978,13 @@ module.exports = async function() {
     var preAborted = trackedSignal(true, 'pre'), preCount = count('setInterval');
     var preIterator = trackIterator(promises.setInterval(60000, 'unused', { signal: preAborted.signal }));
     var preError = await preIterator.next().then(function() { return null; }, function(error) { return error; });
-    check(preError === 'pre' && preAborted.adds() === 0 && count('setInterval') === preCount,
+    check(abortInfo(preError, 'pre') && preAborted.adds() === 0 && count('setInterval') === preCount,
       'pre-aborted first next allocates no timer or listener');
     var betweenSignal = trackedSignal(false), betweenIterator = trackIterator(promises.setInterval(60000, 'unused', { signal: betweenSignal.signal }));
     betweenSignal.abort('between');
     var betweenCount = count('setInterval');
     var betweenError = await betweenIterator.next().then(function() { return null; }, function(error) { return error; });
-    check(betweenError === 'between' && betweenSignal.adds() === 0 && count('setInterval') === betweenCount,
+    check(abortInfo(betweenError, 'between') && betweenSignal.adds() === 0 && count('setInterval') === betweenCount,
       'abort between construction and first next allocates nothing');
 
     var returnSignal = trackedSignal(false), returnIterator = trackIterator(promises.setInterval(60000, 'return', { signal: returnSignal.signal }));
@@ -1999,7 +2000,7 @@ module.exports = async function() {
     liveSignal.abort('aborted');
     var liveError = await livePending.then(function() { return null; }, function(error) { return error; });
     var afterAbortError = await liveIterator.next().then(function() { return null; }, function(error) { return error; });
-    check(liveError === 'aborted' && afterAbortError === 'aborted' && liveSignal.adds() === 1 &&
+    check(abortInfo(liveError, 'aborted') && abortInfo(afterAbortError, 'aborted') && liveSignal.adds() === 1 &&
       liveSignal.removes() === 2 && liveSignal.sameListener() && clearCount(liveRecord.handle) === 1 &&
       count('setInterval') === liveCount + 1,
       'abort rejects waiters, clears timer and removes listener');
@@ -2010,11 +2011,11 @@ module.exports = async function() {
     bufferedRecord.callback();
     bufferedSignal.abort('buffered abort');
     var discardedBufferError = await bufferedIterator.next().then(function() { return null; }, function(error) { return error; });
-    check(discardedBufferError === 'buffered abort' && bufferedSignal.removes() === 2 &&
+    check(abortInfo(discardedBufferError, 'buffered abort') && bufferedSignal.removes() === 2 &&
       bufferedSignal.sameListener() && clearCount(bufferedRecord.handle) === 1, 'abort discards buffered values');
 
     var failureSignal = trackedSignal(false), failureIterator = trackIterator(promises.setInterval(60000, 'failure', { signal: failureSignal.signal }));
-    var failureCount = count('setInterval'); failNextInterval = true;
+    var failureCount = count('setInterval'); failNextInterval = true; nextIntervalFailure = new Error('start failed');
     var startupError = await failureIterator.next().then(function() { return null; }, function(error) { return error.message; });
     var failureRetry = await failureIterator.next().then(function() { return null; }, function(error) { return error.message; });
     check(startupError === 'start failed' && count('setInterval') === failureCount &&
@@ -2030,7 +2031,7 @@ module.exports = async function() {
     var coercionAbortRecord = record('setInterval');
     var coercionAbortResult = await coercionAbortPending.then(function() { return null; }, function(error) { return error; });
     var coercionAbortRetry = await coercionAbortIterator.next().then(function() { return null; }, function(error) { return error; });
-    check(abortCoercionRan && coercionAbortResult === 'during delay' && coercionAbortRetry === 'during delay' &&
+    check(abortCoercionRan && abortInfo(coercionAbortResult, 'during delay') && abortInfo(coercionAbortRetry, 'during delay') &&
       count('setInterval') === abortCoercionCount + 1 && clearCount(coercionAbortRecord.handle) === 1 &&
       coercionAbortSignal.adds() === 1 && coercionAbortSignal.removes() === 2,
       'abort during delay coercion clears the subsequently created handle');
@@ -2052,6 +2053,56 @@ module.exports = async function() {
       coercionReturnSignal.adds() === 1 && coercionReturnSignal.removes() === 1,
       'return during delay coercion clears the subsequently created handle');
 
+    var falseyResults = [];
+    [null, false, 0, ''].forEach(function(reason) {
+      var aborted = trackedSignal(true, reason);
+      falseyResults.push([promises.setTimeout(60000, 'unused', { signal: aborted.signal }).then(function(error) { return [false, error]; }, function(error) { return [true, error]; }),
+        promises.setImmediate('unused', { signal: aborted.signal }).then(function(error) { return [false, error]; }, function(error) { return [true, error]; }),
+        promises.scheduler.wait(60000, { signal: aborted.signal }).then(function(error) { return [false, error]; }, function(error) { return [true, error]; }), reason]);
+    });
+    var falseyIntervalResults = [];
+    [null, false, 0, ''].forEach(function(reason) {
+      var falseySignal = trackedSignal(false), falseyIterator = trackIterator(promises.setInterval(60000, 'unused', { signal: falseySignal.signal }));
+      var waiter = falseyIterator.next().then(function() { return null; }, function(error) { return error; });
+      var falseyRecord = record('setInterval'); falseySignal.abort(reason);
+      falseyIntervalResults.push([waiter, falseyIterator.next().then(function(value) { return value; }, function(error) { return error; }), falseyRecord, falseySignal, reason]);
+    });
+    for (var falseyIndex = 0; falseyIndex < falseyIntervalResults.length; falseyIndex++) {
+      var falsey = falseyIntervalResults[falseyIndex], waiterError = await falsey[0], nextError = await falsey[1];
+      check(abortInfo(waiterError, falsey[4]) && abortInfo(nextError, falsey[4]) && clearCount(falsey[2].handle) === 1 &&
+        falsey[3].adds() === 1 && falsey[3].removes() === 2, 'falsey interval abort remains a failure');
+    }
+    for (var falseyIndex = 0; falseyIndex < falseyResults.length; falseyIndex++) {
+      var falsey = falseyResults[falseyIndex];
+      for (var errorIndex = 0; errorIndex < 3; errorIndex++) {
+        var timerResult = await falsey[errorIndex];
+        check(timerResult[0] && abortInfo(timerResult[1], falsey[3]), 'falsey promise timer abort is AbortError');
+      }
+    }
+    var undefinedFailureSignal = trackedSignal(false), undefinedFailureIterator = trackIterator(promises.setInterval(60000, 'undefined failure', { signal: undefinedFailureSignal.signal }));
+    var undefinedFailureCount = count('setInterval'); failNextInterval = true; nextIntervalFailure = undefined;
+    var undefinedFailure = await undefinedFailureIterator.next().then(function(value) { return [false, value]; }, function(error) { return [true, error]; });
+    var undefinedRetry = await undefinedFailureIterator.next().then(function(value) { return [false, value]; }, function(error) { return [true, error]; });
+    check(undefinedFailure[0] && undefinedFailure[1] === undefined && undefinedRetry[0] && undefinedRetry[1] === undefined &&
+      count('setInterval') === undefinedFailureCount && undefinedFailureSignal.adds() === 1 && undefinedFailureSignal.removes() === 1 &&
+      undefinedFailureSignal.sameListener(), 'undefined startup failure remains rejected on later next');
+
+    var objectReason = {}, objectController = new AbortController(); objectController.abort(objectReason);
+    var objectErrorResult = await promises.setTimeout(60000, 'unused', { signal: objectController.signal }).then(
+      function(error) { return [false, error]; }, function(error) { return [true, error]; });
+    check(objectErrorResult[0] && abortInfo(objectErrorResult[1], objectReason), 'AbortError preserves object cause identity');
+    var defaultController = new AbortController(); defaultController.abort();
+    var defaultErrorResult = await promises.setImmediate('unused', { signal: defaultController.signal }).then(
+      function(error) { return [false, error]; }, function(error) { return [true, error]; });
+    check(defaultErrorResult[0] && abortInfo(defaultErrorResult[1], defaultController.signal.reason), 'AbortError wraps default abort reason');
+    var liveController = new AbortController(), livePromise = promises.setTimeout(60000, 'unused', { signal: liveController.signal });
+    var liveOneShotRecord = record('setTimeout');
+    var liveOneShotResult = livePromise.then(function(error) { return [false, error]; }, function(error) { return [true, error]; });
+    liveController.abort(objectReason);
+    liveOneShotResult = await liveOneShotResult;
+    check(liveOneShotResult[0] && abortInfo(liveOneShotResult[1], objectReason) && clearCount(liveOneShotRecord.handle) === 1,
+      'live one-shot abort wraps its reason and clears timer');
+
     var beforeThrow = records.length, getterReads = 0, getterOrder = [], getterError;
     try {
       promises.setTimeout(1, 'unused', {
@@ -2065,7 +2116,7 @@ module.exports = async function() {
     var controller = new AbortController(); controller.abort('stopped');
     var beforeAbort = records.length, abortReason;
     try { await promises.setTimeout(1, 'unused', { signal: controller.signal, ref: false }); }
-    catch (error) { abortReason = error; }
+    catch (error) { abortReason = [error.name, error.code, error.cause]; }
     var noAllocationWhenAborted = records.length === beforeAbort;
     return [
       [timeoutUnrefed, timeoutValue],
@@ -2116,7 +2167,7 @@ module.exports = async function() {
     assert!(loaded);
     assert_eq!(
         result.as_deref(),
-        Some(r#"[[true,"timeout"],[true,"immediate"],[true,"tick",false,true,"tick",false,true,true,true],[true,"default",true,"true",true,true,true,true],[1,"signal,ref","ref getter",true,true,"stopped"]]"#)
+        Some(r#"[[true,"timeout"],[true,"immediate"],[true,"tick",false,true,"tick",false,true,true,true],[true,"default",true,"true",true,true,true,true],[1,"signal,ref","ref getter",true,true,["AbortError","ABORT_ERR","stopped"]]]"#)
     );
 }
 
