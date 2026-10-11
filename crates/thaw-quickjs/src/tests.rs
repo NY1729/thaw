@@ -2081,6 +2081,52 @@ fn structured_clone_preserves_sparse_array_length_and_graph() {
 }
 
 #[test]
+fn worker_transport_preserves_invalid_dates_and_legacy_dates() {
+    std::thread::spawn(|| {
+        assert_eq!(
+            load(
+                r#"
+      function workerDateCases() {
+        const invalid = new Date(NaN);
+        const wire = __thaw_worker_encode(invalid);
+        const encoded = JSON.parse(wire);
+        const copy = __thaw_worker_decode(wire);
+        const shared = { first: invalid, list: [invalid], map: new Map([[invalid, invalid]]), set: new Set([invalid]) };
+        const sharedCopy = __thaw_worker_decode(__thaw_worker_encode(shared));
+        const dates = [0, -1234, 5678, -8640000000000000, 8640000000000000];
+        const finiteWire = JSON.parse(__thaw_worker_encode(new Date(1234)));
+        const finiteCopy = __thaw_worker_decode(__thaw_worker_encode(dates.map(value => new Date(value))));
+        const legacy = __thaw_worker_decode(JSON.stringify({ root: { r: 0 }, nodes: [
+          { t: 'Date', v: 0 }, { t: 'Date', v: -1234 }, { t: 'Date', v: null }
+        ] }));
+        return [copy instanceof Date && Number.isNaN(copy.getTime()) && copy !== invalid,
+          encoded.nodes[0].v.p === 'NaN',
+          sharedCopy.first instanceof Date && Number.isNaN(sharedCopy.first.getTime())
+            && sharedCopy.list[0] === sharedCopy.first
+            && sharedCopy.map.get(sharedCopy.first) === sharedCopy.first
+            && sharedCopy.set.has(sharedCopy.first),
+          finiteWire.nodes[0].v.v === 1234,
+          finiteCopy.every((date, index) => date instanceof Date && date.getTime() === dates[index]),
+          legacy instanceof Date && legacy.getTime() === 0,
+          __thaw_worker_decode(JSON.stringify({ root: { r: 1 }, nodes: [
+            { t: 'Date', v: 0 }, { t: 'Date', v: -1234 }
+          ] })).getTime() === -1234,
+          __thaw_worker_decode(JSON.stringify({ root: { r: 0 }, nodes: [{ t: 'Date', v: null }] })).getTime() === 0];
+      }
+    "#
+            ),
+            1
+        );
+        assert_eq!(
+            call("workerDateCases", "[]"),
+            "[true,true,true,true,true,true,true,true]"
+        );
+    })
+    .join()
+    .unwrap();
+}
+
+#[test]
 fn structured_clone_preserves_shared_view_backing_buffer() {
     std::thread::spawn(|| {
         assert_eq!(
