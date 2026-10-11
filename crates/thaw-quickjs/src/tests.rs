@@ -789,6 +789,86 @@ fn process_exposes_time_cwd_and_event_helpers() {
 }
 
 #[test]
+fn process_clock_uses_captured_monotonic_nanoseconds() {
+    std::thread::spawn(|| {
+        assert_eq!(
+            load(
+                r#"
+      function processMonotonicClockCases() {
+        const bootstrapName = '__thaw_process_monotonic_clock_bootstrap';
+        const dateNowDescriptor = Object.getOwnPropertyDescriptor(Date, 'now');
+        const bootstrapDescriptor = Object.getOwnPropertyDescriptor(globalThis, bootstrapName);
+        const checks = [];
+        try {
+          const bootstrapAbsent = !Object.prototype.hasOwnProperty.call(globalThis, bootstrapName);
+          const sentinel = new Error('hostile Date.now');
+          Object.defineProperty(globalThis, bootstrapName, {
+            value: () => { throw sentinel; }, configurable: true, writable: true,
+          });
+          Date.now = () => { throw sentinel; };
+          const tuple = process.hrtime();
+          const bigint = process.hrtime.bigint();
+          const uptime = process.uptime();
+          checks.push(bootstrapAbsent,
+            Array.isArray(tuple) && tuple.length === 2 && typeof bigint === 'bigint'
+              && Number.isFinite(uptime) && uptime >= 0);
+
+          let flip = false;
+          Date.now = () => {
+            flip = !flip;
+            return flip ? Number.MAX_SAFE_INTEGER : -Number.MAX_SAFE_INTEGER;
+          };
+          const clocks = [process.hrtime.bigint(), process.hrtime.bigint(), process.hrtime.bigint()];
+          checks.push(clocks[0] >= 0n && clocks[0] <= clocks[1] && clocks[1] <= clocks[2]);
+
+          const beforeTuple = process.hrtime.bigint();
+          const sampledTuple = process.hrtime();
+          const afterTuple = process.hrtime.bigint();
+          const tupleNs = BigInt(sampledTuple[0]) * 1000000000n + BigInt(sampledTuple[1]);
+          checks.push(sampledTuple[0] >= 0 && sampledTuple[1] >= 0 && sampledTuple[1] < 1000000000
+            && beforeTuple <= tupleNs && tupleNs <= afterTuple);
+
+          const previous = process.hrtime();
+          const previousNs = BigInt(previous[0]) * 1000000000n + BigInt(previous[1]);
+          const beforeDelta = process.hrtime.bigint();
+          const delta = process.hrtime(previous);
+          const afterDelta = process.hrtime.bigint();
+          const deltaNs = BigInt(delta[0]) * 1000000000n + BigInt(delta[1]);
+          checks.push(delta[0] >= 0 && delta[1] >= 0 && delta[1] < 1000000000
+            && beforeDelta - previousNs <= deltaNs && deltaNs <= afterDelta - previousNs);
+
+          const beforeUptime = process.hrtime.bigint();
+          const uptimeSample = process.uptime();
+          const afterUptime = process.hrtime.bigint();
+          const seconds = value => Number(value / 1000000000n)
+            + Number(value % 1000000000n) / 1000000000;
+          const tolerance = Number.EPSILON * Math.max(1, Math.abs(seconds(beforeUptime)), Math.abs(seconds(afterUptime))) * 4;
+          checks.push(Number.isFinite(uptimeSample) && uptimeSample >= 0
+            && uptimeSample >= seconds(beforeUptime) - tolerance
+            && uptimeSample <= seconds(afterUptime) + tolerance);
+        } catch (_) {
+          checks.push(false);
+        } finally {
+          Object.defineProperty(Date, 'now', dateNowDescriptor);
+          if (bootstrapDescriptor) Object.defineProperty(globalThis, bootstrapName, bootstrapDescriptor);
+          else delete globalThis[bootstrapName];
+        }
+        return checks;
+      }
+    "#
+            ),
+            1
+        );
+        assert_eq!(
+            call("processMonotonicClockCases", "[]"),
+            "[true,true,true,true,true,true]"
+        );
+    })
+    .join()
+    .unwrap();
+}
+
+#[test]
 fn process_event_listeners_receive_process_as_receiver() {
     std::thread::spawn(|| {
         assert_eq!(

@@ -2931,6 +2931,14 @@ fn ensure_context() {
                     .expect("failed to install graph handle functions");
                 install_async_context_bootstrap(&ctx)
                     .expect("failed to install async context bootstrap");
+                let process_clock_origin = std::time::Instant::now();
+                let process_monotonic_clock = Function::new(ctx.clone(), move || -> String {
+                    process_clock_origin.elapsed().as_nanos().to_string()
+                })
+                .expect("failed to create native process monotonic clock");
+                ctx.globals()
+                    .set("__thaw_process_monotonic_clock_bootstrap", process_monotonic_clock)
+                    .expect("failed to install native process monotonic clock");
                 let clone_unsupported_bootstrap = Function::new(
                     ctx.clone(),
                     |value: Value<'_>| value.is_promise() || value.is_proxy(),
@@ -2950,6 +2958,8 @@ fn ensure_context() {
                 let platform_result = ctx.eval::<(), _>(PLATFORM_GLOBALS);
                 ctx.globals().remove("__thaw_async_context_bootstrap")
                     .expect("failed to remove async context bootstrap");
+                ctx.globals().remove("__thaw_process_monotonic_clock_bootstrap")
+                    .expect("failed to remove process monotonic clock bootstrap");
                 ctx.globals().remove("__thaw_clone_unsupported_bootstrap")
                     .expect("failed to remove clone brand bootstrap");
                 ctx.globals().remove("__thaw_clone_error_bootstrap")
