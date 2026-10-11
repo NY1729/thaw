@@ -238,6 +238,102 @@ fn a_zlib_streams_subclass_overriding_transform_is_actually_called() {
     let _ = fs::remove_dir_all(&empty_node_modules);
 }
 
+#[test]
+fn zlib_dictionary_options_are_rejected_before_native_work() {
+    std::thread::spawn(|| {
+        use std::ffi::{CStr, CString};
+
+        let dir = temp_registry("builtin_zlib_dictionary");
+        fs::write(
+            dir.join("index.js"),
+            r#"
+var zlib = require('node:zlib');
+module.exports = async function() {
+  var source = Buffer.from('dictionary guard'), dictionary = Buffer.from('dict');
+  var streams = [], hexBase = globalThis.__thaw_zlib_hex, createBase = globalThis.__thaw_zlib_stream_create;
+  var hexCalls = 0, createCalls = 0;
+  globalThis.__thaw_zlib_hex = function() { hexCalls++; return hexBase.apply(this, arguments); };
+  globalThis.__thaw_zlib_stream_create = function() { createCalls++; return createBase.apply(this, arguments); };
+  try {
+    function capture(fn) { try { fn(); return null; } catch (error) { return error; } }
+    function unsupported(error) { return error && error.code === 'ERR_ZLIB_UNSUPPORTED_OPTION'; }
+    var syncErrors, syncBefore = hexCalls;
+    syncErrors = [
+      capture(function() { zlib.deflateSync(source, { dictionary: dictionary }); }),
+      capture(function() { zlib.inflateSync(source, { dictionary: dictionary }); }),
+      capture(function() { zlib.deflateRawSync(source, { dictionary: dictionary }); }),
+      capture(function() { zlib.inflateRawSync(source, { dictionary: dictionary }); })
+    ];
+    var syncRejected = syncErrors.every(unsupported) && hexCalls === syncBefore;
+    var getterSentinel = new Error('dictionary getter'), getterReads = 0;
+    var throwingOptions = { get dictionary() { getterReads++; throw getterSentinel; } };
+    var getterSyncSame = capture(function() { zlib.inflateSync(source, throwingOptions); }) === getterSentinel && getterReads === 1;
+    getterReads = 0;
+    var inheritedRejected = unsupported(capture(function() { zlib.deflateSync(source, Object.create({ dictionary: dictionary })); }));
+    var streamBefore = createCalls;
+    var ctorError = capture(function() { new zlib.Deflate({ dictionary: dictionary }); });
+    var factoryError = capture(function() { zlib.createInflateRaw({ dictionary: dictionary }); });
+    var ctorRejected = unsupported(ctorError) && unsupported(factoryError) && createCalls === streamBefore;
+    getterReads = 0;
+    var getterCtorSame = capture(function() { new zlib.Deflate(throwingOptions); }) === getterSentinel && getterReads === 1;
+    var asyncStack = true;
+    var asyncResult = await new Promise(function(resolve) {
+      zlib.inflate(source, { dictionary: dictionary }, function(error, value) {
+        resolve([!asyncStack, unsupported(error), value === undefined, hexCalls === syncBefore]);
+      });
+      asyncStack = false;
+    });
+    getterReads = 0;
+    var getterAsyncSame = await new Promise(function(resolve) {
+      zlib.deflate(source, throwingOptions, function(error) { resolve(error === getterSentinel && getterReads === 1); });
+    });
+    var ordinary = zlib.deflateSync(source, { dictionary: undefined });
+    var ordinaryInflate = zlib.inflateSync(ordinary);
+    var callbackOverload = await new Promise(function(resolve, reject) {
+      zlib.deflate(source, function(error, value) { error ? reject(error) : resolve(value); });
+    });
+    streams.push(zlib.createGzip({ autoDestroy: false, dictionary: undefined }));
+    streams[0].destroy();
+    return [syncRejected, getterSyncSame, inheritedRejected, ctorRejected, getterCtorSame,
+      asyncResult, getterAsyncSame, ordinaryInflate.toString() === source.toString(),
+      callbackOverload.length > 0, streams[0] instanceof zlib.Gzip];
+  } finally {
+    globalThis.__thaw_zlib_hex = hexBase;
+    globalThis.__thaw_zlib_stream_create = createBase;
+    streams.forEach(function(value) { if (!value.destroyed) value.destroy(); });
+  }
+};
+"#,
+        )
+        .unwrap();
+        let empty_node_modules = temp_registry("builtin_zlib_dictionary_node_modules");
+        let (bundle, _, file_count, _) =
+            bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+        let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseZlibDictionary = module.exports;");
+        let source = CString::new(script).unwrap();
+        let loaded = thaw_quickjs::thaw_js_load(source.as_ptr()) == 1;
+        let result = if loaded {
+            let result_ptr = thaw_quickjs::thaw_js_call(
+                CString::new("exerciseZlibDictionary").unwrap().as_ptr(),
+                CString::new("[]").unwrap().as_ptr(),
+            );
+            Some(unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy().into_owned())
+        } else {
+            None
+        };
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&empty_node_modules);
+        assert_eq!(file_count, 3);
+        assert!(loaded);
+        assert_eq!(
+            result.as_deref(),
+            Some(r#"[true,true,true,true,true,[true,true,true,true],true,true,true,true]"#)
+        );
+    })
+    .join()
+    .unwrap();
+}
+
 /// Real `tar` with `gzip: true` crashed (`cannot read property 'close'
 /// of undefined`) because its dependency `minizlib` never uses the
 /// ordinary Transform-stream API (`.write()`/`.pipe()`) on a
