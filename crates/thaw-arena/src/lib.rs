@@ -29,6 +29,7 @@ thread_local! {
     static TRACING: Cell<bool> = const { Cell::new(false) };
     static PINNED: RefCell<BTreeMap<usize, usize>> = const { RefCell::new(BTreeMap::new()) };
     static RESET_HOOKS: RefCell<Vec<fn(bool)>> = const { RefCell::new(Vec::new()) };
+    static METADATA_RESET_HOOKS: RefCell<Vec<fn(bool)>> = const { RefCell::new(Vec::new()) };
 }
 
 /// A runtime-owned reference, released when its callback or watcher is dropped.
@@ -159,6 +160,24 @@ fn run_reset_hooks(tracing: bool) {
     }
 }
 
+/// Registers cleanup of Rust-only side-table metadata before release callbacks.
+/// Hooks must not call Host/user code, allocate arena payloads, or reset recursively.
+pub fn register_metadata_reset_hook(hook: fn(bool)) {
+    METADATA_RESET_HOOKS.with(|hooks| {
+        let mut hooks = hooks.borrow_mut();
+        if !hooks.contains(&hook) {
+            hooks.push(hook);
+        }
+    });
+}
+
+fn run_metadata_reset_hooks(tracing: bool) {
+    let hooks = METADATA_RESET_HOOKS.with(|hooks| hooks.borrow().clone());
+    for hook in hooks {
+        hook(tracing);
+    }
+}
+
 /// Allocates `size` bytes aligned to `align` from the thread-local arena.
 /// Returns a null pointer if `align` isn't a valid alignment (a power of
 /// two) or the underlying allocation fails.
@@ -200,6 +219,7 @@ pub extern "C" fn thaw_arena_reset() {
     if !is_tracing() {
         strings::reset_lengths(false);
         ARENA.with(|arena| arena.borrow_mut().reset());
+        run_metadata_reset_hooks(false);
         run_reset_hooks(false);
         return;
     }
@@ -281,12 +301,77 @@ pub extern "C" fn thaw_arena_reset() {
         });
     });
     strings::reset_lengths(true);
+    run_metadata_reset_hooks(true);
     run_reset_hooks(true);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    thread_local! {
+        static RESET_TEST_EVENTS: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+        static RESET_TEST_LATE_ARMED: Cell<bool> = const { Cell::new(false) };
+        static RESET_TEST_LATE_STATE: Cell<bool> = const { Cell::new(false) };
+    }
+
+    fn reset_test_metadata_hook(_: bool) {
+        assert!(METADATA_RESET_HOOKS.with(|hooks| hooks.try_borrow_mut().is_ok()));
+        assert!(RESET_HOOKS.with(|hooks| hooks.try_borrow_mut().is_ok()));
+        RESET_TEST_EVENTS.with(|events| events.borrow_mut().push(2));
+    }
+
+    fn reset_test_release_hook(_: bool) {
+        assert!(METADATA_RESET_HOOKS.with(|hooks| hooks.try_borrow_mut().is_ok()));
+        assert!(RESET_HOOKS.with(|hooks| hooks.try_borrow_mut().is_ok()));
+        RESET_TEST_EVENTS.with(|events| events.borrow_mut().push(1));
+    }
+
+    fn reset_test_late_metadata_hook(_: bool) {
+        RESET_TEST_LATE_STATE.with(|state| state.set(false));
+    }
+
+    fn reset_test_late_release_hook(_: bool) {
+        if RESET_TEST_LATE_ARMED.with(|armed| armed.replace(false)) {
+            RESET_TEST_LATE_STATE.with(|state| state.set(true));
+            register_metadata_reset_hook(reset_test_late_metadata_hook);
+        }
+    }
+
+    #[test]
+    fn metadata_hooks_run_once_before_release_hooks_in_both_reset_modes() {
+        for tracing in [false, true] {
+            std::thread::spawn(move || {
+                if tracing {
+                    thaw_arena_enable_tracing();
+                }
+                register_reset_hook(reset_test_release_hook);
+                register_metadata_reset_hook(reset_test_metadata_hook);
+                register_metadata_reset_hook(reset_test_metadata_hook);
+                thaw_arena_reset();
+                assert_eq!(
+                    RESET_TEST_EVENTS.with(|events| events.borrow().clone()),
+                    vec![2, 1]
+                );
+            })
+            .join()
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn metadata_hook_registered_during_release_starts_next_reset() {
+        std::thread::spawn(|| {
+            register_reset_hook(reset_test_late_release_hook);
+            RESET_TEST_LATE_ARMED.with(|armed| armed.set(true));
+            thaw_arena_reset();
+            assert!(RESET_TEST_LATE_STATE.with(Cell::get));
+            thaw_arena_reset();
+            assert!(!RESET_TEST_LATE_STATE.with(Cell::get));
+        })
+        .join()
+        .unwrap();
+    }
 
     #[test]
     fn allocates_distinct_writable_regions() {

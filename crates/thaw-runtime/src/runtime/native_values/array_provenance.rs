@@ -62,7 +62,7 @@ pub unsafe extern "C" fn thaw_array_provenance_prepare(
     handle: *mut u8, required_capacity: usize,
 ) -> u8 {
     if handle.is_null() { return 0; }
-    thaw_arena::register_reset_hook(reset_array_provenance);
+    thaw_arena::register_metadata_reset_hook(reset_array_provenance);
     ARRAY_PROVENANCE.with(|entries| {
         let mut entries = entries.borrow_mut();
         let previous = entries.get(&(handle as usize)).copied().unwrap_or(std::ptr::null_mut());
