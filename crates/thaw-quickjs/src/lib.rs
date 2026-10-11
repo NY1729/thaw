@@ -187,11 +187,12 @@ fn install_napi_bridge(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
         text
     })?;
     ctx.globals().set("__thaw_napi_graph_owner", owner)?;
-    let release = Function::new(ctx.clone(), move |token: String| {
+    let release = Function::new(ctx.clone(), move |ctx: Ctx<'_>, token: String| {
         let Ok(token) = token.parse::<u64>() else {
             return false;
         };
         let release = NAPI_BRIDGE.lock().unwrap().as_ref().map(|bridge| bridge.6);
+        let _active = ActiveNapiContext::enter(&ctx);
         release.is_some_and(|release| release(token) != 0)
     })?;
     ctx.globals().set("__thaw_napi_graph_release", release)?;

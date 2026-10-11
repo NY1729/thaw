@@ -776,6 +776,7 @@ fn release_unconsumed_graph_leases(ctx: &Ctx<'_>, text: &str) {
     let Ok(graph) = serde_json::from_str::<serde_json::Value>(text) else {
         return;
     };
+    let _active = ActiveNapiContext::enter(ctx);
     if let Some(leases) = graph.get("leases").and_then(serde_json::Value::as_array) {
         for handle in leases.iter().filter_map(serde_json::Value::as_u64).filter(|handle| *handle != 0) {
             let _ = release_handle_in_context(ctx, handle);
