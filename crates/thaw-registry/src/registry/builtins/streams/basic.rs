@@ -41,19 +41,19 @@ pub(super) fn source(name: &str) -> Option<&'static str> {
         "timers/promises" => Some(
             "function abortReason(signal) { return signal && signal.reason !== undefined ? signal.reason : new DOMException('This operation was aborted', 'AbortError'); }\n\
              function promiseTimer(schedule, delay, value, options) {\n\
-             \x20\x20options = options || {}; var signal = options.signal;\n\
+             \x20\x20options = options || {}; var signal = options.signal, ref = options.ref;\n\
              \x20\x20return new Promise(function(resolve, reject) {\n\
              \x20\x20\x20\x20if (signal && signal.aborted) { reject(abortReason(signal)); return; }\n\
              \x20\x20\x20\x20var id; function aborted() { if (schedule === globalThis.setImmediate) globalThis.clearImmediate(id); else globalThis.clearTimeout(id); reject(abortReason(signal)); }\n\
-             \x20\x20\x20\x20id = schedule(function() { if (signal) signal.removeEventListener('abort', aborted); resolve(value); }, delay);\n\
+             \x20\x20\x20\x20id = schedule(function() { if (signal) signal.removeEventListener('abort', aborted); resolve(value); }, delay); if (ref === false) id.unref();\n\
              \x20\x20\x20\x20if (signal) signal.addEventListener('abort', aborted, { once: true });\n\
              \x20\x20});\n\
              }\n\
              function setTimeoutPromise(delay, value, options) { return promiseTimer(globalThis.setTimeout, delay, value, options); }\n\
              function setImmediatePromise(value, options) { return promiseTimer(globalThis.setImmediate, 0, value, options); }\n\
              function setIntervalPromise(delay, value, options) {\n\
-             \x20\x20options = options || {}; var signal = options.signal; var values = []; var waiters = []; var done = false; var failure;\n\
-             \x20\x20var id = globalThis.setInterval(function() { var result = { value: value, done: false }; if (waiters.length) waiters.shift().resolve(result); else values.push(result); }, delay);\n\
+             \x20\x20options = options || {}; var signal = options.signal, ref = options.ref; var values = []; var waiters = []; var done = false; var failure;\n\
+             \x20\x20var id = globalThis.setInterval(function() { var result = { value: value, done: false }; if (waiters.length) waiters.shift().resolve(result); else values.push(result); }, delay); if (ref === false) id.unref();\n\
              \x20\x20function stop(error) { if (done) return; done = true; failure = error; globalThis.clearInterval(id); while (waiters.length) { var waiter = waiters.shift(); if (error) waiter.reject(error); else waiter.resolve({ value: undefined, done: true }); } }\n\
              \x20\x20if (signal) { if (signal.aborted) stop(abortReason(signal)); else signal.addEventListener('abort', function() { stop(abortReason(signal)); }, { once: true }); }\n\
              \x20\x20return { next: function() { if (values.length) return Promise.resolve(values.shift()); if (done) return failure ? Promise.reject(failure) : Promise.resolve({ value: undefined, done: true }); return new Promise(function(resolve, reject) { waiters.push({ resolve: resolve, reject: reject }); }); }, return: function() { stop(); return Promise.resolve({ value: undefined, done: true }); }, [Symbol.asyncIterator]: function() { return this; } };\n\

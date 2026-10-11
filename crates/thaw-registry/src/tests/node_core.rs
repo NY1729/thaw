@@ -1825,6 +1825,143 @@ fn timer_modules_share_the_runtime_queue_and_support_abort() {
 }
 
 #[test]
+fn timer_promises_ref_false_unrefs_live_handles() {
+    use std::ffi::{CStr, CString};
+
+    let dir = temp_registry("builtin_timer_promises_ref");
+    fs::write(
+        dir.join("index.js"),
+        r#"
+var promises = require('node:timers/promises');
+module.exports = async function() {
+  var original = {
+    setTimeout: globalThis.setTimeout, clearTimeout: globalThis.clearTimeout,
+    setImmediate: globalThis.setImmediate, clearImmediate: globalThis.clearImmediate,
+    setInterval: globalThis.setInterval, clearInterval: globalThis.clearInterval
+  };
+  var records = [], cleared = [];
+  function wrapSchedule(name) {
+    globalThis[name] = function(callback) {
+      var args = Array.prototype.slice.call(arguments);
+      var handle = original[name].apply(globalThis, args);
+      records.push({ name: name, callback: callback, handle: handle });
+      return handle;
+    };
+  }
+  function wrapClear(name) {
+    globalThis[name] = function(handle) {
+      cleared.push(handle);
+      return original[name].call(globalThis, handle);
+    };
+  }
+  function record(name) {
+    for (var i = records.length - 1; i >= 0; i--) if (records[i].name === name) return records[i];
+    throw new Error('missing timer ' + name);
+  }
+  try {
+    wrapSchedule('setTimeout'); wrapClear('clearTimeout');
+    wrapSchedule('setImmediate'); wrapClear('clearImmediate');
+    wrapSchedule('setInterval'); wrapClear('clearInterval');
+
+    var timeoutPromise = promises.setTimeout(60000, 'timeout', { ref: false });
+    var timeoutRecord = record('setTimeout'), timeoutUnrefed = timeoutRecord.handle.hasRef() === false;
+    globalThis.clearTimeout(timeoutRecord.handle); timeoutRecord.callback();
+    var timeoutValue = await timeoutPromise;
+
+    var immediatePromise = promises.setImmediate('immediate', { ref: false });
+    var immediateRecord = record('setImmediate'), immediateUnrefed = immediateRecord.handle.hasRef() === false;
+    globalThis.clearImmediate(immediateRecord.handle); immediateRecord.callback();
+    var immediateValue = await immediatePromise;
+
+    var interval = promises.setInterval(60000, 'tick', { ref: false });
+    var intervalRecord = record('setInterval'), intervalUnrefed = intervalRecord.handle.hasRef() === false;
+    var firstPromise = interval.next(); intervalRecord.callback(); var first = await firstPromise;
+    var secondPromise = interval.next(); intervalRecord.callback(); var second = await secondPromise;
+    var stillUnrefed = intervalRecord.handle.hasRef() === false;
+    var pending = interval.next(), ended = await interval.return(), pendingResult = await pending;
+    var intervalCleared = cleared.indexOf(intervalRecord.handle) >= 0;
+
+    var defaultPromise = promises.setTimeout(60000, 'default');
+    var defaultRecord = record('setTimeout'), defaultRefed = defaultRecord.handle.hasRef() === true;
+    globalThis.clearTimeout(defaultRecord.handle); defaultRecord.callback();
+    var defaultValue = await defaultPromise;
+    var truePromise = promises.setImmediate('true', { ref: true });
+    var trueRecord = record('setImmediate'), trueRefed = trueRecord.handle.hasRef() === true;
+    globalThis.clearImmediate(trueRecord.handle); trueRecord.callback();
+    var trueValue = await truePromise;
+    var defaultInterval = promises.setInterval(60000, 'default interval');
+    var defaultIntervalRecord = record('setInterval'), defaultIntervalRefed = defaultIntervalRecord.handle.hasRef() === true;
+    var defaultIntervalEnd = await defaultInterval.return();
+    var trueInterval = promises.setInterval(60000, 'true interval', { ref: true });
+    var trueIntervalRecord = record('setInterval'), trueIntervalRefed = trueIntervalRecord.handle.hasRef() === true;
+    var trueIntervalEnd = await trueInterval.return();
+
+    var beforeThrow = records.length, getterReads = 0, getterOrder = [], getterError;
+    try {
+      promises.setTimeout(1, 'unused', {
+        get signal() { getterOrder.push('signal'); return undefined; },
+        get ref() { getterReads++; getterOrder.push('ref'); throw new Error('ref getter'); }
+      });
+    }
+    catch (error) { getterError = error.message; }
+    var noAllocationOnThrow = records.length === beforeThrow;
+
+    var controller = new AbortController(); controller.abort('stopped');
+    var beforeAbort = records.length, abortReason;
+    try { await promises.setTimeout(1, 'unused', { signal: controller.signal, ref: false }); }
+    catch (error) { abortReason = error; }
+    var noAllocationWhenAborted = records.length === beforeAbort;
+    return [
+      [timeoutUnrefed, timeoutValue],
+      [immediateUnrefed, immediateValue],
+      [intervalUnrefed, first.value, first.done, stillUnrefed, second.value, second.done,
+        ended.done, pendingResult.done, intervalCleared],
+      [defaultRefed, defaultValue, trueRefed, trueValue, defaultIntervalRefed, defaultIntervalEnd.done,
+        trueIntervalRefed, trueIntervalEnd.done],
+      [getterReads, getterOrder.join(','), getterError, noAllocationOnThrow, noAllocationWhenAborted, abortReason]
+    ];
+  } finally {
+    globalThis.setTimeout = original.setTimeout; globalThis.clearTimeout = original.clearTimeout;
+    globalThis.setImmediate = original.setImmediate; globalThis.clearImmediate = original.clearImmediate;
+    globalThis.setInterval = original.setInterval; globalThis.clearInterval = original.clearInterval;
+    records.forEach(function(record) {
+      if (record.name === 'setTimeout') original.clearTimeout.call(globalThis, record.handle);
+      else if (record.name === 'setImmediate') original.clearImmediate.call(globalThis, record.handle);
+      else original.clearInterval.call(globalThis, record.handle);
+    });
+  }
+};
+"#,
+    )
+    .unwrap();
+    let empty_node_modules = temp_registry("builtin_timer_promises_ref_node_modules");
+    let (bundle, _, file_count, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    let script = format!(
+        "globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseTimerPromisesRef = module.exports;"
+    );
+    let source = CString::new(script).unwrap();
+    let loaded = thaw_quickjs::thaw_js_load(source.as_ptr()) == 1;
+    let result = if loaded {
+        let result_ptr = thaw_quickjs::thaw_js_call(
+            CString::new("exerciseTimerPromisesRef").unwrap().as_ptr(),
+            CString::new("[]").unwrap().as_ptr(),
+        );
+        Some(unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy().into_owned())
+    } else {
+        None
+    };
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+    assert_eq!(file_count, 2);
+    assert!(loaded);
+    assert_eq!(
+        result.as_deref(),
+        Some(r#"[[true,"timeout"],[true,"immediate"],[true,"tick",false,true,"tick",false,true,true,true],[true,"default",true,"true",true,true,true,true],[1,"signal,ref","ref getter",true,true,"stopped"]]"#)
+    );
+}
+
+#[test]
 fn http2_failed_host_write_does_not_complete_queued_data() {
     use std::ffi::{CStr, CString};
 
