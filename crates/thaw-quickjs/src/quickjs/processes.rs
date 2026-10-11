@@ -278,46 +278,67 @@ fn execute_worker_pending_job(ctx: &Ctx<'_>) -> Result<bool, String> {
     if ctx.has_exception() { Err(describe_exception(ctx)) } else { Ok(ran) }
 }
 
-fn close_worker_napi(ctx: &Ctx<'_>) -> Result<(), String> {
+fn close_worker_napi() -> Result<(), String> {
     let Some((begin, poll, take_error, finish)) = *NAPI_SHUTDOWN_BRIDGE.lock().unwrap() else {
         return Ok(());
     };
-    // begin dispatches hooks; poll dispatches completions and finalizers;
-    // finish may run library destructors. All epochs retain this Worker Ctx.
-    let _active = ActiveNapiContext::enter(ctx);
-    if begin() == 0 { return Err("native addon shutdown could not start".into()); }
+    // Each native phase may call back into JS, but must return through the
+    // outer Context::with boundary before the next phase advances shutdown.
+    let started = with_context(|ctx| {
+        let _active = ActiveNapiContext::enter(&ctx);
+        begin()
+    });
+    if started == 0 { return Err("native addon shutdown could not start".into()); }
     let mut errors = Vec::new();
     loop {
-        let ready = poll();
-        loop {
-            let error = take_error();
-            if error.is_null() { break; }
-            errors.push(unsafe { CStr::from_ptr(error) }.to_string_lossy().into_owned());
-            unsafe { thaw_arena::destroy_string(error) };
-        }
+        let (ready, poll_errors) = with_context(|ctx| {
+            let _active = ActiveNapiContext::enter(&ctx);
+            let ready = poll();
+            let mut errors = Vec::new();
+            loop {
+                let error = take_error();
+                if error.is_null() { break; }
+                errors.push(unsafe { CStr::from_ptr(error) }.to_string_lossy().into_owned());
+                unsafe { thaw_arena::destroy_string(error) };
+            }
+            (ready, errors)
+        });
+        errors.extend(poll_errors);
         // poll may have invoked a cleanup hook or finalizer which queued a
-        // QuickJS reaction. Drain it while the addon and Worker Ctx are live,
-        // then poll the native barrier again before final dlclose.
-        let mut ran_job = false;
-        loop {
-            let tick = match drain_next_tick_queue(ctx) {
-                Ok(tick) => tick,
-                Err(error) => {
-                    errors.push(match error {
-                        rquickjs::Error::Exception => describe_exception(ctx),
-                        error => error.to_string(),
-                    });
-                    true
-                }
-            };
-            let job = match execute_worker_pending_job(ctx) {
-                Ok(job) => job,
-                Err(error) => { errors.push(error); true }
-            };
-            ran_job |= tick || job;
-            if !tick && !job { break; }
+        // QuickJS reaction. Return through a bounded context entry before the
+        // next native poll or final unload decision.
+        let (ran_job, job_errors) = with_context(|ctx| {
+            let _active = ActiveNapiContext::enter(&ctx);
+            let mut ran_job = false;
+            let mut errors = Vec::new();
+            loop {
+                let tick = match drain_next_tick_queue(&ctx) {
+                    Ok(tick) => tick,
+                    Err(error) => {
+                        errors.push(match error {
+                            rquickjs::Error::Exception => describe_exception(&ctx),
+                            error => error.to_string(),
+                        });
+                        true
+                    }
+                };
+                let job = match execute_worker_pending_job(&ctx) {
+                    Ok(job) => job,
+                    Err(error) => { errors.push(error); true }
+                };
+                ran_job |= tick || job;
+                if !tick && !job { break; }
+            }
+            (ran_job, errors)
+        });
+        errors.extend(job_errors);
+        if ready != 0 && !ran_job {
+            let finished = with_context(|ctx| {
+                let _active = ActiveNapiContext::enter(&ctx);
+                finish()
+            });
+            if finished != 0 { break; }
         }
-        if ready != 0 && !ran_job && finish() != 0 { break; }
         // The Worker must keep its Ctx and thread-local Host alive until the
         // exact loops it owns have no callback-capable handles or requests.
         // An addon that never closes an unreferenced handle cannot complete
@@ -332,8 +353,7 @@ fn run_host_worker(
     commands: Receiver<HostWorkerCommand>,
     events: Sender<HostWorkerEvent>,
 ) {
-    let result = with_context(|ctx| -> Result<i32, String> {
-        let work = (|| -> Result<i32, String> {
+    let initialized = with_context(|ctx| -> Result<(), String> {
         install_shared_environment_functions(&ctx, start.shared_env.clone())?;
         if !start.bundle_source.is_empty() {
             load_impl(ctx.clone(), &start.bundle_source)?;
@@ -347,142 +367,132 @@ fn run_host_worker(
             ctx.clone(),
             &format!("(function() {{\n{}\n}}).call(globalThis);", start.source),
         )?;
-        loop {
-            loop {
-                drain_next_tick_queue(&ctx).map_err(|error| error.to_string())?;
-                if !execute_worker_pending_job(&ctx)? {
-                    break;
+        Ok(())
+    });
+    let work = match initialized {
+        Err(error) => Err(error),
+        Ok(()) => loop {
+            let should_exit = with_context(|ctx| -> Result<bool, String> {
+                loop {
+                    drain_next_tick_queue(&ctx).map_err(|error| error.to_string())?;
+                    if !execute_worker_pending_job(&ctx)? { break; }
                 }
-            }
-            let run_due: Function = ctx
-                .globals()
-                .get("__thaw_run_due_timers")
-                .map_err(|error| error.to_string())?;
-            run_due
-                .call::<_, usize>(())
-                .map_err(|error| error.to_string())?;
-            loop {
-                drain_next_tick_queue(&ctx).map_err(|error| error.to_string())?;
-                if !execute_worker_pending_job(&ctx)? {
-                    break;
+                let run_due: Function = ctx
+                    .globals()
+                    .get("__thaw_run_due_timers")
+                    .map_err(|error| error.to_string())?;
+                run_due.call::<_, usize>(()).map_err(|error| error.to_string())?;
+                loop {
+                    drain_next_tick_queue(&ctx).map_err(|error| error.to_string())?;
+                    if !execute_worker_pending_job(&ctx)? { break; }
                 }
-            }
-            drain_host_worker_events(&ctx, &events)?;
-            // Native completions belong to this Worker thread. Keep its Ctx
-            // active while dispatching and then run JS jobs they scheduled.
-            poll_napi_bridge(&ctx);
-            // Nested Workers (and any other host event source registered by the
-            // script) deliver through the same platform-event poll as the main thread.
-            if let Ok(poll) = ctx.globals().get::<_, Function>("__thaw_poll_platform_events") {
-                poll.call::<_, ()>(()).map_err(|error| match error {
-                    rquickjs::Error::Exception => describe_exception(&ctx),
-                    error => error.to_string(),
-                })?;
-            }
-            loop {
-                drain_next_tick_queue(&ctx).map_err(|error| error.to_string())?;
-                if !execute_worker_pending_job(&ctx)? { break; }
-            }
-            // Callbacks run by the polls above may have posted messages; flush
-            // them before the exit check can end this thread.
-            drain_host_worker_events(&ctx, &events)?;
+                drain_host_worker_events(&ctx, &events)?;
+                // Native completions belong to this Worker thread. Keep its Ctx
+                // active while dispatching and then run JS jobs they scheduled.
+                poll_napi_bridge(&ctx);
+                // Nested Workers (and any other host event source registered by the
+                // script) deliver through the same platform-event poll as the main thread.
+                if let Ok(poll) = ctx.globals().get::<_, Function>("__thaw_poll_platform_events") {
+                    poll.call::<_, ()>(()).map_err(|error| match error {
+                        rquickjs::Error::Exception => describe_exception(&ctx),
+                        error => error.to_string(),
+                    })?;
+                }
+                loop {
+                    drain_next_tick_queue(&ctx).map_err(|error| error.to_string())?;
+                    if !execute_worker_pending_job(&ctx)? { break; }
+                }
+                // Callbacks run by the polls above may have posted messages; flush
+                // them before the exit check can end this thread.
+                drain_host_worker_events(&ctx, &events)?;
 
-            let should_exit: Function = ctx
-                .globals()
-                .get("__thaw_host_worker_should_exit")
-                .map_err(|error| error.to_string())?;
-            if should_exit
-                .call::<_, bool>(())
-                .map_err(|error| error.to_string())?
-                && !napi_bridge_pending()
-                && !host_workers_active()
-            {
-                return Ok(0);
+                let should_exit: Function = ctx
+                    .globals()
+                    .get("__thaw_host_worker_should_exit")
+                    .map_err(|error| error.to_string())?;
+                should_exit.call::<_, bool>(()).map_err(|error| error.to_string())
+            });
+            let should_exit = match should_exit {
+                Ok(should_exit) => should_exit,
+                Err(error) => break Err(error),
+            };
+            if should_exit && !napi_bridge_pending() && !host_workers_active() {
+                break Ok(0);
             }
 
             match commands.recv_timeout(Duration::from_millis(1)) {
-                Ok(HostWorkerCommand::Message(payload)) => {
-                    let deliver: Function = ctx
-                        .globals()
-                        .get("__thaw_host_worker_deliver")
-                        .map_err(|error| error.to_string())?;
-                    deliver
-                        .call::<_, ()>((payload,))
-                        .map_err(|error| match error {
-                            rquickjs::Error::Exception => describe_exception(&ctx),
-                            error => error.to_string(),
-                        })?;
+                Ok(HostWorkerCommand::Terminate) => break Ok(1),
+                Ok(command) => {
+                    let delivered = with_context(|ctx| -> Result<(), String> {
+                        match command {
+                            HostWorkerCommand::Message(payload) => {
+                                let deliver: Function = ctx.globals()
+                                    .get("__thaw_host_worker_deliver")
+                                    .map_err(|error| error.to_string())?;
+                                deliver.call::<_, ()>((payload,)).map_err(|error| match error {
+                                    rquickjs::Error::Exception => describe_exception(&ctx),
+                                    error => error.to_string(),
+                                })?;
+                            }
+                            HostWorkerCommand::Stdin(payload) => {
+                                let deliver: Function = ctx.globals()
+                                    .get("__thaw_host_worker_stdin")
+                                    .map_err(|error| error.to_string())?;
+                                deliver.call::<_, ()>((payload, false))
+                                    .map_err(|error| error.to_string())?;
+                            }
+                            HostWorkerCommand::StdinEnd => {
+                                let deliver: Function = ctx.globals()
+                                    .get("__thaw_host_worker_stdin")
+                                    .map_err(|error| error.to_string())?;
+                                deliver.call::<_, ()>((String::new(), true))
+                                    .map_err(|error| error.to_string())?;
+                            }
+                            HostWorkerCommand::DirectMessage { payload, source, request, reply } => {
+                                let deliver: Function = ctx.globals()
+                                    .get("__thaw_host_worker_direct_deliver")
+                                    .map_err(|error| error.to_string())?;
+                                let error: String = deliver.call((payload, source))
+                                    .map_err(|error| error.to_string())?;
+                                let error = (!error.is_empty()).then_some(error);
+                                if let Some(reply) = reply {
+                                    let _ = reply.send(HostWorkerCommand::DirectResult { request, error });
+                                } else {
+                                    let _ = events.send(HostWorkerEvent::ParentDirectResult { request, error });
+                                }
+                            }
+                            HostWorkerCommand::DirectResult { request, error } => {
+                                let resolve: Function = ctx.globals()
+                                    .get("__thaw_host_worker_direct_result")
+                                    .map_err(|error| error.to_string())?;
+                                resolve.call::<_, ()>((request, error.unwrap_or_default()))
+                                    .map_err(|error| error.to_string())?;
+                            }
+                            HostWorkerCommand::PortMessage { port, payload } => {
+                                let deliver: Function = ctx.globals()
+                                    .get("__thaw_host_worker_port")
+                                    .map_err(|error| error.to_string())?;
+                                deliver.call::<_, ()>((port, payload))
+                                    .map_err(|error| error.to_string())?;
+                            }
+                            HostWorkerCommand::Terminate => return Ok(()),
+                        }
+                        Ok(())
+                    });
+                    if let Err(error) = delivered { break Err(error); }
                 }
-                Ok(HostWorkerCommand::Stdin(payload)) => {
-                    let deliver: Function = ctx
-                        .globals()
-                        .get("__thaw_host_worker_stdin")
-                        .map_err(|error| error.to_string())?;
-                    deliver
-                        .call::<_, ()>((payload, false))
-                        .map_err(|error| error.to_string())?;
-                }
-                Ok(HostWorkerCommand::StdinEnd) => {
-                    let deliver: Function = ctx
-                        .globals()
-                        .get("__thaw_host_worker_stdin")
-                        .map_err(|error| error.to_string())?;
-                    deliver
-                        .call::<_, ()>((String::new(), true))
-                        .map_err(|error| error.to_string())?;
-                }
-                Ok(HostWorkerCommand::DirectMessage {
-                    payload,
-                    source,
-                    request,
-                    reply,
-                }) => {
-                    let deliver: Function = ctx
-                        .globals()
-                        .get("__thaw_host_worker_direct_deliver")
-                        .map_err(|error| error.to_string())?;
-                    let error: String = deliver
-                        .call((payload, source))
-                        .map_err(|error| error.to_string())?;
-                    let error = (!error.is_empty()).then_some(error);
-                    if let Some(reply) = reply {
-                        let _ = reply.send(HostWorkerCommand::DirectResult { request, error });
-                    } else {
-                        let _ = events.send(HostWorkerEvent::ParentDirectResult { request, error });
-                    }
-                }
-                Ok(HostWorkerCommand::DirectResult { request, error }) => {
-                    let resolve: Function = ctx
-                        .globals()
-                        .get("__thaw_host_worker_direct_result")
-                        .map_err(|error| error.to_string())?;
-                    resolve
-                        .call::<_, ()>((request, error.unwrap_or_default()))
-                        .map_err(|error| error.to_string())?;
-                }
-                Ok(HostWorkerCommand::PortMessage { port, payload }) => {
-                    let deliver: Function = ctx
-                        .globals()
-                        .get("__thaw_host_worker_port")
-                        .map_err(|error| error.to_string())?;
-                    deliver
-                        .call::<_, ()>((port, payload))
-                        .map_err(|error| error.to_string())?;
-                }
-                Ok(HostWorkerCommand::Terminate) => return Ok(1),
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
-                Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(1),
+                Err(mpsc::RecvTimeoutError::Disconnected) => break Ok(1),
             }
         }
-        })();
-        let shutdown = close_worker_napi(&ctx);
-        match (work, shutdown) {
-            (Ok(code), Ok(())) => Ok(code),
-            (Err(error), Ok(())) => Err(error),
-            (Ok(_), Err(shutdown)) => Err(shutdown),
-            (Err(error), Err(shutdown)) => Err(format!("{error}\n{shutdown}")),
-        }
-    });
+    };
+    let shutdown = close_worker_napi();
+    let result = match (work, shutdown) {
+        (Ok(code), Ok(())) => Ok(code),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(_), Err(shutdown)) => Err(shutdown),
+        (Err(error), Err(shutdown)) => Err(format!("{error}\n{shutdown}")),
+    };
     match result {
         Ok(code) => {
             let _ = events.send(HostWorkerEvent::Exit(code));
