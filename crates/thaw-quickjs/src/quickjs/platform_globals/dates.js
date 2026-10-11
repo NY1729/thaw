@@ -61,6 +61,19 @@
         return error;
       }
     }
+    // shortcut: the reserved legacy tag shape can collide with user JSON; origins would be needed to disambiguate it.
+    if (
+      value &&
+      typeof value === 'object' &&
+      !Array.isArray(value) &&
+      Object.keys(value).length === 1 &&
+      Object.prototype.hasOwnProperty.call(value, '$__thaw_non_finite$')
+    ) {
+      const tag = value.$__thaw_non_finite$;
+      if (tag === 'NaN') return NaN;
+      if (tag === 'Infinity') return Infinity;
+      if (tag === '-Infinity') return -Infinity;
+    }
     if (
       value &&
       typeof value === 'object' &&
