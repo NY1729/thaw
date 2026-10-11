@@ -444,3 +444,78 @@ module.exports = async function() {
     .join()
     .unwrap();
 }
+
+#[test]
+fn child_process_sync_max_buffer_counts_native_output_bytes() {
+    std::thread::spawn(|| {
+        use std::ffi::{CStr, CString};
+
+        let dir = temp_registry("builtin_child_process_max_buffer_bytes");
+        fs::write(
+            dir.join("index.js"),
+            r#"
+var cp = require('node:child_process');
+module.exports = function() {
+  var utf8Script = 'printf "\\342\\230\\203"';
+  var utf8Low = cp.spawnSync('/bin/sh', ['-c', utf8Script], { encoding: 'utf8', maxBuffer: 2 });
+  var utf8At = cp.spawnSync('/bin/sh', ['-c', utf8Script], { encoding: 'utf8', maxBuffer: 3 });
+  var hexAt = cp.spawnSync('/bin/sh', ['-c', 'printf ab'], { encoding: 'hex', maxBuffer: 2 });
+  var hexLow = cp.spawnSync('/bin/sh', ['-c', 'printf ab'], { encoding: 'hex', maxBuffer: 1 });
+  var bufferAt = cp.spawnSync('/bin/sh', ['-c', 'printf ABC'], { encoding: 'buffer', maxBuffer: 3 });
+  var bufferLow = cp.spawnSync('/bin/sh', ['-c', 'printf ABC'], { encoding: 'buffer', maxBuffer: 2 });
+  var stderrOnly = cp.spawnSync('/bin/sh', ['-c', 'printf ee >&2'], { encoding: 'utf8', maxBuffer: 2 });
+  var combined = cp.spawnSync('/bin/sh', ['-c', 'printf o; printf e >&2'], { encoding: 'utf8', maxBuffer: 1 });
+  var fileError;
+  try { cp.execFileSync('/bin/sh', ['-c', 'printf o; printf e >&2'], { encoding: 'utf8', maxBuffer: 1 }); }
+  catch (error) { fileError = [error.code, error.stdout, error.stderr, error.output, error.pid > 0]; }
+  var execError;
+  try { cp.execSync('printf x; printf y >&2', { encoding: 'utf8', maxBuffer: 1 }); }
+  catch (error) { execError = [error.code, error.stdout, error.stderr, error.output, error.pid > 0]; }
+  var fileAt = cp.execFileSync('/bin/sh', ['-c', utf8Script], { encoding: 'utf8', maxBuffer: 3 });
+  var execAt = cp.execSync(utf8Script, { encoding: 'utf8', maxBuffer: 3 });
+  var missing = cp.spawnSync('/thaw/missing-max-buffer-executable', [], { encoding: 'utf8', maxBuffer: -1 });
+  var nonzero = cp.spawnSync('/bin/sh', ['-c', 'printf x; exit 6'], { encoding: 'utf8', maxBuffer: 2 });
+  return [
+    [utf8Low.error.code, utf8Low.status, utf8Low.stdout, utf8Low.stderr],
+    [utf8At.status, utf8At.stdout],
+    [hexAt.status, hexAt.stdout],
+    [hexLow.error.code, hexLow.status, hexLow.stdout],
+    [bufferAt.status, Buffer.isBuffer(bufferAt.stdout), Array.from(bufferAt.stdout)],
+    [bufferLow.error.code, bufferLow.status, Buffer.isBuffer(bufferLow.stdout), Array.from(bufferLow.stdout)],
+    [stderrOnly.status, stderrOnly.stdout, stderrOnly.stderr],
+    [combined.error.code, combined.status, combined.stdout, combined.stderr],
+    fileError, execError, fileAt, execAt,
+    [missing.error.code, missing.status],
+    [nonzero.status, nonzero.error === undefined, nonzero.stdout]
+  ];
+};
+"#,
+        )
+        .unwrap();
+        let empty_node_modules = temp_registry("builtin_child_process_max_buffer_bytes_node_modules");
+        let (bundle, _, file_count, _) =
+            bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+        let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseChildMaxBufferBytes = module.exports;");
+        let source = CString::new(script).unwrap();
+        let loaded = thaw_quickjs::thaw_js_load(source.as_ptr()) == 1;
+        let result = if loaded {
+            let result_ptr = thaw_quickjs::thaw_js_call(
+                CString::new("exerciseChildMaxBufferBytes").unwrap().as_ptr(),
+                CString::new("[]").unwrap().as_ptr(),
+            );
+            Some(unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy().into_owned())
+        } else {
+            None
+        };
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&empty_node_modules);
+        assert_eq!(file_count, 4);
+        assert!(loaded);
+        assert_eq!(
+            result.as_deref(),
+            Some(r#"[["ENOBUFS",null,"☃",""],[0,"☃"],[0,"6162"],["ENOBUFS",null,"6162"],[0,true,[65,66,67]],["ENOBUFS",null,true,[65,66,67]],[0,"","ee"],["ENOBUFS",null,"o","e"],["ENOBUFS","o","e",[null,"o","e"],true],["ENOBUFS","x","y",[null,"x","y"],true],"☃","☃",["ENOENT",null],[6,true,"x"]]"#)
+        );
+    })
+    .join()
+    .unwrap();
+}
