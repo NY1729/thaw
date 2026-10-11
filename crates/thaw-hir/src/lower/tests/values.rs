@@ -228,6 +228,157 @@ fn string_normalize_defaults_undefined_forms_lazily() {
 }
 
 #[test]
+fn string_split_defaults_undefined_separator_and_limit_lazily() {
+    let program = lower(
+        r#"
+            function explicit(text: string): string[] { return text.split(undefined, undefined); }
+            function optional(text: string, separator?: string, limit?: number): string[] { return text.split(separator, limit); }
+            function supplied(text: string, separator: string, limit: number): string[] { return text.split(separator, limit); }
+            function spread(text: string, args: [undefined, number]): string[] { return text.split(...args); }
+            function nullSeparator(text: string): string[] { return text.split(null, 1); }
+            function literalSeparator(text: string): string[] { return text.split('undefined', 1); }
+            function regex(text: string, limit?: number): (string | undefined)[] { return text.split(/(,)/, limit); }
+            function receiver(): string { return 'aundefinedb'; }
+            function separator(): undefined { return undefined; }
+            function limit(): number { return 0; }
+            function effects(): string[] { return receiver().split(separator(), limit()); }
+        "#,
+    );
+
+    fn function<'a>(program: &'a HirProgram, name: &str) -> &'a HirFunction {
+        program.functions.iter().find(|function| function.name == name).unwrap()
+    }
+    fn visit_expr<'a>(expr: &'a HirExpr, visit: &mut impl FnMut(&'a HirExpr)) {
+        visit(expr);
+        match expr {
+            HirExpr::Call(callee, arguments) => {
+                visit_expr(callee, visit);
+                for argument in arguments { visit_expr(argument, visit); }
+            }
+            HirExpr::Lambda(_, _, _, body) | HirExpr::TypedClosure(_, body) => visit_expr(body, visit),
+            HirExpr::Conditional(test, yes, no, _) => {
+                visit_expr(test, visit);
+                visit_expr(yes, visit);
+                visit_expr(no, visit);
+            }
+            HirExpr::Block(statements) => for statement in statements { visit_stmt(statement, visit); },
+            HirExpr::BinOp(_, left, right) => { visit_expr(left, visit); visit_expr(right, visit); }
+            _ => {}
+        }
+    }
+    fn visit_stmt<'a>(stmt: &'a HirStmt, visit: &mut impl FnMut(&'a HirExpr)) {
+        match stmt {
+            HirStmt::Expr(expr) | HirStmt::Return(Some(expr)) | HirStmt::Throw(expr)
+            | HirStmt::Let(_, _, expr) => visit_expr(expr, visit),
+            HirStmt::If(condition, yes, no) => {
+                visit_expr(condition, visit);
+                for statement in yes.iter().chain(no) { visit_stmt(statement, visit); }
+            }
+            _ => {}
+        }
+    }
+    fn has_call(expr: &HirExpr, target: &str) -> bool {
+        let mut found = false;
+        visit_expr(expr, &mut |node| {
+            if matches!(node, HirExpr::Call(callee, _) if matches!(callee.as_ref(), HirExpr::Var(name) if name == target)) {
+                found = true;
+            }
+        });
+        found
+    }
+    fn conditionals<'a>(function: &'a HirFunction) -> Vec<&'a HirExpr> {
+        let mut found = Vec::new();
+        for statement in &function.body {
+            visit_stmt(statement, &mut |node| {
+                if matches!(node, HirExpr::Conditional(..)) { found.push(node); }
+            });
+        }
+        found
+    }
+
+    let explicit = conditionals(function(&program, "explicit"));
+    assert!(explicit.iter().any(|node| matches!(node,
+        HirExpr::Conditional(test, yes, no, HirType::Array(item))
+            if **item == HirType::Str
+                && has_call(test, "__thaw_math_trunc")
+                && matches!(yes.as_ref(), HirExpr::ArrayLit(values) if values.is_empty())
+                && matches!(no.as_ref(), HirExpr::ArrayLit(values) if values.len() == 1)
+    )), "undefined separator must choose [] at effective zero limit and [receiver] otherwise: {explicit:?}");
+    assert!(explicit.iter().any(|node| matches!(node,
+        HirExpr::Conditional(test, yes, no, HirType::Array(item))
+            if **item == HirType::Str
+                && has_call(yes, "__thaw_math_trunc")
+                && has_call(no, "__thaw_string_split")
+                && matches!(test.as_ref(), HirExpr::Lit(HirLit::Bool(true)))
+    )), "literal undefined separator should select its fallback without coercing it to string: {explicit:?}");
+    let optional = conditionals(function(&program, "optional"));
+    assert!(optional.iter().any(|node| matches!(node,
+        HirExpr::Conditional(test, yes, no, HirType::F64)
+            if matches!(yes.as_ref(), HirExpr::Lit(HirLit::F64(-1.0)))
+                && matches!(test.as_ref(), HirExpr::OptionalIsNone(..))
+                && !matches!(no.as_ref(), HirExpr::Lit(HirLit::F64(-1.0)))
+    )), "optional undefined limit must lazily choose the unlimited sentinel: {optional:?}");
+    assert!(conditionals(function(&program, "regex")).iter().any(|node| matches!(node,
+        HirExpr::Conditional(test, yes, _, HirType::F64)
+            if matches!(yes.as_ref(), HirExpr::Lit(HirLit::F64(-1.0)))
+                && matches!(test.as_ref(), HirExpr::OptionalIsNone(..))
+    )), "regex split must use the same undefined limit default");
+    assert!(function(&program, "regex").body.iter().any(|statement| match statement {
+        HirStmt::Return(Some(expr)) | HirStmt::Expr(expr) =>
+            has_call(expr, "__thaw_regex_split") && has_call(expr, "__thaw_array_is_null"),
+        _ => false,
+    }), "regex split must retain its native result and invalid-pattern error check");
+    assert!(conditionals(function(&program, "optional")).iter().any(|node| matches!(node,
+        HirExpr::Conditional(test, yes, no, HirType::Array(item))
+            if **item == HirType::Str
+                && matches!(test.as_ref(), HirExpr::OptionalIsNone(..))
+                && has_call(yes, "__thaw_math_trunc")
+                && has_call(no, "__thaw_string_split")
+    )), "optional undefined separator must select the whole-string fallback lazily");
+    for name in ["nullSeparator", "literalSeparator", "supplied"] {
+        assert!(conditionals(function(&program, name)).iter().any(|node| matches!(node,
+            HirExpr::Conditional(test, _, no, HirType::Array(item))
+                if **item == HirType::Str
+                    && matches!(test.as_ref(), HirExpr::Lit(HirLit::Bool(false)))
+                    && has_call(no, "__thaw_string_split")
+        )), "{name} must retain ordinary separator conversion");
+    }
+    assert!(conditionals(function(&program, "spread")).iter().any(|node| matches!(node,
+        HirExpr::Conditional(_, yes, no, HirType::Array(item))
+            if **item == HirType::Str
+                && has_call(yes, "__thaw_math_trunc")
+                && has_call(no, "__thaw_string_split")
+    )), "a finite tuple spread must still use the ordinary split branches");
+
+    let effects = function(&program, "effects");
+    let mut producers = Vec::new();
+    for statement in &effects.body {
+        visit_stmt(statement, &mut |node| {
+            if let HirExpr::Call(callee, arguments) = node {
+                if let HirExpr::Lambda(_, parameters, _, _) = callee.as_ref() {
+                    if let (Some(parameter), Some(source)) = (parameters.first(), arguments.first()) {
+                        if parameter.name.starts_with("__thaw_split_receiver_")
+                            || parameter.name.starts_with("__thaw_native_arg_")
+                        {
+                            producers.push((parameter.name.as_str(), source));
+                        }
+                    }
+                }
+            }
+        });
+    }
+    let receiver = producers.iter().position(|(_, source)| has_call(source, "receiver"));
+    let separator = producers.iter().position(|(_, source)| has_call(source, "separator"));
+    let limit = producers.iter().position(|(_, source)| has_call(source, "limit"));
+    assert!(receiver.is_some() && separator.is_some() && limit.is_some()
+        && receiver.unwrap() < separator.unwrap() && separator.unwrap() < limit.unwrap()
+        && producers.iter().filter(|(_, source)| has_call(source, "receiver")).count() == 1
+        && producers.iter().filter(|(_, source)| has_call(source, "separator")).count() == 1
+        && producers.iter().filter(|(_, source)| has_call(source, "limit")).count() == 1,
+        "receiver and source arguments must each be staged once in order: {producers:?}");
+}
+
+#[test]
 fn rejects_writes_not_representable_by_every_union_array_member() {
     for operation in [
         "value[0] = 1",
