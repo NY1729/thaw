@@ -451,6 +451,10 @@
         seen.set(input, output);
         if (!(input instanceof Date) && !(input instanceof RegExp)
             && !(input instanceof ArrayBuffer) && !ArrayBuffer.isView(input)) {
+          const blobSnapshot = blobFileCloneSnapshot(input);
+          if (blobSnapshot) {
+            for (const key of Object.keys(blobSnapshot)) output[key] = clone(blobSnapshot[key]);
+          }
           for (const key of Object.keys(input)) output[key] = clone(input[key]);
         }
         return output;

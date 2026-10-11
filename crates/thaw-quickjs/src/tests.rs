@@ -1829,6 +1829,518 @@ fn performance_observer_registration_validates_transactionally() {
 }
 
 #[test]
+fn blob_file_conversion_order_and_webidl_numbers() {
+    assert_eq!(
+        load(
+            r#"async function blobFileConversions() {
+              const fileName = new File([], '\uD800\uD83D\uDE00\uDC00');
+              const timestamp = value => new File([], 'x', { lastModified: value }).lastModified;
+              const numbers = [timestamp(1.9) === 1, timestamp(-1.9) === -1,
+                timestamp(NaN) === 0, timestamp(Infinity) === 0, timestamp(-Infinity) === 0,
+                Object.is(timestamp(-0), 0) && !Object.is(timestamp(-0), -0),
+                timestamp(null) === 0, timestamp(2 ** 64) === 0,
+                timestamp(2 ** 63) === -(2 ** 63)];
+              let bigintRejected = false, symbolRejected = false, nameSymbolRejected = false;
+              try { timestamp(1n); } catch (error) { bigintRejected = error instanceof TypeError; }
+              try { timestamp(Symbol('time')); } catch (error) { symbolRejected = error instanceof TypeError; }
+              try { new File([], Symbol('name')); } catch (error) { nameSymbolRejected = error instanceof TypeError; }
+
+              let iteratorReads = 0;
+              const iterable = { get [Symbol.iterator]() { iteratorReads++; return function* () { yield 'x'; }; } };
+              let missingNoArgs = false, missingName = false;
+              try { new File(); } catch (error) { missingNoArgs = error instanceof TypeError; }
+              try { new File(iterable); } catch (error) { missingName = error instanceof TypeError; }
+              let nullSequenceRejected = false, arrayLikeRejected = false, undefinedFileBitsRejected = false;
+              try { new Blob(null); } catch (error) { nullSequenceRejected = error instanceof TypeError; }
+              try { new Blob({ length: 0 }); } catch (error) { arrayLikeRejected = error instanceof TypeError; }
+              try { new File(undefined, 'x'); } catch (error) { undefinedFileBitsRejected = error instanceof TypeError; }
+              const emptySequences = new Blob().size === 0 && new Blob(undefined).size === 0;
+              let iteratorClosed = 0, iteratorErrorPreserved = false;
+              const iteratorSentinel = {};
+              const closingIterable = {
+                *[Symbol.iterator]() {
+                  try { yield { toString() { throw iteratorSentinel; } }; yield 'unreached'; }
+                  finally { iteratorClosed++; }
+                }
+              };
+              try { new Blob(closingIterable); }
+              catch (error) { iteratorErrorPreserved = error === iteratorSentinel; }
+
+              const order = [];
+              const part = { toString() { order.push('parts'); return 'x'; } };
+              const name = { toString() { order.push('name'); return 'n'; } };
+              const options = {
+                get endings() { order.push('endings-get'); return { toString() { order.push('endings-convert'); return 'transparent'; } }; },
+                get type() { order.push('type-get'); return { toString() { order.push('type-convert'); return 'TEXT/PLAIN'; } }; },
+                get lastModified() { order.push('last-get'); return { valueOf() { order.push('last-convert'); return 1.9; } }; }
+              };
+              const ordered = new File([part], name, options);
+              const sentinel = {};
+              let laterReads = 0, sentinelPreserved = false;
+              try {
+                new File([], 'x', {
+                  endings: 'transparent',
+                  get type() { throw sentinel; },
+                  get lastModified() { laterReads++; return 0; }
+                });
+              } catch (error) { sentinelPreserved = error === sentinel; }
+
+              const source = new Uint8Array([1, 2]);
+              const changed = new File([source], { toString() { source[0] = 9; return 'changed'; } }, {
+                get endings() { source[1] = 8; return 'transparent'; },
+                type: 'application/test'
+              });
+              const beforeDefault = Date.now;
+              let nowCalls = 0;
+              Date.now = () => { nowCalls++; return 123 + nowCalls; };
+              let defaultTime;
+              try { defaultTime = new File([], 'default').lastModified; }
+              finally { Date.now = beforeDefault; }
+              return [fileName.name === '\uFFFD😀\uFFFD', numbers.every(Boolean),
+                bigintRejected, symbolRejected, nameSymbolRejected,
+                missingNoArgs && missingName && iteratorReads === 0,
+                nullSequenceRejected && arrayLikeRejected && undefinedFileBitsRejected && emptySequences,
+                iteratorErrorPreserved && iteratorClosed === 1,
+                order.join(',') === 'parts,name,endings-get,endings-convert,type-get,type-convert,last-get,last-convert',
+                ordered.lastModified === 1 && ordered.type === 'text/plain',
+                sentinelPreserved && laterReads === 0,
+                JSON.stringify(Array.from(await changed.bytes())) === '[9,8]',
+                defaultTime === 124 && nowCalls === 1];
+            }"#
+        ),
+        1
+    );
+    assert_eq!(
+        call("blobFileConversions", "[]"),
+        "[true,true,true,true,true,true,true,true,true,true,true,true,true]"
+    );
+}
+
+#[test]
+fn blob_file_readonly_private_bytes_and_brand_checks() {
+    assert_eq!(
+        load(
+            r#"async function blobFilePrivateState() {
+              const buffer = new ArrayBuffer(4), input = new Uint8Array(buffer);
+              input.set([10, 11, 12, 13]);
+              const view = new DataView(buffer, 1, 2);
+              const blob = new Blob([view], { type: 'TEXT/PLAIN' });
+              input[1] = 90; input[2] = 91;
+              const initial = Array.from(await blob.bytes());
+              const bytesCopy = await blob.bytes(); bytesCopy[0] = 70;
+              const arrayBufferCopy = new Uint8Array(await blob.arrayBuffer()); arrayBufferCopy[1] = 71;
+              const stream = blob.stream(), reader = stream.getReader();
+              const streamed = await reader.read();
+              const streamLocked = stream.locked;
+              streamed.value[0] = 72;
+              const streamDone = (await reader.read()).done;
+              reader.releaseLock();
+              const nested = new Blob([blob]).slice(0, 2);
+              Object.defineProperty(blob, 'size', { value: 99, configurable: true });
+              Object.defineProperty(blob, '__thawBytes', { value: new Uint8Array([99]), configurable: true });
+              const sliced = blob.slice(0, 2);
+              const file = new File([blob], 'original', { type: 'IMAGE/PNG', lastModified: 42 });
+              function sloppy(value, fileValue) {
+                value.type = 'changed'; value.size = 0;
+                fileValue.name = 'changed'; fileValue.type = 'changed'; fileValue.lastModified = -1;
+                fileValue.webkitRelativePath = 'changed';
+              }
+              sloppy(blob, file);
+              const strictAssignments = [
+                (() => { 'use strict'; try { blob.size = 1; return false; } catch (error) { return error instanceof TypeError; } })(),
+                (() => { 'use strict'; try { blob.type = 'x'; return false; } catch (error) { return error instanceof TypeError; } })(),
+                (() => { 'use strict'; try { file.name = 'x'; return false; } catch (error) { return error instanceof TypeError; } })(),
+                (() => { 'use strict'; try { file.lastModified = 1; return false; } catch (error) { return error instanceof TypeError; } })(),
+                (() => { 'use strict'; try { file.webkitRelativePath = 'x'; return false; } catch (error) { return error instanceof TypeError; } })()
+              ].every(Boolean);
+              const blobDescriptor = key => Object.getOwnPropertyDescriptor(Blob.prototype, key);
+              const fileDescriptor = key => Object.getOwnPropertyDescriptor(File.prototype, key);
+              const descriptors = ['size', 'type'].every(key => {
+                const value = blobDescriptor(key); return typeof value.get === 'function'
+                  && value.set === undefined && value.enumerable && value.configurable;
+              }) && ['name', 'lastModified', 'webkitRelativePath'].every(key => {
+                const value = fileDescriptor(key); return typeof value.get === 'function'
+                  && value.set === undefined && value.enumerable && value.configurable;
+              });
+              let getterRejects = false, fileGetterRejectsBlob = false, sliceRejects = false;
+              try { blobDescriptor('size').get.call({}); } catch (error) { getterRejects = error instanceof TypeError; }
+              try { fileDescriptor('name').get.call(blob); } catch (error) { fileGetterRejectsBlob = error instanceof TypeError; }
+              try { Blob.prototype.slice.call({}); } catch (error) { sliceRejects = error instanceof TypeError; }
+              const readRejects = await Blob.prototype.bytes.call({}).then(() => false, error => error instanceof TypeError);
+              const forged = Object.create(Blob.prototype);
+              let forgedRejects = false; try { void forged.size; } catch (error) { forgedRejects = error instanceof TypeError; }
+              class ChildBlob extends Blob {}
+              const child = new ChildBlob(['x']);
+              const finalBytes = Array.from(await blob.bytes());
+              const nestedBytes = Array.from(await nested.bytes());
+              const sliceBytes = Array.from(await sliced.bytes());
+              const fileBytes = Array.from(await file.bytes());
+              return [JSON.stringify(initial) === '[11,12]', streamLocked && streamDone,
+                stream instanceof ReadableStream, JSON.stringify(finalBytes) === '[11,12]',
+                JSON.stringify(nestedBytes) === '[11,12]', JSON.stringify(sliceBytes) === '[11,12]',
+                JSON.stringify(fileBytes) === '[11,12]', blob.type === 'text/plain' && blob.size === 99,
+                file.name === 'original' && file.type === 'image/png' && file.lastModified === 42
+                  && file.webkitRelativePath === '', descriptors, strictAssignments,
+                getterRejects && fileGetterRejectsBlob && sliceRejects && readRejects && forgedRejects,
+                file instanceof File && file instanceof Blob && child instanceof Blob];
+            }"#
+        ),
+        1
+    );
+    assert_eq!(
+        call("blobFilePrivateState", "[]"),
+        "[true,true,true,true,true,true,true,true,true,true,true,true,true]"
+    );
+}
+
+#[test]
+fn blob_file_endings_use_captured_host_platform() {
+    let native_newline = if cfg!(target_os = "windows") { "\r\n" } else { "\n" };
+    let expected_native = format!("a{native_newline}b{native_newline}c{native_newline}d");
+    let expected_split = format!("{native_newline}{native_newline}");
+    assert_eq!(
+        load(
+            r#"async function blobFileEndings(nativeNewline, expectedNative, expectedSplit) {
+              const saved = process.platform;
+              process.platform = saved === 'win32' ? 'linux' : 'win32';
+              const changed = process.platform !== saved;
+              try {
+                const transparent = await new Blob(['a\r\nb\rc\nd']).text();
+                const native = await new Blob(['a\r\nb\rc\nd'], { endings: 'native' }).text();
+                const split = await new Blob(['\r', '\n'], { endings: 'native' }).text();
+                const binary = new Blob([new Uint8Array([13, 10])], { endings: 'native' });
+                const nested = new Blob([new Blob([new Uint8Array([13, 10])])], { endings: 'native' });
+                const file = new File(['a\r\nb\rc\nd'], 'lines', { endings: 'native' });
+                let reads = 0;
+                const getter = new Blob(['x'], { get endings() { reads++; return 'native'; } });
+                let invalid = false;
+                try { new Blob(['x'], { endings: 'other' }); } catch (error) { invalid = error instanceof TypeError; }
+                return [transparent === 'a\r\nb\rc\nd', native === expectedNative,
+                  split === expectedSplit, await file.text() === expectedNative,
+                  JSON.stringify(Array.from(await binary.bytes())) === '[13,10]',
+                  JSON.stringify(Array.from(await nested.bytes())) === '[13,10]',
+                  changed, reads === 1 && getter.size === 1, invalid];
+              } finally { process.platform = saved; }
+            }"#
+        ),
+        1
+    );
+    assert_eq!(
+        call(
+            "blobFileEndings",
+            &serde_json::json!([native_newline, expected_native, expected_split]).to_string()
+        ),
+        "[true,true,true,true,true,true,true,true,true]"
+    );
+}
+
+#[test]
+fn blob_file_mime_type_uses_printable_ascii_range() {
+    assert_eq!(
+        load(
+            r#"async function blobFileMimeTypes() {
+              const good = 'A B~Z';
+              const invalidValues = ['\t', '\n', '\r', '\0', '\u001f', '\u007f', '\u0080', 'é', '\uD800'];
+              const invalidBlob = invalidValues.every(value => new Blob([], { type: `x${value}y` }).type === '');
+              const invalidFile = invalidValues.every(value => new File([], 'x', { type: `x${value}y` }).type === '');
+              const invalidSlice = invalidValues.every(value => new Blob(['x']).slice(0, 1, `x${value}y`).type === '');
+              const blob = new Blob([], { type: good });
+              const file = new File([], 'x', { type: good });
+              const slice = new Blob(['x']).slice(0, 1, good);
+              let reads = 0, conversions = 0;
+              const once = new Blob([], { get type() {
+                reads++;
+                return { toString() { conversions++; return 'X/Y'; } };
+              } });
+              const falsy = [new Blob([], { type: 0 }).type,
+                new Blob([], { type: false }).type, new Blob([], { type: null }).type];
+              let symbolRejected = false, laterReads = 0;
+              try {
+                new File([], 'x', { type: Symbol('type'), get lastModified() { laterReads++; return 0; } });
+              } catch (error) { symbolRejected = error instanceof TypeError; }
+              const sentinel = {};
+              let thrownOriginal = false;
+              try { new Blob([], { get type() { throw sentinel; } }); }
+              catch (error) { thrownOriginal = error === sentinel; }
+              return [blob.type === 'a b~z', file.type === 'a b~z', slice.type === 'a b~z',
+                invalidBlob && invalidFile && invalidSlice,
+                JSON.stringify(falsy) === '["0","false","null"]',
+                once.type === 'x/y' && reads === 1 && conversions === 1,
+                symbolRejected && laterReads === 0, thrownOriginal];
+            }"#
+        ),
+        1
+    );
+    assert_eq!(
+        call("blobFileMimeTypes", "[]"),
+        "[true,true,true,true,true,true,true,true]"
+    );
+}
+
+#[test]
+fn blob_slice_converts_clamped_indices_once_in_order() {
+    assert_eq!(
+        load(
+            r#"async function blobSliceConversions() {
+              const blob = new Blob(['abcdef']);
+              const text = async value => await value.text();
+              const nearestEven = await text(blob.slice(1.5, 4.5)) === 'cd'
+                && await text(blob.slice(2.5, 5.5)) === 'cdef'
+                && await text(blob.slice(-1.5)) === 'ef'
+                && await text(blob.slice(-2.5)) === 'ef';
+              const boundaries = await text(blob.slice(NaN)) === 'abcdef'
+                && await text(blob.slice(-Infinity, Infinity)) === 'abcdef'
+                && await text(blob.slice(Infinity)) === ''
+                && await text(blob.slice(4, 2)) === ''
+                && await text(blob.slice(2, null)) === ''
+                && await text(blob.slice(2)) === 'cdef'
+                && await text(blob.slice(2, undefined)) === 'cdef';
+              const order = [];
+              const start = { valueOf() { order.push('start'); return 1.5; } };
+              const end = { valueOf() { order.push('end'); return 4.5; } };
+              const type = { toString() { order.push('type'); return 'TEXT/PLAIN'; } };
+              const ordered = blob.slice(start, end, type);
+              const sentinel = {};
+              let laterReads = 0, threwOriginal = false;
+              try {
+                blob.slice({ valueOf() { throw sentinel; } },
+                  { valueOf() { laterReads++; return 2; } },
+                  { toString() { laterReads++; return 'x'; } });
+              } catch (error) { threwOriginal = error === sentinel; }
+              let bigintRejected = false, symbolRejected = false;
+              try { blob.slice(1n); } catch (error) { bigintRejected = error instanceof TypeError; }
+              try { blob.slice(Symbol('start')); } catch (error) { symbolRejected = error instanceof TypeError; }
+              const fileSlice = new File(['abcdef'], 'file').slice(1, 3, 'TEXT/PLAIN');
+              return [nearestEven, boundaries,
+                await text(ordered) === 'cd' && ordered.type === 'text/plain'
+                  && order.join(',') === 'start,end,type',
+                threwOriginal && laterReads === 0, bigintRejected && symbolRejected,
+                fileSlice instanceof Blob && !(fileSlice instanceof File)
+                  && await text(fileSlice) === 'bc' && fileSlice.size === 2 && fileSlice.type === 'text/plain'];
+            }"#
+        ),
+        1
+    );
+    assert_eq!(
+        call("blobSliceConversions", "[]"),
+        "[true,true,true,true,true,true]"
+    );
+}
+
+#[test]
+fn blob_file_clone_snapshots_preserve_legacy_plain_object_data() {
+    assert_eq!(
+        load(
+            r#"async function blobFileCloneSnapshots() {
+              const blob = new Blob([new Uint8Array([1, 2])], { type: 'TEXT/PLAIN' });
+              const file = new File([new Uint8Array([3, 4])], 'sample.txt', {
+                type: 'TEXT/CSV', lastModified: 42
+              });
+              let reads = 0;
+              Object.defineProperty(file, 'custom', { enumerable: true, get() { reads++; return reads; } });
+              const shadowed = new Blob([new Uint8Array([5])]);
+              Object.defineProperty(shadowed, '__thawBytes', {
+                value: new Uint8Array([9]), enumerable: true, configurable: true
+              });
+              Object.defineProperty(shadowed, 'size', {
+                value: 77, enumerable: true, configurable: true
+              });
+              Object.defineProperty(shadowed, 'type', {
+                value: 'user/type', enumerable: true, configurable: true
+              });
+              const shadowedFile = new File([new Uint8Array([6])], 'actual.txt');
+              Object.defineProperty(shadowedFile, 'name', {
+                value: 'shadow.txt', enumerable: true, configurable: true
+              });
+              const source = { blob, blobAgain: blob, file, fileAgain: file, shadowed, shadowedFile };
+              source.self = source;
+              const globalCopy = structuredClone(source);
+              const globalGetterOnce = reads === 1 && globalCopy.file.custom === 1;
+              const workerCopy = __thaw_worker_decode(__thaw_worker_encode(source));
+              const workerGetterOnce = reads === 2 && workerCopy.file.custom === 2;
+              const objectGraph = copy => copy.self === copy && copy.blob === copy.blobAgain
+                && copy.file === copy.fileAgain && !(copy.blob instanceof Blob)
+                && !(copy.blob instanceof File) && !(copy.file instanceof Blob)
+                && !(copy.file instanceof File);
+              const blobData = copy => JSON.stringify(Array.from(copy.blob.__thawBytes)) === '[1,2]'
+                && copy.blob.size === 2 && copy.blob.type === 'text/plain';
+              const fileData = copy => JSON.stringify(Array.from(copy.file.__thawBytes)) === '[3,4]'
+                && copy.file.size === 2 && copy.file.type === 'text/csv'
+                && copy.file.name === 'sample.txt' && copy.file.lastModified === 42
+                && copy.file.webkitRelativePath === '';
+              const overrides = copy => JSON.stringify(Array.from(copy.shadowed.__thawBytes)) === '[9]'
+                && copy.shadowed.size === 77 && copy.shadowed.type === 'user/type'
+                && copy.shadowedFile.name === 'shadow.txt'
+                && JSON.stringify(Array.from(copy.shadowedFile.__thawBytes)) === '[6]';
+              const graphChecks = objectGraph(globalCopy) && objectGraph(workerCopy);
+              const blobChecks = blobData(globalCopy) && blobData(workerCopy);
+              const fileChecks = fileData(globalCopy) && fileData(workerCopy);
+              const overrideChecks = overrides(globalCopy) && overrides(workerCopy);
+              const getterChecks = globalGetterOnce && workerGetterOnce;
+              globalCopy.blob.__thawBytes[0] = 90;
+              workerCopy.file.__thawBytes[0] = 91;
+              return [graphChecks, blobChecks, fileChecks, overrideChecks, getterChecks,
+                JSON.stringify(Array.from(await blob.bytes())) === '[1,2]'
+                  && JSON.stringify(Array.from(await file.bytes())) === '[3,4]'];
+            }"#
+        ),
+        1
+    );
+    assert_eq!(
+        call("blobFileCloneSnapshots", "[]"),
+        "[true,true,true,true,true,true]"
+    );
+}
+
+#[test]
+fn blob_text_decoder_cannot_mutate_private_bytes() {
+    assert_eq!(
+        load(
+            r#"async function blobTextDecoderIsolation() {
+              const blob = new Blob([new Uint8Array([65, 66])]);
+              const file = new File([new Uint8Array([67, 68])], 'cd.txt');
+              const descriptor = Object.getOwnPropertyDescriptor(TextDecoder.prototype, 'decode');
+              const originalDecode = descriptor.value;
+              const inputs = [];
+              let decoded = false;
+              try {
+                TextDecoder.prototype.decode = function(input, options) {
+                  inputs.push(input);
+                  return originalDecode.call(this, input, options);
+                };
+                decoded = await blob.text() === 'AB' && await file.text() === 'CD';
+              } finally {
+                Object.defineProperty(TextDecoder.prototype, 'decode', descriptor);
+              }
+              const retainedInputs = inputs.length === 2
+                && inputs.every(input => input instanceof Uint8Array);
+              for (const input of inputs) {
+                for (let index = 0; index < input.length; index++) input[index] = 0;
+              }
+              return [decoded, retainedInputs,
+                JSON.stringify(Array.from(await blob.bytes())) === '[65,66]'
+                  && JSON.stringify(Array.from(await file.bytes())) === '[67,68]',
+                JSON.stringify(Array.from(await blob.slice(0, 2).bytes())) === '[65,66]'
+                  && JSON.stringify(Array.from(await file.slice(0, 2).bytes())) === '[67,68]'];
+            }"#
+        ),
+        1
+    );
+    assert_eq!(
+        call("blobTextDecoderIsolation", "[]"),
+        "[true,true,true,true]"
+    );
+}
+
+#[test]
+fn blob_private_bytes_never_reach_mutable_typed_array_prototypes() {
+    assert_eq!(
+        load(
+            r#"async function blobTypedArrayBoundary() {
+              const uint8ArrayPrototype = Uint8Array.prototype;
+              const typedArrayPrototype = Object.getPrototypeOf(uint8ArrayPrototype);
+              const propertyOwner = (object, key) => {
+                let owner = object;
+                while (owner && !Object.prototype.hasOwnProperty.call(owner, key)) {
+                  owner = Object.getPrototypeOf(owner);
+                }
+                return owner;
+              };
+              const sliceOwner = propertyOwner(uint8ArrayPrototype, 'slice');
+              const setOwner = propertyOwner(uint8ArrayPrototype, 'set');
+              const byteLengthOwner = propertyOwner(typedArrayPrototype, 'byteLength');
+              const bufferOwner = propertyOwner(typedArrayPrototype, 'buffer');
+              const descriptors = {
+                slice: Object.getOwnPropertyDescriptor(sliceOwner, 'slice'),
+                set: Object.getOwnPropertyDescriptor(setOwner, 'set'),
+                byteLength: Object.getOwnPropertyDescriptor(byteLengthOwner, 'byteLength'),
+                buffer: Object.getOwnPropertyDescriptor(bufferOwner, 'buffer')
+              };
+              const retained = [];
+              let sliceCalls = 0, setCalls = 0, byteLengthCalls = 0, bufferCalls = 0;
+              const remember = value => { retained.push(value); };
+              let built, nested, file, slice, separate, globalCopy, workerCopy, streamBytes, copiedBuffer;
+              let serializerFields = false;
+              try {
+                Object.defineProperty(sliceOwner, 'slice', {
+                  ...descriptors.slice,
+                  value: function(...args) { sliceCalls++; remember(this); return descriptors.slice.value.apply(this, args); }
+                });
+                Object.defineProperty(setOwner, 'set', {
+                  ...descriptors.set,
+                  value: function(...args) { setCalls++; remember(this); return descriptors.set.value.apply(this, args); }
+                });
+                Object.defineProperty(byteLengthOwner, 'byteLength', {
+                  ...descriptors.byteLength,
+                  get: function() { byteLengthCalls++; remember(this); return descriptors.byteLength.get.call(this); }
+                });
+                Object.defineProperty(bufferOwner, 'buffer', {
+                  ...descriptors.buffer,
+                  get: function() { bufferCalls++; remember(this); return descriptors.buffer.get.call(this); }
+                });
+
+                const probe = new Uint8Array([9, 8]);
+                probe.slice(0, 1);
+                probe.set([7]);
+                void probe.byteLength;
+                void probe.buffer;
+                const input = new Uint8Array([1, 2]);
+                built = new Blob(['A', input, new Uint8Array([3])], { type: 'APPLICATION/BINARY' });
+                nested = new Blob([built]);
+                file = new File([built, new Uint8Array([4])], 'built.bin', { lastModified: 17 });
+                separate = new Blob([new Uint8Array([5, 6])], { type: 'IMAGE/TEST' });
+                slice = built.slice(1, 3, 'APPLICATION/PART');
+                const bytesOutput = await built.bytes();
+                copiedBuffer = await built.arrayBuffer();
+                const decodedText = await new Blob(['XY']).text();
+                const reader = built.stream().getReader();
+                const streamed = await reader.read();
+                streamBytes = Array.from(streamed.value);
+                await reader.read();
+                reader.releaseLock();
+                globalCopy = structuredClone(built);
+                workerCopy = __thaw_worker_decode(__thaw_worker_encode(file));
+                serializerFields = decodedText === 'XY'
+                  && JSON.stringify(Array.from(bytesOutput)) === '[65,1,2,3]'
+                  && globalCopy.size === 4 && globalCopy.type === 'application/binary'
+                  && JSON.stringify(Array.from(globalCopy.__thawBytes)) === '[65,1,2,3]'
+                  && workerCopy.size === 5 && workerCopy.type === ''
+                  && workerCopy.name === 'built.bin' && workerCopy.lastModified === 17
+                  && JSON.stringify(Array.from(workerCopy.__thawBytes)) === '[65,1,2,3,4]';
+              } finally {
+                Object.defineProperty(sliceOwner, 'slice', descriptors.slice);
+                Object.defineProperty(setOwner, 'set', descriptors.set);
+                Object.defineProperty(byteLengthOwner, 'byteLength', descriptors.byteLength);
+                Object.defineProperty(bufferOwner, 'buffer', descriptors.buffer);
+              }
+
+              const wrappersWorked = sliceCalls > 0 && setCalls > 0
+                && byteLengthCalls > 0 && bufferCalls > 0;
+              const publicCopiesCorrect = JSON.stringify(Array.from(new Uint8Array(copiedBuffer))) === '[65,1,2,3]'
+                && JSON.stringify(streamBytes) === '[65,1,2,3]';
+              for (const bytes of retained) {
+                const length = descriptors.byteLength.get.call(bytes);
+                for (let index = 0; index < length; index++) bytes[index] = 0;
+              }
+              const bytes = async value => JSON.stringify(Array.from(await value.bytes()));
+              return [wrappersWorked, serializerFields, publicCopiesCorrect,
+                await bytes(built) === '[65,1,2,3]' && built.size === 4 && built.type === 'application/binary',
+                await bytes(nested) === '[65,1,2,3]' && nested.size === 4,
+                await bytes(file) === '[65,1,2,3,4]' && file.name === 'built.bin'
+                  && file.lastModified === 17 && file.type === '',
+                await bytes(slice) === '[1,2]' && slice.type === 'application/part',
+                await bytes(separate) === '[5,6]' && separate.type === 'image/test'];
+            }"#
+        ),
+        1
+    );
+    assert_eq!(
+        call("blobTypedArrayBoundary", "[]"),
+        "[true,true,true,true,true,true,true,true]"
+    );
+}
+
+#[test]
 fn structured_clone_copies_cycles_and_builtins() {
     assert_eq!(
             load(

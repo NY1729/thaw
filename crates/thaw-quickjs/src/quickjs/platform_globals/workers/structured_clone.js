@@ -38,7 +38,14 @@
       }
       else if (input instanceof ArrayBuffer) node = { t: 'ArrayBuffer', v: Array.from(new Uint8Array(input), byte => byte.toString(16).padStart(2, '0')).join('') };
       else if (ArrayBuffer.isView(input)) node = { t: input instanceof DataView ? 'DataView' : 'TypedArray', c: input.constructor.name, b: encode(input.buffer), o: input.byteOffset, l: input instanceof DataView ? input.byteLength : input.length };
-      else node = { t: 'Object', v: Object.keys(input).map(key => [key, encode(input[key])]) };
+      else {
+        const blobSnapshot = blobFileCloneSnapshot(input);
+        const values = blobSnapshot
+          ? Object.keys(blobSnapshot).map(key => [key, encode(blobSnapshot[key])])
+          : [];
+        for (const key of Object.keys(input)) values.push([key, encode(input[key])]);
+        node = { t: 'Object', v: values };
+      }
       nodes[id] = node; return { r: id };
     };
     return JSON.stringify({ root: encode(value), nodes });

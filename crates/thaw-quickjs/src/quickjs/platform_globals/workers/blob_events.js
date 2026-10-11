@@ -1,29 +1,185 @@
+  const blobState = new WeakMap();
+  const blobWeakMapGet = WeakMap.prototype.get;
+  const blobWeakMapSet = WeakMap.prototype.set;
+  const blobApply = Reflect.apply;
+  const blobNativeUint8Array = Uint8Array;
+  const blobTypedArrayPrototype = Object.getPrototypeOf(blobNativeUint8Array.prototype);
+  const blobNativeByteLength = Object.getOwnPropertyDescriptor(blobTypedArrayPrototype, 'byteLength').get;
+  const blobNativeBuffer = Object.getOwnPropertyDescriptor(blobTypedArrayPrototype, 'buffer').get;
+  const blobStateGet = value => blobApply(blobWeakMapGet, blobState, [value]);
+  const blobByteLength = value => blobApply(blobNativeByteLength, value, []);
+  const blobWriteBytes = (destination, destinationOffset, source, sourceOffset, count) => {
+    for (let index = 0; index < count; index++) destination[destinationOffset + index] = source[sourceOffset + index];
+  };
+  const blobCopyBytes = (source, start, end) => {
+    const length = blobByteLength(source);
+    const from = start === undefined ? 0 : start;
+    const to = end === undefined ? length : end;
+    const copy = new blobNativeUint8Array(to - from);
+    blobWriteBytes(copy, 0, source, from, to - from);
+    return copy;
+  };
+  const blobTypeError = TypeError;
+  const blobArrayFrom = Array.from;
+  const blobIteratorSymbol = Symbol.iterator;
+  const blobNativeNewline = hostInfo.platform === 'win32' ? '\r\n' : '\n';
+  const blobDomString = value => `${value}`;
+  const blobUsvString = value => blobDomString(value).replace(/[\uD800-\uDFFF]/gu, '\uFFFD');
+  const blobLongLong = value => {
+    const number = +value;
+    if (!Number.isFinite(number) || number === 0) return 0;
+    return Number(BigInt.asIntN(64, BigInt(Math.trunc(number))));
+  };
+  const blobClampLongLong = value => {
+    const number = +value;
+    if (Number.isNaN(number)) return 0;
+    const limit = 9007199254740991;
+    if (number <= -limit) return -limit;
+    if (number >= limit) return limit;
+    const lower = Math.floor(number), fraction = number - lower;
+    const rounded = fraction < 0.5 ? lower
+      : fraction > 0.5 ? lower + 1
+      : lower % 2 === 0 ? lower : lower + 1;
+    return rounded === 0 ? 0 : rounded;
+  };
+  const blobNormalizeType = value => {
+    for (let index = 0; index < value.length; index++) {
+      const code = value.charCodeAt(index);
+      if (code < 0x20 || code > 0x7e) return '';
+    }
+    return value.toLowerCase();
+  };
+  const blobDictionary = value => {
+    if (value === undefined || value === null) return {};
+    if (typeof value !== 'object' && typeof value !== 'function') {
+      throw new blobTypeError('Blob options must be a dictionary');
+    }
+    return value;
+  };
+  const blobOptions = (value, isFile) => {
+    const dictionary = blobDictionary(value);
+    const rawEndings = dictionary.endings;
+    const endings = rawEndings === undefined ? 'transparent' : blobDomString(rawEndings);
+    if (endings !== 'transparent' && endings !== 'native') {
+      throw new blobTypeError('endings must be transparent or native');
+    }
+    const rawType = dictionary.type;
+    const type = blobNormalizeType(rawType === undefined ? '' : blobDomString(rawType));
+    let lastModified;
+    if (isFile) {
+      const rawLastModified = dictionary.lastModified;
+      lastModified = rawLastModified === undefined ? undefined : blobLongLong(rawLastModified);
+    }
+    return { endings, type, lastModified };
+  };
+  const blobConvertPart = part => {
+    const state = blobStateGet(part);
+    if (state) return { kind: 'blob', value: part };
+    if (part instanceof ArrayBuffer || ArrayBuffer.isView(part)) {
+      return { kind: 'buffer', value: part };
+    }
+    return { kind: 'string', value: blobUsvString(part) };
+  };
+  const blobConvertParts = parts => {
+    if (parts === null || (typeof parts !== 'object' && typeof parts !== 'function')) {
+      throw new blobTypeError('Blob parts must be a sequence');
+    }
+    const method = parts[blobIteratorSymbol];
+    if (typeof method !== 'function') throw new blobTypeError('Blob parts must be iterable');
+    const iterable = {
+      [blobIteratorSymbol]() { return blobApply(method, parts, []); },
+    };
+    return blobApply(blobArrayFrom, Array, [iterable, blobConvertPart]);
+  };
+  const blobBytes = (parts, endings) => {
+    const chunks = parts.map(part => {
+      if (part.kind === 'blob') return blobCopyBytes(blobStateGet(part.value).bytes);
+      if (part.kind === 'buffer') {
+        const value = part.value;
+        const source = value instanceof ArrayBuffer
+          ? new blobNativeUint8Array(value)
+          : new blobNativeUint8Array(value.buffer, value.byteOffset, value.byteLength);
+        return blobCopyBytes(source);
+      }
+      const text = endings === 'native'
+        ? part.value.replace(/\r\n|\r|\n/g, blobNativeNewline)
+        : part.value;
+      return blobCopyBytes(new TextEncoder().encode(text));
+    });
+    let size = 0;
+    for (const chunk of chunks) size += blobByteLength(chunk);
+    const bytes = new blobNativeUint8Array(size);
+    let offset = 0;
+    for (const chunk of chunks) {
+      const length = blobByteLength(chunk);
+      blobWriteBytes(bytes, offset, chunk, 0, length);
+      offset += length;
+    }
+    return bytes;
+  };
+  const blobFileCloneSnapshot = value => {
+    const state = blobStateGet(value);
+    if (!state) return null;
+    const snapshot = {
+      __thawBytes: blobCopyBytes(state.bytes),
+      size: blobByteLength(state.bytes),
+      type: state.type,
+    };
+    if (state.file) {
+      snapshot.name = state.file.name;
+      snapshot.lastModified = state.file.lastModified;
+      snapshot.webkitRelativePath = state.file.webkitRelativePath;
+    }
+    return snapshot;
+  };
   if (typeof globalThis.Blob !== 'function') {
     globalThis.Blob = class Blob {
       constructor(parts = [], options = {}) {
-        const chunks = Array.from(parts, part => {
-          if (part instanceof Blob) return part.__thawBytes;
-          if (part instanceof ArrayBuffer) return new Uint8Array(part);
-          if (ArrayBuffer.isView(part)) return new Uint8Array(part.buffer, part.byteOffset, part.byteLength);
-          return new TextEncoder().encode(String(part));
-        });
-        const size = chunks.reduce((total, chunk) => total + chunk.byteLength, 0);
-        this.__thawBytes = new Uint8Array(size);
-        let offset = 0;
-        for (const chunk of chunks) { this.__thawBytes.set(chunk, offset); offset += chunk.byteLength; }
-        this.size = size;
-        this.type = String(options.type || '').toLowerCase();
+        const converted = blobConvertParts(parts);
+        const settings = blobOptions(options, false);
+        blobApply(blobWeakMapSet, blobState, [this, {
+          bytes: blobBytes(converted, settings.endings), type: settings.type, file: null,
+        }]);
       }
-      arrayBuffer() { const copy = this.__thawBytes.slice(); return Promise.resolve(copy.buffer); }
-      bytes() { return Promise.resolve(this.__thawBytes.slice()); }
-      text() { return Promise.resolve(new TextDecoder().decode(this.__thawBytes)); }
-      slice(start = 0, end = this.size, type = '') {
-        const from = start < 0 ? Math.max(this.size + Number(start), 0) : Math.min(Number(start), this.size);
-        const to = end < 0 ? Math.max(this.size + Number(end), 0) : Math.min(Number(end), this.size);
-        return new Blob([this.__thawBytes.slice(from, Math.max(from, to))], { type });
+      get size() { return blobByteLength(blobStateGet(this).bytes); }
+      get type() { return blobStateGet(this).type; }
+      arrayBuffer() {
+        let state;
+        try { state = blobStateGet(this); if (!state) throw new blobTypeError('invalid Blob receiver'); }
+        catch (error) { return Promise.reject(error); }
+        const copy = blobCopyBytes(state.bytes);
+        return Promise.resolve(blobApply(blobNativeBuffer, copy, []));
+      }
+      bytes() {
+        let state;
+        try { state = blobStateGet(this); if (!state) throw new blobTypeError('invalid Blob receiver'); }
+        catch (error) { return Promise.reject(error); }
+        return Promise.resolve(blobCopyBytes(state.bytes));
+      }
+      text() {
+        let state;
+        try { state = blobStateGet(this); if (!state) throw new blobTypeError('invalid Blob receiver'); }
+        catch (error) { return Promise.reject(error); }
+        return Promise.resolve(new TextDecoder().decode(blobCopyBytes(state.bytes)));
+      }
+      slice(start, end, type) {
+        const state = blobStateGet(this);
+        if (!state) throw new blobTypeError('invalid Blob receiver');
+        const size = blobByteLength(state.bytes);
+        const fromIndex = arguments.length === 0 || start === undefined ? 0 : blobClampLongLong(start);
+        const toIndex = arguments.length < 2 || end === undefined ? size : blobClampLongLong(end);
+        const contentType = arguments.length < 3 || type === undefined ? '' : blobNormalizeType(blobDomString(type));
+        const from = fromIndex < 0 ? Math.max(size + fromIndex, 0) : Math.min(fromIndex, size);
+        const to = toIndex < 0 ? Math.max(size + toIndex, 0) : Math.min(toIndex, size);
+        const bytes = blobCopyBytes(state.bytes, from, Math.max(from, to));
+        const result = new Blob();
+        blobApply(blobWeakMapSet, blobState, [result, { bytes, type: contentType, file: null }]);
+        return result;
       }
       stream() {
-        const bytes = this.__thawBytes.slice();
+        const state = blobStateGet(this);
+        if (!state) throw new blobTypeError('invalid Blob receiver');
+        const bytes = blobCopyBytes(state.bytes);
         return new ReadableStream({
           type: 'bytes',
           pull(controller) {
@@ -33,9 +189,34 @@
         });
       }
     };
-    globalThis.File = class File extends Blob {
-      constructor(parts, name, options = {}) { super(parts, options); this.name = String(name); this.lastModified = options.lastModified === undefined ? Date.now() : Number(options.lastModified); this.webkitRelativePath = ''; }
+    const blobPrototype = globalThis.Blob.prototype;
+    for (const key of ['size', 'type']) {
+      const descriptor = Object.getOwnPropertyDescriptor(blobPrototype, key);
+      Object.defineProperty(blobPrototype, key, { ...descriptor, enumerable: true });
+    }
+    globalThis.File = class File extends globalThis.Blob {
+      constructor(parts, name, options = {}) {
+        if (arguments.length < 2) throw new blobTypeError('File requires fileBits and fileName');
+        const converted = blobConvertParts(parts);
+        const fileName = blobUsvString(name);
+        const settings = blobOptions(options, true);
+        const lastModified = settings.lastModified === undefined ? Date.now() : settings.lastModified;
+        const bytes = blobBytes(converted, settings.endings);
+        super();
+        blobApply(blobWeakMapSet, blobState, [this, {
+          bytes, type: settings.type,
+          file: { name: fileName, lastModified, webkitRelativePath: '' },
+        }]);
+      }
+      get name() { const state = blobStateGet(this); if (!state || !state.file) throw new blobTypeError('invalid File receiver'); return state.file.name; }
+      get lastModified() { const state = blobStateGet(this); if (!state || !state.file) throw new blobTypeError('invalid File receiver'); return state.file.lastModified; }
+      get webkitRelativePath() { const state = blobStateGet(this); if (!state || !state.file) throw new blobTypeError('invalid File receiver'); return state.file.webkitRelativePath; }
     };
+    const filePrototype = globalThis.File.prototype;
+    for (const key of ['name', 'lastModified', 'webkitRelativePath']) {
+      const descriptor = Object.getOwnPropertyDescriptor(filePrototype, key);
+      Object.defineProperty(filePrototype, key, { ...descriptor, enumerable: true });
+    }
   }
   let eventListenerSignalBridge = null;
   const NativeWeakMap = WeakMap;
