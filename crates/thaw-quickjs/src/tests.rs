@@ -1291,6 +1291,51 @@ fn structured_clone_copies_cycles_and_builtins() {
 }
 
 #[test]
+fn structured_clone_preserves_sparse_array_length_and_graph() {
+    std::thread::spawn(|| {
+        assert_eq!(
+            load(
+                r#"
+      function sparseGlobalClone() {
+        const owns = (value, key) => Object.prototype.hasOwnProperty.call(value, key);
+        const emptyHoles = structuredClone(new Array(3));
+        const source = new Array(5);
+        source[1] = undefined;
+        source[2] = { value: 7 };
+        source.extra = { value: 8 };
+        source.self = source;
+        const copy = structuredClone(source);
+        source[2].value = 70;
+        source.extra.value = 80;
+        const reused = structuredClone({ left: source, right: source });
+        const dense = structuredClone([1, 2]);
+        const empty = structuredClone([]);
+        return [emptyHoles.length, Object.keys(emptyHoles).length,
+                !owns(emptyHoles, 0) && !owns(emptyHoles, 1) && !owns(emptyHoles, 2),
+                copy.length,
+                !owns(copy, 0) && owns(copy, 1) && copy[1] === undefined
+                  && owns(copy, 2) && !owns(copy, 3) && !owns(copy, 4),
+                copy[2].value === 7 && source[2].value === 70,
+                copy.extra !== source.extra && copy.extra.value === 8 && source.extra.value === 80,
+                copy.self === copy, Object.keys(copy).sort().join(',') === '1,2,extra,self',
+                reused.left === reused.right, reused.left.self === reused.left,
+                reused.left.length, !owns(reused.left, 0) && owns(reused.left, 1) && !owns(reused.left, 4),
+                dense.length, dense[0] === 1 && dense[1] === 2, empty.length];
+      }
+    "#
+            ),
+            1
+        );
+        assert_eq!(
+            call("sparseGlobalClone", "[]"),
+            "[3,0,true,5,true,true,true,true,true,true,true,5,true,2,true,0]"
+        );
+    })
+    .join()
+    .unwrap();
+}
+
+#[test]
 fn worker_encoder_rejects_symbol_values() {
     std::thread::spawn(|| {
         assert_eq!(
