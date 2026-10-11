@@ -323,3 +323,124 @@ fn module_create_require_loads_relative_and_builtin_dependencies() {
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
 }
+
+#[test]
+fn child_process_exec_custom_promisify_preserves_child_and_outputs() {
+    std::thread::spawn(|| {
+        use std::ffi::{CStr, CString};
+
+        let dir = temp_registry("builtin_child_process_promisify");
+        fs::write(
+            dir.join("index.js"),
+            r#"
+var cp = require('node:child_process'), util = require('node:util');
+module.exports = async function() {
+  var children = [], records = [], customSymbol = Symbol.for('nodejs.util.promisify.custom');
+  function close(child) {
+    var record = { child: child, closed: new Promise(function(resolve) {
+      child.once('close', function(code, signal) { resolve([code, signal]); });
+    }) };
+    records.push(record);
+    return record;
+  }
+  function track(promise) { children.push(promise.child); return { promise: promise, child: promise.child, record: close(promise.child) }; }
+  function callbackChild(child) { children.push(child); return { child: child, record: close(child) }; }
+  try {
+    var execCustom = cp.exec[customSymbol], fileCustom = cp.execFile[customSymbol];
+    var symbols = [typeof execCustom === 'function', typeof fileCustom === 'function',
+      Object.getOwnPropertyDescriptor(cp.exec, customSymbol).enumerable === false,
+      Object.getOwnPropertyDescriptor(cp.execFile, customSymbol).enumerable === false,
+      util.promisify(cp.exec) === execCustom, util.promisify(cp.execFile) === fileCustom,
+      util.promisify(execCustom) === execCustom, util.promisify(fileCustom) === fileCustom];
+
+    var execRun = track(util.promisify(cp.exec)('printf exec-out; printf exec-err >&2'));
+    var execAccess = execRun.child instanceof cp.ChildProcess && !!execRun.child.stdout && !!execRun.child.stderr;
+    var execValue = await execRun.promise, execClosed = await execRun.record.closed;
+    var execSuccess = [execValue.stdout, execValue.stderr, execAccess, execRun.promise.child === execRun.child,
+      execClosed[0], execRun.child.exitCode];
+
+    var omittedRun = track(util.promisify(cp.execFile)('/bin/echo', { encoding: 'buffer' }));
+    var omittedAccess = omittedRun.child.stdout instanceof require('node:stream').PassThrough;
+    var omittedValue = await omittedRun.promise, omittedClosed = await omittedRun.record.closed;
+    var omittedArgs = [Buffer.isBuffer(omittedValue.stdout), Array.from(omittedValue.stdout),
+      omittedValue.stderr.length, omittedAccess, omittedClosed[0]];
+
+    var explicitRun = track(util.promisify(cp.execFile)('/bin/sh', ['-c', 'printf file-out; printf file-err >&2'], { encoding: 'buffer' }));
+    var explicitValue = await explicitRun.promise, explicitClosed = await explicitRun.record.closed;
+    var explicitArgs = [Buffer.isBuffer(explicitValue.stdout), Array.from(explicitValue.stdout),
+      Buffer.isBuffer(explicitValue.stderr), Array.from(explicitValue.stderr), explicitClosed[0]];
+
+    var failedExecRun = track(execCustom('printf exec-bad-out; printf exec-bad-err >&2; exit 7'));
+    var failedExecError = await failedExecRun.promise.then(function() { return null; }, function(error) { return error; });
+    var failedExecClosed = await failedExecRun.record.closed;
+    var failedExec = [failedExecError.code, failedExecError.stdout, failedExecError.stderr,
+      failedExecError.stdout === 'exec-bad-out' && failedExecError.stderr === 'exec-bad-err',
+      failedExecClosed[0], failedExecRun.child.exitCode];
+
+    var failedFileRun = track(fileCustom('/bin/sh', ['-c', 'printf file-bad-out; printf file-bad-err >&2; exit 8']));
+    var failedFileError = await failedFileRun.promise.then(function() { return null; }, function(error) { return error; });
+    var failedFileClosed = await failedFileRun.record.closed;
+    var failedFile = [failedFileError.code, failedFileError.stdout, failedFileError.stderr,
+      failedFileError.stdout === 'file-bad-out' && failedFileError.stderr === 'file-bad-err',
+      failedFileClosed[0], failedFileRun.child.exitCode];
+
+    var missingRun = track(fileCustom('/thaw/missing-promisify-executable', []));
+    var missingError = await missingRun.promise.then(function() { return null; }, function(error) { return error; });
+    var missingClosed = await missingRun.record.closed;
+    var missing = [missingError.code, missingError.stdout, missingError.stderr,
+      missingClosed[0], missingRun.child.exitCode];
+
+    var callbackExecCount = 0, callbackExecResolve;
+    var callbackExecPromise = new Promise(function(resolve) { callbackExecResolve = resolve; });
+    var callbackExecChild = cp.exec('printf callback-out; printf callback-err >&2', { encoding: 'utf8' }, function(error, stdout, stderr) {
+      callbackExecCount++; callbackExecResolve([error === null, stdout, stderr]);
+    });
+    var callbackExec = callbackChild(callbackExecChild), callbackExecAccess = callbackExecChild instanceof cp.ChildProcess;
+    var callbackExecResult = await callbackExecPromise, callbackExecClosed = await callbackExec.record.closed;
+
+    var callbackFileCount = 0, callbackFileResolve;
+    var callbackFilePromise = new Promise(function(resolve) { callbackFileResolve = resolve; });
+    var callbackFileChild = cp.execFile('/bin/printf', ['callback-file'], { encoding: 'utf8' }, function(error, stdout, stderr) {
+      callbackFileCount++; callbackFileResolve([error === null, stdout, stderr]);
+    });
+    var callbackFile = callbackChild(callbackFileChild), callbackFileAccess = callbackFileChild instanceof cp.ChildProcess;
+    var callbackFileResult = await callbackFilePromise, callbackFileClosed = await callbackFile.record.closed;
+
+    var setupError;
+    try { fileCustom('/bin/true', [], { stdio: 'invalid' }); } catch (error) { setupError = error; }
+    return [symbols, execSuccess, omittedArgs, explicitArgs, failedExec, failedFile, missing,
+      [callbackExecAccess, callbackExecCount, callbackExecResult, callbackExecClosed[0]],
+      [callbackFileAccess, callbackFileCount, callbackFileResult, callbackFileClosed[0]],
+      setupError && setupError.code === 'ERR_INVALID_ARG_VALUE'];
+  } finally {
+    children.forEach(function(child) { if (!child._closed) child.kill('SIGKILL'); });
+    await Promise.all(records.map(function(record) { return record.closed; }));
+  }
+};
+"#,
+        )
+        .unwrap();
+        let empty_node_modules = temp_registry("builtin_child_process_promisify_node_modules");
+        let (bundle, _, file_count, _) =
+            bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+        let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseChildPromisify = module.exports;");
+        let source = CString::new(script).unwrap();
+        let loaded = thaw_quickjs::thaw_js_load(source.as_ptr()) == 1;
+        let result = if loaded {
+            let result_ptr = thaw_quickjs::thaw_js_call(
+                CString::new("exerciseChildPromisify").unwrap().as_ptr(),
+                CString::new("[]").unwrap().as_ptr(),
+            );
+            Some(unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy().into_owned())
+        } else {
+            None
+        };
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&empty_node_modules);
+        assert_eq!(file_count, 5);
+        assert!(loaded);
+        assert_eq!(result.as_deref(), Some(r#"[[true,true,true,true,true,true,true,true],["exec-out","exec-err",true,true,0,0],[true,[10],0,true,0],[true,[102,105,108,101,45,111,117,116],true,[102,105,108,101,45,101,114,114],0],[7,"exec-bad-out","exec-bad-err",true,7,7],[8,"file-bad-out","file-bad-err",true,8,8],["ENOENT","","",null,null],[true,1,[true,"callback-out","callback-err"],0],[true,1,[true,"callback-file",""],0],true]"#));
+    })
+    .join()
+    .unwrap();
+}
