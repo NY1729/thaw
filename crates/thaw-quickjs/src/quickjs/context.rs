@@ -2059,6 +2059,7 @@ fn ensure_context() {
                             alpn_spec: "",
                             report_alpn: false,
                             reject_unauthorized: true,
+                            defer_name_verification: false,
                         })
                     },
                 )
@@ -2082,6 +2083,7 @@ fn ensure_context() {
                             alpn_spec: "",
                             report_alpn: false,
                             reject_unauthorized: true,
+                            defer_name_verification: false,
                         })
                     },
                 )
@@ -2096,8 +2098,10 @@ fn ensure_context() {
                      key: String,
                      options: String| {
                         let ca_spec = match tls_ca_spec(ca) { Ok(value) => value, Err(error) => return format!("err:{error}") };
-                        let (verification, alpn) =
-                            options.split_once('|').unwrap_or(("1", options.as_str()));
+                        let mut option_parts = options.splitn(3, '|');
+                        let verification = option_parts.next().unwrap_or("1");
+                        let alpn = option_parts.next().unwrap_or("");
+                        let defer_name_verification = option_parts.next() == Some("1");
                         tls_connect(TlsClientOptions {
                             host: &host,
                             port: port as u16,
@@ -2108,6 +2112,7 @@ fn ensure_context() {
                             alpn_spec: alpn,
                             report_alpn: true,
                             reject_unauthorized: verification != "0",
+                            defer_name_verification,
                         })
                     },
                 )
@@ -2142,6 +2147,12 @@ fn ensure_context() {
                         tls_certificate_metadata(handle, true)
                     })
                     .expect("failed to create JavaScript TLS peer certificate metadata reader");
+                let tls_authorization_function =
+                    Function::new(ctx.clone(), |handle: u32| tls_authorization(handle))
+                        .expect("failed to create JavaScript TLS authorization reader");
+                let tls_canonical_ip_function =
+                    Function::new(ctx.clone(), |host: String| tls_canonical_ip(&host))
+                        .expect("failed to create JavaScript TLS IP canonicalizer");
                 let tls_local_certificate_metadata_function =
                     Function::new(ctx.clone(), |handle: u32| {
                         tls_certificate_metadata(handle, false)
@@ -2885,6 +2896,12 @@ fn ensure_context() {
                         tls_peer_certificate_metadata_function,
                     )
                     .expect("failed to install JavaScript TLS peer certificate metadata reader");
+                ctx.globals()
+                    .set("__thaw_tls_authorization", tls_authorization_function)
+                    .expect("failed to install JavaScript TLS authorization reader");
+                ctx.globals()
+                    .set("__thaw_tls_canonical_ip", tls_canonical_ip_function)
+                    .expect("failed to install JavaScript TLS IP canonicalizer");
                 ctx.globals()
                     .set(
                         "__thaw_tls_local_certificate_metadata",

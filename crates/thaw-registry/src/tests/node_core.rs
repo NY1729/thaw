@@ -1386,7 +1386,7 @@ module.exports = function() {
     try { http2.connect('https://example.invalid', options); } catch (error) { caught = error; }
     check(caught && caught.message === 'finite client failure', 'client reached finite native result');
     var args = connectCalls[connectCalls.length - 1];
-    check(args[3] === expected && args[6] === (rejectUnauthorized === false ? '0|6832' : '1|6832'), 'client CA and ALPN serialization');
+    check(args[3] === expected && args[6] === (rejectUnauthorized === false ? '0|6832|1' : '1|6832|1'), 'client CA and ALPN serialization');
     check(args[4] === (identity ? '63657274' : '') && args[5] === (identity ? '6b6579' : ''), 'client identity forwarding');
   }
   function secureServer(hasCa, ca, expected, requestCert, rejectUnauthorized) {
@@ -1699,7 +1699,7 @@ fn http2_secure_server_accepts_an_alpn_h2_peer() {
     fs::write(
             dir.join("index.js"),
             format!(
-                "var http2 = require('node:http2'), certificate = {}, key = {}; module.exports = function () {{ return new Promise(function(resolve, reject) {{ var sessionState, server = http2.createSecureServer({{ cert: certificate, key: key }}); server.on('error', reject); server.on('sessionError', reject); server.on('session', function(session) {{ sessionState = [session.encrypted, session.alpnProtocol, session.socket.alpnProtocol]; }}); server.on('stream', function(stream, headers) {{ stream.on('close', function() {{ server.close(function() {{ resolve([server instanceof http2.Http2SecureServer, sessionState, headers[':scheme']]); }}); }}); stream.respond({{ ':status': 202 }}); stream.end('served'); }}); server.listen({}, '127.0.0.1'); }}); }};",
+                "var http2 = require('node:http2'), certificate = {}, key = {}; module.exports = function () {{ return new Promise(function(resolve, reject) {{ var sessionState, server = http2.createSecureServer({{ cert: certificate, key: key }}); server.on('error', reject); server.on('sessionError', reject); server.on('session', function(session) {{ sessionState = [session.encrypted, session.alpnProtocol, session.socket.alpnProtocol, session.socket.authorized, session.socket.authorizationError]; }}); server.on('stream', function(stream, headers) {{ stream.on('close', function() {{ server.close(function() {{ resolve([server instanceof http2.Http2SecureServer, sessionState, headers[':scheme']]); }}); }}); stream.respond({{ ':status': 202 }}); stream.end('served'); }}); server.listen({}, '127.0.0.1'); }}); }};",
                 serde_json::to_string(&certificate).unwrap(),
                 serde_json::to_string(&key).unwrap(),
                 port
@@ -1717,7 +1717,7 @@ fn http2_secure_server_accepts_an_alpn_h2_peer() {
     let arguments = CString::new("[]").unwrap();
     let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
     let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
-    assert_eq!(result, r#"[true,[true,"h2","h2"],"https"]"#);
+    assert_eq!(result, r#"[true,[true,"h2","h2",false,"TLS client authentication was not requested"],"https"]"#);
     let (alpn, body) = peer.join().unwrap();
     assert_eq!(alpn, b"h2");
     assert_eq!(body, b"served");
