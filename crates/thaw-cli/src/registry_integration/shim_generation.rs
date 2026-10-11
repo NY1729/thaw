@@ -173,9 +173,14 @@ fn generate_registry_shims(
         // (see `thaw_bridge::allow_native_bytes_type`'s doc comment) to
         // this one package's `.d.ts` processing below -- only ever `true`
         // for a hand-authored ambient builtin, never a real npm package.
+        let path_builtin = path_builtin_name(name);
         let _native_bytes_type_guard =
-            thaw_bridge::allow_native_bytes_type(name.starts_with("node:"));
-        let package = if name.starts_with("node:") {
+            thaw_bridge::allow_native_bytes_type(name.starts_with("node:") || path_builtin.is_some());
+        let mut package = if let Some(builtin) = path_builtin {
+            let mut package = thaw_registry::resolve_builtin(builtin)?;
+            package.name = name.clone();
+            package
+        } else if name.starts_with("node:") {
             thaw_registry::resolve_builtin(name)?
         } else {
             thaw_registry::resolve(registry_dir, name)?
@@ -199,6 +204,29 @@ fn generate_registry_shims(
             .map_err(|e| format!("failed to parse `{name}`'s package.d.ts classes: {e}"))?;
         let mut values = thaw_bridge::parse_dts_values_named(&package.dts_source, &dts_filename)
             .map_err(|e| format!("failed to parse `{name}`'s package.d.ts values: {e}"))?;
+        if path_builtin.is_some() && !values.iter().any(|value| value.name == "default") {
+            values.push(thaw_bridge::DtsValue {
+                name: "default".into(),
+                ty: thaw_bridge::DtsType::Native(thaw_hir::HirType::JsValue),
+            });
+        }
+        if let Some(builtin) = path_builtin {
+            let root_bundle = if builtin == "node:path" {
+                package.bundle_js.clone()
+            } else {
+                thaw_registry::resolve_builtin("node:path")?.bundle_js
+            }
+            .ok_or_else(|| "built-in `node:path` has no runtime bundle".to_string())?;
+            let selected = match builtin {
+                "node:path" => "root",
+                "node:path/posix" => "root.posix",
+                _ => "root.win32",
+            };
+            package.bundle_js = Some(format!(
+                "(function(){{var cache=globalThis.__thaw_bundle_exports||(globalThis.__thaw_bundle_exports={{}}),root;if(Object.prototype.hasOwnProperty.call(cache,\"node:path\"))root=cache[\"node:path\"];else{{{root_bundle}\nroot=module.exports;cache[\"node:path\"]=root;}}var selected={selected};module.exports=selected;if(selected&&(typeof selected===\"object\"||typeof selected===\"function\")){{selected.default=selected;selected.__esModule=true;}}cache[{canonical}]=selected;}})();",
+                canonical = serde_json::to_string(builtin).unwrap(),
+            ));
+        }
         let explicit_type_exports = thaw_bridge::exported_type_names_named(&package.dts_source, &dts_filename);
         let value_exports = thaw_bridge::exported_value_names_named(&package.dts_source, &dts_filename);
         let type_only_namespaces = thaw_bridge::type_only_namespace_names_named(&package.dts_source, &dts_filename);

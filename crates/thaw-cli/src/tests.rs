@@ -195,6 +195,56 @@ fn compiles_and_runs_a_program_that_constructs_new_intl_classes() {
 }
 
 #[test]
+fn path_builtin_named_values_compile_with_default_and_subpath_imports() {
+    let directory = std::env::temp_dir().join(format!("thaw-cli-path-exports-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let input = directory.join("main.ts");
+    let output = directory.join("app");
+    std::fs::write(
+        &input,
+        "import path, { posix as pathPosix, win32 as pathWin32 } from 'path';\n\
+         import nodePath, { posix as nodePosix, win32 as nodeWin32, join as nodeJoin } from 'node:path';\n\
+         import posixPath, { posix as barePosixPosix, win32 as barePosixWin32 } from 'path/posix';\n\
+         import nodePosixPath, { posix as nodePosixSubpathPosix, win32 as nodePosixSubpathWin32, join as nodePosixJoin } from 'node:path/posix';\n\
+         import win32Path, { posix as bareWin32Posix, win32 as bareWin32Win32 } from 'path/win32';\n\
+         import nodeWin32Path, { posix as nodeWin32SubpathPosix, win32 as nodeWin32SubpathWin32, join as nodeWin32Join } from 'node:path/win32';\n\
+         function main(): void {\n\
+           console.log(JSON.stringify([path === pathPosix, path.posix === pathPosix, path.win32 === pathWin32, path === nodePath, pathPosix === nodePosix, pathWin32 === nodeWin32]));\n\
+           console.log(JSON.stringify([posixPath === pathPosix, barePosixPosix === pathPosix, barePosixWin32 === pathWin32, nodePosixPath === pathPosix, nodePosixSubpathPosix === pathPosix, nodePosixSubpathWin32 === pathWin32]));\n\
+           console.log(JSON.stringify([win32Path === pathWin32, bareWin32Posix === pathPosix, bareWin32Win32 === pathWin32, nodeWin32Path === pathWin32, nodeWin32SubpathPosix === pathPosix, nodeWin32SubpathWin32 === pathWin32]));\n\
+           console.log(JSON.stringify([nodePosix.posix === nodePosix, nodePosix.win32 === nodeWin32, nodeWin32.posix === nodePosix, nodeWin32.win32 === nodeWin32]));\n\
+           console.log(JSON.stringify([nodeJoin('a', 'b'), nodePosixJoin('a', 'b'), nodeWin32Join('a', 'b'), nodePosix.join('a', 'b'), nodeWin32.join('a', 'b')]));\n\
+         }\n",
+    )
+    .unwrap();
+    build(
+        &input,
+        &output,
+        &[],
+        &[],
+        &[],
+        &directory.join("registry"),
+        &[],
+    )
+    .unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "[true,true,true,true,true,true]\n\
+         [true,true,true,true,true,true]\n\
+         [true,true,true,true,true,true]\n\
+         [true,true,true,true]\n\
+         [\"a/b\",\"a/b\",\"a\\\\b\",\"a/b\",\"a\\\\b\"]\n"
+    );
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+#[test]
 fn install_uses_the_project_directory() {
     let command = npm_install_command(Path::new("web"));
     assert_eq!(

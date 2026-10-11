@@ -8,8 +8,19 @@ fn import_meta_resolution_prefers_the_selected_registry_backend() {
     std::fs::create_dir_all(&package).unwrap();
     std::fs::write(package.join("bundle.js"), "module.exports = {};").unwrap();
     std::fs::write(package.join("native.node"), []).unwrap();
-    let resolutions =
-        registry_import_meta_resolutions(&dir, &["pkg".to_string(), "node:fs".to_string()]);
+    let path_names = [
+        "path",
+        "node:path",
+        "path/posix",
+        "node:path/posix",
+        "path/win32",
+        "node:path/win32",
+    ];
+    let mut names = vec!["pkg".to_string(), "node:fs".to_string()];
+    names.extend(path_names.iter().map(|name| (*name).to_string()));
+    names.extend(["pathology", "path/other", "@scope/path", "./path", "path?x"]
+        .iter().map(|name| (*name).to_string()));
+    let resolutions = registry_import_meta_resolutions(&dir, &names);
     assert_eq!(
         resolutions.get("pkg"),
         Some(&module_graph::file_url(&package.join("native.node")))
@@ -18,6 +29,46 @@ fn import_meta_resolution_prefers_the_selected_registry_backend() {
         resolutions.get("node:fs").map(String::as_str),
         Some("node:fs")
     );
+    for (name, canonical) in path_names.iter().zip([
+        "node:path",
+        "node:path",
+        "node:path/posix",
+        "node:path/posix",
+        "node:path/win32",
+        "node:path/win32",
+    ]) {
+        assert_eq!(resolutions.get(*name).map(String::as_str), Some(canonical));
+    }
+    assert!(["pathology", "path/other", "@scope/path", "./path", "path?x"]
+        .iter().all(|name| !resolutions.contains_key(*name)));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn path_subpaths_share_the_root_when_win32_loads_first() {
+    let dir = std::env::temp_dir().join(format!("thaw-cli-path-load-order-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import win32, { posix as winPosix, win32 as winWin32 } from 'path/win32';
+import nodeWin32, { posix as nodeWinPosix, win32 as nodeWinWin32 } from 'node:path/win32';
+import posix, { posix as posixPosix, win32 as posixWin32 } from 'path/posix';
+import nodePosix, { posix as nodePosixPosix, win32 as nodePosixWin32 } from 'node:path/posix';
+import path, { posix as rootPosix, win32 as rootWin32 } from 'path';
+import nodePath from 'node:path';
+function main(): void {
+  console.log(JSON.stringify([win32 === rootWin32, nodeWin32 === rootWin32, winPosix === rootPosix, nodeWinPosix === rootPosix, winWin32 === rootWin32, nodeWinWin32 === rootWin32]));
+  console.log(JSON.stringify([posix === rootPosix, nodePosix === rootPosix, posixPosix === rootPosix, nodePosixPosix === rootPosix, posixWin32 === rootWin32, nodePosixWin32 === rootWin32, path === rootPosix, nodePath === rootPosix]));
+  console.log(JSON.stringify([rootPosix.join('a', 'b'), rootWin32.join('a', 'b')]));
+}"#,
+    ).unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &dir.join("registry"), &[]).unwrap();
+    let result = Command::new(output).output().unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    assert_eq!(String::from_utf8_lossy(&result.stdout),
+        "[true,true,true,true,true,true]\n[true,true,true,true,true,true,true,true]\n[\"a/b\",\"a\\\\b\"]\n");
     let _ = std::fs::remove_dir_all(dir);
 }
 

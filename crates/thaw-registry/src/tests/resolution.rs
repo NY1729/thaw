@@ -4091,6 +4091,12 @@ fn builtin_declarations_cover_typed_buffer_crypto_and_fs_overloads() {
     let test_reporters = resolve_builtin("node:test/reporters").unwrap().dts_source;
     assert!(test_reporters.contains("class Reporter"));
     assert!(test_reporters.contains("dot(source: Json): Reporter"));
+
+    for specifier in ["node:path", "node:path/posix", "node:path/win32"] {
+        let declarations = resolve_builtin(specifier).unwrap().dts_source;
+        assert!(declarations.contains("export declare const posix: any;"), "{specifier}: {declarations}");
+        assert!(declarations.contains("export declare const win32: any;"), "{specifier}: {declarations}");
+    }
 }
 
 /// `resolve_bare_require` used to resolve every bare specifier against
