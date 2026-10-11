@@ -2356,12 +2356,12 @@
     close() { timers.delete(id); },
     [Symbol.toPrimitive]() { return id; }
   });
-  const schedule = (callback, delay, repeat, args, refed = true, api = 'setTimeout', forceReal = false) => {
+  const schedule = (callback, delay, repeat, args, refed = true, api = 'setTimeout', forceReal = false, alreadyValidatedDelay = false) => {
     if (typeof callback !== 'function') {
       throw new TypeError('timer callback must be a function');
     }
     const id = nextTimerId++;
-    const milliseconds = normalizeDelay(delay);
+    const milliseconds = alreadyValidatedDelay ? delay : normalizeDelay(delay);
     const clock = forceReal ? null : activeMockClock(api);
     timers.set(id, { callback, args, repeat, milliseconds, refed,
                      asyncContext: thawAsyncContext.get(),
