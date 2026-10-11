@@ -3889,6 +3889,85 @@ module.exports = function() {
 }
 
 #[test]
+fn tls_ca_presence_and_collections_are_validated_before_native_calls() {
+    use std::ffi::{CStr, CString};
+    let dir = temp_registry("builtin_tls_ca_presence");
+    fs::write(dir.join("index.js"), r#"
+var tls = require('node:tls');
+function check(value, message) { if (!value) throw new Error(message); }
+module.exports = function() {
+  var originalConnect = globalThis.__thaw_tls_connect_with_options;
+  var originalServer = globalThis.__thaw_tls_server_listen_with_options;
+  var originalBasic = globalThis.__thaw_tls_server_listen, originalWithCa = globalThis.__thaw_tls_server_listen_with_ca;
+  var originalQueue = globalThis.queueMicrotask, calls = [], serverCalls = [], queued = [];
+  function client(hasCa, ca, expected) {
+    var options = { host: '127.0.0.1', port: 443 };
+    if (hasCa) options.ca = ca;
+    var socket = new tls.TLSSocket(); socket.on('error', function() {}); socket.connect(options);
+    check(calls[calls.length - 1][3] === expected, 'client CA serialization');
+    check(!socket.connecting, 'client connection state');
+  }
+  function server(hasCa, ca, expected, requestCert) {
+    var value = { cert: 'cert', key: 'key', requestCert: requestCert };
+    if (hasCa) value.ca = ca;
+    var instance = tls.createServer(value); instance.on('error', function() {});
+    instance.listen({ host: '127.0.0.1', port: 443 });
+    check(serverCalls[serverCalls.length - 1][4] === expected, 'server CA serialization');
+    check(!instance.listening && instance._handle === 0, 'server failure allocated no listener');
+  }
+  function invalidClient(ca) {
+    var before = calls.length, socket = new tls.TLSSocket(), caught;
+    try { socket.connect({ host: '127.0.0.1', port: 443, ca: ca }, function() {}); } catch (error) { caught = error; }
+    check(caught instanceof TypeError && calls.length === before && !socket.connecting && socket._handle === 0
+      && !(socket._events.secureConnect || []).length, 'invalid client CA rejected before state/native call');
+  }
+  function invalidServer(ca, requestCert) {
+    var before = serverCalls.length, instance = tls.createServer({ cert: 'cert', key: 'key', ca: ca, requestCert: requestCert }), caught;
+    instance.on('error', function() {});
+    try { instance.listen({ host: '127.0.0.1', port: 443 }, function() {}); } catch (error) { caught = error; }
+    check(caught instanceof TypeError && serverCalls.length === before && !instance.listening && instance._handle === 0
+      && !(instance._events.listening || []).length
+      && globalThis.__thaw_tls_server_listen === originalBasic && globalThis.__thaw_tls_server_listen_with_ca === originalWithCa, 'invalid server CA rejected before state/native call');
+  }
+  try {
+    globalThis.__thaw_tls_connect_with_options = function() { calls.push(Array.prototype.slice.call(arguments)); return 'err:finite client'; };
+    globalThis.__thaw_tls_server_listen_with_options = function() { serverCalls.push(Array.prototype.slice.call(arguments)); return 'err:finite server'; };
+    globalThis.queueMicrotask = function(callback) { queued.push(callback); };
+    client(false, undefined, undefined); client(true, undefined, undefined);
+    client(true, [], ''); client(true, '', ''); client(true, Buffer.alloc(0), '');
+    client(true, 'ca', '6361'); client(true, ['a', 'bc'], '61,6263');
+    client(true, [Buffer.from('a'), Buffer.from('xBC').subarray(1)], '61,4243');
+    server(false, undefined, undefined, false); server(true, undefined, undefined, false);
+    server(true, [], '', true); server(true, '', '', false);
+    server(true, [Buffer.from('a'), Buffer.from('xBC').subarray(1)], '61,4243', true);
+    [null, 7, {}, [undefined], [[Buffer.from('a')]], new Array(1), ['']].forEach(function(value) { invalidClient(value); invalidServer(value, true); invalidServer(value, false); });
+    return true;
+  } finally {
+    globalThis.__thaw_tls_connect_with_options = originalConnect;
+    globalThis.__thaw_tls_server_listen_with_options = originalServer;
+    globalThis.queueMicrotask = originalQueue;
+  }
+};
+"#).unwrap();
+    let empty_node_modules = temp_registry("builtin_tls_ca_presence_modules");
+    let (bundle, _, _, _) = bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    let source = CString::new(format!(
+        "globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseTlsCaPresence = module.exports;"
+    )).unwrap();
+    let loaded = thaw_quickjs::thaw_js_load(source.as_ptr());
+    if loaded != 1 {
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&empty_node_modules);
+        assert_eq!(loaded, 1);
+    }
+    let result = thaw_quickjs::thaw_js_call(c"exerciseTlsCaPresence".as_ptr(), c"[]".as_ptr());
+    let result = unsafe { CStr::from_ptr(result) }.to_string_lossy().into_owned();
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+    assert_eq!(result, "true");
+}
+
+#[test]
 fn tls_alpn_buffer_protocol_lists_are_framed_before_native_calls() {
     use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_tls_alpn_buffer");
