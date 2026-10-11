@@ -348,6 +348,31 @@ impl<'a> FnLowerer<'a> {
         callback: HirExpr,
         this_arg: Option<HirExpr>,
     ) -> Result<HirExpr, String> {
+        self.lower_array_map_mode(receiver, array_type, element_type, callback_element_type, callback, this_arg, false)
+    }
+
+    fn lower_array_flat_map(
+        &mut self,
+        receiver: HirExpr,
+        array_type: HirType,
+        element_type: HirType,
+        callback_element_type: HirType,
+        callback: HirExpr,
+        this_arg: Option<HirExpr>,
+    ) -> Result<HirExpr, String> {
+        self.lower_array_map_mode(receiver, array_type, element_type, callback_element_type, callback, this_arg, true)
+    }
+
+    fn lower_array_map_mode(
+        &mut self,
+        receiver: HirExpr,
+        array_type: HirType,
+        element_type: HirType,
+        callback_element_type: HirType,
+        callback: HirExpr,
+        this_arg: Option<HirExpr>,
+        snapshot_flat_map_results: bool,
+    ) -> Result<HirExpr, String> {
         let receiver_name = format!("__thaw_map_receiver_{}", self.next_binding);
         self.next_binding += 1;
         let callback_name = format!("__thaw_map_callback_{}", self.next_binding);
@@ -361,7 +386,7 @@ impl<'a> FnLowerer<'a> {
             unreachable!("array mapper was validated as a function")
         };
         let returns_void = **output_type == HirType::Void;
-        let output_type = if returns_void { HirType::Undefined } else { output_type.as_ref().clone() };
+        let callback_output_type = if returns_void { HirType::Undefined } else { output_type.as_ref().clone() };
         self.scope.insert(receiver_name.clone(), array_type.clone());
         self.scope
             .insert(callback_name.clone(), callback_type.clone());
@@ -373,6 +398,25 @@ impl<'a> FnLowerer<'a> {
         self.next_binding += 1;
         let element_name = format!("__thaw_map_element_{}", self.next_binding);
         self.next_binding += 1;
+        let callback_result_name = if snapshot_flat_map_results {
+            let name = format!("__thaw_flat_map_callback_result_{}", self.next_binding);
+            self.next_binding += 1;
+            self.scope.insert(name.clone(), callback_output_type.clone());
+            Some(name)
+        } else {
+            None
+        };
+        // shortcut: per-callback snapshots allocate temporary arrays; use direct appends when allocation cost matters.
+        let (output_type, flat_map_snapshot) = if let Some(name) = &callback_result_name {
+            let snapshot = self.lower_array_flat_map_result(HirExpr::ArrayLit(vec![HirExpr::Var(name.clone())]))?;
+            let snapshot_type = self.infer_expr_type(&snapshot)?;
+            if !matches!(&snapshot_type, HirType::Array(_)) {
+                unreachable!("flatMap callback normalization returns an array")
+            }
+            (snapshot_type, Some(snapshot))
+        } else {
+            (callback_output_type.clone(), None)
+        };
         let result_type = HirType::Array(Box::new(output_type.clone()));
         self.scope.insert(length_name.clone(), HirType::F64);
         self.scope.insert(result_name.clone(), result_type.clone());
@@ -432,6 +476,26 @@ impl<'a> FnLowerer<'a> {
         } else {
             callback_call
         };
+        let mapped_statements = if let (Some(name), Some(snapshot)) = (&callback_result_name, &flat_map_snapshot) {
+            vec![
+                HirStmt::Let(element_name, callback_element_type, element),
+                HirStmt::Let(name.clone(), callback_output_type.clone(), callback_call),
+                HirStmt::Expr(HirExpr::IndexAssign(
+                    Box::new(HirExpr::Var(result_name.clone())),
+                    Box::new(HirExpr::Var(index_name.clone())),
+                    Box::new(snapshot.clone()),
+                )),
+            ]
+        } else {
+            vec![
+                HirStmt::Let(element_name, callback_element_type, element),
+                HirStmt::Expr(HirExpr::IndexAssign(
+                    Box::new(HirExpr::Var(result_name.clone())),
+                    Box::new(HirExpr::Var(index_name.clone())),
+                    Box::new(callback_call),
+                )),
+            ]
+        };
         let body = HirExpr::Block(vec![
             HirStmt::Let(
                 length_name.clone(),
@@ -463,18 +527,7 @@ impl<'a> FnLowerer<'a> {
                                 HirExpr::Var(index_name.clone()),
                             ],
                         ),
-                        vec![
-                            HirStmt::Let(
-                                element_name,
-                                callback_element_type,
-                                element,
-                            ),
-                            HirStmt::Expr(HirExpr::IndexAssign(
-                                Box::new(HirExpr::Var(result_name.clone())),
-                                Box::new(HirExpr::Var(index_name.clone())),
-                                Box::new(callback_call),
-                            )),
-                        ],
+                        mapped_statements,
                         vec![HirStmt::Expr(HirExpr::Call(
                             Box::new(HirExpr::Var("__thaw_array_set_hole".into())),
                             vec![HirExpr::Var(result_name.clone()), HirExpr::Var(index_name.clone())],

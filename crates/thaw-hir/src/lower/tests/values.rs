@@ -31,6 +31,228 @@ fn an_any_annotated_copy_of_a_caught_error_keeps_the_string_error_type() {
 }
 
 #[test]
+fn flat_map_snapshots_each_shared_callback_array_inside_the_map_loop() {
+    let program = lower(
+        r#"
+            function flat(): number[] {
+                const shared: number[] = [1];
+                return [0, 1].flatMap((_, index) => {
+                    if (index === 1) shared[0] = 9;
+                    return shared;
+                });
+            }
+            function plainMap(): number[][] {
+                const shared: number[] = [1];
+                return [0, 1].map(() => shared);
+            }
+            function flatLength(): number[] {
+                const shared: number[] = [1];
+                return [0, 1].flatMap((_, index) => {
+                    if (index === 1) shared[1] = 9;
+                    return shared;
+                });
+            }
+            function unionReceiver(values: number[] | string[]): number[] {
+                return values.flatMap(() => [1]);
+            }
+            function spreadArgument(): number[] {
+                const callback: (value: number) => number[] = value => [value];
+                const args: [(value: number) => number[]] = [callback];
+                return [1].flatMap(...args);
+            }
+            function jsonResult(values: any[]): any[] {
+                return values.flatMap(value => value);
+            }
+            function tupleResult(values: number[]): any[] {
+                const callback: (value: number) => [number, number] = value => [value, value];
+                return values.flatMap(callback);
+            }
+            function mixedResult(values: number[]): number[] {
+                return values.flatMap(value => value === 0 ? [value] : value);
+            }
+            function scalarResult(values: number[]): number[] {
+                return values.flatMap(value => value);
+            }
+            function voidResult(values: number[]): undefined[] {
+                return values.flatMap(value => { console.log(value); });
+            }
+        "#,
+    );
+
+    fn visit_expr(expr: &HirExpr, visit: &mut impl FnMut(&HirExpr)) {
+        visit(expr);
+        match expr {
+            HirExpr::Call(callee, args) => {
+                visit_expr(callee, visit);
+                for arg in args { visit_expr(arg, visit); }
+            }
+            HirExpr::FunctionCallWithThis(callee, this_arg, args, _, _) => {
+                visit_expr(callee, visit);
+                visit_expr(this_arg, visit);
+                for arg in args { visit_expr(arg, visit); }
+            }
+            HirExpr::Lambda(_, _, _, body) | HirExpr::TypedClosure(_, body)
+            | HirExpr::NonArrowFunction(body) | HirExpr::RecursiveClosure(_, _, body) => visit_expr(body, visit),
+            HirExpr::Block(statements) => {
+                for statement in statements { visit_stmt(statement, visit); }
+            }
+            HirExpr::Conditional(test, yes, no, _) => {
+                visit_expr(test, visit);
+                visit_expr(yes, visit);
+                visit_expr(no, visit);
+            }
+            HirExpr::BinOp(_, left, right) | HirExpr::EvalThen(left, right)
+            | HirExpr::Index(left, right) | HirExpr::JsonKey(left, right)
+            | HirExpr::JsonIndex(left, right) => {
+                visit_expr(left, visit);
+                visit_expr(right, visit);
+            }
+            HirExpr::ArrayLit(values) | HirExpr::DynamicCall(_, values) => {
+                for value in values { visit_expr(value, visit); }
+            }
+            HirExpr::ArrayAlloc(length, _) | HirExpr::ArrayLen(length)
+            | HirExpr::Await(length) | HirExpr::AwaitPromise(length, _)
+            | HirExpr::TypedIndex(length, _, _)
+            | HirExpr::JsValueAsJson(length) | HirExpr::JsonAsNumber(length)
+            | HirExpr::JsonAsString(length) | HirExpr::JsonAsBool(length)
+            | HirExpr::UnionInject(length, _, _) | HirExpr::UnionTag(length, _)
+            | HirExpr::UnionValue(length, _, _) | HirExpr::OptionalSome(length, _)
+            | HirExpr::OptionalIsNone(length, _) | HirExpr::OptionalValue(length, _)
+            | HirExpr::ThrowValue(length, _) => visit_expr(length, visit),
+            HirExpr::IndexAssign(array, index, value) => {
+                visit_expr(array, visit);
+                visit_expr(index, visit);
+                visit_expr(value, visit);
+            }
+            HirExpr::Assign(_, value) | HirExpr::ArraySetLen(value, _, _) => visit_expr(value, visit),
+            _ => {}
+        }
+    }
+    fn visit_stmt(statement: &HirStmt, visit: &mut impl FnMut(&HirExpr)) {
+        match statement {
+            HirStmt::Expr(expr) | HirStmt::Return(Some(expr)) | HirStmt::Throw(expr)
+            | HirStmt::Let(_, _, expr) => visit_expr(expr, visit),
+            HirStmt::If(test, yes, no) => {
+                visit_expr(test, visit);
+                for statement in yes.iter().chain(no) { visit_stmt(statement, visit); }
+            }
+            HirStmt::While(test, body) => {
+                visit_expr(test, visit);
+                for statement in body { visit_stmt(statement, visit); }
+            }
+            HirStmt::Try(body, _, catch, _) => {
+                for statement in body.iter().chain(catch) { visit_stmt(statement, visit); }
+            }
+            _ => {}
+        }
+    }
+    fn has_snapshot_allocation(expr: &HirExpr, element: &HirType) -> bool {
+        let mut found = false;
+        visit_expr(expr, &mut |node| {
+            if matches!(node, HirExpr::ArrayAlloc(_, allocated) if allocated == element) { found = true; }
+        });
+        found
+    }
+    fn flat_map_loop(function: &HirFunction) {
+        let mut found = false;
+        visit_expr(&HirExpr::Block(function.body.clone()), &mut |node| {
+            let HirExpr::Block(statements) = node else { return };
+            for (position, statement) in statements.iter().enumerate() {
+                let HirStmt::While(_, body) = statement else { continue };
+                let Some(HirStmt::If(_, present, _)) = body.iter().find(|statement|
+                    matches!(statement, HirStmt::If(test, _, _) if matches!(test, HirExpr::Call(callee, _) if matches!(callee.as_ref(), HirExpr::Var(name) if name == "__thaw_array_has_index")))
+                ) else { continue };
+                let Some((callback_position, callback_type)) = present.iter().enumerate().find_map(|(index, statement)| {
+                    match statement {
+                        HirStmt::Let(name, ty, _) if name.starts_with("__thaw_flat_map_callback_result_") => Some((index, ty)),
+                        _ => None,
+                    }
+                }) else { continue };
+                let Some(HirStmt::Expr(HirExpr::IndexAssign(destination, _, snapshot))) = present.get(callback_position + 1) else { continue };
+                let HirExpr::Var(destination_name) = destination.as_ref() else { continue };
+                let callback_expr = match &present[callback_position] {
+                    HirStmt::Let(_, _, expr) => expr,
+                    _ => unreachable!(),
+                };
+                let mut outer_callback = None;
+                visit_expr(callback_expr, &mut |node| {
+                    if let HirExpr::Call(callee, _) = node {
+                        if let HirExpr::Var(name) = callee.as_ref() {
+                            if name.starts_with("__thaw_map_callback_") { outer_callback = Some(name.clone()); }
+                        }
+                    }
+                });
+                let outer_callback = outer_callback.expect("user callback binding in callback-result initializer");
+                let mut calls = 0;
+                for statement in present {
+                    match statement {
+                        HirStmt::Let(_, _, expr) | HirStmt::Expr(expr) => visit_expr(expr, &mut |node| {
+                            if matches!(node, HirExpr::Call(callee, _) if matches!(callee.as_ref(), HirExpr::Var(name) if name == &outer_callback)) { calls += 1; }
+                        }),
+                        _ => {}
+                    }
+                }
+                assert_eq!(calls, 1, "callback must execute exactly once in the present branch: {present:?}");
+                let allocation = statements[..position].iter().find_map(|statement| match statement {
+                    HirStmt::Let(name, ty, HirExpr::ArrayAlloc(_, element)) if name == destination_name => Some((ty, element)),
+                    _ => None,
+                }).expect("flatMap destination allocation before its loop");
+                let HirType::Array(snapshot_type) = allocation.0 else { continue };
+                let HirType::Array(final_element) = snapshot_type.as_ref() else { continue };
+                assert_eq!(allocation.1, snapshot_type.as_ref(), "destination allocates snapshots");
+                if **final_element == HirType::Json {
+                    assert!(matches!(snapshot, HirExpr::Call(callee, _) if matches!(callee.as_ref(), HirExpr::Var(name) if name == "__thaw_any_array_flat")), "Json snapshot uses runtime array flattening: {snapshot:?}");
+                } else {
+                    assert!(has_snapshot_allocation(snapshot, final_element.as_ref()), "snapshot allocation has the final element type: {snapshot:?}");
+                }
+                assert_eq!(function.ret, HirType::Array(final_element.clone()), "outer flatten returns the snapshot element type");
+                assert!(matches!(body.get(1), Some(HirStmt::Expr(HirExpr::Assign(_, _)))), "source index advances after the callback and snapshot branch");
+                assert!(matches!(present.get(callback_position + 1), Some(HirStmt::Expr(HirExpr::IndexAssign(_, _, _)))));
+                match function.name.as_str() {
+                    "flat" | "flatLength" | "unionReceiver" | "spreadArgument" => assert_eq!(callback_type, &HirType::Array(Box::new(HirType::F64))),
+                    "jsonResult" => assert_eq!(callback_type, &HirType::Json),
+                    "tupleResult" => assert_eq!(callback_type, &HirType::Tuple(vec![HirType::F64, HirType::F64])),
+                    "scalarResult" => assert_eq!(callback_type, &HirType::F64),
+                    "voidResult" => assert_eq!(callback_type, &HirType::Undefined),
+                    "mixedResult" => assert!(matches!(callback_type, HirType::Union(members) if members.contains(&HirType::F64) && members.contains(&HirType::Array(Box::new(HirType::F64))))),
+                    _ => unreachable!(),
+                }
+                found = true;
+            }
+        });
+        assert!(found, "a flatMap callback loop with an in-loop snapshot: {}", function.name);
+    }
+
+    for name in ["flat", "flatLength", "unionReceiver", "spreadArgument", "jsonResult", "tupleResult", "mixedResult", "scalarResult", "voidResult"] {
+        let function = program.functions.iter().find(|function| function.name == name).unwrap();
+        flat_map_loop(function);
+    }
+    let plain_map = program.functions.iter().find(|function| function.name == "plainMap").unwrap();
+    assert_eq!(plain_map.ret, HirType::Array(Box::new(HirType::Array(Box::new(HirType::F64)))));
+    let mut direct_map = false;
+    visit_expr(&HirExpr::Block(plain_map.body.clone()), &mut |node| {
+        let HirExpr::Block(statements) = node else { return };
+        for statement in statements {
+            let HirStmt::While(_, body) = statement else { continue };
+            let Some(HirStmt::If(test, present, absent)) = body.first() else { continue };
+            if !matches!(test, HirExpr::Call(callee, _) if matches!(callee.as_ref(), HirExpr::Var(name) if name == "__thaw_array_has_index")) { continue; }
+            assert!(matches!(absent.first(), Some(HirStmt::Expr(HirExpr::Call(callee, _))) if matches!(callee.as_ref(), HirExpr::Var(name) if name == "__thaw_array_set_hole")));
+            let HirStmt::Expr(HirExpr::IndexAssign(_, _, value)) = present.last().unwrap() else { continue };
+            assert!(matches!(value.as_ref(), HirExpr::Call(callee, _) if matches!(callee.as_ref(), HirExpr::Var(name) if name.starts_with("__thaw_map_callback_"))));
+            assert!(!present.iter().any(|statement| matches!(statement, HirStmt::Let(name, _, _) if name.starts_with("__thaw_flat_map_callback_result_"))));
+            let allocated = statements.iter().find_map(|statement| match statement {
+                HirStmt::Let(_, ty, HirExpr::ArrayAlloc(_, element)) if matches!(ty, HirType::Array(_)) => Some((ty, element)),
+                _ => None,
+            }).unwrap();
+            assert_eq!(allocated.0, &HirType::Array(Box::new(HirType::Array(Box::new(HirType::F64)))));
+            assert_eq!(allocated.1, &HirType::Array(Box::new(HirType::F64)));
+            direct_map = true;
+        }
+    });
+    assert!(direct_map, "plain map stores the callback's Array<F64> directly");
+}
+
+#[test]
 fn string_normalize_defaults_undefined_forms_lazily() {
     let program = lower(
         r#"
