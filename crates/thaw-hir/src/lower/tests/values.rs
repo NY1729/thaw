@@ -2276,3 +2276,314 @@ fn logical_operators_over_different_types_yield_the_union_of_the_operands() {
     ).unwrap();
     assert!(lower_module(&module).is_err(), "the union result must not silently narrow to one operand type");
 }
+
+#[test]
+fn array_and_string_end_arguments_default_only_for_undefined() {
+    let program = lower(r#"
+        function arraySliceOmitted(a: number[]): number[] { return a.slice(); }
+        function arraySliceUndefined(a: number[]): number[] { return a.slice(0, undefined); }
+        function arraySliceOptional(a: number[], end?: number): number[] { return a.slice(0, end); }
+        function arraySliceUnionEnd(a: number[], end: number | string | undefined): number[] { return a.slice(0, end); }
+        function arraySliceJson(a: number[], end: any): number[] { return a.slice(0, end); }
+        function arraySliceJsValue(a: number[], end: JsValue): number[] { return a.slice(0, end); }
+        function arraySliceNull(a: number[]): number[] { return a.slice(0, null); }
+        function arraySliceNaN(a: number[]): number[] { return a.slice(0, 0 / 0); }
+        function arraySliceUnion(a: number[] | string[], end: number | undefined): number[] | string[] { return a.slice(0, end); }
+        function arraySliceSpread(a: number[], args: [number, number | undefined]): number[] { return a.slice(...args); }
+        function arraySliceSpreadUnion(a: number[] | string[], args: [number, number | undefined]): number[] | string[] { return a.slice(...args); }
+        function fillOmitted(a: number[]): number[] { return a.fill(1); }
+        function fillUndefined(a: number[], end: number | undefined): number[] { return a.fill(1, 0, end); }
+        function fillLiteralUndefined(a: number[]): number[] { return a.fill(1, 0, undefined); }
+        function fillUnion(a: number[] | (number | undefined)[], end?: number): void { a.fill(1, 0, end); }
+        function fillSpread(a: number[], args: [number, number, number | undefined]): number[] { return a.fill(...args); }
+        function copyOmitted(a: number[]): number[] { return a.copyWithin(0, 0); }
+        function copyUndefined(a: number[], end: number | undefined): number[] { return a.copyWithin(0, 0, end); }
+        function copyLiteralUndefined(a: number[]): number[] { return a.copyWithin(0, 0, undefined); }
+        function copyUnion(a: number[] | string[], end?: number): number[] | string[] { return a.copyWithin(0, 0, end); }
+        function copySpread(a: number[], args: [number, number, number | undefined]): number[] { return a.copyWithin(...args); }
+        function endsOmitted(s: string): boolean { return s.endsWith("x"); }
+        function endsUndefined(s: string, end: any): boolean { return s.endsWith("x", end); }
+        function endsLiteralUndefined(s: string): boolean { return s.endsWith("x", undefined); }
+        function endsSpread(s: string, args: [string, number | undefined]): boolean { return s.endsWith(...args); }
+        function stringSliceOmitted(s: string): string { return s.slice(); }
+        function stringSliceUndefined(s: string, end?: number): string { return s.slice(0, end); }
+        function stringSliceLiteralUndefined(s: string): string { return s.slice(0, undefined); }
+        function stringSliceSpread(s: string, args: [number, number | undefined]): string { return s.slice(...args); }
+        function substringOmitted(s: string): string { return s.substring(); }
+        function substringUndefined(s: string, end: number | undefined): string { return s.substring(0, end); }
+        function substringLiteralUndefined(s: string): string { return s.substring(0, undefined); }
+        function substrOmitted(s: string): string { return s.substr(); }
+        function substrUndefined(s: string, end: number | undefined): string { return s.substr(0, end); }
+        function substrLiteralUndefined(s: string): string { return s.substr(0, undefined); }
+
+        function arrayReceiver(): number[] { return [1]; }
+        function arrayStart(): number { return 0; }
+        function arrayEnd(): number | undefined { return undefined; }
+        function arrayOrder(): number[] { return arrayReceiver().slice(arrayStart(), arrayEnd()); }
+        function fillValue(): number { return 1; }
+        function fillStart(): number { return 0; }
+        function fillEnd(): number | undefined { return undefined; }
+        function fillOrder(): number[] { return arrayReceiver().fill(fillValue(), fillStart(), fillEnd()); }
+        function copyTarget(): number { return 0; }
+        function copyStart(): number { return 0; }
+        function copyEnd(): number | undefined { return undefined; }
+        function copyOrder(): number[] { return arrayReceiver().copyWithin(copyTarget(), copyStart(), copyEnd()); }
+        function stringReceiver(): string { return "abcd"; }
+        function stringStart(): number { return 0; }
+        function stringEnd(): number | undefined { return undefined; }
+        function stringOrder(): string { return stringReceiver().slice(stringStart(), stringEnd()); }
+        function endNeedle(): string { return "x"; }
+        function endsPosition(): number | undefined { return undefined; }
+        function endsOrder(): boolean { return stringReceiver().endsWith(endNeedle(), endsPosition()); }
+        function arrayArgs(): [number, number | undefined] { return [arrayStart(), arrayEnd()]; }
+        function arraySpreadOrder(): number[] { return arrayReceiver().slice(...arrayArgs()); }
+        function fillArgs(): [number, number, number | undefined] { return [fillValue(), fillStart(), fillEnd()]; }
+        function fillSpreadOrder(): number[] { return arrayReceiver().fill(...fillArgs()); }
+        function copyArgs(): [number, number, number | undefined] { return [copyTarget(), copyStart(), copyEnd()]; }
+        function copySpreadOrder(): number[] { return arrayReceiver().copyWithin(...copyArgs()); }
+        function stringArgs(): [string, number | undefined] { return [endNeedle(), endsPosition()]; }
+        function endsSpreadOrder(): boolean { return stringReceiver().endsWith(...stringArgs()); }
+        function stringSliceArgs(): [number, number | undefined] { return [stringStart(), stringEnd()]; }
+        function stringSliceSpreadOrder(): string { return stringReceiver().slice(...stringSliceArgs()); }
+    "#);
+
+    fn visit_expr(expr: &HirExpr, visit: &mut impl FnMut(&HirExpr)) {
+        visit(expr);
+        match expr {
+            HirExpr::Call(callee, args) => { visit_expr(callee, visit); for arg in args { visit_expr(arg, visit); } }
+            HirExpr::FunctionCallWithThis(callee, this_arg, args, _, _) => {
+                visit_expr(callee, visit); visit_expr(this_arg, visit); for arg in args { visit_expr(arg, visit); }
+            }
+            HirExpr::Lambda(_, _, _, body) | HirExpr::TypedClosure(_, body)
+            | HirExpr::NonArrowFunction(body) | HirExpr::RecursiveClosure(_, _, body) => visit_expr(body, visit),
+            HirExpr::Block(statements) => for statement in statements { visit_stmt(statement, visit); },
+            HirExpr::Conditional(test, yes, no, _) => { visit_expr(test, visit); visit_expr(yes, visit); visit_expr(no, visit); }
+            HirExpr::BinOp(_, left, right) | HirExpr::EvalThen(left, right)
+            | HirExpr::Index(left, right) | HirExpr::JsonIndex(left, right) | HirExpr::JsonKey(left, right) => {
+                visit_expr(left, visit); visit_expr(right, visit);
+            }
+            HirExpr::ArrayLit(values) | HirExpr::DynamicCall(_, values) => for value in values { visit_expr(value, visit); },
+            HirExpr::IndexAssign(array, index, value) => { visit_expr(array, visit); visit_expr(index, visit); visit_expr(value, visit); }
+            HirExpr::ArrayAlloc(value, _) | HirExpr::ArrayLen(value) | HirExpr::Await(value)
+            | HirExpr::AwaitPromise(value, _) | HirExpr::TypedIndex(value, _, _)
+            | HirExpr::OptionalSome(value, _) | HirExpr::OptionalIsNone(value, _)
+            | HirExpr::OptionalValue(value, _) | HirExpr::NullableSome(value, _)
+            | HirExpr::NullableIsNone(value, _) | HirExpr::NullableValue(value, _)
+            | HirExpr::NullishSome(value, _) | HirExpr::NullishIsNull(value, _)
+            | HirExpr::NullishIsUndefined(value, _) | HirExpr::NullishIsNone(value, _)
+            | HirExpr::NullishValue(value, _) | HirExpr::JsValueAsJson(value)
+            | HirExpr::JsonAsNumber(value) | HirExpr::JsonAsString(value) | HirExpr::JsonAsBool(value)
+            | HirExpr::UnionInject(value, _, _) | HirExpr::UnionTag(value, _) | HirExpr::UnionValue(value, _, _) => visit_expr(value, visit),
+            HirExpr::Assign(_, value) => visit_expr(value, visit),
+            _ => {}
+        }
+    }
+    fn visit_stmt(statement: &HirStmt, visit: &mut impl FnMut(&HirExpr)) {
+        match statement {
+            HirStmt::Expr(expr) | HirStmt::Return(Some(expr)) | HirStmt::Throw(expr) | HirStmt::Let(_, _, expr) => visit_expr(expr, visit),
+            HirStmt::If(test, yes, no) => { visit_expr(test, visit); for statement in yes.iter().chain(no) { visit_stmt(statement, visit); } }
+            HirStmt::While(test, body) => { visit_expr(test, visit); for statement in body { visit_stmt(statement, visit); } }
+            _ => {}
+        }
+    }
+    fn function<'a>(program: &'a HirProgram, name: &str) -> &'a HirFunction {
+        program.functions.iter().find(|function| function.name == name).unwrap()
+    }
+    fn raw_end_guard(function: &HirFunction, predicate: fn(&HirExpr) -> bool) {
+        let mut found = false;
+        for statement in &function.body {
+            visit_stmt(statement, &mut |node| {
+                if let HirExpr::Conditional(test, yes, no, HirType::F64) = node {
+                    if matches!(yes.as_ref(), HirExpr::Lit(HirLit::F64(value)) if value.is_infinite() && value.is_sign_positive())
+                        && predicate(test) && shares_raw_argument(test, no)
+                    {
+                        found = true;
+                    }
+                }
+            });
+        }
+        assert!(found, "undefined guard must select +Infinity before number conversion: {}", function.name);
+    }
+    fn vars(expr: &HirExpr, output: &mut Vec<String>) {
+        visit_expr(expr, &mut |node| if let HirExpr::Var(name) = node { output.push(name.clone()); });
+    }
+    fn tuple_end_slots(expr: &HirExpr, output: &mut Vec<(String, usize, HirType)>) {
+        visit_expr(expr, &mut |node| {
+            if let HirExpr::TypedIndex(source, offset, ty) = node {
+                if let (HirExpr::Var(source_name), HirExpr::Lit(HirLit::F64(slot))) =
+                    (source.as_ref(), offset.as_ref())
+                {
+                    if source_name.starts_with("__thaw_native_spread_")
+                        && *slot >= 0.0
+                        && slot.fract() == 0.0
+                    {
+                        output.push((source_name.clone(), *slot as usize, ty.clone()));
+                    }
+                }
+            }
+        });
+    }
+    fn shares_raw_argument(test: &HirExpr, number: &HirExpr) -> bool {
+        let mut test_vars = Vec::new();
+        let mut number_vars = Vec::new();
+        vars(test, &mut test_vars);
+        vars(number, &mut number_vars);
+        if test_vars.iter().any(|name| name.starts_with("__thaw_native_arg_") && number_vars.contains(name)) {
+            return true;
+        }
+        let mut test_slots = Vec::new();
+        let mut number_slots = Vec::new();
+        tuple_end_slots(test, &mut test_slots);
+        tuple_end_slots(number, &mut number_slots);
+        test_slots.iter().any(|slot| number_slots.contains(slot))
+    }
+    fn shares_tuple_slot(test: &HirExpr, number: &HirExpr, expected_slot: usize) -> bool {
+        let mut test_slots = Vec::new();
+        let mut number_slots = Vec::new();
+        tuple_end_slots(test, &mut test_slots);
+        tuple_end_slots(number, &mut number_slots);
+        test_slots.iter().any(|(source, slot, ty)| {
+            *slot == expected_slot
+                && number_slots.contains(&(source.clone(), *slot, ty.clone()))
+        })
+    }
+    fn has_call(expr: &HirExpr, target: &str) -> bool {
+        let mut found = false;
+        visit_expr(expr, &mut |node| if matches!(node, HirExpr::Call(callee, _) if matches!(callee.as_ref(), HirExpr::Var(name) if name == target)) { found = true; });
+        found
+    }
+    fn has_optional_guard(expr: &HirExpr) -> bool {
+        let mut found = false;
+        visit_expr(expr, &mut |node| if matches!(node, HirExpr::OptionalIsNone(..)) { found = true; });
+        found
+    }
+    fn has_union_guard(expr: &HirExpr) -> bool {
+        let mut found = false;
+        visit_expr(expr, &mut |node| if matches!(node, HirExpr::UnionTag(..)) { found = true; });
+        found
+    }
+
+    for name in ["arraySliceOptional", "fillUndefined", "copyUndefined", "stringSliceUndefined", "substringUndefined", "substrUndefined"] {
+        raw_end_guard(function(&program, name), |test| has_optional_guard(test));
+    }
+    raw_end_guard(function(&program, "arraySliceUnionEnd"), |test| has_union_guard(test) || has_optional_guard(test));
+    raw_end_guard(function(&program, "arraySliceJson"), |test| has_call(test, "__thaw_json_is_undefined"));
+    raw_end_guard(function(&program, "arraySliceJsValue"), |test| has_call(test, "__thaw_is_undefined_dynamic_value"));
+    raw_end_guard(function(&program, "endsUndefined"), |test| has_call(test, "__thaw_json_is_undefined"));
+    for name in ["arraySliceUnion", "arraySliceSpread", "arraySliceSpreadUnion", "fillUnion", "fillSpread", "copyUnion", "copySpread", "endsSpread", "stringSliceSpread"] {
+        let f = function(&program, name);
+        let mut found = false;
+        for statement in &f.body {
+            visit_stmt(statement, &mut |node| if matches!(node,
+                HirExpr::Conditional(test, yes, no, HirType::F64)
+                    if matches!(yes.as_ref(), HirExpr::Lit(HirLit::F64(value)) if value.is_infinite() && value.is_sign_positive())
+                        && shares_raw_argument(test, no)
+            ) { found = true; });
+        }
+        assert!(found, "union and spread methods retain a shared raw end guard: {name}");
+    }
+    for (name, expected_slot) in [
+        ("arraySliceSpread", 1), ("arraySliceSpreadUnion", 1),
+        ("fillSpread", 2), ("copySpread", 2), ("endsSpread", 1),
+        ("stringSliceSpread", 1),
+    ] {
+        let f = function(&program, name);
+        let mut found = false;
+        for statement in &f.body {
+            visit_stmt(statement, &mut |node| if let HirExpr::Conditional(test, _, no, HirType::F64) = node {
+                if shares_tuple_slot(test, no, expected_slot) { found = true; }
+            });
+        }
+        assert!(found, "spread end guard uses the same raw tuple slot {expected_slot}: {name}");
+    }
+    for name in ["arraySliceOmitted", "fillOmitted", "copyOmitted", "endsOmitted", "stringSliceOmitted", "substringOmitted", "substrOmitted"] {
+        let f = function(&program, name);
+        let mut has_infinity = false;
+        for statement in &f.body {
+            visit_stmt(statement, &mut |node| if matches!(node, HirExpr::Lit(HirLit::F64(value)) if value.is_infinite() && value.is_sign_positive()) { has_infinity = true; });
+        }
+        assert!(has_infinity, "omitted end defaults to +Infinity: {name}");
+    }
+    for name in ["arraySliceUndefined", "fillLiteralUndefined", "copyLiteralUndefined", "endsLiteralUndefined", "stringSliceLiteralUndefined", "substringLiteralUndefined", "substrLiteralUndefined"] {
+        let f = function(&program, name);
+        let mut explicit_undefined = false;
+        for statement in &f.body {
+            visit_stmt(statement, &mut |node| if matches!(node,
+                HirExpr::Conditional(test, yes, no, HirType::F64)
+                    if matches!(test.as_ref(), HirExpr::Lit(HirLit::Bool(true)) )
+                        && matches!(yes.as_ref(), HirExpr::Lit(HirLit::F64(value)) if value.is_infinite() && value.is_sign_positive())
+                        && matches!(no.as_ref(), HirExpr::Lit(HirLit::F64(value)) if value.is_nan())
+            ) { explicit_undefined = true; });
+        }
+        assert!(explicit_undefined, "explicit undefined selects +Infinity lazily: {name}");
+    }
+    let null_fn = function(&program, "arraySliceNull");
+    let mut null_is_zero = false;
+    for statement in &null_fn.body {
+        visit_stmt(statement, &mut |node| if matches!(node,
+            HirExpr::Conditional(test, yes, no, HirType::F64)
+                if matches!(test.as_ref(), HirExpr::Lit(HirLit::Bool(false)))
+                    && matches!(yes.as_ref(), HirExpr::Lit(HirLit::F64(value)) if value.is_infinite() && value.is_sign_positive())
+                    && matches!(no.as_ref(), HirExpr::Lit(HirLit::F64(0.0)))
+        ) { null_is_zero = true; });
+    }
+    assert!(null_is_zero, "null stays numeric zero");
+    let nan_fn = function(&program, "arraySliceNaN");
+    let mut nan_is_preserved = false;
+    for statement in &nan_fn.body {
+        visit_stmt(statement, &mut |node| if matches!(node,
+            HirExpr::Conditional(test, yes, no, HirType::F64)
+                if matches!(test.as_ref(), HirExpr::Lit(HirLit::Bool(false)))
+                    && matches!(yes.as_ref(), HirExpr::Lit(HirLit::F64(value)) if value.is_infinite() && value.is_sign_positive())
+                    && matches!(no.as_ref(), HirExpr::Var(_))
+        ) { nan_is_preserved = true; });
+    }
+    assert!(nan_is_preserved, "NaN stays on the provided-number branch");
+
+    fn source_bindings<'a>(expr: &'a HirExpr, output: &mut Vec<(String, &'a HirExpr)>) {
+        if let HirExpr::Call(callee, args) = expr {
+            if let HirExpr::Lambda(_, params, _, body) = callee.as_ref() {
+                for (param, arg) in params.iter().zip(args) {
+                    if param.name.starts_with("__thaw_native_arg_") || param.name.starts_with("__thaw_native_spread_")
+                        || param.name.contains("receiver")
+                    {
+                        output.push((param.name.clone(), arg));
+                    }
+                }
+                source_bindings(body, output);
+            } else {
+                source_bindings(callee, output);
+            }
+            for arg in args { source_bindings(arg, output); }
+        } else if let HirExpr::Block(statements) = expr {
+            for statement in statements {
+                if let HirStmt::Expr(value) | HirStmt::Return(Some(value)) | HirStmt::Let(_, _, value) = statement {
+                    source_bindings(value, output);
+                }
+            }
+        }
+    }
+    fn call_name(expr: &HirExpr, target: &str) -> bool {
+        matches!(expr, HirExpr::Call(callee, _) if matches!(callee.as_ref(), HirExpr::Var(name) if name == target))
+    }
+    fn assert_source_order(program: &HirProgram, function_name: &str, expected: &[&str]) {
+        let mut bindings = Vec::new();
+        for statement in &function(program, function_name).body {
+            if let HirStmt::Expr(value) | HirStmt::Return(Some(value)) = statement { source_bindings(value, &mut bindings); }
+        }
+        let positions = expected.iter().map(|target| bindings.iter().position(|(_, source)| call_name(source, target)).unwrap()).collect::<Vec<_>>();
+        let counts = expected.iter().map(|target| bindings.iter().filter(|(_, source)| call_name(source, target)).count()).collect::<Vec<_>>();
+        assert!(counts.iter().all(|count| *count == 1) && positions.windows(2).all(|pair| pair[0] < pair[1]),
+            "receiver and raw call arguments are evaluated once in source order for {function_name}: {bindings:?}");
+    }
+    assert_source_order(&program, "arrayOrder", &["arrayReceiver", "arrayStart", "arrayEnd"]);
+    assert_source_order(&program, "fillOrder", &["arrayReceiver", "fillValue", "fillStart", "fillEnd"]);
+    assert_source_order(&program, "copyOrder", &["arrayReceiver", "copyTarget", "copyStart", "copyEnd"]);
+    assert_source_order(&program, "stringOrder", &["stringReceiver", "stringStart", "stringEnd"]);
+    assert_source_order(&program, "endsOrder", &["stringReceiver", "endNeedle", "endsPosition"]);
+    assert_source_order(&program, "arraySpreadOrder", &["arrayReceiver", "arrayArgs"]);
+    assert_source_order(&program, "fillSpreadOrder", &["arrayReceiver", "fillArgs"]);
+    assert_source_order(&program, "copySpreadOrder", &["arrayReceiver", "copyArgs"]);
+    assert_source_order(&program, "endsSpreadOrder", &["stringReceiver", "stringArgs"]);
+    assert_source_order(&program, "stringSliceSpreadOrder", &["stringReceiver", "stringSliceArgs"]);
+}

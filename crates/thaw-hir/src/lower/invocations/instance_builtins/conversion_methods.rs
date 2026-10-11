@@ -138,6 +138,21 @@ impl<'a> FnLowerer<'a> {
         }
     }
 
+    fn number_format_end_or_infinity(&mut self, value: Option<&HirExpr>) -> Result<HirExpr, String> {
+        let Some(value) = value else {
+            return Ok(HirExpr::Lit(HirLit::F64(f64::INFINITY)));
+        };
+        let ty = self.infer_expr_type(value)?;
+        let is_undefined = self.number_format_is_undefined(value.clone(), &ty);
+        let number = self.number_format_to_number(value.clone(), &ty)?;
+        Ok(HirExpr::Conditional(
+            Box::new(is_undefined),
+            Box::new(HirExpr::Lit(HirLit::F64(f64::INFINITY))),
+            Box::new(number),
+            HirType::F64,
+        ))
+    }
+
     fn lower_native_conversion_method(
         &mut self,
         member: &MemberExpr,
