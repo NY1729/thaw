@@ -306,6 +306,223 @@ fn zlib_gzip_exposes_the_private_handle_and_process_chunk_contract_minizlib_need
 }
 
 #[test]
+fn zlib_reset_discards_buffers_and_recreates_native_state() {
+    std::thread::spawn(|| {
+        use std::ffi::{CStr, CString};
+
+        let dir = temp_registry("builtin_zlib_reset");
+        fs::write(
+            dir.join("index.js"),
+            r#"
+var zlib = require('node:zlib');
+module.exports = async function() {
+  var streams = [], createBase = globalThis.__thaw_zlib_stream_create;
+  var createCalls = 0;
+  globalThis.__thaw_zlib_stream_create = function(operation, format) {
+    createCalls++;
+    return createBase(operation, format);
+  };
+  function keep(stream) { streams.push(stream); return stream; }
+  function rejectedReset(stream) {
+    try { stream.reset(); return false; }
+    catch (error) { return error.message === 'Cannot reset a finished zlib stream'; }
+  }
+  function dropped(handle) { return __thaw_zlib_stream_drop(handle) === false; }
+  var bufferedText, bufferedBytes, bufferedSame, bufferedOldGone, bufferedHandleGone;
+  var deflateText, deflateOldGone, deflateHandleGone;
+  var inflateText, inflateOldGone;
+  var autoUnopened, autoResetNull, autoNoCreate, autoOldGone, autoText, autoHandleGone, autoTerminal;
+  var fixedTerminal, fixedNoCreate, truncatedFailed, truncatedErrorCaptured, truncatedReleased, truncatedTerminal, truncatedNoCreate;
+  var normalFinalTerminal, normalFinalReleased, resetCloseReleased, resetCloseTerminal, destroyTerminal;
+  var createFailureIdentity, createFailureKeepsHandle, createFailureContinues, createFailureReleased;
+  var bufferedCreateFailureIdentity, bufferedCreateFailureKeepsHandle, bufferedCreateFailureText, bufferedCreateFailureReleased;
+  try {
+    var buffered = keep(zlib.createGzip({ autoDestroy: false }));
+    var bufferedOld = buffered._streamHandle, bufferedChunks = [];
+    buffered.on('data', function(chunk) { bufferedChunks.push(chunk); });
+    buffered.write(Buffer.from('old'));
+    bufferedSame = buffered.reset() === buffered;
+    bufferedOldGone = dropped(bufferedOld);
+    var bufferedNew = buffered._streamHandle;
+    bufferedBytes = -1;
+    await new Promise(function(resolve, reject) {
+      buffered.on('error', reject);
+      buffered.end(Buffer.from('new'), resolve);
+    });
+    bufferedText = zlib.gunzipSync(Buffer.concat(bufferedChunks)).toString();
+    bufferedBytes = buffered.bytesWritten;
+    bufferedHandleGone = dropped(bufferedNew);
+    normalFinalTerminal = rejectedReset(buffered);
+    normalFinalReleased = bufferedHandleGone;
+
+    var deflater = keep(new zlib.Deflate({ autoDestroy: false }));
+    var deflateOld = deflater._streamHandle;
+    deflater._processChunk(Buffer.from('discarded-'), zlib.constants.Z_NO_FLUSH);
+    deflater.reset();
+    deflateOldGone = dropped(deflateOld);
+    var deflateNew = deflater._streamHandle;
+    var deflated = Buffer.concat([
+      deflater._processChunk(Buffer.from('fresh deflate'), zlib.constants.Z_NO_FLUSH),
+      deflater._processChunk(Buffer.alloc(0), zlib.constants.Z_FINISH)
+    ]);
+    deflateText = zlib.inflateSync(deflated).toString();
+    deflateHandleGone = dropped(deflateNew);
+
+    var inflater = keep(new zlib.Inflate({ autoDestroy: false }));
+    var inflateOld = inflater._streamHandle;
+    inflater._processChunk(zlib.deflateSync(Buffer.from('discarded inflate')), zlib.constants.Z_NO_FLUSH);
+    inflater.reset();
+    inflateOldGone = dropped(inflateOld);
+    var inflated = Buffer.concat([
+      inflater._processChunk(zlib.deflateSync(Buffer.from('fresh inflate')), zlib.constants.Z_NO_FLUSH),
+      inflater._processChunk(Buffer.alloc(0), zlib.constants.Z_FINISH)
+    ]);
+    inflateText = inflated.toString();
+
+    var auto = keep(new zlib.Unzip({ autoDestroy: false }));
+    var beforeAutoReset = createCalls;
+    autoUnopened = auto._streamHandle === null;
+    autoResetNull = auto.reset() === auto && auto._streamHandle === null;
+    autoNoCreate = createCalls === beforeAutoReset;
+    auto._processChunk(zlib.gzipSync(Buffer.from('discarded auto')), zlib.constants.Z_NO_FLUSH);
+    var autoOld = auto._streamHandle;
+    auto.reset();
+    autoOldGone = dropped(autoOld);
+    var autoFirst = auto._processChunk(zlib.deflateSync(Buffer.from('auto deflate')), zlib.constants.Z_NO_FLUSH);
+    var autoNew = auto._streamHandle;
+    var autoOutput = Buffer.concat([autoFirst, auto._processChunk(Buffer.alloc(0), zlib.constants.Z_FINISH)]);
+    autoText = autoOutput.toString();
+    autoHandleGone = dropped(autoNew);
+    var autoCreatesBeforeReset = createCalls;
+    autoTerminal = rejectedReset(auto) && createCalls === autoCreatesBeforeReset;
+
+    var fixed = keep(new zlib.Gzip({ autoDestroy: false }));
+    fixed._processChunk(Buffer.from('finished'), zlib.constants.Z_FINISH);
+    var fixedCreatesBeforeReset = createCalls;
+    fixedTerminal = rejectedReset(fixed);
+    fixedNoCreate = createCalls === fixedCreatesBeforeReset;
+
+    var truncated = keep(new zlib.Gunzip({ autoDestroy: false }));
+    var truncatedHandle = truncated._streamHandle;
+    var truncatedGzip = zlib.gzipSync(Buffer.from('truncated payload'));
+    var truncatedInput = truncatedGzip.subarray(0, truncatedGzip.length - 4);
+    var truncatedError;
+    try { truncated._processChunk(truncatedInput, zlib.constants.Z_FINISH); }
+    catch (error) { truncatedError = error; truncatedFailed = true; }
+    truncatedErrorCaptured = truncatedError instanceof Error && truncatedError.message.length > 0;
+    truncatedReleased = dropped(truncatedHandle);
+    var truncatedCreatesBeforeReset = createCalls;
+    truncatedTerminal = rejectedReset(truncated);
+    truncatedNoCreate = createCalls === truncatedCreatesBeforeReset;
+
+    var closeAfterReset = keep(new zlib.Gzip({ autoDestroy: false }));
+    closeAfterReset.reset();
+    var closeReplacement = closeAfterReset._streamHandle;
+    closeAfterReset.close();
+    resetCloseReleased = dropped(closeReplacement);
+    resetCloseTerminal = rejectedReset(closeAfterReset);
+
+    var destroyed = keep(new zlib.Gzip({ autoDestroy: false }));
+    destroyed.destroy();
+    destroyTerminal = rejectedReset(destroyed);
+
+    var bufferedFailure = keep(new zlib.Gzip({ autoDestroy: false }));
+    var bufferedFailureHandle = bufferedFailure._streamHandle, bufferedFailureChunks = [];
+    bufferedFailure.on('data', function(chunk) { bufferedFailureChunks.push(chunk); });
+    bufferedFailure.write(Buffer.from('old-'));
+    var trackedCreate = globalThis.__thaw_zlib_stream_create;
+    var sentinel = new Error('create sentinel');
+    try {
+      globalThis.__thaw_zlib_stream_create = function() { throw sentinel; };
+      try { bufferedFailure.reset(); }
+      catch (error) { bufferedCreateFailureIdentity = error === sentinel; }
+    } finally {
+      globalThis.__thaw_zlib_stream_create = trackedCreate;
+    }
+    bufferedCreateFailureKeepsHandle = bufferedFailure._streamHandle === bufferedFailureHandle;
+    await new Promise(function(resolve, reject) {
+      bufferedFailure.on('error', reject);
+      bufferedFailure.end(Buffer.from('new'), resolve);
+    });
+    bufferedCreateFailureText = zlib.gunzipSync(Buffer.concat(bufferedFailureChunks)).toString();
+    bufferedCreateFailureReleased = dropped(bufferedFailureHandle);
+
+    var continuing = keep(new zlib.Deflate({ autoDestroy: false }));
+    var continuingHandle = continuing._streamHandle;
+    var oldOutput = continuing._processChunk(Buffer.from('old-'), zlib.constants.Z_NO_FLUSH);
+    trackedCreate = globalThis.__thaw_zlib_stream_create;
+    try {
+      globalThis.__thaw_zlib_stream_create = function() { throw sentinel; };
+      try { continuing.reset(); }
+      catch (error) { createFailureIdentity = error === sentinel; }
+    } finally {
+      globalThis.__thaw_zlib_stream_create = trackedCreate;
+    }
+    createFailureKeepsHandle = continuing._streamHandle === continuingHandle;
+    var continued = Buffer.concat([
+      oldOutput,
+      continuing._processChunk(Buffer.from('new'), zlib.constants.Z_NO_FLUSH),
+      continuing._processChunk(Buffer.alloc(0), zlib.constants.Z_FINISH)
+    ]);
+    createFailureContinues = zlib.inflateSync(continued).toString();
+    createFailureReleased = dropped(continuingHandle);
+  } finally {
+    globalThis.__thaw_zlib_stream_create = createBase;
+    for (var index = 0; index < streams.length; index++) {
+      try { streams[index].destroy(); } catch (_) {}
+    }
+  }
+  return {
+    bufferedText: bufferedText, bufferedBytes: bufferedBytes, bufferedSame: bufferedSame,
+    bufferedOldGone: bufferedOldGone, bufferedHandleGone: bufferedHandleGone,
+    deflateText: deflateText, deflateOldGone: deflateOldGone, deflateHandleGone: deflateHandleGone,
+    inflateText: inflateText, inflateOldGone: inflateOldGone,
+    autoUnopened: autoUnopened, autoResetNull: autoResetNull, autoNoCreate: autoNoCreate,
+    autoOldGone: autoOldGone, autoText: autoText, autoHandleGone: autoHandleGone, autoTerminal: autoTerminal,
+    fixedTerminal: fixedTerminal, fixedNoCreate: fixedNoCreate,
+    truncatedFailed: truncatedFailed, truncatedErrorCaptured: truncatedErrorCaptured, truncatedReleased: truncatedReleased, truncatedTerminal: truncatedTerminal, truncatedNoCreate: truncatedNoCreate,
+    normalFinalTerminal: normalFinalTerminal, normalFinalReleased: normalFinalReleased,
+    resetCloseReleased: resetCloseReleased, resetCloseTerminal: resetCloseTerminal, destroyTerminal: destroyTerminal,
+    createFailureIdentity: createFailureIdentity, createFailureKeepsHandle: createFailureKeepsHandle,
+    createFailureContinues: createFailureContinues, createFailureReleased: createFailureReleased,
+    bufferedCreateFailureIdentity: bufferedCreateFailureIdentity, bufferedCreateFailureKeepsHandle: bufferedCreateFailureKeepsHandle,
+    bufferedCreateFailureText: bufferedCreateFailureText, bufferedCreateFailureReleased: bufferedCreateFailureReleased
+  };
+};
+"#,
+        )
+        .unwrap();
+        let empty_node_modules = temp_registry("builtin_zlib_reset_node_modules");
+        let (bundle, _, file_count, _) =
+            bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+        let script = format!(
+            "globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseZlibReset = module.exports;"
+        );
+        let source = CString::new(script).unwrap();
+        let loaded = thaw_quickjs::thaw_js_load(source.as_ptr());
+        let result = if loaded == 1 {
+            let result_ptr = thaw_quickjs::thaw_js_call(
+                CString::new("exerciseZlibReset").unwrap().as_ptr(),
+                CString::new("[]").unwrap().as_ptr(),
+            );
+            unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy().into_owned()
+        } else {
+            String::new()
+        };
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&empty_node_modules);
+        assert_eq!(loaded, 1);
+        assert_eq!(file_count, 3);
+        assert_eq!(
+            result,
+            r#"{"bufferedText":"new","bufferedBytes":6,"bufferedSame":true,"bufferedOldGone":true,"bufferedHandleGone":true,"deflateText":"fresh deflate","deflateOldGone":true,"deflateHandleGone":true,"inflateText":"fresh inflate","inflateOldGone":true,"autoUnopened":true,"autoResetNull":true,"autoNoCreate":true,"autoOldGone":true,"autoText":"auto deflate","autoHandleGone":true,"autoTerminal":true,"fixedTerminal":true,"fixedNoCreate":true,"truncatedFailed":true,"truncatedErrorCaptured":true,"truncatedReleased":true,"truncatedTerminal":true,"truncatedNoCreate":true,"normalFinalTerminal":true,"normalFinalReleased":true,"resetCloseReleased":true,"resetCloseTerminal":true,"destroyTerminal":true,"createFailureIdentity":true,"createFailureKeepsHandle":true,"createFailureContinues":"old-new","createFailureReleased":true,"bufferedCreateFailureIdentity":true,"bufferedCreateFailureKeepsHandle":true,"bufferedCreateFailureText":"old-new","bufferedCreateFailureReleased":true}"#
+        );
+    })
+    .join()
+    .unwrap();
+}
+
+#[test]
 fn worker_threads_builtin_exchanges_cloned_messages() {
     use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_worker_threads");
