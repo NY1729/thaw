@@ -183,7 +183,7 @@
     {
       "name": "v8 serialization round trip",
       "expect": "matched",
-      "source": "import { deserialize, serialize } from 'node:v8'; function main(): void { const value = deserialize(serialize({ name: 'thaw', values: [1, 2] })); console.log(JSON.stringify(value)); }"
+      "source": "import { deserialize, serialize } from 'node:v8'; function main(): void { const invalid = new Date(NaN); const value = deserialize(serialize({ valid: new Date(1234), invalid, again: invalid })); console.log(value.valid.getTime(), Number.isNaN(value.invalid.getTime()), value.invalid === value.again); }"
     },
     {
       "name": "crypto random bytes and timing safe equality",
