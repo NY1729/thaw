@@ -97,12 +97,43 @@
     return entry;
   };
   class PerformanceObserver {
-    constructor(callback) { if (typeof callback !== 'function') throw new TypeError('callback must be a function'); this._callback = callback; this._types = new Set(); this._records = []; this._queued = false; }
+    constructor(callback) { if (typeof callback !== 'function') throw new TypeError('callback must be a function'); this._callback = callback; this._types = new Set(); this._records = []; this._queued = false; this._mode = undefined; }
     observe(options = {}) {
-      if (options.type) this._types.add(String(options.type));
-      if (options.entryTypes) for (const type of options.entryTypes) this._types.add(String(type));
+      const type = options.type;
+      const entryTypes = options.entryTypes;
+      const hasType = type !== undefined;
+      const hasEntryTypes = entryTypes !== undefined;
+      if (hasType === hasEntryTypes) throw new TypeError('observe requires exactly one of type or entryTypes');
+      const buffered = options.buffered;
+      if (hasEntryTypes && buffered !== undefined) throw new TypeError('buffered is only valid with type');
+      const mode = hasType ? 'type' : 'entryTypes';
+      if (this._mode !== undefined && this._mode !== mode) {
+        throw new DOMException('Observer registration mode cannot change', 'InvalidModificationError');
+      }
+      let selected;
+      if (hasType) {
+        selected = String(type);
+      } else {
+        selected = [];
+        for (const candidate of entryTypes) selected.push(String(candidate));
+      }
+      this._mode = mode;
+      const supported = PerformanceObserver.supportedEntryTypes;
+      let types;
+      if (hasType) {
+        if (!supported.includes(selected)) return;
+        types = new Set(this._types);
+        types.add(selected);
+      } else {
+        types = new Set(selected.filter(candidate => supported.includes(candidate)));
+        if (types.size === 0) return;
+      }
+      const bufferedRecords = hasType && buffered
+        ? performanceEntries.filter(entry => entry.entryType === selected)
+        : [];
+      this._types = types;
       performanceObservers.add(this);
-      if (options.buffered && options.type) this._records.push(...performanceEntries.filter(entry => entry.entryType === String(options.type)));
+      this._records.push(...bufferedRecords);
       if (this._records.length && !this._queued) {
         this._queued = true;
         queueMicrotask(() => { this._queued = false; const records = this.takeRecords(); if (records.length) this._callback(new PerformanceObserverEntryList(records), this); });
