@@ -2943,15 +2943,91 @@ fn ensure_context() {
     });
 }
 
+thread_local! {
+    static PENDING_NATIVE_GRAPH_RELEASES: RefCell<Vec<PendingNativeGraphRelease>> = const { RefCell::new(Vec::new()) };
+    static NATIVE_GRAPH_RELEASES_OUTSTANDING: Cell<usize> = const { Cell::new(0) };
+    static NATIVE_GRAPH_RELEASES_DRAINING: Cell<bool> = const { Cell::new(false) };
+    static ENGINE_ENTRY_DEPTH: Cell<usize> = const { Cell::new(0) };
+    static REALM_CLOSING: Cell<bool> = const { Cell::new(false) };
+}
+
+struct EngineEntryGuard;
+
+impl EngineEntryGuard {
+    fn enter() -> Self {
+        ENGINE_ENTRY_DEPTH.with(|depth| depth.set(depth.get().saturating_add(1)));
+        Self
+    }
+}
+
+impl Drop for EngineEntryGuard {
+    fn drop(&mut self) {
+        let _ = ENGINE_ENTRY_DEPTH.try_with(|depth| depth.set(depth.get().saturating_sub(1)));
+    }
+}
+
+fn drain_native_graph_releases() {
+    if ENGINE_ENTRY_DEPTH.try_with(Cell::get).unwrap_or(usize::MAX) != 0
+        || ACTIVE_NAPI_CONTEXT.try_with(|active| !active.get().is_null()).unwrap_or(true)
+        || REALM_CLOSING.try_with(Cell::get).unwrap_or(true)
+        || !JS.try_with(|slot| slot.try_borrow_mut().is_ok_and(|slot| slot.is_some())).unwrap_or(false)
+    {
+        return;
+    }
+    drain_native_graph_release_queue();
+}
+
+fn drain_native_graph_release_queue() {
+    let Ok(entered) = NATIVE_GRAPH_RELEASES_DRAINING.try_with(|draining| {
+        if draining.replace(true) { false } else { true }
+    }) else { return; };
+    if !entered { return; }
+    struct DrainGuard;
+    impl Drop for DrainGuard {
+        fn drop(&mut self) { let _ = NATIVE_GRAPH_RELEASES_DRAINING.try_with(|draining| draining.set(false)); }
+    }
+    let _guard = DrainGuard;
+    loop {
+        let Some(batch) = PENDING_NATIVE_GRAPH_RELEASES.try_with(|pending| {
+            pending.try_borrow_mut().ok().map(|mut pending| std::mem::take(&mut *pending))
+        }).ok().flatten() else { break; };
+        if batch.is_empty() { break; }
+        let mut iter = batch.into_iter();
+        while let Some(release) = iter.next() {
+            let success = release.callback.is_some_and(|callback| callback(release.token) != 0);
+            if success {
+                let _ = NATIVE_GRAPH_RELEASES_OUTSTANDING.try_with(|count| count.set(count.get().saturating_sub(1)));
+                continue;
+            }
+            let _ = PENDING_NATIVE_GRAPH_RELEASES.try_with(|pending| {
+                let Ok(mut pending) = pending.try_borrow_mut() else { return; };
+                pending.push(release);
+                pending.extend(iter);
+            });
+            return;
+        }
+    }
+}
+
+fn native_graph_releases_pending() -> bool {
+    NATIVE_GRAPH_RELEASES_OUTSTANDING.try_with(|count| count.get() != 0).unwrap_or(true)
+        || PENDING_NATIVE_GRAPH_RELEASES.try_with(|pending| pending.try_borrow().map_or(true, |pending| !pending.is_empty()))
+            .unwrap_or(true)
+}
+
 fn with_context<R>(f: impl FnOnce(Ctx<'_>) -> R) -> R {
-    ensure_context();
-    JS.with(|cell| {
-        cell.borrow()
-            .as_ref()
-            .expect("QuickJS context was initialized")
-            .1
-            .with(f)
-    })
+    let outer = ENGINE_ENTRY_DEPTH.with(|depth| depth.get() == 0);
+    {
+        let _initialization_entry = EngineEntryGuard::enter();
+        ensure_context();
+    }
+    if outer { drain_native_graph_releases(); }
+    let entry = EngineEntryGuard::enter();
+    let result = JS.with(|cell| cell.borrow().as_ref()
+        .expect("QuickJS context was initialized").1.with(f));
+    drop(entry);
+    if outer { drain_native_graph_releases(); }
+    result
 }
 
 /// Like [`with_context`], but reuses the currently-active `Ctx` (see
