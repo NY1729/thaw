@@ -1793,3 +1793,81 @@ fn embedded_compat_and_package_bundle_names_are_logical_sources() {
         "package JavaScript could not be parsed for specialization"
     );
 }
+
+#[test]
+fn text_encoding_named_util_and_globals_compile_and_run() {
+    let directory = std::env::temp_dir().join(format!(
+        "thaw-cli-text-encoding-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&directory).unwrap();
+    let input = directory.join("main.ts");
+    let output = directory.join("app");
+    std::fs::write(
+        &input,
+        r#"import { TextEncoder, TextDecoder } from 'node:util';
+
+function main(): void {
+  const encoder = new TextEncoder();
+  const destination = new Uint8Array(5);
+  destination.set = (): void => {};
+  const into = encoder.encodeInto('A😀B', destination);
+  const written = Array.from(new Uint8Array(destination.buffer));
+
+  let invalidInput = '';
+  try {
+    new TextDecoder().decode({ buffer: new ArrayBuffer(1), byteOffset: 0, byteLength: 1 } as any);
+  } catch (error: any) {
+    invalidInput = error.name;
+  }
+
+  const decoder = new TextDecoder('utf-8', { fatal: true });
+  const first = decoder.decode(new Uint8Array([65]), { stream: true });
+  let fatal = false;
+  try {
+    decoder.decode(new Uint8Array([255]));
+  } catch (error: any) {
+    fatal = error.name === 'TypeError';
+  }
+  const fresh = decoder.decode(new Uint8Array([239, 187, 191, 66]));
+
+  const globalEncoder = new globalThis.TextEncoder();
+  const globalDecoder = new globalThis.TextDecoder();
+  console.log(JSON.stringify([
+    TextEncoder === globalThis.TextEncoder,
+    TextDecoder === globalThis.TextDecoder,
+    into,
+    written,
+    invalidInput,
+    [first, fatal, fresh],
+    globalDecoder.decode(globalEncoder.encode('web'))
+  ]));
+}
+
+// Expected stdout:
+// [true,true,{"read":3,"written":5},[65,240,159,152,128],"TypeError",["A",true,"B"],"web"]
+"#,
+    )
+    .unwrap();
+    build(
+        &input,
+        &output,
+        &[],
+        &[],
+        &[],
+        &directory.join("registry"),
+        &[],
+    )
+    .unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "[true,true,{\"read\":3,\"written\":5},[65,240,159,152,128],\"TypeError\",[\"A\",true,\"B\"],\"web\"]\n"
+    );
+    let _ = std::fs::remove_dir_all(directory);
+}
