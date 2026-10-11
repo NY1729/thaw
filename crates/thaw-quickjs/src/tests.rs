@@ -1407,6 +1407,65 @@ fn structured_clone_preserves_shared_view_backing_buffer() {
 }
 
 #[test]
+fn structured_clone_resets_regexp_last_index() {
+    std::thread::spawn(|| {
+        assert_eq!(
+            load(
+                r#"
+      function regexpCloneIndexCases() {
+        const global = /a/g;
+        global.lastIndex = 2;
+        const sticky = /b/y;
+        sticky.lastIndex = 3;
+        const control = /c/i;
+        const source = { global, sticky, again: global, control };
+        const globalCopy = structuredClone(source);
+        const wire = __thaw_worker_encode(source);
+        const encoded = JSON.parse(wire);
+        const regexpNodes = encoded.nodes.filter(node => node.t === 'RegExp');
+        const workerCopy = __thaw_worker_decode(wire);
+        const legacyCopy = __thaw_worker_decode(JSON.stringify({
+          root: { r: 0 }, nodes: [{ t: 'RegExp', s: 'legacy', f: 'g', i: 7 }]
+        }));
+        const beforeSearch = [
+          globalCopy.global.lastIndex === 0 && globalCopy.sticky.lastIndex === 0,
+          globalCopy.again === globalCopy.global && globalCopy.global !== global
+            && globalCopy.sticky !== sticky,
+          globalCopy.global.source === global.source && globalCopy.global.flags === global.flags,
+          globalCopy.control.source === control.source && globalCopy.control.flags === control.flags
+            && globalCopy.control.lastIndex === 0,
+          workerCopy.global.lastIndex === 0 && workerCopy.sticky.lastIndex === 0,
+          workerCopy.again === workerCopy.global && workerCopy.global !== global
+            && workerCopy.sticky !== sticky,
+          workerCopy.global.source === global.source && workerCopy.global.flags === global.flags,
+          workerCopy.control.source === control.source && workerCopy.control.flags === control.flags
+            && workerCopy.control.lastIndex === 0,
+          regexpNodes.length === 3 && regexpNodes.every(node => !Object.prototype.hasOwnProperty.call(node, 'i')),
+          legacyCopy instanceof RegExp && legacyCopy.source === 'legacy'
+            && legacyCopy.flags === 'g' && legacyCopy.lastIndex === 0
+        ];
+        const globalMatch = globalCopy.global.exec('aba');
+        const stickyMatch = globalCopy.sticky.exec('bbb');
+        const workerGlobalMatch = workerCopy.global.exec('aba');
+        const workerStickyMatch = workerCopy.sticky.exec('bbb');
+        return [beforeSearch.every(Boolean), globalMatch.index, stickyMatch.index,
+                workerGlobalMatch.index, workerStickyMatch.index,
+                global.lastIndex, sticky.lastIndex];
+      }
+    "#
+            ),
+            1
+        );
+        assert_eq!(
+            call("regexpCloneIndexCases", "[]"),
+            "[true,0,0,0,0,2,3]"
+        );
+    })
+    .join()
+    .unwrap();
+}
+
+#[test]
 fn worker_encoder_rejects_symbol_values() {
     std::thread::spawn(|| {
         assert_eq!(
