@@ -1182,7 +1182,7 @@ impl<'a> FnLowerer<'a> {
                             for (index, element) in elements.iter().enumerate() {
                                 let HirType::Array(inner) = element else { unreachable!("checked above") };
                                 let member_callback_type = if sparse_callback { Self::array_read_type(inner) } else { inner.as_ref().clone() };
-                                let mapped = self.lower_array_map(
+                                let mapped = self.lower_array_flat_map(
                                     HirExpr::UnionValue(Box::new(bound.clone()), index, elements.clone()),
                                     element.clone(), inner.as_ref().clone(), member_callback_type,
                                     callback.clone(), this_arg.clone(),
@@ -1251,7 +1251,7 @@ impl<'a> FnLowerer<'a> {
                             None,
                             "array mapper",
                         )?;
-                        let mapped = self.lower_array_map(
+                        let mapped = self.lower_array_flat_map(
                             HirExpr::Var(source_name.clone()),
                             array_type.clone(),
                             element_type,
@@ -1279,7 +1279,7 @@ impl<'a> FnLowerer<'a> {
                         .get(1)
                         .map(|argument| self.lower_expr(&argument.expr))
                         .transpose()?;
-                    let mapped = self.lower_array_map(
+                    let mapped = self.lower_array_flat_map(
                         receiver,
                         array_type,
                         element_type,
