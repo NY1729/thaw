@@ -193,6 +193,129 @@ fn gzip_decompression_reads_concatenated_members_through_installed_bridge() {
     .unwrap();
 }
 
+fn assert_zlib_stream_sink_released(stream: &mut WebZlibStream) {
+    let sink = match &mut stream.writer {
+        WebZlibWriter::GzipEncoder(writer) => writer.get_mut(),
+        WebZlibWriter::ZlibEncoder(writer) => writer.get_mut(),
+        WebZlibWriter::DeflateEncoder(writer) => writer.get_mut(),
+        WebZlibWriter::GzipDecoder(writer) => writer.get_mut(),
+        WebZlibWriter::ZlibDecoder(writer) => writer.get_mut(),
+        WebZlibWriter::DeflateDecoder(writer) => writer.get_mut(),
+        #[cfg(feature = "brotli")]
+        WebZlibWriter::BrotliEncoder(writer) => writer.get_mut(),
+        #[cfg(feature = "brotli")]
+        WebZlibWriter::BrotliDecoder(writer) => writer.get_mut(),
+    };
+    assert!(sink.is_empty());
+    assert_eq!(sink.capacity(), 0);
+}
+
+#[test]
+fn streaming_zlib_takes_flushed_output_and_preserves_codec_state() {
+    let mut formats = vec!["gzip", "deflate", "deflateRaw"];
+    #[cfg(feature = "brotli")]
+    formats.push("brotli");
+    let payload = b"first chunksecond chunkfinish tail";
+
+    for format in formats {
+        let mut encoder = WebZlibStream::new("compress", format).unwrap();
+        let mut encoded = Vec::new();
+        for input in [&b""[..], &b"first chunk"[..], &b"second chunk"[..]] {
+            encoded.extend(encoder.write_and_flush(input).unwrap());
+            assert_zlib_stream_sink_released(&mut encoder);
+        }
+        encoded.extend(encoder.finish(b"finish tail").unwrap());
+
+        let first = encoded.len() / 3;
+        let second = 2 * encoded.len() / 3;
+        let mut decoder = WebZlibStream::new("decompress", format).unwrap();
+        let mut decoded = Vec::new();
+        for input in [&b""[..], &encoded[..first], &encoded[first..second]] {
+            decoded.extend(decoder.write_and_flush(input).unwrap());
+            assert_zlib_stream_sink_released(&mut decoder);
+        }
+        decoded.extend(decoder.finish(&encoded[second..]).unwrap());
+        assert_eq!(decoded, payload, "{format}");
+
+        let mut empty = WebZlibStream::new("compress", format).unwrap();
+        let mut empty_encoded = empty.write_and_flush(&[]).unwrap();
+        assert_zlib_stream_sink_released(&mut empty);
+        empty_encoded.extend(empty.finish(&[]).unwrap());
+        assert!(decompress_bytes(format, &empty_encoded).unwrap().is_empty());
+    }
+
+    let mut gzip = compress_bytes("gzip", payload).unwrap();
+    let crc_byte = gzip.len() - 8;
+    gzip[crc_byte] ^= 1;
+    let mut decoder = WebZlibStream::new("decompress", "gzip").unwrap();
+    let split = gzip.len() - 8;
+    let first = decoder.write_and_flush(&gzip[..split]);
+    let invalid = match first {
+        Ok(_) => decoder.finish(&gzip[split..]),
+        Err(error) => Err(error),
+    };
+    assert!(invalid.is_err());
+}
+
+#[test]
+fn web_compression_streams_roundtrip_while_readers_consume() {
+    std::thread::spawn(|| {
+        assert_eq!(
+            load(
+                r#"
+      async function webCompressionStreamRoundtrip() {
+        const compressedStream = new CompressionStream('gzip');
+        const compressedReader = compressedStream.readable.getReader();
+        const compressedWriter = compressedStream.writable.getWriter();
+        const encoded = [];
+        const collectCompressed = (async () => {
+          while (true) {
+            const { value, done } = await compressedReader.read();
+            if (done) break;
+            encoded.push(...value);
+          }
+        })();
+        await compressedWriter.write(new Uint8Array());
+        await compressedWriter.write(new Uint8Array([111, 110, 101]));
+        await compressedWriter.write(new Uint8Array([116, 119, 111]));
+        await compressedWriter.close();
+        await collectCompressed;
+        compressedReader.releaseLock();
+        compressedWriter.releaseLock();
+
+        const decompressedStream = new DecompressionStream('gzip');
+        const decompressedReader = decompressedStream.readable.getReader();
+        const decompressedWriter = decompressedStream.writable.getWriter();
+        const decoded = [];
+        const collectDecoded = (async () => {
+          while (true) {
+            const { value, done } = await decompressedReader.read();
+            if (done) break;
+            decoded.push(...value);
+          }
+        })();
+        const first = Math.floor(encoded.length / 2);
+        await decompressedWriter.write(new Uint8Array(encoded.slice(0, first)));
+        await decompressedWriter.write(new Uint8Array(encoded.slice(first)));
+        await decompressedWriter.close();
+        await collectDecoded;
+        decompressedReader.releaseLock();
+        decompressedWriter.releaseLock();
+        return [encoded.length > 0, String.fromCharCode(...decoded) === 'onetwo', decoded.length === 6];
+      }
+    "#
+            ),
+            1
+        );
+        assert_eq!(
+            call("webCompressionStreamRoundtrip", "[]"),
+            "[true,true,true]"
+        );
+    })
+    .join()
+    .unwrap();
+}
+
 #[test]
 fn loads_and_calls_a_simple_function() {
     assert_eq!(load("function add(a, b) { return a + b; }"), 1);
