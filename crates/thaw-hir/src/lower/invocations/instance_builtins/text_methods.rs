@@ -178,7 +178,19 @@ impl<'a> FnLowerer<'a> {
                         return Err("native `.normalize()` expects zero or one argument".into());
                     }
                     let form = match arguments.first() {
-                        Some(argument) => self.coerce_primitive_to_string(argument.clone())?,
+                        Some(argument) => {
+                            let argument_type = self.infer_expr_type(argument)?;
+                            let missing = self.number_format_is_undefined(
+                                argument.clone(),
+                                &argument_type,
+                            );
+                            HirExpr::Conditional(
+                                Box::new(missing),
+                                Box::new(HirExpr::Lit(HirLit::Str("NFC".into()))),
+                                Box::new(self.coerce_primitive_to_string(argument.clone())?),
+                                HirType::Str,
+                            )
+                        }
                         None => HirExpr::Lit(HirLit::Str("NFC".into())),
                     };
                     let receiver_name =
