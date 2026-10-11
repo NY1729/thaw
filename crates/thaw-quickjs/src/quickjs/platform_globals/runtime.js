@@ -2652,7 +2652,7 @@
     const listeners = (processListeners.get(name) || []).slice();
     for (const entry of listeners) {
       if (entry.once) processOff(name, entry.listener);
-      entry.listener(...args);
+      thawDateApply(entry.listener, globalThis.process, args);
     }
     return listeners.length !== 0;
   };
