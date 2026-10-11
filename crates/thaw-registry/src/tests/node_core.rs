@@ -1849,9 +1849,10 @@ module.exports = async function() {
     setImmediate: globalThis.setImmediate, clearImmediate: globalThis.clearImmediate,
     setInterval: globalThis.setInterval, clearInterval: globalThis.clearInterval
   };
-  var records = [], cleared = [];
+  var records = [], cleared = [], failNextInterval = false, iterators = [], signals = [];
   function wrapSchedule(name) {
     globalThis[name] = function(callback) {
+      if (name === 'setInterval' && failNextInterval) { failNextInterval = false; throw new Error('start failed'); }
       var args = Array.prototype.slice.call(arguments);
       var handle = original[name].apply(globalThis, args);
       records.push({ name: name, callback: callback, handle: handle });
@@ -1868,6 +1869,40 @@ module.exports = async function() {
     for (var i = records.length - 1; i >= 0; i--) if (records[i].name === name) return records[i];
     throw new Error('missing timer ' + name);
   }
+  function count(name) { return records.filter(function(item) { return item.name === name; }).length; }
+  function clearCount(handle) { return cleared.filter(function(item) { return item === handle; }).length; }
+  function trackedSignal(aborted, reason) {
+    var controller = new AbortController(), signal = controller.signal;
+    var nativeAdd = signal.addEventListener, nativeRemove = signal.removeEventListener;
+    var addDescriptor = Object.getOwnPropertyDescriptor(signal, 'addEventListener');
+    var removeDescriptor = Object.getOwnPropertyDescriptor(signal, 'removeEventListener');
+    var listeners = [], adds = 0, removes = 0, sameListener = true;
+    signal.addEventListener = function(type, listener, options) {
+      if (type === 'abort') { adds++; listeners.push(listener); }
+      return nativeAdd.call(signal, type, listener, options);
+    };
+    signal.removeEventListener = function(type, listener, options) {
+      if (type === 'abort') { removes++; if (listeners.indexOf(listener) < 0) sameListener = false; }
+      return nativeRemove.call(signal, type, listener, options);
+    };
+    var tracked = {
+      signal: signal,
+      abort: function(value) { controller.abort(value); },
+      adds: function() { return adds; }, removes: function() { return removes; },
+      sameListener: function() { return sameListener; },
+      restore: function() {
+        if (addDescriptor) Object.defineProperty(signal, 'addEventListener', addDescriptor);
+        else delete signal.addEventListener;
+        if (removeDescriptor) Object.defineProperty(signal, 'removeEventListener', removeDescriptor);
+        else delete signal.removeEventListener;
+      }
+    };
+    signals.push(tracked);
+    if (aborted) controller.abort(reason);
+    return tracked;
+  }
+  function trackIterator(iterator) { iterators.push(iterator); return iterator; }
+  function check(value, message) { if (!value) throw new Error(message); }
   try {
     wrapSchedule('setTimeout'); wrapClear('clearTimeout');
     wrapSchedule('setImmediate'); wrapClear('clearImmediate');
@@ -1883,13 +1918,40 @@ module.exports = async function() {
     globalThis.clearImmediate(immediateRecord.handle); immediateRecord.callback();
     var immediateValue = await immediatePromise;
 
-    var interval = promises.setInterval(60000, 'tick', { ref: false });
+    var intervalCountBefore = count('setInterval'), interval = trackIterator(promises.setInterval(60000, 'tick', { ref: false }));
+    var lazyInterval = count('setInterval') === intervalCountBefore;
+    var firstPromise = interval.next(), secondPromise = interval.next();
+    var deliveryOrder = [];
+    firstPromise.then(function() { deliveryOrder.push(1); });
+    secondPromise.then(function() { deliveryOrder.push(2); });
     var intervalRecord = record('setInterval'), intervalUnrefed = intervalRecord.handle.hasRef() === false;
-    var firstPromise = interval.next(); intervalRecord.callback(); var first = await firstPromise;
-    var secondPromise = interval.next(); intervalRecord.callback(); var second = await secondPromise;
+    check(lazyInterval && count('setInterval') === intervalCountBefore + 1, 'lazy single interval allocation');
+    intervalRecord.callback(); var first = await firstPromise;
+    intervalRecord.callback(); var second = await secondPromise;
     var stillUnrefed = intervalRecord.handle.hasRef() === false;
-    var pending = interval.next(), ended = await interval.return(), pendingResult = await pending;
+    check(deliveryOrder.join(',') === '1,2', 'concurrent interval waiters resolve in order');
+    intervalRecord.callback();
+    var ended = await interval.return();
+    var endedAgain = await interval.return();
+    var pendingResult = await interval.next(), pendingAlsoResult = await interval.next();
     var intervalCleared = cleared.indexOf(intervalRecord.handle) >= 0;
+    intervalRecord.callback();
+    var afterReturn = await interval.next(), afterStaleTick = await interval.next();
+    check(endedAgain.done && pendingResult.done && pendingAlsoResult.done && afterReturn.done && afterStaleTick.done &&
+      clearCount(intervalRecord.handle) === 1 && count('setInterval') === intervalCountBefore + 1,
+      'return clears queue, settles waiters once, and blocks stale ticks');
+
+    var unstartedCount = count('setInterval'), unstartedSignal = trackedSignal(false);
+    var unstarted = trackIterator(promises.setInterval(60000, 'unused', { signal: unstartedSignal.signal }));
+    var unstartedEnd = await unstarted.return(), unstartedNext = await unstarted.next();
+    check(unstartedEnd.done && unstartedNext.done && count('setInterval') === unstartedCount &&
+      unstartedSignal.adds() === 0 && unstartedSignal.removes() === 0,
+      'return before next does not allocate or attach listener');
+    var waitingInterval = trackIterator(promises.setInterval(60000, 'waiting'));
+    var waitingFirst = waitingInterval.next(), waitingSecond = waitingInterval.next();
+    var waitingRecord = record('setInterval'), waitingEnd = await waitingInterval.return();
+    check((await waitingFirst).done && (await waitingSecond).done && waitingEnd.done &&
+      clearCount(waitingRecord.handle) === 1, 'return settles all concurrent pending next calls');
 
     var defaultPromise = promises.setTimeout(60000, 'default');
     var defaultRecord = record('setTimeout'), defaultRefed = defaultRecord.handle.hasRef() === true;
@@ -1899,12 +1961,96 @@ module.exports = async function() {
     var trueRecord = record('setImmediate'), trueRefed = trueRecord.handle.hasRef() === true;
     globalThis.clearImmediate(trueRecord.handle); trueRecord.callback();
     var trueValue = await truePromise;
-    var defaultInterval = promises.setInterval(60000, 'default interval');
+    var defaultIntervalCount = count('setInterval'), defaultInterval = trackIterator(promises.setInterval(60000, 'default interval'));
+    var defaultStillLazy = count('setInterval') === defaultIntervalCount, defaultPending = defaultInterval.next();
     var defaultIntervalRecord = record('setInterval'), defaultIntervalRefed = defaultIntervalRecord.handle.hasRef() === true;
-    var defaultIntervalEnd = await defaultInterval.return();
-    var trueInterval = promises.setInterval(60000, 'true interval', { ref: true });
+    var defaultIntervalEnd = await defaultInterval.return(), defaultPendingResult = await defaultPending;
+    check(defaultStillLazy && defaultPendingResult.done && clearCount(defaultIntervalRecord.handle) === 1,
+      'default interval starts on first next and return settles waiter');
+    var trueIntervalCount = count('setInterval'), trueInterval = trackIterator(promises.setInterval(60000, 'true interval', { ref: true }));
+    var trueStillLazy = count('setInterval') === trueIntervalCount, truePending = trueInterval.next();
     var trueIntervalRecord = record('setInterval'), trueIntervalRefed = trueIntervalRecord.handle.hasRef() === true;
-    var trueIntervalEnd = await trueInterval.return();
+    var trueIntervalEnd = await trueInterval.return(), truePendingResult = await truePending;
+    check(trueStillLazy && truePendingResult.done && clearCount(trueIntervalRecord.handle) === 1,
+      'true interval starts on first next and return settles waiter');
+
+    var preAborted = trackedSignal(true, 'pre'), preCount = count('setInterval');
+    var preIterator = trackIterator(promises.setInterval(60000, 'unused', { signal: preAborted.signal }));
+    var preError = await preIterator.next().then(function() { return null; }, function(error) { return error; });
+    check(preError === 'pre' && preAborted.adds() === 0 && count('setInterval') === preCount,
+      'pre-aborted first next allocates no timer or listener');
+    var betweenSignal = trackedSignal(false), betweenIterator = trackIterator(promises.setInterval(60000, 'unused', { signal: betweenSignal.signal }));
+    betweenSignal.abort('between');
+    var betweenCount = count('setInterval');
+    var betweenError = await betweenIterator.next().then(function() { return null; }, function(error) { return error; });
+    check(betweenError === 'between' && betweenSignal.adds() === 0 && count('setInterval') === betweenCount,
+      'abort between construction and first next allocates nothing');
+
+    var returnSignal = trackedSignal(false), returnIterator = trackIterator(promises.setInterval(60000, 'return', { signal: returnSignal.signal }));
+    var returnPending = returnIterator.next(), returnSignalRecord = record('setInterval');
+    var returnDone = await returnIterator.return(), returnPendingValue = await returnPending;
+    check(returnDone.done && returnPendingValue.done && returnSignal.adds() === 1 &&
+      returnSignal.removes() === 1 && returnSignal.sameListener() && clearCount(returnSignalRecord.handle) === 1,
+      'normal return removes the named abort listener');
+
+    var liveCount = count('setInterval'), liveSignal = trackedSignal(false);
+    var liveIterator = trackIterator(promises.setInterval(60000, 'abort', { signal: liveSignal.signal }));
+    var livePending = liveIterator.next(), liveRecord = record('setInterval');
+    liveSignal.abort('aborted');
+    var liveError = await livePending.then(function() { return null; }, function(error) { return error; });
+    var afterAbortError = await liveIterator.next().then(function() { return null; }, function(error) { return error; });
+    check(liveError === 'aborted' && afterAbortError === 'aborted' && liveSignal.adds() === 1 &&
+      liveSignal.removes() === 2 && liveSignal.sameListener() && clearCount(liveRecord.handle) === 1 &&
+      count('setInterval') === liveCount + 1,
+      'abort rejects waiters, clears timer and removes listener');
+
+    var bufferedSignal = trackedSignal(false), bufferedIterator = trackIterator(promises.setInterval(60000, 'buffered', { signal: bufferedSignal.signal }));
+    var bufferedPending = bufferedIterator.next(), bufferedRecord = record('setInterval');
+    bufferedRecord.callback(); await bufferedPending;
+    bufferedRecord.callback();
+    bufferedSignal.abort('buffered abort');
+    var discardedBufferError = await bufferedIterator.next().then(function() { return null; }, function(error) { return error; });
+    check(discardedBufferError === 'buffered abort' && bufferedSignal.removes() === 2 &&
+      bufferedSignal.sameListener() && clearCount(bufferedRecord.handle) === 1, 'abort discards buffered values');
+
+    var failureSignal = trackedSignal(false), failureIterator = trackIterator(promises.setInterval(60000, 'failure', { signal: failureSignal.signal }));
+    var failureCount = count('setInterval'); failNextInterval = true;
+    var startupError = await failureIterator.next().then(function() { return null; }, function(error) { return error.message; });
+    var failureRetry = await failureIterator.next().then(function() { return null; }, function(error) { return error.message; });
+    check(startupError === 'start failed' && count('setInterval') === failureCount &&
+      failureRetry === 'start failed' && failureSignal.adds() === 1 && failureSignal.removes() === 1 &&
+      failureSignal.sameListener(),
+      'startup failure removes registered listener without leaking timer');
+
+    var coercionAbortSignal = trackedSignal(false), coercionAbortIterator, abortCoercionRan = false;
+    var abortDelay = { valueOf: function() { if (!abortCoercionRan) { abortCoercionRan = true; coercionAbortSignal.abort('during delay'); } return 60000; } };
+    coercionAbortIterator = trackIterator(promises.setInterval(abortDelay, 'unused', { signal: coercionAbortSignal.signal }));
+    var abortCoercionCount = count('setInterval');
+    var coercionAbortPending = coercionAbortIterator.next();
+    var coercionAbortRecord = record('setInterval');
+    var coercionAbortResult = await coercionAbortPending.then(function() { return null; }, function(error) { return error; });
+    var coercionAbortRetry = await coercionAbortIterator.next().then(function() { return null; }, function(error) { return error; });
+    check(abortCoercionRan && coercionAbortResult === 'during delay' && coercionAbortRetry === 'during delay' &&
+      count('setInterval') === abortCoercionCount + 1 && clearCount(coercionAbortRecord.handle) === 1 &&
+      coercionAbortSignal.adds() === 1 && coercionAbortSignal.removes() === 2,
+      'abort during delay coercion clears the subsequently created handle');
+
+    var coercionReturnSignal = trackedSignal(false), coercionReturnIterator, returnCoercionRan = false;
+    var reentrantReturn;
+    var returnDelay = { valueOf: function() {
+      if (!returnCoercionRan) { returnCoercionRan = true; reentrantReturn = coercionReturnIterator.return(); }
+      return 60000;
+    } };
+    coercionReturnIterator = trackIterator(promises.setInterval(returnDelay, 'unused', { signal: coercionReturnSignal.signal }));
+    var returnCoercionCount = count('setInterval'), coercionReturnPending = coercionReturnIterator.next();
+    var coercionReturnRecord = record('setInterval'), coercionReturnResult = await coercionReturnPending;
+    var reentrantReturnResult = await reentrantReturn;
+    var coercionReturnRetry = await coercionReturnIterator.next();
+    check(returnCoercionRan && coercionReturnResult.done && reentrantReturnResult.done &&
+      coercionReturnRetry.done && count('setInterval') === returnCoercionCount + 1 &&
+      clearCount(coercionReturnRecord.handle) === 1 &&
+      coercionReturnSignal.adds() === 1 && coercionReturnSignal.removes() === 1,
+      'return during delay coercion clears the subsequently created handle');
 
     var beforeThrow = records.length, getterReads = 0, getterOrder = [], getterError;
     try {
@@ -1931,6 +2077,8 @@ module.exports = async function() {
       [getterReads, getterOrder.join(','), getterError, noAllocationOnThrow, noAllocationWhenAborted, abortReason]
     ];
   } finally {
+    signals.forEach(function(signal) { try { signal.abort('fixture cleanup'); } catch (_) {} });
+    iterators.forEach(function(iterator) { try { iterator.return(); } catch (_) {} });
     globalThis.setTimeout = original.setTimeout; globalThis.clearTimeout = original.clearTimeout;
     globalThis.setImmediate = original.setImmediate; globalThis.clearImmediate = original.clearImmediate;
     globalThis.setInterval = original.setInterval; globalThis.clearInterval = original.clearInterval;
@@ -1939,6 +2087,7 @@ module.exports = async function() {
       else if (record.name === 'setImmediate') original.clearImmediate.call(globalThis, record.handle);
       else original.clearInterval.call(globalThis, record.handle);
     });
+    signals.forEach(function(signal) { signal.restore(); });
   }
 };
 "#,
