@@ -1069,9 +1069,8 @@ fn finish_root_test_hooks_at_idle(ctx: &Ctx<'_>) -> rquickjs::Result<bool> {
     Ok(true)
 }
 
-#[no_mangle]
-pub extern "C" fn thaw_js_run_event_loop() -> i32 {
-    with_context(|ctx| loop {
+fn run_event_loop_turn() -> std::ops::ControlFlow<i32> {
+    with_context(|ctx| {
         dispatch_pending_process_signal(&ctx);
         if let Ok(poll) = ctx
             .globals()
@@ -1121,7 +1120,7 @@ pub extern "C" fn thaw_js_run_event_loop() -> i32 {
                         error.to_string()
                     };
                     eprintln!("{message}");
-                    return 1;
+                    return std::ops::ControlFlow::Break(1);
                 }
             }
             let ran_job = ctx.execute_pending_job();
@@ -1138,7 +1137,7 @@ pub extern "C" fn thaw_js_run_event_loop() -> i32 {
                 }
                 if result.value == 0 || listener_failed {
                     eprintln!("{message}");
-                    return 1;
+                    return std::ops::ControlFlow::Break(1);
                 }
                 drained_any = true;
                 continue;
@@ -1150,37 +1149,37 @@ pub extern "C" fn thaw_js_run_event_loop() -> i32 {
             }
         }
         if drained_any {
-            continue;
+            return std::ops::ControlFlow::Continue(());
         }
         if let Some(code) = report_unhandled_js_rejections(&ctx) {
-            return code;
+            return std::ops::ControlFlow::Break(code);
         }
         let Ok(next_delay) = ctx.globals().get::<_, Function>("__thaw_next_timer_delay") else {
-            return process_exit_code(&ctx);
+            return std::ops::ControlFlow::Break(process_exit_code(&ctx));
         };
         let Ok(delay) = next_delay.call::<_, i64>(()) else {
-            return process_exit_code(&ctx);
+            return std::ops::ControlFlow::Break(process_exit_code(&ctx));
         };
         if delay < 0 {
             if platform_activity_pending(&ctx) {
                 std::thread::sleep(Duration::from_millis(1));
-                continue;
+                return std::ops::ControlFlow::Continue(());
             }
             match finish_root_test_hooks_at_idle(&ctx) {
-                Ok(true) => continue,
+                Ok(true) => return std::ops::ControlFlow::Continue(()),
                 Ok(false) => {}
                 Err(error) => {
                     eprintln!("root test finalization failed: {error}");
-                    return 1;
+                    return std::ops::ControlFlow::Break(1);
                 }
             }
-            return process_exit_code(&ctx);
+            return std::ops::ControlFlow::Break(process_exit_code(&ctx));
         }
         if delay > 0 {
             std::thread::sleep(Duration::from_millis(delay as u64));
         }
         let Ok(run_due) = ctx.globals().get::<_, Function>("__thaw_run_due_timers") else {
-            return process_exit_code(&ctx);
+            return std::ops::ControlFlow::Break(process_exit_code(&ctx));
         };
         if let Err(error) = run_due.call::<_, usize>(()) {
             let message = if matches!(error, rquickjs::Error::Exception) {
@@ -1189,9 +1188,21 @@ pub extern "C" fn thaw_js_run_event_loop() -> i32 {
                 error.to_string()
             };
             eprintln!("{message}");
-            return 1;
+            return std::ops::ControlFlow::Break(1);
         }
+
+        std::ops::ControlFlow::Continue(())
     })
+}
+
+#[no_mangle]
+pub extern "C" fn thaw_js_run_event_loop() -> i32 {
+    loop {
+        match run_event_loop_turn() {
+            std::ops::ControlFlow::Continue(()) => {}
+            std::ops::ControlFlow::Break(code) => return code,
+        }
+    }
 }
 
 /// Run one ordinary QuickJS collection turn while the context and any N-API

@@ -198,6 +198,103 @@ fn standalone_event_loop_runs_pending_timers() {
 }
 
 #[test]
+fn event_loop_turn_releases_context_and_preserves_queued_work() {
+    std::thread::spawn(|| {
+        extern "C" fn resume_native(_frame: *mut u8, _result: *const u8) {
+            let result = thaw_js_call_result(c"recordNativeContinuation".as_ptr(), c"[]".as_ptr());
+            unsafe {
+                if !result.value.is_null() {
+                    thaw_arena::destroy_string(result.value.cast_mut());
+                }
+                if !result.error.is_null() {
+                    thaw_arena::destroy_string(result.error.cast_mut());
+                }
+            }
+        }
+
+        fn assert_turn_boundary() {
+            let context_available = JS
+                .try_with(|cell| {
+                    let Ok(borrow) = cell.try_borrow_mut() else {
+                        return false;
+                    };
+                    drop(borrow);
+                    true
+                })
+                .unwrap_or(false);
+            assert!(context_available, "QuickJS TLS RefCell is unborrowed between turns");
+            assert!(
+                ACTIVE_NAPI_CONTEXT.with(|active| active.get().is_null()),
+                "the reentrant N-API context guard is cleared between turns"
+            );
+        }
+
+        let promise = thaw_runtime::thaw_promise_new();
+        assert_eq!(
+            unsafe { thaw_runtime::thaw_promise_subscribe(promise, resume_native, std::ptr::null_mut()) },
+            1
+        );
+        with_context(|ctx| {
+            let resolve = Function::new(ctx.clone(), move || {
+                thaw_runtime::thaw_promise_resolve(promise, std::ptr::dangling()) != 0
+            })
+            .expect("install native promise resolver");
+            ctx.globals()
+                .set("resolveNativeTurnPromise", resolve)
+                .expect("publish native promise resolver");
+        });
+        assert_eq!(
+            load(
+                "globalThis.turnOrder = []; \
+                 globalThis.turnBoundaryToken = {}; \
+                 globalThis.recordNativeContinuation = () => turnOrder.push('native'); \
+                 process.nextTick(() => { turnOrder.push('tick'); resolveNativeTurnPromise(); }); \
+                 Promise.resolve().then(() => turnOrder.push('microtask')); \
+                 setTimeout(() => turnOrder.push('timer'), 0);"
+            ),
+            1
+        );
+
+        let handle = thaw_js_get_global(c"turnBoundaryToken".as_ptr());
+        assert_ne!(handle, 0);
+        let first = run_event_loop_turn();
+        assert!(matches!(first, std::ops::ControlFlow::Continue(())));
+        assert_turn_boundary();
+        assert_eq!(thaw_js_release_handle(handle), 1,
+            "a host handle release can reenter with_active_or_context between turns");
+        // The Rust unit-test executable does not export the runtime poller
+        // through dlsym, so drive its existing queue entry point directly.
+        assert_eq!(thaw_runtime::thaw_runtime_poll_one(), 1,
+            "the nextTick-scheduled native continuation survives the turn boundary");
+        assert_eq!(thaw_runtime::thaw_runtime_poll_one(), 0,
+            "the queued native continuation was consumed once");
+        assert_turn_boundary();
+
+        let mut turns = 1;
+        let mut outcome = first;
+        while let std::ops::ControlFlow::Continue(()) = outcome {
+            assert_turn_boundary();
+            outcome = run_event_loop_turn();
+            turns += 1;
+            assert!(turns < 16, "scheduled work should finish in a bounded number of turns");
+        }
+        assert_eq!(outcome, std::ops::ControlFlow::Break(0));
+        assert!(turns >= 2, "the event loop crossed at least one released-context boundary");
+        assert_eq!(
+            eval_json("turnOrder"),
+            Ok(Some(r#"["tick","microtask","native","timer"]"#.into()))
+        );
+        assert_eq!(
+            load("delete globalThis.resolveNativeTurnPromise; delete globalThis.recordNativeContinuation; delete globalThis.turnBoundaryToken; delete globalThis.turnOrder;"),
+            1
+        );
+        unsafe { thaw_runtime::thaw_promise_destroy(promise) };
+    })
+    .join()
+    .expect("event-loop turn boundary test");
+}
+
+#[test]
 fn timer_exceptions_reach_the_process_event_surface() {
     assert_eq!(
         load("globalThis.timerError = ''; process.once('uncaughtException', error => { timerError = error.message; }); setTimeout(() => { throw new Error('timer boom'); }, 0);"),
