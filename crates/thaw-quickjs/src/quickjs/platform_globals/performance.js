@@ -291,7 +291,6 @@
           output = new Date(input.getTime());
         } else if (input instanceof RegExp) {
           output = new RegExp(input.source, input.flags);
-          output.lastIndex = input.lastIndex;
         } else if (input instanceof Map) {
           output = new Map();
           seen.set(input, output);
