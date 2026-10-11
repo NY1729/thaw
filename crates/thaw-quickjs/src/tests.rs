@@ -1291,6 +1291,52 @@ fn structured_clone_copies_cycles_and_builtins() {
 }
 
 #[test]
+fn worker_encoder_rejects_symbol_values() {
+    std::thread::spawn(|| {
+        assert_eq!(
+            load(
+                r#"
+      function workerSymbolCloneCases() {
+        const rejects = value => {
+          let wire;
+          let error;
+          try { wire = __thaw_worker_encode(value); }
+          catch (caught) { error = caught; }
+          return wire === undefined && error instanceof DOMException && error.name === 'DataCloneError';
+        };
+        const root = rejects(Symbol('root'));
+        const arrayValue = rejects([Symbol('array')]);
+        const objectValue = rejects({ nested: { value: Symbol('object') } });
+        const mapKey = rejects(new Map([[Symbol('key'), 'value']]));
+        const mapValue = rejects(new Map([['key', Symbol('value')]]));
+        const setValue = rejects(new Set([Symbol('set')]));
+        const cycle = { value: 7 }; cycle.self = cycle;
+        const cycleCopy = __thaw_worker_decode(__thaw_worker_encode(cycle));
+        const cycleWorks = cycleCopy !== cycle && cycleCopy.self === cycleCopy && cycleCopy.value === 7;
+        const symbolKeyed = { value: 9 };
+        symbolKeyed[Symbol('ignored key')] = Symbol('ignored value');
+        const symbolKeyCopy = __thaw_worker_decode(__thaw_worker_encode(symbolKeyed));
+        const symbolKeyIgnored = symbolKeyCopy.value === 9 && Object.keys(symbolKeyCopy).join(',') === 'value';
+        const primitives = Object.is(__thaw_worker_decode(__thaw_worker_encode(false)), false)
+          && Object.is(__thaw_worker_decode(__thaw_worker_encode(0)), 0)
+          && __thaw_worker_decode(__thaw_worker_encode(undefined)) === undefined;
+        return [root, arrayValue, objectValue, mapKey, mapValue, setValue,
+                cycleWorks, symbolKeyIgnored, primitives];
+      }
+    "#
+            ),
+            1
+        );
+        assert_eq!(
+            call("workerSymbolCloneCases", "[]"),
+            "[true,true,true,true,true,true,true,true,true]"
+        );
+    })
+    .join()
+    .unwrap();
+}
+
+#[test]
 fn clone_traversals_read_getters_once_and_check_marked_nodes_in_place() {
     assert_eq!(
         load(

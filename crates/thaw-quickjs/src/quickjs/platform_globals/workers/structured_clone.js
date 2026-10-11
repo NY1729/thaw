@@ -10,6 +10,7 @@
       if (input === undefined) return { p: 'undefined' };
       if (typeof input === 'number' && !Number.isFinite(input)) return { p: String(input) };
       if (typeof input === 'bigint') return { p: 'bigint', v: String(input) };
+      if (typeof input === 'symbol') throw new DOMException('value cannot be cloned', 'DataCloneError');
       if (input === null || (typeof input !== 'object' && typeof input !== 'function')) return { v: input };
       if (seen.has(input)) return { r: seen.get(input) };
       if (typeof input === 'function') throw new DOMException('value cannot be cloned', 'DataCloneError');
