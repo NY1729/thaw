@@ -501,6 +501,32 @@ fn util_helpers_run_through_bundled_commonjs_require() {
              \x20 var conversions = 0;\n\
              \x20 if (util.toUSVString({ toString: function() { conversions++; return '\\udc00\\udc01'; } }) !== '\\ufffd\\ufffd' || conversions !== 1) throw new Error('toUSVString conversion');\n\
              \x20 if (util.toUSVString(123) !== '123') throw new Error('toUSVString numeric conversion');\n\
+             \x20 var getterCalls = 0, accessed = {};\n\
+             \x20 Object.defineProperty(accessed, 'value', { enumerable: true, get: function() { getterCalls++; throw new Error('getter ran'); } });\n\
+             \x20 if (util.inspect(accessed).indexOf('[Getter]') < 0 || getterCalls !== 0) throw new Error('inspect default getter');\n\
+             \x20 if (util.format('%o', accessed).indexOf('[Getter]') < 0 || getterCalls !== 0) throw new Error('format default getter');\n\
+             \x20 var getterArray = []; Object.defineProperty(getterArray, '0', { enumerable: true, configurable: true, get: function() { getterCalls++; return 5; } });\n\
+             \x20 if (util.inspect(getterArray).indexOf('[Getter]') < 0 || getterCalls !== 0) throw new Error('inspect array getter');\n\
+             \x20 var selected = {}, onlyCalls = 0, bothCalls = 0;\n\
+             \x20 Object.defineProperty(selected, 'only', { enumerable: true, get: function() { onlyCalls++; return 7; } });\n\
+             \x20 Object.defineProperty(selected, 'both', { enumerable: true, get: function() { bothCalls++; return 8; }, set: function() {} });\n\
+             \x20 util.inspect(selected, { getters: 'get' }); if (onlyCalls !== 1 || bothCalls !== 0) throw new Error('inspect getter-only selection');\n\
+             \x20 util.inspect(selected, { getters: 'set' }); if (onlyCalls !== 1 || bothCalls !== 1) throw new Error('inspect getter-setter selection');\n\
+             \x20 util.inspect(selected, { getters: true }); if (onlyCalls !== 2 || bothCalls !== 2) throw new Error('inspect all getters');\n\
+             \x20 if (util.inspect(accessed, { getters: true }).indexOf('Inspection threw') < 0 || getterCalls !== 1) throw new Error('inspect throwing explicit getter');\n\
+             \x20 var hookCalls = 0, hookObject = { value: 3 };\n\
+             \x20 hookObject[util.inspect.custom] = function(depth, options, inspect) { hookCalls++; if (depth !== 0 || options.customInspect !== undefined || inspect !== util.inspect || this !== hookObject) throw new Error('inspect hook arguments'); return 'hook'; };\n\
+             \x20 if (util.inspect(hookObject, { depth: 0 }) !== 'hook' || hookCalls !== 1) throw new Error('inspect enabled custom');\n\
+             \x20 if (util.inspect(hookObject, { customInspect: false }).indexOf('value: 3') < 0 || hookCalls !== 1) throw new Error('inspect disabled custom');\n\
+             \x20 var symbolAccessorCalls = 0, symbolAccessor = { value: 4 }; Object.defineProperty(symbolAccessor, util.inspect.custom, { get: function() { symbolAccessorCalls++; throw new Error('hook lookup'); } });\n\
+             \x20 util.inspect(symbolAccessor, { customInspect: false }); if (symbolAccessorCalls !== 0) throw new Error('inspect disabled hook lookup');\n\
+             \x20 var deep = { a: { b: { c: { d: 1 } } } };\n\
+             \x20 if (util.inspect(deep) !== '{ a: { b: { c: [Object] } } }' || util.inspect(deep, { depth: 0 }) !== '{ a: [Object] }') throw new Error('inspect depth');\n\
+             \x20 if (util.inspect(deep, { depth: null }).indexOf('d: 1') < 0 || util.inspect(deep, { depth: Infinity }).indexOf('d: 1') < 0) throw new Error('inspect unlimited depth');\n\
+             \x20 if (util.inspect([[1]], { depth: 0 }).indexOf('[Array]') < 0 || util.inspect(new Map([['x', { deep: 1 }]]), { depth: 0 }).indexOf('[Object]') < 0 || util.inspect(new Set([{ deep: 1 }]), { depth: 0 }).indexOf('[Object]') < 0) throw new Error('inspect container depth');\n\
+             \x20 var depthGetterCalls = 0, depthGuard = { child: {} }; Object.defineProperty(depthGuard.child, 'hidden', { enumerable: true, get: function() { depthGetterCalls++; return 1; } });\n\
+             \x20 if (util.inspect(depthGuard, { depth: 0 }).indexOf('[Object]') < 0 || depthGetterCalls !== 0) throw new Error('inspect depth getter guard');\n\
+             \x20 var cycle = {}; cycle.self = cycle; if (util.inspect(cycle, { depth: null }).indexOf('[Circular]') < 0) throw new Error('inspect circular');\n\
              \x20 var debug = util.debuglog('sharp');\n\
              \x20 return [util.format('%s:%d:%j:%%', 'value', 4, { ok: true }), util.inspect(custom), Child.super_ === Base, new Child() instanceof Base, util.types.isDate(new Date()), util.types.isRegExp(/x/), util.types.isMap(new Map()), util.types.isTypedArray(new Uint8Array(1)), sum, callbackValue, util.stripVTControlCharacters('\\u001b[31mred\\u001b[0m'), util.toUSVString('x\\ud800y'), typeof debug, debug.enabled];\n\
              };",
