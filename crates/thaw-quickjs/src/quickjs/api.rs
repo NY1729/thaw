@@ -3227,6 +3227,53 @@ pub extern "C" fn thaw_js_get_property_result(
     }
 }
 
+/// Compiled dynamic property reads use the exact exception lane so a getter's
+/// original thrown JavaScript value survives the Rust/LLVM boundary. The
+/// legacy handle-or-text property ABI above remains available to direct callers.
+#[no_mangle]
+pub extern "C" fn thaw_js_get_property_exact_result(
+    handle: u64,
+    name: *const c_char,
+) -> ThawCallWithExceptionResult {
+    enum Outcome { Value(u64), Exception(u64, bool) }
+    let name = to_str(name);
+    let result: Result<Outcome, BoundaryError> = with_active_or_context(|ctx| {
+        let object = boxed_object_for_handle(&ctx, handle)?;
+        let key = dynamic_property_key(&ctx, &name)?;
+        let key = rquickjs::Atom::from_value(ctx.clone(), &key)
+            .map_err(|error| error.to_string())?;
+        match object.get::<_, Value>(key) {
+            Ok(value) => retain_value(&ctx, value).map(Outcome::Value),
+            Err(rquickjs::Error::Exception) => {
+                let thrown = ctx.catch();
+                let object_like = thrown.is_object() || thrown.is_function();
+                retain_value(&ctx, thrown).map(|value| Outcome::Exception(value, object_like))
+            }
+            Err(error) => Err(error.to_string().into()),
+        }
+    });
+    match result {
+        Ok(Outcome::Value(value)) => ThawCallWithExceptionResult {
+            value,
+            exception_handle: 0,
+            exception_object_like: 0,
+            error: std::ptr::null(),
+        },
+        Ok(Outcome::Exception(exception_handle, object_like)) => ThawCallWithExceptionResult {
+            value: 0,
+            exception_handle,
+            exception_object_like: u8::from(object_like),
+            error: std::ptr::null(),
+        },
+        Err(error) => ThawCallWithExceptionResult {
+            value: 0,
+            exception_handle: 0,
+            exception_object_like: 0,
+            error: owned_exception_error(error),
+        },
+    }
+}
+
 /// The live Json host bridge passes a JSON string literal, rather than a raw
 /// C string, so a key containing NUL or a lone surrogate retains its exact
 /// UTF-16 property identity. The returned handle owns one registry reference.

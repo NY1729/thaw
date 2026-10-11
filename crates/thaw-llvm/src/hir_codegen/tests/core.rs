@@ -2445,6 +2445,120 @@ fn compiles_quickjs_fallback_path() {
     );
 }
 
+#[test]
+fn quickjs_dynamic_property_first_boundary_preserves_exact_getter_throws() {
+    let source = r#"
+        function main(): void {
+            console.log(loadScript(
+                "globalThis.getterObjectMarker = { tag: 'object' }; globalThis.getterStringMarker = 'string marker'; globalThis.getterFunctionMarker = function marker() {}; globalThis.getterSymbolMarker = Symbol('marker'); globalThis.getterTarget = Object.create(null); Object.defineProperties(getterTarget, { object: { get() { throw getterObjectMarker; } }, text: { get() { throw getterStringMarker; } }, missing: { get() { throw undefined; } }, callable: { get() { throw getterFunctionMarker; } }, symbol: { get() { throw getterSymbolMarker; } } });"
+            ));
+            const target: JsValue = getDynamicValue("getterTarget");
+            const objectMarker: JsValue = getDynamicValue("getterObjectMarker");
+            const stringMarker: JsValue = getDynamicValue("getterStringMarker");
+            const functionMarker: JsValue = getDynamicValue("getterFunctionMarker");
+            const symbolMarker: JsValue = getDynamicValue("getterSymbolMarker");
+            let objectMatches = false;
+            try { const ignored: JsValue = getDynamicProperty(target, "object"); }
+            catch (error) { objectMatches = error === objectMarker; }
+            let stringMatches = false;
+            try { const ignored: JsValue = getDynamicProperty(target, "text"); }
+            catch (error) { stringMatches = error === stringMarker; }
+            let undefinedDidThrow = false;
+            let undefinedMatches = false;
+            try { const ignored: JsValue = getDynamicProperty(target, "missing"); }
+            catch (error) { undefinedDidThrow = true; undefinedMatches = error === undefined; }
+            let functionMatches = false;
+            try { const ignored: JsValue = getDynamicProperty(target, "callable"); }
+            catch (error) { functionMatches = error === functionMarker; }
+            let symbolMatches = false;
+            try { const ignored: JsValue = getDynamicProperty(target, "symbol"); }
+            catch (error) { symbolMatches = error === symbolMarker; }
+            console.log(objectMatches);
+            console.log(stringMatches);
+            console.log(undefinedDidThrow);
+            console.log(undefinedMatches);
+            console.log(functionMatches);
+            console.log(symbolMatches);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "quickjs_dynamic_property_exact_first_throw"),
+        "true\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\n"
+    );
+}
+
+#[test]
+fn quickjs_dynamic_property_exact_read_preserves_order_and_success_identity() {
+    let source = r#"
+        function main(): void {
+            console.log(loadScript(
+                "globalThis.savedPropertyValue = { live: true }; globalThis.propertyTarget = { other: savedPropertyValue }; globalThis.propertyTrace = []; Object.defineProperty(propertyTarget, 'payload', { enumerable: false, get() { propertyTrace.push('G'); console.log('G'); if (this !== propertyTarget) throw 'wrong receiver'; return savedPropertyValue; } }); globalThis.hiddenPrototype = Object.create(null); Object.defineProperty(hiddenPrototype, 'hidden', { value: savedPropertyValue, enumerable: false }); globalThis.hiddenTarget = Object.create(hiddenPrototype); globalThis.getterFailureMarker = { exact: true }; globalThis.getterFailureTarget = Object.create(null); Object.defineProperty(getterFailureTarget, 'fail', { get() { propertyTrace.push('G'); console.log('G'); throw getterFailureMarker; } });"
+            ));
+            const saved: JsValue = getDynamicValue("savedPropertyValue");
+            const target: JsValue = getDynamicValue("propertyTarget");
+            const trace: JsValue = getDynamicValue("propertyTrace");
+            function receiverProducer(): JsValue { console.log("R"); return target; }
+            function keyProducer(): string { console.log("K"); return "payload"; }
+            const result: JsValue = receiverProducer()[keyProducer()];
+            console.log(result === saved);
+            if (Number(readDynamicValue(getDynamicProperty(trace, "length"))) !== 1) {
+                throw new Error("success getter should run exactly once");
+            }
+            const reusedReceiver: JsValue = getDynamicProperty(target, "other");
+            console.log(reusedReceiver === saved);
+            const inherited: JsValue = getDynamicProperty(getDynamicValue("hiddenTarget"), "hidden");
+            console.log(inherited === saved);
+
+            const failingTarget: JsValue = getDynamicValue("getterFailureTarget");
+            const failureMarker: JsValue = getDynamicValue("getterFailureMarker");
+            function failureReceiver(): JsValue { console.log("R"); return failingTarget; }
+            function failureKey(): string { console.log("K"); return "fail"; }
+            let getterMatches = false;
+            try { const ignored: JsValue = failureReceiver()[failureKey()]; }
+            catch (error) { getterMatches = error === failureMarker; }
+            if (Number(readDynamicValue(getDynamicProperty(trace, "length"))) !== 2) {
+                throw new Error("throwing getter should run exactly once");
+            }
+            console.log(getterMatches);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "quickjs_dynamic_property_exact_order"),
+        "true\nR\nK\nG\ntrue\ntrue\ntrue\nR\nK\nG\ntrue\n"
+    );
+}
+
+#[test]
+fn quickjs_dynamic_property_exact_receiver_and_key_throws_keep_order() {
+    let source = r#"
+        function main(): void {
+            console.log(loadScript(
+                "globalThis.receiverFailureMarker = { where: 'receiver' }; globalThis.keyFailureMarker = { where: 'key' }; globalThis.throwTarget = Object.create(null); Object.defineProperty(throwTarget, 'never', { get() { console.log('G'); return 1; } });"
+            ));
+            const receiverMarker: JsValue = getDynamicValue("receiverFailureMarker");
+            const keyMarker: JsValue = getDynamicValue("keyFailureMarker");
+            function throwingReceiver(): JsValue { console.log("R"); throw receiverMarker; }
+            function skippedKey(): string { console.log("K"); return "never"; }
+            let receiverMatches = false;
+            try { const ignored: JsValue = throwingReceiver()[skippedKey()]; }
+            catch (error) { receiverMatches = error === receiverMarker; }
+            console.log(receiverMatches);
+
+            const target: JsValue = getDynamicValue("throwTarget");
+            function validReceiver(): JsValue { console.log("R"); return target; }
+            function throwingKey(): string { console.log("K"); throw keyMarker; }
+            let keyMatches = false;
+            try { const ignored: JsValue = validReceiver()[throwingKey()]; }
+            catch (error) { keyMatches = error === keyMarker; }
+            console.log(keyMatches);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "quickjs_dynamic_property_exact_argument_throws"),
+        "true\nR\ntrue\nR\nK\ntrue\n"
+    );
+}
+
 /// A dynamic property read or method call on a `JsValue` whose runtime value
 /// is a *primitive* string must auto-box, exactly like `value.property` /
 /// `value.method()` do in JS. Real triggers: highlight.js's
