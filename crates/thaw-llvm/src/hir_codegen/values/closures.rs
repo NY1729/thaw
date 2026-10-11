@@ -1245,11 +1245,25 @@ impl<'ctx> HirCompiler<'ctx> {
             .module
             .get_function(&Self::llvm_symbol_for(name))
             .ok_or_else(|| format!("function value `{name}` is not declared"))?;
+        let target_symbol = target.get_name().to_string_lossy().into_owned();
+        let abi_signature = self.function_type(params, ret)?;
+        if let Some(closure) = self
+            .function_ref_closures
+            .get(&target_symbol)
+            .and_then(|entries| {
+                entries
+                    .iter()
+                    .find(|(signature, _)| *signature == abi_signature)
+            })
+            .map(|(_, closure)| *closure)
+        {
+            return Ok(closure.into());
+        }
         let adapter_name = format!("__thaw_function_ref_{}", self.next_lambda);
         self.next_lambda += 1;
         let adapter = self.module.add_function(
             &adapter_name,
-            self.function_type(params, ret)?,
+            abi_signature,
             Some(Linkage::Internal),
         );
         let parent = self.builder.get_insert_block().unwrap();
@@ -1282,46 +1296,24 @@ impl<'ctx> HirCompiler<'ctx> {
             ret,
             &format!("{adapter_name}__thaw_this_adapter"),
         )?;
+        let pointer_type = self.context.ptr_type(AddressSpace::default());
+        let closure_type = pointer_type.array_type(2);
+        let initializer = pointer_type.const_array(&[
+            adapter.as_global_value().as_pointer_value(),
+            this_adapter.as_global_value().as_pointer_value(),
+        ]);
         let closure = self
-            .builder
-            .build_call(
-                self.module.get_function("thaw_arena_alloc").unwrap(),
-                &[
-                    self.context
-                        .i64_type()
-                        .const_int(CLOSURE_CAPTURE_BASE, false)
-                        .into(),
-                    self.context.i64_type().const_int(8, false).into(),
-                ],
-                "function_ref_closure",
-            )
-            .map_err(|error| error.to_string())?
-            .try_as_basic_value()
-            .basic()
-            .ok_or("function reference closure allocation returned no value")?
-            .into_pointer_value();
-        self.builder
-            .build_store(closure, adapter.as_global_value().as_pointer_value())
-            .map_err(|error| error.to_string())?;
-        let this_entry = unsafe {
-            self.builder
-                .build_in_bounds_gep(
-                    self.context.i8_type(),
-                    closure,
-                    &[self
-                        .context
-                        .i64_type()
-                        .const_int(CLOSURE_THIS_ENTRY_OFFSET, false)],
-                    "function_ref_this_entry",
-                )
-                .map_err(|error| error.to_string())?
-        };
-        self.builder
-            .build_store(
-                this_entry,
-                this_adapter.as_global_value().as_pointer_value(),
-            )
-            .map_err(|error| error.to_string())?;
+            .module
+            .add_global(closure_type, None, &format!("{adapter_name}__closure"));
+        closure.set_linkage(Linkage::Private);
+        closure.set_initializer(&initializer);
+        closure.set_constant(true);
+        closure.set_alignment(8);
+        let closure = closure.as_pointer_value();
+        self.function_ref_closures
+            .entry(target_symbol)
+            .or_default()
+            .push((abi_signature, closure));
         Ok(closure.into())
     }
 

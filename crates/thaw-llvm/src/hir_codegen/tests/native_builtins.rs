@@ -2382,6 +2382,120 @@ fn compiles_array_from_a_generator() {
     );
 }
 
+#[test]
+fn compiles_array_from_a_real_typed_array_iterator() {
+    let source = r#"
+        function main(): void {
+            const bytes: JsValue = new Uint8Array([65, 240, 159, 152, 128]);
+            const copied: JsValue = new Uint8Array((bytes as any).buffer);
+            console.log(JSON.stringify(Array.from(copied)));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "array_from_real_typed_array_iterator"),
+        "[65,240,159,152,128]\n"
+    );
+}
+
+#[test]
+fn compiles_array_from_live_iterator_with_single_acquisition_and_receivers() {
+    let source = r#"
+        let sourceCalls = 0;
+        function produce(): JsValue {
+            sourceCalls++;
+            return getDynamicValue("arrayFromReceiverSource");
+        }
+        function main(): void {
+            loadScript("globalThis.arrayFromIteratorGetterCalls = 0; globalThis.arrayFromIteratorCalls = 0; globalThis.arrayFromIteratorNextCalls = 0; globalThis.arrayFromSourceNextCalls = 0; globalThis.arrayFromReceiverSource = {}; Object.defineProperty(arrayFromReceiverSource, Symbol.iterator, { get() { arrayFromIteratorGetterCalls++; return function() { if (this !== arrayFromReceiverSource) throw new Error('wrong source receiver'); arrayFromIteratorCalls++; let step = 0; let iterator; iterator = { next() { if (this !== iterator) throw new Error('wrong iterator receiver'); arrayFromIteratorNextCalls++; step++; return step <= 2 ? { value: step === 1 ? 7 : 8, done: false } : { done: true }; } }; return iterator; }; } }); Object.defineProperty(arrayFromReceiverSource, 'next', { value() { arrayFromSourceNextCalls++; throw new Error('source next used'); } });");
+            const values: Json = Array.from(produce());
+            console.log(JSON.stringify(values), sourceCalls, Number(getDynamicValue("arrayFromIteratorGetterCalls")), Number(getDynamicValue("arrayFromIteratorCalls")), Number(getDynamicValue("arrayFromIteratorNextCalls")), Number(getDynamicValue("arrayFromSourceNextCalls")));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "array_from_live_iterator_receiver_and_once"),
+        "[7,8] 1 1 1 3 0\n"
+    );
+}
+
+#[test]
+fn compiles_array_from_existing_next_only_dynamic_iterator() {
+    let source = r#"
+        function main(): void {
+            loadScript("globalThis.arrayFromNextOnlyCalls = 0; globalThis.arrayFromNextOnly = { next() { arrayFromNextOnlyCalls++; return arrayFromNextOnlyCalls === 1 ? { value: 9, done: false } : { done: true }; } };");
+            const iterator: JsValue = getDynamicValue("arrayFromNextOnly");
+            console.log(JSON.stringify(Array.from(iterator)), Number(getDynamicValue("arrayFromNextOnlyCalls")));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "array_from_existing_next_only_iterator"),
+        "[9] 2\n"
+    );
+}
+
+#[test]
+fn compiles_array_from_preserving_iterator_acquisition_throw() {
+    let source = r#"
+        function main(): void {
+            loadScript("globalThis.arrayFromAcquireNextCalls = 0; globalThis.arrayFromAcquireFailure = {}; Object.defineProperty(arrayFromAcquireFailure, Symbol.iterator, { get() { throw 'iter-acquire'; } }); Object.defineProperty(arrayFromAcquireFailure, 'next', { value() { arrayFromAcquireNextCalls++; return { done: true }; } });");
+            const source: JsValue = getDynamicValue("arrayFromAcquireFailure");
+            try {
+                Array.from(source);
+                console.log("missed acquisition throw");
+            } catch (error) {
+                console.log(error === "iter-acquire", Number(getDynamicValue("arrayFromAcquireNextCalls")));
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "array_from_iterator_acquisition_throw"),
+        "true 0\n"
+    );
+}
+
+#[test]
+fn compiles_array_from_first_boundary_object_acquisition_throw_identity() {
+    let source = r#"
+        function main(): void {
+            loadScript("globalThis.arrayFromObjectAcquireNextCalls = 0; globalThis.arrayFromObjectAcquireMarker = {}; globalThis.arrayFromObjectAcquireFailure = {}; Object.defineProperty(arrayFromObjectAcquireFailure, Symbol.iterator, { get() { throw arrayFromObjectAcquireMarker; } }); Object.defineProperty(arrayFromObjectAcquireFailure, 'next', { value() { arrayFromObjectAcquireNextCalls++; return { done: true }; } });");
+            const marker: JsValue = getDynamicValue("arrayFromObjectAcquireMarker");
+            const source: JsValue = getDynamicValue("arrayFromObjectAcquireFailure");
+            try {
+                Array.from(source);
+                console.log("missed acquisition throw");
+            } catch (error) {
+                console.log(error === marker, Number(getDynamicValue("arrayFromObjectAcquireNextCalls")));
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "array_from_first_boundary_object_acquisition_throw"),
+        "true 0\n"
+    );
+}
+
+#[test]
+fn compiles_array_from_first_boundary_undefined_acquisition_throw() {
+    let source = r#"
+        function main(): void {
+            loadScript("globalThis.arrayFromUndefinedAcquireNextCalls = 0; globalThis.arrayFromUndefinedAcquireFailure = {}; Object.defineProperty(arrayFromUndefinedAcquireFailure, Symbol.iterator, { get() { throw undefined; } }); Object.defineProperty(arrayFromUndefinedAcquireFailure, 'next', { value() { arrayFromUndefinedAcquireNextCalls++; return { done: true }; } });");
+            const source: JsValue = getDynamicValue("arrayFromUndefinedAcquireFailure");
+            let didThrow = false;
+            let caughtUndefined = false;
+            try {
+                Array.from(source);
+            } catch (error) {
+                didThrow = true;
+                caughtUndefined = error === undefined;
+            }
+            console.log(didThrow, caughtUndefined, Number(getDynamicValue("arrayFromUndefinedAcquireNextCalls")));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "array_from_first_boundary_undefined_acquisition_throw"),
+        "true true 0\n"
+    );
+}
+
 /// `Array.fromAsync(anAsyncGenerator())` -- the `async function*`
 /// sibling of `compiles_array_from_a_generator` above. `Array.fromAsync`
 /// otherwise delegates entirely to the embedded QuickJS realm's own

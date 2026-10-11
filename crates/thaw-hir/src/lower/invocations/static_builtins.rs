@@ -3248,6 +3248,10 @@ impl<'a> FnLowerer<'a> {
                                     ),
                                     HirStmt::Return(Some(HirExpr::Var(array_name))),
                                 ]);
+                                let iterator = HirExpr::Call(
+                                    Box::new(HirExpr::Var("__thaw_to_iterator_exact".into())),
+                                    vec![source],
+                                );
                                 let source = HirExpr::Call(
                                     Box::new(HirExpr::Lambda(
                                         Vec::new(),
@@ -3258,7 +3262,7 @@ impl<'a> FnLowerer<'a> {
                                         array_type.clone(),
                                         Box::new(block),
                                     )),
-                                    vec![source],
+                                    vec![iterator],
                                 );
                                 (source, array_type, element_type)
                             }

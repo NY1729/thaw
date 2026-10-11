@@ -1649,6 +1649,257 @@ fn an_any_copy_of_a_caught_error_exposes_name_and_message() {
 }
 
 #[test]
+fn caught_primitive_strict_equality_uses_original_values() {
+    let source = r#"
+        let rhsCalls = 0;
+        function stringRhs(): string { rhsCalls++; return "token"; }
+        function main(): void {
+            try { throw "token"; } catch (error) {
+                console.log(error === "token", "token" === error, error !== "token", "token" !== error, error === "other", error === stringRhs(), rhsCalls);
+            }
+            try { throw 17; } catch (error) {
+                console.log(error === 17, 17 === error, error !== 17, 17 !== error, error === 18);
+            }
+            try { throw true; } catch (error) {
+                console.log(error === true, true === error, error !== true, true !== error, error === false);
+            }
+            try { throw null; } catch (error) {
+                console.log(error === null, null === error, error !== null, null !== error, error === undefined);
+            }
+            try { throw undefined; } catch (error) {
+                console.log(error === undefined, undefined === error, error !== undefined, undefined !== error, error === null);
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "caught_primitive_strict_equality_original_values"),
+        "true true false false false true 1\ntrue true false false false\ntrue true false false false\ntrue true false false false\ntrue true false false false\n"
+    );
+}
+
+#[test]
+fn caught_native_object_strict_identity_stays_exact() {
+    let source = r#"
+        function main(): void {
+            const original = { payload: 7 };
+            const different = { payload: 7 };
+            try { throw original; } catch (error) {
+                console.log(error === original, original === error, error !== different);
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "caught_native_object_strict_identity"),
+        "true true true\n"
+    );
+}
+
+#[test]
+fn caught_native_exception_strict_comparison_keeps_original_values() {
+    let source = r#"
+        let undefinedCalls = 0;
+        function readUndefined() {
+            undefinedCalls++;
+            return undefined;
+        }
+        function savedFunction(): void {}
+        function differentFunction(): void {}
+        function main(): void {
+            try { throw savedFunction; } catch (error) {
+                console.log(
+                    error === savedFunction,
+                    savedFunction === error,
+                    error !== differentFunction,
+                    differentFunction !== error,
+                    error !== undefined,
+                    undefined !== error,
+                    error === readUndefined(),
+                    undefinedCalls
+                );
+            }
+            const symbol = Symbol("native symbol");
+            try { throw symbol; } catch (error) {
+                console.log(
+                    error !== undefined,
+                    undefined !== error,
+                    error === undefined,
+                    undefined === error
+                );
+            }
+            const values: number[] = [1, 2];
+            try { throw values; } catch (error) {
+                console.log(
+                    error === undefined,
+                    undefined === error,
+                    error !== undefined,
+                    undefined !== error,
+                    error === readUndefined(),
+                    undefinedCalls
+                );
+            }
+            const bytes = new Uint8Array([1, 2]);
+            try { throw bytes; } catch (error) {
+                console.log(
+                    error === undefined,
+                    undefined === error,
+                    error !== undefined,
+                    undefined !== error,
+                    error === readUndefined(),
+                    undefinedCalls
+                );
+            }
+            const tuple: readonly [number, string] = [1, "native tuple"];
+            try { throw tuple; } catch (error) {
+                console.log(
+                    error === undefined,
+                    undefined === error,
+                    error !== undefined,
+                    undefined !== error,
+                    error === readUndefined(),
+                    undefinedCalls
+                );
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "caught_native_exception_strict_comparison_original_values"),
+        "true true true true true true false 1\ntrue true false false\nfalse false true true false 2\nfalse false true true false 3\nfalse false true true false 4\n"
+    );
+}
+
+#[test]
+fn caught_native_carrier_pairs_keep_original_owner_identity() {
+    let source = r#"
+        function savedFunction(): void {}
+        function differentFunction(): void {}
+        function main(): void {
+            try { throw savedFunction; } catch (outer) {
+                const alias = outer;
+                console.log(
+                    outer === outer,
+                    outer !== outer,
+                    alias === outer,
+                    outer === alias
+                );
+                try { throw savedFunction; } catch (same) {
+                    console.log(
+                        alias === same,
+                        same === alias,
+                        alias !== same,
+                        same !== alias
+                    );
+                }
+                try { throw differentFunction; } catch (different) {
+                    console.log(
+                        alias === different,
+                        different === alias,
+                        alias !== different,
+                        different !== alias
+                    );
+                }
+                try { throw undefined; } catch (scalar) {
+                    console.log(
+                        alias === scalar,
+                        scalar === alias,
+                        alias !== scalar,
+                        scalar !== alias
+                    );
+                }
+                const readLeft = () => { console.log("L"); return alias; };
+                const readRight = () => { console.log("R"); return alias; };
+                console.log(readLeft() === readRight());
+            }
+
+            const values: number[] = [1, 2];
+            const differentValues: number[] = [1, 2];
+            try { throw values; } catch (arrayOuter) {
+                const arrayAlias = arrayOuter;
+                console.log(
+                    arrayOuter === arrayOuter,
+                    arrayOuter !== arrayOuter,
+                    arrayAlias === arrayOuter,
+                    arrayOuter === arrayAlias
+                );
+                try { throw values; } catch (sameArray) {
+                    console.log(
+                        arrayAlias === sameArray,
+                        sameArray === arrayAlias,
+                        arrayAlias !== sameArray,
+                        sameArray !== arrayAlias
+                    );
+                }
+                try { throw differentValues; } catch (differentArray) {
+                    console.log(
+                        arrayAlias === differentArray,
+                        differentArray === arrayAlias,
+                        arrayAlias !== differentArray,
+                        differentArray !== arrayAlias
+                    );
+                }
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "caught_native_carrier_pair_owner_identity"),
+        "true false true true\ntrue true false false\nfalse false true true\nfalse false true true\nL\nR\ntrue\ntrue false true true\ntrue true false false\nfalse false true true\n"
+    );
+}
+
+#[test]
+fn capture_free_named_function_references_share_identity() {
+    let source = r#"
+        function saved(): number { return 7; }
+        function different(): number { return 7; }
+        function main(): void {
+            const alias = saved;
+            console.log(alias === saved, saved === saved, saved === different, alias());
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "capture_free_named_function_reference_identity"),
+        "true true false 7\n"
+    );
+}
+
+#[test]
+fn named_function_reference_cache_survives_global_symbol_collision() {
+    let source = r#"
+        function saved(): void {}
+        function __thaw_function_ref_0__closure(): void {}
+        function main(): void {
+            const first = saved;
+            const second = saved;
+            console.log(first === second, first === saved);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "named_function_reference_cache_global_symbol_collision"),
+        "true true\n"
+    );
+}
+
+#[test]
+fn captured_closure_references_keep_allocation_identity() {
+    let source = r#"
+        function make(value: number): () => number {
+            return () => value;
+        }
+        function main(): void {
+            const a = make(1);
+            const b = make(2);
+            console.log(a === a, a === b);
+            try { throw a; } catch (error) {
+                console.log(error === a, error === b, a(), b());
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "captured_closure_reference_identity_is_distinct"),
+        "true false\ntrue false 1 2\n"
+    );
+}
+
+#[test]
 fn typed_quickjs_catches_preserve_original_thrown_values() {
     let source = r#"
         declare function __thaw_typed_js_626f6f6d(): void;
