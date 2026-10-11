@@ -951,7 +951,7 @@ impl<'a> FnLowerer<'a> {
                             "substr" => "String.substr",
                             _ => "String.slice",
                         };
-                        let (arguments, bindings) =
+                        let (arguments, spread_bindings) =
                             self.lower_native_spread_values(&call.args, label)?;
                         if arguments.len() > 2 {
                             return Err(format!("native `{label}` expects zero to two arguments"));
@@ -962,21 +962,28 @@ impl<'a> FnLowerer<'a> {
                             .map(|value| self.coerce_primitive_to_number(value))
                             .transpose()?
                             .unwrap_or(HirExpr::Lit(HirLit::F64(0.0)));
-                        let end = arguments
-                            .get(1)
-                            .cloned()
-                            .map(|value| self.coerce_primitive_to_number(value))
-                            .transpose()?
-                            .unwrap_or(HirExpr::Lit(HirLit::F64(f64::INFINITY)));
+                        let end = if is_subarray {
+                            arguments.get(1).cloned()
+                                .map(|value| self.coerce_primitive_to_number(value))
+                                .transpose()?
+                                .unwrap_or(HirExpr::Lit(HirLit::F64(f64::INFINITY)))
+                        } else {
+                            self.number_format_end_or_infinity(arguments.get(1))?
+                        };
                         let intrinsic = match property.sym.as_ref() {
                             "substring" => "__thaw_string_substring",
                             "substr" => "__thaw_string_substr",
                             _ => "__thaw_string_slice",
                         };
+                        let receiver_name = format!("__thaw_string_slice_receiver_{}", self.next_binding);
+                        self.next_binding += 1;
+                        self.scope.insert(receiver_name.clone(), HirType::Str);
                         let result = HirExpr::Call(
                             Box::new(HirExpr::Var(intrinsic.into())),
-                            vec![receiver, start, end],
+                            vec![HirExpr::Var(receiver_name.clone()), start, end],
                         );
+                        let mut bindings = vec![(receiver_name, HirType::Str, receiver)];
+                        bindings.extend(spread_bindings);
                         return self.wrap_call_argument_bindings(result, &bindings);
                     }
                     if !matches!(receiver_type, HirType::Array(_) | HirType::Union(_)) {
@@ -989,16 +996,19 @@ impl<'a> FnLowerer<'a> {
                     if arguments.len() > 2 {
                         return Err("native `.slice()` expects zero to two arguments".into());
                     }
-                    let mut indices = Vec::with_capacity(2);
-                    for value in arguments {
-                        indices.push(self.coerce_primitive_to_number(value)?);
-                    }
-                    if indices.is_empty() {
-                        indices.push(HirExpr::Lit(HirLit::F64(0.0)));
-                    }
-                    if indices.len() == 1 {
-                        indices.push(HirExpr::Lit(HirLit::F64(f64::INFINITY)));
-                    }
+                    let start = arguments.first().cloned()
+                        .map(|value| self.coerce_primitive_to_number(value))
+                        .transpose()?
+                        .unwrap_or(HirExpr::Lit(HirLit::F64(0.0)));
+                    let end = if is_subarray {
+                        arguments.get(1).cloned()
+                            .map(|value| self.coerce_primitive_to_number(value))
+                            .transpose()?
+                            .unwrap_or(HirExpr::Lit(HirLit::F64(f64::INFINITY)))
+                    } else {
+                        self.number_format_end_or_infinity(arguments.get(1))?
+                    };
+                    let indices = vec![start, end];
                     if let HirType::Union(members) = &receiver_type {
                         if !members.iter().all(|member| matches!(member, HirType::Array(_))) {
                             return Err(format!(
@@ -1090,11 +1100,15 @@ impl<'a> FnLowerer<'a> {
                         return Err("native `.copyWithin()` expects two or three arguments".into());
                     }
                     let mut indices = Vec::with_capacity(3);
-                    for value in arguments {
-                        indices.push(self.coerce_primitive_to_number(value)?);
+                    for (position, value) in arguments.iter().enumerate() {
+                        indices.push(if position == 2 {
+                            self.number_format_end_or_infinity(Some(value))?
+                        } else {
+                            self.coerce_primitive_to_number(value.clone())?
+                        });
                     }
                     if indices.len() == 2 {
-                        indices.push(HirExpr::Lit(HirLit::F64(f64::INFINITY)));
+                        indices.push(self.number_format_end_or_infinity(None)?);
                     }
                     let receiver_name = format!("__thaw_copy_receiver_{}", self.next_binding);
                     self.next_binding += 1;
@@ -1157,14 +1171,18 @@ impl<'a> FnLowerer<'a> {
                     }
                     let value_type = self.infer_expr_type(&value)?;
                     let mut indices = Vec::with_capacity(2);
-                    for argument in arguments.into_iter().skip(1) {
-                        indices.push(self.coerce_primitive_to_number(argument)?);
+                    for (position, argument) in arguments.into_iter().skip(1).enumerate() {
+                        indices.push(if position == 1 {
+                            self.number_format_end_or_infinity(Some(&argument))?
+                        } else {
+                            self.coerce_primitive_to_number(argument)?
+                        });
                     }
                     if indices.is_empty() {
                         indices.push(HirExpr::Lit(HirLit::F64(0.0)));
                     }
                     if indices.len() == 1 {
-                        indices.push(HirExpr::Lit(HirLit::F64(f64::INFINITY)));
+                        indices.push(self.number_format_end_or_infinity(None)?);
                     }
                     let receiver_name = format!("__thaw_fill_receiver_{}", self.next_binding);
                     self.next_binding += 1;
@@ -1777,9 +1795,11 @@ impl<'a> FnLowerer<'a> {
                     }
                     if receiver_type == HirType::Str {
                         let needle = self.coerce_primitive_to_string(arguments[0].clone())?;
-                        let position = if let Some(argument) = arguments.get(1) {
+                        let position = if property.sym == *"endsWith" {
+                            self.number_format_end_or_infinity(arguments.get(1))?
+                        } else if let Some(argument) = arguments.get(1) {
                             self.coerce_primitive_to_number(argument.clone())?
-                        } else if property.sym == *"endsWith" || property.sym == *"lastIndexOf" {
+                        } else if property.sym == *"lastIndexOf" {
                             HirExpr::Lit(HirLit::F64(f64::INFINITY))
                         } else {
                             HirExpr::Lit(HirLit::F64(0.0))
