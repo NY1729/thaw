@@ -3004,6 +3004,333 @@ fn abort_controller_dispatches_once_and_timeout_aborts() {
 }
 
 #[test]
+fn abort_signal_timeout_enforce_range_and_unclamped_delay() {
+    assert_eq!(load(r#"
+      function abortTimeoutBoundaries() {
+        const sentinel = __thaw_set_timeout_ref(() => {}, 60000, true);
+        let invalidTypes, noInvalidTimer;
+        try {
+          const invalid = [
+            () => AbortSignal.timeout(),
+            () => AbortSignal.timeout(undefined),
+            () => AbortSignal.timeout(-1),
+            () => AbortSignal.timeout(NaN),
+            () => AbortSignal.timeout(Infinity),
+            () => AbortSignal.timeout(-Infinity),
+            () => AbortSignal.timeout(Number.MAX_SAFE_INTEGER + 1),
+            () => AbortSignal.timeout(Symbol('delay')),
+            () => AbortSignal.timeout(1n),
+          ];
+          invalidTypes = invalid.map(run => {
+            try { run(); return false; }
+            catch (error) { return error instanceof TypeError; }
+          });
+          noInvalidTimer = __thaw_next_any_timer_delay() > 0;
+        } finally { clearTimeout(sentinel); }
+
+        const clock = __thaw_test_mock_timers_enable({ apis: ['setTimeout'] });
+        try {
+          const coercionError = { marker: 'coercion' };
+          let coercions = 0;
+          let thrownIdentity = false;
+          try {
+            AbortSignal.timeout({
+              [Symbol.toPrimitive]() { coercions++; throw coercionError; }
+            });
+          } catch (error) { thrownIdentity = error === coercionError; }
+          const once = { count: 0, [Symbol.toPrimitive]() { this.count++; return 1.9; } };
+          const fractional = AbortSignal.timeout(once);
+          __thaw_test_mock_timers_tick(clock, 0);
+          const beforeOne = fractional.aborted;
+          __thaw_test_mock_timers_tick(clock, 1);
+          const afterOne = fractional.aborted;
+
+          const zeroCases = [-0, -0.5, 0, null, false, '0'];
+          const zeroResults = zeroCases.map(value => {
+            const signal = AbortSignal.timeout(value);
+            __thaw_test_mock_timers_tick(clock, 0);
+            return signal.aborted;
+          });
+          const oneCases = ['1', true];
+          const oneResults = oneCases.map(value => {
+            const signal = AbortSignal.timeout(value);
+            __thaw_test_mock_timers_tick(clock, 1);
+            return signal.aborted;
+          });
+
+          const long = AbortSignal.timeout(2147483648);
+          __thaw_test_mock_timers_tick(clock, 2147483647);
+          const notClamped = !long.aborted;
+          __thaw_test_mock_timers_tick(clock, 1);
+          const longFired = long.aborted && long.reason.name === 'TimeoutError';
+          const maximum = AbortSignal.timeout(Number.MAX_SAFE_INTEGER);
+          const maximumAccepted = maximum instanceof AbortSignal && !maximum.aborted;
+          return [invalidTypes.every(Boolean), noInvalidTimer, coercions === 1, thrownIdentity,
+            once.count === 1, !beforeOne, afterOne, zeroResults.every(Boolean),
+            oneResults.every(Boolean), notClamped, longFired, maximumAccepted];
+        } finally {
+          // Also clears the accepted MAX_SAFE_INTEGER timer without waiting for it.
+          __thaw_test_mock_timers_reset(clock);
+        }
+      }
+    "#), 1);
+    assert_eq!(call("abortTimeoutBoundaries", "[]"),
+        "[true,true,true,true,true,true,true,true,true,true,true,true]");
+}
+
+#[test]
+fn abort_signal_any_brands_and_observer_bookkeeping() {
+    assert_eq!(load(r#"
+      function abortAnyBrandsAndObservers() {
+        const root = new AbortController().signal;
+        const child = new (class ChildSignal extends AbortSignal {})();
+        const accepted = AbortSignal.any([child]);
+        const empty = AbortSignal.any([]);
+        const emptyRemainsLive = empty instanceof AbortSignal && !empty.aborted;
+        const fake = Object.create(AbortSignal.prototype);
+        const proxied = new Proxy(new AbortController().signal, {});
+        const eventTarget = new EventTarget();
+        const invalids = [fake, proxied, eventTarget, {
+          addEventListener() {}, aborted: false, reason: undefined
+        }].map(value => {
+          try { AbortSignal.any([value]); return false; }
+          catch (error) { return error instanceof TypeError; }
+        });
+        const pre = AbortSignal.abort('early');
+        const firstPre = AbortSignal.abort('first-pre');
+        const secondPre = AbortSignal.abort('second-pre');
+        const firstPreWins = AbortSignal.any([firstPre, secondPre]).reason === 'first-pre';
+        let lateInvalidRejected = false;
+        try { AbortSignal.any([pre, fake]); }
+        catch (error) { lateInvalidRejected = error instanceof TypeError; }
+
+        const iterateError = { marker: 'iterator' };
+        let iteratorIdentity = false;
+        try {
+          AbortSignal.any({
+            [Symbol.iterator]() { throw iterateError; }
+          });
+        } catch (error) { iteratorIdentity = error === iterateError; }
+        let iteratorGetterIdentity = false;
+        const getterIterable = {};
+        Object.defineProperty(getterIterable, Symbol.iterator, {
+          get() { throw iterateError; }
+        });
+        try { AbortSignal.any(getterIterable); }
+        catch (error) { iteratorGetterIdentity = error === iterateError; }
+        const reentrantRoot = new AbortController().signal;
+        const reentrantReason = { marker: 'during iteration' };
+        const reentrantIterable = {
+          *[Symbol.iterator]() {
+            reentrantRoot.__thawAbort(reentrantReason);
+            yield reentrantRoot;
+          }
+        };
+        const iterationStateSelected = AbortSignal.any(reentrantIterable).reason === reentrantReason;
+        const originalWeakGet = WeakMap.prototype.get;
+        let capturedWeakGetWorks = false;
+        try {
+          WeakMap.prototype.get = () => ({ aborted: true, reason: 'spoofed' });
+          capturedWeakGetWorks = AbortSignal.any([new AbortController().signal]).aborted === false;
+          try { AbortSignal.any([fake]); } catch (error) {
+            capturedWeakGetWorks = capturedWeakGetWorks && error instanceof TypeError;
+          }
+        } finally { WeakMap.prototype.get = originalWeakGet; }
+
+        const nativeWeakRef = WeakRef;
+        const nativeDeref = nativeWeakRef.prototype.deref;
+        const nativeFinalizer = FinalizationRegistry;
+        const nativeRegister = nativeFinalizer.prototype.register;
+        const nativeUnregister = nativeFinalizer.prototype.unregister;
+        const originalWeakRefGlobal = globalThis.WeakRef;
+        let replacedGraphPrimitiveCalls = 0;
+        let graphOperationsProtected = false;
+        try {
+          globalThis.WeakRef = function() { replacedGraphPrimitiveCalls++; throw false; };
+          nativeWeakRef.prototype.deref = function() { replacedGraphPrimitiveCalls++; throw false; };
+          nativeFinalizer.prototype.register = function() { replacedGraphPrimitiveCalls++; throw false; };
+          nativeFinalizer.prototype.unregister = function() { replacedGraphPrimitiveCalls++; throw false; };
+          const graphRoot = new AbortController().signal;
+          const graphDependent = AbortSignal.any([graphRoot]);
+          let graphEvents = 0;
+          graphDependent.addEventListener('abort', () => graphEvents++);
+          graphRoot.__thawAbort('captured-operations');
+          graphRoot.__thawAbort('ignored-after-settlement');
+          graphOperationsProtected = graphRoot.aborted && graphDependent.aborted
+            && graphDependent.reason === 'captured-operations' && graphEvents === 1;
+        } finally {
+          globalThis.WeakRef = originalWeakRefGlobal;
+          nativeWeakRef.prototype.deref = nativeDeref;
+          nativeFinalizer.prototype.register = nativeRegister;
+          nativeFinalizer.prototype.unregister = nativeUnregister;
+        }
+
+        // Internal any propagation never calls these public methods.
+        root.addEventListener = () => { throw new Error('public add called'); };
+        root.removeEventListener = () => { throw new Error('public remove called'); };
+        const combined = AbortSignal.any([root]);
+        let combinedEvents = 0;
+        combined.addEventListener('abort', () => combinedEvents++);
+        root.__thawAbort('root-reason');
+
+        const observerRoot = new AbortController().signal;
+        const observed = AbortSignal.any([observerRoot]);
+        const listener = () => {};
+        const reentrantType = {
+          toString() { observed.addEventListener('abort', listener); return 'abort'; }
+        };
+        observed.addEventListener(reentrantType, listener);
+        const afterTypeReentry = observed.__thawListeners.get('abort').length;
+        observed.removeEventListener('abort', listener);
+        const afterTypeRemoval = observed.__thawListeners.get('abort').length;
+
+        const reentrantOnce = () => {};
+        let onceGetterCalls = 0;
+        const reentrantOptions = { get once() {
+          onceGetterCalls++;
+          observed.addEventListener('abort', reentrantOnce);
+          return true;
+        } };
+        observed.addEventListener('abort', reentrantOnce, reentrantOptions);
+        const afterOnceReentry = observed.__thawListeners.get('abort').length;
+        observed.removeEventListener('abort', reentrantOnce);
+        const afterOnceRemoval = observed.__thawListeners.get('abort').length;
+
+        const onceThrow = { marker: 'once getter' };
+        const throwReentrant = () => {};
+        let onceThrowIdentity = false;
+        try {
+          observed.addEventListener('abort', throwReentrant, { get once() {
+            observed.addEventListener('abort', throwReentrant);
+            throw onceThrow;
+          } });
+        } catch (error) { onceThrowIdentity = error === onceThrow; }
+        const afterThrowReentry = observed.__thawListeners.get('abort').length;
+        observed.removeEventListener('abort', throwReentrant);
+        const afterThrowRemoval = observed.__thawListeners.get('abort').length;
+
+        const objectListener = { handleEvent() {} };
+        observed.addEventListener('abort', objectListener);
+        observed.addEventListener('abort', objectListener);
+        const objectDuplicateCount = observed.__thawListeners.get('abort').length;
+        observed.removeEventListener('abort', objectListener);
+        const objectRemovalCount = observed.__thawListeners.get('abort').length;
+
+        observed.onabort = () => {};
+        const firstHandler = observed.onabort;
+        observed.onabort = () => {};
+        const replacedHandler = observed.onabort !== firstHandler;
+        observed.onabort = null;
+        const clearedHandler = observed.onabort === null;
+        const nonAbort = () => {};
+        let onceDelivery = 0;
+        observed.addEventListener('abort', () => onceDelivery++, { once: true });
+        observed.addEventListener('message', nonAbort);
+        const abortCountUnaffected = observed.__thawListeners.get('abort').length === 1;
+        observerRoot.__thawAbort('settle');
+        observerRoot.__thawAbort('repeat');
+        const settledOnce = observed.aborted && observed.reason === 'settle';
+        const onceRemovedBeforeEventReturns = onceDelivery === 1
+          && observed.__thawListeners.get('abort').length === 0;
+        return [invalids.every(Boolean), lateInvalidRejected, iteratorIdentity,
+          iteratorGetterIdentity, firstPreWins, iterationStateSelected,
+          capturedWeakGetWorks, graphOperationsProtected,
+          replacedGraphPrimitiveCalls === 0,
+          accepted instanceof AbortSignal, emptyRemainsLive,
+          combinedEvents === 1,
+          afterTypeReentry === 1, afterTypeRemoval === 0,
+          onceGetterCalls === 1, afterOnceReentry === 2, afterOnceRemoval === 0,
+          onceThrowIdentity, afterThrowReentry === 1, afterThrowRemoval === 0,
+          objectDuplicateCount === 1, objectRemovalCount === 0,
+          replacedHandler, clearedHandler, abortCountUnaffected, settledOnce,
+          onceRemovedBeforeEventReturns];
+      }
+    "#), 1);
+    assert_eq!(call("abortAnyBrandsAndObservers", "[]"),
+        "[true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true]");
+}
+
+#[test]
+fn abort_signal_flattened_propagation_and_cleanup() {
+    assert_eq!(load(r#"
+      function abortPropagationAndCleanup() {
+        const a = new AbortController().signal;
+        const b = new AbortController().signal;
+        const inner = AbortSignal.any([a, b]);
+        const left = AbortSignal.any([inner, a]);
+        const right = AbortSignal.any([inner, b]);
+        const top = AbortSignal.any([left, right, a]);
+        const reason = { marker: 'same object' };
+        const seen = [];
+        a.addEventListener('abort', event => {
+          seen.push([a.aborted, inner.aborted, left.aborted, right.aborted,
+            top.aborted, inner.reason === reason, left.reason === reason,
+            right.reason === reason, top.reason === reason].every(Boolean));
+          event.stopImmediatePropagation();
+        });
+        let blockedSourceListener = 0;
+        a.addEventListener('abort', () => blockedSourceListener++);
+        const counts = [0, 0, 0, 0];
+        [inner, left, right, top].forEach((signal, index) =>
+          signal.addEventListener('abort', () => counts[index]++));
+        a.__thawAbort(reason);
+        a.__thawAbort('ignored');
+        const allOnce = counts.every(count => count === 1);
+        const stopped = blockedSourceListener === 0 && seen.length === 1 && seen[0];
+
+        const first = new AbortController().signal;
+        const second = new AbortController().signal;
+        const winner = AbortSignal.any([first, second]);
+        let winnerEvents = 0;
+        winner.addEventListener('abort', () => winnerEvents++);
+        first.onabort = () => second.__thawAbort('later-root');
+        first.__thawAbort(false);
+        const winnerStable = winner.aborted && winner.reason === false && winnerEvents === 1;
+
+        const directRoot1 = new AbortController().signal;
+        const directRoot2 = new AbortController().signal;
+        const directlyAborted = AbortSignal.any([directRoot1, directRoot2]);
+        let directEvents = 0;
+        directlyAborted.addEventListener('abort', () => directEvents++);
+        directlyAborted.__thawAbort('self');
+        directRoot1.__thawAbort('after-self-1');
+        directRoot2.__thawAbort('after-self-2');
+        const directCleanup = directEvents === 1 && directlyAborted.reason === 'self';
+
+        const zeroReasonSignal = AbortSignal.abort(0);
+        const zeroReasonPreserved = zeroReasonSignal.aborted && zeroReasonSignal.reason === 0;
+        const handlerRoot = new AbortController().signal;
+        const handlerDependent = AbortSignal.any([handlerRoot]);
+        let handlerCalls = 0;
+        handlerDependent.onabort = () => handlerCalls++;
+        handlerRoot.__thawAbort('handler');
+        const dependentOnabortDelivered = handlerCalls === 1
+          && handlerDependent.reason === 'handler';
+
+        const throwingRoot = new AbortController().signal;
+        const firstDependent = AbortSignal.any([throwingRoot]);
+        const secondDependent = AbortSignal.any([throwingRoot]);
+        const delivery = [];
+        throwingRoot.onabort = () => { throw undefined; };
+        throwingRoot.addEventListener('abort', () => delivery.push('root-listener'));
+        firstDependent.addEventListener('abort', () => { delivery.push('first'); throw false; });
+        secondDependent.addEventListener('abort', () => delivery.push('second'));
+        let caught = false, caughtUndefined = false;
+        try { throwingRoot.__thawAbort(null); }
+        catch (error) { caught = true; caughtUndefined = error === undefined; }
+        const throwsAndContinues = caught && caughtUndefined
+          && delivery.join(',') === 'root-listener,first,second';
+        return [allOnce, stopped, winnerStable, directCleanup, zeroReasonPreserved,
+          dependentOnabortDelivered, throwsAndContinues,
+          firstDependent.aborted && secondDependent.aborted,
+          firstDependent.reason === null && secondDependent.reason === null];
+      }
+    "#), 1);
+    assert_eq!(call("abortPropagationAndCleanup", "[]"),
+        "[true,true,true,true,true,true,true,true,true]");
+}
+
+#[test]
 fn text_encoder_and_decoder_support_utf8() {
     assert_eq!(
             load(
