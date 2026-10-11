@@ -978,6 +978,12 @@ fn resolve_value_graph_impl<'js>(
     })
 }
 
+fn sleep_until_next_poll(delay: i64) {
+    if delay > 0 {
+        std::thread::sleep(Duration::from_millis((delay as u64).min(1)));
+    }
+}
+
 fn finish_with_platform_events<'js>(
     ctx: &Ctx<'js>,
     promise: &rquickjs::Promise<'js>,
@@ -1025,16 +1031,12 @@ fn finish_with_platform_events<'js>(
             if any_delay < 0 {
                 return Err(rquickjs::Error::WouldBlock);
             }
-            if any_delay > 0 {
-                std::thread::sleep(Duration::from_millis(any_delay as u64));
-            }
+            sleep_until_next_poll(any_delay);
             let run_due: Function = ctx.globals().get("__thaw_run_due_timers")?;
             run_due.call::<_, usize>(())?;
             continue;
         }
-        if delay > 0 {
-            std::thread::sleep(Duration::from_millis(delay as u64));
-        }
+        sleep_until_next_poll(delay);
         let run_due: Function = ctx.globals().get("__thaw_run_due_timers")?;
         run_due.call::<_, usize>(())?;
     }
@@ -1176,9 +1178,7 @@ fn run_event_loop_turn() -> std::ops::ControlFlow<i32> {
             }
             return std::ops::ControlFlow::Break(process_exit_code(&ctx));
         }
-        if delay > 0 {
-            std::thread::sleep(Duration::from_millis(delay as u64));
-        }
+        sleep_until_next_poll(delay);
         let Ok(run_due) = ctx.globals().get::<_, Function>("__thaw_run_due_timers") else {
             return std::ops::ControlFlow::Break(process_exit_code(&ctx));
         };
@@ -1285,9 +1285,7 @@ pub extern "C" fn thaw_js_run_until_native_resolved(promise: *const c_void) {
             }
             return;
         }
-        if delay > 0 {
-            std::thread::sleep(Duration::from_millis(delay as u64));
-        }
+        sleep_until_next_poll(delay);
         let Ok(run_due) = ctx.globals().get::<_, Function>("__thaw_run_due_timers") else {
             return;
         };
