@@ -5520,6 +5520,51 @@ fn intl_large_exact_digits_share_format_parts_range_and_styles() {
     assert_eq!(call("intlLargeExact", "[]"), "[true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true]");
 }
 
+/// Compact BigInt inputs use the native signed decimal ceiling while strings
+/// keep their narrower bound. Kept unrun for the requested source-only phase.
+#[cfg(feature = "intl")]
+#[test]
+fn intl_compact_bigint_respects_signed_ceiling() {
+    assert_eq!(
+        load(
+            r#"function intlCompactBigIntBounds() {
+          const compact = new Intl.NumberFormat('en-US', { notation: 'compact' });
+          const digits = '1' + '0'.repeat(31999);
+          const accepted = BigInt(digits);
+          const rejected = BigInt(digits + '0');
+          const acceptedNegative = -BigInt(digits.slice(0, -1));
+          const rejectedNegative = -accepted;
+          const long = BigInt('1' + '0'.repeat(10000));
+          const longNegative = -long;
+          const partsJoin = value => compact.formatToParts(value).map(part => part.value).join('');
+          const noSpecialParts = value => !compact.formatToParts(value).some(part => part.type === 'infinity' || part.type === 'nan');
+          let rangesWork = false;
+          try {
+            const different = compact.formatRange(long, long * 10n);
+            const equal = compact.formatRange(longNegative, longNegative);
+            rangesWork = !different.includes('Infinity') && !equal.includes('Infinity') &&
+              compact.formatRangeToParts(long, long * 10n).map(part => part.value).join('') === different &&
+              compact.formatRangeToParts(longNegative, longNegative).map(part => part.value).join('') === equal;
+          } catch (_) {}
+          return [
+            compact._exactNotationDigits(long) !== null && compact._exactNotationDigits(longNegative) !== null,
+            partsJoin(long) === compact.format(long) && partsJoin(longNegative) === compact.format(longNegative),
+            noSpecialParts(long) && noSpecialParts(longNegative),
+            rangesWork,
+            compact._exactNotationDigits(accepted) !== null && compact._exactNotationDigits(acceptedNegative) !== null,
+            compact._exactNotationDigits(rejected) === null && compact._exactNotationDigits(rejectedNegative) === null,
+            compact._exactNotationDigits('1' + '0'.repeat(10000)) === null,
+          ];
+        }"#
+        ),
+        1
+    );
+    assert_eq!(
+        call("intlCompactBigIntBounds", "[]"),
+        "[true,true,true,true,true,true,true]"
+    );
+}
+
 /// The native Bh pattern supplies flexible-period names and ordering when
 /// fractional seconds are the only requested numeric field. The synthetic
 /// hour and its unit suffix must not leak into visible parts.

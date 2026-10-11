@@ -1234,11 +1234,11 @@
     }
 
     _exactNotationDigits(value) {
-      // Compact notation has its own ICU rounding/formatting route. Retain
-      // its existing input ceiling until that separate route is repaired.
+      // Compact strings retain their 10k ceiling; BigInts match the native
+      // signed decimal input ceiling.
       if (this._notation === 'compact' &&
           ((typeof value === 'string' && value.trim().length > 10000) ||
-           (typeof value === 'bigint' && value.toString().length > 10000))) return null;
+           (typeof value === 'bigint' && value.toString().length > 32000))) return null;
       return this._notation === 'scientific' || this._notation === 'engineering'
         ? this._exactScientificDigits(value) : this._exactStandardDigits(value);
     }
