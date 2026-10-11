@@ -4340,6 +4340,184 @@ fn text_decoder_rejects_invalid_second_bytes_without_consuming_them() {
 }
 
 #[test]
+fn text_encoder_into_uses_native_uint8_writes_and_progress() {
+    assert_eq!(
+        load(
+            r#"function textEncodeIntoContracts() {
+              const ownerOf = (object, key) => { let owner = object; while (owner && !Object.prototype.hasOwnProperty.call(owner, key)) owner = Object.getPrototypeOf(owner); return owner; };
+              const setOwner = ownerOf(Uint8Array.prototype, 'set'), setDescriptor = Object.getOwnPropertyDescriptor(setOwner, 'set');
+              const encoder = new TextEncoder(), output = new Uint8Array(5); let ownSetCalls = 0, prototypeSetCalls = 0, getterCalls = 0;
+              const originalSet = output.set; output.set = function() { ownSetCalls++; };
+              const into = encoder.encodeInto('A😀B', output);
+              const actual = Array.from(new Uint8Array(output.buffer));
+              const throwing = new Uint8Array(5);
+              Object.defineProperty(throwing, 'set', { get() { getterCalls++; throw new Error('own set getter'); } });
+              const throwingInto = encoder.encodeInto('A😀B', throwing);
+              const throwingBytes = Array.from(new Uint8Array(throwing.buffer));
+              let prototypeInto; const prototypeOutput = new Uint8Array(5);
+              try {
+                Object.defineProperty(setOwner, 'set', { ...setDescriptor, value: function() { prototypeSetCalls++; throw new Error('prototype set'); } });
+                prototypeInto = encoder.encodeInto('A😀B', prototypeOutput);
+              } finally { Object.defineProperty(setOwner, 'set', setDescriptor); }
+              const prototypeBytes = Array.from(new Uint8Array(prototypeOutput.buffer));
+              const tiny = new Uint8Array([7, 7, 7]);
+              const tinyInto = encoder.encodeInto('😀', tiny);
+              const four = new Uint8Array(4), fourInto = encoder.encodeInto('😀', four);
+              const emptyDestination = new Uint8Array([6, 7]), emptyInto = encoder.encodeInto('', emptyDestination);
+              const zeroDestination = new Uint8Array(0), zeroInto = encoder.encodeInto('A', zeroDestination);
+              const multibyte = new Uint8Array(5), multibyteInto = encoder.encodeInto('é中', multibyte);
+              const prefix = new Uint8Array([9, 9, 9, 9]);
+              const prefixInto = encoder.encodeInto('A😀B', prefix);
+              const outer = new Uint8Array([9, 9, 9, 9, 9, 9, 9]), subarray = outer.subarray(1, 6);
+              const subarrayInto = encoder.encodeInto('A😀B', subarray);
+              const lone = new Uint8Array(7), loneInto = encoder.encodeInto('\ud800A\udc00', lone);
+              let metadataReads = 0;
+              const shadowed = new Uint8Array(1);
+              Object.defineProperties(shadowed, { length: { get() { metadataReads++; throw new Error('length'); } }, byteLength: { get() { metadataReads++; throw new Error('byteLength'); } }, [Symbol.toStringTag]: { get() { metadataReads++; throw new Error('tag'); } } });
+              const shadowedInto = encoder.encodeInto('A', shadowed);
+              const subclass = new (class extends Uint8Array {})(1), subclassInto = encoder.encodeInto('Z', subclass);
+              const shared = new Uint8Array(new SharedArrayBuffer(1)), sharedInto = encoder.encodeInto('S', shared);
+              const buffer = Buffer.from([0]); const bufferInto = encoder.encodeInto('B', buffer);
+              let invalidSourceCalls = 0;
+              const invalidDestination = [new Int8Array(2), new Uint8ClampedArray(2), new DataView(new ArrayBuffer(2)), Object.create(Uint8Array.prototype), new Proxy(new Uint8Array(2), {})];
+              const invalidRejected = invalidDestination.every(destination => { try { encoder.encodeInto({ toString() { invalidSourceCalls++; return 'x'; } }, destination); return false; } catch (error) { return error instanceof TypeError; } });
+              const marker = {}, conversion = { toString() { throw marker; } }; let markerPreserved = false;
+              try { encoder.encodeInto(conversion, new Uint8Array(2)); } catch (error) { markerPreserved = error === marker; }
+              let sourceReads = 0; const converted = encoder.encodeInto({ toString() { sourceReads++; return 'C'; } }, new Uint8Array(1));
+              const detached = new Uint8Array(1); __thaw_detach_array_buffer(detached.buffer);
+              const detachedInto = encoder.encodeInto('D', detached);
+              return [into, actual, ownSetCalls, throwingInto, getterCalls, throwingBytes, prototypeInto, prototypeSetCalls, prototypeBytes,
+                tinyInto, Array.from(tiny), fourInto, Array.from(four), emptyInto, Array.from(emptyDestination),
+                zeroInto, multibyteInto, Array.from(multibyte), prefixInto, Array.from(prefix),
+                subarrayInto, Array.from(outer), loneInto, Array.from(lone), shadowedInto, metadataReads,
+                Array.from(shadowed), subclassInto, Array.from(subclass), sharedInto, Array.from(shared), bufferInto, Array.from(buffer), invalidRejected, invalidSourceCalls,
+                markerPreserved, detachedInto, sourceReads, converted];
+            }"#
+        ),
+        1
+    );
+    assert_eq!(
+        call("textEncodeIntoContracts", "[]"),
+        r#"[{"read":3,"written":5},[65,240,159,152,128],0,{"read":3,"written":5},0,[65,240,159,152,128],{"read":3,"written":5},0,[65,240,159,152,128],{"read":0,"written":0},[7,7,7],{"read":2,"written":4},[240,159,152,128],{"read":0,"written":0},[6,7],{"read":0,"written":0},{"read":2,"written":5},[195,169,228,184,173],{"read":1,"written":1},[65,9,9,9],{"read":3,"written":5},[9,65,240,159,152,128,9],{"read":3,"written":7},[239,191,189,65,239,191,189],{"read":1,"written":1},0,[65],{"read":1,"written":1},[90],{"read":1,"written":1},[83],{"read":1,"written":1},[66],true,0,true,{"read":0,"written":0},1,{"read":1,"written":1}]"#
+    );
+}
+
+#[test]
+fn text_decoder_requires_real_buffer_sources_and_snapshots_visible_bytes() {
+    assert_eq!(
+        load(
+            r#"function textDecodeSourceContracts() {
+              const decoder = new TextDecoder(), backing = new Uint8Array([65, 66, 67, 68]).buffer;
+              const whole = decoder.decode(backing);
+              const subview = decoder.decode(new Uint8Array(backing, 1, 2));
+              const dataView = decoder.decode(new DataView(backing, 1, 2));
+              const wider = decoder.decode(new Uint16Array(backing, 0, 2));
+              const sharedBuffer = new SharedArrayBuffer(4); new Uint8Array(sharedBuffer).set([83, 65, 66, 67]);
+              const shared = decoder.decode(new Uint8Array(sharedBuffer, 1, 2));
+              const empty = [decoder.decode(), decoder.decode(undefined), decoder.decode(new ArrayBuffer(0)), decoder.decode(new Uint8Array(0))];
+              const revoked = Proxy.revocable(backing, {}); revoked.revoke();
+              let hostileReads = 0, proxyReads = 0;
+              const hostile = {};
+              for (const key of ['buffer', 'byteOffset', 'byteLength', Symbol.toStringTag]) Object.defineProperty(hostile, key, { get() { hostileReads++; throw new Error('hostile ' + String(key)); } });
+              const proxyBuffer = new Proxy(backing, { get() { proxyReads++; throw new Error('proxy buffer'); } });
+              const proxyView = new Proxy(new Uint8Array(backing), { get() { proxyReads++; throw new Error('proxy view'); } });
+              const invalid = [null, 1, true, 'x', Symbol('x'), 1n, [], function(){}, {}, hostile, { buffer: backing, byteOffset: 0, byteLength: 4 }, { [Symbol.toStringTag]: 'Uint8Array', buffer: backing }, Object.create(ArrayBuffer.prototype), Object.create(Uint8Array.prototype), proxyBuffer, proxyView, revoked.proxy];
+              let optionReads = 0;
+              const invalidRejected = invalid.every(value => { try { decoder.decode(value, { get stream() { optionReads++; return false; } }); return false; } catch (error) { return error instanceof TypeError; } });
+              const metadata = new Uint8Array([88, 89]);
+              for (const key of ['buffer', 'byteOffset', 'byteLength']) Object.defineProperty(metadata, key, { get() { throw new Error(key); } });
+              Object.defineProperty(metadata, Symbol.toStringTag, { get() { throw new Error('tag'); } });
+              let shadowedBufferReads = 0; const shadowedBuffer = new ArrayBuffer(1);
+              Object.defineProperty(shadowedBuffer, 'byteLength', { get() { shadowedBufferReads++; throw new Error('byteLength'); } });
+              const genuine = [decoder.decode(metadata), decoder.decode(shadowedBuffer)];
+              const genuineSubclass = new (class extends Uint8Array {})([69, 70]);
+              const changedPrototype = new Uint8Array([71, 72]); Object.setPrototypeOf(changedPrototype, null);
+              const genuineVariants = [decoder.decode(genuineSubclass), decoder.decode(changedPrototype)];
+              const changing = new Uint8Array([65]); let streamReads = 0;
+              const changed = decoder.decode(changing, { get stream() { streamReads++; changing[0] = 66; return false; } });
+              const split = new TextDecoder(), prefix = new Uint8Array([0xf0, 0x9f]);
+              split.decode(prefix, { stream: true }); prefix.fill(0);
+              const continuation = split.decode(new Uint8Array([0x98, 0x80]));
+              const sharedPrefix = new Uint8Array(new SharedArrayBuffer(2)); sharedPrefix.set([0xf0, 0x9f]);
+              const sharedSplit = new TextDecoder(); sharedSplit.decode(sharedPrefix, { stream: true }); sharedPrefix.fill(0);
+              const sharedContinuation = sharedSplit.decode(new Uint8Array([0x98, 0x80]));
+              const optionState = new TextDecoder(); optionState.decode(new Uint8Array([0xf0, 0x9f]), { stream: true });
+              const optionMarker = {}; let optionMarkerPreserved = false;
+              try { optionState.decode(new Uint8Array([0x98, 0x80]), { get stream() { throw optionMarker; } }); }
+              catch (error) { optionMarkerPreserved = error === optionMarker; }
+              const afterOptionMarker = optionState.decode(new Uint8Array([0x98, 0x80]));
+              const invalidState = new TextDecoder(); invalidState.decode(new Uint8Array([0xf0, 0x9f]), { stream: true });
+              let invalidStateRejected = false;
+              try { invalidState.decode({}, { get stream() { optionReads++; return false; } }); }
+              catch (error) { invalidStateRejected = error instanceof TypeError; }
+              const afterInvalidState = invalidState.decode(new Uint8Array([0x98, 0x80]));
+              const detachedBuffer = new ArrayBuffer(2), detachedView = new Uint8Array(detachedBuffer), detachedDataView = new DataView(detachedBuffer);
+              __thaw_detach_array_buffer(detachedBuffer);
+              const detachedValues = [decoder.decode(detachedBuffer), decoder.decode(detachedView), decoder.decode(detachedDataView)];
+              const pendingDetached = new TextDecoder(); pendingDetached.decode(new Uint8Array([0xf0]), { stream: true });
+              const emptyDataViewBuffer = new ArrayBuffer(1), emptyDataView = new DataView(emptyDataViewBuffer); __thaw_detach_array_buffer(emptyDataViewBuffer);
+              const detachedFlush = pendingDetached.decode(emptyDataView);
+              return [whole, subview, dataView, wider, shared, empty, invalidRejected, optionReads,
+                genuine, shadowedBufferReads, changed, streamReads, continuation, optionMarkerPreserved,
+                afterOptionMarker, invalidStateRejected, afterInvalidState, detachedValues, detachedFlush,
+                hostileReads, proxyReads, genuineVariants, sharedContinuation];
+            }"#
+        ),
+        1
+    );
+    assert_eq!(
+        call("textDecodeSourceContracts", "[]"),
+        r#"["ABCD","BC","BC","ABCD","AB",["","","",""],true,0,["XY","\u0000"],0,"B",1,"😀",true,"😀",true,"😀",["","",""],"�",0,0,["EF","GH"],"😀"]"#
+    );
+}
+
+#[test]
+fn text_decoder_resets_after_fatal_nonstream_completion() {
+    assert_eq!(
+        load(
+            r#"function textDecodeFatalResetContracts() {
+              const utf8 = bytes => new Uint8Array(bytes), points = text => Array.from(text, character => character.codePointAt(0));
+              const fatal = new TextDecoder('utf-8', { fatal: true });
+              const first = fatal.decode(utf8([65]), { stream: true });
+              let fatalError = false; try { fatal.decode(utf8([0xff])); } catch (error) { fatalError = error instanceof TypeError; }
+              const freshAfterFatal = fatal.decode(utf8([0xef, 0xbb, 0xbf, 66]));
+              const flush = new TextDecoder('utf-8', { fatal: true }); flush.decode(utf8([0xf0]), { stream: true });
+              const detachedFlushBuffer = new ArrayBuffer(1), detachedFlushView = new DataView(detachedFlushBuffer); __thaw_detach_array_buffer(detachedFlushBuffer);
+              let flushError = false; try { flush.decode(detachedFlushView); } catch (error) { flushError = error instanceof TypeError; }
+              const afterFlush = flush.decode(utf8([0xef, 0xbb, 0xbf, 67]));
+              const streamAgain = flush.decode(utf8([0xef, 0xbb, 0xbf, 68]), { stream: true });
+              const interiorBom = flush.decode(utf8([0xef, 0xbb, 0xbf, 69]), { stream: true });
+              const successful = new TextDecoder();
+              const successCalls = [successful.decode(utf8([0xef, 0xbb, 0xbf, 65])), successful.decode(utf8([0xef, 0xbb, 0xbf, 66]))];
+              const ignore = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }); ignore.decode(utf8([65]), { stream: true });
+              try { ignore.decode(utf8([0xff])); } catch (_) {}
+              const ignoredFresh = ignore.decode(utf8([0xef, 0xbb, 0xbf, 70]));
+              const continued = new TextDecoder('utf-8', { fatal: true }); continued.decode(utf8([65]), { stream: true });
+              let streamError = false; try { continued.decode(utf8([0xff]), { stream: true }); } catch (error) { streamError = error instanceof TypeError; }
+              const continuingBom = continued.decode(utf8([0xef, 0xbb, 0xbf, 71]), { stream: true });
+              const direct = new TextDecoder('utf-8', { fatal: true });
+              const directFirst = direct.decode(utf8([65]), { stream: true });
+              let directError = false; try { direct.decode(utf8([0xff])); } catch (error) { directError = error instanceof TypeError; }
+              const directFreshStream = direct.decode(utf8([0xef, 0xbb, 0xbf, 68]), { stream: true });
+              const directInteriorBom = direct.decode(utf8([0xef, 0xbb, 0xbf, 69]), { stream: true });
+              const splitBom = new TextDecoder();
+              const splitFirst = splitBom.decode(utf8([0xef, 0xbb]), { stream: true });
+              const emptyStream = splitBom.decode(utf8([]), { stream: true });
+              const splitLast = splitBom.decode(utf8([0xbf, 72]), { stream: true });
+              return [points(first), fatalError, points(freshAfterFatal), flushError, points(afterFlush), points(streamAgain),
+                points(interiorBom), successCalls.map(points), points(ignoredFresh), streamError, points(continuingBom),
+                splitFirst, emptyStream, points(splitLast), [points(directFirst), directError, points(directFreshStream), points(directInteriorBom)]];
+            }"#
+        ),
+        1
+    );
+    assert_eq!(
+        call("textDecodeFatalResetContracts", "[]"),
+        r#"[[65],true,[66],true,[67],[68],[65279,69],[[65],[66]],[65279,70],true,[65279,71],"","",[72],[[65],true,[68],[65279,69]]]"#
+    );
+}
+
+#[test]
 fn buffer_supports_encodings_views_search_and_numeric_access() {
     assert_eq!(
             load(

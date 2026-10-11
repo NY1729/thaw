@@ -896,3 +896,50 @@ fn form_data_preserves_file_metadata_and_utf8_multipart_parameters() {
     let _ = fs::remove_dir_all(dir);
     let _ = fs::remove_dir_all(modules);
 }
+
+#[test]
+fn node_util_text_encoding_exports_and_web_callers_share_fixed_utf8_paths() {
+    use std::ffi::{CStr, CString};
+    let dir = temp_registry("util_text_encoding_contracts");
+    fs::write(
+        dir.join("index.js"),
+        r#"var util = require('node:util'), web = require('node:stream/web'), consumers = require('node:stream/consumers');
+module.exports = async function () {
+  var encoder = new util.TextEncoder(), output = new Uint8Array(5); output.set = function() {};
+  var into = encoder.encodeInto('A😀B', output), encoded = Array.from(new Uint8Array(output.buffer));
+  var invalid; try { new util.TextDecoder().decode({ buffer: new ArrayBuffer(1), byteOffset: 0, byteLength: 1 }); } catch (error) { invalid = error.name; }
+  var fatal = new util.TextDecoder('utf-8', { fatal: true }); fatal.decode(new Uint8Array([65]), { stream: true }); var failed = false;
+  try { fatal.decode(new Uint8Array([255])); } catch (error) { failed = error instanceof TypeError; }
+  var afterFatal = fatal.decode(new Uint8Array([239, 187, 191, 66]));
+  var blobText = await new Blob(['Blob']).text(), responseText = await new Response('Response').text();
+  var requestText = await new Request('https://example.test/', { method: 'POST', body: 'Request' }).text();
+  var formBom = new URLSearchParams('x=%EF%BB%BFy').get('x').codePointAt(0);
+  var source = new web.ReadableStream({ start: function(controller) { controller.enqueue(new Uint8Array([239, 187])); controller.enqueue(new Uint8Array([191, 226, 130])); controller.enqueue(new Uint8Array([172])); controller.close(); } });
+  var decoderStream = await consumers.text(source.pipeThrough(new web.TextDecoderStream()));
+  var strings = new web.ReadableStream({ start: function(controller) { controller.enqueue('\ud83d'); controller.enqueue('\ude00A'); controller.close(); } });
+  var encoderStream = await consumers.text(strings.pipeThrough(new web.TextEncoderStream()).pipeThrough(new web.TextDecoderStream()));
+  return [util.TextEncoder === globalThis.TextEncoder, util.TextDecoder === globalThis.TextDecoder,
+    into, encoded, invalid, failed, afterFatal, blobText, responseText, requestText, formBom, decoderStream, encoderStream];
+};"#,
+    )
+    .unwrap();
+    let empty_node_modules = temp_registry("util_text_encoding_contracts_modules");
+    let (bundle, _, _, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    let script = format!(
+        "globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseUtilText = module.exports;"
+    );
+    let source = CString::new(script).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let result_ptr = thaw_quickjs::thaw_js_call(
+        CString::new("exerciseUtilText").unwrap().as_ptr(),
+        CString::new("[]").unwrap().as_ptr(),
+    );
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(
+        result,
+        r#"[true,true,{"read":3,"written":5},[65,240,159,152,128],"TypeError",true,"B","Blob","Response","Request",65279,"€","😀A"]"#
+    );
+    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(empty_node_modules);
+}
