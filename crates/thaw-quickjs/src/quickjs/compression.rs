@@ -59,7 +59,6 @@ enum WebZlibWriter {
 
 struct WebZlibStream {
     writer: WebZlibWriter,
-    emitted: usize,
 }
 
 impl WebZlibStream {
@@ -101,7 +100,7 @@ impl WebZlibStream {
                 ))
             }
         };
-        Ok(Self { writer, emitted: 0 })
+        Ok(Self { writer })
     }
 
     fn write_and_flush(&mut self, input: &[u8]) -> io::Result<Vec<u8>> {
@@ -109,10 +108,10 @@ impl WebZlibStream {
             ($writer:expr) => {{
                 $writer.write_all(input)?;
                 $writer.flush()?;
-                $writer.get_ref()
+                std::mem::take($writer.get_mut())
             }};
         }
-        let output = match &mut self.writer {
+        Ok(match &mut self.writer {
             WebZlibWriter::GzipEncoder(writer) => write!(writer),
             WebZlibWriter::ZlibEncoder(writer) => write!(writer),
             WebZlibWriter::DeflateEncoder(writer) => write!(writer),
@@ -123,10 +122,7 @@ impl WebZlibStream {
             WebZlibWriter::BrotliEncoder(writer) => write!(writer),
             #[cfg(feature = "brotli")]
             WebZlibWriter::BrotliDecoder(writer) => write!(writer),
-        };
-        let chunk = output[self.emitted..].to_vec();
-        self.emitted = output.len();
-        Ok(chunk)
+        })
     }
 
     fn finish(self, input: &[u8]) -> io::Result<Vec<u8>> {
@@ -159,6 +155,6 @@ impl WebZlibStream {
                 })?
             }
         };
-        Ok(output[self.emitted..].to_vec())
+        Ok(output)
     }
 }
