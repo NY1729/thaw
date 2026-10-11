@@ -2931,9 +2931,19 @@ fn ensure_context() {
                     .expect("failed to install graph handle functions");
                 install_async_context_bootstrap(&ctx)
                     .expect("failed to install async context bootstrap");
+                let clone_unsupported_bootstrap = Function::new(
+                    ctx.clone(),
+                    |value: Value<'_>| value.is_promise() || value.is_proxy(),
+                )
+                .expect("failed to create clone brand bootstrap");
+                ctx.globals()
+                    .set("__thaw_clone_unsupported_bootstrap", clone_unsupported_bootstrap)
+                    .expect("failed to install clone brand bootstrap");
                 let platform_result = ctx.eval::<(), _>(PLATFORM_GLOBALS);
                 ctx.globals().remove("__thaw_async_context_bootstrap")
                     .expect("failed to remove async context bootstrap");
+                ctx.globals().remove("__thaw_clone_unsupported_bootstrap")
+                    .expect("failed to remove clone brand bootstrap");
                 platform_result.expect("failed to install JavaScript platform globals");
                 install_native_exception_bridge(&ctx)
                     .expect("failed to install native exception carrier bridge");
