@@ -2157,7 +2157,7 @@ fn https_client_verifies_a_custom_ca_and_parses_http() {
     let server_result = unsafe { CStr::from_ptr(server_result) }.to_string_lossy();
     assert_eq!(
         server_result,
-        r#"[[["GET","/from-rust",true,true],["GET","/from-rust",true,true]],false,true,[true,true],1]"#
+        r#"[[["GET","/from-rust",true,false],["GET","/from-rust",true,false]],false,true,[true,true],1]"#
     );
     let responses = tls_client.join().unwrap();
     assert!(responses[1].contains("X-First-Finished: yes\r\n"));
@@ -3968,6 +3968,467 @@ module.exports = function() {
 }
 
 #[test]
+fn tls_check_server_identity_matches_dns_ip_and_strict_san_shapes() {
+    use std::ffi::{CStr, CString};
+    let dir = temp_registry("builtin_tls_identity_matcher");
+    fs::write(dir.join("index.js"), r#"
+var tls = require('node:tls');
+function check(value, message) { if (!value) throw new Error(message); }
+module.exports = function() {
+  function match(host, cert) { check(tls.checkServerIdentity(host, cert) === undefined, 'expected identity match: ' + host); }
+  function fail(host, cert, code) { var error = tls.checkServerIdentity(host, cert); check(error instanceof Error && error.code === code && error.host === host && error.cert === cert && typeof error.reason === 'string', 'expected identity error: ' + host); }
+  match('API.Example.COM.', { subjectaltname: 'DNS:api.example.com' });
+  fail('api.example.com', { subject: { CN: 'api.example.com' }, subjectaltname: 'DNS:other.example.com' }, 'ERR_TLS_CERT_ALTNAME_INVALID');
+  match('legacy.example', { subject: { CN: 'legacy.example' } });
+  match('legacy.example', { subject: { CN: ['other.example', 'legacy.example'] } });
+  fail('missing.example', { subject: {} }, 'ERR_TLS_CERT_ALTNAME_INVALID');
+  fail('fallback.example', { subject: { CN: 'fallback.example' }, dnsNames: [], hasDnsSan: true }, 'ERR_TLS_CERT_ALTNAME_INVALID');
+  match('one.example.com', { subjectaltname: 'DNS:*.example.com' });
+  fail('two.one.example.com', { subjectaltname: 'DNS:*.example.com' }, 'ERR_TLS_CERT_ALTNAME_INVALID');
+  fail('example.com', { subjectaltname: 'DNS:*.com' }, 'ERR_TLS_CERT_ALTNAME_INVALID');
+  fail('one.example.com', { subjectaltname: 'DNS:*.*.example.com' }, 'ERR_TLS_CERT_ALTNAME_INVALID');
+  fail('service.example', { subjectaltname: 'URI:service.example' }, 'ERR_TLS_CERT_ALTNAME_INVALID');
+  match('192.0.2.1', { ipAddresses: ['192.0.2.1'], dnsNames: ['wrong.example'] });
+  fail('192.0.2.2', { ipAddresses: ['192.0.2.1'], dnsNames: ['192.0.2.2'] }, 'ERR_TLS_CERT_ALTNAME_INVALID');
+  match('2001:db8::1', { ipAddresses: ['2001:0db8:0:0:0:0:0:1'], dnsNames: [] });
+  fail('192.0.2.1', { subject: { CN: '192.0.2.1' } }, 'ERR_TLS_CERT_ALTNAME_INVALID');
+  match('api.example.com', { subjectaltname: 'DNS:"api.example.com", URI:https://issuer.example/x' });
+  match('api.example.com', { subjectaltname: 'DNS:"comma,name.example", DNS:api.example.com' });
+  match('api.example.com', { subjectaltname: 'DNS:"\\u0061pi.example.com"' });
+  match('api.example.com', { subjectaltname: 'DNS:"quoted\\"name.example", DNS:api.example.com' });
+  fail('api.example.com', { subjectaltname: 'DNS:"attacker\\q.example", DNS:api.example.com' }, 'ERR_TLS_CERT_ALTNAME_FORMAT');
+  fail('api.example.com', { subjectaltname: 'DNS:"api.example.com' }, 'ERR_TLS_CERT_ALTNAME_FORMAT');
+  fail('münich.example', { subject: { CN: 'xn--mnich-kva.example' } }, 'ERR_TLS_CERT_ALTNAME_INVALID');
+  fail('bad..example', { subjectaltname: 'DNS:bad.example' }, 'ERR_TLS_CERT_ALTNAME_INVALID');
+  return true;
+};
+"#).unwrap();
+    let empty_node_modules = temp_registry("builtin_tls_identity_matcher_modules");
+    let (bundle, _, _, _) = bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    let source = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseTlsIdentityMatcher = module.exports;")).unwrap();
+    let loaded = thaw_quickjs::thaw_js_load(source.as_ptr());
+    if loaded != 1 { let _ = fs::remove_dir_all(&dir); let _ = fs::remove_dir_all(&empty_node_modules); assert_eq!(loaded, 1); }
+    let result = thaw_quickjs::thaw_js_call(c"exerciseTlsIdentityMatcher".as_ptr(), c"[]".as_ptr());
+    let result = unsafe { CStr::from_ptr(result) }.to_string_lossy().into_owned();
+    let _ = fs::remove_dir_all(&dir); let _ = fs::remove_dir_all(&empty_node_modules);
+    assert_eq!(result, "true");
+}
+
+#[test]
+fn https_agent_forwards_custom_identity_checker_to_tls_connect() {
+    use std::ffi::{CStr, CString};
+    let dir = temp_registry("builtin_https_identity_forwarding");
+    fs::write(dir.join("index.js"), r#"
+var https = require('node:https'), tls = require('node:tls');
+function check(value, message) { if (!value) throw new Error(message); }
+module.exports = function() {
+  var originalConnect = tls.connect, forwarded, checker = function() {};
+  try {
+    tls.connect = function(options) {
+      forwarded = options;
+      return { on: function() { return this; }, once: function() { return this; }, destroy: function() {} };
+    };
+    var request = https.request({ hostname: 'api.example', port: 443, path: '/', servername: 'identity.example', checkServerIdentity: checker });
+    request.end();
+    check(forwarded && forwarded.host === 'api.example' && forwarded.servername === 'identity.example'
+      && forwarded.checkServerIdentity === checker, 'HTTPS request forwards host, selected TLS name, and custom identity checker');
+    return true;
+  } finally { tls.connect = originalConnect; }
+};
+"#).unwrap();
+    let empty_node_modules = temp_registry("builtin_https_identity_forwarding_modules");
+    let (bundle, _, _, _) = bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    let source = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseHttpsIdentityForwarding = module.exports;")).unwrap();
+    let loaded = thaw_quickjs::thaw_js_load(source.as_ptr());
+    if loaded != 1 { let _ = fs::remove_dir_all(&dir); let _ = fs::remove_dir_all(&empty_node_modules); assert_eq!(loaded, 1); }
+    let result = thaw_quickjs::thaw_js_call(c"exerciseHttpsIdentityForwarding".as_ptr(), c"[]".as_ptr());
+    let result = unsafe { CStr::from_ptr(result) }.to_string_lossy().into_owned();
+    let _ = fs::remove_dir_all(&dir); let _ = fs::remove_dir_all(&empty_node_modules);
+    assert_eq!(result, "true");
+}
+
+#[test]
+fn https_agent_forwards_custom_identity_checker_to_tls_connect() {
+    use std::ffi::{CStr, CString};
+    let dir = temp_registry("builtin_https_identity_forwarding");
+    fs::write(dir.join("index.js"), r#"
+var https = require('node:https'), tls = require('node:tls');
+function check(value, message) { if (!value) throw new Error(message); }
+module.exports = function() {
+  var originalConnect = tls.connect, forwarded, checker = function() {}, agent;
+  try {
+    tls.connect = function(options) {
+      forwarded = options;
+      return { on: function() { return this; }, once: function() { return this; }, destroy: function() {} };
+    };
+    agent = new https.Agent();
+    var request = https.request({ hostname: 'api.example', port: 443, path: '/', servername: 'identity.example', agent: agent, checkServerIdentity: checker });
+    request.end();
+    check(forwarded && forwarded.host === 'api.example' && forwarded.servername === 'identity.example'
+      && forwarded.checkServerIdentity === checker, 'HTTPS request forwards host, selected TLS name, and custom identity checker');
+    return true;
+  } finally { tls.connect = originalConnect; if (agent) agent.destroy(); }
+};
+"#).unwrap();
+    let empty_node_modules = temp_registry("builtin_https_identity_forwarding_modules");
+    let (bundle, _, _, _) = bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    let source = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseHttpsIdentityForwarding = module.exports;")).unwrap();
+    let loaded = thaw_quickjs::thaw_js_load(source.as_ptr());
+    if loaded != 1 { let _ = fs::remove_dir_all(&dir); let _ = fs::remove_dir_all(&empty_node_modules); assert_eq!(loaded, 1); }
+    let result = thaw_quickjs::thaw_js_call(c"exerciseHttpsIdentityForwarding".as_ptr(), c"[]".as_ptr());
+    let result = unsafe { CStr::from_ptr(result) }.to_string_lossy().into_owned();
+    let _ = fs::remove_dir_all(&dir); let _ = fs::remove_dir_all(&empty_node_modules);
+    assert_eq!(result, "true");
+}
+
+#[test]
+fn tls_custom_identity_finalizes_before_success_and_cleans_up_failures() {
+    use std::ffi::{CStr, CString};
+    let dir = temp_registry("builtin_tls_identity_finalizer");
+    fs::write(dir.join("index.js"), r#"
+var tls = require('node:tls');
+function check(value, message) { if (!value) throw new Error(message); }
+module.exports = function() {
+  var names = ['__thaw_tls_connect_with_options', '__thaw_tls_peer_certificate', '__thaw_tls_local_certificate', '__thaw_tls_peer_certificate_metadata', '__thaw_tls_local_certificate_metadata', '__thaw_tls_authorization', '__thaw_tls_destroy', '__thaw_tls_poll_read', '__thaw_crypto_hash_hex', 'queueMicrotask', 'setTimeout'];
+  var originals = names.map(function(name) { return globalThis[name]; }), queued = [], delayed = [], calls = [], destroyed = [], nextHandle = 41;
+  function install(auth) {
+    destroyed.length = 0; nextHandle = 41;
+    globalThis.__thaw_tls_connect_with_options = function() { calls.push(Array.prototype.slice.call(arguments)); return 'ok:' + nextHandle++ + ':6832'; };
+    globalThis.__thaw_tls_peer_certificate = function(handle) { return handle >= 41 ? 'aabb' : ''; };
+    globalThis.__thaw_tls_local_certificate = function() { return ''; };
+    globalThis.__thaw_tls_peer_certificate_metadata = function() { return JSON.stringify({ subject: { CN: ['fallback.example'] }, dnsNames: ['api.example'], ipAddresses: [], subjectaltname: 'DNS:api.example' }); };
+    globalThis.__thaw_tls_local_certificate_metadata = function() { return '{}'; };
+    globalThis.__thaw_tls_authorization = function() { return JSON.stringify(auth); };
+    globalThis.__thaw_tls_destroy = function(handle) { destroyed.push(handle); };
+    globalThis.__thaw_tls_poll_read = function() { return 'pending'; };
+    globalThis.__thaw_crypto_hash_hex = function() { return 'ab'.repeat(32); };
+    globalThis.queueMicrotask = function(callback) { queued.push(callback); };
+    globalThis.setTimeout = function(callback) { delayed.push(callback); return delayed.length; };
+  }
+  function drain() { while (queued.length) queued.shift()(); }
+  function socketFor(options, events) {
+    var socket = new tls.TLSSocket(); socket.on('error', function(error) { events.push('error:' + error.code); }); socket.on('close', function() { events.push('close'); });
+    socket.on('connect', function() { events.push('connect'); }); socket.on('secureConnect', function() { events.push('secureConnect'); });
+    socket.connect(Object.assign({ host: 'api.example', port: 443 }, options)); return socket;
+  }
+  try {
+    install({ authorized: true, authorizationError: null, chainVerified: true });
+    var seen = [], events = [], socket = socketFor({ checkServerIdentity: function(host, cert) { seen.push([host, cert.subject.CN[0], cert.raw.toString('hex')]); events.push('checker'); } }, events);
+    check(calls[0][6] === '1||1' && seen.length === 1 && seen[0][0] === 'api.example' && seen[0][1] === 'fallback.example' && seen[0][2] === 'aabb', 'custom checker receives selected name and full peer certificate before events');
+    drain(); check(events.join(',') === 'checker,connect,secureConnect' && socket.authorized, 'successful identity finalization precedes success notification');
+
+    install({ authorized: true, authorizationError: null, chainVerified: true });
+    events = []; socket = socketFor({ checkServerIdentity: function() { return Object.assign(new Error('pin mismatch'), { code: 'PIN_MISMATCH' }); } }, events);
+    check(socket.destroyed && destroyed[destroyed.length - 1] === 41 && !socket.authorized, 'strict custom error destroys original TLS handle');
+    drain(); check(events.indexOf('secureConnect') < 0 && events.filter(function(value) { return value === 'close'; }).length === 1, 'strict custom error never emits secureConnect and closes once');
+
+    install({ authorized: true, authorizationError: null, chainVerified: true });
+    events = []; socket = socketFor({ rejectUnauthorized: false, checkServerIdentity: function() { return new Error('pin mismatch'); } }, events);
+    check(!socket.authorized && socket.authorizationError === 'pin mismatch', 'permissive custom error records unauthorized state');
+    drain(); check(events.indexOf('secureConnect') >= 0, 'permissive identity error may still secureConnect');
+
+    install({ authorized: false, authorizationError: 'unknown issuer', chainVerified: false });
+    var called = 0; events = []; socket = socketFor({ rejectUnauthorized: false, checkServerIdentity: function() { called++; } }, events);
+    check(called === 0 && !socket.authorized && socket.authorizationError === 'unknown issuer', 'failed chain skips custom checker and retains real auth error');
+    drain(); check(events.indexOf('secureConnect') >= 0, 'permissive chain failure preserves allowed handshake');
+
+    install({ authorized: false, authorizationError: 'unknown issuer', chainVerified: false });
+    called = 0; events = []; socket = socketFor({ checkServerIdentity: function() { called++; } }, events);
+    check(called === 0 && socket.destroyed && !socket.authorized, 'strict failed chain closes before checker');
+    drain(); check(events.indexOf('secureConnect') < 0 && events.indexOf('close') >= 0, 'strict failed chain never signals success');
+
+    install({ authorized: true, authorizationError: null, chainVerified: true });
+    events = []; socket = socketFor({ checkServerIdentity: function() { throw new Error('checker threw'); } }, events);
+    check(socket.destroyed && !socket.authorized && socket.authorizationError === 'checker threw', 'throwing checker records failure and closes');
+    drain(); check(events.indexOf('secureConnect') < 0, 'throwing checker never signals success');
+
+    ['return-code', 'throw-message', 'throw-string'].forEach(function(mode) {
+      install({ authorized: true, authorizationError: null, chainVerified: true });
+      events = []; var guarded = new tls.TLSSocket(); guarded.on('error', function(error) { events.push('error:' + error.message); });
+      guarded.on('connect', function() { events.push('connect'); }); guarded.on('secureConnect', function() { events.push('secureConnect'); });
+      var metadataReads = 0, reentrantError;
+      function reconnectFromMetadata() { metadataReads++; guarded.connect({ host: 'api.example', port: 443, checkServerIdentity: function() {} }); return 'PIN_MISMATCH'; }
+      if (mode === 'return-code') {
+        reentrantError = new Error('pin mismatch'); Object.defineProperty(reentrantError, 'code', { get: reconnectFromMetadata });
+      } else if (mode === 'throw-message') {
+        reentrantError = new Error(); Object.defineProperty(reentrantError, 'message', { get: reconnectFromMetadata });
+      } else {
+        reentrantError = { toString: function() { reconnectFromMetadata(); return 'custom checker failure'; } };
+      }
+      var beforeMetadata = calls.length;
+      guarded.connect({ host: 'api.example', port: 443, checkServerIdentity: function() { if (mode === 'return-code') return reentrantError; throw reentrantError; } });
+      check(calls.length === beforeMetadata + 2 && destroyed.join(',') === '41' && metadataReads === 1
+        && guarded._handle === 42 && guarded.authorized && guarded.authorizationError === null && !guarded.destroyed,
+        mode + ' metadata reentry preserves replacement and retires original exactly once');
+      drain(); check(events.join(',') === 'connect,secureConnect', mode + ' metadata reentry emits only replacement success');
+    });
+
+    install({ authorized: true, authorizationError: null, chainVerified: true });
+    events = []; var metadataFailure = new tls.TLSSocket(); metadataFailure.on('error', function(error) { events.push('error:' + error.code); });
+    metadataFailure.on('connect', function() { events.push('connect'); }); metadataFailure.on('secureConnect', function() { events.push('secureConnect'); }); metadataFailure.on('close', function() { events.push('close'); });
+    var metadataFailureCalls = calls.length, metadataFailureDestroyed = destroyed.length, metadataFailureReads = 0;
+    metadataFailure.connect({ host: 'api.example', port: 443, checkServerIdentity: function() { return { get code() { metadataFailureReads++; throw new Error('metadata getter failed'); } }; } });
+    check(metadataFailureReads === 1 && calls.length === metadataFailureCalls + 1 && destroyed.length === metadataFailureDestroyed + 1
+      && destroyed[destroyed.length - 1] === 41 && metadataFailure._handle === 0 && metadataFailure.destroyed && !metadataFailure.authorized
+      && metadataFailure.authorizationError === 'TLS identity check failed', 'throwing error metadata deterministically closes the still-owned failed handle');
+    drain(); check(events.indexOf('secureConnect') < 0 && events.filter(function(value) { return value === 'close'; }).length === 1,
+      'normalization failure cannot leak success from the failed handle');
+
+    install({ authorized: true, authorizationError: null, chainVerified: true });
+    events = []; socket = new tls.TLSSocket();
+    socket.on('error', function(error) { events.push('error:' + error.message); });
+    socket.on('connect', function() { events.push('connect'); }); socket.on('secureConnect', function() { events.push('secureConnect'); });
+    socket.on('close', function() { events.push('close'); });
+    socket.connect({ host: 'api.example', port: 443, checkServerIdentity: function() { socket.destroy(); } });
+    check(socket.destroyed && destroyed.join(',') === '41', 'checker destruction closes the captured connection exactly once');
+    drain(); check(events.join(',') === 'close', 'destroyed connection emits close once and no stale success');
+
+    ['return', 'throw', 'destroy-then-reconnect'].forEach(function(mode) {
+      install({ authorized: true, authorizationError: null, chainVerified: true });
+      events = []; var reentrant = new tls.TLSSocket(); reentrant.on('error', function(error) { events.push('error:' + error.message); });
+      reentrant.on('connect', function() { events.push('connect'); }); reentrant.on('secureConnect', function() { events.push('secureConnect'); });
+      reentrant.connect({ host: 'api.example', port: 443, checkServerIdentity: function() {
+        if (mode === 'destroy-then-reconnect') reentrant.destroy();
+        reentrant.connect({ host: 'api.example', port: 443, checkServerIdentity: function() {} });
+        if (mode === 'throw') throw new Error('old checker throw');
+        return new Error('old checker return');
+      } });
+      check(reentrant._handle === 42 && reentrant.authorized && reentrant.authorizationError === null && !reentrant.destroyed, 'reentrant ' + mode + ' preserves replacement handle/authentication');
+      check(destroyed.join(',') === '41', 'reentrant ' + mode + ' retires original native handle exactly once');
+      drain(); check(events.join(',') === 'connect,secureConnect', 'reentrant ' + mode + ' suppresses retired connection events');
+    });
+
+    install({ authorized: true, authorizationError: null, chainVerified: true });
+    events = []; var stable = socketFor({ checkServerIdentity: function() {} }, events), stableHandle = stable._handle, stableGeneration = stable._identityGeneration, stableCalls = calls.length;
+    var stableDestroyed = destroyed.length, caught;
+    try { stable.connect({ host: 'api.example', port: 443, checkServerIdentity: true }); } catch (error) { caught = error; }
+    check(caught instanceof TypeError && calls.length === stableCalls && destroyed.length === stableDestroyed && stable._handle === stableHandle
+      && stable._identityGeneration === stableGeneration && stable.authorized && !stable.destroyed, 'invalid reconnect preserves active native connection/generation');
+    var marker = new Error('host conversion failed'); caught = undefined;
+    try { stable.connect({ host: { toString: function() { throw marker; } }, port: 443 }); } catch (error) { caught = error; }
+    check(caught === marker && calls.length === stableCalls && destroyed.length === stableDestroyed && stable._handle === stableHandle
+      && stable._identityGeneration === stableGeneration && stable.authorized && !stable.destroyed, 'throwing host coercion preserves active connection');
+    caught = undefined;
+    try { stable.connect({ host: 'api.example', port: Symbol('port') }); } catch (error) { caught = error; }
+    check(caught instanceof TypeError && calls.length === stableCalls && destroyed.length === stableDestroyed && stable._handle === stableHandle
+      && stable._identityGeneration === stableGeneration && stable.authorized && !stable.destroyed, 'invalid port preserves active connection');
+    caught = undefined;
+    try { stable.connect({ host: 'api.example', port: 443, cert: 42 }); } catch (error) { caught = error; }
+    check(caught instanceof TypeError && calls.length === stableCalls && destroyed.length === stableDestroyed && stable._handle === stableHandle
+      && stable._identityGeneration === stableGeneration && stable.authorized && !stable.destroyed, 'invalid certificate preserves active connection');
+    drain(); check(events.join(',') === 'connect,secureConnect', 'all invalid reconnect inputs preserve valid queued success');
+
+    ['host-return', 'host-throw', 'alpn-return', 'alpn-throw'].forEach(function(mode) {
+      install({ authorized: true, authorizationError: null, chainVerified: true });
+      events = []; var coercing = new tls.TLSSocket(); coercing.on('error', function(error) { events.push('error:' + error.message); });
+      coercing.on('connect', function() { events.push('connect'); }); coercing.on('secureConnect', function() { events.push('secureConnect'); });
+      coercing.connect({ host: 'api.example', port: 443, checkServerIdentity: function() {} });
+      var beforeReentry = calls.length, reentryError = new Error('coercion reentry failed'), caughtReentry;
+      if (mode.indexOf('host-') === 0) {
+        var hostCalls = 0, host = { toString: function() { hostCalls++; coercing.connect({ host: 'api.example', port: 443, checkServerIdentity: function() {} }); if (mode === 'host-throw') throw reentryError; return 'stale.example'; } };
+        try { coercing.connect({ host: host, port: 443, checkServerIdentity: function() {} }); } catch (error) { caughtReentry = error; }
+      } else {
+        var alpnCalls = 0, protocols = ['h2']; protocols.map = function() { alpnCalls++; coercing.connect({ host: 'api.example', port: 443, checkServerIdentity: function() {} }); if (mode === 'alpn-throw') throw reentryError; return ['6832']; };
+        try { coercing.connect({ host: 'api.example', port: 443, ALPNProtocols: protocols, checkServerIdentity: function() {} }); } catch (error) { caughtReentry = error; }
+      }
+      check((mode.endsWith('throw') ? caughtReentry === reentryError : caughtReentry === undefined) && calls.length === beforeReentry + 1
+        && destroyed.join(',') === '41' && coercing._handle === 42 && coercing.authorized && coercing.authorizationError === null && !coercing.destroyed
+        && (mode.indexOf('host-') === 0 ? hostCalls === 1 : alpnCalls === 1),
+        mode + ' coercion reentry preserves replacement and retires old handle once');
+      drain(); check(events.join(',') === 'connect,secureConnect', mode + ' coercion reentry emits only replacement success');
+    });
+
+    install({ authorized: true, authorizationError: null, chainVerified: true });
+    var counts = Object.create(null), values = {
+      host: { toString: function() { counts.hostString = (counts.hostString || 0) + 1; return 'api.example'; } },
+      port: { valueOf: function() { counts.portNumber = (counts.portNumber || 0) + 1; return 443; } },
+      servername: { toString: function() { counts.servernameString = (counts.servernameString || 0) + 1; return 'api.example'; } },
+      checkServerIdentity: function() { return undefined; }, ca: 'ca', cert: 'cert', key: 'key', ALPNProtocols: null, rejectUnauthorized: true
+    }, onceOptions = {};
+    values.ALPNProtocols = ['h2']; values.ALPNProtocols.map = function(callback) { counts.alpnMap = (counts.alpnMap || 0) + 1; return Array.prototype.map.call(this, callback); };
+    Object.keys(values).forEach(function(name) { counts[name] = 0; Object.defineProperty(onceOptions, name, { enumerable: true, get: function() { counts[name]++; return values[name]; } }); });
+    socket = new tls.TLSSocket(); socket.on('error', function() {}); socket.connect(onceOptions);
+    check(Object.keys(values).every(function(name) { return counts[name] === 1; }) && counts.hostString === 1 && counts.portNumber === 1 && counts.servernameString === 1 && counts.alpnMap === 1,
+      'all TLS option getters and host/port/name coercions run exactly once');
+    check(calls[calls.length - 1].join('|') === 'api.example|443|api.example|6361|63657274|6b6579|1|6832|1', 'prepared TLS record preserves normalized native arguments'); drain();
+    return true;
+  } finally { names.forEach(function(name, index) { globalThis[name] = originals[index]; }); }
+};
+"#).unwrap();
+    let empty_node_modules = temp_registry("builtin_tls_identity_finalizer_modules");
+    let (bundle, _, _, _) = bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    let source = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseTlsIdentityFinalizer = module.exports;")).unwrap();
+    let loaded = thaw_quickjs::thaw_js_load(source.as_ptr());
+    if loaded != 1 { let _ = fs::remove_dir_all(&dir); let _ = fs::remove_dir_all(&empty_node_modules); assert_eq!(loaded, 1); }
+    let result = thaw_quickjs::thaw_js_call(c"exerciseTlsIdentityFinalizer".as_ptr(), c"[]".as_ptr());
+    let result = unsafe { CStr::from_ptr(result) }.to_string_lossy().into_owned();
+    let _ = fs::remove_dir_all(&dir); let _ = fs::remove_dir_all(&empty_node_modules);
+    assert_eq!(result, "true");
+}
+
+#[test]
+fn tls_server_authorization_is_captured_before_secure_connection() {
+    use std::ffi::{CStr, CString};
+    let dir = temp_registry("builtin_tls_server_authorization");
+    fs::write(dir.join("index.js"), r#"
+var tls = require('node:tls');
+function check(value, message) { if (!value) throw new Error(message); }
+module.exports = function() {
+  var names = ['__thaw_tls_server_listen_with_options', '__thaw_tls_server_poll_accept', '__thaw_tls_peer_certificate', '__thaw_tls_local_certificate', '__thaw_tls_peer_certificate_metadata', '__thaw_tls_local_certificate_metadata', '__thaw_tls_authorization', '__thaw_tls_alpn', '__thaw_tls_destroy', '__thaw_tls_server_close', 'queueMicrotask', 'setTimeout'];
+  var originals = names.map(function(name) { return globalThis[name]; }), queue = [], delayed = [], records = [], active = null;
+  function run(options, accepted, peer, auth) {
+    active = { accepted: accepted, peer: peer, auth: auth };
+    globalThis.__thaw_tls_server_listen_with_options = function() { return 'ok:9:443'; };
+    globalThis.__thaw_tls_server_poll_accept = function() { var value = active.accepted; active.accepted = 'err:pending'; return value; };
+    globalThis.__thaw_tls_peer_certificate = function() { return active.peer ? 'aabb' : ''; };
+    globalThis.__thaw_tls_local_certificate = function() { return 'ccdd'; };
+    globalThis.__thaw_tls_peer_certificate_metadata = function() { return JSON.stringify(active.peer ? { subject: { CN: ['client.example'] }, dnsNames: ['client.example'], ipAddresses: [] } : {}); };
+    globalThis.__thaw_tls_local_certificate_metadata = function() { return '{}'; };
+    globalThis.__thaw_tls_authorization = function() { return JSON.stringify(active.auth); };
+    globalThis.__thaw_tls_alpn = function() { return ''; };
+    globalThis.__thaw_tls_destroy = function() {};
+    globalThis.__thaw_tls_server_close = function() {};
+    var server = tls.createServer(Object.assign({ cert: 'cert', key: 'key' }, options));
+    server.on('error', function(error) { throw error; });
+    server.on('secureConnection', function(socket) { records.push([socket.authorized, socket.authorizationError, Boolean(socket.getPeerCertificate().raw)]); socket.destroy(); server.close(); });
+    server.listen({ port: 443, host: '127.0.0.1' });
+    while (queue.length) queue.shift()();
+  }
+  try {
+    globalThis.queueMicrotask = function(callback) { queue.push(callback); };
+    globalThis.setTimeout = function(callback) { delayed.push(callback); return delayed.length; };
+    run({ requestCert: false }, 'ok:41:127.0.0.1:1234:', false, { authorized: false, authorizationError: 'TLS client authentication was not requested', chainVerified: false });
+    check(records[0][0] === false && records[0][1] === 'TLS client authentication was not requested' && records[0][2] === false, 'no-request server is unauthorized before event');
+    run({ requestCert: true, rejectUnauthorized: false }, 'ok:42:127.0.0.1:1234:', false, { authorized: false, authorizationError: 'CERT_NOT_PROVIDED', chainVerified: false });
+    check(records[1][0] === false && records[1][1] === 'CERT_NOT_PROVIDED', 'optional client-cert omission remains unauthorized');
+    run({ requestCert: true }, 'ok:43:127.0.0.1:1234:', true, { authorized: true, authorizationError: null, chainVerified: true });
+    check(records[2][0] === true && records[2][1] === null && records[2][2], 'verified requested peer certificate is authorized before event');
+    check(delayed.every(function(callback) { return typeof callback === 'function'; }), 'timers are captured without execution');
+    return true;
+  } finally { names.forEach(function(name, index) { globalThis[name] = originals[index]; }); }
+};
+"#).unwrap();
+    let empty_node_modules = temp_registry("builtin_tls_server_authorization_modules");
+    let (bundle, _, _, _) = bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    let source = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseTlsServerAuthorization = module.exports;")).unwrap();
+    let loaded = thaw_quickjs::thaw_js_load(source.as_ptr());
+    if loaded != 1 { let _ = fs::remove_dir_all(&dir); let _ = fs::remove_dir_all(&empty_node_modules); assert_eq!(loaded, 1); }
+    let result = thaw_quickjs::thaw_js_call(c"exerciseTlsServerAuthorization".as_ptr(), c"[]".as_ptr());
+    let result = unsafe { CStr::from_ptr(result) }.to_string_lossy().into_owned();
+    let _ = fs::remove_dir_all(&dir); let _ = fs::remove_dir_all(&empty_node_modules);
+    assert_eq!(result, "true");
+}
+
+#[test]
+fn http2_custom_identity_check_precedes_session_and_preserves_tls_options() {
+    use std::ffi::{CStr, CString};
+    let dir = temp_registry("builtin_http2_tls_identity");
+    fs::write(dir.join("index.js"), r#"
+var http2 = require('node:http2'), tls = require('node:tls');
+function check(value, message) { if (!value) throw new Error(message); }
+module.exports = function() {
+  var names = ['__thaw_tls_connect_with_options', '__thaw_tls_peer_certificate', '__thaw_tls_local_certificate', '__thaw_tls_peer_certificate_metadata', '__thaw_tls_local_certificate_metadata', '__thaw_tls_authorization', '__thaw_tls_alpn', '__thaw_tls_destroy', '__thaw_crypto_hash_hex', 'queueMicrotask'];
+  var originals = names.map(function(name) { return globalThis[name]; }), queue = [], calls = [], destroyed = [], starts = 0, callbackCalls = 0, originalStart;
+  try {
+    globalThis.__thaw_tls_connect_with_options = function() { calls.push(Array.prototype.slice.call(arguments)); return 'ok:41:6832'; };
+    globalThis.__thaw_tls_peer_certificate = function() { return 'aabb'; }; globalThis.__thaw_tls_local_certificate = function() { return ''; };
+    globalThis.__thaw_tls_peer_certificate_metadata = function() { return JSON.stringify({ subject: { CN: ['fallback.example'] }, dnsNames: ['api.example'], ipAddresses: [] }); };
+    globalThis.__thaw_tls_local_certificate_metadata = function() { return '{}'; };
+    globalThis.__thaw_tls_authorization = function() { return JSON.stringify({ authorized: true, authorizationError: null, chainVerified: true }); };
+    globalThis.__thaw_tls_alpn = function() { return '6832'; }; globalThis.__thaw_tls_destroy = function(handle) { destroyed.push(handle); };
+    globalThis.__thaw_crypto_hash_hex = function() { return 'ab'.repeat(32); }; globalThis.queueMicrotask = function(callback) { queue.push(callback); };
+    originalStart = http2.ClientHttp2Session.prototype._start;
+    http2.ClientHttp2Session.prototype._start = function() { starts++; };
+    var session = http2.connect('https://api.example', { ca: ['root-a', Buffer.from('root-b')], checkServerIdentity: function(host, cert) { callbackCalls++; check(host === 'api.example' && cert.raw.toString('hex') === 'aabb', 'HTTP2 checker receives peer data'); } });
+    check(calls[0][3] === '726f6f742d61,726f6f742d62' && calls[0][6] === '1|6832|1', 'HTTP2 preserves complete CA and h2 custom-name mode');
+    check(callbackCalls === 1 && starts === 1 && session.socket.authorized && session.socket.alpnProtocol === 'h2', 'HTTP2 identity accepted before session start with ALPN');
+    while (queue.length) queue.shift()();
+    check(session.destroyed === false, 'finite session connect event leaves no pump running');
+    session.destroy();
+    http2.ClientHttp2Session.prototype._start = function() {};
+    var beforeStarts = starts, thrown;
+    try { http2.connect('https://api.example', { checkServerIdentity: function() { return Object.assign(new Error('pin mismatch'), { code: 'PIN_MISMATCH' }); } }); } catch (error) { thrown = error; }
+    check(thrown && thrown.code === 'PIN_MISMATCH' && starts === beforeStarts && destroyed[destroyed.length - 1] === 41, 'HTTP2 returned identity error closes handle before session creation');
+    thrown = undefined;
+    try { http2.connect('https://api.example', { checkServerIdentity: function() { throw new Error('checker threw'); } }); } catch (error) { thrown = error; }
+    check(thrown && thrown.message === 'checker threw' && starts === beforeStarts && destroyed[destroyed.length - 1] === 41, 'HTTP2 callback throw closes handle before session creation');
+    var beforeCalls = calls.length, invalid;
+    try { http2.connect('https://api.example', { checkServerIdentity: true }); } catch (error) { invalid = error; }
+    check(invalid instanceof TypeError && calls.length === beforeCalls && starts === beforeStarts, 'HTTP2 validates callback before native call/session mutation');
+    http2.ClientHttp2Session.prototype._start = originalStart;
+    return true;
+  } finally { if (originalStart) http2.ClientHttp2Session.prototype._start = originalStart; names.forEach(function(name, index) { globalThis[name] = originals[index]; }); }
+};
+"#).unwrap();
+    let empty_node_modules = temp_registry("builtin_http2_tls_identity_modules");
+    let (bundle, _, _, _) = bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    let source = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseHttp2TlsIdentity = module.exports;")).unwrap();
+    let loaded = thaw_quickjs::thaw_js_load(source.as_ptr());
+    if loaded != 1 { let _ = fs::remove_dir_all(&dir); let _ = fs::remove_dir_all(&empty_node_modules); assert_eq!(loaded, 1); }
+    let result = thaw_quickjs::thaw_js_call(c"exerciseHttp2TlsIdentity".as_ptr(), c"[]".as_ptr());
+    let result = unsafe { CStr::from_ptr(result) }.to_string_lossy().into_owned();
+    let _ = fs::remove_dir_all(&dir); let _ = fs::remove_dir_all(&empty_node_modules);
+    assert_eq!(result, "true");
+}
+
+#[test]
+fn http2_server_authorization_uses_native_result_before_session() {
+    use std::ffi::{CStr, CString};
+    let dir = temp_registry("builtin_http2_tls_server_authorization");
+    fs::write(dir.join("index.js"), r#"
+var http2 = require('node:http2');
+function check(value, message) { if (!value) throw new Error(message); }
+module.exports = function() {
+  var names = ['__thaw_tls_server_listen_with_options', '__thaw_tls_server_poll_accept', '__thaw_tls_authorization', '__thaw_tls_destroy', '__thaw_tls_server_close', 'queueMicrotask', 'setTimeout'];
+  var originals = names.map(function(name) { return globalThis[name]; }), queued = [], delayed = [], calls = [], destroyed = [], active, accepted, originalStart = http2.ServerHttp2Session.prototype._start;
+  function run(result) {
+    active = result; accepted = 'ok:42:127.0.0.1:1234:6832'; queued = []; delayed = [];
+    globalThis.__thaw_tls_server_listen_with_options = function() { calls.push(Array.prototype.slice.call(arguments)); return 'ok:7:443'; };
+    globalThis.__thaw_tls_server_poll_accept = function() { var value = accepted; accepted = 'err:pending'; return value; };
+    globalThis.__thaw_tls_authorization = function() { return JSON.stringify(active); };
+    globalThis.__thaw_tls_destroy = function(handle) { destroyed.push(handle); };
+    globalThis.__thaw_tls_server_close = function(handle) { check(handle === 7, 'server closes the captured listener'); };
+    var server = http2.createSecureServer({ cert: 'cert', key: 'key', ca: ['root'], requestCert: true, rejectUnauthorized: false });
+    var seen;
+    server.on('session', function(session) {
+      seen = [session.socket.authorized, session.socket.authorizationError, session.socket.alpnProtocol, session.socket.encrypted];
+      session.destroy();
+      server.close();
+    });
+    server.on('sessionError', function(error) { throw error; });
+    server.listen(443, '127.0.0.1');
+    while (queued.length) queued.shift()();
+    return seen;
+  }
+  try {
+    globalThis.queueMicrotask = function(callback) { queued.push(callback); };
+    globalThis.setTimeout = function(callback) { delayed.push(callback); return delayed.length; };
+    http2.ServerHttp2Session.prototype._start = function() {};
+    var anonymous = run({ authorized: false, authorizationError: 'CERT_NOT_PROVIDED', chainVerified: false });
+    check(anonymous[0] === false && anonymous[1] === 'CERT_NOT_PROVIDED' && anonymous[2] === 'h2' && anonymous[3], 'HTTP2 session reports anonymous TLS client accurately');
+    var verified = run({ authorized: true, authorizationError: null, chainVerified: true });
+    check(verified[0] === true && verified[1] === null && verified[2] === 'h2' && verified[3], 'HTTP2 session reports verified client certificate before session event');
+    check(calls.length === 2 && calls.every(function(call) { return call[4] === '726f6f74' && call[5] === 1 && call[6] === '6832'; }), 'HTTP2 server preserves CA, request-cert flags, and h2 ALPN');
+    check(destroyed.join(',') === '42,42', 'finite server sessions release each accepted stream');
+    return true;
+  } finally {
+    http2.ServerHttp2Session.prototype._start = originalStart;
+    names.forEach(function(name, index) { globalThis[name] = originals[index]; });
+  }
+};
+"#).unwrap();
+    let empty_node_modules = temp_registry("builtin_http2_tls_server_authorization_modules");
+    let (bundle, _, _, _) = bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    let source = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseHttp2TlsServerAuthorization = module.exports;")).unwrap();
+    let loaded = thaw_quickjs::thaw_js_load(source.as_ptr());
+    if loaded != 1 { let _ = fs::remove_dir_all(&dir); let _ = fs::remove_dir_all(&empty_node_modules); assert_eq!(loaded, 1); }
+    let result = thaw_quickjs::thaw_js_call(c"exerciseHttp2TlsServerAuthorization".as_ptr(), c"[]".as_ptr());
+    let result = unsafe { CStr::from_ptr(result) }.to_string_lossy().into_owned();
+    let _ = fs::remove_dir_all(&dir); let _ = fs::remove_dir_all(&empty_node_modules);
+    assert_eq!(result, "true");
+}
+
+#[test]
 fn tls_alpn_buffer_protocol_lists_are_framed_before_native_calls() {
     use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_tls_alpn_buffer");
@@ -3985,7 +4446,7 @@ module.exports = function() {
   function connect(options, spec) {
     var socket = new tls.TLSSocket(); socket.on('error', function() {}); socket.on('close', function() {});
     socket.connect(Object.assign({ host: '127.0.0.1', port: 443 }, options));
-    check(connectCalls[connectCalls.length - 1][6] === '1|' + spec, 'client ALPN bytes');
+    check(connectCalls[connectCalls.length - 1][6] === '1|' + spec + '|1', 'client ALPN bytes');
     drainQueue(); check(socket._handle === 0, 'client failure did not allocate handle');
     return socket;
   }

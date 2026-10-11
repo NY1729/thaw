@@ -377,6 +377,13 @@ pub(super) struct TlsClientOptions<'a> {
     pub(super) alpn_spec: &'a str,
     pub(super) report_alpn: bool,
     pub(super) reject_unauthorized: bool,
+    pub(super) defer_name_verification: bool,
+}
+
+fn server_client_auth_status(request_cert: bool, peer_present: bool, verifier_accepted: bool) -> (bool, Option<&'static str>) {
+    if !request_cert { return (false, Some("TLS client authentication was not requested")); }
+    if !peer_present { return (false, Some("CERT_NOT_PROVIDED")); }
+    if verifier_accepted { (true, None) } else { (false, Some("CERT_REJECTED")) }
 }
 
 pub(super) fn take_tls_stream_handle(next: &mut u32) -> Option<u32> {
@@ -448,9 +455,11 @@ pub(super) fn tls_connect(options: TlsClientOptions<'_>) -> String {
         alpn_spec,
         report_alpn,
         reject_unauthorized,
+        defer_name_verification,
     } = options;
     let roots = match tls_client_roots(ca_spec) { Ok(roots) => roots, Err(error) => return format!("err:{error}") };
-    let builder = ClientConfig::builder().with_root_certificates(roots);
+    let verifier_result = Arc::new(Mutex::new(None));
+    let builder = ClientConfig::builder().with_root_certificates(roots.clone());
     let mut local_certificate = None;
     let config = if cert_spec.is_empty() && key_spec.is_empty() {
         builder.with_no_client_auth()
@@ -475,11 +484,13 @@ pub(super) fn tls_connect(options: TlsClientOptions<'_>) -> String {
     };
     let mut config = config;
     config.alpn_protocols = decode_alpn_protocols(alpn_spec);
-    if !reject_unauthorized {
-        config
-            .dangerous()
-            .set_certificate_verifier(Arc::new(InsecureServerVerifier));
-    }
+    config.dangerous().set_certificate_verifier(Arc::new(RecordingServerVerifier {
+        roots,
+        defer_name: defer_name_verification,
+        allow_invalid: !reject_unauthorized,
+        result: Arc::clone(&verifier_result),
+        algorithms: rustls::crypto::ring::default_provider().signature_verification_algorithms,
+    }));
     let config = Arc::new(config);
     let name = match ServerName::try_from(server_name.to_string()) {
         Ok(name) => name,
@@ -508,12 +519,17 @@ pub(super) fn tls_connect(options: TlsClientOptions<'_>) -> String {
         let Some(handle) = take_tls_stream_handle(&mut streams.0) else {
             return "err:TLS socket handle exhausted".to_string();
         };
+        let verification_error = verifier_result.lock().ok().and_then(|result| result.clone());
+        let chain_verified = verification_error.is_none();
         TLS_CLIENT_CERTIFICATES.with(|certificates| {
             certificates.borrow_mut().insert(
                 handle,
                 TlsCertificates {
                     peer: peer_certificate,
                     local: local_certificate,
+                    authorized: chain_verified,
+                    authorization_error: verification_error,
+                    chain_verified,
                 },
             );
         });
@@ -611,6 +627,7 @@ pub(super) fn tls_server_listen(options: TlsServerOptions<'_>) -> String {
                 socket,
                 config,
                 local_certificate,
+                request_cert,
             },
         );
         format!("ok:{handle}:{actual_port}")
@@ -637,6 +654,7 @@ fn tls_server_accept_impl(handle: u32, nonblocking: bool) -> String {
                     peer,
                     Arc::clone(&listener.config),
                     listener.local_certificate.clone(),
+                    listener.request_cert,
                 )
             })
             .map_err(|error| {
@@ -647,7 +665,7 @@ fn tls_server_accept_impl(handle: u32, nonblocking: bool) -> String {
                 }
             })
     });
-    let (mut socket, peer, config, local_certificate) = match accepted {
+    let (mut socket, peer, config, local_certificate, request_cert) = match accepted {
         Ok(accepted) => accepted,
         Err(error) => return format!("err:{error}"),
     };
@@ -673,9 +691,16 @@ fn tls_server_accept_impl(handle: u32, nonblocking: bool) -> String {
         TLS_SERVER_CERTIFICATES.with(|certificates| {
             certificates.borrow_mut().insert(
                 stream_handle,
-                TlsCertificates {
-                    peer: peer_certificate,
-                    local: Some(local_certificate),
+                {
+                    let peer_present = peer_certificate.as_ref().is_some_and(|certificate| !certificate.is_empty());
+                    let (authorized, authorization_error) = server_client_auth_status(request_cert, peer_present, true);
+                    TlsCertificates {
+                        peer: peer_certificate.clone(),
+                        local: Some(local_certificate),
+                        authorized,
+                        authorization_error: authorization_error.map(str::to_owned),
+                        chain_verified: authorized,
+                    }
                 },
             );
         });
@@ -940,29 +965,74 @@ pub(super) fn tls_certificate(handle: u32, peer: bool) -> String {
         .unwrap_or_default()
 }
 
-pub(super) fn tls_certificate_metadata(handle: u32, peer: bool) -> String {
-    let Some(bytes) = tls_certificate_bytes(handle, peer) else {
+pub(super) fn tls_authorization(handle: u32) -> String {
+    let read = |certificates: &HashMap<u32, TlsCertificates>| certificates.get(&handle).map(|entry| serde_json::json!({
+        "authorized": entry.authorized,
+        "authorizationError": entry.authorization_error,
+        "chainVerified": entry.chain_verified,
+    }));
+    let value = TLS_CLIENT_CERTIFICATES.with(|certificates| read(&certificates.borrow()))
+        .or_else(|| TLS_SERVER_CERTIFICATES.with(|certificates| read(&certificates.borrow())));
+    value.unwrap_or_else(|| serde_json::json!({"authorized": false, "authorizationError": "TLS socket is closed", "chainVerified": false})).to_string()
+}
+
+fn certificate_metadata(bytes: &[u8]) -> String {
+    let Ok((_, certificate)) = x509_parser::parse_x509_certificate(bytes) else {
         return "{}".to_string();
     };
-    let Ok((_, certificate)) = x509_parser::parse_x509_certificate(&bytes) else {
-        return "{}".to_string();
-    };
-    let common_name = |name: &x509_parser::x509::X509Name<'_>| {
+    let common_names = |name: &x509_parser::x509::X509Name<'_>| {
         name.iter_common_name()
-            .next()
-            .and_then(|attribute| attribute.as_str().ok())
-            .unwrap_or_default()
-            .to_string()
+            .filter_map(|attribute| attribute.as_str().ok().map(str::to_owned))
+            .collect::<Vec<_>>()
     };
     let validity = certificate.validity();
+    let san_result = certificate.subject_alternative_name();
+    let mut dns_names = Vec::new();
+    let mut ip_addresses = Vec::new();
+    let mut has_dns_san = false;
+    if let Ok(Some(extension)) = &san_result {
+        for name in &extension.value.general_names {
+            match name {
+                x509_parser::extensions::GeneralName::DNSName(name) => {
+                    has_dns_san = true;
+                    dns_names.push((*name).to_owned())
+                }
+                x509_parser::extensions::GeneralName::IPAddress(bytes) if bytes.len() == 4 => {
+                    if let Ok(octets) = <[u8; 4]>::try_from(*bytes) { ip_addresses.push(std::net::Ipv4Addr::from(octets).to_string()); }
+                }
+                x509_parser::extensions::GeneralName::IPAddress(bytes) if bytes.len() == 16 => {
+                    if let Ok(octets) = <[u8; 16]>::try_from(*bytes) { ip_addresses.push(std::net::Ipv6Addr::from(octets).to_string()); }
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut san_tokens = dns_names.iter().map(|name| {
+        if name.chars().any(|character| matches!(character, ',' | '"' | '\\') || character.is_ascii_whitespace()) {
+            format!("DNS:{}", serde_json::to_string(name).unwrap_or_else(|_| "\"\"".to_string()))
+        } else {
+            format!("DNS:{name}")
+        }
+    }).collect::<Vec<_>>();
+    san_tokens.extend(ip_addresses.iter().map(|address| format!("IP Address:{address}")));
+    let subject_alt_name = san_tokens.join(", ");
     serde_json::json!({
-        "subject": { "CN": common_name(certificate.subject()) },
-        "issuer": { "CN": common_name(certificate.issuer()) },
+        "subject": { "CN": common_names(certificate.subject()) },
+        "issuer": { "CN": common_names(certificate.issuer()) },
         "valid_from": validity.not_before.to_rfc2822().unwrap_or_else(|_| validity.not_before.to_string()),
         "valid_to": validity.not_after.to_rfc2822().unwrap_or_else(|_| validity.not_after.to_string()),
         "serialNumber": certificate.raw_serial_as_string().replace(':', "").to_uppercase(),
+        "dnsNames": dns_names,
+        "hasDnsSan": has_dns_san,
+        "ipAddresses": ip_addresses,
+        "subjectaltname": subject_alt_name,
+        "sanError": san_result.is_err(),
     })
     .to_string()
+}
+
+pub(super) fn tls_certificate_metadata(handle: u32, peer: bool) -> String {
+    tls_certificate_bytes(handle, peer).as_deref().map(certificate_metadata).unwrap_or_else(|| "{}".to_string())
 }
 
 #[cfg(test)]
@@ -991,6 +1061,61 @@ mod explicit_ca_tests {
         let pem = format!("-----BEGIN CERTIFICATE-----\n{}\n-----END CERTIFICATE-----\n-----BEGIN CERTIFICATE-----\n{}\n-----END CERTIFICATE-----", base64::engine::general_purpose::STANDARD.encode(ROOT), base64::engine::general_purpose::STANDARD.encode(ROOT));
         let pem_roots = tls_ca_roots(Some(&spec(pem.as_bytes()))).unwrap();
         assert_eq!(pem_roots.roots.as_slice(), [expected.roots[0].clone(), expected.roots[0].clone()]);
+    }
+
+    #[test]
+    fn public_root_metadata_exposes_safe_subject_and_san_shapes() {
+        let metadata: serde_json::Value = serde_json::from_str(&certificate_metadata(ROOT)).unwrap();
+        assert!(metadata["subject"]["CN"].is_array());
+        assert!(metadata["issuer"]["CN"].is_array());
+        assert!(metadata["dnsNames"].is_array());
+        assert!(metadata["hasDnsSan"].is_boolean());
+        assert!(metadata["ipAddresses"].is_array());
+        assert!(metadata["subjectaltname"].is_string());
+        assert!(metadata["sanError"].is_boolean());
+        assert_eq!(tls_canonical_ip("2001:0db8:0:0:0:0:0:1"), "2001:db8::1");
+        assert_eq!(tls_canonical_ip("name.example"), "");
+    }
+
+    #[test]
+    fn invalid_server_certificate_chain_is_recorded_before_strict_or_permissive_result() {
+        let name = ServerName::try_from("identity.example").unwrap();
+        let certificate = CertificateDer::from(b"not an X.509 certificate".to_vec());
+        let timestamp = UnixTime::since_unix_epoch(Duration::from_secs(1));
+
+        let strict_result = Arc::new(Mutex::new(None));
+        let strict = RecordingServerVerifier {
+            roots: RootCertStore::empty(),
+            defer_name: true,
+            allow_invalid: false,
+            result: Arc::clone(&strict_result),
+            algorithms: rustls::crypto::ring::default_provider().signature_verification_algorithms,
+        };
+        assert!(rustls::client::danger::ServerCertVerifier::verify_server_cert(
+            &strict, &certificate, &[], &name, &[], timestamp,
+        ).is_err());
+        assert!(strict_result.lock().unwrap().as_ref().is_some());
+
+        let permissive_result = Arc::new(Mutex::new(None));
+        let permissive = RecordingServerVerifier {
+            roots: RootCertStore::empty(),
+            defer_name: true,
+            allow_invalid: true,
+            result: Arc::clone(&permissive_result),
+            algorithms: rustls::crypto::ring::default_provider().signature_verification_algorithms,
+        };
+        assert!(rustls::client::danger::ServerCertVerifier::verify_server_cert(
+            &permissive, &certificate, &[], &name, &[], timestamp,
+        ).is_ok());
+        assert!(permissive_result.lock().unwrap().as_ref().is_some());
+    }
+
+    #[test]
+    fn server_authorization_requires_requested_and_verified_client_identity() {
+        assert_eq!(server_client_auth_status(false, false, true), (false, Some("TLS client authentication was not requested")));
+        assert_eq!(server_client_auth_status(true, false, true), (false, Some("CERT_NOT_PROVIDED")));
+        assert_eq!(server_client_auth_status(true, true, false), (false, Some("CERT_REJECTED")));
+        assert_eq!(server_client_auth_status(true, true, true), (true, None));
     }
 
     #[test]
@@ -1043,6 +1168,7 @@ struct TlsClientOptions<'a> {
     alpn_spec: &'a str,
     report_alpn: bool,
     reject_unauthorized: bool,
+    defer_name_verification: bool,
 }
 
 #[cfg(not(feature = "tls"))]
@@ -1088,6 +1214,12 @@ fn tls_alpn(_: u32) -> String { String::new() }
 fn tls_certificate(_: u32, _: bool) -> String { String::new() }
 #[cfg(not(feature = "tls"))]
 fn tls_certificate_metadata(_: u32, _: bool) -> String { "{}".to_string() }
+#[cfg(not(feature = "tls"))]
+fn tls_authorization(_: u32) -> String { r#"{"authorized":false,"authorizationError":"TLS support is unavailable","chainVerified":false}"#.to_string() }
+
+fn tls_canonical_ip(host: &str) -> String {
+    host.parse::<std::net::IpAddr>().map(|address| address.to_string()).unwrap_or_default()
+}
 
 #[cfg(all(test, target_os = "linux"))]
 #[test]

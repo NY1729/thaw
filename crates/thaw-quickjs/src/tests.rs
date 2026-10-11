@@ -9378,6 +9378,7 @@ fn tls_client_and_accepted_server_handles_remain_independent() {
         alpn_spec: "6832",
         report_alpn: true,
         reject_unauthorized: true,
+        defer_name_verification: false,
     });
     assert!(client_result.starts_with("ok:"), "{client_result}");
     let client_handle: u32 = client_result.split(':').nth(1).unwrap().parse().unwrap();

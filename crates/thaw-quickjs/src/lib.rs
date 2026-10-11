@@ -301,6 +301,7 @@ struct TlsListener {
     socket: TcpListener,
     config: Arc<ServerConfig>,
     local_certificate: Vec<u8>,
+    request_cert: bool,
 }
 
 #[cfg(feature = "tls")]
@@ -308,47 +309,82 @@ struct TlsListener {
 struct TlsCertificates {
     peer: Option<Vec<u8>>,
     local: Option<Vec<u8>>,
+    authorized: bool,
+    authorization_error: Option<String>,
+    chain_verified: bool,
 }
 
 #[cfg(feature = "tls")]
-#[derive(Debug)]
-struct InsecureServerVerifier;
+struct RecordingServerVerifier {
+    roots: RootCertStore,
+    defer_name: bool,
+    allow_invalid: bool,
+    result: Arc<Mutex<Option<String>>>,
+    algorithms: rustls::crypto::WebPkiSupportedAlgorithms,
+}
 
 #[cfg(feature = "tls")]
-impl rustls::client::danger::ServerCertVerifier for InsecureServerVerifier {
+impl std::fmt::Debug for RecordingServerVerifier {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("RecordingServerVerifier").finish_non_exhaustive()
+    }
+}
+
+#[cfg(feature = "tls")]
+impl rustls::client::danger::ServerCertVerifier for RecordingServerVerifier {
     fn verify_server_cert(
         &self,
-        _end_entity: &CertificateDer<'_>,
-        _intermediates: &[CertificateDer<'_>],
-        _server_name: &ServerName<'_>,
+        end_entity: &CertificateDer<'_>,
+        intermediates: &[CertificateDer<'_>],
+        server_name: &ServerName<'_>,
         _ocsp_response: &[u8],
-        _now: UnixTime,
+        now: UnixTime,
     ) -> Result<rustls::client::danger::ServerCertVerified, RustlsError> {
-        Ok(rustls::client::danger::ServerCertVerified::assertion())
+        let validation = (|| {
+            let parsed = rustls::server::ParsedCertificate::try_from(end_entity)?;
+            rustls::client::verify_server_cert_signed_by_trust_anchor(
+                &parsed,
+                &self.roots,
+                intermediates,
+                now,
+                self.algorithms.all,
+            )?;
+            if !self.defer_name {
+                rustls::client::verify_server_name(&parsed, server_name)?;
+            }
+            Ok(())
+        })();
+        let error = validation.as_ref().err().map(ToString::to_string);
+        if let Ok(mut result) = self.result.lock() {
+            *result = error.clone();
+        }
+        match validation {
+            Ok(()) => Ok(rustls::client::danger::ServerCertVerified::assertion()),
+            Err(_error) if self.allow_invalid => Ok(rustls::client::danger::ServerCertVerified::assertion()),
+            Err(error) => Err(error),
+        }
     }
 
     fn verify_tls12_signature(
         &self,
-        _message: &[u8],
-        _cert: &CertificateDer<'_>,
-        _dss: &DigitallySignedStruct,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
     ) -> Result<rustls::client::danger::HandshakeSignatureValid, RustlsError> {
-        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+        rustls::crypto::verify_tls12_signature(message, cert, dss, &self.algorithms)
     }
 
     fn verify_tls13_signature(
         &self,
-        _message: &[u8],
-        _cert: &CertificateDer<'_>,
-        _dss: &DigitallySignedStruct,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
     ) -> Result<rustls::client::danger::HandshakeSignatureValid, RustlsError> {
-        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+        rustls::crypto::verify_tls13_signature(message, cert, dss, &self.algorithms)
     }
 
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-        rustls::crypto::ring::default_provider()
-            .signature_verification_algorithms
-            .supported_schemes()
+        self.algorithms.supported_schemes()
     }
 }
 
