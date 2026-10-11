@@ -1,4 +1,6 @@
   const thawAsyncContext = globalThis.__thaw_async_context_bootstrap;
+  const thawProcessMonotonicClock = globalThis.__thaw_process_monotonic_clock_bootstrap;
+  const thawProcessBigInt = BigInt;
   globalThis.global = globalThis;
   const thawDateConstructor = Date;
   const thawDateGetTime = Date.prototype.getTime;
@@ -2624,7 +2626,7 @@
   if (typeof globalThis.process === 'undefined') globalThis.process = {};
   const hostInfo = typeof globalThis.__thaw_os_identity === 'function'
     ? JSON.parse(globalThis.__thaw_os_identity()) : {};
-  const processStart = Date.now();
+  const processClockNanoseconds = () => thawProcessBigInt(thawProcessMonotonicClock());
   const processListeners = new Map();
   const processOn = (event, listener, once = false) => {
     if (typeof listener !== 'function') throw new TypeError('listener must be a function');
@@ -2672,7 +2674,7 @@
     return listeners.length !== 0;
   };
   const hrtime = previous => {
-    const nanoseconds = BigInt(Date.now() - processStart) * 1000000n;
+    const nanoseconds = processClockNanoseconds();
     let seconds = Number(nanoseconds / 1000000000n);
     let remainder = Number(nanoseconds % 1000000000n);
     if (previous !== undefined) {
@@ -2682,7 +2684,7 @@
     }
     return [seconds, remainder];
   };
-  hrtime.bigint = () => BigInt(Date.now() - processStart) * 1000000n;
+  hrtime.bigint = processClockNanoseconds;
   // Buffer is defined later (buffer_crypto.js); capture Buffer.from on first use.
   let processBufferFrom;
   const processApply = Reflect.apply,
@@ -2849,7 +2851,11 @@
       globalThis.__thaw_process_exit(status);
     },
     nextTick,
-    uptime: () => (Date.now() - processStart) / 1000,
+    uptime: () => {
+      const nanoseconds = processClockNanoseconds();
+      return Number(nanoseconds / 1000000000n)
+        + Number(nanoseconds % 1000000000n) / 1000000000;
+    },
     hrtime,
     memoryUsage: () => ({ rss: 0, heapTotal: 0, heapUsed: 0, external: 0, arrayBuffers: 0 }),
     cpuUsage: () => ({ user: 0, system: 0 }),
