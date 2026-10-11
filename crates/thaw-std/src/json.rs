@@ -479,12 +479,12 @@ pub extern "C" fn thaw_closure_alias_register(
     original: *const u8,
 ) -> *const u8 {
     if !adapter.is_null() && !original.is_null() && adapter != original {
+        thaw_arena::register_metadata_reset_hook(reset_closure_aliases);
         CLOSURE_ALIASES.with(|aliases| {
             aliases
                 .borrow_mut()
                 .insert(adapter as usize, original as usize)
         });
-        thaw_arena::register_reset_hook(reset_closure_aliases);
     }
     adapter
 }

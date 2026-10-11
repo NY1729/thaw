@@ -26,7 +26,7 @@ fn reset_regex_meta(tracing: bool) {
 }
 
 fn store_regex_meta(pointer: *mut u8, meta: RegexMatchMeta) {
-    thaw_arena::register_reset_hook(reset_regex_meta);
+    thaw_arena::register_metadata_reset_hook(reset_regex_meta);
     REGEX_META.with(|stored| {
         stored.borrow_mut().insert(pointer as usize, meta);
     });

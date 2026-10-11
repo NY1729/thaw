@@ -30,7 +30,7 @@ pub unsafe extern "C" fn thaw_template_strings_register(cooked: *const u8, raw: 
     if cooked_buffer.is_null() || raw_buffer.is_null() {
         return;
     }
-    thaw_arena::register_reset_hook(reset_template_strings);
+    thaw_arena::register_metadata_reset_hook(reset_template_strings);
     let previous = TEMPLATE_RAW_STRINGS.with(|stored| {
         stored.borrow_mut().insert(cooked as usize, raw.cast_mut())
     }).unwrap_or(std::ptr::null_mut());
