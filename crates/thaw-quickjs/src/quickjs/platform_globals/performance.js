@@ -4,6 +4,52 @@
   const cloneObject = Object;
   const cloneString = String;
   const cloneDefineProperty = Object.defineProperty;
+  const utilTypesTag = value => Object.prototype.toString.call(value);
+  const utilTypes = {
+    isDate: value => value instanceof Date,
+    isRegExp: value => value instanceof RegExp,
+    isMap: value => value instanceof Map,
+    isSet: value => value instanceof Set,
+    isWeakMap: value => value instanceof WeakMap,
+    isWeakSet: value => value instanceof WeakSet,
+    isPromise: value => value instanceof Promise,
+    isArrayBuffer: value => value instanceof ArrayBuffer,
+    isAnyArrayBuffer: value => value instanceof ArrayBuffer
+      || (typeof SharedArrayBuffer === 'function' && value instanceof SharedArrayBuffer),
+    isArrayBufferView: value => ArrayBuffer.isView(value),
+    isDataView: value => value instanceof DataView,
+    isTypedArray: value => ArrayBuffer.isView(value) && !(value instanceof DataView),
+    isUint8Array: value => value instanceof Uint8Array,
+    isUint8ClampedArray: value => value instanceof Uint8ClampedArray,
+    isUint16Array: value => value instanceof Uint16Array,
+    isUint32Array: value => value instanceof Uint32Array,
+    isInt8Array: value => value instanceof Int8Array,
+    isInt16Array: value => value instanceof Int16Array,
+    isInt32Array: value => value instanceof Int32Array,
+    isFloat32Array: value => value instanceof Float32Array,
+    isFloat64Array: value => value instanceof Float64Array,
+    isBigInt64Array: value => typeof BigInt64Array === 'function' && value instanceof BigInt64Array,
+    isBigUint64Array: value => typeof BigUint64Array === 'function' && value instanceof BigUint64Array,
+    isNativeError: value => cloneErrorBootstrap(value),
+    isArgumentsObject: value => utilTypesTag(value) === '[object Arguments]',
+    isNumberObject: value => utilTypesTag(value) === '[object Number]',
+    isStringObject: value => utilTypesTag(value) === '[object String]',
+    isBooleanObject: value => utilTypesTag(value) === '[object Boolean]',
+    isBigIntObject: value => utilTypesTag(value) === '[object BigInt]',
+    isSymbolObject: value => utilTypesTag(value) === '[object Symbol]',
+    isBoxedPrimitive: value => /\[object (Number|String|Boolean|BigInt|Symbol)\]/.test(utilTypesTag(value)),
+    isAsyncFunction: value => utilTypesTag(value) === '[object AsyncFunction]',
+    isGeneratorFunction: value => utilTypesTag(value) === '[object GeneratorFunction]',
+    isGeneratorObject: value => utilTypesTag(value) === '[object Generator]',
+    isExternal: () => false,
+    isProxy: () => false,
+    isModuleNamespaceObject: () => false,
+    isKeyObject: () => false,
+    isCryptoKey: () => false,
+  };
+  utilTypes.default = utilTypes;
+  utilTypes.__esModule = true;
+  cloneDefineProperty(globalThis, '__thaw_util_types', { value: utilTypes });
   const cloneGetOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
   const cloneHasOwnProperty = Object.prototype.hasOwnProperty;
   const cloneWeakMapHas = WeakMap.prototype.has;
