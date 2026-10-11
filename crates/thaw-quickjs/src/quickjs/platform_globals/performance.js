@@ -1,3 +1,24 @@
+  const cloneUnsupportedBootstrap = globalThis.__thaw_clone_unsupported_bootstrap;
+  const cloneReflectApply = Reflect.apply;
+  const cloneWeakMapHas = WeakMap.prototype.has;
+  const cloneWeakSetHas = WeakSet.prototype.has;
+  const cloneTypeErrorPrototype = TypeError.prototype;
+  const cloneObjectIsPrototypeOf = Object.prototype.isPrototypeOf;
+  const cloneWeakProbeKey = {};
+  const cloneHasWeakBrand = (has, value) => {
+    try { cloneReflectApply(has, value, [cloneWeakProbeKey]); return true; }
+    catch (error) {
+      if (error !== null && (typeof error === 'object' || typeof error === 'function')
+          && cloneReflectApply(cloneObjectIsPrototypeOf, cloneTypeErrorPrototype, [error])) return false;
+      throw error;
+    }
+  };
+  const isUnsupportedCloneObject = value =>
+    cloneUnsupportedBootstrap(value)
+    || cloneHasWeakBrand(cloneWeakMapHas, value)
+    || cloneHasWeakBrand(cloneWeakSetHas, value);
+  const isCloneUncloneable = (set, value) =>
+    cloneReflectApply(cloneWeakSetHas, set, [value]);
   const base64Alphabet =
     'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
   globalThis.btoa = input => {
@@ -69,10 +90,17 @@
     toJSON() { return { name: this.name, entryType: this.entryType, startTime: this.startTime, duration: this.duration, detail: this.detail }; }
   }
   class PerformanceMark extends PerformanceEntry {
-    constructor(name, options = {}) { super(name, 'mark', options.startTime === undefined ? performanceNow() : options.startTime, 0, options.detail); if (this.startTime < 0) throw new TypeError('Performance timestamp must be non-negative'); }
+    constructor(name, options = {}) {
+      super(name, 'mark', options.startTime === undefined ? performanceNow() : options.startTime, 0, options.detail);
+      if (this.startTime < 0) throw new TypeError('Performance timestamp must be non-negative');
+      this.detail = cloneMetadata(this.detail);
+    }
   }
   class PerformanceMeasure extends PerformanceEntry {
-    constructor(name, startTime, duration, detail) { super(name, 'measure', startTime, duration, detail); }
+    constructor(name, startTime, duration, detail) {
+      super(name, 'measure', startTime, duration, detail);
+      this.detail = cloneMetadata(this.detail);
+    }
   }
   class PerformanceObserverEntryList {
     constructor(entries) { this._entries = entries; }
@@ -232,10 +260,13 @@
       }
       const clone = input => {
         if (((typeof input === 'object' && input !== null) || typeof input === 'function')
-            && workerUncloneableObjects.has(input)) {
+            && isCloneUncloneable(workerUncloneableObjects, input)) {
           const error = new DOMException('Object is marked as uncloneable', 'DataCloneError');
           workerUncloneableErrors.add(error);
           throw error;
+        }
+        if (input !== null && typeof input === 'object' && isUnsupportedCloneObject(input)) {
+          throw new DOMException('value cannot be cloned', 'DataCloneError');
         }
         if (input === null || typeof input !== 'object') {
           if (typeof input === 'function' || typeof input === 'symbol') {
@@ -301,3 +332,4 @@
     };
     globalThis.__thaw_structured_clone_with_uncloneable_checks = globalThis.structuredClone;
   }
+  const cloneMetadata = globalThis.structuredClone;

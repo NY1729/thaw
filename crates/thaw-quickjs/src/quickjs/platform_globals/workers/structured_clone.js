@@ -4,8 +4,11 @@
     const seen = new Map(), nodes = [];
     const encode = input => {
       if (((typeof input === 'object' && input !== null) || typeof input === 'function')
-          && uncloneable.has(input)) {
+          && isCloneUncloneable(uncloneable, input)) {
         throw new DOMException('Object is marked as uncloneable', 'DataCloneError');
+      }
+      if (input !== null && typeof input === 'object' && isUnsupportedCloneObject(input)) {
+        throw new DOMException('value cannot be cloned', 'DataCloneError');
       }
       if (input === undefined) return { p: 'undefined' };
       if (typeof input === 'number' && !Number.isFinite(input)) return { p: String(input) };

@@ -1337,6 +1337,199 @@ fn worker_encoder_rejects_symbol_values() {
 }
 
 #[test]
+fn clone_rejects_native_promise_proxy_and_weak_collection_brands() {
+    std::thread::spawn(|| {
+        assert_eq!(
+            load(
+                r#"
+      function unsupportedCloneBrandCases() {
+        const rejects = value => {
+          const fails = clone => {
+            try { clone(value); return false; }
+            catch (error) { return error instanceof DOMException && error.name === 'DataCloneError'; }
+          };
+          return fails(input => structuredClone(input))
+            && fails(input => __thaw_worker_encode(input));
+        };
+        const promise = Promise.resolve(1);
+        let thenReads = 0, constructorReads = 0, speciesReads = 0;
+        Object.defineProperties(promise, {
+          then: { configurable: true, get() { thenReads++; throw new Error('then read'); } },
+          constructor: { configurable: true, get() { constructorReads++; throw new Error('constructor read'); } }
+        });
+        const speciesDescriptor = Object.getOwnPropertyDescriptor(Promise, Symbol.species);
+        Object.defineProperty(Promise, Symbol.species, {
+          configurable: true,
+          get() { speciesReads++; throw new Error('species read'); }
+        });
+        const weakMap = new WeakMap(), weakSet = new WeakSet();
+        const brands = [promise, weakMap, weakSet];
+        const originalPrototypes = brands.map(value => Object.getPrototypeOf(value));
+        let rootRejected, nestedRejected, alteredPrototypeRejected, proxiesRejected;
+        let overridesRespected = false;
+        let spoofAccepted, classAccepted, getterCounts;
+        let proxyTraps = 0;
+        const trapHandler = {
+          get() { proxyTraps++; throw new Error('proxy get trap'); },
+          ownKeys() { proxyTraps++; throw new Error('proxy keys trap'); },
+          getPrototypeOf() { proxyTraps++; throw new Error('proxy prototype trap'); }
+        };
+        const proxy = new Proxy({}, trapHandler);
+        const revokedPair = Proxy.revocable({}, trapHandler);
+        revokedPair.revoke();
+        try {
+          rootRejected = brands.every(rejects);
+          nestedRejected = brands.every(value => rejects({ nested: value }) && rejects([value]));
+          brands.forEach(value => Object.setPrototypeOf(value, null));
+          alteredPrototypeRejected = brands.every(rejects);
+          proxiesRejected = rejects(proxy) && rejects(revokedPair.proxy) && proxyTraps === 0;
+
+          const weakMapPrototype = originalPrototypes[1];
+          const weakSetPrototype = originalPrototypes[2];
+          const weakMapHas = Object.getOwnPropertyDescriptor(weakMapPrototype, 'has');
+          const weakSetHas = Object.getOwnPropertyDescriptor(weakSetPrototype, 'has');
+          const weakMapConstructor = globalThis.WeakMap;
+          const weakSetConstructor = globalThis.WeakSet;
+          const reflectApply = Reflect.apply;
+          try {
+            Object.defineProperty(weakMapPrototype, 'has', { configurable: true, writable: true, value() { throw new Error('mutable WeakMap.has'); } });
+            Object.defineProperty(weakSetPrototype, 'has', { configurable: true, writable: true, value() { throw new Error('mutable WeakSet.has'); } });
+            globalThis.WeakMap = function() { throw new Error('mutable WeakMap'); };
+            globalThis.WeakSet = function() { throw new Error('mutable WeakSet'); };
+            Reflect.apply = function() { throw new Error('mutable Reflect.apply'); };
+            overridesRespected = brands.every(rejects);
+          } finally {
+            Object.defineProperty(weakMapPrototype, 'has', weakMapHas);
+            Object.defineProperty(weakSetPrototype, 'has', weakSetHas);
+            globalThis.WeakMap = weakMapConstructor;
+            globalThis.WeakSet = weakSetConstructor;
+            Reflect.apply = reflectApply;
+          }
+
+          const spoof = { value: 3, [Symbol.toStringTag]: 'Promise' };
+          const spoofGlobal = structuredClone(spoof);
+          const spoofWorker = __thaw_worker_decode(__thaw_worker_encode(spoof));
+          spoofAccepted = spoofGlobal.value === 3 && spoofWorker.value === 3;
+          class PlainData { constructor() { this.value = 4; } }
+          const plain = new PlainData();
+          const plainGlobal = structuredClone(plain);
+          const plainWorker = __thaw_worker_decode(__thaw_worker_encode(plain));
+          classAccepted = plainGlobal.value === 4 && plainWorker.value === 4;
+          getterCounts = [thenReads, constructorReads, speciesReads];
+        } finally {
+          brands.forEach((value, index) => Object.setPrototypeOf(value, originalPrototypes[index]));
+          Object.defineProperty(Promise, Symbol.species, speciesDescriptor);
+        }
+        return [rootRejected, nestedRejected, alteredPrototypeRejected, proxiesRejected,
+                proxyTraps, overridesRespected, spoofAccepted, classAccepted, getterCounts];
+      }
+    "#
+            ),
+            1
+        );
+        assert_eq!(
+            call("unsupportedCloneBrandCases", "[]"),
+            "[true,true,true,true,0,true,true,true,[0,0,0]]"
+        );
+    })
+    .join()
+    .unwrap();
+}
+
+#[test]
+fn performance_details_are_snapshotted_and_rejected_before_storage() {
+    std::thread::spawn(|| {
+        assert_eq!(
+            load(
+                r#"
+      function performanceDetailCloneCases() {
+        performance.clearMarks(); performance.clearMeasures();
+        const observers = [];
+        const observer = new PerformanceObserver(() => {}); observers.push(observer);
+        observer.observe({ entryTypes: ['mark', 'measure'] });
+        try {
+          const markDetail = { nested: { value: 1 }, map: new Map([['item', { value: 2 }]]), buffer: new Uint8Array([3, 4]).buffer };
+          markDetail.self = markDetail;
+          const mark = performance.mark('snapshottedMark', { startTime: 10, detail: markDetail });
+          markDetail.nested.value = 11; markDetail.map.get('item').value = 22; new Uint8Array(markDetail.buffer)[0] = 33;
+          const markSnapshot = mark.detail !== markDetail && mark.detail.self === mark.detail
+            && mark.detail.nested.value === 1 && mark.detail.map.get('item').value === 2
+            && new Uint8Array(mark.detail.buffer)[0] === 3 && new Uint8Array(markDetail.buffer)[0] === 33;
+          const measureDetail = { nested: { value: 5 }, map: new Map([['item', 6]]) };
+          measureDetail.self = measureDetail;
+          const measure = performance.measure('snapshottedMeasure', { start: 10, end: 20, detail: measureDetail });
+          measureDetail.nested.value = 55; measureDetail.map.set('item', 66);
+          const measureSnapshot = measure.detail !== measureDetail && measure.detail.self === measure.detail
+            && measure.detail.nested.value === 5 && measure.detail.map.get('item') === 6;
+          const directDetail = { nested: { value: 7 } };
+          const direct = new PerformanceMark('directSnapshot', { startTime: 30, detail: directDetail });
+          directDetail.nested.value = 77;
+          const directSnapshot = direct.detail !== directDetail && direct.detail.nested.value === 7;
+          const nullDefault = performance.mark('nullDetail', { startTime: 40 }).detail === null;
+          const setupRecords = observer.takeRecords().length;
+
+          const badValues = [() => {}, Symbol('detail'), Promise.resolve(1), new WeakMap(), new WeakSet()];
+          const rejected = badValues.every((value, index) => {
+            const markName = 'rejectedMark' + index, measureName = 'rejectedMeasure' + index;
+            const fails = (create, entries, name) => {
+              let error;
+              try { create(); } catch (caught) { error = caught; }
+              return error instanceof DOMException && error.name === 'DataCloneError'
+                && entries(name).length === 0;
+            };
+            return fails(() => performance.mark(markName, { startTime: 50, detail: value }),
+                         name => performance.getEntriesByName(name, 'mark'), markName)
+              && fails(() => performance.measure(measureName, { start: 10, end: 20, detail: value }),
+                       name => performance.getEntriesByName(name, 'measure'), measureName);
+          });
+          const sentinel = new Error('detail getter sentinel');
+          const throwingDetail = { get value() { throw sentinel; } };
+          let markGetterPreserved = false, measureGetterPreserved = false;
+          try { performance.mark('throwingMarkDetail', { startTime: 60, detail: throwingDetail }); }
+          catch (error) { markGetterPreserved = error === sentinel; }
+          try { performance.measure('throwingMeasureDetail', { start: 10, end: 20, detail: throwingDetail }); }
+          catch (error) { measureGetterPreserved = error === sentinel; }
+          let negativePrecedence = false, unknownPrecedence = false;
+          try { performance.mark('negativeDetail', { startTime: -1, detail: () => {} }); }
+          catch (error) { negativePrecedence = error instanceof TypeError; }
+          try { performance.measure('unknownDetail', { start: 'missingDetailMark', end: 20, detail: Promise.resolve(1) }); }
+          catch (error) { unknownPrecedence = error instanceof SyntaxError; }
+          const successfulRecords = observer.takeRecords().map(entry => entry.entryType).join(',');
+          const noFailedEntries = performance.getEntriesByName('throwingMarkDetail', 'mark').length === 0
+            && performance.getEntriesByName('throwingMeasureDetail', 'measure').length === 0
+            && performance.getEntriesByName('negativeDetail', 'mark').length === 0
+            && performance.getEntriesByName('unknownDetail', 'measure').length === 0;
+          const noFailedRecords = observer.takeRecords().length === 0;
+
+          const originalClone = globalThis.structuredClone;
+          let cloneOverrideIgnored = false;
+          try {
+            globalThis.structuredClone = value => value;
+            const input = { value: 8 };
+            const captured = performance.mark('capturedClone', { startTime: 70, detail: input });
+            input.value = 88;
+            cloneOverrideIgnored = captured.detail !== input && captured.detail.value === 8;
+          } finally { globalThis.structuredClone = originalClone; }
+          return [markSnapshot, measureSnapshot, directSnapshot, nullDefault, rejected,
+                  markGetterPreserved, measureGetterPreserved, negativePrecedence,
+                  unknownPrecedence, setupRecords, successfulRecords, noFailedEntries,
+                  noFailedRecords, cloneOverrideIgnored];
+        } finally { for (const current of observers) current.disconnect(); }
+      }
+    "#
+            ),
+            1
+        );
+        assert_eq!(
+            call("performanceDetailCloneCases", "[]"),
+            r#"[true,true,true,true,true,true,true,true,true,3,"",true,true,true]"#
+        );
+    })
+    .join()
+    .unwrap();
+}
+
+#[test]
 fn clone_traversals_read_getters_once_and_check_marked_nodes_in_place() {
     assert_eq!(
         load(
