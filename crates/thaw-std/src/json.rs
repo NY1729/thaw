@@ -8040,6 +8040,13 @@ mod tests {
         static NAPI_RELEASES: Cell<usize> = const { Cell::new(0) };
         static TRACKED_REENTRANT_ROOTS: Cell<(usize, usize)> = const { Cell::new((0, 0)) };
         static TRACKED_RELEASE_REENTERED: Cell<bool> = const { Cell::new(false) };
+        static NESTED_ARENA_RELEASE_ARMED: Cell<bool> = const { Cell::new(false) };
+        static NESTED_ARENA_FRESH: Cell<usize> = const { Cell::new(0) };
+        static NESTED_ARENA_FRESH_TOKEN: Cell<usize> = const { Cell::new(0) };
+        static NESTED_ARENA_FRESH_FROZEN: Cell<bool> = const { Cell::new(false) };
+        static NESTED_ARENA_FRESH_FROZEN_AFTER: Cell<bool> = const { Cell::new(false) };
+        static NESTED_ARENA_ALIAS: Cell<(usize, usize)> = const { Cell::new((0, 0)) };
+        static NESTED_ARENA_ALIAS_AFTER: Cell<usize> = const { Cell::new(0) };
         static HOST_ARRAY_TEST_LENGTH: Cell<f64> = const { Cell::new(5.0) };
         static HOST_ARRAY_TEST_FAIL_GET: Cell<bool> = const { Cell::new(false) };
         static HOST_ARRAY_TEST_FAIL_INDEX: Cell<i32> = const { Cell::new(-1) };
@@ -8347,6 +8354,34 @@ mod tests {
 
     extern "C" fn count_host_release(_handle: u64) -> u8 {
         HOST_RELEASES.with(|count| count.set(count.get() + 1));
+        1
+    }
+
+    extern "C" fn release_host_with_nested_reset(_handle: u64) -> u8 {
+        HOST_RELEASES.with(|count| count.set(count.get() + 1));
+        if NESTED_ARENA_RELEASE_ARMED.with(|armed| armed.replace(false)) {
+            let fresh = thaw_json_track_arena_owned_root(leak(Value::shared_object(
+                indexmap::IndexMap::new(),
+            )));
+            let token = arena_owned_json_root_token(fresh).unwrap_or(0);
+            let frozen = unsafe { thaw_object_set_state(token as *const u8, 3) };
+            let adapter = thaw_arena::thaw_arena_alloc(8, 8);
+            let original = thaw_arena::thaw_arena_alloc(8, 8);
+            if !adapter.is_null() && !original.is_null() {
+                thaw_closure_alias_register(adapter, original);
+            }
+            NESTED_ARENA_FRESH.with(|pointer| pointer.set(fresh as usize));
+            NESTED_ARENA_FRESH_TOKEN.with(|pointer| pointer.set(token));
+            NESTED_ARENA_FRESH_FROZEN.with(|state| state.set(frozen));
+            NESTED_ARENA_ALIAS.with(|alias| alias.set((adapter as usize, original as usize)));
+
+            thaw_arena::thaw_arena_reset();
+
+            NESTED_ARENA_FRESH_FROZEN_AFTER
+                .with(|state| state.set(unsafe { thaw_object_state(token as *const u8, 2) }));
+            NESTED_ARENA_ALIAS_AFTER
+                .with(|resolved| resolved.set(thaw_closure_alias_resolve(adapter) as usize));
+        }
         1
     }
 
@@ -10029,6 +10064,54 @@ mod tests {
             HOST_RELEASES.with(|count| assert_eq!(count.get(), 1));
             assert!(!ARENA_OWNED_JSON_ROOTS
                 .with(|roots| roots.borrow().contains_key(&(receiver as usize))));
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    fn host_release_nested_reset_preserves_fresh_arena_metadata() {
+        std::thread::spawn(|| {
+            HOST_RELEASES.with(|count| count.set(0));
+            NESTED_ARENA_RELEASE_ARMED.with(|armed| armed.set(true));
+            thaw_arena::thaw_arena_enable_tracing();
+            let old = leak(Value::Host(Rc::new(HostLease {
+                handle: 50,
+                release: release_host_with_nested_reset,
+            })));
+            assert_eq!(thaw_json_track_arena_owned_root(old), old);
+
+            thaw_arena::thaw_arena_reset();
+
+            let fresh = NESTED_ARENA_FRESH.with(Cell::get);
+            let token = NESTED_ARENA_FRESH_TOKEN.with(Cell::get);
+            assert_ne!(fresh, 0);
+            assert_ne!(token, 0);
+            assert!(ARENA_OWNED_JSON_ROOTS.with(|roots| roots.borrow().contains_key(&fresh)));
+            assert!(thaw_arena::contains_allocation(token));
+            assert!(NESTED_ARENA_FRESH_FROZEN.with(Cell::get));
+            assert!(NESTED_ARENA_FRESH_FROZEN_AFTER.with(Cell::get));
+            assert!(unsafe { thaw_object_state(token as *const u8, 2) });
+            let (adapter, original) = NESTED_ARENA_ALIAS.with(Cell::get);
+            assert_ne!(adapter, 0);
+            assert_ne!(original, 0);
+            assert_eq!(NESTED_ARENA_ALIAS_AFTER.with(Cell::get), original);
+            assert_eq!(
+                thaw_closure_alias_resolve(adapter as *const u8) as usize,
+                original
+            );
+            HOST_RELEASES.with(|count| assert_eq!(count.get(), 1));
+
+            thaw_arena::thaw_arena_reset();
+
+            assert!(!ARENA_OWNED_JSON_ROOTS.with(|roots| roots.borrow().contains_key(&fresh)));
+            assert!(!thaw_arena::contains_allocation(token));
+            assert!(!unsafe { thaw_object_state(token as *const u8, 2) });
+            assert_eq!(
+                thaw_closure_alias_resolve(adapter as *const u8) as usize,
+                adapter
+            );
+            HOST_RELEASES.with(|count| assert_eq!(count.get(), 1));
         })
         .join()
         .unwrap();

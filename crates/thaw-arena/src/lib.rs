@@ -30,6 +30,30 @@ thread_local! {
     static PINNED: RefCell<BTreeMap<usize, usize>> = const { RefCell::new(BTreeMap::new()) };
     static RESET_HOOKS: RefCell<Vec<fn(bool)>> = const { RefCell::new(Vec::new()) };
     static METADATA_RESET_HOOKS: RefCell<Vec<fn(bool)>> = const { RefCell::new(Vec::new()) };
+    static RESET_ACTIVE: Cell<bool> = const { Cell::new(false) };
+}
+
+struct ResetGuard;
+
+impl ResetGuard {
+    fn acquire() -> Option<Self> {
+        RESET_ACTIVE
+            .try_with(|active| {
+                if active.replace(true) {
+                    None
+                } else {
+                    Some(Self)
+                }
+            })
+            .ok()
+            .flatten()
+    }
+}
+
+impl Drop for ResetGuard {
+    fn drop(&mut self) {
+        let _ = RESET_ACTIVE.try_with(|active| active.set(false));
+    }
 }
 
 /// A runtime-owned reference, released when its callback or watcher is dropped.
@@ -212,9 +236,14 @@ pub extern "C" fn thaw_arena_alloc(size: usize, align: usize) -> *mut u8 {
 
 /// Reclaims generations with no values reachable from registered global roots.
 /// With tracing disabled this is a plain bulk reset.
+/// A same-thread reset called from a reset hook is ignored; callback allocations
+/// are eligible for reclamation at the next independent reset.
 /// `thaw-runtime` runs it once at every Lambda invocation boundary.
 #[no_mangle]
 pub extern "C" fn thaw_arena_reset() {
+    let Some(_reset_guard) = ResetGuard::acquire() else {
+        return;
+    };
     let roots = ROOTS.with(|roots| roots.borrow().clone());
     if !is_tracing() {
         strings::reset_lengths(false);
@@ -313,6 +342,13 @@ mod tests {
         static RESET_TEST_EVENTS: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
         static RESET_TEST_LATE_ARMED: Cell<bool> = const { Cell::new(false) };
         static RESET_TEST_LATE_STATE: Cell<bool> = const { Cell::new(false) };
+        static NESTED_RESET_ARMED: Cell<bool> = const { Cell::new(false) };
+        static NESTED_RESET_FRESH: Cell<usize> = const { Cell::new(0) };
+        static NESTED_RESET_OLD_AFTER_NESTED: Cell<bool> = const { Cell::new(false) };
+        static NESTED_RESET_OLD_IN_B: Cell<bool> = const { Cell::new(false) };
+        static NESTED_RESET_HOOK_COUNTS: RefCell<[usize; 2]> = const { RefCell::new([0; 2]) };
+        static NESTED_RESET_METADATA_COUNT: Cell<usize> = const { Cell::new(0) };
+        static NESTED_RESET_OLD: Cell<usize> = const { Cell::new(0) };
     }
 
     fn reset_test_metadata_hook(_: bool) {
@@ -336,6 +372,87 @@ mod tests {
             RESET_TEST_LATE_STATE.with(|state| state.set(true));
             register_metadata_reset_hook(reset_test_late_metadata_hook);
         }
+    }
+
+    fn nested_reset_metadata_hook(_: bool) {
+        NESTED_RESET_METADATA_COUNT.with(|count| count.set(count.get() + 1));
+    }
+
+    fn nested_reset_release_a(_: bool) {
+        NESTED_RESET_HOOK_COUNTS.with(|counts| counts.borrow_mut()[0] += 1);
+        if NESTED_RESET_ARMED.with(|armed| armed.replace(false)) {
+            let fresh = thaw_arena_alloc(8, 8) as usize;
+            NESTED_RESET_FRESH.with(|pointer| pointer.set(fresh));
+            thaw_arena_reset();
+            thaw_arena_reset();
+            let old = NESTED_RESET_OLD.with(Cell::get);
+            NESTED_RESET_OLD_AFTER_NESTED.with(|reclaimed| reclaimed.set(was_reclaimed(old)));
+        }
+    }
+
+    fn nested_reset_release_b(_: bool) {
+        NESTED_RESET_HOOK_COUNTS.with(|counts| counts.borrow_mut()[1] += 1);
+        let old = NESTED_RESET_OLD.with(Cell::get);
+        NESTED_RESET_OLD_IN_B.with(|reclaimed| reclaimed.set(was_reclaimed(old)));
+    }
+
+    #[test]
+    fn nested_reset_preserves_outer_classification_and_fresh_allocations() {
+        std::thread::spawn(|| {
+            thaw_arena_enable_tracing();
+            let old = thaw_arena_alloc(8, 8) as usize;
+            let survivor = thaw_arena_alloc(8, 8) as usize;
+            let _survivor_pin = ArenaRoot::new(survivor);
+            NESTED_RESET_OLD.with(|pointer| pointer.set(old));
+            register_reset_hook(nested_reset_release_a);
+            register_reset_hook(nested_reset_release_b);
+            NESTED_RESET_ARMED.with(|armed| armed.set(true));
+
+            thaw_arena_reset();
+
+            assert!(NESTED_RESET_OLD_AFTER_NESTED.with(Cell::get));
+            assert!(NESTED_RESET_OLD_IN_B.with(Cell::get));
+            let fresh = NESTED_RESET_FRESH.with(Cell::get);
+            assert!(contains_allocation(fresh));
+            assert_eq!(
+                NESTED_RESET_HOOK_COUNTS.with(|counts| counts.borrow()[1]),
+                1
+            );
+
+            let fresh_pin = ArenaRoot::new(fresh);
+            thaw_arena_reset();
+            assert!(contains_allocation(fresh));
+            drop(fresh_pin);
+            thaw_arena_reset();
+            assert!(was_reclaimed(fresh));
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    fn nested_reset_is_ignored_without_tracing_and_later_reset_runs() {
+        std::thread::spawn(|| {
+            register_reset_hook(nested_reset_release_a);
+            register_reset_hook(nested_reset_release_b);
+            register_metadata_reset_hook(nested_reset_metadata_hook);
+            NESTED_RESET_ARMED.with(|armed| armed.set(true));
+            thaw_arena_reset();
+
+            assert_eq!(
+                NESTED_RESET_HOOK_COUNTS.with(|counts| *counts.borrow()),
+                [1, 1]
+            );
+            assert_eq!(NESTED_RESET_METADATA_COUNT.with(Cell::get), 1);
+            thaw_arena_reset();
+            assert_eq!(
+                NESTED_RESET_HOOK_COUNTS.with(|counts| *counts.borrow()),
+                [2, 2]
+            );
+            assert_eq!(NESTED_RESET_METADATA_COUNT.with(Cell::get), 2);
+        })
+        .join()
+        .unwrap();
     }
 
     #[test]
