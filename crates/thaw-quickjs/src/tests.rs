@@ -812,6 +812,161 @@ fn process_event_listeners_receive_process_as_receiver() {
     .unwrap();
 }
 
+#[test]
+fn process_listener_removal_removes_one_last_matching_registration() {
+    std::thread::spawn(|| {
+        assert_eq!(
+            load(
+                r#"
+      function processListenerRemovalCases() {
+        const firstEvent = 'thaw:remove:last-once';
+        const secondEvent = 'thaw:remove:last-regular';
+        const thirdEvent = 'thaw:remove:three';
+        const fourthEvent = 'thaw:remove:unmatched';
+        let first = 0, second = 0, third = 0, fourth = 0;
+        const f1 = () => first++;
+        const f2 = () => second++;
+        const f3 = () => third++;
+        const f4 = () => fourth++;
+        try {
+          process.on(firstEvent, f1); process.once(firstEvent, f1);
+          const firstEmit = process.emit(firstEvent);
+          const firstCount = process.listenerCount(firstEvent);
+          const secondEmit = process.emit(firstEvent);
+
+          process.once(secondEvent, f2); process.on(secondEvent, f2);
+          const offChain = process.removeListener(secondEvent, f2) === process;
+          const secondCount = process.listenerCount(secondEvent);
+          const secondFirstEmit = process.emit(secondEvent);
+          const secondSecondEmit = process.emit(secondEvent);
+
+          process.on(thirdEvent, f3); process.on(thirdEvent, f3); process.on(thirdEvent, f3);
+          process.off(thirdEvent, f3);
+          const thirdCount = process.listenerCount(thirdEvent);
+          process.emit(thirdEvent);
+          const thirdCalls = third;
+          process.removeListener(thirdEvent, f3);
+          const thirdAfterRemoveListener = process.listenerCount(thirdEvent);
+
+          process.on(fourthEvent, f4);
+          const noMatchChain = process.off(fourthEvent, () => {}) === process;
+          const fourthCount = process.listenerCount(fourthEvent);
+          const fourthEmit = process.emit(fourthEvent);
+          return [firstEmit, firstCount, secondEmit, first,
+                  offChain, secondFirstEmit, secondCount, secondSecondEmit, second,
+                  thirdCount, thirdCalls, thirdAfterRemoveListener,
+                  noMatchChain, fourthCount, fourthEmit, fourth];
+        } finally {
+          process.off(firstEvent, f1); process.off(firstEvent, f1);
+          process.off(secondEvent, f2); process.off(secondEvent, f2);
+          process.off(thirdEvent, f3); process.off(thirdEvent, f3); process.off(thirdEvent, f3);
+          process.off(fourthEvent, f4);
+        }
+      }
+    "#
+            ),
+            1
+        );
+        assert_eq!(
+            call("processListenerRemovalCases", "[]"),
+            "[true,1,true,3,true,true,1,false,1,2,2,1,true,1,true,1]"
+        );
+    })
+    .join()
+    .unwrap();
+}
+
+#[test]
+fn process_listener_removal_preserves_emit_snapshots_and_once_reentrancy() {
+    std::thread::spawn(|| {
+        assert_eq!(
+            load(
+                r#"
+      function processListenerSnapshotCases() {
+        const reentrantEvent = 'thaw:remove:reentrant-once';
+        const recursiveEvent = 'thaw:remove:recursive-once';
+        const ordinaryEvent = 'thaw:remove:snapshot-ordinary';
+        const removedOnceEvent = 'thaw:remove:snapshot-once';
+        const freshEvent = 'thaw:remove:fresh-same-callback';
+        const reentrantLog = [], ordinaryLog = [], removedOnceLog = [];
+        let depth = 0, recursiveCalls = 0, nestedEmit = true;
+        let freshCalls = 0;
+        const lead = function(label) {
+          reentrantLog.push('lead:' + label);
+          if (depth === 0) {
+            depth++;
+            process.emit(reentrantEvent, 'inner');
+            depth--;
+          }
+        };
+        const recursiveOnce = function() {
+          recursiveCalls++;
+          nestedEmit = process.emit(recursiveEvent);
+        };
+        const ordinary = () => ordinaryLog.push('later');
+        const removeOrdinary = () => process.off(ordinaryEvent, ordinary);
+        const removedOnce = () => removedOnceLog.push('later-once');
+        const removeOnce = () => process.off(removedOnceEvent, removedOnce);
+        const reentrantOnce = label => reentrantLog.push('once:' + label);
+        const same = () => freshCalls++;
+        const replaceOnceWithRegular = () => {
+          process.off(freshEvent, same);
+          process.on(freshEvent, same);
+        };
+        try {
+          process.on(reentrantEvent, lead);
+          process.once(reentrantEvent, reentrantOnce);
+          process.emit(reentrantEvent, 'outer');
+
+          process.once(recursiveEvent, recursiveOnce);
+          const recursiveOuter = process.emit(recursiveEvent);
+          const recursiveAfter = process.emit(recursiveEvent);
+
+          process.on(ordinaryEvent, removeOrdinary);
+          process.on(ordinaryEvent, ordinary);
+          process.emit(ordinaryEvent);
+          const ordinaryAfter = process.listenerCount(ordinaryEvent);
+          ordinaryLog.push(process.emit(ordinaryEvent) ? 'still-emits' : 'empty');
+
+          process.on(removedOnceEvent, removeOnce);
+          process.once(removedOnceEvent, removedOnce);
+          process.emit(removedOnceEvent);
+          const removedOnceCount = process.listenerCount(removedOnceEvent);
+
+          process.once(freshEvent, replaceOnceWithRegular);
+          process.once(freshEvent, same);
+          process.emit(freshEvent);
+          const freshCount = process.listenerCount(freshEvent);
+          process.emit(freshEvent);
+          return [reentrantLog, recursiveOuter, nestedEmit, recursiveAfter, recursiveCalls,
+                  ordinaryLog, ordinaryAfter, removedOnceLog, removedOnceCount,
+                  freshCalls, freshCount];
+        } finally {
+          process.off(reentrantEvent, lead);
+          process.off(reentrantEvent, reentrantOnce);
+          process.off(recursiveEvent, recursiveOnce);
+          process.off(ordinaryEvent, removeOrdinary);
+          process.off(ordinaryEvent, ordinary);
+          process.off(removedOnceEvent, removeOnce);
+          process.off(removedOnceEvent, removedOnce);
+          process.off(freshEvent, replaceOnceWithRegular);
+          process.off(freshEvent, same);
+          process.off(freshEvent, same);
+        }
+      }
+    "#
+            ),
+            1
+        );
+        assert_eq!(
+            call("processListenerSnapshotCases", "[]"),
+            "[[\"lead:outer\",\"lead:inner\",\"once:inner\"],true,false,false,1,[\"later\",\"still-emits\"],1,[\"later-once\"],1,2,1]"
+        );
+    })
+    .join()
+    .unwrap();
+}
+
 /// `process.report.getReport().header.glibcVersionRuntime` -- real
 /// Node's own way of telling a glibc build apart from a musl one at
 /// runtime, which some native-addon loaders check directly instead of

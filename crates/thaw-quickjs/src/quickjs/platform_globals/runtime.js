@@ -2637,13 +2637,24 @@
     processListeners.set(name, listeners);
     return globalThis.process;
   };
+  const processRemoveEntry = (name, entry) => {
+    const listeners = processListeners.get(name) || [];
+    const index = listeners.indexOf(entry);
+    if (index === -1) return globalThis.process;
+    listeners.splice(index, 1);
+    processListeners.set(name, listeners);
+    if (listeners.length === 0 && (name === 'SIGINT' || name === 'SIGTERM')) {
+      globalThis.__thaw_process_configure_signal(name, false);
+    }
+    return globalThis.process;
+  };
   const processOff = (event, listener) => {
     const name = String(event);
     const listeners = processListeners.get(name) || [];
-    const remaining = listeners.filter(entry => entry.listener !== listener);
-    processListeners.set(name, remaining);
-    if (remaining.length === 0 && (name === 'SIGINT' || name === 'SIGTERM')) {
-      globalThis.__thaw_process_configure_signal(name, false);
+    for (let index = listeners.length - 1; index >= 0; index--) {
+      if (listeners[index].listener === listener) {
+        return processRemoveEntry(name, listeners[index]);
+      }
     }
     return globalThis.process;
   };
@@ -2651,7 +2662,11 @@
     const name = String(event);
     const listeners = (processListeners.get(name) || []).slice();
     for (const entry of listeners) {
-      if (entry.once) processOff(name, entry.listener);
+      if (entry.once) {
+        if (entry.fired) continue;
+        entry.fired = true;
+        processRemoveEntry(name, entry);
+      }
       thawDateApply(entry.listener, globalThis.process, args);
     }
     return listeners.length !== 0;
