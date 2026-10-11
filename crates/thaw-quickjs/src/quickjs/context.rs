@@ -2987,25 +2987,26 @@ fn drain_native_graph_release_queue() {
         fn drop(&mut self) { let _ = NATIVE_GRAPH_RELEASES_DRAINING.try_with(|draining| draining.set(false)); }
     }
     let _guard = DrainGuard;
+    let mut failed = Vec::new();
     loop {
         let Some(batch) = PENDING_NATIVE_GRAPH_RELEASES.try_with(|pending| {
             pending.try_borrow_mut().ok().map(|mut pending| std::mem::take(&mut *pending))
         }).ok().flatten() else { break; };
         if batch.is_empty() { break; }
-        let mut iter = batch.into_iter();
-        while let Some(release) = iter.next() {
+        for release in batch {
             let success = release.callback.is_some_and(|callback| callback(release.token) != 0);
             if success {
                 let _ = NATIVE_GRAPH_RELEASES_OUTSTANDING.try_with(|count| count.set(count.get().saturating_sub(1)));
-                continue;
+            } else {
+                failed.push(release);
             }
-            let _ = PENDING_NATIVE_GRAPH_RELEASES.try_with(|pending| {
-                let Ok(mut pending) = pending.try_borrow_mut() else { return; };
-                pending.push(release);
-                pending.extend(iter);
-            });
-            return;
         }
+    }
+    if !failed.is_empty() {
+        let _ = PENDING_NATIVE_GRAPH_RELEASES.try_with(|pending| {
+            let Ok(mut pending) = pending.try_borrow_mut() else { return; };
+            pending.extend(failed);
+        });
     }
 }
 
