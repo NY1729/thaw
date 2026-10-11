@@ -312,7 +312,7 @@
             output = new input.constructor(input);
           }
         } else {
-          output = Array.isArray(input) ? [] : {};
+          output = Array.isArray(input) ? new Array(input.length) : {};
         }
         seen.set(input, output);
         if (!(input instanceof Date) && !(input instanceof RegExp)
