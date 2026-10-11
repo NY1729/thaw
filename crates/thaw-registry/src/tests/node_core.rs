@@ -473,9 +473,20 @@ fn util_helpers_run_through_bundled_commonjs_require() {
     let dir = temp_registry("builtin_util_helpers");
     fs::write(
             dir.join("index.js"),
-            "var util = require('node:util');\n\
+            "var directTypes = require('node:util/types'); var util = require('node:util');\n\
              function Base() {} function Child() {} util.inherits(Child, Base);\n\
              module.exports = async function () {\n\
+             \x20 if (directTypes !== util.types || directTypes.default !== directTypes || util.default.types !== directTypes) throw new Error('util types identity');\n\
+             \x20 if (!directTypes.isDataView(new DataView(new ArrayBuffer(8))) || !util.types.isUint8Array(new Uint8Array(1)) || !util.types.isArrayBufferView(new DataView(new ArrayBuffer(1)))) throw new Error('util types complete table');\n\
+             \x20 if (!directTypes.isWeakMap(new WeakMap()) || !directTypes.isNumberObject(Object(1)) || typeof directTypes.isCryptoKey !== 'function' || typeof directTypes.isGeneratorObject !== 'function') throw new Error('util types retained fields');\n\
+             \x20 var marker = {}; directTypes.__testAlias = marker; if (util.types.__testAlias !== marker) throw new Error('util types export mutation'); delete directTypes.__testAlias;\n\
+             \x20 var realError = new Error('brand'), derivedError = new TypeError('derived'), fakeError = Object.create(Error.prototype);\n\
+             \x20 class CustomError extends Error {} var subclassError = new CustomError('subclass');\n\
+             \x20 if (!directTypes.isNativeError(realError) || !util.types.isNativeError(derivedError) || !directTypes.isNativeError(subclassError) || directTypes.isNativeError(fakeError) || directTypes.isNativeError(new Proxy(realError, {}))) throw new Error('util native Error brand');\n\
+             \x20 Object.setPrototypeOf(realError, null); if (!directTypes.isNativeError(realError)) throw new Error('util detached Error prototype');\n\
+             \x20 var touched = 0, spoof = {}; Object.defineProperty(spoof, Symbol.toStringTag, { get: function() { touched++; return 'Error'; } }); Object.defineProperty(spoof, 'stack', { get: function() { touched++; throw new Error('stack getter'); } });\n\
+             \x20 if (directTypes.isNativeError(spoof) || touched !== 0 || directTypes.isNativeError(null) || directTypes.isNativeError('Error') || directTypes.isNativeError()) throw new Error('util spoof brand');\n\
+             \x20 var originalError = globalThis.Error; try { globalThis.Error = function() { throw new originalError('replacement constructor'); }; if (!directTypes.isNativeError(derivedError) || directTypes.isNativeError(fakeError)) throw new originalError('util captured brand'); } finally { globalThis.Error = originalError; }\n\
              \x20 var custom = {}; custom[util.inspect.custom] = function() { return 'custom'; };\n\
              \x20 var add = util.promisify(function(a, b, callback) { queueMicrotask(function() { callback(null, a + b); }); });\n\
              \x20 var sum = await add(2, 3);\n\
@@ -557,7 +568,7 @@ fn util_helpers_run_through_bundled_commonjs_require() {
     let empty_node_modules = temp_registry("builtin_util_helpers_node_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    assert_eq!(file_count, 2);
+    assert_eq!(file_count, 3);
     let script = format!(
             "globalThis.module = {{ exports: {{}} }};\n\
              globalThis.exports = globalThis.module.exports;\n\
