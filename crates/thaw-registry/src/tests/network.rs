@@ -2643,6 +2643,123 @@ module.exports = async function() {
 }
 
 #[test]
+fn http_client_destroy_before_send_settles_once_and_guards_late_connect() {
+    use std::ffi::{CStr, CString};
+
+    let dir = temp_registry("builtin_http_destroy_before_send");
+    fs::write(dir.join("index.js"), r#"var http = require('node:http'), https = require('node:https'), EventEmitter = require('node:events');
+module.exports = async function() {
+  var marker = new Error('cancel');
+  async function beforeEnd(mode) {
+    var creates = 0, errors = 0, closes = 0, aborts = 0, callbacks = 0, request;
+    request = http.request('http://localhost/', { agent: false, _transport: { createConnection: function() { creates++; return new EventEmitter(); } } });
+    request.on('error', function(error) { if (error === marker) errors++; }); request.on('close', function() { closes++; }); request.on('abort', function() { aborts++; });
+    if (mode === 'abort') request.abort(); else request.destroy(mode === 'error' ? marker : undefined);
+    request.end('never-send', function() { callbacks++; }); request.destroy(new Error('later')); await Promise.resolve();
+    return [creates, errors, closes, aborts, callbacks, request.destroyed];
+  }
+  async function socketReentry(createReentry) {
+    var creates = 0, writes = 0, ends = 0, destroys = 0, errors = 0, closes = 0, finishes = 0, callbacks = 0, request, socket = new EventEmitter();
+    socket.write = function() { writes++; }; socket.end = function() { ends++; }; socket.destroy = function() { destroys++; return this; };
+    var transport = { createConnection: function() { creates++; if (createReentry) request.destroy(marker); return socket; } };
+    request = http.request('http://localhost/', { agent: false, _transport: transport });
+    request.on('error', function(error) { if (error === marker) errors++; }); request.on('close', function() { closes++; }); request.on('finish', function() { finishes++; });
+    if (!createReentry) request.on('socket', function(value) { request.destroy(marker); value.emit('connect'); value.emit('connect'); });
+    request.end('never-send', function() { callbacks++; }); await Promise.resolve();
+    return [creates, writes, ends, destroys, errors, closes, finishes, callbacks];
+  }
+  async function writeFailure() {
+    var failure = new Error('write failure'), notification = new Error('error listener'), socket = new EventEmitter(), errors = 0, closes = 0, destroys = 0, caught = false;
+    socket.write = function() { throw failure; }; socket.destroy = function() { destroys++; return this; };
+    var request = http.request('http://localhost/', { agent: false, _transport: { createConnection: function() { return socket; } } });
+    request.on('error', function(error) { if (error === failure) errors++; throw notification; }); request.on('close', function() { closes++; }); request.end();
+    try { socket.emit('connect'); } catch (error) { caught = error === notification; } await Promise.resolve(); return [caught, errors, closes, destroys];
+  }
+  async function callbackFailure() {
+    var failure = new Error('callback failure'), socket = new EventEmitter(), closes = 0, destroys = 0, finishes = 0, caught = false;
+    socket.write = function() {}; socket.destroy = function() { destroys++; return this; };
+    var request = http.request('http://localhost/', { agent: false, _transport: { createConnection: function() { return socket; } } });
+    request.on('close', function() { closes++; }); request.on('finish', function() { finishes++; }); request.end(function() { throw failure; });
+    try { socket.emit('connect'); } catch (error) { caught = error === failure; } await Promise.resolve(); return [caught, closes, destroys, finishes];
+  }
+  async function transportError() {
+    var failure = new Error('transport failure'), socket = new EventEmitter(), errors = 0, closes = 0, destroys = 0;
+    socket.destroy = function() { destroys++; return this; };
+    var request = http.request('http://localhost/', { agent: false, _transport: { createConnection: function() { return socket; } } });
+    request.on('error', function(error) { if (error === failure) errors++; }); request.on('close', function() { closes++; }); request.end(); socket.emit('error', failure); await Promise.resolve(); return [errors, closes, destroys];
+  }
+  async function destroyThrows() {
+    var reason = new Error('first reason'), thrown = new Error('destroy throws'), socket = new EventEmitter(), errors = 0, closes = 0, destroys = 0, caught = false;
+    socket.destroy = function() { destroys++; throw thrown; };
+    var request = http.request('http://localhost/', { agent: false, _transport: { createConnection: function() { return socket; } } });
+    request.on('error', function(error) { if (error === reason) errors++; }); request.on('close', function() { closes++; }); request.on('socket', function() { try { request.destroy(reason); } catch (error) { caught = error === thrown; } });
+    request.end(); await Promise.resolve(); return [caught, errors, closes, destroys];
+  }
+  async function responseCancel() {
+    var socket = new EventEmitter(), events = [], timeout, marker = new Error('response cancel');
+    socket.write = function() {}; socket.destroy = function() { events.push('destroy'); return this; }; socket.setTimeout = function(ms, callback) { timeout = callback; };
+    var request = http.request('http://localhost/', { agent: false, _transport: { createConnection: function() { return socket; } } }, function(response) { response.on('data', function() { events.push('data'); }); response.on('end', function() { events.push('end'); }); response.on('aborted', function() { events.push('aborted'); }); response.on('error', function() { events.push('response-error'); }); request.destroy(marker); });
+    request.on('error', function(error) { events.push(error === marker ? 'request-error' : 'other-error'); }); request.on('close', function() { events.push('close'); }); request.on('timeout', function() { events.push('timeout'); }); request.end(); request.setTimeout(1); socket.emit('connect'); socket.emit('data', Buffer.from('HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nbody!')); socket.emit('data', Buffer.from('late')); socket.emit('end'); if (timeout) timeout(); await Promise.resolve(); return events;
+  }
+  async function nestedCancelException() {
+    var socket = new EventEmitter(), marker = new Error('abort notification'), requestErrors = 0, aborted = 0, responseErrors = 0, closes = 0, destroys = 0, caught = false;
+    socket.write = function() {}; socket.destroy = function() { destroys++; return this; };
+    var request = http.request('http://localhost/', { agent: false, _transport: { createConnection: function() { return socket; } } }, function(response) { response.on('aborted', function() { aborted++; throw marker; }); response.on('error', function() { responseErrors++; throw new Error('later notification'); }); request.destroy(new Error('cancel reason')); });
+    request.on('error', function() { requestErrors++; }); request.on('close', function() { closes++; }); request.end(); socket.emit('connect');
+    try { socket.emit('data', Buffer.from('HTTP/1.1 200 OK\r\nContent-Length: 1\r\n\r\nx')); } catch (error) { caught = error === marker; }
+    await Promise.resolve(); return [caught, aborted, responseErrors, requestErrors, closes, destroys];
+  }
+  async function encryptedCancel() {
+    var socket = new EventEmitter(), creates = 0, writes = 0, ends = 0, destroys = 0, finishes = 0, callbacks = 0, errors = 0, closes = 0, marker = new Error('encrypted cancel');
+    socket.encrypted = true; socket.write = function() { writes++; }; socket.end = function() { ends++; }; socket.destroy = function() { destroys++; return this; };
+    var secure = http.__createSecureModule({ createConnection: function() { throw new Error('unexpected TLS fallback'); } });
+    var request = secure.request({ hostname: 'localhost', protocol: 'https:', agent: { createConnection: function() { creates++; return socket; } } });
+    request.on('socket', function() { request.destroy(marker); }); request.on('error', function(error) { if (error === marker) errors++; }); request.on('close', function() { closes++; }); request.on('finish', function() { finishes++; });
+    request.end('never-send', function() { callbacks++; }); socket.emit('connect'); await Promise.resolve(); return [creates, writes, ends, destroys, finishes, callbacks, errors, closes];
+  }
+  async function upgradedDestroyError() {
+    var socket = new EventEmitter(), marker = new Error('upgrade cancel'), errors = 0, closes = 0, destroys = 0;
+    socket.write = function() {}; socket.destroy = function(error) { destroys++; if (error) this.emit('error', error); this.emit('close'); return this; };
+    var request = http.request('http://localhost/', { agent: false, _transport: { createConnection: function() { return socket; } } });
+    request.on('upgrade', function() { request.destroy(marker); }); request.on('error', function(error) { if (error === marker) errors++; }); request.on('close', function() { closes++; });
+    request.end(); socket.emit('connect'); socket.emit('data', Buffer.from('HTTP/1.1 101 Switching Protocols\r\nUpgrade: test\r\n\r\n')); await Promise.resolve(); return [errors, closes, destroys];
+  }
+  async function successfulEof() {
+    var socket = new EventEmitter(), events = [];
+    socket.write = function() {}; socket.destroy = function() { return this; };
+    var request = http.request('http://localhost/', { agent: false, _transport: { createConnection: function() { return socket; } } }, function(response) { response.on('data', function(value) { events.push('data:' + value); }); response.on('end', function() { events.push('end'); }); });
+    request.on('close', function() { events.push('close'); }); request.end(); socket.emit('connect'); socket.emit('data', Buffer.from('HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nabc')); socket.emit('end'); await Promise.resolve(); await Promise.resolve(); return events;
+  }
+  async function upgradeOwnership() {
+    var socket = new EventEmitter(), upgrades = 0, destroys = 0;
+    socket.write = function() {}; socket.destroy = function() { destroys++; return this; };
+    var request = http.request('http://localhost/', { agent: false, _transport: { createConnection: function() { return socket; } } });
+    request.on('upgrade', function() { upgrades++; }); request.end(); socket.emit('connect'); socket.emit('data', Buffer.from('HTTP/1.1 101 Switching Protocols\r\nUpgrade: test\r\n\r\n')); var before = destroys; request.destroy(); return [upgrades, before, destroys];
+  }
+  function callSites() {
+    var creates = 0, options = { hostname: 'localhost', agent: false, _transport: { createConnection: function() { creates++; return new EventEmitter(); } } };
+    var direct = new http.ClientRequest(options); direct.destroy(); direct.end('x');
+    var secure = https.request({ hostname: 'localhost', protocol: 'https:', agent: false, _transport: options._transport }); secure.destroy(); secure.end('x');
+    var agentCalls = 0, custom = http.request({ hostname: 'localhost', agent: { createConnection: function() { agentCalls++; return new EventEmitter(); } } }); custom.destroy(); custom.end('x');
+    return [creates, agentCalls];
+  }
+  return [await beforeEnd('plain'), await beforeEnd('error'), await beforeEnd('abort'), await socketReentry(false), await socketReentry(true), await writeFailure(), await callbackFailure(), await transportError(), await destroyThrows(), await responseCancel(), await nestedCancelException(), await encryptedCancel(), await upgradedDestroyError(), await successfulEof(), await upgradeOwnership(), callSites()];
+};"#).unwrap();
+    let empty_node_modules = temp_registry("builtin_http_destroy_before_send_modules");
+    let (bundle, _, _, _) = bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseHttpDestroyBeforeSend = module.exports;");
+    let source = CString::new(script).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let function = CString::new("exerciseHttpDestroyBeforeSend").unwrap();
+    let arguments = CString::new("[]").unwrap();
+    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(result, r#"[[0,0,1,0,0,true],[0,1,1,0,0,true],[0,0,1,1,0,true],[1,0,0,1,1,1,0,0],[1,0,0,1,1,1,0,0],[true,1,1,1],[true,1,1,1],[1,1,1],[true,1,1,1],["aborted","response-error","request-error","destroy","close"],[true,1,1,1,1,1],[1,0,0,1,0,0,1,1],[1,1,1],["data:abc","end","close"],[1,0,1],[0,0]]"#);
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+}
+
+#[test]
 fn http_client_write_accepts_second_argument_callback() {
     use std::ffi::{CStr, CString};
 
