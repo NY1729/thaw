@@ -1681,7 +1681,14 @@ impl<'a> FnLowerer<'a> {
                         .ok_or_else(|| format!("unknown break label `{name}`"))?;
                     return Ok(vec![HirStmt::BreakDepth(self.loop_depth - target_depth)]);
                 }
-                Ok(vec![HirStmt::Break])
+                let target_depth = *self.source_break_depths.last()
+                    .ok_or("`break` used outside a loop or switch")?;
+                let depth = self.loop_depth - target_depth;
+                Ok(vec![if depth == 0 {
+                    HirStmt::Break
+                } else {
+                    HirStmt::BreakDepth(depth)
+                }])
             }
 
             Stmt::Continue(continue_stmt) => {
@@ -1700,7 +1707,14 @@ impl<'a> FnLowerer<'a> {
                         self.loop_depth - target_depth,
                     )]);
                 }
-                Ok(vec![HirStmt::Continue])
+                let target_depth = *self.source_continue_depths.last()
+                    .ok_or("`continue` used outside a loop")?;
+                let depth = self.loop_depth - target_depth;
+                Ok(vec![if depth == 0 {
+                    HirStmt::Continue
+                } else {
+                    HirStmt::ContinueDepth(depth)
+                }])
             }
 
             Stmt::Labeled(labeled) => {
@@ -2639,6 +2653,8 @@ impl<'a> FnLowerer<'a> {
             }
 
             Stmt::Switch(switch_stmt) => {
+                self.loop_depth += 1;
+                self.source_break_depths.push(self.loop_depth);
                 let saved = self.bindings.clone();
                 let saved_scope = self.scope.clone();
                 let lowered = (|| -> Result<Vec<HirStmt>, String> {
@@ -2701,10 +2717,6 @@ impl<'a> FnLowerer<'a> {
                         Vec::new(),
                     ));
 
-                    let exit = HirStmt::Expr(HirExpr::Assign(
-                        selected_name.clone(),
-                        Box::new(HirExpr::Lit(HirLit::F64(case_count as f64))),
-                    ));
                     // A case body is entered either by a jump from the dispatch (so only the
                     // narrowings that held before the switch apply) or by falling through; guards
                     // established inside another case must not leak into it, nor past the switch.
@@ -2811,12 +2823,6 @@ impl<'a> FnLowerer<'a> {
                         let lowered_case = self.lower_stmts(&case.cons);
                         self.union_narrowings = saved_union_narrowings;
                         let mut body = lowered_case?;
-                        body = rewrite_switch_case_stmts(
-                            body,
-                            &selected_name,
-                            index,
-                            &exit,
-                        );
                         body.push(HirStmt::If(
                             HirExpr::BinOp(
                                 BinOp::EqEqEq,
@@ -2840,17 +2846,25 @@ impl<'a> FnLowerer<'a> {
                         ));
                     }
                     self.restore_narrowings(switch_narrowings);
-                    if default_index < case_count
+                    let exhaustive = default_index < case_count
                         && switch_stmt.cases.iter().all(|case| {
                             case.cons.last().is_some_and(Self::stmt_definitely_exits)
-                        })
-                    {
-                        out.push(HirStmt::Throw(HirExpr::Lit(HirLit::Str(
-                            "unreachable exhaustive switch".into(),
-                        ))));
+                        });
+                    let unreachable = HirStmt::Throw(HirExpr::Lit(HirLit::Str(
+                        "unreachable exhaustive switch".into(),
+                    )));
+                    out.push(HirStmt::Break);
+                    let mut statements = vec![HirStmt::While(
+                        HirExpr::Lit(HirLit::Bool(true)), out,
+                    )];
+                    // Keep the enclosing-list exit signal: LLVM treats every While as possibly exiting.
+                    if exhaustive {
+                        statements.push(unreachable);
                     }
-                    Ok(out)
+                    Ok(statements)
                 })();
+                self.source_break_depths.pop();
+                self.loop_depth -= 1;
                 self.bindings = saved;
                 self.scope = saved_scope;
                 lowered

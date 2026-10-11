@@ -3,6 +3,29 @@ fn only_lets(statements: &[HirStmt]) -> bool {
     !statements.is_empty() && statements.iter().all(|statement| matches!(statement, HirStmt::Let(..)))
 }
 
+fn collect_loop_targets(stmts: &[HirStmt], depth: usize, out: &mut Vec<(char, usize, usize)>) {
+    for stmt in stmts {
+        match stmt {
+            HirStmt::Break => out.push(('b', depth, depth)),
+            HirStmt::BreakDepth(target) => out.push(('b', depth, depth - target)),
+            HirStmt::Continue => out.push(('c', depth, depth)),
+            HirStmt::ContinueDepth(target) => out.push(('c', depth, depth - target)),
+            HirStmt::If(_, yes, no) => {
+                collect_loop_targets(yes, depth, out);
+                collect_loop_targets(no, depth, out);
+            }
+            HirStmt::While(_, body) | HirStmt::Finally(body, _) => {
+                collect_loop_targets(body, depth + usize::from(matches!(stmt, HirStmt::While(..))), out);
+            }
+            HirStmt::Try(body, _, catch_body, _) => {
+                collect_loop_targets(body, depth, out);
+                collect_loop_targets(catch_body, depth, out);
+            }
+            _ => {}
+        }
+    }
+}
+
 #[test]
 fn creates_distinct_native_instantiations_for_polymorphic_uses() {
     let program = lower(
@@ -366,20 +389,7 @@ fn desugars_for_of_assignment_to_existing_variable() {
 }
 
 #[test]
-fn lowers_switch_to_selected_case_state_without_switch_breaks() {
-    fn contains_break(stmts: &[HirStmt]) -> bool {
-        stmts.iter().any(|stmt| match stmt {
-            HirStmt::Break => true,
-            HirStmt::If(_, then_body, else_body) => {
-                contains_break(then_body) || contains_break(else_body)
-            }
-            HirStmt::Try(body, _, catch_body, _) => {
-                contains_break(body) || contains_break(catch_body)
-            }
-            HirStmt::While(_, _) => false,
-            _ => false,
-        })
-    }
+fn lowers_switch_to_one_shot_selected_case_loop() {
     let program = lower(
         r#"function main(): void {
             switch (2) {
@@ -389,13 +399,382 @@ fn lowers_switch_to_selected_case_state_without_switch_breaks() {
             }
         }"#,
     );
-    assert!(program.functions[0].body.len() > 4);
-    assert!(!contains_break(&program.functions[0].body));
-    assert!(matches!(
-        &program.functions[0].body[0],
-        HirStmt::Let(name, HirType::F64, HirExpr::Lit(HirLit::F64(2.0)))
-            if name.starts_with("__thaw_switch_value_")
-    ));
+    let [HirStmt::While(HirExpr::Lit(HirLit::Bool(true)), body)] =
+        program.functions[0].body.as_slice()
+    else { panic!("switch should lower to one one-shot loop"); };
+    assert!(matches!(body.first(), Some(HirStmt::Let(name, HirType::F64, HirExpr::Lit(HirLit::F64(2.0)))) if name.starts_with("__thaw_switch_value_")));
+    assert!(body.iter().any(|stmt| matches!(stmt, HirStmt::Break)));
+    fn has_dispatch(stmts: &[HirStmt]) -> bool {
+        stmts.iter().any(|stmt| match stmt {
+            HirStmt::If(HirExpr::BinOp(BinOp::EqEqEq, left, _), yes, no) => matches!(left.as_ref(), HirExpr::Var(name) if name.starts_with("__thaw_switch_selected_")) || has_dispatch(yes) || has_dispatch(no),
+            HirStmt::If(_, yes, no) => has_dispatch(yes) || has_dispatch(no),
+            _ => false,
+        })
+    }
+    assert!(has_dispatch(body));
+    fn has_case_break(stmts: &[HirStmt]) -> bool {
+        stmts.iter().any(|stmt| match stmt {
+            HirStmt::If(_, yes, no) => yes.iter().any(|item| matches!(item, HirStmt::Break))
+                || has_case_break(yes) || has_case_break(no),
+            _ => false,
+        })
+    }
+    assert!(matches!(body.last(), Some(HirStmt::Break)), "one-shot terminal break");
+    assert!(has_case_break(body), "source break remains inside selected-case dispatch");
+}
+
+#[test]
+fn thaw_exhaustive_switch_keeps_the_outer_definite_exit_sentinel() {
+    let program = lower("function value(flag: boolean): number { switch (flag) { case true: return 1; default: return 0; } }");
+    let Some(HirStmt::While(HirExpr::Lit(HirLit::Bool(true)), body)) = program.functions[0].body.first() else {
+        panic!("expected one-shot switch loop");
+    };
+    assert!(matches!(body.last(), Some(HirStmt::Break)));
+    assert!(!body.iter().any(|stmt| matches!(stmt, HirStmt::Throw(HirExpr::Lit(HirLit::Str(message))) if message == "unreachable exhaustive switch")));
+    assert!(matches!(program.functions[0].body.last(), Some(HirStmt::Throw(HirExpr::Lit(HirLit::Str(message)))) if message == "unreachable exhaustive switch"));
+}
+
+#[test]
+fn thaw_labeled_block_unnamed_continue_targets_iteration() {
+    let program = lower("function main(): void { while (true) { a: { b: { continue; } } } }");
+    let [HirStmt::While(_, body)] = program.functions[0].body.as_slice() else { panic!("expected source loop"); };
+    let [HirStmt::While(_, a)] = body.as_slice() else { panic!("expected a label wrapper"); };
+    let [HirStmt::While(_, b), HirStmt::Break] = a.as_slice() else { panic!("expected b label wrapper and a tail break"); };
+    assert_eq!(b, &[HirStmt::ContinueDepth(2), HirStmt::Break]);
+    let mut targets = Vec::new();
+    collect_loop_targets(&program.functions[0].body, 0, &mut targets);
+    assert!(targets.contains(&('c', 3, 1)));
+}
+
+#[test]
+fn thaw_labeled_block_unnamed_break_targets_iteration() {
+    let program = lower("function main(): void { while (true) { a: { b: { break; } } } }");
+    let [HirStmt::While(_, body)] = program.functions[0].body.as_slice() else { panic!("expected source loop"); };
+    let [HirStmt::While(_, a)] = body.as_slice() else { panic!("expected a label wrapper"); };
+    let [HirStmt::While(_, b), HirStmt::Break] = a.as_slice() else { panic!("expected b label wrapper and a tail break"); };
+    assert_eq!(b, &[HirStmt::BreakDepth(2), HirStmt::Break]);
+    let mut targets = Vec::new();
+    collect_loop_targets(&program.functions[0].body, 0, &mut targets);
+    assert!(targets.contains(&('b', 3, 1)));
+}
+
+#[test]
+fn thaw_labeled_block_unnamed_break_targets_switch() {
+    let program = lower("function main(): void { switch (1) { default: a: { break; console.log(1); } } }");
+    let [HirStmt::While(HirExpr::Lit(HirLit::Bool(true)), body)] = program.functions[0].body.as_slice() else { panic!("expected switch frame"); };
+    fn has_target(stmts: &[HirStmt]) -> bool {
+        stmts.iter().any(|stmt| match stmt {
+            HirStmt::BreakDepth(1) => true,
+            HirStmt::If(_, yes, no) => has_target(yes) || has_target(no),
+            HirStmt::While(_, body) => has_target(body),
+            _ => false,
+        })
+    }
+    assert!(has_target(body));
+}
+
+#[test]
+fn thaw_named_and_nested_targets_resolve_to_their_exact_source_frames() {
+    let chained = lower("function main() { outer: inner: while (true) { continue outer; break inner; } }");
+    let mut targets = Vec::new();
+    collect_loop_targets(&chained.functions[0].body, 0, &mut targets);
+    assert!(targets.contains(&('c', 1, 1)), "chained label continue: {targets:?}");
+    assert!(targets.contains(&('b', 1, 1)), "chained label break: {targets:?}");
+
+    let blocks = lower("function main() { while (true) { outer: { inner: { break outer; } } } }");
+    let mut targets = Vec::new();
+    collect_loop_targets(&blocks.functions[0].body, 0, &mut targets);
+    assert!(targets.contains(&('b', 3, 2)), "outer block break: {targets:?}");
+
+    let inner_block = lower("function main() { while (true) { outer: { inner: { break inner; } } } }");
+    let mut targets = Vec::new();
+    collect_loop_targets(&inner_block.functions[0].body, 0, &mut targets);
+    assert!(targets.contains(&('b', 3, 3)), "inner block break: {targets:?}");
+    fn has_source_and_generated_label_break(stmts: &[HirStmt]) -> bool {
+        stmts.iter().any(|stmt| match stmt {
+            HirStmt::While(_, body) => matches!(body.as_slice(), [HirStmt::BreakDepth(0), HirStmt::Break])
+                || has_source_and_generated_label_break(body),
+            HirStmt::If(_, yes, no) => has_source_and_generated_label_break(yes) || has_source_and_generated_label_break(no),
+            _ => false,
+        })
+    }
+    assert!(has_source_and_generated_label_break(&inner_block.functions[0].body), "source break must precede, and remain distinct from, the generated label tail");
+
+    let labeled_switch = lower("function main() { target: switch (1) { default: while (true) { break target; } } }");
+    let mut targets = Vec::new();
+    collect_loop_targets(&labeled_switch.functions[0].body, 0, &mut targets);
+    assert!(targets.contains(&('b', 3, 1)), "labeled switch break: {targets:?}");
+
+    let nested_switch = lower("function main() { switch (1) { default: switch (2) { default: break; } break; } }");
+    let mut targets = Vec::new();
+    collect_loop_targets(&nested_switch.functions[0].body, 0, &mut targets);
+    assert!(targets.contains(&('b', 2, 2)), "inner switch break: {targets:?}");
+    assert!(targets.contains(&('b', 1, 1)), "outer switch break: {targets:?}");
+    fn has_source_break_in_dispatch(stmts: &[HirStmt]) -> bool {
+        stmts.iter().any(|stmt| match stmt {
+            HirStmt::While(_, body) => body.last() == Some(&HirStmt::Break)
+                && body.iter().any(|item| matches!(item, HirStmt::If(_, yes, _) if yes.contains(&HirStmt::Break)))
+                || has_source_break_in_dispatch(body),
+            HirStmt::If(_, yes, no) => has_source_break_in_dispatch(yes) || has_source_break_in_dispatch(no),
+            _ => false,
+        })
+    }
+    assert!(has_source_break_in_dispatch(&nested_switch.functions[0].body), "source breaks stay inside case dispatch, separate from generated tails");
+
+    let inner_loop = lower("function main() { while (true) { label: { while (true) { break; continue; } } } }");
+    let mut targets = Vec::new();
+    collect_loop_targets(&inner_loop.functions[0].body, 0, &mut targets);
+    assert!(targets.contains(&('b', 3, 3)), "inner loop break remains local: {targets:?}");
+    assert!(targets.contains(&('c', 3, 3)), "inner loop continue remains local: {targets:?}");
+}
+
+#[test]
+fn thaw_switch_continue_skips_switch_and_labels() {
+    let program = lower("function main(): void { while (true) { switch (1) { default: a: { continue; } } } }");
+    fn has_target(stmts: &[HirStmt]) -> bool {
+        stmts.iter().any(|stmt| match stmt {
+            HirStmt::ContinueDepth(2) => true,
+            HirStmt::If(_, yes, no) => has_target(yes) || has_target(no),
+            HirStmt::While(_, body) => has_target(body),
+            _ => false,
+        })
+    }
+    assert!(has_target(&program.functions[0].body));
+}
+
+#[test]
+fn thaw_for_advance_precedes_only_continues_that_leave_the_for_loop() {
+    let program = lower("function main(): void { for (let i = 0; i < 3; i++) { a: { b: { continue; } } } }");
+    fn count_update_before_continue(stmts: &[HirStmt]) -> usize {
+        stmts.windows(2).filter(|pair| matches!(pair,
+            [HirStmt::Expr(HirExpr::PostfixUpdate(name, BinOp::Add)), HirStmt::ContinueDepth(2)] if name == "i"
+        )).count() + stmts.iter().map(|stmt| match stmt {
+            HirStmt::If(_, yes, no) => count_update_before_continue(yes) + count_update_before_continue(no),
+            HirStmt::While(_, body) | HirStmt::Finally(body, _) => count_update_before_continue(body),
+            HirStmt::Try(body, _, catch_body, _) => count_update_before_continue(body) + count_update_before_continue(catch_body),
+            _ => 0,
+        }).sum::<usize>()
+    }
+    assert_eq!(count_update_before_continue(&program.functions[0].body), 1);
+    let nested = lower("function main(): void { for (let i = 0; i < 3; i++) { a: { while (true) { continue; break; } } } }");
+    fn has_update_before_plain_continue(stmts: &[HirStmt]) -> bool {
+        stmts.windows(2).any(|pair| matches!(pair,
+            [HirStmt::Expr(HirExpr::PostfixUpdate(name, BinOp::Add)), HirStmt::Continue] if name == "i"
+        )) || stmts.iter().any(|stmt| match stmt {
+            HirStmt::If(_, yes, no) => has_update_before_plain_continue(yes) || has_update_before_plain_continue(no),
+            HirStmt::While(_, body) | HirStmt::Finally(body, _) => has_update_before_plain_continue(body),
+            HirStmt::Try(body, _, catch_body, _) => has_update_before_plain_continue(body) || has_update_before_plain_continue(catch_body),
+            _ => false,
+        })
+    }
+    assert!(has_update_before_plain_continue(&nested.functions[0].body) == false);
+}
+
+#[test]
+fn thaw_for_of_continue_has_one_advance_and_using_cleanup_before_it() {
+    let program = lower("function main() { for (const value of [1, 2]) { label: { continue; } } }");
+    fn advances_before_continue(stmts: &[HirStmt]) -> usize {
+        stmts.windows(2).filter(|pair| matches!(pair,
+            [HirStmt::Expr(HirExpr::Assign(name, value)), HirStmt::ContinueDepth(1)]
+                if name.starts_with("__thaw_for_of_index_")
+                    && matches!(value.as_ref(), HirExpr::BinOp(BinOp::Add, _, _))
+        )).count() + stmts.iter().map(|stmt| match stmt {
+            HirStmt::If(_, yes, no) => advances_before_continue(yes) + advances_before_continue(no),
+            HirStmt::While(_, body) | HirStmt::Finally(body, _) => advances_before_continue(body),
+            HirStmt::Try(body, _, catch_body, _) => advances_before_continue(body) + advances_before_continue(catch_body),
+            _ => 0,
+        }).sum::<usize>()
+    }
+    assert_eq!(advances_before_continue(&program.functions[0].body), 1);
+
+    let using = lower("function make() { return { [Symbol.dispose]() {} }; } function main() { for (using item of [make()]) { label: { continue; } } }");
+    fn count_finally(stmts: &[HirStmt]) -> usize {
+        stmts.iter().map(|stmt| match stmt {
+            HirStmt::Finally(body, _) => 1 + count_finally(body),
+            HirStmt::If(_, yes, no) => count_finally(yes) + count_finally(no),
+            HirStmt::While(_, body) => count_finally(body),
+            HirStmt::Try(body, _, catch_body, _) => count_finally(body) + count_finally(catch_body),
+            _ => 0,
+        }).sum()
+    }
+    let mut targets = Vec::new();
+    collect_loop_targets(&using.functions[1].body, 0, &mut targets);
+    assert_eq!(targets.iter().filter(|(kind, _, _)| *kind == 'c').count(), 1);
+    fn disposal_has_pending_binding(stmts: &[HirStmt]) -> bool {
+        stmts.iter().any(|stmt| match stmt {
+            HirStmt::Let(name, ..) => name.starts_with("__thaw_using_pending"),
+            HirStmt::If(_, yes, no) => disposal_has_pending_binding(yes) || disposal_has_pending_binding(no),
+            HirStmt::Try(body, _, catch_body, _) => disposal_has_pending_binding(body) || disposal_has_pending_binding(catch_body),
+            HirStmt::Finally(body, _) | HirStmt::While(_, body) => disposal_has_pending_binding(body),
+            _ => false,
+        })
+    }
+    fn has_dispose_advance_continue(stmts: &[HirStmt]) -> usize {
+        stmts.windows(3).filter(|triple| matches!(triple,
+            [HirStmt::Finally(disposal, _), HirStmt::Expr(HirExpr::Assign(name, value)), HirStmt::ContinueDepth(1)]
+                if name.starts_with("__thaw_for_of_index_")
+                    && matches!(value.as_ref(), HirExpr::BinOp(BinOp::Add, _, _))
+                    && disposal_has_pending_binding(disposal)
+        )).count() + stmts.iter().map(|stmt| match stmt {
+            HirStmt::If(_, yes, no) => has_dispose_advance_continue(yes) + has_dispose_advance_continue(no),
+            HirStmt::While(_, body) | HirStmt::Finally(body, _) => has_dispose_advance_continue(body),
+            HirStmt::Try(body, _, catch_body, _) => has_dispose_advance_continue(body) + has_dispose_advance_continue(catch_body),
+            _ => 0,
+        }).sum::<usize>()
+    }
+    assert_eq!(has_dispose_advance_continue(&using.functions[1].body), 1,
+        "iteration disposal runs once before the one advance for the crossing continue");
+    assert!(count_finally(&using.functions[1].body) >= 1);
+
+    let for_in = lower("function main() { for (const key in { a: 1 }) { label: { continue; } } }");
+    fn for_in_advances_before_continue(stmts: &[HirStmt]) -> usize {
+        stmts.windows(2).filter(|pair| matches!(pair,
+            [HirStmt::Expr(HirExpr::Assign(name, value)), HirStmt::ContinueDepth(1)]
+                if name.starts_with("__thaw_for_in_index_")
+                    && matches!(value.as_ref(), HirExpr::BinOp(BinOp::Add, _, _))
+        )).count() + stmts.iter().map(|stmt| match stmt {
+            HirStmt::If(_, yes, no) => for_in_advances_before_continue(yes) + for_in_advances_before_continue(no),
+            HirStmt::While(_, body) | HirStmt::Finally(body, _) => for_in_advances_before_continue(body),
+            HirStmt::Try(body, _, catch_body, _) => for_in_advances_before_continue(body) + for_in_advances_before_continue(catch_body),
+            _ => 0,
+        }).sum::<usize>()
+    }
+    assert_eq!(for_in_advances_before_continue(&for_in.functions[0].body), 1);
+}
+
+#[test]
+fn thaw_do_while_guard_precedes_continue_through_a_label() {
+    let program = lower("function main(): void { let more = true; do { label: { continue; } } while (more); }");
+    let HirStmt::While(HirExpr::Lit(HirLit::Bool(true)), body) = &program.functions[0].body[1] else {
+        panic!("expected desugared do-while");
+    };
+    fn has_guard_before_target(stmts: &[HirStmt]) -> bool {
+        stmts.windows(2).any(|pair| matches!(pair,
+            [HirStmt::If(_, _, else_body), HirStmt::ContinueDepth(1)] if else_body == &[HirStmt::BreakDepth(1)]
+        )) || stmts.iter().any(|stmt| match stmt {
+            HirStmt::If(_, yes, no) => has_guard_before_target(yes) || has_guard_before_target(no),
+            HirStmt::While(_, body) => has_guard_before_target(body),
+            _ => false,
+        })
+    }
+    assert!(has_guard_before_target(body));
+    assert!(matches!(body.last(), Some(HirStmt::If(_, _, else_body)) if else_body == &[HirStmt::Break]));
+}
+
+#[test]
+fn thaw_unmatched_source_transfers_keep_their_diagnostics() {
+    fn first_statement(source: &str) -> Stmt {
+        let module = thaw_parser::parse_typescript(source).expect("valid control-flow setup");
+        let ModuleItem::Stmt(Stmt::Decl(Decl::Fn(function))) = &module.body[0] else {
+            panic!("expected function declaration");
+        };
+        function.function.body.as_ref().unwrap().stmts[0].clone()
+    }
+    fn lowering_error(stmt: &Stmt) -> String {
+        let signatures = HashMap::<Symbol, FnSignature>::new();
+        let interfaces = HashMap::<Symbol, HirType>::new();
+        let generic_interfaces = GenericInterfaces::new();
+        let enum_values = EnumValues::new();
+        let enum_reverse_values = EnumReverseValues::new();
+        FnLowerer::new(
+            &signatures, &interfaces, &generic_interfaces, &enum_values,
+            &enum_reverse_values, HirType::Void, None,
+        ).lower_stmt_seq(stmt).unwrap_err()
+    }
+    let loop_with_break = first_statement("function main() { while (true) { break; } }");
+    let Stmt::While(while_stmt) = loop_with_break else { panic!("expected while"); };
+    let Stmt::Block(body) = while_stmt.body.as_ref() else { panic!("expected block"); };
+    assert!(lowering_error(&body.stmts[0]).contains("`break` used outside a loop or switch"));
+
+    let loop_with_continue = first_statement("function main() { while (true) { continue; } }");
+    let Stmt::While(while_stmt) = loop_with_continue else { panic!("expected while"); };
+    let Stmt::Block(body) = while_stmt.body.as_ref() else { panic!("expected block"); };
+    assert!(lowering_error(&body.stmts[0]).contains("`continue` used outside a loop"));
+
+    let switch_with_continue = first_statement("function main() { while (true) { switch (1) { default: continue; } } }");
+    let Stmt::While(while_stmt) = switch_with_continue else { panic!("expected while"); };
+    let Stmt::Block(body) = while_stmt.body.as_ref() else { panic!("expected block"); };
+    assert!(matches!(body.stmts[0], Stmt::Switch(_)));
+    let Stmt::Switch(switch_stmt) = &body.stmts[0] else { unreachable!() };
+    assert!(lowering_error(&Stmt::Switch(switch_stmt.clone())).contains("`continue` used outside a loop"));
+
+    for (source, expected) in [
+        ("function main() { while (true) { label: { break; } } }", "`break` used outside a loop or switch"),
+        ("function main() { while (true) { label: { continue; } } }", "`continue` used outside a loop"),
+    ] {
+        let wrapper = first_statement(source);
+        let Stmt::While(loop_stmt) = wrapper else { panic!("expected valid loop scaffold"); };
+        let Stmt::Block(loop_body) = loop_stmt.body.as_ref() else { panic!("expected loop block"); };
+        assert!(matches!(loop_body.stmts[0], Stmt::Labeled(_)));
+        assert!(lowering_error(&loop_body.stmts[0]).contains(expected));
+    }
+
+    let mut non_loop_continue = first_statement(
+        "function main() { while (true) { label: while (true) { continue label; } } }",
+    );
+    let Stmt::While(outer_loop) = &mut non_loop_continue else { panic!("expected outer loop"); };
+    let Stmt::Block(outer_body) = outer_loop.body.as_mut() else { panic!("expected outer body"); };
+    let Stmt::Labeled(label) = &mut outer_body.stmts[0] else { panic!("expected label"); };
+    let Stmt::While(label_loop) = label.body.as_ref() else { panic!("expected labeled loop"); };
+    label.body = label_loop.body.clone();
+    assert!(lowering_error(&non_loop_continue).contains("continue label `label` does not name a loop"));
+
+    let mut unknown_break = first_statement("function main() { known: while (true) { break known; } }");
+    let Stmt::Labeled(label) = &mut unknown_break else { panic!("expected label"); };
+    let Stmt::While(loop_stmt) = label.body.as_mut() else { panic!("expected loop"); };
+    let Stmt::Block(body) = loop_stmt.body.as_mut() else { panic!("expected block"); };
+    let Stmt::Break(break_stmt) = &mut body.stmts[0] else { panic!("expected break"); };
+    break_stmt.label.as_mut().unwrap().sym = "missing".into();
+    assert!(lowering_error(&unknown_break).contains("unknown break label `missing`"));
+
+    let mut unknown_continue = first_statement("function main() { known: while (true) { continue known; } }");
+    let Stmt::Labeled(label) = &mut unknown_continue else { panic!("expected label"); };
+    let Stmt::While(loop_stmt) = label.body.as_mut() else { panic!("expected loop"); };
+    let Stmt::Block(body) = loop_stmt.body.as_mut() else { panic!("expected block"); };
+    let Stmt::Continue(continue_stmt) = &mut body.stmts[0] else { panic!("expected continue"); };
+    continue_stmt.label.as_mut().unwrap().sym = "missing".into();
+    assert!(lowering_error(&unknown_continue).contains("unknown continue label `missing`"));
+
+    let mut duplicate = first_statement("function main() { outer: { inner: { debugger; } } }");
+    let Stmt::Labeled(outer) = &mut duplicate else { panic!("expected outer label"); };
+    let outer_name = outer.label.sym.clone();
+    let Stmt::Block(outer_body) = outer.body.as_mut() else { panic!("expected outer block"); };
+    let Stmt::Labeled(inner) = &mut outer_body.stmts[0] else { panic!("expected inner label"); };
+    inner.label.sym = outer_name;
+    assert!(lowering_error(&duplicate).contains("duplicate active label `outer`"));
+
+    let mut nested = thaw_parser::parse_typescript(
+        "function main() { outer: while (true) { function inner() { inner: while (true) { continue inner; } } } }",
+    ).expect("valid nested-function setup");
+    let ModuleItem::Stmt(Stmt::Decl(Decl::Fn(main))) = &mut nested.body[0] else { panic!("expected main"); };
+    let Stmt::Labeled(outer) = &mut main.function.body.as_mut().unwrap().stmts[0] else { panic!("expected outer label"); };
+    let Stmt::While(outer_loop) = outer.body.as_mut() else { panic!("expected outer loop"); };
+    let Stmt::Block(outer_body) = outer_loop.body.as_mut() else { panic!("expected outer body"); };
+    let Stmt::Decl(Decl::Fn(inner)) = &mut outer_body.stmts[0] else { panic!("expected inner function"); };
+    let Stmt::Labeled(inner_label) = &mut inner.function.body.as_mut().unwrap().stmts[0] else { panic!("expected inner label"); };
+    let Stmt::While(inner_loop) = inner_label.body.as_mut() else { panic!("expected inner loop"); };
+    let Stmt::Block(inner_body) = inner_loop.body.as_mut() else { panic!("expected inner body"); };
+    let Stmt::Continue(continue_stmt) = &mut inner_body.stmts[0] else { panic!("expected continue"); };
+    continue_stmt.label = Some(outer.label.clone());
+    assert!(lower_module(&nested).unwrap_err().contains("unknown continue label `outer`"));
+
+    let mut nested_unnamed = thaw_parser::parse_typescript(
+        "function main() { outer: while (true) { function inner() { while (true) { continue; } } } }",
+    ).expect("valid nested-function setup");
+    let ModuleItem::Stmt(Stmt::Decl(Decl::Fn(main))) = &mut nested_unnamed.body[0] else { panic!("expected main"); };
+    let Stmt::Labeled(outer) = &mut main.function.body.as_mut().unwrap().stmts[0] else { panic!("expected outer label"); };
+    let Stmt::While(outer_loop) = outer.body.as_mut() else { panic!("expected outer loop"); };
+    let Stmt::Block(outer_body) = outer_loop.body.as_mut() else { panic!("expected outer body"); };
+    let Stmt::Decl(Decl::Fn(inner)) = &mut outer_body.stmts[0] else { panic!("expected inner function"); };
+    let inner_stmts = &mut inner.function.body.as_mut().unwrap().stmts;
+    let Stmt::While(inner_loop) = &inner_stmts[0] else { panic!("expected valid inner loop"); };
+    let Stmt::Block(inner_body) = inner_loop.body.as_ref() else { panic!("expected inner body"); };
+    let transfer = inner_body.stmts[0].clone();
+    inner_stmts[0] = transfer;
+    assert!(lower_module(&nested_unnamed).unwrap_err().contains("`continue` used outside a loop"));
+
+    let program = lower("function main() { label: {} label: {} }");
+    assert_eq!(program.functions.len(), 1);
 }
 
 #[test]
@@ -517,6 +896,48 @@ fn lowers_finally_onto_normal_return_and_rethrow_paths() {
     // A caught exception publishes its provenance through a run of Lets before the finalizer.
     assert!(matches!(failure.as_slice(), [lets @ .., HirStmt::Finally(_, 0), HirStmt::Throw(_)] if only_lets(lets)), "{failure:?}");
     assert!(matches!(program.functions[0].body[2], HirStmt::Expr(_)));
+}
+
+#[test]
+fn source_target_cleanup_is_attached_only_to_exits_that_cross_its_try() {
+    let crossing = lower("function main() { while (true) { try { switch (1) { default: label: { continue; } } } finally { console.log(1); } } }");
+    fn finally_before_continue(stmts: &[HirStmt]) -> usize {
+        stmts.windows(2).filter(|pair| matches!(pair,
+            [HirStmt::Finally(_, _), HirStmt::ContinueDepth(_)]
+        )).count() + stmts.iter().map(|stmt| match stmt {
+            HirStmt::If(_, yes, no) => finally_before_continue(yes) + finally_before_continue(no),
+            HirStmt::While(_, body) | HirStmt::Finally(body, _) => finally_before_continue(body),
+            HirStmt::Try(body, _, catch_body, _) => finally_before_continue(body) + finally_before_continue(catch_body),
+            _ => 0,
+        }).sum::<usize>()
+    }
+    assert_eq!(finally_before_continue(&crossing.functions[0].body), 1);
+
+    let contained = lower("function main() { try { switch (1) { default: break; } } finally { console.log(1); } }");
+    fn switch_frame_has_inner_finalizer(stmts: &[HirStmt]) -> bool {
+        stmts.iter().any(|stmt| match stmt {
+            HirStmt::While(_, body) => body.iter().any(|item| matches!(item, HirStmt::Finally(..)))
+                || switch_frame_has_inner_finalizer(body),
+            HirStmt::If(_, yes, no) => switch_frame_has_inner_finalizer(yes) || switch_frame_has_inner_finalizer(no),
+            HirStmt::Try(body, _, catch_body, _) => switch_frame_has_inner_finalizer(body) || switch_frame_has_inner_finalizer(catch_body),
+            _ => false,
+        })
+    }
+    assert!(!switch_frame_has_inner_finalizer(&contained.functions[0].body));
+
+    let switch_break = lower("function main() { switch (1) { default: label: { try { break; } finally { console.log(2); } } } }");
+    fn finalizer_before_switch_break(stmts: &[HirStmt]) -> usize {
+        stmts.windows(2).filter(|pair| matches!(pair,
+            [HirStmt::Finally(_, _), HirStmt::BreakDepth(1)]
+        )).count() + stmts.iter().map(|stmt| match stmt {
+            HirStmt::If(_, yes, no) => finalizer_before_switch_break(yes) + finalizer_before_switch_break(no),
+            HirStmt::While(_, body) | HirStmt::Finally(body, _) => finalizer_before_switch_break(body),
+            HirStmt::Try(body, _, catch_body, _) => finalizer_before_switch_break(body) + finalizer_before_switch_break(catch_body),
+            _ => 0,
+        }).sum::<usize>()
+    }
+    assert_eq!(finalizer_before_switch_break(&switch_break.functions[0].body), 1,
+        "the switch exit crosses exactly this try's finalizer");
 }
 
 #[test]
@@ -1905,4 +2326,3 @@ fn unreachable_placeholders_exist_for_every_native_value_type() {
     }
     assert!(problems.is_empty(), "{problems:#?}");
 }
-

@@ -574,7 +574,11 @@ impl<'a> FnLowerer<'a> {
 
     fn lower_loop_body(&mut self, stmt: &Stmt) -> Result<Vec<HirStmt>, String> {
         self.loop_depth += 1;
+        self.source_break_depths.push(self.loop_depth);
+        self.source_continue_depths.push(self.loop_depth);
         let result = self.lower_body(stmt);
+        self.source_continue_depths.pop();
+        self.source_break_depths.pop();
         self.loop_depth -= 1;
         result
     }
@@ -1578,4 +1582,71 @@ mod thaw_binding_helper_controls {
         assert!(!lowerer.immutable_bindings.contains(&let_outer));
         assert!(!lowerer.immutable_bindings.contains(&let_inner));
     }
+
+    #[test]
+    fn thaw_source_target_stacks_restore_after_nested_lowering_errors() {
+        fn first_statement(source: &str) -> Stmt {
+            let module = thaw_parser::parse_typescript(source).unwrap();
+            let swc_ecma_ast::ModuleItem::Stmt(Stmt::Decl(Decl::Fn(function))) = &module.body[0]
+            else { panic!("expected a function declaration"); };
+            function.function.body.as_ref().unwrap().stmts[0].clone()
+        }
+        let signatures = HashMap::<Symbol, FnSignature>::new();
+        let interfaces = HashMap::<Symbol, HirType>::new();
+        let generic_interfaces = GenericInterfaces::new();
+        let enum_values = EnumValues::new();
+        let enum_reverse_values = EnumReverseValues::new();
+        let mut lowerer = FnLowerer::new(
+            &signatures, &interfaces, &generic_interfaces, &enum_values,
+            &enum_reverse_values, HirType::Void, None,
+        );
+        lowerer.loop_depth = 5;
+        lowerer.source_break_depths.push(5);
+        lowerer.source_continue_depths.push(5);
+        lowerer.labels.push(("seed".into(), 5, true));
+        let bindings = lowerer.bindings.clone();
+        let scope = lowerer.scope.clone();
+        let mut loop_error = first_statement(
+            "function main() { known: while (true) { continue known; } }",
+        );
+        let Stmt::Labeled(label) = &mut loop_error else { panic!("expected label"); };
+        let Stmt::While(loop_stmt) = label.body.as_mut() else { panic!("expected loop"); };
+        let Stmt::Block(body) = loop_stmt.body.as_mut() else { panic!("expected block"); };
+        let Stmt::Continue(continue_stmt) = &mut body.stmts[0] else { panic!("expected continue"); };
+        continue_stmt.label.as_mut().unwrap().sym = "missing".into();
+
+        let mut switch_error = first_statement(
+            "function main() { known: while (true) { switch (1) { default: break known; } } }",
+        );
+        let Stmt::Labeled(label) = &mut switch_error else { panic!("expected label"); };
+        let Stmt::While(loop_stmt) = label.body.as_mut() else { panic!("expected loop"); };
+        let Stmt::Block(body) = loop_stmt.body.as_mut() else { panic!("expected block"); };
+        let Stmt::Switch(switch_stmt) = &mut body.stmts[0] else { panic!("expected switch"); };
+        let Stmt::Break(break_stmt) = &mut switch_stmt.cases[0].cons[0] else { panic!("expected break"); };
+        break_stmt.label.as_mut().unwrap().sym = "missing".into();
+
+        let mut label_error = first_statement(
+            "function main() { while (true) { label: while (true) { continue label; } } }",
+        );
+        let Stmt::While(outer_loop) = &mut label_error else { panic!("expected outer loop"); };
+        let Stmt::Block(outer_body) = outer_loop.body.as_mut() else { panic!("expected outer body"); };
+        let Stmt::Labeled(label) = &mut outer_body.stmts[0] else { panic!("expected label"); };
+        let Stmt::While(label_loop) = label.body.as_ref() else { panic!("expected labeled loop"); };
+        label.body = label_loop.body.clone();
+
+        for (stmt, expected) in [
+            (&loop_error, "unknown continue label `missing`"),
+            (&switch_error, "unknown break label `missing`"),
+            (&label_error, "continue label `label` does not name a loop"),
+        ] {
+            assert!(lowerer.lower_stmt_seq(stmt).unwrap_err().contains(expected));
+            assert_eq!(lowerer.loop_depth, 5);
+            assert_eq!(lowerer.source_break_depths, [5]);
+            assert_eq!(lowerer.source_continue_depths, [5]);
+            assert_eq!(lowerer.labels, [("seed".into(), 5, true)]);
+            assert_eq!(lowerer.bindings, bindings);
+            assert_eq!(lowerer.scope, scope);
+        }
+    }
+
 }

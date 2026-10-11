@@ -767,53 +767,6 @@ fn inject_do_while_guard_before_continue(stmts: Vec<HirStmt>, condition: &HirExp
     )])
 }
 
-/// Rewrites breaks that target a source switch into an assignment selecting
-/// the synthetic exit state. Breaks inside nested loops retain their loop
-/// target; nested switches have already consumed their own breaks while
-/// lowering.
-fn rewrite_switch_case_stmts(
-    mut stmts: Vec<HirStmt>,
-    selected: &str,
-    case_index: usize,
-    exit: &HirStmt,
-) -> Vec<HirStmt> {
-    if stmts.is_empty() {
-        return Vec::new();
-    }
-    let first = stmts.remove(0);
-    let rewritten = match first {
-        HirStmt::Break => exit.clone(),
-        HirStmt::If(cond, then_body, else_body) => HirStmt::If(
-            cond,
-            rewrite_switch_case_stmts(then_body, selected, case_index, exit),
-            rewrite_switch_case_stmts(else_body, selected, case_index, exit),
-        ),
-        HirStmt::Finally(body, suspended) => HirStmt::Finally(
-            rewrite_switch_case_stmts(body, selected, case_index, exit), suspended,
-        ),
-        HirStmt::Try(body, catch_name, catch_body, hidden) => HirStmt::Try(
-            rewrite_switch_case_stmts(body, selected, case_index, exit),
-            catch_name,
-            rewrite_switch_case_stmts(catch_body, selected, case_index, exit),
-            hidden,
-        ),
-        other => other,
-    };
-    let mut out = vec![rewritten];
-    let rest = rewrite_switch_case_stmts(stmts, selected, case_index, exit);
-    if !rest.is_empty() {
-        out.push(HirStmt::If(
-            HirExpr::BinOp(
-                BinOp::EqEqEq,
-                Box::new(HirExpr::Var(selected.to_string())),
-                Box::new(HirExpr::Lit(HirLit::F64(case_index as f64))),
-            ),
-            rest,
-            Vec::new(),
-        ));
-    }
-    out
-}
 
 fn compound_op(op: AssignOp) -> Option<BinOp> {
     match op {

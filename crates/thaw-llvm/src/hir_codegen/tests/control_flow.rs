@@ -189,6 +189,29 @@ fn compiles_switch_selection_default_fallthrough_and_break() {
 }
 
 #[test]
+fn switch_empty_no_match_and_nested_fallthrough_keep_exact_output() {
+    let source = r#"
+        function main(): void {
+            switch (1) { }
+            switch (2) { case 1: console.log("wrong"); }
+            switch (1) {
+                case 1:
+                    console.log("outer-one");
+                    switch (2) {
+                        case 1: console.log("wrong-inner");
+                        case 2: console.log("inner-two");
+                        default: console.log("inner-default");
+                    }
+                    console.log("outer-after-inner");
+                case 2: console.log("outer-two");
+            }
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "switch_empty_no_match_nested_fallthrough"),
+        "outer-one\ninner-two\ninner-default\nouter-after-inner\nouter-two\n");
+}
+
+#[test]
 fn switch_cases_use_strict_kind_matching_in_source_order() {
     let source = r#"
         function probe(label: string, value: any): any {
@@ -1747,4 +1770,202 @@ fn legacy_caught_error_json_properties_stay_live_for_the_invocation() {
         compile_and_run(source, "legacy_caught_error_json_properties"),
         "418 true null undefined 9\n9\n"
     );
+}
+
+
+#[test]
+fn labeled_continue_and_switch_break_keep_their_source_targets() {
+    let source = r#"
+        let i = 0;
+        let checks = 0;
+        function condition(): boolean { checks++; return i < 3; }
+        function probe(label: string, value: number): number {
+            console.log(label);
+            return value;
+        }
+        function main(): void {
+            while (condition()) {
+                tag: {
+                    i++;
+                    if (i < 3) continue;
+                    break tag;
+                }
+            }
+            console.log(i, checks);
+            switch (probe("discriminant", 1)) {
+                case probe("case", 1):
+                    tag: {
+                        console.log("before");
+                        break;
+                        console.log("unreachable");
+                    }
+                case probe("late", 2): console.log("fallthrough");
+            }
+            console.log("after");
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "labeled_continue_switch_break"),
+        "3 4\ndiscriminant\ncase\nbefore\nafter\n"
+    );
+}
+
+
+#[test]
+fn labeled_loop_exits_run_the_right_updates_and_finalizers() {
+    let source = r#"
+        function main(): void {
+            let values = "";
+            for (let i = 0; i < 3; i++) {
+                outer: {
+                    if (i < 2) continue;
+                    values += i;
+                    break outer;
+                }
+            }
+            console.log(values);
+            let i = 0;
+            do {
+                i++;
+                label: { continue; }
+            } while (i < 2);
+            console.log(i);
+            let j = 0;
+            while (j < 2) {
+                try {
+                    label: {
+                        j++;
+                        if (j < 2) continue;
+                        break label;
+                    }
+                } finally { console.log("continue-finally" + j); }
+            }
+            try {
+                switch (1) {
+                    default: console.log("switch"); break;
+                }
+                console.log("after-switch");
+            } finally { console.log("outer-finally"); }
+            switch (1) {
+                default:
+                    try { label: { break; } }
+                    finally { console.log("inner-finally"); }
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "labeled_loop_cleanup"),
+        "2\n2\ncontinue-finally1\ncontinue-finally2\nswitch\nafter-switch\nouter-finally\ninner-finally\n"
+    );
+}
+
+
+#[test]
+fn exhaustive_switch_returns_remain_definite_exits() {
+    let source = r#"
+        function value(flag: boolean): number {
+            switch (flag) {
+                case true: return 1;
+                default: return 0;
+            }
+        }
+        function main(): void { console.log(value(true), value(false)); }
+    "#;
+    assert_eq!(compile_and_run(source, "exhaustive_switch_returns"), "1 0\n");
+}
+
+
+#[test]
+fn labeled_for_of_and_for_in_continue_preserve_advance_and_disposal() {
+    let source = r#"
+        function make(name: string) {
+            return { name, [Symbol.dispose]() { console.log("dispose " + name); } };
+        }
+        function main(): void {
+            for (const value of [1, 2]) {
+                label: { console.log("of" + value); continue; }
+            }
+            const object = { a: 1, b: 2 };
+            for (const key in object) {
+                label: { console.log("in" + key); continue; }
+            }
+            for (using item of [make("a"), make("b")]) {
+                label: { console.log("body " + item.name); continue; }
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "labeled_iteration_advance_disposal"),
+        "of1\nof2\nina\ninb\nbody a\ndispose a\nbody b\ndispose b\n"
+    );
+}
+
+
+#[test]
+fn async_labeled_continue_and_switch_break_survive_frame_splitting() {
+    let source = r#"
+        async function main(): Promise<void> {
+            let i = 0;
+            while (i < 2) {
+                await sleep(1);
+                label: {
+                    i++;
+                    if (i < 2) continue;
+                    break label;
+                }
+            }
+            switch (1) {
+                default: label: {
+                    await sleep(1);
+                    break;
+                    console.log("unreachable");
+                }
+            }
+            console.log(i);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "async_labeled_loop_switch_targets"), "2\n");
+}
+
+#[test]
+fn async_switch_and_label_exits_run_crossed_cleanup_once() {
+    let source = r#"
+        async function main(): Promise<void> {
+            let i = 0;
+            while (i < 2) {
+                try {
+                    await sleep(1);
+                    switch (i) {
+                        case 0: label: { i++; continue; }
+                        default: label: { i++; break; }
+                    }
+                } finally { console.log("cleanup" + i); }
+            }
+            console.log("done" + i);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "async_switch_label_cleanup"), "cleanup1\ncleanup2\ndone2\n");
+}
+
+
+#[test]
+fn generator_close_runs_after_a_labeled_switch_exit() {
+    let source = r#"
+        function* values(): Generator<number> {
+            try { yield 1; yield 2; }
+            finally { console.log("closed"); }
+        }
+        function main(): void {
+            for (const value of values()) {
+                if (value === 1) {
+                    label: { console.log("first"); continue; }
+                }
+                switch (value) {
+                    default: label: { console.log("second"); break; }
+                }
+                break;
+            }
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "generator_labeled_switch_close"), "first\nsecond\nclosed\n");
 }

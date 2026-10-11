@@ -77,6 +77,10 @@ struct FnLowerer<'a> {
     promise_catch_bindings: HashSet<Symbol>,
     promise_catch_parameter: Option<Symbol>,
     loop_depth: usize,
+    /// Emitted HIR depths for source breakable statements (iterations and switches).
+    source_break_depths: Vec<usize>,
+    /// Emitted HIR depths for source iterations only.
+    source_continue_depths: Vec<usize>,
     labels: Vec<(Symbol, usize, bool)>,
     super_initializer: Option<(Symbol, HirType, Symbol)>,
     class_static_context: bool,
