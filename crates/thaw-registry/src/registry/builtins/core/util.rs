@@ -40,6 +40,7 @@ pub(super) fn source(name: &str) -> Option<&'static str> {
              \x20\x20if (typeof args[0] !== 'string') return args.map(inspect).join(' ');\n\
              \x20\x20var index = 1; var output = args[0].replace(/%[sdifjoOc%]/g, function(token) {\n\
              \x20\x20\x20\x20if (token === '%%') return '%'; if (index >= args.length) return token; var value = args[index++];\n\
+             \x20\x20\x20\x20if (typeof value === 'symbol' && (token === '%d' || token === '%i' || token === '%f')) return 'NaN';\n\
              \x20\x20\x20\x20if (token === '%s') return String(value); if (token === '%d') return String(Number(value));\n\
              \x20\x20\x20\x20if (token === '%i') return String(parseInt(value, 10)); if (token === '%f') return String(parseFloat(value));\n\
              \x20\x20\x20\x20if (token === '%j') { try { return JSON.stringify(value); } catch (_) { return '[Circular]'; } }\n\

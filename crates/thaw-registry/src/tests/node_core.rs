@@ -527,6 +527,15 @@ fn util_helpers_run_through_bundled_commonjs_require() {
              \x20 var depthGetterCalls = 0, depthGuard = { child: {} }; Object.defineProperty(depthGuard.child, 'hidden', { enumerable: true, get: function() { depthGetterCalls++; return 1; } });\n\
              \x20 if (util.inspect(depthGuard, { depth: 0 }).indexOf('[Object]') < 0 || depthGetterCalls !== 0) throw new Error('inspect depth getter guard');\n\
              \x20 var cycle = {}; cycle.self = cycle; if (util.inspect(cycle, { depth: null }).indexOf('[Circular]') < 0) throw new Error('inspect circular');\n\
+             \x20 var numericSymbol = Symbol('numeric');\n\
+             \x20 if (util.format('%d:%i:%f', numericSymbol, numericSymbol, numericSymbol) !== 'NaN:NaN:NaN') throw new Error('format numeric Symbol');\n\
+             \x20 if (util.format('%d %s', numericSymbol, 'next', 7) !== 'NaN next 7') throw new Error('format Symbol argument consumption');\n\
+             \x20 if (util.format('%% %d') !== '% %d') throw new Error('format missing numeric argument');\n\
+             \x20 if (util.format('%s', numericSymbol) !== 'Symbol(numeric)' || util.format('%o', numericSymbol) !== 'Symbol(numeric)') throw new Error('format nonnumeric Symbol');\n\
+             \x20 if (util.format('%d:%i:%f', '12.5', '12.5', '12.5') !== '12.5:12:12.5') throw new Error('format numeric coercion');\n\
+             \x20 var numericHookCalls = 0, numericHook = {}; numericHook[util.inspect.custom] = function() { numericHookCalls++; return 'kept'; };\n\
+             \x20 if (util.format('%o', numericHook) !== 'kept' || numericHookCalls !== 1) throw new Error('format inspect hook');\n\
+             \x20 ['%d', '%i', '%f'].forEach(function(token) { var reason = new Error('conversion'), received; var value = {}; value[Symbol.toPrimitive] = function() { throw reason; }; try { util.format(token, value); } catch (error) { received = error; } if (received !== reason) throw new Error('format preserves conversion failure'); var boxedError; try { util.format(token, Object(numericSymbol)); } catch (error) { boxedError = error; } if (!(boxedError instanceof TypeError)) throw new Error('format boxed Symbol remains object coercion'); });\n\
              \x20 var debug = util.debuglog('sharp');\n\
              \x20 return [util.format('%s:%d:%j:%%', 'value', 4, { ok: true }), util.inspect(custom), Child.super_ === Base, new Child() instanceof Base, util.types.isDate(new Date()), util.types.isRegExp(/x/), util.types.isMap(new Map()), util.types.isTypedArray(new Uint8Array(1)), sum, callbackValue, util.stripVTControlCharacters('\\u001b[31mred\\u001b[0m'), util.toUSVString('x\\ud800y'), typeof debug, debug.enabled];\n\
              };",
