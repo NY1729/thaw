@@ -3686,3 +3686,72 @@ fn net_socket_read_queue_preserves_reads_and_eof_order() {
     let _ = fs::remove_dir_all(dir);
     let _ = fs::remove_dir_all(empty_node_modules);
 }
+
+#[test]
+fn tcp_and_tls_emit_unhandled_errors_and_preserve_tls_failure_close() {
+    use std::ffi::{CStr, CString};
+    let dir = temp_registry("builtin_network_unhandled_error");
+    fs::write(dir.join("index.js"), r#"
+var net = require('node:net'), tls = require('node:tls');
+function check(value, message) { if (!value) throw new Error(message); }
+function unhandled(emitter) {
+  var owned = new Error('owned'), caught;
+  try { emitter.emit('error', owned); } catch (error) { caught = error; }
+  check(caught === owned, 'original error identity');
+  var handler = function() {};
+  emitter.on('error', handler); check(emitter.emit('error', owned) === true, 'handled return');
+  emitter.off('error', handler);
+  caught = undefined; try { emitter.emit('error', owned); } catch (error) { caught = error; }
+  check(caught === owned, 'off restores unhandled throw');
+  emitter.once('error', handler); emitter.emit('error', owned);
+  caught = undefined; try { emitter.emit('error', owned); } catch (error) { caught = error; }
+  check(caught === owned, 'once removal restores unhandled throw');
+  caught = undefined; try { emitter.emit('error'); } catch (error) { caught = error; }
+  check(caught instanceof Error && caught.message === 'Unhandled error event', 'fallback error');
+  check(emitter.emit('missing') === false, 'ordinary missing event');
+}
+module.exports = function() {
+  [new net.Socket(), new tls.TLSSocket(), new net.Server(), new tls.Server()].forEach(unhandled);
+  var emitter = new net.Socket(), seen = [], second = function() { seen.push('second'); };
+  emitter.on('event', function(a, b) { check(this === emitter && a === 1 && b === 2, 'listener receiver and arguments'); seen.push('first'); emitter.off('event', second); });
+  emitter.on('event', second); check(emitter.emit('event', 1, 2) === true, 'registered return');
+  check(seen.join(',') === 'first,second', 'snapshot listener delivery');
+  var once = new net.Socket(), onceCount = 0;
+  once.once('event', function() { onceCount++; once.emit('event'); });
+  once.emit('event'); check(onceCount === 1 && once.emit('event') === false, 'once removed before callback');
+  var originalConnect = globalThis.__thaw_tls_connect_with_options, originalQueue = globalThis.queueMicrotask;
+  var queued = [], socket, closes = 0, caught;
+  try {
+    globalThis.__thaw_tls_connect_with_options = function() { return 'err:finite TLS failure'; };
+    globalThis.queueMicrotask = function(callback) { queued.push(callback); };
+    socket = new tls.TLSSocket(); socket.on('close', function() { closes++; });
+    socket.connect({ host: 'example.invalid', port: 443 });
+    check(socket.destroyed && socket.authorizationError === 'finite TLS failure', 'failed connect state');
+    check(queued.length === 1, 'failed connect callback queued');
+    try { queued.shift()(); } catch (error) { caught = error; }
+    check(caught instanceof Error && caught.code === 'ERR_TLS_CERT_ALTNAME_INVALID' && caught.message === 'finite TLS failure', 'TLS error identity fields');
+    check(closes === 1, 'close delivered before throw');
+  } finally {
+    globalThis.__thaw_tls_connect_with_options = originalConnect;
+    globalThis.queueMicrotask = originalQueue;
+  }
+  return true;
+};
+"#).unwrap();
+    let empty_node_modules = temp_registry("builtin_network_unhandled_error_modules");
+    let (bundle, _, _, _) = bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    let source = CString::new(format!(
+        "globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseNetworkUnhandledError = module.exports;"
+    )).unwrap();
+    let load_result = thaw_quickjs::thaw_js_load(source.as_ptr());
+    if load_result != 1 {
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&empty_node_modules);
+        assert_eq!(load_result, 1);
+    }
+    let result = thaw_quickjs::thaw_js_call(c"exerciseNetworkUnhandledError".as_ptr(), c"[]".as_ptr());
+    let result = unsafe { CStr::from_ptr(result) }.to_string_lossy().into_owned();
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+    assert_eq!(result, "true");
+}
