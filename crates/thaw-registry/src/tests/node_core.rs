@@ -166,6 +166,12 @@ fn querystring_builtin_runs_through_bundled_commonjs_require() {
             dir.join("index.js"),
             "var querystring = require('querystring');\n\
              module.exports = function () {\n\
+             \x20 var values = { n: NaN, p: Infinity, m: -Infinity, finite: 1.5, zero: -0, repeat: [NaN, 2, Infinity, -Infinity], truth: true, text: 'Infinity', big: 3n };\n\
+             \x20 var expected = 'n=&p=&m=&finite=1.5&zero=0&repeat=&repeat=2&repeat=&repeat=&truth=true&text=Infinity&big=3';\n\
+             \x20 if (querystring.stringify(values) !== expected) throw new Error('querystring numeric primitives');\n\
+             \x20 if (querystring.encode(values) !== expected) throw new Error('querystring encode alias');\n\
+             \x20 var encoded = querystring.stringify({ n: NaN, p: Infinity, m: -Infinity, finite: 2 }, ';', ':', { encodeURIComponent: function(value) { return '[' + value + ']'; } });\n\
+             \x20 if (encoded !== '[n]:[];[p]:[];[m]:[];[finite]:[2]') throw new Error('querystring custom encoder');\n\
              \x20 return querystring.stringify({ a: [1, 2], space: 'two words' }) + ':' + JSON.stringify(querystring.parse('x=1&x=2'));\n\
              };",
         )
