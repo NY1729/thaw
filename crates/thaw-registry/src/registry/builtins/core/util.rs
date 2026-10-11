@@ -71,7 +71,7 @@ pub(super) fn source(name: &str) -> Option<&'static str> {
              function toUSVString(value) { return String(value).replace(/[\\uD800-\\uDFFF]/gu, '\\uFFFD'); }\n\
              function parseArgs(config) {\n\
              \x20\x20config = config || {};\n\
-             \x20\x20var args = Array.from(config.args === undefined ? (process.argv || []).slice(2) : config.args, String), definitions = config.options || {}, values = Object.create(null), positionals = [], tokens = [], short = Object.create(null);\n\
+             \x20\x20var args = Array.from(config.args === undefined ? (process.argv || []).slice(2) : config.args, String), definitions = config.options || {}, values = Object.create(null), positionals = [], tokens = [], short = Object.create(null), allowPositionals = config.allowPositionals === undefined ? config.strict === false : config.allowPositionals;\n\
              \x20\x20Object.keys(definitions).forEach(function(name) { var definition = definitions[name] || {}; if (definition.short) short[String(definition.short)] = name; });\n\
              \x20\x20function assign(name, value, optionIndex, rawName, inlineValue) {\n\
              \x20\x20\x20\x20var definition = definitions[name];\n\
@@ -85,9 +85,10 @@ pub(super) fn source(name: &str) -> Option<&'static str> {
              \x20\x20\x20\x20if (definition.multiple) (values[name] || (values[name] = [])).push(value); else values[name] = value;\n\
              \x20\x20\x20\x20tokens.push({ kind: 'option', index: optionIndex, name: name, rawName: rawName, value: definition.type === 'string' || (!strict && supplied) ? (supplied ? value : undefined) : undefined, inlineValue: inlineValue });\n\
              \x20\x20}\n\
+             \x20\x20function addPositional(value, index) { if (!allowPositionals) { var error = new TypeError('Unexpected argument ' + value); error.code = 'ERR_PARSE_ARGS_UNEXPECTED_POSITIONAL'; throw error; } positionals.push(value); tokens.push({ kind: 'positional', index: index, value: value }); }\n\
              \x20\x20for (var index = 0; index < args.length; index++) {\n\
              \x20\x20\x20\x20var argument = args[index];\n\
-             \x20\x20\x20\x20if (argument === '--') { tokens.push({ kind: 'option-terminator', index: index }); for (index++; index < args.length; index++) { positionals.push(args[index]); tokens.push({ kind: 'positional', index: index, value: args[index] }); } break; }\n\
+             \x20\x20\x20\x20if (argument === '--') { tokens.push({ kind: 'option-terminator', index: index }); for (index++; index < args.length; index++) addPositional(args[index], index); break; }\n\
              \x20\x20\x20\x20if (argument.slice(0, 2) === '--') {\n\
              \x20\x20\x20\x20\x20\x20var optionIndex = index, equal = argument.indexOf('='), name = argument.slice(2, equal < 0 ? undefined : equal), value = equal < 0 ? undefined : argument.slice(equal + 1), rawName = '--' + name, definition = definitions[name];\n\
              \x20\x20\x20\x20\x20\x20if (name.slice(0, 3) === 'no-' && config.allowNegative && definitions[name.slice(3)] && definitions[name.slice(3)].type === 'boolean') {\n\
@@ -107,7 +108,7 @@ pub(super) fn source(name: &str) -> Option<&'static str> {
              \x20\x20\x20\x20\x20\x20\x20\x20}\n\
              \x20\x20\x20\x20\x20\x20\x20\x20assign(name, undefined, optionIndex, '-' + character, undefined);\n\
              \x20\x20\x20\x20\x20\x20}\n\
-             \x20\x20\x20\x20} else { if (!config.allowPositionals && config.strict !== false) { var error = new TypeError('Unexpected argument ' + argument); error.code = 'ERR_PARSE_ARGS_UNEXPECTED_POSITIONAL'; throw error; } positionals.push(argument); tokens.push({ kind: 'positional', index: index, value: argument }); }\n\
+             \x20\x20\x20\x20} else addPositional(argument, index);\n\
              \x20\x20}\n\
              \x20\x20Object.keys(definitions).forEach(function(name) { if (!Object.prototype.hasOwnProperty.call(values, name)) { var definition = definitions[name] || {}, defaultValue = definition.default; if (defaultValue !== undefined) values[name] = definition.multiple ? Array.from(defaultValue) : defaultValue; } });\n\
              \x20\x20var result = { values: values, positionals: positionals }; if (config.tokens) result.tokens = tokens; return result;\n\
