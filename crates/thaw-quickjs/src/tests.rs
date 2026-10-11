@@ -198,6 +198,101 @@ fn standalone_event_loop_runs_pending_timers() {
 }
 
 #[test]
+fn standalone_event_loop_repolls_platform_before_long_timer() {
+    let (setup, code, polls, order) = std::thread::spawn(|| {
+        let setup = load(
+            r#"
+            globalThis.__thaw_wait_order = [];
+            globalThis.__thaw_wait_polls = 0;
+            globalThis.__thaw_wait_original_poll = __thaw_poll_platform_events;
+            globalThis.__thaw_wait_timer = setTimeout(() => __thaw_wait_order.push('timer'), 200);
+            globalThis.__thaw_poll_platform_events = () => {
+              __thaw_wait_original_poll();
+              if (++__thaw_wait_polls === 2) {
+                __thaw_wait_order.push('platform');
+                clearTimeout(__thaw_wait_timer);
+                __thaw_poll_platform_events = __thaw_wait_original_poll;
+              }
+            };
+            "#,
+        );
+        let code = if setup == 1 { thaw_js_run_event_loop() } else { 1 };
+        let (polls, order) = with_context(|ctx| {
+            let polls = ctx.globals().get::<_, i32>("__thaw_wait_polls").unwrap_or(-1);
+            let order = ctx.eval::<String, _>("JSON.stringify(__thaw_wait_order)").unwrap_or_default();
+            let _ = ctx.eval::<(), _>(
+                "if (globalThis.__thaw_wait_original_poll) __thaw_poll_platform_events = __thaw_wait_original_poll; if (globalThis.__thaw_wait_timer) clearTimeout(__thaw_wait_timer);",
+            );
+            (polls, order)
+        });
+        (setup, code, polls, order)
+    })
+    .join()
+    .expect("standalone timer polling test context");
+
+    assert_eq!(setup, 1);
+    assert_eq!(code, 0);
+    assert!(polls >= 2);
+    assert_eq!(order, r#"["platform"]"#);
+}
+
+#[test]
+fn js_promise_wait_repolls_platform_for_ref_and_unref_timers() {
+    for refed in [true, false] {
+        let (result, polls, order) = std::thread::spawn(move || {
+            with_context(|ctx| {
+                let refed = if refed { "true" } else { "false" };
+                let result = (|| -> Result<Option<String>, String> {
+                    ctx.eval::<(), _>(format!(
+                        r#"
+                        globalThis.__thaw_wait_order = [];
+                        globalThis.__thaw_wait_polls = 0;
+                        globalThis.__thaw_wait_original_poll = __thaw_poll_platform_events;
+                        globalThis.__thaw_wait_timer = setTimeout(() => __thaw_wait_order.push('timer'), 200);
+                        __thaw_set_timer_ref(__thaw_wait_timer, {refed});
+                        globalThis.__thaw_wait_promise = new Promise(resolve => {{
+                          globalThis.__thaw_wait_resolve = resolve;
+                        }});
+                        globalThis.__thaw_poll_platform_events = () => {{
+                          __thaw_wait_original_poll();
+                          if (++__thaw_wait_polls === 2) {{
+                            __thaw_wait_order.push('platform');
+                            clearTimeout(__thaw_wait_timer);
+                            __thaw_poll_platform_events = __thaw_wait_original_poll;
+                            __thaw_wait_resolve('resolved');
+                          }}
+                        }};
+                        "#
+                    ))
+                    .map_err(|error| error.to_string())?;
+                    let promise: rquickjs::Promise = ctx
+                        .globals()
+                        .get("__thaw_wait_promise")
+                        .map_err(|error| error.to_string())?;
+                    let value = finish_with_platform_events(&ctx, &promise)
+                        .map_err(|error| error.to_string())?;
+                    ctx.json_stringify(value)
+                        .map(|value| value.map(|value| value.to_string().unwrap_or_default()))
+                        .map_err(|error| error.to_string())
+                })();
+                let polls = ctx.globals().get::<_, i32>("__thaw_wait_polls").unwrap_or(-1);
+                let order = ctx.eval::<String, _>("JSON.stringify(__thaw_wait_order)").unwrap_or_default();
+                let _ = ctx.eval::<(), _>(
+                    "if (globalThis.__thaw_wait_original_poll) __thaw_poll_platform_events = __thaw_wait_original_poll; if (globalThis.__thaw_wait_timer) clearTimeout(__thaw_wait_timer);",
+                );
+                (result, polls, order)
+            })
+        })
+        .join()
+        .expect("JS Promise polling test context");
+
+        assert_eq!(result, Ok(Some(r#""resolved""#.into())));
+        assert!(polls >= 2);
+        assert_eq!(order, r#"["platform"]"#);
+    }
+}
+
+#[test]
 fn event_loop_turn_releases_context_and_preserves_queued_work() {
     std::thread::spawn(|| {
         extern "C" fn resume_native(_frame: *mut u8, _result: *const u8) {
