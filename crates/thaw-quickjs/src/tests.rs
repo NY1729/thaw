@@ -1080,6 +1080,198 @@ fn performance_rejects_negative_mark_and_measure_timestamps() {
 }
 
 #[test]
+fn performance_observer_selection_replaces_and_preserves_mode() {
+    std::thread::spawn(|| {
+        assert_eq!(
+            load(
+                r#"
+      function observerSelectionBehavior() {
+        performance.clearMarks(); performance.clearMeasures();
+        const observers = [];
+        const make = () => { const observer = new PerformanceObserver(() => {}); observers.push(observer); return observer; };
+        try {
+          const replace = make();
+          replace.observe({ entryTypes: ['mark'] });
+          performance.mark('oldMark');
+          const old = replace.takeRecords().map(entry => entry.entryType).join(',');
+          replace.observe({ entryTypes: ['measure'] });
+          performance.mark('ignoredMark'); performance.measure('selectedMeasure', 2, 3);
+          const replaced = replace.takeRecords().map(entry => entry.entryType).join(',');
+          replace.observe({ entryTypes: [] });
+          performance.mark('afterEmpty'); performance.measure('afterEmptyMeasure', 2, 3);
+          const afterEmpty = replace.takeRecords().map(entry => entry.entryType).join(',');
+          replace.observe({ entryTypes: ['unsupported'] });
+          performance.mark('afterUnsupported'); performance.measure('afterUnsupportedMeasure', 2, 3);
+          const afterUnsupported = replace.takeRecords().map(entry => entry.entryType).join(',');
+          replace.observe({ entryTypes: ['unsupported', 'mark'] });
+          performance.mark('mixedMark'); performance.measure('mixedMeasure', 2, 3);
+          const mixed = replace.takeRecords().map(entry => entry.entryType).join(',');
+
+          const emptyInitial = make(); emptyInitial.observe({ entryTypes: [] });
+          performance.mark('emptyInitialMark');
+          const emptyStayedUnregistered = emptyInitial.takeRecords().length === 0;
+          let emptyMode = false;
+          try { emptyInitial.observe({ type: 'mark' }); }
+          catch (error) { emptyMode = error.name === 'InvalidModificationError'; }
+          emptyInitial.observe({ entryTypes: ['measure'] });
+          performance.measure('emptyInitialMeasure', 2, 3);
+          const emptyRecovered = emptyInitial.takeRecords().map(entry => entry.entryType).join(',');
+
+          const unsupportedInitial = make(); unsupportedInitial.observe({ entryTypes: ['unknown'] });
+          performance.mark('unsupportedInitialMark');
+          const unsupportedStayedUnregistered = unsupportedInitial.takeRecords().length === 0;
+          let unsupportedMode = false;
+          try { unsupportedInitial.observe({ type: 'mark' }); }
+          catch (error) { unsupportedMode = error.name === 'InvalidModificationError'; }
+          unsupportedInitial.observe({ entryTypes: ['mark'] });
+          performance.mark('unsupportedRecoveredMark');
+          const unsupportedRecovered = unsupportedInitial.takeRecords().map(entry => entry.entryType).join(',');
+
+          const unsupportedType = make(); unsupportedType.observe({ type: 'unknown' });
+          let singleMode = false;
+          try { unsupportedType.observe({ entryTypes: ['mark'] }); }
+          catch (error) { singleMode = error.name === 'InvalidModificationError'; }
+          unsupportedType.observe({ type: 'mark' }); performance.mark('singleRecoveredMark');
+          const singleRecovered = unsupportedType.takeRecords().map(entry => entry.entryType).join(',');
+
+          const additive = make(); additive.observe({ type: 'mark' }); additive.observe({ type: 'measure' }); additive.observe({ type: 'mark' });
+          performance.mark('additiveMark'); performance.measure('additiveMeasure', 2, 3);
+          const added = additive.takeRecords().map(entry => entry.entryType).join(',');
+
+          const pending = make(); pending.observe({ entryTypes: ['mark'] });
+          performance.mark('pendingMark'); pending.observe({ entryTypes: ['measure'] });
+          performance.measure('pendingMeasure', 2, 3);
+          const preserved = pending.takeRecords().map(entry => entry.entryType).join(',');
+
+          performance.clearMarks(); performance.clearMeasures();
+          performance.mark('bufferedExisting');
+          const buffered = make(); buffered.observe({ type: 'mark', buffered: true });
+          const replayed = buffered.takeRecords().map(entry => entry.name).join(',');
+          const notBuffered = make(); notBuffered.observe({ type: 'mark', buffered: false });
+          const falseDidNotReplay = notBuffered.takeRecords().length === 0;
+          const undefinedBuffered = make();
+          undefinedBuffered.observe({ entryTypes: ['measure'], buffered: undefined });
+          performance.measure('undefinedBufferedMeasure', 2, 3);
+          const undefinedBufferedWorks = undefinedBuffered.takeRecords().map(entry => entry.entryType).join(',');
+          return [old, replaced, afterEmpty, afterUnsupported, mixed, emptyStayedUnregistered,
+                  emptyMode, emptyRecovered, unsupportedStayedUnregistered, unsupportedMode,
+                  unsupportedRecovered, singleMode, singleRecovered, added, preserved,
+                  replayed, falseDidNotReplay, undefinedBufferedWorks];
+        } finally { for (const observer of observers) observer.disconnect(); }
+      }
+    "#
+            ),
+            1
+        );
+        assert_eq!(
+            call("observerSelectionBehavior", "[]"),
+            r#"["mark","measure","measure","measure","mark",true,true,"measure",true,true,"mark",true,"mark","mark,measure","mark,measure","bufferedExisting",true,"measure"]"#
+        );
+    })
+    .join()
+    .unwrap();
+}
+
+#[test]
+fn performance_observer_registration_validates_transactionally() {
+    std::thread::spawn(|| {
+        assert_eq!(
+            load(
+                r#"
+      function observerRegistrationValidation() {
+        performance.clearMarks(); performance.clearMeasures();
+        const observers = [];
+        const make = () => { const observer = new PerformanceObserver(() => {}); observers.push(observer); return observer; };
+        const typeError = callback => { try { callback(); return false; } catch (error) { return error instanceof TypeError; } };
+        const modeError = callback => { try { callback(); return false; } catch (error) { return error.name === 'InvalidModificationError'; } };
+        try {
+          const shapes = make();
+          const invalidShapes = [
+            () => shapes.observe(), () => shapes.observe({}),
+            () => shapes.observe({ type: undefined, entryTypes: undefined }),
+            () => shapes.observe({ type: 'mark', entryTypes: ['measure'] }),
+            () => shapes.observe({ entryTypes: ['mark'], buffered: true }),
+            () => shapes.observe({ entryTypes: ['mark'], buffered: false })
+          ].every(typeError);
+          shapes.observe({ type: 'mark' }); performance.mark('shapeStillUsable');
+          const shapeUsable = shapes.takeRecords().map(entry => entry.entryType).join(',');
+
+          const single = make(); single.observe({ type: 'mark' }); performance.mark('singlePending');
+          const singleSwitch = modeError(() => single.observe({ entryTypes: ['measure'] }));
+          const singlePending = single.takeRecords().map(entry => entry.entryType).join(',');
+          performance.mark('singleStillSelectedMark');
+          const singleRetained = single.takeRecords().map(entry => entry.entryType).join(',');
+
+          const multiple = make(); multiple.observe({ entryTypes: ['mark'] });
+          const multipleSwitch = modeError(() => multiple.observe({ type: 'measure' }));
+          performance.mark('multipleStillSelected'); performance.measure('multipleNotAdded', 2, 3);
+          const multipleRetained = multiple.takeRecords().map(entry => entry.entryType).join(',');
+
+          const afterDisconnect = make(); afterDisconnect.observe({ type: 'mark' }); afterDisconnect.disconnect();
+          const disconnectMode = modeError(() => afterDisconnect.observe({ entryTypes: ['mark'] }));
+          afterDisconnect.observe({ type: 'measure' }); performance.measure('sameModeAfterDisconnect', 2, 3);
+          const sameModeWorks = afterDisconnect.takeRecords().map(entry => entry.entryType).join(',');
+
+          const sentinel = new Error('conversion sentinel');
+          const throwingName = { toString() { throw sentinel; } };
+          const stagedMultiple = make(); stagedMultiple.observe({ entryTypes: ['mark'] });
+          performance.mark('stagedMultiplePending');
+          let multipleSentinel = false;
+          try { stagedMultiple.observe({ entryTypes: ['measure', throwingName] }); }
+          catch (error) { multipleSentinel = error === sentinel; }
+          performance.mark('stagedMultipleStillMark');
+          const multipleAtomic = stagedMultiple.takeRecords().map(entry => entry.entryType).join(',');
+
+          const stagedSingle = make(); stagedSingle.observe({ type: 'mark' });
+          performance.mark('stagedSinglePending');
+          let singleSentinel = false;
+          try { stagedSingle.observe({ type: throwingName }); }
+          catch (error) { singleSentinel = error === sentinel; }
+          performance.mark('stagedSingleStillMark');
+          const singleAtomic = stagedSingle.takeRecords().map(entry => entry.entryType).join(',');
+
+          const buffered = make(); buffered.observe({ type: 'mark' }); performance.mark('bufferedPending');
+          let bufferedSentinel = false;
+          try { buffered.observe({ type: 'measure', get buffered() { throw sentinel; } }); }
+          catch (error) { bufferedSentinel = error === sentinel; }
+          performance.mark('bufferedStillMark');
+          const bufferedAtomic = buffered.takeRecords().map(entry => entry.entryType).join(',');
+
+          const failedFirst = make();
+          let failedFirstSentinel = false;
+          try { failedFirst.observe({ type: throwingName }); }
+          catch (error) { failedFirstSentinel = error === sentinel; }
+          failedFirst.observe({ entryTypes: ['measure'] }); performance.measure('failedFirstRecovered', 2, 3);
+          const failedFirstRecovered = failedFirst.takeRecords().map(entry => entry.entryType).join(',');
+
+          const rejected = make();
+          const rejectedConflict = typeError(() => rejected.observe({ type: 'mark', entryTypes: ['measure'] }));
+          performance.mark('rejectedDidNotRegister');
+          const rejectedStayedAbsent = rejected.takeRecords().length === 0;
+          rejected.observe({ type: 'mark' }); performance.mark('rejectedStillUsable');
+          const rejectedRecovered = rejected.takeRecords().map(entry => entry.entryType).join(',');
+          return [invalidShapes, shapeUsable, singleSwitch, singlePending, singleRetained,
+                  multipleSwitch, multipleRetained, disconnectMode, sameModeWorks,
+                  multipleSentinel, multipleAtomic, singleSentinel, singleAtomic,
+                  bufferedSentinel, bufferedAtomic, failedFirstSentinel,
+                  failedFirstRecovered, rejectedConflict, rejectedStayedAbsent,
+                  rejectedRecovered];
+        } finally { for (const observer of observers) observer.disconnect(); }
+      }
+    "#
+            ),
+            1
+        );
+        assert_eq!(
+            call("observerRegistrationValidation", "[]"),
+            r#"[true,"mark",true,"mark","mark",true,"mark",true,"measure",true,"mark,mark",true,"mark,mark",true,"mark,mark",true,"measure",true,true,"mark"]"#
+        );
+    })
+    .join()
+    .unwrap();
+}
+
+#[test]
 fn structured_clone_copies_cycles_and_builtins() {
     assert_eq!(
             load(
