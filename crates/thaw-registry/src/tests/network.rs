@@ -4048,7 +4048,7 @@ module.exports = function() {
 }
 
 #[test]
-fn https_agent_forwards_custom_identity_checker_to_tls_connect() {
+fn https_explicit_agent_forwards_custom_identity_checker_to_tls_connect() {
     use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_https_identity_forwarding");
     fs::write(dir.join("index.js"), r#"
