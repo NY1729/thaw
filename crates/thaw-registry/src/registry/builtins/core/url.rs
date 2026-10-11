@@ -49,6 +49,7 @@ pub(super) fn source(name: &str) -> Option<&'static str> {
              \x20\x20try { return decodeURIComponent(String(value).replace(/\\+/g, ' ')); } catch (_) { return String(value); }\n\
              }\n\
              function primitive(value) {\n\
+             \x20\x20if (typeof value === 'number' && !Number.isFinite(value)) return '';\n\
              \x20\x20return value === null || value === undefined ? '' : (typeof value === 'string' || typeof value === 'number' || typeof value === 'bigint' || typeof value === 'boolean' ? String(value) : '');\n\
              }\n\
              function stringify(object, separator, assignment, options) {\n\
