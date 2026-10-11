@@ -69,7 +69,7 @@
     toJSON() { return { name: this.name, entryType: this.entryType, startTime: this.startTime, duration: this.duration, detail: this.detail }; }
   }
   class PerformanceMark extends PerformanceEntry {
-    constructor(name, options = {}) { super(name, 'mark', options.startTime === undefined ? performanceNow() : options.startTime, 0, options.detail); }
+    constructor(name, options = {}) { super(name, 'mark', options.startTime === undefined ? performanceNow() : options.startTime, 0, options.detail); if (this.startTime < 0) throw new TypeError('Performance timestamp must be non-negative'); }
   }
   class PerformanceMeasure extends PerformanceEntry {
     constructor(name, startTime, duration, detail) { super(name, 'measure', startTime, duration, detail); }
@@ -114,8 +114,11 @@
   PerformanceObserver.supportedEntryTypes = ['function', 'mark', 'measure'];
   const entryTime = (value, fallback) => {
     if (value === undefined) return fallback;
-    if (typeof value === 'number') return value;
-    const entry = performanceEntries.slice().reverse().find(candidate => candidate.name === String(value));
+    if (typeof value === 'number') {
+      if (value < 0) throw new TypeError('Performance timestamp must be non-negative');
+      return value;
+    }
+    const entry = performanceEntries.slice().reverse().find(candidate => candidate.entryType === 'mark' && candidate.name === String(value));
     if (!entry) throw new SyntaxError(`Unknown performance mark: ${value}`);
     return entry.startTime;
   };

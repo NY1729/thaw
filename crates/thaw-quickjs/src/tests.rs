@@ -964,6 +964,122 @@ fn performance_measure_end_duration_and_option_dictionary_order() {
 }
 
 #[test]
+fn performance_measure_names_resolve_only_the_newest_mark() {
+    std::thread::spawn(|| {
+        assert_eq!(
+            load(
+                r#"
+      function measureMarkNameLookup() {
+        performance.clearMarks(); performance.clearMeasures();
+        performance.mark('timingCollision', { startTime: 30 });
+        performance.mark('timingCollision', { startTime: 10 });
+        performance.measure('timingCollision', { start: 3, end: 4 });
+        performance.mark('timingEnd', { startTime: 50 });
+        performance.timerify(function timingCollision() {})();
+        const options = performance.measure('optionsLookup', { start: 'timingCollision', end: 50 });
+        const legacy = performance.measure('legacyLookup', 'timingCollision', 'timingEnd');
+        performance.measure('measureOnly', { start: 3, end: 4 });
+        performance.timerify(function functionOnly() {})();
+        const rejects = (name, start, end) => {
+          const before = performance.getEntriesByName(name, 'measure').length;
+          let thrown = false;
+          try { performance.measure(name, { start, end }); }
+          catch (error) { thrown = error instanceof SyntaxError; }
+          return thrown && performance.getEntriesByName(name, 'measure').length === before;
+        };
+        const measureOnlyRejected = rejects('measureOnlyStart', 'measureOnly', 50)
+          && rejects('measureOnlyEnd', 10, 'measureOnly');
+        const functionOnlyRejected = rejects('functionOnlyStart', 'functionOnly', 50)
+          && rejects('functionOnlyEnd', 10, 'functionOnly');
+        performance.clearMarks('timingCollision');
+        let collisionFallbackRejected = false;
+        try { performance.measure('afterClear', { start: 'timingCollision', end: 50 }); }
+        catch (error) { collisionFallbackRejected = error instanceof SyntaxError; }
+        return [[options.startTime, options.duration], [legacy.startTime, legacy.duration],
+                measureOnlyRejected, functionOnlyRejected, collisionFallbackRejected];
+      }
+    "#
+            ),
+            1
+        );
+        assert_eq!(
+            call("measureMarkNameLookup", "[]"),
+            r#"[[10,40],[10,40],true,true,true]"#
+        );
+    })
+    .join()
+    .unwrap();
+}
+
+#[test]
+fn performance_rejects_negative_mark_and_measure_timestamps() {
+    std::thread::spawn(|| {
+        assert_eq!(
+            load(
+                r#"
+      function negativePerformanceTimestamps() {
+        performance.clearMarks(); performance.clearMeasures();
+        const rejectedMark = (name, create) => {
+          let thrown = false;
+          try { create(); } catch (error) { thrown = error instanceof TypeError; }
+          return thrown && performance.getEntriesByName(name, 'mark').length === 0;
+        };
+        const negativeMark = rejectedMark('negativeNumber',
+          () => performance.mark('negativeNumber', { startTime: -1 }));
+        const negativeString = rejectedMark('negativeString',
+          () => performance.mark('negativeString', { startTime: '-1' }));
+        const directMark = rejectedMark('negativeDirect',
+          () => new PerformanceMark('negativeDirect', { startTime: -1 }));
+        let coercions = 0;
+        const coercionMark = rejectedMark('negativeCoercion', () => performance.mark('negativeCoercion', {
+          startTime: { valueOf() { coercions++; return -1; } }
+        }));
+        const sentinel = new Error('coercion sentinel');
+        let propagated = false;
+        try { performance.mark('throwingCoercion', { startTime: { valueOf() { throw sentinel; } } }); }
+        catch (error) { propagated = error === sentinel; }
+        performance.mark('positiveCoercion', { startTime: { valueOf() { return 5; } } });
+        performance.mark('negativeZero', { startTime: -0 });
+        const rejectedMeasure = (name, create) => {
+          let thrown = false;
+          try { create(); } catch (error) { thrown = error instanceof TypeError; }
+          return thrown && performance.getEntriesByName(name, 'measure').length === 0;
+        };
+        const negativeStarts = rejectedMeasure('negativeStarts', () => {
+          performance.measure('negativeStarts', { start: -1, end: 10 });
+        }) && rejectedMeasure('negativeLegacyStart', () => {
+          performance.measure('negativeLegacyStart', -1, 10);
+        });
+        const negativeEnds = rejectedMeasure('negativeEnds', () => {
+          performance.measure('negativeEnds', { start: 10, end: -1 });
+        }) && rejectedMeasure('negativeLegacyEnd', () => {
+          performance.measure('negativeLegacyEnd', 10, -1);
+        });
+        const negativeDuration = performance.measure('negativeDuration', { start: 10, end: 5 });
+        const computedNegativeStart = performance.measure('computedNegativeStart', { end: 5, duration: 10 });
+        const suppliedNegativeDuration = performance.measure('suppliedNegativeDuration', { start: 10, duration: -5 });
+        return [negativeMark, negativeString, directMark, coercionMark, coercions, propagated,
+                performance.getEntriesByName('positiveCoercion', 'mark')[0].startTime,
+                Object.is(performance.getEntriesByName('negativeZero', 'mark')[0].startTime, -0),
+                negativeStarts, negativeEnds,
+                [negativeDuration.startTime, negativeDuration.duration],
+                [computedNegativeStart.startTime, computedNegativeStart.duration],
+                [suppliedNegativeDuration.startTime, suppliedNegativeDuration.duration]];
+      }
+    "#
+            ),
+            1
+        );
+        assert_eq!(
+            call("negativePerformanceTimestamps", "[]"),
+            r#"[true,true,true,true,1,true,5,true,true,true,[10,-5],[-5,10],[10,-5]]"#
+        );
+    })
+    .join()
+    .unwrap();
+}
+
+#[test]
 fn structured_clone_copies_cycles_and_builtins() {
     assert_eq!(
             load(
