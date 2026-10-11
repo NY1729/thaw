@@ -666,6 +666,75 @@ fn interval_repeats_and_can_cancel_itself() {
 }
 
 #[test]
+fn refreshing_a_due_timer_defers_its_snapshot_invocation() {
+    std::thread::spawn(|| {
+        let loaded = load(
+            r#"
+      globalThis.__thawTimerRefreshState = { timeout: [], interval: [], cancel: [] };
+      globalThis.__thawTimerRefreshHandles = {};
+      globalThis.__thawTimerRefreshStart = function() {
+        const state = __thawTimerRefreshState, handles = __thawTimerRefreshHandles;
+        handles.timeoutTarget = setTimeout(() => state.timeout.push('target'), 200);
+        handles.timeoutFirst = setTimeout(() => {
+          state.timeout.push('first'); handles.timeoutTarget.refresh();
+        }, 0);
+        handles.intervalTarget = setInterval(() => state.interval.push('target'), 200);
+        handles.intervalFirst = setTimeout(() => {
+          state.interval.push('first'); handles.intervalTarget.refresh();
+        }, 0);
+        handles.cancelTarget = setTimeout(() => state.cancel.push('target'), 200);
+        handles.cancelFirst = setTimeout(() => {
+          state.cancel.push('first'); clearTimeout(handles.cancelTarget);
+        }, 0);
+        return true;
+      };
+      globalThis.__thawTimerRefreshStateJson = () => __thawTimerRefreshState;
+      globalThis.__thawTimerRefreshCleanup = function() {
+        const h = __thawTimerRefreshHandles;
+        clearTimeout(h.timeoutFirst); clearTimeout(h.timeoutTarget);
+        clearTimeout(h.intervalFirst); clearInterval(h.intervalTarget);
+        clearTimeout(h.cancelFirst); clearTimeout(h.cancelTarget);
+      };
+    "#,
+        );
+        let mut start = String::new();
+        let mut first_state = String::new();
+        let mut final_state = String::new();
+        let mut hook_results = Vec::new();
+        if loaded == 1 {
+            start = call("__thawTimerRefreshStart", "[]");
+            if start == "true" {
+                // Drive the real hook directly so a full event loop cannot hide an early invocation.
+                // A host pause longer than the refreshed 200 ms deadline can still change this ordering.
+                std::thread::sleep(std::time::Duration::from_millis(230));
+                hook_results.push(call("__thaw_run_due_timers", "[]"));
+                first_state = call("__thawTimerRefreshStateJson", "[]");
+                std::thread::sleep(std::time::Duration::from_millis(230));
+                hook_results.push(call("__thaw_run_due_timers", "[]"));
+                final_state = call("__thawTimerRefreshStateJson", "[]");
+            }
+        }
+        let cleaned = load(
+            "if (typeof globalThis.__thawTimerRefreshCleanup === 'function') __thawTimerRefreshCleanup();",
+        );
+        assert_eq!(loaded, 1);
+        assert_eq!(start, "true");
+        assert_eq!(cleaned, 1);
+        assert!(hook_results.iter().all(|result| !result.contains("__thaw_error__")));
+        assert_eq!(
+            first_state,
+            r#"{"timeout":["first"],"interval":["first"],"cancel":["first"]}"#
+        );
+        assert_eq!(
+            final_state,
+            r#"{"timeout":["first","target"],"interval":["first","target"],"cancel":["first"]}"#
+        );
+    })
+    .join()
+    .unwrap();
+}
+
+#[test]
 fn microtasks_run_before_zero_delay_timers() {
     assert_eq!(
         load(
