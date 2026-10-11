@@ -4973,6 +4973,50 @@ fn shared_json_reviver_reconstructs_node_buffers() {
 }
 
 #[test]
+fn shared_json_reviver_restores_non_finite_numbers() {
+    assert_eq!(
+        load(
+            r#"function reviveNonFinite(nan, positive, negative, nested) {
+              const roundtrip = JSON.parse(__thaw_json_safe_stringify([NaN, Infinity, -Infinity]), __thaw_json_date_reviver);
+              return [typeof nan, Number.isNaN(nan), positive === Infinity, negative === -Infinity,
+                Number.isNaN(nested[0]), nested[1] === Infinity, nested[2] === -Infinity,
+                roundtrip.every((value, index) => index === 0 ? Number.isNaN(value) : value === (index === 1 ? Infinity : -Infinity)),
+                1 / positive === 0, 1 / negative === -0];
+            }"#
+        ),
+        1
+    );
+    assert_eq!(
+        call(
+            "reviveNonFinite",
+            r#"[{"$__thaw_non_finite$":"NaN"},{"$__thaw_non_finite$":"Infinity"},{"$__thaw_non_finite$":"-Infinity"},[{"$__thaw_non_finite$":"NaN"},{"$__thaw_non_finite$":"Infinity"},{"$__thaw_non_finite$":"-Infinity"}]]"#
+        ),
+        "[\"number\",true,true,true,true,true,true,true,true,true]"
+    );
+}
+
+#[test]
+fn shared_json_reviver_preserves_invalid_non_finite_tags() {
+    assert_eq!(
+        load(
+            r#"function preserveInvalidNonFinite(values) {
+              return [values.length, values.map(value => Array.isArray(value) ? 'array' : typeof value),
+                values.map(value => value && typeof value === 'object' ? Object.keys(value).length : null),
+                values.slice(0, 8).map(value => value.$__thaw_non_finite$), values[11]];
+            }"#
+        ),
+        1
+    );
+    assert_eq!(
+        call(
+            "preserveInvalidNonFinite",
+            r#"[[{"$__thaw_non_finite$":"NaN","extra":1},{"$__thaw_non_finite$":"inf"},{"$__thaw_non_finite$":"nan"},{"$__thaw_non_finite$":"0"},{"$__thaw_non_finite$":""},{"$__thaw_non_finite$":1},{"$__thaw_non_finite$":false},{"$__thaw_non_finite$":null},{"$__thaw_non_finite$":{}},{"$__thaw_non_finite$":[]} ,[1],17]]"#
+        ),
+        r#"[12,["object","object","object","object","object","object","object","object","object","object","array","number"],[2,1,1,1,1,1,1,1,1,1,1,null],["NaN","inf","nan","0","",1,false,null],17]"#
+    );
+}
+
+#[test]
 fn shared_json_reviver_reconstructs_maps_and_sets() {
     assert_eq!(
         load(
