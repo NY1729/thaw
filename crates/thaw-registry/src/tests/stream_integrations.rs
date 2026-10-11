@@ -519,3 +519,143 @@ module.exports = function() {
     .join()
     .unwrap();
 }
+
+#[test]
+fn child_process_async_exec_limits_each_pipe_and_preserves_null_encoding() {
+    std::thread::spawn(|| {
+        use std::ffi::{CStr, CString};
+
+        let dir = temp_registry("builtin_child_process_async_output_contract");
+        fs::write(
+            dir.join("index.js"),
+            r#"
+var cp = require('node:child_process'), util = require('node:util');
+module.exports = async function() {
+  var children = [], records = [];
+  function close(child) {
+    var record = { child: child, closed: new Promise(function(resolve) {
+      child.once('close', function(code, signal) { resolve([code, signal]); });
+    }) };
+    records.push(record);
+    return record;
+  }
+  function callbackCall(start) {
+    var count = 0, resolveResult;
+    var result = new Promise(function(resolve) { resolveResult = resolve; });
+    var child = start(function(error, stdout, stderr) {
+      count++;
+      resolveResult([error, stdout, stderr]);
+    });
+    children.push(child);
+    return { child: child, result: result, closed: close(child).closed, count: function() { return count; } };
+  }
+  function promiseCall(promise) {
+    children.push(promise.child);
+    return { promise: promise, child: promise.child, closed: close(promise.child).closed };
+  }
+  try {
+    var balancedCallback = callbackCall(function(done) {
+      return cp.execFile('/bin/sh', ['-c', 'printf abc; printf def >&2'], { encoding: 'utf8', maxBuffer: 3 }, done);
+    });
+    var balancedCallbackResult = await balancedCallback.result, balancedCallbackClose = await balancedCallback.closed;
+    var balancedPromise = promiseCall(util.promisify(cp.exec)('printf abc; printf def >&2', { encoding: 'utf8', maxBuffer: 3 }));
+    var balancedPromiseChildVisible = balancedPromise.promise.child === balancedPromise.child && !!balancedPromise.child.stdout;
+    var balancedPromiseValue = await balancedPromise.promise, balancedPromiseClose = await balancedPromise.closed;
+
+    var stdoutOverflow = callbackCall(function(done) {
+      return cp.execFile('/bin/sh', ['-c', 'printf abcd; printf x >&2'], { encoding: 'utf8', maxBuffer: 3 }, done);
+    });
+    var stdoutErrorResult = await stdoutOverflow.result, stdoutClose = await stdoutOverflow.closed;
+    var stderrOverflow = promiseCall(util.promisify(cp.exec)('printf x; printf abcd >&2', { encoding: 'utf8', maxBuffer: 3 }));
+    var stderrError = await stderrOverflow.promise.then(function() { return null; }, function(error) { return error; });
+    var stderrClose = await stderrOverflow.closed;
+
+    var utf8Command = 'printf "\\342\\230\\203"';
+    var utf8Overflow = callbackCall(function(done) {
+      return cp.execFile('/bin/sh', ['-c', utf8Command], { encoding: 'utf8', maxBuffer: 2 }, done);
+    });
+    var utf8ErrorResult = await utf8Overflow.result, utf8OverflowClose = await utf8Overflow.closed;
+    var utf8Boundary = callbackCall(function(done) {
+      return cp.execFile('/bin/sh', ['-c', utf8Command], { encoding: 'utf8', maxBuffer: 3 }, done);
+    });
+    var utf8BoundaryResult = await utf8Boundary.result, utf8BoundaryClose = await utf8Boundary.closed;
+    var hexBoundary = promiseCall(util.promisify(cp.execFile)('/bin/printf', ['ab'], { encoding: 'hex', maxBuffer: 2 }));
+    var hexValue = await hexBoundary.promise, hexClose = await hexBoundary.closed;
+
+    var invalidCommand = 'printf "\\377"; printf "\\376" >&2';
+    var nullExec = callbackCall(function(done) {
+      return cp.exec(invalidCommand, { encoding: null, maxBuffer: 1 }, done);
+    });
+    var nullExecResult = await nullExec.result, nullExecClose = await nullExec.closed;
+    var nullFile = promiseCall(util.promisify(cp.execFile)('/bin/sh', ['-c', invalidCommand], { encoding: null, maxBuffer: 1 }));
+    var nullFileValue = await nullFile.promise, nullFileClose = await nullFile.closed;
+    var bufferFile = callbackCall(function(done) {
+      return cp.execFile('/bin/sh', ['-c', invalidCommand], { encoding: 'buffer', maxBuffer: 1 }, done);
+    });
+    var bufferResult = await bufferFile.result, bufferClose = await bufferFile.closed;
+    var utf8Default = callbackCall(function(done) {
+      return cp.execFile('/bin/sh', ['-c', utf8Command], { maxBuffer: 3 }, done);
+    });
+    var utf8DefaultResult = await utf8Default.result, utf8DefaultClose = await utf8Default.closed;
+    var failedNull = promiseCall(util.promisify(cp.execFile)('/bin/sh', ['-c', 'printf "\\377"; printf "\\376" >&2; exit 5'], { encoding: null, maxBuffer: 1 }));
+    var failedNullError = await failedNull.promise.then(function() { return null; }, function(error) { return error; });
+    var failedNullClose = await failedNull.closed;
+
+    return [
+      [balancedCallbackResult[0] === null, balancedCallbackResult[1], balancedCallbackResult[2],
+        balancedCallback.count(), balancedCallbackClose[0]],
+      [balancedPromiseValue.stdout, balancedPromiseValue.stderr, balancedPromiseChildVisible,
+        balancedPromiseClose[0]],
+      [stdoutErrorResult[0].code, stdoutErrorResult[0].message.indexOf('stdout') >= 0,
+        stdoutErrorResult[0].stdout === stdoutErrorResult[1], stdoutErrorResult[0].stderr === stdoutErrorResult[2],
+        stdoutErrorResult[1], stdoutErrorResult[2], stdoutOverflow.count(), stdoutClose[0]],
+      [stderrError.code, stderrError.message.indexOf('stderr') >= 0, stderrError.stdout, stderrError.stderr, stderrClose[0]],
+      [utf8ErrorResult[0].code, utf8ErrorResult[1], utf8ErrorResult[2], utf8OverflowClose[0]],
+      [utf8BoundaryResult[0] === null, utf8BoundaryResult[1], utf8BoundaryClose[0]],
+      [hexValue.stdout, hexValue.stdout.length, hexClose[0]],
+      [nullExecResult[0] === null, Buffer.isBuffer(nullExecResult[1]), Array.from(nullExecResult[1]),
+        Buffer.isBuffer(nullExecResult[2]), Array.from(nullExecResult[2]), nullExecClose[0]],
+      [Buffer.isBuffer(nullFileValue.stdout), Array.from(nullFileValue.stdout),
+        Buffer.isBuffer(nullFileValue.stderr), Array.from(nullFileValue.stderr), nullFileClose[0]],
+      [bufferResult[0] === null, Buffer.isBuffer(bufferResult[1]), Array.from(bufferResult[1]),
+        Buffer.isBuffer(bufferResult[2]), Array.from(bufferResult[2]), bufferClose[0]],
+      [utf8DefaultResult[0] === null, utf8DefaultResult[1], utf8DefaultClose[0]],
+      [failedNullError.code, Buffer.isBuffer(failedNullError.stdout), Array.from(failedNullError.stdout),
+        Buffer.isBuffer(failedNullError.stderr), Array.from(failedNullError.stderr),
+        failedNullClose[0] === 5]
+    ];
+  } finally {
+    children.forEach(function(child) { if (!child._closed) child.kill('SIGKILL'); });
+    await Promise.all(records.map(function(record) { return record.closed; }));
+  }
+};
+"#,
+        )
+        .unwrap();
+        let empty_node_modules = temp_registry("builtin_child_process_async_output_contract_node_modules");
+        let (bundle, _, file_count, _) =
+            bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+        let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseChildAsyncOutput = module.exports;");
+        let source = CString::new(script).unwrap();
+        let loaded = thaw_quickjs::thaw_js_load(source.as_ptr()) == 1;
+        let result = if loaded {
+            let result_ptr = thaw_quickjs::thaw_js_call(
+                CString::new("exerciseChildAsyncOutput").unwrap().as_ptr(),
+                CString::new("[]").unwrap().as_ptr(),
+            );
+            Some(unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy().into_owned())
+        } else {
+            None
+        };
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&empty_node_modules);
+        assert_eq!(file_count, 5);
+        assert!(loaded);
+        assert_eq!(
+            result.as_deref(),
+            Some(r#"[[true,"abc","def",1,0],["abc","def",true,0],["ERR_CHILD_PROCESS_STDIO_MAXBUFFER",true,true,true,"abcd","x",1,0],["ERR_CHILD_PROCESS_STDIO_MAXBUFFER",true,"x","abcd",0],["ERR_CHILD_PROCESS_STDIO_MAXBUFFER","☃","",0],[true,"☃",0],["6162",4,0],[true,true,[255],true,[254],0],[true,[255],true,[254],0],[true,true,[255],true,[254],0],[true,"☃",0],[5,true,[255],true,[254],true]]"#)
+        );
+    })
+    .join()
+    .unwrap();
+}
