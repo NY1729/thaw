@@ -3484,7 +3484,7 @@ extern "C" fn test_native_graph_release(token: u64) -> u8 {
 
 #[cfg(test)]
 #[test]
-fn native_graph_root_drop_queues_duplicates_and_retries_failed_batch() {
+fn native_graph_root_drop_queues_duplicates_and_retries_failed_release() {
     std::thread::spawn(|| {
         use std::sync::atomic::Ordering;
         TEST_NATIVE_GRAPH_RELEASE_CALLS.store(0, Ordering::SeqCst);
@@ -3495,9 +3495,9 @@ fn native_graph_root_drop_queues_duplicates_and_retries_failed_batch() {
         assert_eq!(NATIVE_GRAPH_RELEASES_OUTSTANDING.with(Cell::get), 2);
         assert_eq!(PENDING_NATIVE_GRAPH_RELEASES.with(|pending| pending.borrow().len()), 2);
         drain_native_graph_release_queue();
-        assert_eq!(NATIVE_GRAPH_RELEASES_OUTSTANDING.with(Cell::get), 2);
-        assert_eq!(PENDING_NATIVE_GRAPH_RELEASES.with(|pending| pending.borrow().len()), 2);
-        assert_eq!(TEST_NATIVE_GRAPH_RELEASE_CALLS.load(Ordering::SeqCst), 1);
+        assert_eq!(NATIVE_GRAPH_RELEASES_OUTSTANDING.with(Cell::get), 1);
+        assert_eq!(PENDING_NATIVE_GRAPH_RELEASES.with(|pending| pending.borrow().len()), 1);
+        assert_eq!(TEST_NATIVE_GRAPH_RELEASE_CALLS.load(Ordering::SeqCst), 2);
 
         drain_native_graph_release_queue();
         assert_eq!(NATIVE_GRAPH_RELEASES_OUTSTANDING.with(Cell::get), 0);
