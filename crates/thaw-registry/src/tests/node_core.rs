@@ -466,6 +466,26 @@ fn util_helpers_run_through_bundled_commonjs_require() {
              \x20 var custom = {}; custom[util.inspect.custom] = function() { return 'custom'; };\n\
              \x20 var add = util.promisify(function(a, b, callback) { queueMicrotask(function() { callback(null, a + b); }); });\n\
              \x20 var sum = await add(2, 3);\n\
+             \x20 var multi = util.promisify(function(callback) { callback(null, 'first', 'extra'); });\n\
+             \x20 if (await multi() !== 'first') throw new Error('promisify first value');\n\
+             \x20 if (util.promisify(multi) !== multi || multi[util.promisify.custom] !== multi) throw new Error('promisify identity');\n\
+             \x20 var descriptor = Object.getOwnPropertyDescriptor(multi, util.promisify.custom);\n\
+             \x20 if (!descriptor || descriptor.enumerable || descriptor.writable || !descriptor.configurable) throw new Error('promisify descriptor');\n\
+             \x20 if (await util.promisify(function(callback) { callback(null); })() !== undefined) throw new Error('promisify no success value');\n\
+             \x20 var receiver = { value: 7, method: util.promisify(function(callback) { callback(null, this.value, 'extra'); }) };\n\
+             \x20 if (await receiver.method() !== 7) throw new Error('promisify receiver');\n\
+             \x20 var reason = new Error('callback failure'), rejected;\n\
+             \x20 try { await util.promisify(function(callback) { callback(reason); })(); } catch (error) { rejected = error; }\n\
+             \x20 if (rejected !== reason) throw new Error('promisify rejection');\n\
+             \x20 var thrown = new Error('sync failure'), caught;\n\
+             \x20 try { await util.promisify(function() { throw thrown; })(); } catch (error) { caught = error; }\n\
+             \x20 if (caught !== thrown) throw new Error('promisify synchronous throw');\n\
+             \x20 var original = function() { throw new Error('original must not be called'); };\n\
+             \x20 var override = function() { return Promise.resolve('custom'); };\n\
+             \x20 original[util.promisify.custom] = override;\n\
+             \x20 if (util.promisify(original) !== override || util.promisify(override) !== override || await override() !== 'custom') throw new Error('promisify custom');\n\
+             \x20 [123, 'custom', {}].forEach(function(value) { var fn = function() {}; fn[util.promisify.custom] = value; var error; try { util.promisify(fn); } catch (caught) { error = caught; } if (!(error instanceof TypeError) || error.code !== 'ERR_INVALID_ARG_TYPE') throw new Error('promisify custom validation'); });\n\
+             \x20 [undefined, null, false, 0, '', NaN].forEach(function(value) { var fn = function(callback) { callback(null, 'normal'); }; fn[util.promisify.custom] = value; var wrapped = util.promisify(fn); if (typeof wrapped !== 'function' || wrapped === fn || util.promisify(wrapped) !== wrapped) throw new Error('promisify falsy custom'); });\n\
              \x20 var callbackValue = await new Promise(function(resolve, reject) { util.callbackify(async function(value) { return value * 2; })(4, function(error, value) { if (error) reject(error); else resolve(value); }); });\n\
              \x20 var debug = util.debuglog('sharp');\n\
              \x20 return [util.format('%s:%d:%j:%%', 'value', 4, { ok: true }), util.inspect(custom), Child.super_ === Base, new Child() instanceof Base, util.types.isDate(new Date()), util.types.isRegExp(/x/), util.types.isMap(new Map()), util.types.isTypedArray(new Uint8Array(1)), sum, callbackValue, util.stripVTControlCharacters('\\u001b[31mred\\u001b[0m'), util.toUSVString('x\\ud800y'), typeof debug, debug.enabled];\n\
