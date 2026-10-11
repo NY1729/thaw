@@ -8609,6 +8609,52 @@ fn webassembly_start_refreshes_imported_memory() {
     assert_eq!(call("wasmStartMemory", "[]"), "[[42,65,8,0,131072],50,42]");
 }
 
+// Unrun regression: failed start writes and growth survive a native trap.
+#[test]
+fn webassembly_failed_start_refreshes_imported_memory() {
+    assert_eq!(
+        load(
+            r#"
+        function wasmFailedStartMemory() {
+            const memory = new WebAssembly.Memory({ initial: 1, maximum: 2 });
+            const oldBuffer = memory.buffer;
+            const failed = new TextEncoder().encode(`(module
+                (import "host" "memory" (memory 1 2))
+                (func $start
+                    i32.const 0 i32.const 42 i32.store8
+                    i32.const 1 memory.grow drop
+                    i32.const 65536 i32.const 8 i32.store8
+                    unreachable)
+                (start $start))`);
+            let trapped = false;
+            try { new WebAssembly.Instance(new WebAssembly.Module(failed), { host: { memory } }); }
+            catch (error) { trapped = error instanceof WebAssembly.RuntimeError; }
+            const immediate = [new Uint8Array(memory.buffer)[0], new Uint8Array(memory.buffer)[65536]];
+            const reader = new TextEncoder().encode(`(module
+                (import "host" "memory" (memory 1 2))
+                (func (export "read") (result i32)
+                    i32.const 0 i32.load8_u i32.const 65536 i32.load8_u i32.add))`);
+            const instance = new WebAssembly.Instance(new WebAssembly.Module(reader), { host: { memory } });
+            const marker = { reason: "callback" };
+            const callbackStart = new TextEncoder().encode(`(module
+                (import "host" "callback" (func $callback))
+                (func $start call $callback) (start $start))`);
+            let exact = false;
+            try { new WebAssembly.Instance(new WebAssembly.Module(callbackStart), { host: { callback() { throw marker; } } }); }
+            catch (error) { exact = error === marker; }
+            return [trapped, oldBuffer.byteLength, memory.buffer.byteLength, immediate,
+                instance.exports.read(), exact];
+        }
+    "#
+        ),
+        1
+    );
+    assert_eq!(
+        call("wasmFailedStartMemory", "[]"),
+        "[true,0,131072,[42,8],50,true]"
+    );
+}
+
 // Unrun regression: memory export aliases share the original object and one sync resource.
 #[test]
 fn webassembly_memory_export_aliases_reuse_original_buffer() {

@@ -354,16 +354,24 @@
           else throw new WebAssembly.LinkError(`WebAssembly import '${item.module}.${item.name}' has an unsupported kind`);
         }
       } catch (error) { __thaw_wasm_release_pending(JSON.stringify(linkage.functions.map(value => value.handle))); throw error; }
-      let rawResult;
-      try { rawResult = JSON.parse(__thaw_wasm_instantiate(module.__thawHandle, JSON.stringify(linkage))); }
-      catch (error) { __thaw_wasm_release_pending(JSON.stringify(linkage.functions.map(value => value.handle))); throw error; }
-      if (!rawResult.ok) { __thaw_wasm_release_pending(JSON.stringify(linkage.functions.map(value => value.handle))); wasmResult(JSON.stringify(rawResult), rawResult.runtime ? WebAssembly.RuntimeError : WebAssembly.LinkError); }
+      const pendingHandles = JSON.stringify(linkage.functions.map(value => value.handle));
+      let rawResult, failed = false, primary;
+      try {
+        rawResult = JSON.parse(__thaw_wasm_instantiate(module.__thawHandle, JSON.stringify(linkage)));
+        if (!rawResult.ok) wasmResult(JSON.stringify(rawResult), rawResult.runtime ? WebAssembly.RuntimeError : WebAssembly.LinkError);
+      } catch (error) { failed = true; primary = error; }
+      for (const memory of linkedMemories.keys()) {
+        try { memory.__thawRefresh(); }
+        catch (error) { if (!failed) { failed = true; primary = error; } }
+      }
+      if (failed) {
+        if (rawResult && rawResult.ok) __thaw_wasm_release('instance', rawResult.handle);
+        __thaw_wasm_release_pending(pendingHandles);
+        throw primary;
+      }
       const result = rawResult;
       Object.defineProperty(this, '__thawHandle', { value: result.handle });
       const exports = Object.create(null), resources = pendingResources.map(resource => ({ value: resource.value, binding: resource.value.__thawBind(this.__thawHandle, resource.item.module, resource.item.name) }));
-      // Instantiation runs data segments and the start function before returning.
-      // Adopt their imported-memory writes before any later call can sync an old buffer.
-      for (const resource of resources) if (resource.value instanceof WasmMemory) resource.value.__thawRefresh(resource.binding);
       const memories = new Map();
       for (const item of result.exports) {
         if (item.kind === 'function') {
