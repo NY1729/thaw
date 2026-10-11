@@ -1670,22 +1670,79 @@ mod process_credential_tests {
     }
 
     #[cfg(all(unix, not(any(target_os = "vxworks", target_os = "espidf", target_os = "horizon", target_os = "vita", target_os = "l4re"))))]
-    fn identity_helper_command() -> (String, Vec<String>, serde_json::Map<String, serde_json::Value>) {
-        let executable = std::env::current_exe().expect("test executable path");
-        let mut path = executable.as_path();
-        while let Some(parent) = path.parent() {
-            use std::os::unix::fs::PermissionsExt;
-            let metadata = std::fs::metadata(path).expect("helper path metadata");
-            let mode = metadata.permissions().mode();
-            assert_ne!(mode & 0o001, 0, "helper path is not traversable by dropped identity: {path:?}");
-            path = parent;
+    struct IdentityHelperDirectory(std::path::PathBuf);
+
+    #[cfg(all(unix, not(any(target_os = "vxworks", target_os = "espidf", target_os = "horizon", target_os = "vita", target_os = "l4re"))))]
+    impl Drop for IdentityHelperDirectory {
+        fn drop(&mut self) {
+            if let Err(error) = std::fs::remove_dir_all(&self.0) {
+                use std::io::Write;
+                let _ = writeln!(std::io::stderr().lock(), "failed to remove credential helper directory {:?}: {error}", self.0);
+            }
         }
+    }
+
+    #[cfg(all(unix, not(any(target_os = "vxworks", target_os = "espidf", target_os = "horizon", target_os = "vita", target_os = "l4re"))))]
+    fn traversable_directory(path: &std::path::Path) -> Result<std::path::PathBuf, String> {
         use std::os::unix::fs::PermissionsExt;
-        assert_ne!(std::fs::metadata(&executable).unwrap().permissions().mode() & 0o001, 0, "test executable must be world executable");
+        let canonical = std::fs::canonicalize(path).map_err(|error| format!("canonicalize {path:?}: {error}"))?;
+        let mut current = canonical.as_path();
+        loop {
+            let metadata = std::fs::metadata(current).map_err(|error| format!("metadata {current:?}: {error}"))?;
+            if !metadata.is_dir() {
+                return Err(format!("{current:?} is not a directory"));
+            }
+            if metadata.permissions().mode() & 0o001 == 0 {
+                return Err(format!("{current:?} is not traversable by a dropped identity"));
+            }
+            match current.parent() {
+                Some(parent) => current = parent,
+                None => return Ok(canonical),
+            }
+        }
+    }
+
+    #[cfg(all(unix, not(any(target_os = "vxworks", target_os = "espidf", target_os = "horizon", target_os = "vita", target_os = "l4re"))))]
+    fn assert_traversable_helper(path: &std::path::Path) {
+        use std::os::unix::fs::PermissionsExt;
+        let canonical = std::fs::canonicalize(path).expect("canonical credential helper path");
+        let metadata = std::fs::metadata(&canonical).expect("credential helper metadata");
+        assert!(metadata.is_file(), "credential helper is not a file: {canonical:?}");
+        assert_eq!(metadata.permissions().mode() & 0o7777, 0o755, "credential helper must be exactly mode 0755");
+        assert_ne!(metadata.permissions().mode() & 0o001, 0, "credential helper must be world executable");
+        let mut current = canonical.parent();
+        while let Some(path) = current {
+            let metadata = std::fs::metadata(path).expect("credential helper ancestor metadata");
+            assert!(metadata.is_dir(), "credential helper ancestor is not a directory: {path:?}");
+            assert_ne!(metadata.permissions().mode() & 0o001, 0, "helper path is not traversable by dropped identity: {path:?}");
+            current = path.parent();
+        }
+    }
+
+    #[cfg(all(unix, not(any(target_os = "vxworks", target_os = "espidf", target_os = "horizon", target_os = "vita", target_os = "l4re"))))]
+    fn identity_helper_command() -> (IdentityHelperDirectory, String, Vec<String>, serde_json::Map<String, serde_json::Value>) {
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        let temporary_root = std::env::temp_dir();
+        let root = traversable_directory(&temporary_root)
+            .or_else(|_| traversable_directory(std::path::Path::new("/tmp")))
+            .unwrap_or_else(|error| panic!("no traversable temporary root ({} or /tmp): {error}", temporary_root.display()));
+        let mut random = [0u8; 8];
+        getrandom::getrandom(&mut random).expect("credential helper directory randomness");
+        let directory = root.join(format!("thaw-credential-helper-{}", hex_encode(&random)));
+        std::fs::DirBuilder::new().mode(0o700).create(&directory)
+            .unwrap_or_else(|error| panic!("create owned credential helper directory {directory:?}: {error}"));
+        let guard = IdentityHelperDirectory(directory.clone());
+        let executable = std::env::current_exe().expect("test executable path");
+        let helper = directory.join("credential-helper");
+        std::fs::copy(&executable, &helper).expect("copy test executable to owned credential helper directory");
+        std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755)).expect("set credential helper mode");
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o755)).expect("set credential helper directory mode");
+        assert_eq!(std::fs::metadata(&directory).unwrap().permissions().mode() & 0o7777, 0o755, "owned credential helper directory must be exactly mode 0755");
+        assert_traversable_helper(&helper);
         let args = vec!["--exact".into(), "process_credential_tests::identity_helper_test_mode".into(), "--nocapture".into()];
         let mut env = serde_json::Map::new();
         env.insert("THAW_PROCESS_CREDENTIAL_HELPER".into(), serde_json::Value::String("1".into()));
-        (executable.to_string_lossy().into_owned(), args, env)
+        (guard, helper.to_string_lossy().into_owned(), args, env)
     }
 
     #[cfg(all(unix, not(any(target_os = "vxworks", target_os = "espidf", target_os = "horizon", target_os = "vita", target_os = "l4re"))))]
@@ -1700,13 +1757,14 @@ mod process_credential_tests {
 
     #[cfg(all(unix, not(any(target_os = "vxworks", target_os = "espidf", target_os = "horizon", target_os = "vita", target_os = "l4re"))))]
     fn run_identity(options: serde_json::Value) -> serde_json::Value {
-        let (command, arguments, mut env) = identity_helper_command();
+        let (_helper_directory, command, arguments, mut env) = identity_helper_command();
         if let Some(extra) = options.get("env").and_then(serde_json::Value::as_object) {
             env.extend(extra.clone());
         }
         let mut options = options;
         options["env"] = serde_json::Value::Object(env);
-        serde_json::from_str(&run_child_process(command, serde_json::to_string(&arguments).unwrap(), options.to_string())).unwrap()
+        let record = run_child_process(command, serde_json::to_string(&arguments).unwrap(), options.to_string());
+        serde_json::from_str(&record).unwrap()
     }
 
     #[cfg(all(unix, not(any(target_os = "vxworks", target_os = "espidf", target_os = "horizon", target_os = "vita", target_os = "l4re"))))]
@@ -1782,7 +1840,7 @@ mod process_credential_tests {
             eprintln!("SKIP: async credential identity fixture requires matching real/effective IDs or root");
             return;
         };
-        let (command, arguments, env) = identity_helper_command();
+        let (_helper_directory, command, arguments, env) = identity_helper_command();
         let options = serde_json::json!({
             "uid": uid,
             "gid": gid,
