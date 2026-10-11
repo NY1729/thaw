@@ -437,8 +437,8 @@ impl<'a> FnLowerer<'a> {
                     let split_result = self.wrap_call_argument_bindings(
                         split_result,
                         &[
-                            (separator_name, HirType::Str, separator),
                             (limit_name, HirType::F64, limit),
+                            (separator_name, HirType::Str, separator),
                         ],
                     )?;
                     let result = HirExpr::Conditional(
