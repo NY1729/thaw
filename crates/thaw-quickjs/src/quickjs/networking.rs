@@ -371,7 +371,7 @@ pub(super) struct TlsClientOptions<'a> {
     pub(super) host: &'a str,
     pub(super) port: u16,
     pub(super) server_name: &'a str,
-    pub(super) ca_spec: &'a str,
+    pub(super) ca_spec: Option<&'a str>,
     pub(super) cert_spec: &'a str,
     pub(super) key_spec: &'a str,
     pub(super) alpn_spec: &'a str,
@@ -383,6 +383,58 @@ pub(super) fn take_tls_stream_handle(next: &mut u32) -> Option<u32> {
     let handle = *next;
     *next = handle.checked_add(2)?;
     Some(handle)
+}
+
+fn tls_client_roots(ca_spec: Option<&str>) -> Result<RootCertStore, String> {
+    match ca_spec {
+        None => Ok(RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned())),
+        Some(spec) => tls_ca_roots(Some(spec)),
+    }
+}
+
+fn tls_ca_roots(ca_spec: Option<&str>) -> Result<RootCertStore, String> {
+    let mut roots = RootCertStore::empty();
+    let Some(spec) = ca_spec else { return Ok(roots) };
+    if spec.is_empty() { return Ok(roots) }
+    for encoded in spec.split(',') {
+        if encoded.is_empty() || encoded.len() % 2 != 0 || !encoded.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err("invalid CA encoding".to_string());
+        }
+        let bytes = hex_decode(encoded);
+        let certificates = decode_ca_certificates(&bytes)?;
+        for certificate in certificates { roots.add(certificate).map_err(|error| error.to_string())?; }
+    }
+    Ok(roots)
+}
+
+fn decode_ca_certificates(bytes: &[u8]) -> Result<Vec<CertificateDer<'static>>, String> {
+    if bytes.is_empty() { return Err("empty CA certificate".to_string()); }
+    let pem = std::str::from_utf8(bytes)
+        .ok()
+        .map(|text| text.trim_start_matches(|character: char| character.is_ascii_whitespace()))
+        .is_some_and(|text| text.starts_with("-----BEGIN "));
+    if pem {
+        let text = std::str::from_utf8(bytes).map_err(|error| error.to_string())?;
+        let mut rest = text.trim_matches(|character: char| character.is_ascii_whitespace());
+        let mut certs = Vec::new();
+        while !rest.is_empty() {
+            let prefix = "-----BEGIN CERTIFICATE-----";
+            let Some(body_start) = rest.strip_prefix(prefix) else { return Err("invalid CA PEM block".to_string()) };
+            let Some((body, tail)) = body_start.split_once("-----END CERTIFICATE-----") else { return Err("unterminated CA PEM block".to_string()) };
+            let encoded = body
+                .chars()
+                .filter(|character| !character.is_ascii_whitespace())
+                .collect::<String>();
+            let der = base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .map_err(|error| error.to_string())?;
+            if der.is_empty() { return Err("empty CA certificate".to_string()); }
+            certs.push(CertificateDer::from(der));
+            rest = tail.trim_matches(|character: char| character.is_ascii_whitespace());
+        }
+        return if certs.is_empty() { Err("no CA certificates found".to_string()) } else { Ok(certs) };
+    }
+    Ok(vec![CertificateDer::from(bytes.to_vec())])
 }
 
 pub(super) fn tls_connect(options: TlsClientOptions<'_>) -> String {
@@ -397,18 +449,7 @@ pub(super) fn tls_connect(options: TlsClientOptions<'_>) -> String {
         report_alpn,
         reject_unauthorized,
     } = options;
-    let mut roots = RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    for certificate_spec in ca_spec.split(',').filter(|value| !value.is_empty()) {
-        let certificates = match decode_certificates(certificate_spec) {
-            Ok(certificates) => certificates,
-            Err(error) => return format!("err:{error}"),
-        };
-        for certificate in certificates {
-            if let Err(error) = roots.add(certificate) {
-                return format!("err:{error}");
-            }
-        }
-    }
+    let roots = match tls_client_roots(ca_spec) { Ok(roots) => roots, Err(error) => return format!("err:{error}") };
     let builder = ClientConfig::builder().with_root_certificates(roots);
     let mut local_certificate = None;
     let config = if cert_spec.is_empty() && key_spec.is_empty() {
@@ -498,7 +539,7 @@ pub(super) struct TlsServerOptions<'a> {
     pub(super) port: u16,
     pub(super) cert_spec: &'a str,
     pub(super) key_spec: &'a str,
-    pub(super) ca_spec: &'a str,
+    pub(super) ca_spec: Option<&'a str>,
     pub(super) request_cert: bool,
     pub(super) reject_unauthorized: bool,
     pub(super) alpn_spec: &'a str,
@@ -527,20 +568,9 @@ pub(super) fn tls_server_listen(options: TlsServerOptions<'_>) -> String {
         Ok(private_key) => private_key,
         Err(error) => return format!("err:{error}"),
     };
+    let roots = match tls_ca_roots(ca_spec) { Ok(roots) => roots, Err(error) => return format!("err:{error}") };
     let builder = ServerConfig::builder();
     let builder = if request_cert {
-        let mut roots = RootCertStore::empty();
-        for certificate_spec in ca_spec.split(',').filter(|value| !value.is_empty()) {
-            let ca_certificates = match decode_certificates(certificate_spec) {
-                Ok(certificates) => certificates,
-                Err(error) => return format!("err:{error}"),
-            };
-            for certificate in ca_certificates {
-                if let Err(error) = roots.add(certificate) {
-                    return format!("err:{error}");
-                }
-            }
-        }
         let verifier = if reject_unauthorized {
             WebPkiClientVerifier::builder(Arc::new(roots)).build()
         } else {
@@ -935,6 +965,67 @@ pub(super) fn tls_certificate_metadata(handle: u32, peer: bool) -> String {
     .to_string()
 }
 
+#[cfg(test)]
+mod explicit_ca_tests {
+    use super::*;
+
+    const ROOT: &[u8] = include_bytes!("fixtures/tubitak-root.der");
+
+    fn spec(bytes: &[u8]) -> String { hex_encode(bytes) }
+
+    #[test]
+    fn explicit_ca_replaces_defaults_and_preserves_all_pem_certificates() {
+        let defaults = tls_client_roots(None).unwrap();
+        assert_eq!(defaults.roots.as_slice(), webpki_roots::TLS_SERVER_ROOTS);
+        assert!(defaults.len() > 1);
+        assert_eq!(tls_ca_roots(None).unwrap().len(), 0);
+        assert_eq!(tls_client_roots(Some("")).unwrap().len(), 0);
+        let root = spec(ROOT);
+        let explicit = tls_client_roots(Some(&root)).unwrap();
+        let mut expected = RootCertStore::empty();
+        expected.add(CertificateDer::from(ROOT.to_vec())).unwrap();
+        assert_eq!(explicit.roots.as_slice(), expected.roots.as_slice());
+        assert_eq!(explicit.len(), 1);
+        let comma = tls_ca_roots(Some(&format!("{root},{root}"))).unwrap();
+        assert_eq!(comma.roots.as_slice(), [expected.roots[0].clone(), expected.roots[0].clone()]);
+        let pem = format!("-----BEGIN CERTIFICATE-----\n{}\n-----END CERTIFICATE-----\n-----BEGIN CERTIFICATE-----\n{}\n-----END CERTIFICATE-----", base64::engine::general_purpose::STANDARD.encode(ROOT), base64::engine::general_purpose::STANDARD.encode(ROOT));
+        let pem_roots = tls_ca_roots(Some(&spec(pem.as_bytes()))).unwrap();
+        assert_eq!(pem_roots.roots.as_slice(), [expected.roots[0].clone(), expected.roots[0].clone()]);
+    }
+
+    #[test]
+    fn explicit_ca_rejects_malformed_or_partial_inputs() {
+        for invalid in ["z", "abc", "00", "zz", "00,"] {
+            assert!(tls_ca_roots(Some(invalid)).is_err(), "accepted {invalid:?}");
+        }
+        for pem in [
+            b"-----BEGIN CERTIFICATE-----bad".as_slice(),
+            b"-----BEGIN CERTIFICATE-----\n\n-----END CERTIFICATE-----".as_slice(),
+            b"-----BEGIN PRIVATE KEY-----\nAA==\n-----END PRIVATE KEY-----".as_slice(),
+        ] {
+            assert!(tls_ca_roots(Some(&spec(pem))).is_err());
+        }
+        let encoded = base64::engine::general_purpose::STANDARD.encode(ROOT);
+        let valid_pem = format!("-----BEGIN CERTIFICATE-----\n{encoded}\n-----END CERTIFICATE-----");
+        for invalid_bundle in [
+            format!("{valid_pem}\n-----BEGIN CERTIFICATE-----\nbad"),
+            format!("{valid_pem}\n-----BEGIN PRIVATE KEY-----\nAA==\n-----END PRIVATE KEY-----"),
+            format!("{valid_pem}\ntrailing"),
+            format!("\u{2003}{valid_pem}"),
+            format!("{valid_pem}\n\u{2003}{valid_pem}"),
+            format!("-----BEGIN CERTIFICATE-----\n{encoded}\u{2003}\n-----END CERTIFICATE-----"),
+        ] {
+            assert!(tls_ca_roots(Some(&spec(invalid_bundle.as_bytes()))).is_err());
+        }
+        let mixed_bad_hex = format!("{},zz", spec(ROOT));
+        assert!(tls_ca_roots(Some(&mixed_bad_hex)).is_err());
+        let mixed_bad_der = format!("{},00", spec(ROOT));
+        assert!(tls_ca_roots(Some(&mixed_bad_der)).is_err());
+        let mixed_bad_pem = format!("{},{}", spec(ROOT), spec(b"-----BEGIN CERTIFICATE-----bad"));
+        assert!(tls_ca_roots(Some(&mixed_bad_pem)).is_err());
+    }
+}
+
 }
 
 #[cfg(feature = "tls")]
@@ -946,7 +1037,7 @@ struct TlsClientOptions<'a> {
     host: &'a str,
     port: u16,
     server_name: &'a str,
-    ca_spec: &'a str,
+    ca_spec: Option<&'a str>,
     cert_spec: &'a str,
     key_spec: &'a str,
     alpn_spec: &'a str,
@@ -961,7 +1052,7 @@ struct TlsServerOptions<'a> {
     port: u16,
     cert_spec: &'a str,
     key_spec: &'a str,
-    ca_spec: &'a str,
+    ca_spec: Option<&'a str>,
     request_cert: bool,
     reject_unauthorized: bool,
     alpn_spec: &'a str,

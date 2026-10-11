@@ -912,7 +912,7 @@ fn http2_h2c_sessions_exchange_real_frames_over_tcp() {
     let empty_node_modules = temp_registry("builtin_http2_h2c_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    assert_eq!(file_count, 3);
+    assert_eq!(file_count, 4);
     let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseHttp2 = module.exports;");
     let source = CString::new(script).unwrap();
     assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
@@ -1029,7 +1029,7 @@ module.exports = function () {
     let empty_node_modules = temp_registry("builtin_http2_zero_window_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    assert_eq!(file_count, 3);
+    assert_eq!(file_count, 4);
     let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseHttp2ZeroWindow = module.exports;");
     let source = CString::new(script).unwrap();
     assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
@@ -1074,7 +1074,7 @@ module.exports = function () {
     let empty_node_modules = temp_registry("builtin_http2_local_window_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    assert_eq!(file_count, 3);
+    assert_eq!(file_count, 4);
     let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseHttp2LocalWindow = module.exports;");
     let source = CString::new(script).unwrap();
     assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
@@ -1100,7 +1100,7 @@ fn http2_flow_control_resumes_large_bidirectional_bodies() {
     let empty_node_modules = temp_registry("builtin_http2_flow_control_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    assert_eq!(file_count, 3);
+    assert_eq!(file_count, 4);
     let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseHttp2Flow = module.exports;");
     let source = CString::new(script).unwrap();
     assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
@@ -1126,7 +1126,7 @@ fn http2_hpack_reuses_dynamic_entries_across_streams() {
     let empty_node_modules = temp_registry("builtin_http2_hpack_dynamic_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    assert_eq!(file_count, 3);
+    assert_eq!(file_count, 4);
     let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseHttp2Hpack = module.exports;");
     let source = CString::new(script).unwrap();
     assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
@@ -1177,7 +1177,7 @@ module.exports = function() {
     let empty_node_modules = temp_registry("builtin_http2_hpack_zero_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    assert_eq!(file_count, 3);
+    assert_eq!(file_count, 4);
     let script = [
         "globalThis.module = { exports: {} }; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) { throw new Error(name); };",
         &bundle,
@@ -1247,7 +1247,7 @@ module.exports = function() {
     let empty_node_modules = temp_registry("builtin_http2_hpack_wire_size_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    assert_eq!(file_count, 3);
+    assert_eq!(file_count, 4);
     let script = [
         "globalThis.module = { exports: {} }; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) { throw new Error(name); };",
         &bundle,
@@ -1348,7 +1348,7 @@ module.exports = function() {
     let empty_node_modules = temp_registry("builtin_http2_hpack_wire_reentry_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    assert_eq!(file_count, 3);
+    assert_eq!(file_count, 4);
     let script = [
         "globalThis.module = { exports: {} }; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) { throw new Error(name); };",
         &bundle,
@@ -1364,6 +1364,90 @@ module.exports = function() {
     assert_eq!(result, r#"[[true,0,0,1],["2082",null],[true,"ERR_HTTP2_ERROR",[4]],[true,"ERR_HTTP2_ERROR",[1]],[false,1,3,[1,3],true,1],[false,[3,1],true,"88be",null,1],["Response has already been initiated",1,204,0],[1,3,[[1,4],[3,5]],1,true],["Response has already been initiated",[[1,4]],1,204,false],[false,false,null,1,[[4,1],[1,4]]],[false,true,null,0,[[4,1],[1,0]]]]"#);
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
+}
+
+#[test]
+fn http2_tls_ca_presence_and_collections_are_validated_before_native_calls() {
+    use std::ffi::{CStr, CString};
+
+    let dir = temp_registry("builtin_http2_tls_ca_capture");
+    fs::write(dir.join("index.js"), r#"
+var http2 = require('node:http2');
+function check(value, message) { if (!value) throw new Error(message); }
+module.exports = function() {
+  var originalConnect = globalThis.__thaw_tls_connect_with_options;
+  var originalServer = globalThis.__thaw_tls_server_listen_with_options;
+  var connectCalls = [], serverCalls = [];
+  function connect(hasCa, ca, expected, identity, rejectUnauthorized) {
+    var options = { rejectUnauthorized: rejectUnauthorized !== false };
+    if (hasCa) options.ca = ca;
+    if (identity) { options.cert = 'cert'; options.key = 'key'; }
+    var caught;
+    try { http2.connect('https://example.invalid', options); } catch (error) { caught = error; }
+    check(caught && caught.message === 'finite client failure', 'client reached finite native result');
+    var args = connectCalls[connectCalls.length - 1];
+    check(args[3] === expected && args[6] === (rejectUnauthorized === false ? '0|6832' : '1|6832'), 'client CA and ALPN serialization');
+    check(args[4] === (identity ? '63657274' : '') && args[5] === (identity ? '6b6579' : ''), 'client identity forwarding');
+  }
+  function secureServer(hasCa, ca, expected, requestCert, rejectUnauthorized) {
+    var options = { cert: 'cert', key: 'key', requestCert: requestCert, rejectUnauthorized: rejectUnauthorized };
+    if (hasCa) options.ca = ca;
+    var server = http2.createSecureServer(options), caught;
+    try { server.listen(0, '127.0.0.1', function() {}); } catch (error) { caught = error; }
+    check(caught && caught.message === 'finite server failure', 'server reached finite native result');
+    var args = serverCalls[serverCalls.length - 1];
+    check(args[4] === expected && args[5] === ((requestCert ? 1 : 0) | (rejectUnauthorized !== false ? 2 : 0)) && args[6] === '6832', 'server CA, flags, and ALPN serialization');
+    check(args[2] === '63657274' && args[3] === '6b6579' && !server.listening && server._handle === 0, 'server identity/state preserved');
+  }
+  function invalidClient(ca) {
+    var before = connectCalls.length, caught;
+    try { http2.connect('https://example.invalid', { ca: ca }); } catch (error) { caught = error; }
+    check(caught instanceof TypeError && connectCalls.length === before, 'invalid HTTP2 client CA rejected before native call');
+  }
+  function invalidServer(ca, requestCert) {
+    var before = serverCalls.length, server = http2.createSecureServer({ cert: 'cert', key: 'key', ca: ca, requestCert: requestCert }), caught;
+    try { server.listen(0, '127.0.0.1', function() {}); } catch (error) { caught = error; }
+    check(caught instanceof TypeError && serverCalls.length === before && !server.listening && server._handle === 0
+      && server.listenerCount('listening') === 0, 'invalid HTTP2 server CA rejected before listener state/native call');
+  }
+  try {
+    globalThis.__thaw_tls_connect_with_options = function() { connectCalls.push(Array.prototype.slice.call(arguments)); return 'err:finite client failure'; };
+    globalThis.__thaw_tls_server_listen_with_options = function() { serverCalls.push(Array.prototype.slice.call(arguments)); return 'err:finite server failure'; };
+    connect(false, undefined, undefined, true, false);
+    connect(true, undefined, undefined, false, true);
+    connect(true, [], '', false, true); connect(true, '', '', false, true); connect(true, Buffer.alloc(0), '', false, true);
+    connect(true, 'ca', '6361', false, true); connect(true, ['a', 'bc'], '61,6263', false, true);
+    connect(true, [Buffer.from('a'), Buffer.from('xBC').subarray(1)], '61,4243', false, true);
+    secureServer(false, undefined, undefined, false, true);
+    secureServer(true, undefined, undefined, true, true);
+    secureServer(true, [], '', true, true); secureServer(true, '', '', false, true);
+    secureServer(true, [Buffer.from('a'), Buffer.from('xBC').subarray(1)], '61,4243', true, false);
+    [null, 7, {}, [undefined], [[Buffer.from('a')]], new Array(1), ['']].forEach(function(value) {
+      invalidClient(value); invalidServer(value, true); invalidServer(value, false);
+    });
+    return true;
+  } finally {
+    globalThis.__thaw_tls_connect_with_options = originalConnect;
+    globalThis.__thaw_tls_server_listen_with_options = originalServer;
+  }
+};
+"#).unwrap();
+    let empty_node_modules = temp_registry("builtin_http2_tls_ca_capture_modules");
+    let (bundle, _, _, _) = bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    let source = CString::new(format!(
+        "globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseHttp2TlsCaCapture = module.exports;"
+    )).unwrap();
+    let loaded = thaw_quickjs::thaw_js_load(source.as_ptr());
+    if loaded != 1 {
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&empty_node_modules);
+        assert_eq!(loaded, 1);
+    }
+    let result = thaw_quickjs::thaw_js_call(c"exerciseHttp2TlsCaCapture".as_ptr(), c"[]".as_ptr());
+    let result = unsafe { CStr::from_ptr(result) }.to_string_lossy().into_owned();
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+    assert_eq!(result, "true");
 }
 
 #[test]
@@ -1482,7 +1566,7 @@ fn http2_tls_sessions_negotiate_h2_with_alpn() {
     let empty_node_modules = temp_registry("builtin_http2_tls_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    assert_eq!(file_count, 3);
+    assert_eq!(file_count, 4);
     let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseHttp2Tls = module.exports;");
     let source = CString::new(script).unwrap();
     assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
@@ -1625,7 +1709,7 @@ fn http2_secure_server_accepts_an_alpn_h2_peer() {
     let empty_node_modules = temp_registry("builtin_http2_secure_server_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    assert_eq!(file_count, 3);
+    assert_eq!(file_count, 4);
     let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseHttp2SecureServer = module.exports;");
     let source = CString::new(script).unwrap();
     assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
@@ -2216,7 +2300,7 @@ fn http2_failed_host_write_does_not_complete_queued_data() {
     let empty_node_modules = temp_registry("builtin_http2_failed_write_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    assert_eq!(file_count, 3);
+    assert_eq!(file_count, 4);
     let script = [
         "globalThis.module = { exports: {} }; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) { throw new Error(name); };",
         &bundle,
@@ -2275,7 +2359,7 @@ module.exports = function () {
     let empty_node_modules = temp_registry("builtin_http2_failed_write_reentry_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    assert_eq!(file_count, 3);
+    assert_eq!(file_count, 4);
     let script = [
         "globalThis.module = { exports: {} }; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) { throw new Error(name); };",
         &bundle,
@@ -2336,7 +2420,7 @@ module.exports = function () {
     let empty_node_modules = temp_registry("builtin_http2_failed_controls_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    assert_eq!(file_count, 3);
+    assert_eq!(file_count, 4);
     let script = [
         "globalThis.module = { exports: {} }; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) { throw new Error(name); };",
         &bundle,
@@ -2407,7 +2491,7 @@ module.exports = function() {
     let empty_node_modules = temp_registry("builtin_http2_failed_ack_parse_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    assert_eq!(file_count, 3);
+    assert_eq!(file_count, 4);
     let script = [
         "globalThis.module = { exports: {} }; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) { throw new Error(name); };",
         &bundle,
@@ -2453,7 +2537,7 @@ module.exports = function() {
     let empty_node_modules = temp_registry("builtin_http2_ping_remove_throw_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    assert_eq!(file_count, 3);
+    assert_eq!(file_count, 4);
     let script = [
         "globalThis.module = { exports: {} }; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) { throw new Error(name); };",
         &bundle,
@@ -2508,7 +2592,7 @@ module.exports = function() {
     let empty_node_modules = temp_registry("builtin_http2_pending_ack_destroy_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    assert_eq!(file_count, 3);
+    assert_eq!(file_count, 4);
     let script = [
         "globalThis.module = { exports: {} }; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) { throw new Error(name); };",
         &bundle,
@@ -2580,7 +2664,7 @@ module.exports = function() {
     let empty_node_modules = temp_registry("builtin_http2_ack_fifo_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    assert_eq!(file_count, 3);
+    assert_eq!(file_count, 4);
     let script = [
         "globalThis.module = { exports: {} }; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) { throw new Error(name); };",
         &bundle,
@@ -2651,7 +2735,7 @@ module.exports = function() {
     let empty_node_modules = temp_registry("builtin_http2_finish_throw_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    assert_eq!(file_count, 3);
+    assert_eq!(file_count, 4);
     let script = [
         "globalThis.module = { exports: {} }; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) { throw new Error(name); };",
         &bundle,
@@ -2700,7 +2784,7 @@ module.exports = function() {
     let empty_node_modules = temp_registry("builtin_http2_rst_error_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    assert_eq!(file_count, 3);
+    assert_eq!(file_count, 4);
     let script = [
         "globalThis.module = { exports: {} }; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) { throw new Error(name); };",
         &bundle,
@@ -2763,7 +2847,7 @@ module.exports = function() {
     let empty_node_modules = temp_registry("builtin_http2_protocol_boundaries_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    assert_eq!(file_count, 3);
+    assert_eq!(file_count, 4);
     let script = [
         "globalThis.module = { exports: {} }; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) { throw new Error(name); };",
         &bundle,
@@ -2937,7 +3021,7 @@ module.exports = function() {
     let empty_node_modules = temp_registry("builtin_http2_goaway_boundaries_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    assert_eq!(file_count, 3);
+    assert_eq!(file_count, 4);
     let script = [
         "globalThis.module = { exports: {} }; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) { throw new Error(name); };",
         &bundle,
