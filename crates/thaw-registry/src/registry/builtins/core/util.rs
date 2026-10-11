@@ -1,29 +1,38 @@
 pub(super) fn source(name: &str) -> Option<&'static str> {
-    // ponytail: native Promise rejections currently cross a string ABI; remove
-    // callbackifyReason's falsy decoding when that channel preserves JS values.
     match name {
         "util" => Some(
             "var inspectCustom = Symbol.for('nodejs.util.inspect.custom');\n\
              function inspect(value, options) {\n\
-             \x20\x20if (value && typeof value[inspectCustom] === 'function') return String(value[inspectCustom](2, options || {}, inspect));\n\
-             \x20\x20if (typeof value === 'string') return \"'\" + value.replace(/\\\\/g, '\\\\\\\\').replace(/'/g, \"\\\\'\") + \"'\";\n\
-             \x20\x20if (typeof value === 'function') return '[Function' + (value.name ? ': ' + value.name : '') + ']';\n\
-             \x20\x20if (typeof value === 'symbol' || typeof value === 'bigint') return String(value);\n\
-             \x20\x20if (value instanceof Error) return value.stack || value.name + ': ' + value.message;\n\
-             \x20\x20var seen = new Set();\n\
-             \x20\x20function render(input) {\n\
-             \x20\x20\x20\x20if (input === null || typeof input !== 'object') return typeof input === 'string' ? \"'\" + input + \"'\" : String(input);\n\
-             \x20\x20\x20\x20if (seen.has(input)) return '[Circular]'; seen.add(input);\n\
-             \x20\x20\x20\x20var result;\n\
-             \x20\x20\x20\x20if (Array.isArray(input)) result = '[ ' + input.map(render).join(', ') + ' ]';\n\
-             \x20\x20\x20\x20else if (input instanceof Date) result = isNaN(input.getTime()) ? 'Invalid Date' : input.toISOString();\n\
-             \x20\x20\x20\x20else if (input instanceof RegExp) result = String(input);\n\
-             \x20\x20\x20\x20else if (input instanceof Map) result = 'Map(' + input.size + ') { ' + Array.from(input).map(function(entry) { return render(entry[0]) + ' => ' + render(entry[1]); }).join(', ') + ' }';\n\
-             \x20\x20\x20\x20else if (input instanceof Set) result = 'Set(' + input.size + ') { ' + Array.from(input).map(render).join(', ') + ' }';\n\
-             \x20\x20\x20\x20else result = '{ ' + Object.keys(input).map(function(key) { return key + ': ' + render(input[key]); }).join(', ') + ' }';\n\
-             \x20\x20\x20\x20seen.delete(input); return result;\n\
+             \x20\x20options = options || {};\n\
+             \x20\x20var depth = options.depth === undefined ? 2 : options.depth === null ? Infinity : options.depth, seen = new Set();\n\
+             \x20\x20function renderProperty(owner, key, remaining) {\n\
+             \x20\x20\x20\x20var descriptor = Object.getOwnPropertyDescriptor(owner, key);\n\
+             \x20\x20\x20\x20if (!descriptor) return '';\n\
+             \x20\x20\x20\x20if (Object.prototype.hasOwnProperty.call(descriptor, 'value')) return render(descriptor.value, remaining);\n\
+             \x20\x20\x20\x20var getter = descriptor.get, setter = descriptor.set, evaluate = getter && (options.getters === true || options.getters === 'get' && !setter || options.getters === 'set' && setter);\n\
+             \x20\x20\x20\x20if (evaluate) { var value; try { value = getter.call(owner); } catch (_) { return '[Inspection threw]'; } return render(value, remaining); }\n\
+             \x20\x20\x20\x20return getter && setter ? '[Getter/Setter]' : getter ? '[Getter]' : setter ? '[Setter]' : '';\n\
              \x20\x20}\n\
-             \x20\x20return render(value);\n\
+             \x20\x20function render(input, remaining) {\n\
+             \x20\x20\x20\x20if (input && options.customInspect !== false) { var custom = input[inspectCustom]; if (typeof custom === 'function') return String(custom.call(input, remaining, options, inspect)); }\n\
+             \x20\x20if (input === null) return 'null';\n\
+             \x20\x20if (typeof input === 'string') return \"'\" + input.replace(/\\\\/g, '\\\\\\\\').replace(/'/g, \"\\\\'\") + \"'\";\n\
+             \x20\x20if (typeof input === 'function') return '[Function' + (input.name ? ': ' + input.name : '') + ']';\n\
+             \x20\x20if (typeof input === 'symbol' || typeof input === 'bigint') return String(input);\n\
+             \x20\x20if (typeof input !== 'object') return String(input);\n\
+             \x20\x20\x20\x20if (input instanceof Error) return input.stack || input.name + ': ' + input.message;\n\
+             \x20\x20\x20\x20if (input instanceof Date) return isNaN(input.getTime()) ? 'Invalid Date' : input.toISOString();\n\
+             \x20\x20\x20\x20if (input instanceof RegExp) return String(input);\n\
+             \x20\x20\x20\x20if (remaining < 0) return Array.isArray(input) ? '[Array]' : input instanceof Map ? '[Map]' : input instanceof Set ? '[Set]' : '[Object]';\n\
+             \x20\x20\x20\x20if (seen.has(input)) return '[Circular]'; seen.add(input);\n\
+             \x20\x20\x20\x20try {\n\
+             \x20\x20\x20\x20\x20\x20if (Array.isArray(input)) { var items = []; for (var index = 0; index < input.length; index++) items.push(renderProperty(input, String(index), remaining - 1)); return '[ ' + items.join(', ') + ' ]'; }\n\
+             \x20\x20\x20\x20\x20\x20if (input instanceof Map) return 'Map(' + input.size + ') { ' + Array.from(input).map(function(entry) { return render(entry[0], remaining - 1) + ' => ' + render(entry[1], remaining - 1); }).join(', ') + ' }';\n\
+             \x20\x20\x20\x20\x20\x20if (input instanceof Set) return 'Set(' + input.size + ') { ' + Array.from(input).map(function(value) { return render(value, remaining - 1); }).join(', ') + ' }';\n\
+             \x20\x20\x20\x20\x20\x20return '{ ' + Object.keys(input).map(function(key) { return key + ': ' + renderProperty(input, key, remaining - 1); }).join(', ') + ' }';\n\
+             \x20\x20\x20\x20} finally { seen.delete(input); }\n\
+             \x20\x20}\n\
+             \x20\x20return render(value, depth);\n\
              }\n\
              inspect.custom = inspectCustom; inspect.defaultOptions = {};\n\
              function format() {\n\
