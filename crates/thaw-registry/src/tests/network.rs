@@ -136,6 +136,21 @@ fn net_builtin_validates_addresses_and_block_lists() {
 }
 
 #[test]
+fn net_block_list_matches_ipv6_numerically_and_validates_inputs() {
+    use std::ffi::{CStr, CString};
+    let dir = temp_registry("builtin_net_ipv6_block_list");
+    fs::write(dir.join("index.js"), "var net = require('node:net'); module.exports = function () { function ok(value) { if (!value) throw new Error('IPv6 BlockList assertion failed'); } var b = new net.BlockList(); b.addAddress('2001:0DB8:0000:0000:0000:0000:0000:0001'); ok(b.check('2001:db8::1')); var mapped = new net.BlockList(); mapped.addAddress('::ffff:192.0.2.1'); ok(mapped.check('0:0:0:0:0:ffff:c000:201')); var r = new net.BlockList(); r.addRange('2001:db8::2', '2001:db8::10'); ok(r.check('2001:0db8:0:0:0:0:0:2') && r.check('2001:db8::10') && !r.check('2001:db8::11')); var prefixes = [[0,'::1','ffff::1',true],[1,'8000::1','7fff::1',false],[15,'2000::1','2001:ffff::1',true],[16,'2001::1','2002::1',false],[17,'2001:8000::1','2001:7fff::1',false],[63,'2001:db8:0:7fff::1','2001:db8:0:8000::1',false],[64,'2001:db8:0:0::1','2001:db8:0:1::1',false],[65,'2001:db8:0:0:8000::1','2001:db8:0:0:7fff::1',false],[127,'2001:db8::1','2001:db8::2',false],[128,'2001:db8::1','2001:db8::2',false]]; prefixes.forEach(function(x) { var n = new net.BlockList(); n.addSubnet(x[1], x[0]); ok(n.check(x[1]) === true); ok(n.check(x[2]) === x[3]); }); var v4 = new net.BlockList(); v4.addRange('10.0.0.0','10.0.0.1'); v4.addSubnet('192.0.2.1',32); ok(v4.check('10.0.0.1') && v4.check('192.0.2.1') && !v4.check('::1')); var before = v4.rules.length; [['addAddress',['invalid','ipv6']],['addAddress',['::1','ipv4']],['addRange',['::1','::2','ipv4']],['addRange',['::1','::2','bogus']],['addRange',['bad','::1','ipv6']],['addRange',['::1','bad','ipv6']],['addSubnet',['bad',64,'ipv6']],['addSubnet',['::1',-1,'ipv6']],['addSubnet',['::1',129,'ipv6']],['addSubnet',['::1',1.5,'ipv6']],['addSubnet',['::1',64,'bogus']],['addAddress',['::1','bogus']]].forEach(function(x) { var threw = false; try { v4[x[0]].apply(v4,x[1]); } catch (e) { threw = e instanceof TypeError; } ok(threw && v4.rules.length === before); }); ok(!v4.check('bad','ipv6') && !v4.check('::1','ipv4') && !v4.check('::1','bogus')); var reverse = false; try { b.addRange('2001:db8::2','2001:db8::1'); } catch (e) { reverse = e instanceof TypeError; } ok(reverse); b.addRange('2001:db8::1','2001:db8::1'); ok(b.check('2001:db8::1')); ['1::2::3','1:2:3','1:2:3:4:5:6:7:8:9','1.2.3.4::','1::192.0.2.01','::1%','::1%bad%zone'].forEach(function(ip) { ok(!net.isIPv6(ip)); }); ok(net.isIPv6('fe80::1%eth0') && !net.isIPv6('2001:db8::1%bad zone')); return true; };").unwrap();
+    let empty_node_modules = temp_registry("builtin_net_ipv6_block_list_node_modules");
+    let (bundle, _, _, _) = bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    let source = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseNetIpv6BlockList = module.exports;")).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let result = thaw_quickjs::thaw_js_call(CString::new("exerciseNetIpv6BlockList").unwrap().as_ptr(), CString::new("[]").unwrap().as_ptr());
+    assert_eq!(unsafe { CStr::from_ptr(result) }.to_string_lossy(), "true");
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+}
+
+#[test]
 fn net_socket_supports_write_batching_methods() {
     use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_net_write_batching");
