@@ -2963,6 +2963,106 @@ pub struct ThawCallWithExceptionResult {
     pub error: *const c_char,
 }
 
+#[cfg(test)]
+thread_local! {
+    // Test-only source override for the new exact graph invocation worker.
+    // Production always reads the readonly decoder from the active globals.
+    static ERROR_BOUNDARY_TEST_DECODER_SOURCE: RefCell<Option<Persistent<Object<'static>>>> =
+        const { RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn set_error_boundary_test_decoder_source<'js>(
+    ctx: &Ctx<'js>,
+    source: Object<'js>,
+) {
+    ERROR_BOUNDARY_TEST_DECODER_SOURCE.with(|slot| {
+        *slot.borrow_mut() = Some(Persistent::save(ctx, source));
+    });
+}
+
+#[cfg(test)]
+pub(crate) fn clear_error_boundary_test_decoder_source() {
+    ERROR_BOUNDARY_TEST_DECODER_SOURCE.with(|slot| *slot.borrow_mut() = None);
+}
+
+fn error_boundary_graph_decoder_source<'js>(ctx: &Ctx<'js>) -> Object<'js> {
+    #[cfg(test)]
+    {
+        if let Some(source) = ERROR_BOUNDARY_TEST_DECODER_SOURCE.with(|slot| {
+            slot.borrow().as_ref().map(|source| source.clone().restore(ctx)
+                .expect("test decoder source belongs to the active QuickJS context"))
+        }) {
+            return source;
+        }
+    }
+    ctx.globals()
+}
+
+/// Looks up one of the seven ordinary Error-family globals without resolving
+/// a dotted path or coercing the selected value. The presence check separates
+/// a missing identifier from a present global whose value is `undefined`.
+#[no_mangle]
+pub extern "C" fn thaw_js_get_error_constructor_exact_result(
+    name: *const c_char,
+) -> ThawCallWithExceptionResult {
+    enum Outcome { Value(u64), Exception(u64, bool) }
+    if name.is_null() {
+        return ThawCallWithExceptionResult {
+            value: 0, exception_handle: 0, exception_object_like: 0,
+            error: owned_exception_error("null exact Error constructor name".into()),
+        };
+    }
+    let name = to_str(name);
+    if !matches!(name.as_str(), "Error" | "EvalError" | "RangeError" | "ReferenceError"
+        | "SyntaxError" | "TypeError" | "URIError") {
+        return ThawCallWithExceptionResult {
+            value: 0, exception_handle: 0, exception_object_like: 0,
+            error: owned_exception_error("unsupported exact Error constructor name".into()),
+        };
+    }
+    let result: Result<Outcome, BoundaryError> = with_active_or_context(|ctx| {
+        let globals = ctx.globals();
+        match globals.contains_key(name.as_str()) {
+            Ok(true) => {}
+            Ok(false) => {
+                let _ = rquickjs::Exception::throw_reference(&ctx, &format!("{name} is not defined"));
+                let thrown = ctx.catch();
+                let object_like = thrown.is_object() || thrown.is_function();
+                return retain_value(&ctx, thrown).map(|handle| Outcome::Exception(handle, object_like));
+            }
+            Err(rquickjs::Error::Exception) => {
+                let thrown = ctx.catch();
+                let object_like = thrown.is_object() || thrown.is_function();
+                return retain_value(&ctx, thrown).map(|handle| Outcome::Exception(handle, object_like));
+            }
+            Err(error) => return Err(error.to_string().into()),
+        }
+        match globals.get::<_, Value>(name.as_str()) {
+            Ok(value) => retain_value(&ctx, value).map(Outcome::Value),
+            Err(rquickjs::Error::Exception) => {
+                let thrown = ctx.catch();
+                let object_like = thrown.is_object() || thrown.is_function();
+                retain_value(&ctx, thrown).map(|handle| Outcome::Exception(handle, object_like))
+            }
+            Err(error) => Err(error.to_string().into()),
+        }
+    });
+    match result {
+        Ok(Outcome::Value(value)) => ThawCallWithExceptionResult {
+            value, exception_handle: 0, exception_object_like: 0, error: std::ptr::null(),
+        },
+        Ok(Outcome::Exception(exception_handle, object_like)) => ThawCallWithExceptionResult {
+            value: 0, exception_handle, exception_object_like: u8::from(object_like),
+            error: std::ptr::null(),
+        },
+        Err(error) => ThawCallWithExceptionResult {
+            value: 0, exception_handle: 0, exception_object_like: 0,
+            error: owned_exception_error(error),
+        },
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn thaw_js_call_handle_with_this_graph_result(
     handle: u64, args_json: *const c_char,
@@ -5050,6 +5150,196 @@ unsafe fn thaw_js_call_handle_mixed_exact_consuming_impl(
     }
 }
 
+/// Calls or constructs an already-selected actual callee with arguments from
+/// one registered native graph wire. The callee is borrowed; only the result
+/// or original thrown value receives a new retained handle.
+#[no_mangle]
+pub extern "C" fn thaw_js_invoke_handle_graph_exact_result(
+    callee_handle: u64,
+    args_wire: *const c_char,
+    is_new: u8,
+) -> ThawCallWithExceptionResult {
+    enum Outcome { Value(u64), Exception(u64, bool) }
+    if args_wire.is_null() {
+        return ThawCallWithExceptionResult {
+            value: 0, exception_handle: 0, exception_object_like: 0,
+            error: owned_exception_error("null exact graph argument wire".into()),
+        };
+    }
+    // The registered buffer may be re-entered or mutated by user callbacks;
+    // decode the immutable snapshot while retiring the original grant below.
+    let args_text = to_str(args_wire);
+    let result: Result<Outcome, BoundaryError> = with_active_or_context(|ctx| {
+        let operation: Result<Outcome, BoundaryError> = (|| {
+            if is_new > 1 {
+                return Err("invalid exact invocation mode".into());
+            }
+            let selected = value_for_handle(&ctx, callee_handle)?;
+            let decoder_source = error_boundary_graph_decoder_source(&ctx);
+            let graph: Value = match ctx.json_parse(args_text.as_bytes()) {
+                Ok(graph) => graph,
+                Err(rquickjs::Error::Exception) => {
+                    let thrown = ctx.catch();
+                    let object_like = thrown.is_object() || thrown.is_function();
+                    return retain_value(&ctx, thrown)
+                        .map(|handle| Outcome::Exception(handle, object_like));
+                }
+                Err(error) => return Err(error.to_string().into()),
+            };
+            let decode: Function = match decoder_source.get("__thaw_json_graph_decode") {
+                Ok(decode) => decode,
+                Err(rquickjs::Error::Exception) => {
+                    let thrown = ctx.catch();
+                    let object_like = thrown.is_object() || thrown.is_function();
+                    return retain_value(&ctx, thrown)
+                        .map(|handle| Outcome::Exception(handle, object_like));
+                }
+                Err(error) => return Err(error.to_string().into()),
+            };
+            let arguments: Value = match decode.call((graph,)) {
+                Ok(arguments) => arguments,
+                Err(rquickjs::Error::Exception) => {
+                    let thrown = ctx.catch();
+                    let object_like = thrown.is_object() || thrown.is_function();
+                    return retain_value(&ctx, thrown)
+                        .map(|handle| Outcome::Exception(handle, object_like));
+                }
+                Err(error) => return Err(error.to_string().into()),
+            };
+            let array_is_array = ctx.userdata::<NativeBundleOwner<'_>>()
+                .ok_or("intrinsic Array.isArray is unavailable")?.array_is_array.clone();
+            let is_array = match array_is_array.call::<_, bool>((arguments.clone(),)) {
+                Ok(is_array) => is_array,
+                Err(rquickjs::Error::Exception) => {
+                    let thrown = ctx.catch();
+                    let object_like = thrown.is_object() || thrown.is_function();
+                    return retain_value(&ctx, thrown)
+                        .map(|handle| Outcome::Exception(handle, object_like));
+                }
+                Err(error) => return Err(error.to_string().into()),
+            };
+            if !is_array {
+                let _ = rquickjs::Exception::throw_type(&ctx, "Argument graph decoder must return an Array");
+                let thrown = ctx.catch();
+                let object_like = thrown.is_object() || thrown.is_function();
+                return retain_value(&ctx, thrown)
+                    .map(|handle| Outcome::Exception(handle, object_like));
+            }
+            let arguments = Object::from_value(arguments)
+                .map_err(|error| error.to_string())?;
+            let length_value: Value = match arguments.get::<_, Value>("length") {
+                Ok(length) => length,
+                Err(rquickjs::Error::Exception) => {
+                    let thrown = ctx.catch();
+                    let object_like = thrown.is_object() || thrown.is_function();
+                    return retain_value(&ctx, thrown)
+                        .map(|handle| Outcome::Exception(handle, object_like));
+                }
+                Err(error) => return Err(error.to_string().into()),
+            };
+            let invalid_length = |message: &str| {
+                let _ = rquickjs::Exception::throw_type(&ctx, message);
+                let thrown = ctx.catch();
+                let object_like = thrown.is_object() || thrown.is_function();
+                retain_value(&ctx, thrown).map(|handle| Outcome::Exception(handle, object_like))
+            };
+            let Some(length_number) = length_value.as_number() else {
+                return invalid_length("Invalid argument array length");
+            };
+            if !length_number.is_finite()
+                || length_number < 0.0
+                || length_number.fract() != 0.0
+                || length_number > u32::MAX as f64
+            {
+                return invalid_length("Invalid argument array length");
+            }
+            // QuickJS build_arg_list rejects this same engine limit before
+            // allocating argument slots; keep Args::apply/construct below it.
+            const MAX_ENGINE_ARGUMENTS: f64 = 65_535.0;
+            if length_number > MAX_ENGINE_ARGUMENTS {
+                let _ = rquickjs::Exception::throw_range(&ctx, "Too many function arguments");
+                let thrown = ctx.catch();
+                let object_like = thrown.is_object() || thrown.is_function();
+                return retain_value(&ctx, thrown)
+                    .map(|handle| Outcome::Exception(handle, object_like));
+            }
+            let mut args = Args::new_unsized(ctx.clone());
+            for index in 0..length_number as u32 {
+                let argument: Value = match arguments.get::<_, Value>(index) {
+                    Ok(argument) => argument,
+                    Err(rquickjs::Error::Exception) => {
+                        let thrown = ctx.catch();
+                        let object_like = thrown.is_object() || thrown.is_function();
+                        return retain_value(&ctx, thrown)
+                            .map(|handle| Outcome::Exception(handle, object_like));
+                    }
+                    Err(error) => return Err(error.to_string().into()),
+                };
+                args.push_arg(argument).map_err(|error| error.to_string())?;
+            }
+            if is_new == 0 {
+                let Some(target) = Function::from_value(selected.clone()).ok() else {
+                    let _ = rquickjs::Exception::throw_type(&ctx, "Value is not callable");
+                    let thrown = ctx.catch();
+                    let object_like = thrown.is_object() || thrown.is_function();
+                    return retain_value(&ctx, thrown)
+                        .map(|handle| Outcome::Exception(handle, object_like));
+                };
+                args.this(Value::new_undefined(ctx.clone()))
+                    .map_err(|error| error.to_string())?;
+                match target.call_arg(args) {
+                    Ok(value) => retain_value(&ctx, value).map(Outcome::Value),
+                    Err(rquickjs::Error::Exception) => {
+                        let thrown = ctx.catch();
+                        let object_like = thrown.is_object() || thrown.is_function();
+                        retain_value(&ctx, thrown)
+                            .map(|handle| Outcome::Exception(handle, object_like))
+                    }
+                    Err(error) => Err(error.to_string().into()),
+                }
+            } else {
+                let Some(target) = selected.into_constructor() else {
+                    let _ = rquickjs::Exception::throw_type(&ctx, "Value is not a constructor");
+                    let thrown = ctx.catch();
+                    let object_like = thrown.is_object() || thrown.is_function();
+                    return retain_value(&ctx, thrown)
+                        .map(|handle| Outcome::Exception(handle, object_like));
+                };
+                match target.construct_args(args) {
+                    Ok(value) => retain_value(&ctx, value).map(Outcome::Value),
+                    Err(rquickjs::Error::Exception) => {
+                        let thrown = ctx.catch();
+                        let object_like = thrown.is_object() || thrown.is_function();
+                        retain_value(&ctx, thrown)
+                            .map(|handle| Outcome::Exception(handle, object_like))
+                    }
+                    Err(error) => Err(error.to_string().into()),
+                }
+            }
+        })();
+        operation
+    });
+    unsafe extern "C" { fn thaw_json_discard_graph_wire(source: *const c_char); }
+    // The borrowed decoder never consumes the native registered-wire grant.
+    // Retain any value/exception in the context closure before releasing the
+    // transferred claims here, outside the active QuickJS context borrow.
+    unsafe { thaw_json_discard_graph_wire(args_wire) };
+    match result {
+        Ok(Outcome::Value(value)) => ThawCallWithExceptionResult {
+            value, exception_handle: 0, exception_object_like: 0,
+            error: std::ptr::null(),
+        },
+        Ok(Outcome::Exception(exception_handle, object_like)) => ThawCallWithExceptionResult {
+            value: 0, exception_handle, exception_object_like: u8::from(object_like),
+            error: std::ptr::null(),
+        },
+        Err(error) => ThawCallWithExceptionResult {
+            value: 0, exception_handle: 0, exception_object_like: 0,
+            error: owned_exception_error(error),
+        },
+    }
+}
+
 #[cfg(test)]
 thread_local! {
     static EXACT_MIXED_NAPI_RELEASES: std::cell::Cell<u8> = const {
@@ -5122,6 +5412,19 @@ fn exact_mixed_pre_dispatch_consumes_registered_graph_grant_once() {
         assert!(unsafe { thaw_arena::register_owned_graph_wire(wire.as_ptr()) });
         unsafe { thaw_json_discard_graph_wire(wire.as_ptr()) };
         EXACT_MIXED_NAPI_RELEASES.with(|releases| assert_eq!(releases.get(), 4));
+
+        // The new graph-invocation boundary also consumes the native grant
+        // exactly once, including an early mode-validation failure.
+        let invoke_wire = std::ffi::CString::new(
+            r#"{"root":{"v":null},"nodes":[],"leases":[],"napiLeases":["73"]}"#,
+        ).unwrap();
+        assert!(unsafe { thaw_arena::register_owned_graph_wire(invoke_wire.as_ptr()) });
+        let result = thaw_js_invoke_handle_graph_exact_result(0, invoke_wire.as_ptr(), 2);
+        assert!(!result.error.is_null());
+        unsafe { thaw_arena::destroy_string(result.error.cast_mut()) };
+        EXACT_MIXED_NAPI_RELEASES.with(|releases| assert_eq!(releases.get(), 5));
+        unsafe { thaw_json_discard_graph_wire(invoke_wire.as_ptr()) };
+        EXACT_MIXED_NAPI_RELEASES.with(|releases| assert_eq!(releases.get(), 5));
     }).join().unwrap();
 }
 

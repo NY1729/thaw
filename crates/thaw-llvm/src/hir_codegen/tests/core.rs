@@ -2920,6 +2920,50 @@ fn dynamic_json_calls_release_bridge_temporaries() {
 }
 
 #[test]
+fn declares_error_exact_constructor_boundary_abi() {
+    let context = Context::create();
+    let compiler = HirCompiler::new(&context, "error_exact_boundary_abi");
+    compiler.declare_runtime_builtins();
+    let module = &compiler.module;
+    let i8_ptr = context.ptr_type(AddressSpace::default());
+    let result = context.struct_type(&[
+        context.i64_type().into(),
+        context.i64_type().into(),
+        context.i8_type().into(),
+        i8_ptr.into(),
+    ], false);
+    let lookup = module.get_function("thaw_js_get_error_constructor_exact_result").unwrap();
+    let invoke = module.get_function("thaw_js_invoke_handle_graph_exact_result").unwrap();
+    for (function, params) in [
+        (lookup, vec![i8_ptr.into()]),
+        (invoke, vec![context.i64_type().into(), i8_ptr.into(), context.i8_type().into()]),
+    ] {
+        let ty = function.get_type();
+        assert_eq!(ty.get_return_type(), Some(result.into()));
+        assert_eq!(ty.get_param_types(), params);
+        assert!(!ty.is_var_arg());
+        assert_eq!(function.get_linkage(), Linkage::External);
+    }
+
+    // Adding siblings must not change the existing consumers' ABI.
+    let legacy = [
+        ("thaw_js_get_property_exact_result", vec![context.i64_type().into(), i8_ptr.into()]),
+        ("thaw_js_call_handle_mixed_exact_consuming_result", vec![context.i64_type().into(), i8_ptr.into(), i8_ptr.into()]),
+        ("thaw_js_construct_handle_graph_args_result", vec![context.i64_type().into(), i8_ptr.into()]),
+    ];
+    for (name, params) in legacy {
+        let function = module.get_function(name).unwrap();
+        assert_eq!(function.get_type().get_param_types(), params, "{name}");
+        assert!(!function.get_type().is_var_arg(), "{name}");
+        assert_eq!(function.get_linkage(), Linkage::External, "{name}");
+    }
+    assert_eq!(module.get_function("thaw_js_get_property_exact_result").unwrap().get_type().get_return_type(), Some(result.into()));
+    assert_eq!(module.get_function("thaw_js_call_handle_mixed_exact_consuming_result").unwrap().get_type().get_return_type(), Some(result.into()));
+    let legacy_handle_result = context.struct_type(&[context.i64_type().into(), i8_ptr.into()], false);
+    assert_eq!(module.get_function("thaw_js_construct_handle_graph_args_result").unwrap().get_type().get_return_type(), Some(legacy_handle_result.into()));
+}
+
+#[test]
 fn dynamic_json_setter_destroys_owned_result_before_exception_branch() {
     // Both paths use setDynamicPropertyJson: one ordinary assignment and one
     // assignment whose JavaScript setter can throw into a Thaw catch block.

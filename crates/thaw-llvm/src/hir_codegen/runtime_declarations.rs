@@ -2881,6 +2881,18 @@ impl<'ctx> HirCompiler<'ctx> {
             self.context.i8_type().into(), i8_ptr.into(),
         ], false);
         self.module.add_function(
+            "thaw_js_get_error_constructor_exact_result",
+            exact_mixed_result_type.fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_js_invoke_handle_graph_exact_result",
+            exact_mixed_result_type.fn_type(&[
+                self.context.i64_type().into(), i8_ptr.into(), self.context.i8_type().into(),
+            ], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
             "thaw_js_get_property_exact_result",
             exact_mixed_result_type.fn_type(&[
                 self.context.i64_type().into(), i8_ptr.into(),
