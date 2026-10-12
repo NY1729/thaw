@@ -1450,6 +1450,34 @@ impl<'a> FnLowerer<'a> {
             self.scope.insert(name.clone(), lhs_type.clone());
             return self.wrap_call_argument_bindings(result, &[(name, lhs_type, lhs)]);
         }
+        let dynamic_nullish_literal = if lhs_type == HirType::JsValue
+            && matches!(&rhs, HirExpr::Lit(HirLit::Null | HirLit::Undefined))
+        {
+            Some(matches!(&rhs, HirExpr::Lit(HirLit::Null)))
+        } else if rhs_type == HirType::JsValue
+            && matches!(&lhs, HirExpr::Lit(HirLit::Null | HirLit::Undefined))
+        {
+            Some(matches!(&lhs, HirExpr::Lit(HirLit::Null)))
+        } else {
+            None
+        };
+        if let Some(compare_null) = dynamic_nullish_literal {
+            let value = if lhs_type == HirType::JsValue { lhs } else { rhs };
+            // Evaluate the live operand before the bootstrap helper's global lookup.
+            let name = format!("__thaw_strict_dynamic_nullish_{}", self.next_binding);
+            self.next_binding += 1;
+            self.scope.insert(name.clone(), HirType::JsValue);
+            let bound = HirExpr::Var(name.clone());
+            let result = if compare_null {
+                self.dynamic_value_is_null(bound.clone())
+            } else {
+                self.dynamic_value_is_undefined(bound)
+            };
+            return self.wrap_call_argument_bindings(
+                result,
+                &[(name, HirType::JsValue, value)],
+            );
+        }
         let lhs_name = format!("__thaw_strict_left_{}", self.next_binding);
         self.next_binding += 1;
         let rhs_name = format!("__thaw_strict_right_{}", self.next_binding);

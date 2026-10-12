@@ -2687,6 +2687,46 @@ fn function_typed_values_keep_runtime_undefined_checks() {
 }
 
 
+
+#[test]
+fn strict_live_jsvalue_nullish_literals_bind_before_dynamic_check() {
+    let program = lower(r#"
+        function eqNullLeft(value: JsValue): boolean { return value === null; }
+        function eqNullRight(value: JsValue): boolean { return null === value; }
+        function neNullLeft(value: JsValue): boolean { return value !== null; }
+        function neNullRight(value: JsValue): boolean { return null !== value; }
+        function eqUndefinedLeft(value: JsValue): boolean { return value === undefined; }
+        function eqUndefinedRight(value: JsValue): boolean { return undefined === value; }
+        function neUndefinedLeft(value: JsValue): boolean { return value !== undefined; }
+        function neUndefinedRight(value: JsValue): boolean { return undefined !== value; }
+        function nonliteral(value: JsValue, other: JsValue): boolean { return value === other; }
+        function main(): void {}
+    "#);
+    for (name, helper) in [
+        ("eqNullLeft", "__thaw_is_null_dynamic_value"),
+        ("eqNullRight", "__thaw_is_null_dynamic_value"),
+        ("neNullLeft", "__thaw_is_null_dynamic_value"),
+        ("neNullRight", "__thaw_is_null_dynamic_value"),
+        ("eqUndefinedLeft", "__thaw_is_undefined_dynamic_value"),
+        ("eqUndefinedRight", "__thaw_is_undefined_dynamic_value"),
+        ("neUndefinedLeft", "__thaw_is_undefined_dynamic_value"),
+        ("neUndefinedRight", "__thaw_is_undefined_dynamic_value"),
+    ] {
+        let function = program.functions.iter().find(|function| function.name == name).unwrap();
+        let body = format!("{:?}", function.body);
+        assert!(body.contains(helper), "{name}: {body}");
+        assert!(body.contains("Call(Lambda([], [HirParam { name: \"__thaw_strict_dynamic_nullish_"),
+            "{name}: operand must be evaluated as the single lambda argument before helper lookup: {body}");
+        assert!(body.contains("Var(\"value\")"), "{name}: source operand must appear in the outer argument: {body}");
+    }
+    let nonliteral = program.functions.iter().find(|function| function.name == "nonliteral").unwrap();
+    let body = format!("{:?}", nonliteral.body);
+    assert!(body.contains("__thaw_strict_equal_dynamic"), "{body}");
+    assert!(!body.contains("__thaw_strict_dynamic_nullish_"), "nonliteral comparison must keep the previous path: {body}");
+    assert!(!body.contains("__thaw_is_null_dynamic_value") && !body.contains("__thaw_is_undefined_dynamic_value"),
+        "nonliteral comparison must not add a nullish helper lookup: {body}");
+}
+
 #[test]
 fn tagged_function_absence_is_observed_before_equality_fallbacks() {
     let program = lower(r#"
