@@ -345,6 +345,25 @@ impl<'a> FnLowerer<'a> {
         if lhs_type != rhs_type && lhs_type != HirType::Json {
             return self.lower_mixed_logical_expr(lhs, lhs_type, rhs, rhs_type, is_and);
         }
+        // Boolean logical expressions always return a boolean, so they can
+        // be lowered directly to a lazy conditional. Binding the left value
+        // in a temporary lambda here captures every free value in the right
+        // branch, including JsValue handles that are not evaluated on the
+        // short-circuit path.
+        if lhs_type == HirType::Bool && rhs_type == HirType::Bool {
+            let condition = self.truthiness_expr(lhs, &lhs_type)?;
+            let (then_value, else_value) = if is_and {
+                (rhs, HirExpr::Lit(HirLit::Bool(false)))
+            } else {
+                (HirExpr::Lit(HirLit::Bool(true)), rhs)
+            };
+            return Ok(HirExpr::Conditional(
+                Box::new(condition),
+                Box::new(then_value),
+                Box::new(else_value),
+                HirType::Bool,
+            ));
+        }
         // A plain variable needs no bound temporary: evaluating it twice is
         // unobservable (the branch not taken never runs the right operand),
         // and the binding lambda would capture -- and claim -- every dynamic

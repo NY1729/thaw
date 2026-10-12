@@ -166,7 +166,7 @@ fn mutual_recursion_between_unannotated_class_methods_reports_an_error() {
 }
 
 #[test]
-fn lowers_boolean_logical_operators_to_short_circuit_closures() {
+fn lowers_boolean_logical_operators_to_single_evaluation_conditionals() {
     // Operands that are plain bindings have no side effects to sequence, so `&&`/`||`
     // lower straight to a short-circuiting conditional (`a && b` => `a ? b : a`).
     let program = lower(
@@ -187,8 +187,8 @@ fn lowers_boolean_logical_operators_to_short_circuit_closures() {
         );
     }
 
-    // A left operand with side effects is evaluated once through an immediately invoked
-    // closure (original assertion: one captured argument, Bool result).
+    // A boolean result can keep the left call directly in the conditional test. The
+    // right call stays in only the branch where JavaScript evaluates it.
     let program = lower(
         r#"function f(): boolean { return true; }
         function main(): void {
@@ -197,18 +197,24 @@ fn lowers_boolean_logical_operators_to_short_circuit_closures() {
         }"#,
     );
     let main = program.functions.iter().find(|function| function.name == "main").unwrap();
-    for statement in &main.body {
+    for (statement, is_and) in main.body.iter().zip([true, false]) {
         let HirStmt::Expr(HirExpr::Call(_, arguments)) = statement else {
             panic!("expected console call");
         };
-        let HirExpr::Call(callee, call_arguments) = &arguments[0] else {
-            panic!("expected immediately invoked logical closure");
+        let HirExpr::Conditional(test, yes, no, HirType::Bool) = &arguments[0] else {
+            panic!("expected direct short-circuit conditional: {:?}", arguments[0]);
         };
-        assert_eq!(call_arguments.len(), 1);
-        assert!(matches!(
-            callee.as_ref(),
-            HirExpr::Lambda(_, params, HirType::Bool, _) if params.len() == 1
-        ));
+        assert!(matches!(test.as_ref(), HirExpr::Call(callee, args)
+            if matches!(callee.as_ref(), HirExpr::Var(name) if name == "f") && args.is_empty()));
+        if is_and {
+            assert!(matches!(yes.as_ref(), HirExpr::Call(callee, args)
+                if matches!(callee.as_ref(), HirExpr::Var(name) if name == "f") && args.is_empty()));
+            assert!(matches!(no.as_ref(), HirExpr::Lit(HirLit::Bool(false))));
+        } else {
+            assert!(matches!(yes.as_ref(), HirExpr::Lit(HirLit::Bool(true))));
+            assert!(matches!(no.as_ref(), HirExpr::Call(callee, args)
+                if matches!(callee.as_ref(), HirExpr::Var(name) if name == "f") && args.is_empty()));
+        }
     }
 }
 

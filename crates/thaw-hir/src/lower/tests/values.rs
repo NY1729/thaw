@@ -2945,6 +2945,35 @@ fn logical_operators_over_different_types_yield_the_union_of_the_operands() {
 }
 
 #[test]
+fn boolean_logical_expression_keeps_dynamic_rhs_out_of_capture_lambda() {
+    use crate::{HirExpr, HirLit, HirStmt, HirType};
+
+    let program = lower(r#"
+        function isReady(): boolean { return true; }
+        function hasValue(value: JsValue): boolean { return true; }
+        function main(value: JsValue): boolean {
+            return isReady() && hasValue(value);
+        }
+    "#);
+    let main = program.functions.iter().find(|function| function.name == "main").unwrap();
+    let expression = match main.body.as_slice() {
+        [HirStmt::Return(Some(expression))] => expression,
+        body => panic!("expected one return expression, got {body:#?}"),
+    };
+    assert!(
+        !format!("{expression:#?}").contains("Lambda("),
+        "a Bool/Bool logical expression must not capture its JsValue RHS in a temporary lambda: {expression:#?}",
+    );
+    assert!(matches!(
+        expression,
+        HirExpr::Conditional(test, _, no, HirType::Bool)
+            if matches!(test.as_ref(), HirExpr::Call(callee, _)
+                if matches!(callee.as_ref(), HirExpr::Var(name) if name == "isReady"))
+            && matches!(no.as_ref(), HirExpr::Lit(HirLit::Bool(false)))
+    ), "&& must evaluate the left test once and keep the RHS lazy: {expression:#?}");
+}
+
+#[test]
 fn array_and_string_end_arguments_default_only_for_undefined() {
     let program = lower(r#"
         function arraySliceOmitted(a: number[]): number[] { return a.slice(); }
