@@ -1718,6 +1718,7 @@ impl<'a> FnLowerer<'a> {
                     }
                     _ => None,
                 });
+            let mut known_actual_rest = None;
             let contextual_function = generic_context.or_else(|| {
                 if argument.spread.is_some() || generic_placeholder {
                     return None;
@@ -1732,10 +1733,11 @@ impl<'a> FnLowerer<'a> {
                         HirType::CallableFunction(params, _, rest, ret) => {
                             let mut abi_params = params.clone();
                             if let Some(rest) = rest {
-                                let (argument_count, declares_rest) = match argument.expr.as_ref() {
+                                let (argument_count, declares_rest, actual_has_rest) = match argument.expr.as_ref() {
                                     Expr::Arrow(arrow) => (
                                         arrow.params.len(),
                                         matches!(arrow.params.last(), Some(Pat::Rest(_))),
+                                        false,
                                     ),
                                     Expr::Fn(function) => (
                                         function.function.params.len(),
@@ -1743,10 +1745,71 @@ impl<'a> FnLowerer<'a> {
                                             function.function.params.last(),
                                             Some(param) if matches!(param.pat, Pat::Rest(_))
                                         ),
+                                        false,
                                     ),
-                                    _ => (abi_params.len() + 1, true),
+                                    Expr::Ident(ident) => {
+                                        let name = self.resolve_binding(ident.sym.as_ref());
+                                        let generic_template = self.generic_named_templates.contains_key(&name)
+                                            || self.generic_arrows.contains_key(&name);
+                                        let actual = if generic_template {
+                                            None
+                                        } else if let Some(ty) = self.scope.get(&name) {
+                                            let wrapped_actual = matches!(
+                                                ty,
+                                                HirType::FunctionWithThis(_, _)
+                                                    | HirType::Optional(_)
+                                                    | HirType::Nullable(_)
+                                                    | HirType::Nullish(_)
+                                            );
+                                            let mut ty = ty;
+                                            loop {
+                                                ty = match ty {
+                                                    HirType::FunctionWithThis(_, visible)
+                                                    | HirType::Optional(visible)
+                                                    | HirType::Nullable(visible)
+                                                    | HirType::Nullish(visible) => visible,
+                                                    _ => break,
+                                                };
+                                            }
+                                            match ty {
+                                                HirType::Function(params, _) => {
+                                                    Some((params.len(), false, false))
+                                                }
+                                                HirType::CallableFunction(params, _, actual_rest, _) => {
+                                                    Some((
+                                                        params.len() + usize::from(actual_rest.is_some()),
+                                                        actual_rest.is_some(),
+                                                        actual_rest.is_some() && !wrapped_actual,
+                                                    ))
+                                                }
+                                                _ => None,
+                                            }
+                                        } else {
+                                            self.signatures.get(&name)
+                                                .filter(|signature| signature.generic_type_params.is_empty())
+                                                .map(|signature| (
+                                                    signature.params.len(),
+                                                    signature.native_rest.is_some(),
+                                                    signature.native_rest.is_some(),
+                                                ))
+                                        };
+                                        if generic_template {
+                                            (abi_params.len() + 1, true, false)
+                                        } else if let Some(shape) = actual {
+                                            shape
+                                        } else {
+                                            (abi_params.len() + 1, true, false)
+                                        }
+                                    }
+                                    _ => (abi_params.len() + 1, true, false),
                                 };
                                 if declares_rest {
+                                    abi_params.resize(
+                                        argument_count
+                                            .saturating_sub(1)
+                                            .max(abi_params.len()),
+                                        rest.as_ref().clone(),
+                                    );
                                     abi_params.push(HirType::Array(rest.clone()));
                                 } else {
                                     abi_params.resize(
@@ -1754,13 +1817,21 @@ impl<'a> FnLowerer<'a> {
                                         rest.as_ref().clone(),
                                     );
                                 }
+                                if actual_has_rest {
+                                    let fixed_prefix = abi_params.len().saturating_sub(1);
+                                    known_actual_rest = Some((
+                                        abi_params.clone(),
+                                        fixed_prefix,
+                                        rest.as_ref().clone(),
+                                    ));
+                                }
                             }
                             Some((abi_params, Some(ret.as_ref().clone())))
                         }
                         _ => None,
-                    })
+                })
             });
-            let value = if let Some((params, ret)) = contextual_function {
+            let mut value = if let Some((params, ret)) = contextual_function {
                 if matches!(
                     argument.expr.as_ref(),
                     Expr::Arrow(_) | Expr::Fn(_) | Expr::Ident(_)
@@ -1818,6 +1889,35 @@ impl<'a> FnLowerer<'a> {
                     }
                 }
             };
+            if let Some((physical_params, fixed_prefix, rest_element)) = known_actual_rest.take() {
+                if physical_params.len() != fixed_prefix + 1
+                    || physical_params.get(fixed_prefix)
+                        != Some(&HirType::Array(Box::new(rest_element.clone())) )
+                {
+                    return Err("internal contextual rest callback ABI has an invalid tail boundary".into());
+                }
+                value = match self.infer_expr_type(&value)? {
+                    HirType::Function(params, ret) if params == physical_params => {
+                        HirExpr::TypedClosure(
+                            HirType::CallableFunction(
+                                physical_params[..fixed_prefix].to_vec(),
+                                HirOptionalMask::default(),
+                                Some(Box::new(rest_element)),
+                                ret,
+                            ),
+                            Box::new(value),
+                        )
+                    }
+                    HirType::CallableFunction(params, _, Some(actual_rest), _)
+                        if params.as_slice() == &physical_params[..fixed_prefix]
+                            && actual_rest.as_ref() == &rest_element => value,
+                    actual => {
+                        return Err(format!(
+                            "normalized named rest callback has type {actual:?}, expected physical parameters {physical_params:?}"
+                        ));
+                    }
+                };
+            }
             if let Some(pattern) = signature
                 .as_ref()
                 .and_then(|signature| generic_pattern_for_physical_argument(signature, index))

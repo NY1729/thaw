@@ -1374,3 +1374,350 @@ fn switch_cases_do_not_inherit_presence_guards_from_other_entries() {
     lower("function read(x: number | undefined, key: number): number { if (x === undefined) return 0; switch (key) { case 0: return x; default: return x; } }");
     lower("function read(x: number | undefined, key: number): number { switch (key) { case 0: if (x === undefined) return 0; return x; default: if (x === undefined) return 0; return x; } }");
 }
+
+fn find_test_normalized_adapter<'a>(expr: &'a HirExpr) -> Option<(&'a [HirParam], &'a HirExpr)> {
+    match expr {
+        HirExpr::Lambda(_, params, _, body)
+            if params.iter().any(|param| param.name.starts_with("__thaw_promise_argument_")) =>
+        {
+            Some((params, body))
+        }
+        HirExpr::Lambda(_, _, _, body) | HirExpr::TypedClosure(_, body)
+        | HirExpr::EvalThen(_, body) => find_test_normalized_adapter(body),
+        HirExpr::Call(callee, args) => find_test_normalized_adapter(callee)
+            .or_else(|| args.iter().find_map(find_test_normalized_adapter)),
+        HirExpr::FfiCall(_, args) | HirExpr::DynamicCall(_, args) => {
+            args.iter().find_map(find_test_normalized_adapter)
+        }
+        HirExpr::Block(statements) => statements.iter().find_map(find_test_normalized_adapter_in_stmt),
+        _ => None,
+    }
+}
+
+fn find_test_callback_alias_in_expr<'a>(expr: &'a HirExpr) -> Option<(&'a [HirParam], &'a HirExpr, &'a HirExpr)> {
+    if let HirExpr::Call(callee, args) = expr {
+        if matches!(callee.as_ref(), HirExpr::Var(name) if name == "__thaw_closure_alias") {
+            if let [adapted, original] = args.as_slice() {
+                if let Some((params, body)) = find_test_normalized_adapter(adapted) {
+                    return Some((params, body, original));
+                }
+            }
+        }
+    }
+    match expr {
+        HirExpr::Call(callee, args) => find_test_callback_alias_in_expr(callee)
+            .or_else(|| args.iter().find_map(find_test_callback_alias_in_expr)),
+        HirExpr::FfiCall(_, args) | HirExpr::DynamicCall(_, args) => {
+            args.iter().find_map(find_test_callback_alias_in_expr)
+        }
+        HirExpr::PromiseThen(source, callback, ..) => find_test_callback_alias_in_expr(source)
+            .or_else(|| find_test_callback_alias_in_expr(callback)),
+        HirExpr::PromiseThenBoth(source, fulfilled, rejected, ..) => {
+            find_test_callback_alias_in_expr(source)
+                .or_else(|| fulfilled.as_deref().and_then(find_test_callback_alias_in_expr))
+                .or_else(|| find_test_callback_alias_in_expr(rejected))
+        }
+        HirExpr::Lambda(_, _, _, body) | HirExpr::TypedClosure(_, body)
+        | HirExpr::EvalThen(_, body) => find_test_callback_alias_in_expr(body),
+        HirExpr::Block(statements) => statements.iter().find_map(find_test_callback_alias_in_stmt),
+        _ => None,
+    }
+}
+
+fn find_test_normalized_adapter_in_stmt<'a>(statement: &'a HirStmt) -> Option<(&'a [HirParam], &'a HirExpr)> {
+    match statement {
+        HirStmt::Expr(expr) | HirStmt::Return(Some(expr)) | HirStmt::Throw(expr)
+        | HirStmt::Let(_, _, expr) => find_test_normalized_adapter(expr),
+        HirStmt::If(condition, yes, no) => find_test_normalized_adapter(condition)
+            .or_else(|| yes.iter().find_map(find_test_normalized_adapter_in_stmt))
+            .or_else(|| no.iter().find_map(find_test_normalized_adapter_in_stmt)),
+        HirStmt::While(condition, body) => find_test_normalized_adapter(condition)
+            .or_else(|| body.iter().find_map(find_test_normalized_adapter_in_stmt)),
+        HirStmt::Try(body, _, catch, _) => body.iter().find_map(find_test_normalized_adapter_in_stmt)
+            .or_else(|| catch.iter().find_map(find_test_normalized_adapter_in_stmt)),
+        HirStmt::Finally(body, _) => body.iter().find_map(find_test_normalized_adapter_in_stmt),
+        _ => None,
+    }
+}
+
+fn find_test_callback_alias_in_stmt<'a>(statement: &'a HirStmt) -> Option<(&'a [HirParam], &'a HirExpr, &'a HirExpr)> {
+    match statement {
+        HirStmt::Expr(expr) | HirStmt::Return(Some(expr)) | HirStmt::Throw(expr) => {
+            find_test_callback_alias_in_expr(expr)
+        }
+        HirStmt::Let(_, _, expr) => find_test_callback_alias_in_expr(expr),
+        HirStmt::If(condition, yes, no) => find_test_callback_alias_in_expr(condition)
+            .or_else(|| yes.iter().find_map(find_test_callback_alias_in_stmt))
+            .or_else(|| no.iter().find_map(find_test_callback_alias_in_stmt)),
+        HirStmt::While(condition, body) => find_test_callback_alias_in_expr(condition)
+            .or_else(|| body.iter().find_map(find_test_callback_alias_in_stmt)),
+        HirStmt::Try(body, _, catch, _) => body.iter().find_map(find_test_callback_alias_in_stmt)
+            .or_else(|| catch.iter().find_map(find_test_callback_alias_in_stmt)),
+        HirStmt::Finally(body, _) => body.iter().find_map(find_test_callback_alias_in_stmt),
+        _ => None,
+    }
+}
+
+fn has_test_json_coercion(expr: &HirExpr, expected: &HirType) -> bool {
+    match expr {
+        HirExpr::JsonAsString(_) => expected == &HirType::Str,
+        HirExpr::JsonAsNumber(_) => expected == &HirType::F64,
+        HirExpr::Call(callee, args) => has_test_json_coercion(callee, expected)
+            || args.iter().any(|arg| has_test_json_coercion(arg, expected)),
+        HirExpr::Block(statements) => statements.iter().any(|statement| match statement {
+            HirStmt::Expr(expr) | HirStmt::Return(Some(expr)) | HirStmt::Throw(expr)
+            | HirStmt::Let(_, _, expr) => has_test_json_coercion(expr, expected),
+            _ => false,
+        }),
+        HirExpr::TypedClosure(_, body) | HirExpr::Lambda(_, _, _, body)
+        | HirExpr::EvalThen(_, body) => has_test_json_coercion(body, expected),
+        HirExpr::FfiCall(_, args) | HirExpr::DynamicCall(_, args) => {
+            args.iter().any(|arg| has_test_json_coercion(arg, expected))
+        }
+        _ => false,
+    }
+}
+
+fn find_test_lambda_params_in_expr(expr: &HirExpr) -> Option<&[HirParam]> {
+    match expr {
+        HirExpr::Lambda(_, params, _, _) => Some(params),
+        HirExpr::Call(callee, args) => find_test_lambda_params_in_expr(callee)
+            .or_else(|| args.iter().find_map(find_test_lambda_params_in_expr)),
+        HirExpr::FfiCall(_, args) | HirExpr::DynamicCall(_, args) => {
+            args.iter().find_map(find_test_lambda_params_in_expr)
+        }
+        HirExpr::PromiseThen(source, callback, ..) => find_test_lambda_params_in_expr(source)
+            .or_else(|| find_test_lambda_params_in_expr(callback)),
+        HirExpr::PromiseThenBoth(source, fulfilled, rejected, ..) => {
+            find_test_lambda_params_in_expr(source)
+                .or_else(|| fulfilled.as_deref().and_then(find_test_lambda_params_in_expr))
+                .or_else(|| find_test_lambda_params_in_expr(rejected))
+        }
+        HirExpr::TypedClosure(_, value) | HirExpr::EvalThen(_, value) => {
+            find_test_lambda_params_in_expr(value)
+        }
+        HirExpr::Block(statements) => statements.iter().find_map(|statement| match statement {
+            HirStmt::Expr(expr) | HirStmt::Return(Some(expr)) | HirStmt::Throw(expr)
+            | HirStmt::Let(_, _, expr) => find_test_lambda_params_in_expr(expr),
+            _ => None,
+        }),
+        _ => None,
+    }
+}
+
+#[test]
+fn contextual_rest_callback_adapts_named_fixed_arity_functions() {
+    let program = lower(
+        r#"
+        declare function accept(callback: (...values: any[]) => void): void;
+        function main(): void {
+            const fixed: (value: string, count: number) => void = (value, count) => {};
+            accept(fixed);
+        }
+        "#,
+    );
+    let main = program.functions.iter().find(|function| function.name == "main").unwrap();
+    let (params, adapter_body, original) = main.body.iter()
+        .find_map(find_test_callback_alias_in_stmt)
+        .expect("fixed callback is captured by a typed adapter");
+    assert_eq!(params.iter().map(|param| param.ty.clone()).collect::<Vec<_>>(),
+        vec![HirType::Json, HirType::Json]);
+    assert!(matches!(original, HirExpr::Var(name) if name == "fixed"));
+    assert!(has_test_json_coercion(adapter_body, &HirType::Str));
+    assert!(has_test_json_coercion(adapter_body, &HirType::F64));
+}
+
+#[test]
+fn contextual_rest_callback_preserves_zero_and_fixed_prefix_rest_shapes() {
+    let zero = lower(
+        r#"
+        declare function accept(callback: (...values: any[]) => void): void;
+        function zero(): void {}
+        function main(): void { accept(zero); }
+        "#,
+    );
+    let main = zero.functions.iter().find(|function| function.name == "main").unwrap();
+    assert!(format!("{:?}", main.body).contains("FunctionRef(\"zero\""));
+
+    let rest = lower(
+        r#"
+        declare function accept(callback: (...values: any[]) => void): void;
+        function rest(prefix: any, ...values: any[]): void {}
+        function main(): void { accept(rest); }
+        "#,
+    );
+    let main = rest.functions.iter().find(|function| function.name == "main").unwrap();
+    let (params, _) = main.body.iter()
+        .find_map(find_test_normalized_adapter_in_stmt)
+        .expect("rest callback adapter");
+    assert_eq!(params.len(), 2);
+    assert_eq!(params[0].ty, HirType::Json);
+    assert_eq!(params[1].ty, HirType::Array(Box::new(HirType::Json)));
+    assert!(format!("{:?}", main.body).contains("FunctionRef(\"rest\""));
+}
+
+#[test]
+fn contextual_rest_callbacks_keep_inline_and_named_fixed_prefixes() {
+    let program = lower(
+        r#"
+        declare function accept(callback: (prefix: string, ...values: any[]) => void): void;
+        function named(prefix: string, count: number, ...values: any[]): void {}
+        function main(): void {
+            accept(named);
+            const namedLocal: (prefix: string, count: number, ...values: any[]) => void = named;
+            accept(namedLocal);
+            accept((prefix: string, ...values: any[]) => {});
+        }
+        "#,
+    );
+    let main = program.functions.iter().find(|function| function.name == "main").unwrap();
+    let (named_params, _) = main.body.iter()
+        .find_map(find_test_normalized_adapter_in_stmt)
+        .expect("named fixed-prefix rest adapter");
+    assert_eq!(named_params.iter().map(|param| param.ty.clone()).collect::<Vec<_>>(),
+        vec![HirType::Str, HirType::Json, HirType::Array(Box::new(HirType::Json))]);
+    assert!(format!("{:?}", main.body).contains("FunctionRef(\"named\""));
+    let accept_arguments = main.body.iter().filter_map(|statement| match statement {
+        HirStmt::Expr(HirExpr::FfiCall(signature, args))
+            if signature.symbol == "accept" =>
+        {
+            args.first()
+        }
+        _ => None,
+    }).collect::<Vec<_>>();
+    assert_eq!(accept_arguments.len(), 3, "named, named-local, and inline accept calls stay top-level FFI calls");
+    let (final_named_type, final_named_value) = match accept_arguments[0] {
+        HirExpr::TypedClosure(ty, value) => (ty.clone(), value.as_ref()),
+        _ => panic!("final named callback argument retains its contextual rest ABI"),
+    };
+    assert_eq!(final_named_type, HirType::CallableFunction(
+        vec![HirType::Str, HirType::Json],
+        HirOptionalMask::default(),
+        Some(Box::new(HirType::Json)),
+        Box::new(HirType::Void),
+    ));
+    let direct_named_params = match final_named_value {
+        HirExpr::Call(callee, args)
+            if matches!(callee.as_ref(), HirExpr::Lambda(_, _, _, _))
+                && matches!(args.as_slice(), [HirExpr::FunctionRef(name, _, _)] if name == "named") =>
+        {
+            find_test_normalized_adapter(callee)
+                .expect("direct named binder contains its normalized adapter")
+                .0
+        }
+        _ => panic!("direct named function reference is passed through its callback binder"),
+    };
+    assert_eq!(direct_named_params.iter().map(|param| param.ty.clone()).collect::<Vec<_>>(),
+        vec![HirType::Str, HirType::Json, HirType::Array(Box::new(HirType::Json))]);
+    let (local_type, local_value) = match accept_arguments[1] {
+        HirExpr::TypedClosure(ty, value) => (ty, value.as_ref()),
+        _ => panic!("named-local callback argument retains its contextual rest ABI"),
+    };
+    assert_eq!(local_type, &HirType::CallableFunction(
+        vec![HirType::Str, HirType::Json],
+        HirOptionalMask::default(),
+        Some(Box::new(HirType::Json)),
+        Box::new(HirType::Void),
+    ));
+    assert!(matches!(local_value,
+        HirExpr::Call(callee, args)
+            if matches!(callee.as_ref(), HirExpr::Var(name) if name == "__thaw_closure_alias")
+                && args.len() == 2
+                && find_test_normalized_adapter(&args[0]).is_some()
+                && matches!(&args[1], HirExpr::Var(name) if name == "namedLocal")
+    ), "named-local rest adapter is aliased exactly once to the selected local binding");
+    let inline_params = main.body.iter().find_map(|statement| match statement {
+        HirStmt::Expr(expr) => find_test_lambda_params_in_expr(expr)
+            .filter(|params| params.len() == 2 && params[0].name == "prefix"),
+        _ => None,
+    }).expect("inline fixed-prefix rest lambda");
+    assert_eq!(inline_params[0].ty, HirType::Str);
+    assert_eq!(inline_params[1].ty, HirType::Array(Box::new(HirType::Json)));
+}
+
+#[test]
+fn contextual_rest_callback_preserves_optional_metadata_and_shadowed_bindings() {
+    let optional = lower(
+        r#"
+        declare function accept(callback: (...values: any[]) => void): void;
+        function main(): void {
+            const optional: (value?: string) => void = (value) => {};
+            accept(optional);
+        }
+        "#,
+    );
+    let main = optional.functions.iter().find(|function| function.name == "main").unwrap();
+    assert!(main.body.iter().any(|statement| matches!(statement,
+        HirStmt::Let(name, HirType::CallableFunction(_, mask, _, _), _)
+            if name == "optional" && mask.contains(0))));
+    let (params, _, original) = main.body.iter()
+        .find_map(find_test_callback_alias_in_stmt)
+        .expect("optional callback adapter");
+    assert_eq!(params.len(), 1);
+    assert_eq!(params[0].ty, HirType::Json);
+    assert!(matches!(original, HirExpr::Var(name) if name == "optional"));
+
+    let shadowed = lower(
+        r#"
+        declare function accept(callback: (...values: any[]) => void): void;
+        function callback(value: string): void {}
+        function main(): void {
+            const callback: (value: string, count: number) => void = (value, count) => {};
+            accept(callback);
+        }
+        "#,
+    );
+    assert!(shadowed.functions.iter().any(|function| function.name == "callback"));
+    let main = shadowed.functions.iter().find(|function| function.name == "main").unwrap();
+    let local_callback = main.body.iter().find_map(|statement| match statement {
+        HirStmt::Let(name, HirType::Function(params, _), _) if params.len() == 2 => Some(name.as_str()),
+        HirStmt::Let(name, HirType::CallableFunction(params, _, _, _), _) if params.len() == 2 => Some(name.as_str()),
+        _ => None,
+    }).unwrap_or_else(|| panic!("two-parameter shadowing local binding not found in HIR: {:#?}", main.body));
+    let (params, _, original) = main.body.iter()
+        .find_map(find_test_callback_alias_in_stmt)
+        .expect("shadowed callback adapter");
+    assert_eq!(params.len(), 2);
+    assert_eq!(params[0].ty, HirType::Json);
+    assert_eq!(params[1].ty, HirType::Json);
+    assert!(matches!(original, HirExpr::Var(name) if name == local_callback));
+}
+
+#[test]
+fn promise_then_keeps_single_value_callback_validation() {
+    lower(
+        r#"
+        function single(value: number): void {}
+        function optional(value?: number): void {}
+        function main(): void {
+            new Promise<number>((resolve) => resolve(1)).then(single);
+            new Promise<number>((resolve) => resolve(1)).then(optional);
+        }
+        "#,
+    );
+    let invalid = thaw_parser::parse_typescript(
+        r#"
+        function required(value: number, count: number): void {}
+        function main(): void {
+            new Promise<number>((resolve) => resolve(1)).then(required);
+        }
+        "#,
+    ).unwrap();
+    assert!(lower_module(&invalid).is_err(), "Promise.then supplies one value");
+
+    for source in [
+        r#"
+        declare function accept(callback: (prefix: string, ...values: any[]) => number): void;
+        function badPrefix(prefix: number, count: number, ...values: any[]): number { return count; }
+        function main(): void { accept(badPrefix); }
+        "#,
+        r#"
+        declare function accept(callback: (prefix: string, ...values: any[]) => number): void;
+        function badReturn(prefix: string, count: number, ...values: any[]): string { return "bad"; }
+        function main(): void { accept(badReturn); }
+        "#,
+    ] {
+        let module = thaw_parser::parse_typescript(source).unwrap();
+        assert!(lower_module(&module).is_err(), "accepted incompatible fixed prefix/return: {source}");
+    }
+}

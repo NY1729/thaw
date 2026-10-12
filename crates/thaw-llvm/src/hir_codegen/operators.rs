@@ -166,6 +166,13 @@ impl<'ctx> HirCompiler<'ctx> {
                 Some(HirType::Function(params.clone(), Box::new(ret.clone())))
             }
             HirExpr::Call(callee, arguments) => {
+                // HIR preserves the adapted closure's callable type through this
+                // identity alias; keep the LLVM type mirror in sync with HIR inference.
+                if matches!(callee.as_ref(), HirExpr::Var(name) if name == "__thaw_closure_alias") {
+                    if let [adapted, _original] = arguments.as_slice() {
+                        return self.expr_hir_type(adapted);
+                    }
+                }
                 if let HirExpr::Var(name) = callee.as_ref() {
                     match name.as_str() {
                         "JSON.parse"
