@@ -265,6 +265,14 @@ impl Visit for IdentifierUseCollector<'_> {
             self.found = true;
         }
     }
+
+    fn visit_labeled_stmt(&mut self, statement: &swc_ecma_ast::LabeledStmt) {
+        statement.body.visit_with(self);
+    }
+
+    fn visit_break_stmt(&mut self, _: &swc_ecma_ast::BreakStmt) {}
+
+    fn visit_continue_stmt(&mut self, _: &swc_ecma_ast::ContinueStmt) {}
 }
 
 fn named_function_is_recursive(expression: &swc_ecma_ast::FnExpr) -> bool {
