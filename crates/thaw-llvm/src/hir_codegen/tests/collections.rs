@@ -1316,6 +1316,124 @@ fn compiles_dynamic_array_flat_map_with_a_tuple_returning_callback() {
 }
 
 #[test]
+fn compiles_sparse_optional_json_flat_map_and_preserves_callback_snapshots() {
+    let source = r#"
+        function flat(): number[] { const shared: number[] = [1]; return [0, 1].flatMap((_, index) => { if (index === 1) shared[0] = 9; return shared; }); }
+        function flatSnapshotAndSource(): [number[], number[]] { const shared: number[] = [1]; const snapshot = [0, 1].flatMap((_, index) => { if (index === 1) shared[0] = 9; return shared; }); return [snapshot, shared]; }
+        function plainMap(): number[][] { const shared: number[] = [1]; return [0, 1].map(() => shared); }
+        function flatLength(): number[] { const shared: number[] = [1]; return [0, 1].flatMap((_, index) => { if (index === 1) shared[1] = 9; return shared; }); }
+        function unionReceiver(values: number[] | string[]): number[] { return values.flatMap(() => [1]); }
+        function spreadArgument(): number[] { const callback: (value: number) => number[] = value => [value]; const args: [(value: number) => number[]] = [callback]; return [1].flatMap(...args); }
+        function jsonResult(values: any[]): any[] { return values.flatMap(value => value); }
+        function tupleResult(values: number[]): any[] { const callback: (value: number) => [number, number] = value => [value, value]; return values.flatMap(callback); }
+        function mixedResult(values: number[]): number[] { return values.flatMap(value => value === 0 ? [value] : value); }
+        function scalarResult(values: number[]): number[] { return values.flatMap(value => value); }
+        function voidResult(values: number[]): undefined[] { return values.flatMap(value => { console.log(value); }); }
+        function main(): void {
+            console.log(JSON.stringify(flat()));
+            console.log(JSON.stringify(flatLength()));
+            const numberInput: number[] = [1]; const stringInput: string[] = ["x"];
+            console.log(JSON.stringify([...unionReceiver(numberInput), ...unionReceiver(stringInput)]));
+            console.log(JSON.stringify(spreadArgument()));
+            console.log(JSON.stringify(jsonResult([1, [2, 3], 4])));
+            console.log(JSON.stringify(tupleResult([1, 2])));
+            console.log(JSON.stringify(mixedResult([0, 1])));
+            console.log(JSON.stringify(scalarResult([1, 2])));
+            const voids = voidResult([1, 2]);
+            console.log(voids.length, Object.hasOwn(voids, 0), Object.hasOwn(voids, 1), typeof voids[0], typeof voids[1]);
+            const mapped = plainMap(); mapped[0][0] = 9;
+            console.log(mapped[0] === mapped[1], JSON.stringify(mapped[0]), JSON.stringify(mapped[1]));
+            const snapshotPair = flatSnapshotAndSource(); snapshotPair[1][0] = 7;
+            console.log(JSON.stringify(snapshotPair[0]), JSON.stringify(snapshotPair[1]));
+            const sparse: any[] = []; sparse.length = 4; sparse[1] = undefined; sparse[2] = null;
+            let calls = 0; const sparseResult: any[] = sparse.flatMap(value => { calls++; return value; });
+            console.log(JSON.stringify(sparseResult), calls, sparseResult.length, Object.hasOwn(sparseResult, 0), typeof sparseResult[0], Object.hasOwn(sparseResult, 1), sparseResult[1] === null);
+            console.log(sparse.flatMap(() => []).length);
+            const empty: any[] = []; console.log(empty.flatMap(value => value).length);
+            const nestedSource: any[] = [1]; const nestedResult: any[] = nestedSource.flatMap(value => [value, [value]]);
+            console.log(nestedResult.length, nestedResult[0], Array.isArray(nestedResult[1]), nestedResult[1][0]);
+            const shared: any[] = [1]; const sharedSource: any[] = [shared, shared]; let sharedCalls = 0;
+            const snapshots: any[] = sharedSource.flatMap((value, index) => { sharedCalls++; if (index === 1) shared[0] = 9; return index === 1 ? shared : value; });
+            console.log(JSON.stringify(snapshots), sharedCalls);
+            const growing: any[] = [1]; const growingSource: any[] = [growing, growing]; let growingCalls = 0;
+            const grown: any[] = growingSource.flatMap((value, index) => { growingCalls++; if (index === 1) growing.push(9); return index === 1 ? growing : value; });
+            console.log(JSON.stringify(grown), growingCalls);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "sparse_optional_json_flat_map_snapshots"),
+        "[1,9]\n[1,1,9]\n[1,1]\n[1]\n[1,2,3,4]\n[1,1,2,2]\n[0,1]\n[1,2]\n1\n2\n2 true true undefined undefined\ntrue [9] [9]\n[1,9] [7]\n[null,null] 2 2 true undefined true true\n0\n0\n2 1 true 1\n[1,9] 2\n[1,1,9] 2\n"
+    );
+}
+
+#[test]
+fn compiles_sparse_named_numeric_map_and_flat_map_callbacks() {
+    let source = r#"
+        function main(): void {
+            const values: number[] = [];
+            values.length = 3;
+            values[1] = 2;
+            const mapCallback: (value: number) => number = value => value + 1;
+            const mapped = values.map(mapCallback);
+            console.log(JSON.stringify(mapped), mapped.length,
+                Object.hasOwn(mapped, 0), Object.hasOwn(mapped, 1), Object.hasOwn(mapped, 2));
+            const flatMapCallback: (value: number) => number = value => value + 1;
+            const flattened = values.flatMap(flatMapCallback);
+            console.log(JSON.stringify(flattened), flattened.length);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "sparse_named_numeric_map_and_flat_map_callbacks"),
+        "[null,3,null] 3 false true false\n[3] 1\n"
+    );
+}
+
+#[test]
+fn compiles_nested_optional_json_flat_map_wrappers() {
+    let source = r#"
+        function naturalNullable(values: Json[], calls: number[]): Json[] {
+            return values.flatMap(value => { calls.push(1); return value === undefined ? null : value; });
+        }
+        function naturalNullish(values: Json[], calls: number[]): Json[] {
+            return values.flatMap(value => { calls.push(1); return value === null ? undefined : value; });
+        }
+        function nullableTyped(values: Json[], calls: number[]): Json[] {
+            const callback: (value: Json) => Json | null = value => { calls.push(1); return value === null ? null : value; };
+            return values.flatMap(callback);
+        }
+        function nullishTyped(values: Json[], calls: number[]): Json[] {
+            const callback: (value: Json) => Json | null | undefined = value => { calls.push(1); return value === null ? null : value === undefined ? undefined : value; };
+            return values.flatMap(callback);
+        }
+        function main(): void {
+            const naturalInput: Json[] = [null, undefined, [1, 2]];
+            const naturalNullableCalls: number[] = [];
+            const naturalNullableResult = naturalNullable(naturalInput, naturalNullableCalls);
+            console.log(JSON.stringify(naturalNullableResult), naturalNullableResult.length,
+                naturalNullableResult[0] === null, naturalNullableResult[1] === null,
+                Object.hasOwn(naturalNullableResult, 1), typeof naturalNullableResult[1], naturalNullableCalls.length);
+            const naturalNullishCalls: number[] = [];
+            const naturalNullishResult = naturalNullish(naturalInput, naturalNullishCalls);
+            console.log(JSON.stringify(naturalNullishResult), naturalNullishResult.length,
+                Object.hasOwn(naturalNullishResult, 0), Object.hasOwn(naturalNullishResult, 1),
+                typeof naturalNullishResult[0], typeof naturalNullishResult[1], naturalNullishCalls.length);
+            const nullableCalls: number[] = [];
+            const nullableResult = nullableTyped([1, [2, 3], null], nullableCalls);
+            console.log(JSON.stringify(nullableResult), nullableResult.length,
+                nullableResult[3] === null, Object.hasOwn(nullableResult, 3), typeof nullableResult[3], nullableCalls.length);
+            const nullishCalls: number[] = [];
+            const nullishResult = nullishTyped([1, [2, 3], null, undefined], nullishCalls);
+            console.log(JSON.stringify(nullishResult), nullishResult.length,
+                nullishResult[3] === null, Object.hasOwn(nullishResult, 4), typeof nullishResult[4], nullishCalls.length);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "nested_optional_json_flat_map_wrappers"),
+        "[null,null,1,2] 4 true true true object 3\n[null,null,1,2] 4 true true undefined undefined 3\n[1,2,3,null] 4 true true object 3\n[1,2,3,null,null] 5 true true undefined 4\n"
+    );
+}
+
+#[test]
 fn compiles_tuple_spreads_for_array_positional_methods() {
     let source = r#"
         function main(): void {

@@ -1534,6 +1534,10 @@ impl<'a> FnLowerer<'a> {
             identity
         } else if tagged_function_pair {
             self.function_present_pair(left.clone(), &lhs_type, right.clone(), &rhs_type, true)?
+        } else if let Some(result) = self.strict_optional_json_pair(
+            left.clone(), &lhs_type, right.clone(), &rhs_type,
+        )? {
+            result
         } else if let Some(result) =
             self.lower_optional_undefined_equality(left.clone(), right.clone())? {
             result
@@ -1614,6 +1618,50 @@ impl<'a> FnLowerer<'a> {
         ])
     }
 
+    /// Compare an exact Optional<Json> only after checking presence. Map.get
+    /// uses this representation to distinguish a missing key from a stored
+    /// Json undefined while preserving the existing Json/live comparison for
+    /// the present payload.
+    fn strict_optional_json_pair(
+        &mut self,
+        left: HirExpr,
+        left_type: &HirType,
+        right: HirExpr,
+        right_type: &HirType,
+    ) -> Result<Option<HirExpr>, String> {
+        if matches!(left_type, HirType::Optional(payload) if payload.as_ref() == &HirType::Json) {
+            let present = self.lower_strict_equality(
+                HirExpr::OptionalValue(Box::new(left.clone()), HirType::Json),
+                right.clone(),
+            )?;
+            let absent = self.lower_strict_equality(
+                HirExpr::Lit(HirLit::Undefined),
+                right,
+            )?;
+            return Ok(Some(Self::strict_if(
+                HirExpr::OptionalIsNone(Box::new(left), HirType::Json),
+                absent,
+                present,
+            )));
+        }
+        if matches!(right_type, HirType::Optional(payload) if payload.as_ref() == &HirType::Json) {
+            let present = self.lower_strict_equality(
+                left.clone(),
+                HirExpr::OptionalValue(Box::new(right.clone()), HirType::Json),
+            )?;
+            let absent = self.lower_strict_equality(
+                left,
+                HirExpr::Lit(HirLit::Undefined),
+            )?;
+            return Ok(Some(Self::strict_if(
+                HirExpr::OptionalIsNone(Box::new(right), HirType::Json),
+                absent,
+                present,
+            )));
+        }
+        Ok(None)
+    }
+
     /// `caught === original` for a thrown native object: the carrier keeps the owner pointer of the
     /// original (member 6), so identity is the active tag plus pointer equality with that object.
     fn caught_object_identity(
@@ -1673,6 +1721,13 @@ impl<'a> FnLowerer<'a> {
     }
 
     fn strict_json_vs_native(&mut self, json: HirExpr, native: HirExpr, ty: &HirType) -> Result<HirExpr, String> {
+        if matches!(ty, HirType::Object(fields)
+            if !fields.iter().any(|(name, _)| name.starts_with("__thaw_class_identity_\u{1e}"))
+                && Self::fixed_object_supports_live_projection(ty))
+        {
+            let projected = self.coerce_to_declared(&HirType::Json, native)?;
+            return self.strict_json_pair(json, projected);
+        }
         let handle = Self::strict_json_handle(json.clone());
         let live = self.strict_handle_vs_native(Self::strict_handle_value(handle.clone()), native.clone(), ty)?;
         let plain = match ty {

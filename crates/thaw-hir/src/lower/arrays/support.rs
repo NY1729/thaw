@@ -765,8 +765,46 @@ impl<'a> FnLowerer<'a> {
             ));
         }
         let available = [element_type.clone(), HirType::F64, array_type.clone()];
+        // A fixed local callback with a declared numeric/string parameter
+        // keeps its own ABI. The array loop already adapts sparse primitive
+        // reads at the call site; normalizing the callback here instead
+        // would route Optional<F64> through the general declared-value
+        // coercion and reject a valid `number` parameter.
+        let direct_fixed_primitive_callback = if let Expr::Ident(ident) = expr {
+            let name = self.resolve_binding(ident.sym.as_ref());
+            let is_template = self.generic_arrows.contains_key(&name)
+                || self.generic_named_templates.contains_key(&name);
+            let has_rest = self.signatures.get(&name)
+                .is_some_and(|signature| signature.native_rest.is_some());
+            !is_template && !has_rest && self.scope.get(&name).is_some_and(|ty| {
+                let HirType::Function(params, _) = ty else { return false };
+                if params.len() != arity || params.len() > available.len() {
+                    return false;
+                }
+                let supported = params.iter().zip(&available).all(|(declared, supplied)| {
+                    declared == supplied
+                        || matches!((declared, supplied),
+                            (HirType::F64, HirType::Optional(payload)) if **payload == HirType::F64)
+                        || matches!((declared, supplied),
+                            (HirType::Str, HirType::Optional(payload)) if **payload == HirType::Str)
+                });
+                let needs_primitive_adapter = params.iter().zip(&available).any(|(declared, supplied)| {
+                    matches!((declared, supplied),
+                        (HirType::F64, HirType::Optional(payload)) if **payload == HirType::F64)
+                        || matches!((declared, supplied),
+                        (HirType::Str, HirType::Optional(payload)) if **payload == HirType::Str)
+                });
+                supported && needs_primitive_adapter
+            })
+        } else {
+            false
+        };
         self.sparse_mapping_result = true;
-        let result = self.lower_promise_callback(expr, &available[..arity], None);
+        let result = if direct_fixed_primitive_callback {
+            self.lower_expr(expr)
+        } else {
+            self.lower_promise_callback(expr, &available[..arity], None)
+        };
         self.sparse_mapping_result = false;
         result
     }
