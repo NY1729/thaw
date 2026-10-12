@@ -4,6 +4,20 @@ impl<'ctx> HirCompiler<'ctx> {
         callee: &HirExpr,
         args: &[HirExpr],
     ) -> Result<BasicValueEnum<'ctx>, String> {
+        // A zero-argument identity lambda over its sole JsValue capture is
+        // exactly the captured value. Inline this pure case before closure
+        // construction so it does not promote/retain a capture environment.
+        if let HirExpr::Lambda(captures, params, ret, body) = callee {
+            if captures.len() == 1
+                && captures[0].ty == HirType::JsValue
+                && params.is_empty()
+                && *ret == HirType::JsValue
+                && args.is_empty()
+                && matches!(body.as_ref(), HirExpr::Var(name) if name == &captures[0].name)
+            {
+                return self.compile_expr(body);
+            }
+        }
         if let HirExpr::Lambda(_, params, ret, _) = callee {
             let parameter_types = params
                 .iter()
