@@ -935,6 +935,32 @@ impl<'ctx> HirCompiler<'ctx> {
         handles: &[PointerValue<'ctx>],
         direct_handles: &[IntValue<'ctx>],
     ) -> Result<BasicValueEnum<'ctx>, String> {
+        self.compile_check_json_stringify_error_inner(
+            result, cleanup, graph_strings, handles, direct_handles, false,
+        )
+    }
+
+    pub(super) fn compile_check_json_graph_result_error(
+        &mut self,
+        result: BasicValueEnum<'ctx>,
+        cleanup: &[BasicValueEnum<'ctx>],
+        handles: &[PointerValue<'ctx>],
+        direct_handles: &[IntValue<'ctx>],
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        self.compile_check_json_stringify_error_inner(
+            result, cleanup, &[], handles, direct_handles, true,
+        )
+    }
+
+    fn compile_check_json_stringify_error_inner(
+        &mut self,
+        result: BasicValueEnum<'ctx>,
+        cleanup: &[BasicValueEnum<'ctx>],
+        graph_strings: &[BasicValueEnum<'ctx>],
+        handles: &[PointerValue<'ctx>],
+        direct_handles: &[IntValue<'ctx>],
+        graph_result: bool,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
         let error = self.builder.build_call(
             self.module.get_function("thaw_json_take_stringify_error").unwrap(),
             &[], "json_stringify_error",
@@ -949,6 +975,12 @@ impl<'ctx> HirCompiler<'ctx> {
         self.builder.build_conditional_branch(failed, invalid, valid)
             .map_err(|error| error.to_string())?;
         self.builder.position_at_end(invalid);
+        if graph_result {
+            self.builder.build_call(
+                self.module.get_function("thaw_json_discard_graph_wire").unwrap(),
+                &[result.into()], "release_failed_graph_result_grant",
+            ).map_err(|error| error.to_string())?;
+        }
         self.builder.build_call(
             self.module.get_function("thaw_cstring_destroy").unwrap(),
             &[result.into()], "discard_cyclic_json",
@@ -979,6 +1011,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 &[(*handle).into()], "release_failed_projection_builder")
                 .map_err(|error| error.to_string())?;
         }
+        self.release_live_native_projection_ledgers_before_throw()?;
         self.compile_throw_builtin_error("TypeError", "Converting circular structure to JSON")?;
         self.builder.position_at_end(valid);
         let host_error = self.builder.build_call(
@@ -993,6 +1026,12 @@ impl<'ctx> HirCompiler<'ctx> {
         self.builder.build_conditional_branch(has_host_error, host_failed, host_valid)
             .map_err(|error| error.to_string())?;
         self.builder.position_at_end(host_failed);
+        if graph_result {
+            self.builder.build_call(
+                self.module.get_function("thaw_json_discard_graph_wire").unwrap(),
+                &[result.into()], "release_failed_graph_result_grant",
+            ).map_err(|error| error.to_string())?;
+        }
         self.builder.build_call(self.module.get_function("thaw_cstring_destroy").unwrap(),
             &[result.into()], "discard_failed_host_stringify")
             .map_err(|error| error.to_string())?;

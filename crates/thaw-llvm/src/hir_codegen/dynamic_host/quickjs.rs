@@ -73,7 +73,9 @@ impl<'ctx> HirCompiler<'ctx> {
             .try_as_basic_value()
             .basic()
             .unwrap();
+        self.begin_fresh_event_key_argument_scope();
         let assigned = self.compile_expr(assigned)?;
+        let fresh_handles = self.finish_fresh_event_key_argument_scope()?;
         self.compile_typed_dynamic_argument(array, assigned, assigned_type)?;
         let property = dynamic_member_name(&signature.symbol, false)
             .ok_or("invalid typed QuickJS setter symbol")?;
@@ -92,7 +94,11 @@ impl<'ctx> HirCompiler<'ctx> {
             .try_as_basic_value()
             .basic()
             .unwrap();
-        let args_json = self.compile_check_json_stringify_error_with_cleanup(args_json, &[array])?;
+        let raw_fresh_handles = Self::fresh_event_key_raw_handles(&fresh_handles);
+        let args_json = self.compile_check_json_stringify_error_with_inputs_and_handles(
+            args_json, &[array], &[], &[], &raw_fresh_handles,
+        )?;
+        self.release_fresh_event_key_handles(&fresh_handles)?;
         let result = self
             .builder
             .build_call(

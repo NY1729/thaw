@@ -2532,6 +2532,7 @@ impl<'ctx> HirCompiler<'ctx> {
         for (name, value_type) in [
             ("thaw_json_array_push_number", f64_type.into()),
             ("thaw_json_array_push_string", i8_ptr.into()),
+            ("thaw_json_array_push_native_wtf8_string", i8_ptr.into()),
             ("thaw_json_array_push_bool", self.context.i8_type().into()),
             ("thaw_json_array_push_json", i8_ptr.into()),
         ] {
@@ -2810,6 +2811,11 @@ impl<'ctx> HirCompiler<'ctx> {
         self.module.add_function(
             "thaw_js_retain_json_result",
             handle_result_type.fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_js_event_key_handle_result",
+            handle_result_type.fn_type(&[i8_ptr.into(), self.context.i8_type().into()], false),
             Some(Linkage::External),
         );
         self.module.add_function(

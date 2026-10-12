@@ -24,6 +24,24 @@ fn promise_resolve_value_fits(actual: &HirType, resolved: &HirType) -> bool {
     }
 }
 
+fn native_type_contains_symbol(ty: &HirType) -> bool {
+    match ty {
+        HirType::Symbol => true,
+        // Dictionary is physically a boxed Json value, not a native
+        // key/value buffer. Its values cannot carry this native Symbol ABI;
+        // leave it on the pre-existing Json projection route.
+        HirType::Array(element) | HirType::Optional(element)
+        | HirType::Nullable(element) | HirType::Nullish(element) => {
+            native_type_contains_symbol(element)
+        }
+        HirType::Tuple(elements) | HirType::Union(elements) => {
+            elements.iter().any(native_type_contains_symbol)
+        }
+        HirType::Object(fields) => fields.iter().any(|(_, field)| native_type_contains_symbol(field)),
+        _ => false,
+    }
+}
+
 fn absent_after(value: HirExpr, absent: HirExpr) -> HirExpr {
     if matches!(value, HirExpr::Lit(_)) {
         absent
@@ -456,6 +474,14 @@ impl<'a> FnLowerer<'a> {
             }
         }
         let inferred = self.infer_expr_type(&value)?;
+        if *declared == HirType::JsValue
+            && (inferred == HirType::Str || inferred == HirType::Symbol)
+        {
+            return Ok(HirExpr::Call(
+                Box::new(HirExpr::Var("retainEventKey".to_string())),
+                vec![value, HirExpr::Lit(HirLit::Bool(inferred == HirType::Symbol))],
+            ));
+        }
         // A callback value whose parameter object types are a width-subtype
         // (prefix) of the declared callback's -- e.g. a `createServer`
         // handler annotated with a narrower request/response than
@@ -491,6 +517,12 @@ impl<'a> FnLowerer<'a> {
                 HirType::Array(_) | HirType::Tuple(_) | HirType::Object(_) | HirType::Dictionary(_)
             )
         {
+            if native_type_contains_symbol(&inferred) {
+                return Ok(HirExpr::Call(
+                    Box::new(HirExpr::Var("retainDynamicNative".to_string())),
+                    vec![value],
+                ));
+            }
             let json = self.coerce_to_declared(&HirType::Json, value)?;
             return Ok(HirExpr::Call(
                 Box::new(HirExpr::Var("retainDynamicJson".to_string())),

@@ -650,11 +650,13 @@ impl<'ctx> HirCompiler<'ctx> {
                     .build_store(self.pending_exception().as_pointer_value(), val)
                     .map_err(|e| e.to_string())?;
                 if let Some(catch) = self.catch_stack.last().cloned() {
+                    self.emit_fresh_event_key_cleanup_before_catch(Some(self.catch_stack.len() - 1))?;
                     self.emit_stack_promise_cleanup_except(&catch.promise_boundary)?;
                     self.builder
                         .build_unconditional_branch(catch.target)
                         .map_err(|e| e.to_string())?;
                 } else {
+                    self.emit_fresh_event_key_cleanup_before_catch(None)?;
                     self.build_default_return()?;
                 }
                 Ok(true)
