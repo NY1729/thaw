@@ -198,7 +198,10 @@ impl<'ctx> HirCompiler<'ctx> {
                         | "__thaw_json_receiver_number"
                         | "__thaw_json_receiver_bool"
                         | "__thaw_json_receiver_string"
-                        | "__thaw_json_receiver_bigint" => return Some(HirType::Json),
+                        | "__thaw_json_receiver_bigint"
+                        | "__thaw_json_from_consumed_dynamic"
+                        | "__thaw_json_host_from_dynamic"
+                        | "__thaw_json_host_from_borrowed_dynamic" => return Some(HirType::Json),
                         // `Object.keys`/`Object.getOwnPropertyNames`/
                         // `Reflect.ownKeys` on a `Json`/`Dictionary`/
                         // array receiver, and the array-receiver variant
