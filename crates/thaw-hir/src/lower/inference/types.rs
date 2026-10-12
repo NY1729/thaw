@@ -196,7 +196,72 @@ fn callable_value_compatible(expected: &HirType, actual: &HirType) -> bool {
                     None => params.len() == fixed.len(),
                 }
         }
+        (
+            HirType::CallableFunction(
+                expected_fixed,
+                expected_optional,
+                Some(expected_rest),
+                expected_ret,
+            ),
+            HirType::CallableFunction(actual_fixed, actual_optional, Some(actual_rest), ret),
+        ) => {
+            expected_optional.is_empty()
+                && actual_optional.is_empty()
+                && expected_rest == actual_rest
+                && callable_return_compatible(expected_ret, ret)
+                && actual_fixed.len() >= expected_fixed.len()
+                && expected_fixed
+                    .iter()
+                    .zip(actual_fixed)
+                    .all(|(expected, actual)| callback_param_compatible(expected, actual))
+                && actual_fixed[expected_fixed.len()..]
+                    .iter()
+                    .all(|actual| callback_param_compatible(expected_rest, actual))
+        }
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod callable_compatibility_tests {
+    use super::*;
+
+    fn rest_callable(fixed: Vec<HirType>, rest: HirType, ret: HirType) -> HirType {
+        HirType::CallableFunction(
+            fixed,
+            HirOptionalMask::Inline(0),
+            Some(Box::new(rest)),
+            Box::new(ret),
+        )
+    }
+
+    #[test]
+    fn accepts_compatible_actual_rest_callables_and_rejects_mismatches() {
+        let json_rest = rest_callable(vec![], HirType::Json, HirType::Void);
+        assert!(callable_value_compatible(
+            &json_rest,
+            &rest_callable(vec![HirType::Json], HirType::Json, HirType::Void),
+        ));
+        assert!(callable_value_compatible(
+            &rest_callable(vec![HirType::Str], HirType::Json, HirType::Void),
+            &rest_callable(
+                vec![HirType::Str, HirType::Json],
+                HirType::Json,
+                HirType::Void,
+            ),
+        ));
+        assert!(!callable_value_compatible(
+            &rest_callable(vec![HirType::Str], HirType::Json, HirType::Void),
+            &rest_callable(vec![HirType::Json, HirType::Json], HirType::Json, HirType::Void),
+        ));
+        assert!(!callable_value_compatible(
+            &json_rest,
+            &rest_callable(vec![HirType::Json], HirType::Str, HirType::Void),
+        ));
+        assert!(!callable_value_compatible(
+            &rest_callable(vec![HirType::Json], HirType::Json, HirType::Str),
+            &rest_callable(vec![HirType::Json], HirType::Json, HirType::Void),
+        ));
     }
 }
 

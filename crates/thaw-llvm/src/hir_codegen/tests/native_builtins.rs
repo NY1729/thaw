@@ -12176,3 +12176,96 @@ fn callback_annotated_with_a_subset_of_fields_writes_through_to_the_supplied_obj
         "7 2 x!\n"
     );
 }
+#[test]
+fn captured_fixed_two_argument_callback_alias_keeps_native_registration_type() {
+    use thaw_hir::{HirExpr, HirFunction, HirParam, HirProgram, HirStmt, HirType};
+
+    let callback_type = HirType::Function(
+        vec![HirType::Str, HirType::F64],
+        Box::new(HirType::Void),
+    );
+    let adapted_type = HirType::Function(
+        vec![HirType::Json, HirType::Json],
+        Box::new(HirType::Void),
+    );
+    let callback_param = HirParam { name: "callback".into(), ty: callback_type.clone() };
+    let adapter_callback = HirParam { name: "callback".into(), ty: callback_type.clone() };
+    let first = HirParam { name: "first".into(), ty: HirType::Json };
+    let second = HirParam { name: "second".into(), ty: HirType::Json };
+    let adapter = HirExpr::Lambda(
+        vec![adapter_callback],
+        vec![first.clone(), second.clone()],
+        HirType::Void,
+        Box::new(HirExpr::Block(vec![
+            HirStmt::Expr(HirExpr::Call(
+                Box::new(HirExpr::Var("callback".into())),
+                vec![
+                    HirExpr::JsonAsString(Box::new(HirExpr::Var(first.name))),
+                    HirExpr::JsonAsNumber(Box::new(HirExpr::Var(second.name))),
+                ],
+            )),
+            HirStmt::Return(None),
+        ])),
+    );
+    let binder = HirExpr::Lambda(
+        vec![],
+        vec![callback_param],
+        adapted_type,
+        Box::new(HirExpr::Block(vec![HirStmt::Return(Some(adapter))])),
+    );
+    let adapted = HirExpr::Call(
+        Box::new(binder),
+        vec![HirExpr::Var("original".into())],
+    );
+    let aliased = HirExpr::Call(
+        Box::new(HirExpr::Var("__thaw_closure_alias".into())),
+        vec![adapted, HirExpr::Var("original".into())],
+    );
+    let program = HirProgram {
+        functions: vec![
+            HirFunction {
+                name: "fixed".into(),
+                params: vec![
+                    HirParam { name: "value".into(), ty: HirType::Str },
+                    HirParam { name: "count".into(), ty: HirType::F64 },
+                ],
+                ret: HirType::Void,
+                is_async: false,
+                body: vec![HirStmt::Return(None)],
+            },
+            HirFunction {
+                name: "main".into(),
+                params: vec![],
+                ret: HirType::Void,
+                is_async: false,
+                body: vec![
+                    HirStmt::Let(
+                        "original".into(),
+                        callback_type,
+                        HirExpr::FunctionRef(
+                            "fixed".into(),
+                            vec![HirType::Str, HirType::F64],
+                            HirType::Void,
+                        ),
+                    ),
+                    HirStmt::Expr(HirExpr::Call(
+                        Box::new(HirExpr::Var("registerNativeCallback".into())),
+                        vec![aliased],
+                    )),
+                ],
+            },
+        ],
+        ..HirProgram::default()
+    };
+
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "captured_callback_alias_type");
+    compiler.compile_program(&program).unwrap();
+    let ir = compiler.print_to_string();
+    assert!(
+        ir.lines().any(|line| {
+            line.contains("call ") && line.contains("@thaw_js_register_native_callback(")
+        }),
+        "{ir}"
+    );
+}
