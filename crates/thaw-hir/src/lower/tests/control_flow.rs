@@ -758,6 +758,68 @@ fn thaw_unmatched_source_transfers_keep_their_diagnostics() {
     continue_stmt.label = Some(outer.label.clone());
     assert!(lower_module(&nested).unwrap_err().contains("unknown continue label `outer`"));
 
+    let same_name_continue = thaw_parser::parse_typescript(
+        "function main() { outer: while (true) { function inner() { inner: while (true) { continue inner; } } } }",
+    ).expect("same-name function and label control is valid TypeScript");
+    assert!(lower_module(&same_name_continue).is_ok(), "a label reference must not make the named function recursive");
+
+    let recursive_expression = thaw_parser::parse_typescript(
+        "const f = function inner(n: number): number { return n ? inner(n - 1) : 0; };",
+    ).expect("true named-function recursion control is valid TypeScript");
+    let ModuleItem::Stmt(Stmt::Decl(Decl::Var(declaration))) = &recursive_expression.body[0] else { panic!("expected variable declaration"); };
+    let Expr::Fn(recursive_function) = declaration.decls[0].init.as_ref().expect("function initializer").as_ref() else { panic!("expected named function expression"); };
+    assert!(named_function_is_recursive(recursive_function), "a value reference to the function name must remain recursive");
+
+    let mut nested_unlabelled_break = thaw_parser::parse_typescript(
+        "function main() { outer: while (true) { function inner() { while (true) { break; } } } }",
+    ).expect("valid nested-function break setup");
+    let ModuleItem::Stmt(Stmt::Decl(Decl::Fn(main))) = &mut nested_unlabelled_break.body[0] else { panic!("expected main"); };
+    let Stmt::Labeled(outer) = &mut main.function.body.as_mut().unwrap().stmts[0] else { panic!("expected outer label"); };
+    let Stmt::While(outer_loop) = outer.body.as_mut() else { panic!("expected outer loop"); };
+    let Stmt::Block(outer_body) = outer_loop.body.as_mut() else { panic!("expected outer body"); };
+    let Stmt::Decl(Decl::Fn(inner)) = &mut outer_body.stmts[0] else { panic!("expected inner function"); };
+    let inner_stmts = &mut inner.function.body.as_mut().unwrap().stmts;
+    let Stmt::While(inner_loop) = &inner_stmts[0] else { panic!("expected valid inner loop"); };
+    let Stmt::Block(inner_body) = inner_loop.body.as_ref() else { panic!("expected inner body"); };
+    let transfer = inner_body.stmts[0].clone();
+    inner_stmts[0] = transfer;
+    assert!(lower_module(&nested_unlabelled_break).unwrap_err().contains("`break` used outside a loop or switch"));
+
+    let restored_outer_label = thaw_parser::parse_typescript(
+        "function main() { outer: while (true) { function inner() { outer: while (true) { continue outer; } } continue outer; } }",
+    ).expect("nested functions have their own labels and restore the outer loop context");
+    assert!(lower_module(&restored_outer_label).is_ok(), "nested label reuse and the outer continue after the function both lower");
+
+    fn outer_label(module: &swc_ecma_ast::Module) -> swc_ecma_ast::Ident {
+        let ModuleItem::Stmt(Stmt::Decl(Decl::Fn(main))) = &module.body[0] else { panic!("expected main"); };
+        let Stmt::Labeled(label) = &main.function.body.as_ref().unwrap().stmts[0] else { panic!("expected outer label"); };
+        label.label.clone()
+    }
+    struct RetargetContinue {
+        target: swc_ecma_ast::Ident,
+    }
+    impl swc_ecma_visit::VisitMut for RetargetContinue {
+        fn visit_mut_continue_stmt(&mut self, statement: &mut swc_ecma_ast::ContinueStmt) {
+            if statement.label.is_some() {
+                statement.label = Some(self.target.clone());
+            }
+        }
+    }
+    for (form, source) in [
+        ("anonymous function", "function main() { outer: while (true) { const inner = function() { inner: while (true) { continue inner; } }; } }"),
+        ("arrow", "function main() { outer: while (true) { const inner = () => { inner: while (true) { continue inner; } }; } }"),
+        ("async arrow", "function main() { outer: while (true) { const inner = async () => { inner: while (true) { continue inner; } }; } }"),
+        ("contextual arrow", "function main() { outer: while (true) { const inner: () => void = () => { inner: while (true) { continue inner; } }; } }"),
+        ("generator function", "function main() { outer: while (true) { const inner = function*(): Generator<number> { inner: while (true) { continue inner; } yield 1; }; } }"),
+    ] {
+        let valid = thaw_parser::parse_typescript(source).expect("valid nested closure transfer setup");
+        assert!(lower_module(&valid).is_ok(), "{form} with its own labeled continue lowers");
+        let mut invalid = valid;
+        let target = outer_label(&invalid);
+        invalid.visit_mut_with(&mut RetargetContinue { target });
+        assert_eq!(lower_module(&invalid).unwrap_err(), "unknown continue label `outer`", "{form} cannot target an enclosing function label");
+    }
+
     let mut nested_unnamed = thaw_parser::parse_typescript(
         "function main() { outer: while (true) { function inner() { while (true) { continue; } } } }",
     ).expect("valid nested-function setup");
