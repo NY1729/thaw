@@ -338,3 +338,49 @@ include!("tests/native_builtins.rs");
 include!("tests/ffi.rs");
 include!("tests/types.rs");
 include!("tests/values.rs");
+
+#[test]
+fn immediate_jsvalue_identity_lambda_reads_capture_without_retaining_environment() {
+    let value = HirParam {
+        name: "value".into(),
+        ty: HirType::JsValue,
+    };
+    let program = HirProgram {
+        functions: vec![HirFunction {
+            name: "immediate_capture".into(),
+            params: vec![value.clone()],
+            ret: HirType::JsValue,
+            is_async: false,
+            body: vec![HirStmt::Return(Some(HirExpr::Call(
+                Box::new(HirExpr::Lambda(
+                    vec![value.clone()],
+                    Vec::new(),
+                    HirType::JsValue,
+                    Box::new(HirExpr::Var("value".into())),
+                )),
+                Vec::new(),
+            )))],
+        }],
+        ..HirProgram::default()
+    };
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "immediate_capture");
+    compiler.compile_program(&program).unwrap();
+    let ir = compiler.print_to_string();
+    let symbol = ir.find("@immediate_capture(").unwrap();
+    let start = ir[..symbol].rfind("define ").unwrap();
+    let end = ir[symbol..].find("\n}").map(|offset| symbol + offset).unwrap();
+    let function_ir = &ir[start..end];
+    assert!(
+        function_ir.contains("load i64"),
+        "expected the original JsValue parameter to be read: {function_ir}"
+    );
+    assert!(
+        !function_ir.contains("thaw_js_retain_handle"),
+        "identity capture must not retain an environment: {function_ir}"
+    );
+    assert!(
+        !function_ir.contains("__thaw_lambda_"),
+        "identity capture must not construct a closure: {function_ir}"
+    );
+}
