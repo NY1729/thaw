@@ -200,21 +200,38 @@ fn flat_map_snapshots_each_shared_callback_array_inside_the_map_loop() {
                 let HirType::Array(snapshot_type) = allocation.0 else { continue };
                 let HirType::Array(final_element) = snapshot_type.as_ref() else { continue };
                 assert_eq!(allocation.1, snapshot_type.as_ref(), "destination allocates snapshots");
+                let expected_snapshot_element = match function.name.as_str() {
+                    "jsonResult" | "tupleResult" => HirType::Json,
+                    "scalarResult" | "mixedResult" => HirType::Optional(Box::new(HirType::F64)),
+                    "voidResult" => HirType::Undefined,
+                    _ => HirType::F64,
+                };
+                assert_eq!(**final_element, expected_snapshot_element,
+                    "snapshot retains the actual flatMap element type: {}", function.name);
                 if **final_element == HirType::Json {
-                    assert!(matches!(snapshot, HirExpr::Call(callee, _) if matches!(callee.as_ref(), HirExpr::Var(name) if name == "__thaw_any_array_flat")), "Json snapshot uses runtime array flattening: {snapshot:?}");
+                    assert!(matches!(snapshot.as_ref(), HirExpr::Call(callee, _) if matches!(callee.as_ref(), HirExpr::Var(name) if name == "__thaw_any_array_flat")), "Json snapshot uses runtime array flattening: {snapshot:?}");
                 } else {
                     assert!(has_snapshot_allocation(snapshot, final_element.as_ref()), "snapshot allocation has the final element type: {snapshot:?}");
                 }
-                assert_eq!(function.ret, HirType::Array(final_element.clone()), "outer flatten returns the snapshot element type");
+                let expected_public_element = match function.name.as_str() {
+                    "jsonResult" | "tupleResult" => HirType::Json,
+                    "scalarResult" | "mixedResult" | "flat" | "flatLength" | "unionReceiver" | "spreadArgument" => HirType::F64,
+                    "voidResult" => HirType::Undefined,
+                    _ => unreachable!(),
+                };
+                assert_eq!(function.ret, HirType::Array(Box::new(expected_public_element.clone())),
+                    "public return keeps the declared array element type: {}", function.name);
                 assert!(matches!(body.get(1), Some(HirStmt::Expr(HirExpr::Assign(_, _)))), "source index advances after the callback and snapshot branch");
                 assert!(matches!(present.get(callback_position + 1), Some(HirStmt::Expr(HirExpr::IndexAssign(_, _, _)))));
                 match function.name.as_str() {
                     "flat" | "flatLength" | "unionReceiver" | "spreadArgument" => assert_eq!(callback_type, &HirType::Array(Box::new(HirType::F64))),
-                    "jsonResult" => assert_eq!(callback_type, &HirType::Json),
+                    "jsonResult" => assert_eq!(callback_type, &HirType::Optional(Box::new(HirType::Json))),
                     "tupleResult" => assert_eq!(callback_type, &HirType::Tuple(vec![HirType::F64, HirType::F64])),
-                    "scalarResult" => assert_eq!(callback_type, &HirType::F64),
+                    "scalarResult" => assert_eq!(callback_type, &HirType::Optional(Box::new(HirType::F64))),
                     "voidResult" => assert_eq!(callback_type, &HirType::Undefined),
-                    "mixedResult" => assert!(matches!(callback_type, HirType::Union(members) if members.contains(&HirType::F64) && members.contains(&HirType::Array(Box::new(HirType::F64))))),
+                    "mixedResult" => assert!(matches!(callback_type, HirType::Union(members)
+                        if members.contains(&HirType::Optional(Box::new(HirType::F64)))
+                            && members.contains(&HirType::Array(Box::new(HirType::Optional(Box::new(HirType::F64))))))),
                     _ => unreachable!(),
                 }
                 found = true;
@@ -250,6 +267,656 @@ fn flat_map_snapshots_each_shared_callback_array_inside_the_map_loop() {
         }
     });
     assert!(direct_map, "plain map stores the callback's Array<F64> directly");
+}
+
+#[test]
+fn flat_map_normalizes_sparse_wrapped_json_before_runtime_flattening() {
+    let program = lower(
+        r#"
+            function identity(values: Json[]): Json[] {
+                return values.flatMap(value => value);
+            }
+            function mixed(values: Json[]): Json[] {
+                return values.flatMap(value => value === null ? [value] : value);
+            }
+            function naturalNullable(values: Json[]): Json[] {
+                return values.flatMap(value => value === undefined ? null : value);
+            }
+            function naturalNullish(values: Json[]): Json[] {
+                return values.flatMap(value => value === null ? undefined : value);
+            }
+            function nullableTyped(values: Json[]): Json[] {
+                const callback: (value: Json) => Json | null = value => value === null ? null : value;
+                return values.flatMap(callback);
+            }
+            function nullishTyped(values: Json[]): Json[] {
+                const callback: (value: Json) => Json | null | undefined = value => value === null ? null : value === undefined ? undefined : value;
+                return values.flatMap(callback);
+            }
+            function scalarResult(values: number[]): number[] {
+                return values.flatMap(value => value);
+            }
+            function mixedResult(values: number[]): number[] {
+                return values.flatMap(value => value === 0 ? [value] : value);
+            }
+            function namedMap(values: number[]): number[] {
+                const callback: (value: number) => number = value => value + 1;
+                return values.map(callback);
+            }
+            function namedFlatMap(values: number[]): number[] {
+                const callback: (value: number) => number = value => value + 1;
+                return values.flatMap(callback);
+            }
+        "#,
+    );
+
+    #[derive(Clone)]
+    struct CallbackBinding {
+        binding_name: String,
+        parameters: Vec<HirType>,
+        result: HirType,
+        actual_parameter: Option<String>,
+        actual_parameters: Vec<HirType>,
+        actual_result: Option<HirType>,
+        actual_source: HirExpr,
+    }
+    #[derive(Clone)]
+    struct NumberAdapter {
+        parameter_name: String,
+        parameter_type: HirType,
+        result_type: HirType,
+        source: HirExpr,
+        body: HirExpr,
+    }
+    #[derive(Clone)]
+    struct MapRoute {
+        receiver_name: String,
+        receiver_type: HirType,
+        receiver_source: HirExpr,
+        callback_bindings: Vec<CallbackBinding>,
+        callback_calls: Vec<(String, Vec<HirExpr>)>,
+        typed_indices: Vec<(String, HirType)>,
+        map_element_bindings: Vec<(String, HirType, Vec<(String, HirType)>)>,
+        optional_none_names: Vec<String>,
+        optional_value_names: Vec<String>,
+    }
+    #[derive(Default)]
+    struct Observed {
+        normalizers: Vec<(HirType, HirType)>,
+        typed_indices: Vec<(String, HirType)>,
+        map_element_bindings: Vec<(String, HirType, Vec<(String, HirType)>)>,
+        map_callback_bindings: Vec<CallbackBinding>,
+        map_callback_calls: Vec<(String, Vec<HirExpr>)>,
+        map_routes: Vec<MapRoute>,
+        number_adapters: Vec<NumberAdapter>,
+        optional_none_names: Vec<String>,
+        optional_value_names: Vec<String>,
+        flat_inputs: Vec<(Option<f64>, Vec<HirType>, Option<String>)>,
+        flat_map_callback_snapshots: Vec<(String, HirType, String, HirExpr)>,
+        flat_result_bindings: Vec<(String, HirType, HirType)>,
+        variables: Vec<String>,
+    }
+    fn visit_expr(expression: &HirExpr, observed: &mut Observed, collect_allocations: bool) {
+        if collect_allocations {
+            if let HirExpr::ArrayAlloc(_, element) = expression {
+                observed.flat_inputs.last_mut().unwrap().1.push(element.clone());
+            }
+        }
+        match expression {
+            HirExpr::Var(name) => observed.variables.push(name.clone()),
+            HirExpr::Lambda(_, parameters, result, body) => {
+                if let Some(parameter) = parameters.first().filter(|parameter| parameter.name.starts_with("__thaw_flat_map_any_normalize_")) {
+                    observed.normalizers.push((parameter.ty.clone(), result.clone()));
+                }
+                visit_expr(body, observed, collect_allocations);
+            }
+            HirExpr::TypedClosure(_, body) | HirExpr::NonArrowFunction(body) | HirExpr::RecursiveClosure(_, _, body) => {
+                visit_expr(body, observed, collect_allocations);
+            }
+            HirExpr::Call(callee, arguments) => {
+                if let HirExpr::Lambda(_, parameters, result, body) = callee.as_ref() {
+                    if let Some(parameter) = parameters.first().filter(|parameter| parameter.name.starts_with("__thaw_number_optional_")) {
+                        if arguments.len() == 1 {
+                            let source = &arguments[0];
+                            observed.number_adapters.push(NumberAdapter {
+                                parameter_name: parameter.name.clone(),
+                                parameter_type: parameter.ty.clone(),
+                                result_type: result.clone(),
+                                source: source.clone(),
+                                body: body.as_ref().clone(),
+                            });
+                        }
+                    }
+                }
+                if let HirExpr::Var(name) = callee.as_ref() {
+                    if name.starts_with("__thaw_map_callback_") {
+                        observed.map_callback_calls.push((name.clone(), arguments.clone()));
+                    }
+                }
+                if matches!(callee.as_ref(), HirExpr::Var(name) if name == "__thaw_any_array_flat") {
+                    let depth = arguments.get(1).and_then(|argument| match argument {
+                        HirExpr::Lit(HirLit::F64(value)) => Some(*value),
+                        _ => None,
+                    });
+                    let direct_binding = arguments.first().and_then(|input| match input {
+                        HirExpr::ArrayLit(elements) if elements.len() == 1 => match &elements[0] {
+                            HirExpr::Var(name) => Some(name.clone()),
+                            _ => None,
+                        },
+                        _ => None,
+                    });
+                    observed.flat_inputs.push((depth, Vec::new(), direct_binding));
+                    if let Some(input) = arguments.first() { visit_expr(input, observed, true); }
+                    for argument in arguments.iter().skip(1) { visit_expr(argument, observed, collect_allocations); }
+                } else {
+                    if let HirExpr::Lambda(_, parameters, _, body) = callee.as_ref() {
+                        for parameter in parameters {
+                            if !parameter.name.starts_with("__thaw_map_callback_") { continue; }
+                            let HirType::Function(callback_parameters, callback_result) = &parameter.ty else { continue };
+                            if let Some(argument) = arguments.first() {
+                                let (actual_parameter, actual_parameters, actual_result) = match argument {
+                                    HirExpr::Lambda(_, actual_parameters, actual_result, _) => (
+                                        actual_parameters.first().map(|parameter| parameter.name.clone()),
+                                        actual_parameters.iter().map(|parameter| parameter.ty.clone()).collect(),
+                                        Some(actual_result.clone()),
+                                    ),
+                                    _ => (None, Vec::new(), None),
+                                };
+                                observed.map_callback_bindings.push(CallbackBinding {
+                                    binding_name: parameter.name.clone(),
+                                    parameters: callback_parameters.clone(),
+                                    result: callback_result.as_ref().clone(),
+                                    actual_parameter,
+                                    actual_parameters,
+                                    actual_result,
+                                    actual_source: argument.clone(),
+                                });
+                            }
+                        }
+                        if let Some(receiver) = parameters.iter().find(|parameter| parameter.name.starts_with("__thaw_map_receiver_")) {
+                            let mut body_observed = Observed::default();
+                            visit_expr(body, &mut body_observed, false);
+                            if let Some(source) = arguments.first() {
+                                observed.map_routes.push(MapRoute {
+                                    receiver_name: receiver.name.clone(),
+                                    receiver_type: receiver.ty.clone(),
+                                    receiver_source: source.clone(),
+                                    callback_bindings: body_observed.map_callback_bindings,
+                                    callback_calls: body_observed.map_callback_calls,
+                                    typed_indices: body_observed.typed_indices,
+                                    map_element_bindings: body_observed.map_element_bindings,
+                                    optional_none_names: body_observed.optional_none_names,
+                                    optional_value_names: body_observed.optional_value_names,
+                                });
+                            }
+                        }
+                    }
+                    visit_expr(callee, observed, collect_allocations);
+                    for argument in arguments { visit_expr(argument, observed, collect_allocations); }
+                }
+            }
+            HirExpr::FunctionCallWithThis(callee, this_arg, arguments, _, _) => {
+                visit_expr(callee, observed, collect_allocations);
+                visit_expr(this_arg, observed, collect_allocations);
+                for argument in arguments { visit_expr(argument, observed, collect_allocations); }
+            }
+            HirExpr::Block(statements) => visit_statements(statements, observed, collect_allocations),
+            HirExpr::Conditional(test, yes, no, _) => {
+                visit_expr(test, observed, collect_allocations);
+                visit_expr(yes, observed, collect_allocations);
+                visit_expr(no, observed, collect_allocations);
+            }
+            HirExpr::BinOp(_, test, yes)
+            | HirExpr::EvalThen(test, yes)
+            | HirExpr::Index(test, yes)
+            | HirExpr::JsonKey(test, yes)
+            | HirExpr::JsonIndex(test, yes) => {
+                visit_expr(test, observed, collect_allocations);
+                visit_expr(yes, observed, collect_allocations);
+            }
+            HirExpr::TypedIndex(array, index, ty) => {
+                if let HirExpr::Var(name) = array.as_ref() {
+                    observed.typed_indices.push((name.clone(), ty.clone()));
+                }
+                visit_expr(array, observed, collect_allocations);
+                visit_expr(index, observed, collect_allocations);
+            }
+            HirExpr::ArrayLit(values) | HirExpr::DynamicCall(_, values) => {
+                for value in values { visit_expr(value, observed, collect_allocations); }
+            }
+            HirExpr::ArrayAlloc(length, _) | HirExpr::ArrayLen(length)
+            | HirExpr::OptionalSome(length, _)
+            | HirExpr::NullableSome(length, _)
+            | HirExpr::NullableIsNone(length, _) | HirExpr::NullableValue(length, _)
+            | HirExpr::NullishSome(length, _) | HirExpr::NullishIsNull(length, _)
+            | HirExpr::NullishIsUndefined(length, _) | HirExpr::NullishIsNone(length, _)
+            | HirExpr::NullishValue(length, _) | HirExpr::UnionInject(length, _, _)
+            | HirExpr::UnionTag(length, _) | HirExpr::UnionValue(length, _, _)
+            | HirExpr::JsValueAsJson(length) | HirExpr::JsonAsNumber(length)
+            | HirExpr::JsonAsString(length) | HirExpr::JsonAsBool(length)
+            | HirExpr::ThrowValue(length, _) => visit_expr(length, observed, collect_allocations),
+            HirExpr::OptionalIsNone(value, _) => {
+                if let HirExpr::Var(name) = value.as_ref() { observed.optional_none_names.push(name.clone()); }
+                visit_expr(value, observed, collect_allocations);
+            }
+            HirExpr::OptionalValue(value, _) => {
+                if let HirExpr::Var(name) = value.as_ref() { observed.optional_value_names.push(name.clone()); }
+                visit_expr(value, observed, collect_allocations);
+            }
+            HirExpr::IndexAssign(array, index, value) => {
+                visit_expr(array, observed, collect_allocations);
+                visit_expr(index, observed, collect_allocations);
+                visit_expr(value, observed, collect_allocations);
+            }
+            HirExpr::Assign(_, value) | HirExpr::ArraySetLen(value, _, _) => {
+                visit_expr(value, observed, collect_allocations);
+            }
+            HirExpr::UnionMemberIsEqual(left, right, _, _) | HirExpr::UnionIsEqual(left, right, _) => {
+                visit_expr(left, observed, collect_allocations);
+                visit_expr(right, observed, collect_allocations);
+            }
+            _ => {}
+        }
+    }
+    fn visit_statements(statements: &[HirStmt], observed: &mut Observed, collect_allocations: bool) {
+        for pair in statements.windows(2) {
+            if let (
+                HirStmt::Let(name, result_type, _),
+                HirStmt::Expr(HirExpr::IndexAssign(destination, _, snapshot)),
+            ) = (&pair[0], &pair[1]) {
+                if name.starts_with("__thaw_flat_map_callback_result_") {
+                    if let HirExpr::Var(destination_name) = destination.as_ref() {
+                        observed.flat_map_callback_snapshots.push((name.clone(), result_type.clone(), destination_name.clone(), snapshot.as_ref().clone()));
+                    }
+                }
+            }
+        }
+        for statement in statements { visit_stmt(statement, observed, collect_allocations); }
+    }
+    fn visit_stmt(statement: &HirStmt, observed: &mut Observed, collect_allocations: bool) {
+        match statement {
+            HirStmt::Expr(expression) | HirStmt::Return(Some(expression)) | HirStmt::Throw(expression) => {
+                visit_expr(expression, observed, collect_allocations);
+            }
+            HirStmt::Let(name, ty, expression) => {
+                if name.starts_with("__thaw_map_element_") {
+                    let mut initializer = Observed::default();
+                    visit_expr(expression, &mut initializer, false);
+                    observed.map_element_bindings.push((name.clone(), ty.clone(), initializer.typed_indices));
+                }
+                if name.starts_with("__thaw_flat_result_") {
+                    if let HirExpr::ArrayAlloc(_, element) = expression {
+                        observed.flat_result_bindings.push((name.clone(), ty.clone(), element.clone()));
+                    }
+                }
+                visit_expr(expression, observed, collect_allocations);
+            }
+            HirStmt::If(test, yes, no) => {
+                visit_expr(test, observed, collect_allocations);
+                visit_statements(yes, observed, collect_allocations);
+                visit_statements(no, observed, collect_allocations);
+            }
+            HirStmt::While(test, body) => {
+                visit_expr(test, observed, collect_allocations);
+                visit_statements(body, observed, collect_allocations);
+            }
+            HirStmt::Try(body, _, catch, _) => {
+                visit_statements(body, observed, collect_allocations);
+                visit_statements(catch, observed, collect_allocations);
+            }
+            HirStmt::Finally(body, _) => {
+                visit_statements(body, observed, collect_allocations);
+            }
+            HirStmt::Return(None) | HirStmt::Break | HirStmt::Continue
+            | HirStmt::BreakDepth(_) | HirStmt::ContinueDepth(_) => {}
+        }
+    }
+    fn selected_result_body(body: &HirExpr) -> Option<&HirExpr> {
+        match body {
+            HirExpr::Block(statements) => match statements.last()? {
+                HirStmt::Return(Some(expression)) => Some(expression),
+                _ => None,
+            },
+            HirExpr::Call(..) | HirExpr::Var(..) => Some(body),
+            _ => None,
+        }
+    }
+    fn returned_variable(expression: &HirExpr) -> Option<String> {
+        match expression {
+            HirExpr::Var(name) => Some(name.clone()),
+            HirExpr::Call(callee, _) => {
+                let HirExpr::Lambda(_, _, _, body) = callee.as_ref() else { return None };
+                returned_variable(selected_result_body(body)?)
+            }
+            HirExpr::TypedClosure(_, body) => returned_variable(body),
+            _ => None,
+        }
+    }
+    fn selected_return_flat<'a>(expression: &'a HirExpr) -> Option<(String, HirType, &'a HirExpr, String, HirType, &'a HirExpr)> {
+        let HirExpr::Call(callee, arguments) = expression else { return None };
+        let HirExpr::Lambda(_, parameters, _, body) = callee.as_ref() else { return None };
+        let Some(receiver) = parameters.first().filter(|parameter|
+            parameter.name.starts_with("__thaw_flat_receiver_")) else {
+                return selected_return_flat(selected_result_body(body)?);
+            };
+        let HirType::Array(inner) = &receiver.ty else { return None };
+        let HirType::Array(element) = inner.as_ref() else { return None };
+        if arguments.len() != 1 { return None; }
+        let HirExpr::Block(statements) = body.as_ref() else { return None };
+        let HirExpr::ArraySetLen(result, _, returned_element) = selected_result_body(body)? else {
+            return None;
+        };
+        let HirExpr::Var(result_name) = result.as_ref() else { return None };
+        let expected_result_type = HirType::Array(element.clone());
+        let matching_result_bindings = statements.iter().filter(|statement| matches!(statement,
+            HirStmt::Let(name, ty, HirExpr::ArrayAlloc(_, allocated_element))
+                if name == result_name
+                    && ty == &expected_result_type
+                    && allocated_element == element.as_ref()
+        )).count();
+        if matching_result_bindings != 1 || returned_element != element.as_ref() {
+            return None;
+        }
+        let source = arguments.first()?;
+        Some((receiver.name.clone(), receiver.ty.clone(), source,
+            result_name.clone(), element.as_ref().clone(), body.as_ref()))
+    }
+    fn selected_flat_inside_result_body(expression: &HirExpr) -> Option<(String, HirType, &HirExpr, String, HirType, &HirExpr)> {
+        let HirExpr::Call(callee, _) = expression else { return None };
+        let HirExpr::Lambda(_, _, _, body) = callee.as_ref() else { return None };
+        if matches!(body.as_ref(), HirExpr::Block(statements)
+            if matches!(statements.last(), Some(HirStmt::Return(Some(HirExpr::ArraySetLen(..)))))) {
+            if let Some(flat) = selected_return_flat(expression) { return Some(flat); }
+        }
+        selected_flat_inside_result_body(selected_result_body(body)?)
+    }
+
+    let nested_result = HirExpr::Call(
+        Box::new(HirExpr::Lambda(
+            vec![HirParam { name: "capture_decoy".into(), ty: HirType::Json }],
+            vec![HirParam { name: "callback".into(), ty: HirType::Json }],
+            HirType::Json,
+            Box::new(HirExpr::Block(vec![
+                HirStmt::Return(Some(HirExpr::Var("prior_decoy".into()))),
+                HirStmt::Return(Some(HirExpr::Var("map_result".into()))),
+            ])),
+        )),
+        vec![HirExpr::Var("argument_decoy".into())],
+    );
+    let nested_bindings = HirExpr::Call(
+        Box::new(HirExpr::Lambda(
+            vec![HirParam { name: "outer_capture_decoy".into(), ty: HirType::Json }],
+            vec![HirParam { name: "receiver".into(), ty: HirType::Json }],
+            HirType::Json,
+            Box::new(nested_result),
+        )),
+        vec![HirExpr::Var("receiver_argument_decoy".into())],
+    );
+    assert_eq!(returned_variable(&nested_bindings).as_deref(), Some("map_result"),
+        "nested direct Call result bodies follow only each binding Lambda's returned expression");
+    assert_eq!(returned_variable(&HirExpr::Call(
+        Box::new(HirExpr::Lambda(Vec::new(), Vec::new(), HirType::Json,
+            Box::new(HirExpr::Block(vec![HirStmt::Return(Some(HirExpr::Var("argument_decoy".into()))), HirStmt::Return(None)])))),
+        vec![HirExpr::Var("map_result".into())],
+    )), None,
+        "call arguments cannot supply a result when the final statement does not return a value");
+    assert_eq!(returned_variable(&HirExpr::Call(
+        Box::new(HirExpr::Lambda(Vec::new(), Vec::new(), HirType::Json,
+            Box::new(HirExpr::Block(vec![HirStmt::Return(Some(HirExpr::Lit(HirLit::Undefined)))])))),
+        vec![HirExpr::Var("map_result".into())],
+    )), None,
+        "a non-variable final result does not fall back to an unrelated call argument");
+
+    for name in ["identity", "mixed", "nullableTyped", "nullishTyped", "naturalNullable", "naturalNullish"] {
+        let function = program.functions.iter().find(|function| function.name == name).unwrap();
+        assert_eq!(function.ret, HirType::Array(Box::new(HirType::Json)));
+        let mut observed = Observed::default();
+        visit_statements(&function.body, &mut observed, false);
+        assert_eq!(observed.flat_inputs.len(), 1, "{name} has one callback-result flatten");
+        assert_eq!(observed.flat_inputs[0].0, Some(1.0), "{name} uses depth-one runtime flattening");
+        assert_eq!(observed.flat_map_callback_snapshots.len(), 1,
+            "{name} binds the user callback result and snapshots it in the immediately following statement");
+        let (callback_result_name, callback_result_type, _, snapshot) = &observed.flat_map_callback_snapshots[0];
+        let mut snapshot_observed = Observed::default();
+        visit_expr(snapshot, &mut snapshot_observed, false);
+        assert_eq!(snapshot_observed.normalizers, observed.normalizers,
+            "{name} keeps its normalization mapper inside the callback's immediate snapshot");
+        match name {
+            "naturalNullable" => {
+                assert!(observed.normalizers.is_empty(),
+                    "the existing undefined-to-null branch materializes raw Json directly");
+                assert_eq!(*callback_result_type, HirType::Json);
+                assert_eq!(observed.flat_inputs[0].1, Vec::<HirType>::new(),
+                    "the direct Json input is an ArrayLit, not a generated map allocation");
+                assert_eq!(observed.flat_inputs[0].2.as_deref(), Some(callback_result_name.as_str()),
+                    "the depth-one flattener receives the singleton array containing the exact once-bound result");
+            }
+            "identity" | "naturalNullish" | "mixed" | "nullableTyped" | "nullishTyped" => {
+                assert_eq!(observed.normalizers.len(), 1, "{name} has one normalization mapper");
+                let (input_type, return_type) = &observed.normalizers[0];
+                assert_eq!(callback_result_type, input_type,
+                    "{name} normalizes the exact once-bound user callback result type");
+                assert_eq!(*return_type, HirType::Json, "{name} normalizer returns Json");
+                assert_eq!(observed.flat_inputs[0].1, vec![HirType::Json],
+                    "{name} passes the generated Array<Json> map allocation to runtime flattening");
+                assert_eq!(observed.flat_inputs[0].2, None,
+                    "{name} reaches runtime flattening through the generated normalizer map");
+                let routes = snapshot_observed.map_routes.iter().filter(|route|
+                    route.callback_bindings.iter().any(|binding|
+                        binding.binding_name.starts_with("__thaw_map_callback_")
+                            && binding.actual_parameter.as_deref().is_some_and(|parameter| parameter.starts_with("__thaw_flat_map_any_normalize_"))
+                            && binding.parameters == vec![input_type.clone()]
+                            && binding.result == HirType::Json
+                            && binding.actual_parameters == vec![input_type.clone()]
+                            && binding.actual_result.as_ref() == Some(&HirType::Json)
+                    )
+                ).collect::<Vec<_>>();
+                assert_eq!(routes.len(), 1, "{name} binds its normalizer Lambda as exactly one generated map callback");
+                let route = routes[0];
+                assert_eq!(route.receiver_type, HirType::Array(Box::new(input_type.clone())),
+                    "{name} supplies the exact Array<E> ABI to that normalization map");
+                assert!(matches!(&route.receiver_source, HirExpr::ArrayLit(elements)
+                    if elements.as_slice() == [HirExpr::Var(callback_result_name.clone())]),
+                    "{name} maps the once-bound callback result as a singleton source");
+                assert_eq!(route.typed_indices.iter().filter(|(receiver, ty)| receiver == &route.receiver_name && ty == input_type).count(), 1,
+                    "{name} normalization map reads one source element using its exact {input_type:?} ABI");
+                let scratches = route.map_element_bindings.iter().filter(|(_, ty, reads)|
+                    ty == input_type && reads.iter().any(|(receiver, read_type)| receiver == &route.receiver_name && read_type == input_type)
+                ).collect::<Vec<_>>();
+                assert_eq!(scratches.len(), 1,
+                    "{name} normalization map scratch uses its exact {input_type:?} ABI");
+                assert_eq!(observed.flat_map_callback_snapshots[0].1, *input_type,
+                    "{name} snapshots the raw value with the same E type passed to the selected map");
+                match name {
+                    "identity" => assert_eq!(*input_type, HirType::Optional(Box::new(HirType::Json))),
+                    "naturalNullish" => assert_eq!(*input_type, HirType::Optional(Box::new(HirType::Optional(Box::new(HirType::Json))))),
+                    "mixed" => assert!(matches!(input_type, HirType::Union(members)
+                if members.contains(&HirType::Optional(Box::new(HirType::Json)))
+                            && members.contains(&HirType::Array(Box::new(HirType::Optional(Box::new(HirType::Json))))))),
+                    "nullableTyped" => assert_eq!(*input_type, HirType::Nullable(Box::new(HirType::Json))),
+                    "nullishTyped" => assert_eq!(*input_type, HirType::Nullish(Box::new(HirType::Json))),
+                    _ => unreachable!(),
+                }
+            }
+            _ => unreachable!(),
+        }
+    }
+    for (name, expected_raw_type) in [
+        ("scalarResult", HirType::Optional(Box::new(HirType::F64))),
+        ("mixedResult", HirType::Union(vec![
+            HirType::Array(Box::new(HirType::Optional(Box::new(HirType::F64)))),
+            HirType::Optional(Box::new(HirType::F64)),
+        ])),
+    ] {
+        let function = program.functions.iter().find(|function| function.name == name).unwrap();
+        assert_eq!(function.ret, HirType::Array(Box::new(HirType::F64)));
+        let mut observed = Observed::default();
+        visit_statements(&function.body, &mut observed, false);
+        assert_eq!(observed.flat_map_callback_snapshots.len(), 1);
+        assert_eq!(observed.flat_map_callback_snapshots[0].1, expected_raw_type,
+            "{name} keeps the original raw callback result ABI");
+        let final_return = function.body.iter().rev().find_map(|statement| match statement {
+            HirStmt::Return(Some(expression)) => Some(expression),
+            _ => None,
+        }).expect("numeric flatMap function has a final return expression");
+        let mut returned = Observed::default();
+        visit_expr(final_return, &mut returned, false);
+        let routes = returned.map_routes.iter().filter(|route| route.callback_bindings.iter().any(|binding|
+            binding.binding_name.starts_with("__thaw_map_callback_")
+                && binding.actual_parameter.as_deref().is_some_and(|parameter| parameter.starts_with("__thaw_array_unwrap_"))
+                && binding.parameters == vec![HirType::Optional(Box::new(HirType::F64))]
+                && binding.result == HirType::F64
+                && binding.actual_parameters == vec![HirType::Optional(Box::new(HirType::F64))]
+                && binding.actual_result.as_ref() == Some(&HirType::F64)
+        )).collect::<Vec<_>>();
+        assert_eq!(routes.len(), 1, "{name} uses one actual Optional<F64>-to-F64 return mapper binding");
+        let route = routes[0];
+        assert_eq!(route.receiver_type, HirType::Array(Box::new(HirType::Optional(Box::new(HirType::F64)))));
+        assert_eq!(route.typed_indices, vec![(route.receiver_name.clone(), HirType::Optional(Box::new(HirType::F64)))]);
+        assert_eq!(route.map_element_bindings.len(), 1);
+        assert_eq!(route.map_element_bindings[0].1, HirType::Optional(Box::new(HirType::F64)));
+        assert!(route.map_element_bindings[0].2.contains(&(route.receiver_name.clone(), HirType::Optional(Box::new(HirType::F64)))),
+            "{name} return mapper scratch initializes from that map receiver's exact Optional<F64> read");
+        let callback_binding = route.callback_bindings.iter().find(|binding|
+            binding.binding_name.starts_with("__thaw_map_callback_")
+                && binding.actual_parameter.as_deref().is_some_and(|parameter| parameter.starts_with("__thaw_array_unwrap_"))
+        ).unwrap();
+        let actual_parameter = callback_binding.actual_parameter.as_ref().unwrap();
+        let calls = route.callback_calls.iter().filter(|(binding, _)| binding == &callback_binding.binding_name)
+            .collect::<Vec<_>>();
+        assert_eq!(calls.len(), 1, "{name} invokes the selected return mapper once");
+        let arguments = &calls[0].1;
+        assert_eq!(arguments.len(), 1, "{name} passes one adapted numeric element");
+        assert!(matches!(arguments.as_slice(), [HirExpr::Var(element)] if element == &route.map_element_bindings[0].0),
+            "{name} passes the selected map scratch to its callback: {arguments:?}");
+        let mut actual_callback = Observed::default();
+        visit_expr(&callback_binding.actual_source, &mut actual_callback, false);
+        assert_eq!(actual_callback.number_adapters.len(), 1,
+            "{name} has one Optional<F64> adapter in the actual return-mapper callback");
+        let adapter = &actual_callback.number_adapters[0];
+        assert!(adapter.parameter_name.starts_with("__thaw_number_optional_"));
+        assert_eq!(adapter.parameter_type, HirType::Optional(Box::new(HirType::F64)));
+        assert_eq!(adapter.result_type, HirType::F64);
+        assert_eq!(adapter.source, HirExpr::Var(actual_parameter.clone()),
+            "{name} passes the exact return-mapper parameter into the number adapter");
+        assert!(actual_callback.optional_none_names.contains(&adapter.parameter_name),
+            "{name} absence check reads the adapter's exact once-bound Optional<F64> alias");
+        assert!(actual_callback.optional_value_names.contains(&adapter.parameter_name),
+            "{name} reads the present payload through the same adapted alias");
+        let HirExpr::Block(adapter_statements) = &adapter.body else {
+            panic!("{name} numeric conversion binds absence and payload handling in a block: {:?}", adapter.body);
+        };
+        assert!(matches!(adapter_statements.first(), Some(HirStmt::If(test, _, _))
+            if matches!(test, HirExpr::OptionalIsNone(value, HirType::F64)
+                if matches!(value.as_ref(), HirExpr::Var(name) if name == &adapter.parameter_name))),
+            "{name} tests absence on the adapted Optional<F64> alias: {:?}", adapter.body);
+        let (flat_receiver_name, flat_receiver_type, flat_input, flat_result_name,
+            flat_element_type, flat_body) = selected_flat_inside_result_body(&route.receiver_source)
+            .expect("numeric return mapper reaches its returned depth-one flatten loop through result bodies");
+        assert_eq!(flat_element_type, HirType::Optional(Box::new(HirType::F64)));
+        assert_eq!(flat_receiver_type,
+            HirType::Array(Box::new(HirType::Array(Box::new(flat_element_type.clone())))));
+        let matching_flat_results = match flat_body {
+            HirExpr::Block(statements) => statements.iter().filter(|statement| matches!(statement,
+                HirStmt::Let(name, ty, HirExpr::ArrayAlloc(_, allocated_element))
+                    if name == &flat_result_name
+                        && ty == &HirType::Array(Box::new(flat_element_type.clone()))
+                        && allocated_element == &flat_element_type
+            )).count(),
+            _ => 0,
+        };
+        assert_eq!(matching_flat_results, 1,
+            "{name} ties the final ArraySetLen result to one same-block allocation of its exact element type");
+        let mut selected_flat = Observed::default();
+        visit_expr(flat_body, &mut selected_flat, false);
+        assert!(selected_flat.typed_indices.contains(&(
+            flat_receiver_name.clone(), HirType::Array(Box::new(flat_element_type.clone())))),
+            "{name} outer flat loop reads from the selected receiver's exact nested-array type");
+        let flattened_source = returned_variable(flat_input)
+            .expect("outer flat receiver source is a result binding returned by the original map");
+        assert_eq!(flattened_source, observed.flat_map_callback_snapshots[0].2,
+            "{name} selected outer flat source is the destination populated by its callback snapshot");
+        let mut receiver = Observed::default();
+        visit_expr(&route.receiver_source, &mut receiver, false);
+        let selected_flat_bindings = receiver.flat_result_bindings.iter().filter(|(name, ty, element)|
+            name == &flat_result_name
+                && ty == &HirType::Array(Box::new(flat_element_type.clone()))
+                && element == &flat_element_type
+        ).count();
+        assert_eq!(selected_flat_bindings, 1,
+            "{name} selects the actual returned flat allocation without requiring a unique allocation in the whole receiver graph");
+        assert!(receiver.variables.contains(&flat_result_name),
+            "{name} final flat return consumes its selected result binding");
+        assert_eq!(receiver.flat_map_callback_snapshots.len(), 1,
+            "{name} flattened receiver contains the original once-bound callback snapshot");
+        assert_eq!(receiver.flat_map_callback_snapshots[0].0, observed.flat_map_callback_snapshots[0].0,
+            "{name} return adapter source retains the original callback-result binding");
+        assert_eq!(receiver.flat_map_callback_snapshots[0].1, expected_raw_type);
+        assert_eq!(receiver.flat_map_callback_snapshots[0].2, observed.flat_map_callback_snapshots[0].2,
+            "{name} flattened receiver consumes the same map result that receives callback snapshots");
+        assert!(receiver.variables.contains(&receiver.flat_map_callback_snapshots[0].2),
+            "{name} flat-one source reads the result array populated by the original callback snapshot");
+    }
+
+    for name in ["namedMap", "namedFlatMap"] {
+        let function = program.functions.iter().find(|function| function.name == name).unwrap();
+        let mut observed = Observed::default();
+        visit_statements(&function.body, &mut observed, false);
+        let routes = observed.map_routes.iter().filter(|route|
+            route.receiver_type == HirType::Array(Box::new(HirType::F64))
+                && route.callback_bindings.iter().any(|binding|
+                    binding.parameters == vec![HirType::F64]
+                        && binding.result == HirType::F64
+                        && matches!(&binding.actual_source, HirExpr::Var(source) if source == "callback")
+                )
+        ).collect::<Vec<_>>();
+        assert_eq!(routes.len(), 1, "{name} keeps the original fixed local callback signature");
+        let route = routes[0];
+        assert!(matches!(&route.receiver_source, HirExpr::Var(source) if source == "values"));
+        let selected_receiver_reads = route.typed_indices.iter()
+            .filter(|(receiver, _)| receiver == &route.receiver_name)
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(selected_receiver_reads,
+            vec![(route.receiver_name.clone(), HirType::F64)],
+            "{name} has exactly one F64 typed read from the selected map receiver");
+        let scratches = route.map_element_bindings.iter().filter(|(_, ty, reads)|
+            *ty == HirType::Optional(Box::new(HirType::F64))
+                && reads.contains(&(route.receiver_name.clone(), HirType::F64))
+        ).collect::<Vec<_>>();
+        assert_eq!(scratches.len(), 1, "{name} reads one sparse F64 element into its optional scratch");
+        let callback = route.callback_bindings.iter().find(|binding| matches!(&binding.actual_source, HirExpr::Var(_))).unwrap();
+        let calls = route.callback_calls.iter().filter(|(binding, _)| binding == &callback.binding_name).collect::<Vec<_>>();
+        assert_eq!(calls.len(), 1, "{name} invokes its local callback once per present element");
+        let arguments = &calls[0].1;
+        assert_eq!(arguments.len(), 1);
+        let HirExpr::Call(adapter, adapter_arguments) = &arguments[0] else {
+            panic!("{name} uses the existing numeric argument adapter: {:?}", arguments[0]);
+        };
+        let HirExpr::Lambda(_, parameters, result, body) = adapter.as_ref() else {
+            panic!("{name} adapter has a typed optional-number parameter: {adapter:?}");
+        };
+        assert_eq!(parameters.len(), 1);
+        assert!(parameters[0].name.starts_with("__thaw_number_optional_"));
+        assert_eq!(parameters[0].ty, HirType::Optional(Box::new(HirType::F64)));
+        assert_eq!(*result, HirType::F64);
+        assert!(matches!(adapter_arguments.as_slice(), [HirExpr::Var(name)] if name == &scratches[0].0));
+        assert!(route.optional_none_names.contains(&parameters[0].name));
+        let HirExpr::Block(adapter_statements) = body.as_ref() else {
+            panic!("{name} number adapter binds absence and present handling in a block: {body:?}");
+        };
+        assert!(matches!(adapter_statements.first(), Some(HirStmt::If(test, _, _))
+            if matches!(test, HirExpr::OptionalIsNone(value, HirType::F64)
+                if matches!(value.as_ref(), HirExpr::Var(name) if name == &parameters[0].name))));
+        assert!(route.optional_value_names.contains(&parameters[0].name));
+    }
+
+    let invalid = thaw_parser::parse_typescript(
+        "function invalid(values: number[]): number[] { const callback: (value: string) => number = value => value.length; return values.map(callback); }"
+    ).unwrap();
+    let error = lower_module(&invalid).unwrap_err();
+    assert!(error.contains("callback") || error.contains("array mapper") || error.contains("parameter"),
+        "a fixed callback with an incompatible parameter remains rejected: {error}");
 }
 
 #[test]

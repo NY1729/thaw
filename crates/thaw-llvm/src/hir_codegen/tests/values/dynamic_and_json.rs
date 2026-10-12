@@ -1261,6 +1261,83 @@ fn compares_present_optional_strings_by_value() {
     );
 }
 
+#[test]
+fn strict_optional_json_map_values_preserve_presence_and_native_identity() {
+    let source = r#"
+        interface Owner { value: number; }
+        let trace = "";
+        function readKey(): string { trace += "K"; return "owner"; }
+        function asDynamic(owner: Owner): any { return owner; }
+        function replaceAndReturn(map: Map<any, any>, owner: Owner, replacement: Owner): Owner {
+            trace += "R";
+            map.set("owner", replacement);
+            return owner;
+        }
+        function main(): void {
+            const owner: Owner = { value: 7 };
+            const sameContent: Owner = { value: 7 };
+            const map = new Map<any, any>();
+            map.set("owner", owner);
+
+            const snapshot = map.get(readKey()) === replaceAndReturn(map, owner, sameContent);
+            console.log(snapshot, trace);
+            console.log(map.get("owner") === sameContent);
+            console.log(map.get("owner") === owner, owner === map.get("owner"));
+            console.log(map.get("owner") !== owner);
+            const dynamicOwner: any = asDynamic(owner);
+            console.log(dynamicOwner === owner, owner === dynamicOwner);
+
+            const missing = map.get("missing");
+            console.log(missing === undefined, undefined === missing);
+            map.set("undefined", undefined);
+            const storedUndefined = map.get("undefined");
+            console.log(storedUndefined === undefined, undefined === storedUndefined);
+            map.set("null", null);
+            console.log(map.get("null") === null, map.get("null") === undefined);
+            console.log(null === map.get("null"), undefined === map.get("null"), null === missing);
+            console.log(storedUndefined === null, null === storedUndefined);
+            console.log(map.get("missing") === map.get("null"));
+
+            const loaded = loadScript("globalThis.strictOptionalLive = { value: 11 };");
+            if (!loaded) throw new Error("loadScript failed");
+            const live: JsValue = getDynamicValue("strictOptionalLive");
+            if (typeof live !== "object" || live === null) throw new Error("live object missing");
+            map.set("live", live);
+            console.log(map.get("live") === live, live === map.get("live"));
+            console.log(map.get("live") === getDynamicValue("strictOptionalLive"));
+
+            trace = "";
+            console.log(replaceAndReturn(map, sameContent, sameContent) === map.get(readKey()), trace);
+            const otherMap = new Map<any, any>();
+            otherMap.set("owner", owner);
+            console.log(map.get("owner") === map.get("owner"), map.get("owner") === otherMap.get("owner"));
+
+            const undefinedLoaded = loadScript("globalThis.strictOptionalUndefined = undefined;");
+            if (!undefinedLoaded) throw new Error("loadScript undefined failed");
+            const liveUndefined: JsValue = getDynamicValue("strictOptionalUndefined");
+            if (typeof liveUndefined !== "undefined") throw new Error("live undefined missing");
+            console.log(missing === liveUndefined, liveUndefined === missing,
+                storedUndefined === liveUndefined, liveUndefined === storedUndefined,
+                map.get("null") === liveUndefined);
+
+            const getterCalls: number[] = [0];
+            const getterOwner = {
+                value: 99,
+                get probe(): number { getterCalls[0]++; return 99; }
+            };
+            const getterMap = new Map<any, any>();
+            getterMap.set("g", getterOwner);
+            console.log(getterMap.get("g") === getterOwner,
+                getterOwner === getterMap.get("g"), getterCalls[0]);
+            console.log(getterOwner.probe, getterCalls[0]);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "strict_optional_json_map_identity"),
+        "true KR\ntrue\nfalse false\ntrue\ntrue true\ntrue true\ntrue true\ntrue false\ntrue false false\nfalse false\nfalse\ntrue true\ntrue\ntrue RK\ntrue false\ntrue true true true false\ntrue true 0\n99 1\n"
+    );
+}
+
 /// `NaN`/`Infinity`/`-Infinity` boxed into an `any`-typed (`Json`)
 /// value used to be indistinguishable from a real `null`:
 /// `serde_json::Number` structurally cannot hold a non-finite `f64`, so
