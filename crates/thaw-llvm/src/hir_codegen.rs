@@ -318,6 +318,13 @@ struct NativeHandleLedger<'ctx> {
 enum TypedJsonArgumentOwner {
     ProvenWrapper(String),
     DirectQuickJs(String),
+    NapiConstructor(String),
+}
+
+#[derive(Clone, Copy)]
+struct FreshJsonArgumentArray<'ctx> {
+    value: PointerValue<'ctx>,
+    active: PointerValue<'ctx>,
 }
 
 struct FreshEventKeyArgumentScope<'ctx> {
@@ -326,6 +333,7 @@ struct FreshEventKeyArgumentScope<'ctx> {
     typed_json_owner: Option<TypedJsonArgumentOwner>,
     handles: Vec<FreshEventKeyHandle<'ctx>>,
     json_values: Vec<FreshJsonArgument<'ctx>>,
+    argument_array: Option<FreshJsonArgumentArray<'ctx>>,
     native_handle_ledgers: Vec<NativeHandleLedger<'ctx>>,
 }
 

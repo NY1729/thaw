@@ -138,6 +138,7 @@ impl<'ctx> HirCompiler<'ctx> {
                         match kind.as_str() {
                             "wrapper" => TypedJsonArgumentOwner::ProvenWrapper(key.clone()),
                             "direct-quickjs" => TypedJsonArgumentOwner::DirectQuickJs(key.clone()),
+                            "napi-constructor" => TypedJsonArgumentOwner::NapiConstructor(key.clone()),
                             _ => return Some(Err("typed-wrapper JSON ownership marker has unknown owner kind".into())),
                         }
                     }

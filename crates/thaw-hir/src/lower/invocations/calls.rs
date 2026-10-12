@@ -19,6 +19,16 @@ impl<'a> FnLowerer<'a> {
             .any(|prefix| symbol.starts_with(prefix))
     }
 
+    fn is_napi_constructor_typed_call(
+        backend: DynamicBackend,
+        symbol: &str,
+        ret: &HirType,
+    ) -> bool {
+        backend == DynamicBackend::Napi
+            && *ret == HirType::JsValue
+            && symbol.starts_with("$new$")
+    }
+
     fn contains_live_host_jsvalue_json_conversion(expr: &HirExpr) -> bool {
         match expr {
             HirExpr::JsValueAsJson(_) => true,
@@ -2278,6 +2288,12 @@ impl<'a> FnLowerer<'a> {
                     Self::is_ordinary_quickjs_typed_call(backend, &symbol)
                 })
         });
+        let napi_constructor_typed_call = signature.as_ref().is_some_and(|signature| {
+            signature.is_extern
+                && dynamic_symbol(&callee_name).is_some_and(|(backend, symbol)| {
+                    Self::is_napi_constructor_typed_call(backend, &symbol, &signature.ret)
+                })
+        });
         let mut args = lowered_arguments
             .into_iter()
             .enumerate()
@@ -2311,18 +2327,24 @@ impl<'a> FnLowerer<'a> {
                         let value = self.coerce_primitive_array_argument(value, declared).map_err(|error| {
                             format!("argument {} of `{callee_name}` is invalid: {error}", i + 1)
                         })?;
-                        if (is_generated_wrapper || direct_quickjs_typed_call)
+                        if (is_generated_wrapper || direct_quickjs_typed_call || napi_constructor_typed_call)
                             && *declared == HirType::Json
                             && original_is_jsvalue
                             && Self::contains_live_host_jsvalue_json_conversion(&value)
                         {
-                            let owner_kind = if is_generated_wrapper { "wrapper" } else { "direct-quickjs" };
+                            let owner_kind = if is_generated_wrapper {
+                                "wrapper"
+                            } else if direct_quickjs_typed_call {
+                                "direct-quickjs"
+                            } else {
+                                "napi-constructor"
+                            };
                             let owner_key = if is_generated_wrapper {
                                 callee_name.clone()
                             } else {
                                 dynamic_symbol(&callee_name)
                                     .map(|(_, symbol)| symbol)
-                                    .ok_or_else(|| format!("internal direct QuickJS owner missing for `{callee_name}`"))?
+                                    .ok_or_else(|| format!("internal typed-call owner missing for `{callee_name}`"))?
                             };
                             Ok(HirExpr::Call(
                                 Box::new(HirExpr::Var("__thaw_mark_typed_wrapper_json_argument".into())),
@@ -2538,6 +2560,8 @@ impl<'a> FnLowerer<'a> {
                     (sig.params, sig.ret)
                 };
                 let direct_quickjs_typed_call = Self::is_ordinary_quickjs_typed_call(backend, &symbol);
+                let napi_constructor_typed_call =
+                    Self::is_napi_constructor_typed_call(backend, &symbol, &ret);
                 // Argument coercion was skipped for every generic
                 // function's call above (`param_types` there was still
                 // the pre-substitution, `Dynamic`-placeholder version --
@@ -2567,7 +2591,7 @@ impl<'a> FnLowerer<'a> {
                         let value = self.coerce_primitive_array_argument(value, declared).map_err(|error| {
                             format!("argument {} of `{callee_name}` is invalid: {error}", i + 1)
                         })?;
-                        if direct_quickjs_typed_call
+                        if (direct_quickjs_typed_call || napi_constructor_typed_call)
                             && *declared == HirType::Json
                             && original_is_jsvalue
                             && Self::contains_live_host_jsvalue_json_conversion(&value)
@@ -2575,7 +2599,11 @@ impl<'a> FnLowerer<'a> {
                             Ok(HirExpr::Call(
                                 Box::new(HirExpr::Var("__thaw_mark_typed_wrapper_json_argument".into())),
                                 vec![
-                                    HirExpr::Lit(HirLit::Str("direct-quickjs".into())),
+                                    HirExpr::Lit(HirLit::Str(if direct_quickjs_typed_call {
+                                        "direct-quickjs".into()
+                                    } else {
+                                        "napi-constructor".into()
+                                    })),
                                     HirExpr::Lit(HirLit::Str(symbol.clone())),
                                     value,
                                 ],
