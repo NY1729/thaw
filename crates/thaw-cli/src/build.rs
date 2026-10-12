@@ -463,7 +463,9 @@ fn build_with_native_mode(
                 .into(),
         );
     }
-    let quickjs_reasons = quickjs_fallback_reasons(
+    let created_require_live_result =
+        module_graph::uses_created_require_live_result(input, &user_source)?;
+    let mut quickjs_reasons = quickjs_fallback_reasons(
         input,
         &user_source,
         &shim_source,
@@ -471,6 +473,14 @@ fn build_with_native_mode(
         &external_exports,
         &jit_fallback_reasons,
     );
+    if created_require_live_result {
+        quickjs_reasons.push(serde_json::json!({
+            "kind": "dynamic-operation",
+            "operation": "createRequire result handle",
+            "detail": "created-require calls preserve native JavaScript result identity",
+            "source": input.display().to_string(),
+        }));
+    }
     let manifest = serde_json::json!({
         "packages": resolved_packages,
         // Registry fallback wrappers contain `callDynamic(...)` even when a
@@ -479,6 +489,7 @@ fn build_with_native_mode(
         // QuickJS typed symbols are checked separately below.
         "quickjs": shim_source.contains("loadScript(")
             || source_uses_quickjs(&user_source)
+            || created_require_live_result
             || shim_source.contains("__thaw_typed_js_"),
         "quickjs_reasons": quickjs_reasons,
         "napi": shim_source.contains("loadNativeAddonEmbedded(")
