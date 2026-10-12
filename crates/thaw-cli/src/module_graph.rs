@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use swc_ecma_visit::{Visit, VisitMut, VisitMutWith, VisitWith};
 use thaw_parser::ast::{
     Callee, Decl, Expr, Ident, ImportSpecifier, MemberProp, Module, ModuleDecl, ModuleExportName,
-    ModuleItem, Pat, TsEntityName, TsInterfaceDecl, TsTypeRef, VarDeclarator,
+    ModuleItem, Pat, TsEntityName, TsInterfaceDecl, TsTypeRef,
 };
 
 type SourceTransform<'a> = dyn Fn(&str, &Path, bool) -> Result<String, String> + 'a;
@@ -18,6 +18,8 @@ struct LoadedModule {
     dependencies: HashMap<String, usize>,
     runtime_dependencies: HashSet<usize>,
     static_dependencies: HashSet<usize>,
+    specifiers: Vec<(String, bool, bool)>,
+    created_require_helper: Option<String>,
 }
 
 fn export_name(name: &ModuleExportName) -> Result<String, String> {
@@ -171,12 +173,8 @@ fn dependency_specifiers(module: &Module) -> Result<Vec<(String, bool, bool)>, S
     let mut specs = Vec::new();
     let mut runtime = HashSet::new();
     let mut static_runtime = HashSet::new();
-    let mut create_require_functions = HashSet::new();
-    let mut module_namespaces = HashSet::new();
     for item in &module.body {
-        let ModuleItem::ModuleDecl(decl) = item else {
-            continue;
-        };
+        let ModuleItem::ModuleDecl(decl) = item else { continue };
         let source = match decl {
             ModuleDecl::Import(import) => Some((&import.src, !import.type_only
                 && (import.specifiers.is_empty() || import.specifiers.iter().any(|specifier| {
@@ -191,137 +189,22 @@ fn dependency_specifiers(module: &Module) -> Result<Vec<(String, bool, bool)>, S
             _ => None,
         };
         if let Some((source, is_runtime)) = source {
-            let spec = source
-                .value
-                .as_str()
-                .ok_or_else(|| "module specifiers must be valid UTF-8".to_string())?;
-            if !specs.iter().any(|existing| existing == spec) {
-                specs.push(spec.to_string());
-            }
+            let specifier = source.value.as_str().ok_or_else(|| "module specifiers must be valid UTF-8".to_string())?;
+            if !specs.iter().any(|existing| existing == specifier) { specs.push(specifier.to_string()); }
             if is_runtime {
-                runtime.insert(spec.to_string());
-                static_runtime.insert(spec.to_string());
-            }
-            if matches!(spec, "module" | "node:module") {
-                if let ModuleDecl::Import(import) = decl {
-                    for specifier in &import.specifiers {
-                        match specifier {
-                            ImportSpecifier::Named(named)
-                                if export_name(&named.imported.clone().unwrap_or_else(|| {
-                                    ModuleExportName::Ident(named.local.clone())
-                                }))? == "createRequire" =>
-                            {
-                                create_require_functions.insert(named.local.sym.to_string());
-                            }
-                            ImportSpecifier::Namespace(namespace) => {
-                                module_namespaces.insert(namespace.local.sym.to_string());
-                            }
-                            _ => {}
-                        }
-                    }
-                }
+                runtime.insert(specifier.to_string());
+                static_runtime.insert(specifier.to_string());
             }
         }
     }
-
-    struct CreatedRequires<'a> {
-        functions: &'a HashSet<String>,
-        namespaces: &'a HashSet<String>,
-        aliases: HashSet<String>,
-    }
-    impl Visit for CreatedRequires<'_> {
-        fn visit_var_declarator(&mut self, declaration: &VarDeclarator) {
-            let (Pat::Ident(binding), Some(Expr::Call(call))) =
-                (&declaration.name, declaration.init.as_deref())
-            else {
-                declaration.visit_children_with(self);
-                return;
-            };
-            let created = match &call.callee {
-                Callee::Expr(callee) => match callee.as_ref() {
-                    Expr::Ident(function) => self.functions.contains(function.sym.as_str()),
-                    Expr::Member(member) => matches!(
-                        (member.obj.as_ref(), &member.prop),
-                        (Expr::Ident(namespace), MemberProp::Ident(method))
-                            if self.namespaces.contains(namespace.sym.as_str())
-                                && method.sym == *"createRequire"
-                    ),
-                    _ => false,
-                },
-                _ => false,
-            };
-            if created {
-                self.aliases.insert(binding.id.sym.to_string());
-            }
-            declaration.visit_children_with(self);
-        }
-    }
-    let mut created = CreatedRequires {
-        functions: &create_require_functions,
-        namespaces: &module_namespaces,
-        aliases: HashSet::new(),
-    };
-    module.visit_with(&mut created);
-
-    struct RequiredSpecs<'a> {
-        aliases: &'a HashSet<String>,
-        specs: Vec<String>,
-    }
-    impl Visit for RequiredSpecs<'_> {
-        fn visit_call_expr(&mut self, call: &thaw_parser::ast::CallExpr) {
-            if let Callee::Expr(callee) = &call.callee {
-                if matches!(callee.as_ref(), Expr::Ident(name) if self.aliases.contains(name.sym.as_str()))
-                {
-                    if let Some(specifier) = call.args.first().and_then(|argument| {
-                        argument
-                            .spread
-                            .is_none()
-                            .then(|| constant_string(&argument.expr))
-                            .flatten()
-                    }) {
-                        self.specs.push(specifier);
-                    }
-                }
-            }
-            call.visit_children_with(self);
-        }
-    }
-    let mut required = RequiredSpecs {
-        aliases: &created.aliases,
-        specs: Vec::new(),
-    };
-    module.visit_with(&mut required);
-    for specifier in required.specs {
-        runtime.insert(specifier.clone());
-        static_runtime.insert(specifier.clone());
-        if !specs.contains(&specifier) {
-            specs.push(specifier);
-        }
-    }
-
-    // `import("literal")` -- only a literal string specifier is
-    // supported (a computed one, e.g. a template literal with
-    // substitutions, would need real runtime module resolution this
-    // ahead-of-time compiler doesn't have); other shapes are simply
-    // left alone here, same as an unresolvable relative `require`
-    // would be, and surface as a real error later when the call itself
-    // is rewritten (see `RenameReferences::visit_mut_expr`).
-    struct DynamicImportSpecs {
-        specs: Vec<String>,
-    }
+    struct DynamicImportSpecs { specs: Vec<String> }
     impl Visit for DynamicImportSpecs {
         fn visit_call_expr(&mut self, call: &thaw_parser::ast::CallExpr) {
             if matches!(call.callee, Callee::Import(_)) {
                 if let Some(specifier) = call.args.first().and_then(|argument| {
-                    argument
-                        .spread
-                        .is_none()
-                        .then(|| constant_string(&argument.expr))
-                        .flatten()
+                    argument.spread.is_none().then(|| constant_string(&argument.expr)).flatten()
                 }) {
-                    if !self.specs.contains(&specifier) {
-                        self.specs.push(specifier);
-                    }
+                    if !self.specs.contains(&specifier) { self.specs.push(specifier); }
                 }
             }
             call.visit_children_with(self);
@@ -331,18 +214,422 @@ fn dependency_specifiers(module: &Module) -> Result<Vec<(String, bool, bool)>, S
     module.visit_with(&mut dynamic_imports);
     for specifier in dynamic_imports.specs {
         runtime.insert(specifier.clone());
-        if !specs.contains(&specifier) {
-            specs.push(specifier);
+        if !specs.contains(&specifier) { specs.push(specifier); }
+    }
+    Ok(specs.into_iter().map(|specifier| {
+        let is_runtime = runtime.contains(&specifier);
+        let is_static = static_runtime.contains(&specifier);
+        (specifier, is_runtime, is_static)
+    }).collect())
+}
+
+#[derive(Default)]
+struct IdentifierNames(HashSet<String>);
+impl Visit for IdentifierNames {
+    fn visit_ident(&mut self, ident: &Ident) { self.0.insert(ident.sym.to_string()); }
+    fn visit_binding_ident(&mut self, binding: &thaw_parser::ast::BindingIdent) {
+        self.0.insert(binding.id.sym.to_string());
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BindingRole {
+    ImportedCreator,
+    ImportedModuleNamespace,
+    CreatedImmutable,
+    CreatedMutable,
+    Ordinary,
+}
+
+type BindingFrame = HashMap<String, BindingRole>;
+
+#[derive(Default)]
+struct LexicalBindingCollector { names: HashSet<String> }
+impl Visit for LexicalBindingCollector {
+    fn visit_block_stmt(&mut self, _: &thaw_parser::ast::BlockStmt) {}
+    fn visit_function(&mut self, _: &thaw_parser::ast::Function) {}
+    fn visit_arrow_expr(&mut self, _: &thaw_parser::ast::ArrowExpr) {}
+    fn visit_catch_clause(&mut self, _: &thaw_parser::ast::CatchClause) {}
+    fn visit_for_stmt(&mut self, _: &thaw_parser::ast::ForStmt) {}
+    fn visit_for_in_stmt(&mut self, _: &thaw_parser::ast::ForInStmt) {}
+    fn visit_for_of_stmt(&mut self, _: &thaw_parser::ast::ForOfStmt) {}
+    fn visit_switch_stmt(&mut self, _: &thaw_parser::ast::SwitchStmt) {}
+    fn visit_var_decl(&mut self, declaration: &thaw_parser::ast::VarDecl) {
+        if declaration.kind != thaw_parser::ast::VarDeclKind::Var {
+            for binding in &declaration.decls {
+                binding.name.visit_with(&mut PatternBindingCollector(&mut self.names));
+            }
         }
     }
-    Ok(specs
-        .into_iter()
-        .map(|specifier| {
-            let is_runtime = runtime.contains(&specifier);
-            let is_static = static_runtime.contains(&specifier);
-            (specifier, is_runtime, is_static)
-        })
-        .collect())
+    fn visit_fn_decl(&mut self, declaration: &thaw_parser::ast::FnDecl) {
+        self.names.insert(declaration.ident.sym.to_string());
+    }
+    fn visit_class_decl(&mut self, declaration: &thaw_parser::ast::ClassDecl) {
+        self.names.insert(declaration.ident.sym.to_string());
+    }
+}
+
+fn nearest_role(scopes: &[BindingFrame], name: &str) -> Option<BindingRole> {
+    scopes.iter().rev().find_map(|scope| scope.get(name).copied())
+}
+
+fn creator_role(expr: &Expr, scopes: &[BindingFrame]) -> Option<BindingRole> {
+    let Expr::Call(call) = expr else { return None };
+    let Callee::Expr(callee) = &call.callee else { return None };
+    match callee.as_ref() {
+        Expr::Ident(function) if nearest_role(scopes, function.sym.as_ref()) == Some(BindingRole::ImportedCreator) => Some(BindingRole::CreatedImmutable),
+        Expr::Member(member) => match (member.obj.as_ref(), &member.prop) {
+            (Expr::Ident(namespace), MemberProp::Ident(method))
+                if method.sym == *"createRequire"
+                    && nearest_role(scopes, namespace.sym.as_ref()) == Some(BindingRole::ImportedModuleNamespace) => Some(BindingRole::CreatedImmutable),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+struct HoistedVarAliases {
+    scopes: Vec<BindingFrame>,
+    roles: BindingFrame,
+}
+impl HoistedVarAliases {
+    fn with_scope(&mut self, frame: BindingFrame, visit: impl FnOnce(&mut Self)) {
+        self.scopes.push(frame);
+        visit(self);
+        self.scopes.pop();
+    }
+}
+impl Visit for HoistedVarAliases {
+    fn visit_function(&mut self, _: &thaw_parser::ast::Function) {}
+    fn visit_fn_expr(&mut self, _: &thaw_parser::ast::FnExpr) {}
+    fn visit_arrow_expr(&mut self, _: &thaw_parser::ast::ArrowExpr) {}
+    fn visit_class_decl(&mut self, _: &thaw_parser::ast::ClassDecl) {}
+    fn visit_class_expr(&mut self, _: &thaw_parser::ast::ClassExpr) {}
+    fn visit_block_stmt(&mut self, block: &thaw_parser::ast::BlockStmt) {
+        let mut locals = LexicalBindingCollector::default();
+        for statement in &block.stmts { statement.visit_with(&mut locals); }
+        let frame = locals.names.into_iter().map(|name| (name, BindingRole::Ordinary)).collect();
+        self.with_scope(frame, |this| block.visit_children_with(this));
+    }
+    fn visit_var_decl(&mut self, declaration: &thaw_parser::ast::VarDecl) {
+        if declaration.kind == thaw_parser::ast::VarDeclKind::Var {
+            for binding in &declaration.decls {
+                let Pat::Ident(alias) = &binding.name else { continue };
+                let Some(init) = binding.init.as_deref() else { continue };
+                if creator_role(init, &self.scopes).is_some() {
+                    self.roles.insert(alias.id.sym.to_string(), BindingRole::CreatedMutable);
+                }
+            }
+        }
+    }
+    fn visit_for_stmt(&mut self, statement: &thaw_parser::ast::ForStmt) {
+        let mut frame = BindingFrame::new();
+        if let Some(thaw_parser::ast::VarDeclOrExpr::VarDecl(declaration)) = &statement.init {
+            if declaration.kind != thaw_parser::ast::VarDeclKind::Var {
+                let mut names = HashSet::new();
+                declaration.visit_with(&mut PatternBindingCollector(&mut names));
+                frame.extend(names.into_iter().map(|name| (name, BindingRole::Ordinary)));
+            }
+        }
+        self.with_scope(frame, |this| statement.visit_children_with(this));
+    }
+    fn visit_for_in_stmt(&mut self, statement: &thaw_parser::ast::ForInStmt) {
+        let frame = loop_left_frame(&statement.left);
+        self.with_scope(frame, |this| statement.visit_children_with(this));
+    }
+    fn visit_for_of_stmt(&mut self, statement: &thaw_parser::ast::ForOfStmt) {
+        let frame = loop_left_frame(&statement.left);
+        self.with_scope(frame, |this| statement.visit_children_with(this));
+    }
+    fn visit_catch_clause(&mut self, clause: &thaw_parser::ast::CatchClause) {
+        let mut frame = BindingFrame::new();
+        if let Some(parameter) = &clause.param {
+            let mut names = HashSet::new();
+            parameter.visit_with(&mut PatternBindingCollector(&mut names));
+            frame.extend(names.into_iter().map(|name| (name, BindingRole::Ordinary)));
+        }
+        self.with_scope(frame, |this| clause.visit_children_with(this));
+    }
+    fn visit_switch_stmt(&mut self, statement: &thaw_parser::ast::SwitchStmt) {
+        let mut locals = LexicalBindingCollector::default();
+        for case in &statement.cases { for consequent in &case.cons { consequent.visit_with(&mut locals); } }
+        let frame = locals.names.into_iter().map(|name| (name, BindingRole::Ordinary)).collect();
+        self.with_scope(frame, |this| statement.visit_children_with(this));
+    }
+}
+
+fn loop_left_frame(left: &thaw_parser::ast::ForHead) -> BindingFrame {
+    let mut frame = BindingFrame::new();
+    if let thaw_parser::ast::ForHead::VarDecl(declaration) = left {
+        if declaration.kind != thaw_parser::ast::VarDeclKind::Var {
+            let mut names = HashSet::new();
+            declaration.visit_with(&mut PatternBindingCollector(&mut names));
+            frame.extend(names.into_iter().map(|name| (name, BindingRole::Ordinary)));
+        }
+    }
+    frame
+}
+
+struct CreatedRequireCallRewriter<'a> {
+    helper: &'a str,
+    scopes: Vec<BindingFrame>,
+    specifiers: Vec<String>,
+    used: bool,
+}
+impl CreatedRequireCallRewriter<'_> {
+    fn collect_function_body_scope(&self, body: &thaw_parser::ast::FunctionBody) -> BindingFrame {
+        let mut lexical = LexicalBindingCollector::default();
+        for statement in &body.stmts { statement.visit_with(&mut lexical); }
+        let mut hoisted = HoistedBindingCollector::default();
+        body.visit_with(&mut hoisted);
+        lexical.names.extend(hoisted.0.names);
+        let mut frame: BindingFrame = lexical.names.into_iter()
+            .map(|name| (name, BindingRole::Ordinary)).collect();
+        let mut outer = self.scopes.clone();
+        outer.push(frame.clone());
+        let mut aliases = ScopeCreatedAliases { scopes: &outer, roles: HashMap::new() };
+        for statement in &body.stmts { statement.visit_with(&mut aliases); }
+        frame.extend(aliases.roles);
+        let mut outer = self.scopes.clone();
+        outer.push(frame.clone());
+        let mut hoisted_vars = HoistedVarAliases { scopes: outer, roles: HashMap::new() };
+        body.visit_with(&mut hoisted_vars);
+        frame.extend(hoisted_vars.roles);
+        frame
+    }
+
+    fn collect_scope(&self, statements: &[thaw_parser::ast::Stmt]) -> BindingFrame {
+        let mut locals = LexicalBindingCollector::default();
+        for statement in statements { statement.visit_with(&mut locals); }
+        let mut frame: BindingFrame = locals.names.into_iter().map(|name| (name, BindingRole::Ordinary)).collect();
+        let mut outer = self.scopes.clone();
+        outer.push(frame.clone());
+        let mut aliases = ScopeCreatedAliases { scopes: &outer, roles: HashMap::new() };
+        for statement in statements { statement.visit_with(&mut aliases); }
+        frame.extend(aliases.roles);
+        frame
+    }
+}
+
+struct ScopeCreatedAliases<'a> {
+    scopes: &'a [BindingFrame],
+    roles: BindingFrame,
+}
+impl Visit for ScopeCreatedAliases<'_> {
+    fn visit_block_stmt(&mut self, _: &thaw_parser::ast::BlockStmt) {}
+    fn visit_function(&mut self, _: &thaw_parser::ast::Function) {}
+    fn visit_arrow_expr(&mut self, _: &thaw_parser::ast::ArrowExpr) {}
+    fn visit_catch_clause(&mut self, _: &thaw_parser::ast::CatchClause) {}
+    fn visit_class_decl(&mut self, declaration: &thaw_parser::ast::ClassDecl) {
+        let frame = HashMap::from([(declaration.ident.sym.to_string(), BindingRole::Ordinary)]);
+        let mut scopes = self.scopes.to_vec(); scopes.push(frame);
+        let mut nested = ScopeCreatedAliases { scopes: &scopes, roles: HashMap::new() };
+        declaration.class.visit_with(&mut nested);
+        self.roles.extend(nested.roles);
+    }
+    fn visit_class_expr(&mut self, expression: &thaw_parser::ast::ClassExpr) {
+        let mut scopes = self.scopes.to_vec();
+        if let Some(name) = &expression.ident {
+            scopes.push(HashMap::from([(name.sym.to_string(), BindingRole::Ordinary)]));
+        }
+        let mut nested = ScopeCreatedAliases { scopes: &scopes, roles: HashMap::new() };
+        expression.class.visit_with(&mut nested);
+        self.roles.extend(nested.roles);
+    }
+    fn visit_for_stmt(&mut self, _: &thaw_parser::ast::ForStmt) {}
+    fn visit_for_in_stmt(&mut self, _: &thaw_parser::ast::ForInStmt) {}
+    fn visit_for_of_stmt(&mut self, _: &thaw_parser::ast::ForOfStmt) {}
+    fn visit_switch_stmt(&mut self, _: &thaw_parser::ast::SwitchStmt) {}
+    fn visit_var_decl(&mut self, declaration: &thaw_parser::ast::VarDecl) {
+        if declaration.kind == thaw_parser::ast::VarDeclKind::Var { return; }
+        for binding in &declaration.decls {
+            let Pat::Ident(alias) = &binding.name else { continue };
+            let Some(init) = binding.init.as_deref() else { continue };
+            let mut role = creator_role(init, self.scopes);
+            if role.is_some() {
+                role = Some(if declaration.kind == thaw_parser::ast::VarDeclKind::Const {
+                    BindingRole::CreatedImmutable
+                } else {
+                    BindingRole::CreatedMutable
+                });
+                self.roles.insert(alias.id.sym.to_string(), role.unwrap());
+            }
+        }
+    }
+}
+
+impl VisitMut for CreatedRequireCallRewriter<'_> {
+    fn visit_mut_module(&mut self, module: &mut Module) {
+        let mut frame = BindingFrame::new();
+        for item in &module.body {
+            let ModuleItem::ModuleDecl(ModuleDecl::Import(import)) = item else { continue };
+            if import.type_only || !matches!(import.src.value.as_str(), Some("module" | "node:module")) { continue; }
+            for specifier in &import.specifiers {
+                match specifier {
+                    ImportSpecifier::Named(named) if !named.is_type_only => {
+                        let imported = named.imported.as_ref().map(export_name).transpose().ok().flatten()
+                            .unwrap_or_else(|| named.local.sym.to_string());
+                        if imported == "createRequire" { frame.insert(named.local.sym.to_string(), BindingRole::ImportedCreator); }
+                    }
+                    ImportSpecifier::Namespace(namespace) => { frame.insert(namespace.local.sym.to_string(), BindingRole::ImportedModuleNamespace); }
+                    _ => {}
+                }
+            }
+        }
+        let mut locals = LocalBindingCollector::default();
+        module.visit_with(&mut locals);
+        let mut hoisted = HoistedBindingCollector::default();
+        module.visit_with(&mut hoisted);
+        locals.names.extend(hoisted.0.names);
+        for name in locals.names { frame.entry(name).or_insert(BindingRole::Ordinary); }
+        let mut aliases = ScopeCreatedAliases { scopes: std::slice::from_ref(&frame), roles: HashMap::new() };
+        for item in &module.body { item.visit_with(&mut aliases); }
+        frame.extend(aliases.roles);
+        let mut hoisted_vars = HoistedVarAliases { scopes: vec![frame.clone()], roles: HashMap::new() };
+        for item in &module.body { item.visit_with(&mut hoisted_vars); }
+        frame.extend(hoisted_vars.roles);
+        self.scopes.push(frame);
+        module.visit_mut_children_with(self);
+        self.scopes.pop();
+    }
+
+    fn visit_mut_block_stmt(&mut self, block: &mut thaw_parser::ast::BlockStmt) {
+        let frame = self.collect_scope(&block.stmts);
+        self.scopes.push(frame);
+        block.visit_mut_children_with(self);
+        self.scopes.pop();
+    }
+    fn visit_mut_function(&mut self, function: &mut thaw_parser::ast::Function) {
+        let mut parameters = HashSet::new();
+        for parameter in &function.params {
+            parameter.pat.visit_with(&mut PatternBindingCollector(&mut parameters));
+        }
+        let frame: BindingFrame = parameters.into_iter()
+            .map(|name| (name, BindingRole::Ordinary)).collect();
+        self.scopes.push(frame);
+        function.visit_mut_children_with(self);
+        self.scopes.pop();
+    }
+
+    fn visit_mut_function_body(&mut self, body: &mut thaw_parser::ast::FunctionBody) {
+        // Parameter defaults are visited before the body environment exists.
+        // Body vars and lexical aliases are visible only while visiting this
+        // FunctionBody, unlike parameter names and outer lexical bindings.
+        let frame = self.collect_function_body_scope(body);
+        self.scopes.push(frame);
+        body.visit_mut_children_with(self);
+        self.scopes.pop();
+    }
+    fn visit_mut_fn_expr(&mut self, expression: &mut thaw_parser::ast::FnExpr) {
+        let mut frame = BindingFrame::new();
+        if let Some(name) = &expression.ident {
+            frame.insert(name.sym.to_string(), BindingRole::Ordinary);
+        }
+        self.scopes.push(frame);
+        expression.visit_mut_children_with(self);
+        self.scopes.pop();
+    }
+    fn visit_mut_class_expr(&mut self, expression: &mut thaw_parser::ast::ClassExpr) {
+        let mut frame = BindingFrame::new();
+        if let Some(name) = &expression.ident {
+            frame.insert(name.sym.to_string(), BindingRole::Ordinary);
+        }
+        self.scopes.push(frame);
+        expression.class.visit_mut_with(self);
+        self.scopes.pop();
+    }
+    fn visit_mut_arrow_expr(&mut self, arrow: &mut thaw_parser::ast::ArrowExpr) {
+        let mut parameters = HashSet::new();
+        for parameter in &arrow.params {
+            parameter.visit_with(&mut PatternBindingCollector(&mut parameters));
+        }
+        let frame: BindingFrame = parameters.into_iter()
+            .map(|name| (name, BindingRole::Ordinary)).collect();
+        self.scopes.push(frame);
+        arrow.visit_mut_children_with(self);
+        self.scopes.pop();
+    }
+    fn visit_mut_catch_clause(&mut self, clause: &mut thaw_parser::ast::CatchClause) {
+        let mut frame = BindingFrame::new();
+        if let Some(param) = &clause.param {
+            let mut names = HashSet::new();
+            param.visit_with(&mut PatternBindingCollector(&mut names));
+            frame.extend(names.into_iter().map(|name| (name, BindingRole::Ordinary)));
+        }
+        self.scopes.push(frame);
+        clause.visit_mut_children_with(self);
+        self.scopes.pop();
+    }
+    fn visit_mut_for_stmt(&mut self, statement: &mut thaw_parser::ast::ForStmt) {
+        let mut frame = BindingFrame::new();
+        if let Some(thaw_parser::ast::VarDeclOrExpr::VarDecl(declaration)) = &statement.init {
+            let mut locals = HashSet::new();
+            if declaration.kind != thaw_parser::ast::VarDeclKind::Var {
+                declaration.visit_with(&mut PatternBindingCollector(&mut locals));
+            }
+            frame.extend(locals.into_iter().map(|name| (name, BindingRole::Ordinary)));
+            let mut outer = self.scopes.clone();
+            outer.push(frame.clone());
+            let mut aliases = ScopeCreatedAliases { scopes: &outer, roles: HashMap::new() };
+            declaration.visit_with(&mut aliases);
+            frame.extend(aliases.roles);
+        }
+        self.scopes.push(frame);
+        statement.visit_mut_children_with(self);
+        self.scopes.pop();
+    }
+    fn visit_mut_for_in_stmt(&mut self, statement: &mut thaw_parser::ast::ForInStmt) {
+        self.scopes.push(loop_left_frame(&statement.left));
+        statement.visit_mut_children_with(self); self.scopes.pop();
+    }
+    fn visit_mut_for_of_stmt(&mut self, statement: &mut thaw_parser::ast::ForOfStmt) {
+        self.scopes.push(loop_left_frame(&statement.left));
+        statement.visit_mut_children_with(self); self.scopes.pop();
+    }
+    fn visit_mut_switch_stmt(&mut self, statement: &mut thaw_parser::ast::SwitchStmt) {
+        statement.discriminant.visit_mut_with(self);
+        let mut locals = LexicalBindingCollector::default();
+        for case in &statement.cases { for consequent in &case.cons { consequent.visit_with(&mut locals); } }
+        let mut frame: BindingFrame = locals.names.into_iter().map(|name| (name, BindingRole::Ordinary)).collect();
+        let mut outer = self.scopes.clone(); outer.push(frame.clone());
+        let mut aliases = ScopeCreatedAliases { scopes: &outer, roles: HashMap::new() };
+        for case in &statement.cases { for consequent in &case.cons { consequent.visit_with(&mut aliases); } }
+        frame.extend(aliases.roles);
+        self.scopes.push(frame);
+        statement.cases.visit_mut_with(self);
+        self.scopes.pop();
+    }
+    fn visit_mut_expr(&mut self, expr: &mut Expr) {
+        if let Expr::Call(call) = &*expr {
+            let role = match &call.callee {
+                Callee::Expr(callee) => match callee.as_ref() {
+                    Expr::Ident(ident) => nearest_role(&self.scopes, ident.sym.as_ref()),
+                    _ => None,
+                },
+                _ => None,
+            };
+            if matches!(role, Some(BindingRole::CreatedImmutable | BindingRole::CreatedMutable)) {
+                if let Some(specifier) = call.args.first().filter(|arg| arg.spread.is_none()).and_then(|arg| constant_string(&arg.expr)) {
+                    if !self.specifiers.contains(&specifier) { self.specifiers.push(specifier); }
+                }
+                if role == Some(BindingRole::CreatedImmutable) && call.args.len() == 1 && call.args[0].spread.is_none() {
+                    let original = call.clone();
+                    let callee = match original.callee { Callee::Expr(callee) => callee, _ => unreachable!() };
+                    let argument = original.args[0].expr.clone();
+                    *expr = Expr::Call(thaw_parser::ast::CallExpr {
+                        span: original.span, ctxt: Default::default(),
+                        callee: Callee::Expr(Box::new(Expr::Ident(Ident::new_no_ctxt(self.helper.to_string().into(), original.span)))),
+                        args: vec![
+                            thaw_parser::ast::ExprOrSpread { spread: None, expr: callee },
+                            thaw_parser::ast::ExprOrSpread { spread: None, expr: argument },
+                        ], type_args: None,
+                    });
+                    self.used = true;
+                }
+            }
+        }
+        expr.visit_mut_children_with(self);
+    }
 }
 
 fn load_module(
@@ -378,13 +665,38 @@ fn load_module(
     let module = thaw_parser::parse_typescript_with_source_map_named(&source, source_name)
         .map(|(module, _)| module)
         .map_err(|error| format!("failed to parse `{}`: {error}", path.display()))?;
-    let module = thaw_hir::normalize_top_level_destructuring(&module)
+    let mut module = thaw_hir::normalize_top_level_destructuring(&module)
         .map_err(|error| format!("failed to normalize `{}`: {error}", path.display()))?;
-    let specifiers = dependency_specifiers(&module)?;
+    let mut specifiers = dependency_specifiers(&module)?;
+    let mut identifiers = IdentifierNames::default();
+    module.visit_with(&mut identifiers);
+    let index = modules.len();
+    for name in declared_names(&module) {
+        identifiers.0.insert(format!("__thawmod{index}_{name}"));
+    }
+    let stem = format!("__thawmod{index}_created_require_result");
+    let mut helper = stem.clone();
+    let mut suffix = 0;
+    while identifiers.0.contains(&helper) {
+        suffix += 1;
+        helper = format!("{stem}_{suffix}");
+    }
+    let mut created_calls = CreatedRequireCallRewriter {
+        helper: &helper, scopes: Vec::new(), specifiers: Vec::new(), used: false,
+    };
+    module.visit_mut_with(&mut created_calls);
+    for specifier in created_calls.specifiers {
+        if let Some(existing) = specifiers.iter().position(|(name, _, _)| name == &specifier) {
+            specifiers[existing].1 = true;
+            specifiers[existing].2 = true;
+        } else {
+            specifiers.push((specifier, true, true));
+        }
+    }
+    let created_require_helper = created_calls.used.then_some(helper);
     // Reserve identity before descending so a dynamic or type-only back edge
     // can refer to this module. Static cycles are checked separately against
     // the static dependency graph before emission.
-    let index = modules.len();
     modules.push(LoadedModule {
         path: path.clone(),
         source: source.clone(),
@@ -392,12 +704,14 @@ fn load_module(
         dependencies: HashMap::new(),
         runtime_dependencies: HashSet::new(),
         static_dependencies: HashSet::new(),
+        specifiers: specifiers.clone(),
+        created_require_helper,
     });
     loaded.insert(path.clone(), index);
     let mut dependencies = HashMap::new();
     let mut runtime_dependencies = HashSet::new();
     let mut static_dependencies = HashSet::new();
-    for (specifier, is_runtime, is_static) in specifiers {
+    for (specifier, is_runtime, is_static) in specifiers.iter().cloned() {
         if !specifier.starts_with('.') {
             continue;
         }
@@ -1150,6 +1464,15 @@ pub fn source_paths(entry: &Path) -> Result<(Vec<PathBuf>, bool), String> {
     Ok((paths, complete))
 }
 
+pub fn uses_created_require_live_result(entry: &Path, entry_source: &str) -> Result<bool, String> {
+    let mut modules = Vec::new();
+    load_module(
+        entry.canonicalize().map_err(|error| format!("failed to resolve `{}`: {error}", entry.display()))?,
+        Some(entry_source), None, &mut modules, &mut HashMap::new(), &mut HashSet::new(),
+    )?;
+    Ok(modules.iter().any(|module| module.created_require_helper.is_some()))
+}
+
 pub fn external_specifiers(
     entry: &Path,
     entry_source: &str,
@@ -1169,11 +1492,11 @@ pub fn external_specifiers(
     let mut result = Vec::new();
     for index in module_emission_order(&modules)? {
         let module = &modules[index];
-        for (specifier, _, _) in dependency_specifiers(&module.module)? {
+        for (specifier, _, _) in &module.specifiers {
             if !specifier.starts_with('.')
-                && !result.iter().any(|(existing, _)| existing == &specifier)
+                && !result.iter().any(|(existing, _)| existing == specifier)
             {
-                result.push((specifier.clone(), module_location(module, &specifier)));
+                result.push((specifier.clone(), module_location(module, specifier)));
             }
         }
     }
@@ -1197,9 +1520,9 @@ pub fn external_runtime_specifiers(
     )?;
     let mut runtime = HashSet::new();
     for module in &modules {
-        for (specifier, is_runtime, _) in dependency_specifiers(&module.module)? {
-            if is_runtime && !specifier.starts_with('.') {
-                runtime.insert(specifier);
+        for (specifier, is_runtime, _) in &module.specifiers {
+            if *is_runtime && !specifier.starts_with('.') {
+                runtime.insert(specifier.clone());
             }
         }
     }
@@ -1225,9 +1548,9 @@ pub fn external_static_specifiers(
         if !reachable.contains(&index) {
             continue;
         }
-        for (specifier, _, is_static) in dependency_specifiers(&module.module)? {
-            if is_static && !specifier.starts_with('.') {
-                static_packages.insert(specifier);
+        for (specifier, _, is_static) in &module.specifiers {
+            if *is_static && !specifier.starts_with('.') {
+                static_packages.insert(specifier.clone());
             }
         }
     }
@@ -2140,9 +2463,9 @@ pub(crate) fn bundle_with_named_source_transform(
             .iter()
             .copied()
             .collect::<Vec<_>>();
-        for (specifier, _, is_static) in dependency_specifiers(&modules[index].module)? {
-            if is_static {
-                if let Some(external) = external_module_indices.get(&specifier) {
+        for (specifier, _, is_static) in &modules[index].specifiers {
+            if *is_static {
+                if let Some(external) = external_module_indices.get(specifier) {
                     static_dependencies.push(*external);
                 }
             }
@@ -2204,6 +2527,17 @@ pub(crate) fn bundle_with_named_source_transform(
         for item in &mut bundled_items[start..end] {
             item.visit_mut_with(&mut rewriter);
         }
+    }
+
+    for helper in modules.iter().filter_map(|module| module.created_require_helper.as_ref()) {
+        let helper_source = format!(
+            "function {helper}(callable: JsValue, specifier: string): JsValue {{ return callDynamicValueHandle(callable, JSON.parse(JSON.stringify([specifier]))); }}"
+        );
+        let (helper_module, _) = thaw_parser::parse_typescript_with_source_map_named(
+            &helper_source,
+            thaw_parser::common::FileName::Custom("generated created-require result helper.ts".into()),
+        )?;
+        bundled_items.extend(helper_module.body);
     }
 
     // Allocate namespace objects once during startup. Without their own
