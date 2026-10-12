@@ -3174,8 +3174,22 @@ pub extern "C" fn thaw_js_retain_handle(handle: u64) -> u8 {
             return 0;
         };
         let index = (handle - 1) as usize;
-        let count = refs.get::<u64>(index).unwrap_or(1);
-        u8::from(refs.set(index, count + 1).is_ok())
+        let count = match refs.get::<u64>(index) {
+            Ok(count) => count,
+            Err(rquickjs::Error::Exception) => {
+                drop(ctx.catch());
+                return 0;
+            }
+            Err(_) => 1,
+        };
+        match refs.set(index, count + 1) {
+            Ok(()) => 1,
+            Err(rquickjs::Error::Exception) => {
+                drop(ctx.catch());
+                0
+            }
+            Err(_) => 0,
+        }
     })
 }
 
