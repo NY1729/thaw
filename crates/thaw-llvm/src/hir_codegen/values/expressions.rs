@@ -150,6 +150,10 @@ impl<'ctx> HirCompiler<'ctx> {
                 }
                 let val = self.compile_expr(value)?;
                 self.builder.build_store(ptr, val).map_err(|e| e.to_string())?;
+                // A named binding now owns the produced Json value. Revoke
+                // its whole-statement discard candidate even when pure HIR
+                // wrappers (TypedClosure/EvalThen/Block) return this same SSA.
+                self.revoke_fresh_owned_json_result(val)?;
                 if let Some((catch_slot, _, _, valid_slot, _)) = self.catch_native_text.get(name) {
                     if *catch_slot == ptr {
                         self.builder.build_store(*valid_slot,
@@ -420,6 +424,7 @@ impl<'ctx> HirCompiler<'ctx> {
                         "array_presence_mark",
                     )
                     .map_err(|e| e.to_string())?;
+                self.revoke_fresh_owned_json_result(val)?;
                 self.builder.build_unconditional_branch(done).map_err(|error| error.to_string())?;
                 self.builder.position_at_end(done);
                 Ok(val)
@@ -526,7 +531,9 @@ impl<'ctx> HirCompiler<'ctx> {
                     &[handle.into()], "js_value_as_json",
                 ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
                     .ok_or("live JSON conversion returned no value")?;
-                self.compile_check_json_host_error(json, Some("thaw_json_destroy"))
+                let json = self.compile_check_json_host_error(json, Some("thaw_json_destroy"))?;
+                self.mark_fresh_owned_json_result(json)?;
+                Ok(json)
             }
             // A statement block lowered in expression position (e.g. `new Date(0)`): run the
             // leading statements, then the trailing `return` is the block's value.
@@ -603,6 +610,7 @@ impl<'ctx> HirCompiler<'ctx> {
                             "update_object_accessor",
                         )
                         .map_err(|error| error.to_string())?;
+                    self.revoke_fresh_owned_json_result(val)?;
                     return Ok(val);
                 }
                 let marker = if field.starts_with("__thaw_class_identity_\u{1e}") {
@@ -715,6 +723,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     .build_unconditional_branch(done)
                     .map_err(|error| error.to_string())?;
                 self.builder.position_at_end(done);
+                self.revoke_fresh_owned_json_result(val)?;
                 Ok(val)
             }
 

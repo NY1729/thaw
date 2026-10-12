@@ -164,6 +164,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .map_err(|error| error.to_string())?;
         self.compile_throw_type_error("Invalid JavaScript result graph")?;
         self.builder.position_at_end(valid);
+        self.mark_fresh_owned_json_result(decoded)?;
         Ok(decoded)
     }
     /// A live QuickJS-backed Json operation can execute a getter or coercion.
@@ -232,7 +233,9 @@ impl<'ctx> HirCompiler<'ctx> {
         let value = call.try_as_basic_value()
             .basic()
             .ok_or_else(|| "thaw_json_get did not return a value".to_string())?;
-        self.compile_check_json_host_error(value, Some("thaw_json_destroy"))
+        let value = self.compile_check_json_host_error(value, Some("thaw_json_destroy"))?;
+        self.mark_fresh_owned_json_result(value)?;
+        Ok(value)
     }
 
     fn compile_json_key(
@@ -252,7 +255,9 @@ impl<'ctx> HirCompiler<'ctx> {
             .try_as_basic_value()
             .basic()
             .ok_or_else(|| "thaw_json_get did not return a value".to_string())?;
-        self.compile_check_json_host_error(value, Some("thaw_json_destroy"))
+        let value = self.compile_check_json_host_error(value, Some("thaw_json_destroy"))?;
+        self.mark_fresh_owned_json_result(value)?;
+        Ok(value)
     }
 
     fn compile_json_set(
@@ -468,6 +473,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 element,
             )?;
         }
+        self.mark_fresh_owned_json_result(object)?;
         Ok(object)
     }
 
@@ -502,7 +508,9 @@ impl<'ctx> HirCompiler<'ctx> {
         let value = call.try_as_basic_value()
             .basic()
             .ok_or_else(|| "thaw_json_index did not return a value".to_string())?;
-        self.compile_check_json_host_error(value, Some("thaw_json_destroy"))
+        let value = self.compile_check_json_host_error(value, Some("thaw_json_destroy"))?;
+        self.mark_fresh_owned_json_result(value)?;
+        Ok(value)
     }
 
     fn compile_json_index_set(

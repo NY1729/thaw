@@ -481,9 +481,19 @@ impl<'ctx> HirCompiler<'ctx> {
                     self.compile_and_discard_promise_expression(expr)?;
                     return Ok(false);
                 }
-                let value = self.compile_expr(expr)?;
+                let discard_frame_depth = self.owned_json_discard_frames.len();
+                self.begin_owned_json_discard_frame();
+                let value = match self.compile_expr(expr) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        self.owned_json_discard_frames.truncate(discard_frame_depth);
+                        return Err(error);
+                    }
+                };
+                let result_type = self.expr_hir_type(expr);
+                self.discard_owned_json_statement_result(expr, value, result_type.clone())?;
                 if matches!(expr, HirExpr::Call(..) | HirExpr::DynamicCall(..))
-                    && self.expr_hir_type(expr) == Some(HirType::JsValue)
+                    && result_type == Some(HirType::JsValue)
                 {
                     self.builder
                         .build_call(

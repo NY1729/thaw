@@ -2866,8 +2866,10 @@ impl<'ctx> HirCompiler<'ctx> {
                     .map_err(|error| error.to_string())?;
                 Ok(value)
             }
-            HirType::Json => Ok(json),
-            HirType::Dictionary(_) => Ok(json),
+            HirType::Json | HirType::Dictionary(_) => {
+                self.mark_fresh_owned_json_result(json)?;
+                Ok(json)
+            },
             HirType::Bytes => {
                 let is_buffer = self.builder.build_call(
                     self.module.get_function("thaw_json_is_buffer").unwrap(),

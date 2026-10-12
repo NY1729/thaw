@@ -3318,3 +3318,63 @@ fn mixed_number_boolean_ternaries_stringify_the_selected_jit_value() {
     assert_eq!(String::from_utf8_lossy(&result.stdout), "42\nfalse\nfalse\n42\n");
     let _ = std::fs::remove_dir_all(dir);
 }
+
+
+#[test]
+fn json_host_index_assignment_keeps_valid_graph_and_discards_invalid_graph() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-json-index-graph-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(&entry, r#"
+function main(): void {
+  loadScript("globalThis.__thaw_index_child = Symbol('index-child'); globalThis.__thaw_index_capture = value => { globalThis.__thaw_index_captured = value; return true; }; globalThis.__thaw_index_matches = () => !!globalThis.__thaw_index_captured && globalThis.__thaw_index_captured.nested === globalThis.__thaw_index_child; globalThis.__thaw_index_refs_total = () => __thaw_value_handle_refs.reduce((sum, refs) => sum + refs, 0);");
+  const child: JsValue = getDynamicValue("__thaw_index_child");
+  const capture: JsValue = getDynamicValue("__thaw_index_capture");
+  const matches: JsValue = getDynamicValue("__thaw_index_matches");
+  const refsTotal: JsValue = getDynamicValue("__thaw_index_refs_total");
+  const values: Json[] = [JSON.parse("null")];
+
+  // A valid write transfers the fresh JSON host into the array. The existing
+  // JsonGraph call bridge must still revive its nested live Symbol identity.
+  values[0] = { nested: child };
+  callDynamicValue(capture, __thaw_json_argument_array(values[0]));
+  if (callDynamicValue(matches, __thaw_json_argument_array()) !== true)
+    throw new Error("valid JSON index write lost nested JsValue identity");
+  const validRefs = Number(callDynamicValue(refsTotal, __thaw_json_argument_array()));
+
+  // A rejected negative index leaves the fresh RHS untransferred; discarding
+  // that JSON host must release its nested graph lease.
+  values[-1] = { nested: child };
+  if (values.length !== 1)
+    throw new Error("negative JSON index unexpectedly extended the array");
+  if (Number(callDynamicValue(refsTotal, __thaw_json_argument_array())) !== validRefs)
+    throw new Error("discarded negative-index JSON host leaked a graph lease");
+
+  // The failed array write still returns its fresh RHS. Its result remains
+  // live when the assignment value is consumed by a subsequent JSONGraph call.
+  const assigned: Json = (values[-1] = { nested: child });
+  if (values.length !== 1)
+    throw new Error("used negative-index assignment unexpectedly extended the array");
+  if (Number(callDynamicValue(refsTotal, __thaw_json_argument_array())) !== validRefs + 1)
+    throw new Error("used assignment result did not retain its nested graph lease");
+  callDynamicValue(capture, __thaw_json_argument_array(assigned));
+  if (callDynamicValue(matches, __thaw_json_argument_array()) !== true)
+    throw new Error("used failed-assignment result lost nested JsValue identity");
+  if (Number(callDynamicValue(refsTotal, __thaw_json_argument_array())) !== validRefs + 1)
+    throw new Error("used failed-assignment result was destroyed before its consumer");
+
+  releaseDynamicValue(child);
+  releaseDynamicValue(refsTotal);
+  releaseDynamicValue(matches);
+  releaseDynamicValue(capture);
+}
+"#).unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &dir.join("registry"), &[]).unwrap();
+    let result = Command::new(output).output().unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    let _ = std::fs::remove_dir_all(dir);
+}

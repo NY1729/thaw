@@ -73,7 +73,13 @@ impl<'ctx> HirCompiler<'ctx> {
             HirExpr::Lit(HirLit::Undefined | HirLit::ArrayHole) => Some(HirType::Undefined),
             HirExpr::Lit(HirLit::Null) => Some(HirType::Null),
             HirExpr::Var(name) => self.variable_hir_types.get(name).cloned(),
-            HirExpr::Assign(_, value) => self.expr_hir_type(value),
+            HirExpr::Assign(_, value)
+            | HirExpr::IndexAssign(_, _, value)
+            | HirExpr::PropAssign(_, _, _, value) => self.expr_hir_type(value),
+            HirExpr::Block(statements) => match statements.last() {
+                Some(HirStmt::Return(Some(value))) => self.expr_hir_type(value),
+                _ => None,
+            },
             HirExpr::EvalThen(_, second) => self.expr_hir_type(second),
             HirExpr::PostfixUpdate(_, _) => Some(HirType::F64),
             HirExpr::OptionalSome(_, payload) | HirExpr::OptionalNone(payload) => {
