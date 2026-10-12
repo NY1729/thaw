@@ -11704,6 +11704,96 @@ fn private_graph_arguments_release_input_leases_before_target_lookup_errors() {
 }
 
 #[test]
+fn retain_handle_clears_only_its_own_reference_registry_exceptions() {
+    let mut guard = ErrorBoundaryFixtureGuard::new();
+    guard.preserve_globals(&[
+        "__retainHandleExceptionSentinel",
+        "__retainHandleTestObject",
+        "__retainHandleExceptionCaught",
+        "__retainHandleRefsDescriptor",
+        "__retainHandleArrayDescriptor",
+    ]);
+    guard.append_restore_with(r#"
+      (() => {
+        const index = globalThis.__retainHandleTestHandle - 1;
+        const refs = globalThis.__thaw_value_handle_refs;
+        const handles = globalThis.__thaw_value_handles;
+        if (globalThis.__retainHandleRefsDescriptor)
+          Object.defineProperty(refs, index, globalThis.__retainHandleRefsDescriptor);
+        if (globalThis.__retainHandleArrayDescriptor)
+          Object.defineProperty(handles, index, globalThis.__retainHandleArrayDescriptor);
+        delete globalThis.__retainHandleTestHandle;
+        delete globalThis.__retainHandleRefsDescriptor;
+        delete globalThis.__retainHandleArrayDescriptor;
+        delete globalThis.__retainHandleExceptionSentinel;
+        delete globalThis.__retainHandleExceptionCaught;
+        return 1;
+      })()
+    "#);
+    assert_eq!(load("globalThis.__retainHandleTestObject = {}; globalThis.__retainHandleExceptionSentinel = new Error('handle getter sentinel'); 1"), 1);
+    let handle = thaw_js_get_global(c"__retainHandleTestObject".as_ptr());
+    guard.handle(handle);
+    assert_ne!(handle, 0);
+    assert_eq!(load(&format!(r#"
+      (() => {{
+        const index = {index};
+        const refs = globalThis.__thaw_value_handle_refs;
+        globalThis.__retainHandleTestHandle = index + 1;
+        globalThis.__retainHandleRefsDescriptor = Object.getOwnPropertyDescriptor(refs, index);
+        Object.defineProperty(refs, index, {{ ...globalThis.__retainHandleRefsDescriptor, writable: false }});
+        return 1;
+      }})()
+    "#, index = handle - 1)), 1);
+    assert_eq!(thaw_js_retain_handle(handle), 0, "readonly refs slot is a status failure");
+    assert!(!with_context(|ctx| ctx.has_exception()), "a retain refs.set failure must not leave a QuickJS exception pending");
+    assert_eq!(load("1 + 1"), 1, "the context remains usable after the nonthrowing retain failure");
+    assert_eq!(load(r#"
+      (() => {
+        const index = globalThis.__retainHandleTestHandle - 1;
+        const refs = globalThis.__thaw_value_handle_refs;
+        Object.defineProperty(refs, index, globalThis.__retainHandleRefsDescriptor);
+        if (Object.getOwnPropertyDescriptor(refs, index).value !== globalThis.__retainHandleRefsDescriptor.value)
+          throw new Error('failed retain changed the refs slot');
+        globalThis.__retainHandleRefsDescriptor = Object.getOwnPropertyDescriptor(refs, index);
+        Object.defineProperty(refs, index, {
+          configurable: true,
+          get() { throw globalThis.__retainHandleExceptionSentinel; }
+        });
+        return 1;
+      })()
+    "#), 1);
+    assert_eq!(thaw_js_retain_handle(handle), 0, "a refs getter exception is a status failure");
+    assert!(!with_context(|ctx| ctx.has_exception()), "a retain refs.get exception must be caught at its nonthrowing boundary");
+    assert_eq!(load("1 + 1"), 1);
+    assert_eq!(load(r#"
+      (() => {
+        const index = globalThis.__retainHandleTestHandle - 1;
+        const refs = globalThis.__thaw_value_handle_refs;
+        Object.defineProperty(refs, index, globalThis.__retainHandleRefsDescriptor);
+        if (Object.getOwnPropertyDescriptor(refs, index).value !== globalThis.__retainHandleRefsDescriptor.value)
+          throw new Error('failed refs getter changed the refs slot');
+        const handles = globalThis.__thaw_value_handles;
+        globalThis.__retainHandleArrayDescriptor = Object.getOwnPropertyDescriptor(handles, index);
+        Object.defineProperty(handles, index, {
+          configurable: true,
+          get() { throw globalThis.__retainHandleExceptionSentinel; }
+        });
+        return 1;
+      })()
+    "#), 1);
+    assert_eq!(thaw_js_retain_handle(handle), 0, "the live handle lookup fails");
+    assert!(with_context(|ctx| ctx.has_exception()), "a handle-array getter exception is outside the refs status boundary");
+    with_context(|ctx| {
+        let thrown = ctx.catch();
+        ctx.globals().set("__retainHandleExceptionCaught", thrown).unwrap();
+        assert!(ctx.eval::<bool, _>("__retainHandleExceptionCaught === __retainHandleExceptionSentinel").unwrap(),
+            "the original handle getter exception is preserved by identity");
+    });
+    assert_eq!(load("1 + 1"), 1);
+    guard.finish();
+}
+
+#[test]
 fn private_graph_property_setter_runs_before_result_encoding() {
     assert_eq!(
         load(
