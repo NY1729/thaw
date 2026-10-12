@@ -1543,11 +1543,51 @@ impl<'a> FnLowerer<'a> {
 
             Expr::Bin(bin) => {
                 if bin.op == BinaryOp::InstanceOf {
-                    let Expr::Ident(class) = bin.right.as_ref() else {
-                        return Err(
-                            "native `instanceof` requires a class identifier on the right"
-                                .into(),
+                    if !matches!(bin.right.as_ref(), Expr::Ident(_)) {
+                        // A property-valued constructor needs the realm's exact
+                        // instanceof semantics, including custom @@hasInstance.
+                        let left = self.lower_expr(&bin.left)?;
+                        let left_type = self.infer_expr_type(&left)?;
+                        let right = self.lower_expr(&bin.right)?;
+                        let right_type = self.infer_expr_type(&right)?;
+                        let left_name =
+                            format!("__thaw_dynamic_instanceof_left_{}", self.next_binding);
+                        self.next_binding += 1;
+                        let right_name =
+                            format!("__thaw_dynamic_instanceof_right_{}", self.next_binding);
+                        self.next_binding += 1;
+                        self.scope.insert(left_name.clone(), left_type.clone());
+                        self.scope.insert(right_name.clone(), right_type.clone());
+                        let json_arguments = self.coerce_to_declared(
+                            &HirType::Json,
+                            HirExpr::ArrayLit(vec![
+                                HirExpr::Var(left_name.clone()),
+                                HirExpr::Var(right_name.clone()),
+                            ]),
+                        )?;
+                        let result = HirExpr::JsonAsBool(Box::new(HirExpr::Call(
+                            Box::new(HirExpr::Var("callDynamicValueMixedExact".into())),
+                            vec![
+                                HirExpr::Call(
+                                    Box::new(HirExpr::Var("getDynamicValue".into())),
+                                    vec![HirExpr::Lit(HirLit::Str(
+                                        "__thaw_json_host_instanceof".into(),
+                                    ))],
+                                ),
+                                json_arguments,
+                                HirExpr::ArrayLit(Vec::new()),
+                            ],
+                        )));
+                        return self.wrap_call_argument_bindings(
+                            result,
+                            &[
+                                (left_name, left_type, left),
+                                (right_name, right_type, right),
+                            ],
                         );
+                    }
+                    let Expr::Ident(class) = bin.right.as_ref() else {
+                        unreachable!("non-identifier instanceof RHS handled above");
                     };
                     // True for the built-ins themselves and for any user
                     // class transitively `extends`ing one of them (its
@@ -3716,12 +3756,6 @@ impl<'a> FnLowerer<'a> {
                                             let (key_type, value_type) = explicit_types.clone().unwrap_or_else(|| {
                                                 (inferred_key.clone(), inferred_value.clone())
                                             });
-                                            let pair_type = HirType::Tuple(vec![key_type.clone(), value_type.clone()]);
-                                            if element.as_ref() != &pair_type {
-                                                return Err(format!(
-                                                    "Map constructor union member has entry type {element:?}, expected {pair_type:?}"
-                                                ));
-                                            }
                                             let map_type = HirType::Map(
                                                 Box::new(key_type.clone()),
                                                 Box::new(value_type.clone()),
@@ -3733,10 +3767,12 @@ impl<'a> FnLowerer<'a> {
                                                     members.clone(),
                                                 ),
                                                 member.clone(),
+                                                element.as_ref().clone(),
                                                 map_type,
                                                 key_validator(&key_type)?,
                                                 key_type,
-                                                Some((value_type, pair_type)),
+                                                Some((inferred_key.clone(), inferred_value.clone())),
+                                                true,
                                             )?);
                                         }
                                         let result = self.merge_union_array_method_branches(
@@ -3751,7 +3787,8 @@ impl<'a> FnLowerer<'a> {
                                     }
                                 }
                             }
-                            let (key_type, value_type) = if let Some(types) = explicit_types {
+                            let explicit_target = explicit_types.is_some();
+                            let (key_type, value_type) = if let Some(types) = explicit_types.clone() {
                                 types
                             } else {
                                 let HirType::Array(element) = &actual_type else {
@@ -3783,26 +3820,104 @@ impl<'a> FnLowerer<'a> {
                                     Box::new(value_type.clone()),
                                 )
                             };
-                            let pair_type =
+                            let target_pair_type =
                                 HirType::Tuple(vec![key_type.clone(), value_type.clone()]);
-                            let entries_type = HirType::Array(Box::new(pair_type.clone()));
-                            if let Some((collected, _)) =
-                                self.collect_generator_for_array_spread(entries.clone(), &actual_type)?
+                            let target_entries_type =
+                                HirType::Array(Box::new(target_pair_type.clone()));
+                            if is_weak {
+                                if let Some((collected, _)) = self
+                                    .collect_generator_for_array_spread(entries.clone(), &actual_type)?
+                                {
+                                    entries = collected;
+                                }
+                                self.expect_type(
+                                    &target_entries_type,
+                                    &entries,
+                                    &format!("{} constructor entries", class.sym),
+                                )?;
+                                return self.lower_map_or_set_from_iterable(
+                                    entries,
+                                    target_entries_type,
+                                    target_pair_type.clone(),
+                                    map_type,
+                                    key_validator(&key_type)?,
+                                    key_type.clone(),
+                                    Some((key_type.clone(), value_type.clone())),
+                                    false,
+                                );
+                            }
+
+                            if explicit_target && matches!(&entries, HirExpr::ArrayLit(_)) {
+                                let (entries, pair_type, source_key_type, source_value_type) = self
+                                    .lower_explicit_map_literal_entries(
+                                        entries,
+                                        &key_type,
+                                        &value_type,
+                                    )?;
+                                return self.lower_map_or_set_from_iterable(
+                                    entries,
+                                    target_entries_type,
+                                    pair_type,
+                                    map_type,
+                                    key_validator(&key_type)?,
+                                    key_type,
+                                    Some((source_key_type, source_value_type)),
+                                    false,
+                                );
+                            }
+
+                            let mut source_array_type = actual_type.clone();
+                            if let Some((collected, collected_type)) = self
+                                .collect_generator_for_array_spread(entries.clone(), &actual_type)?
                             {
                                 entries = collected;
+                                source_array_type = collected_type;
                             }
-                            self.expect_type(
-                                &entries_type,
-                                &entries,
-                                &format!("{} constructor entries", class.sym),
-                            )?;
+                            let (source_pair_type, source_key_type, source_value_type) =
+                                if explicit_target
+                                    && matches!(&entries, HirExpr::ArrayLit(values) if values.is_empty())
+                                {
+                                    (
+                                        target_pair_type.clone(),
+                                        key_type.clone(),
+                                        value_type.clone(),
+                                    )
+                                } else {
+                                    let HirType::Array(source_pair) = &source_array_type else {
+                                        return Err(format!(
+                                            "Map constructor entries must be an array of [key, value] pairs, got {source_array_type:?}"
+                                        ));
+                                    };
+                                    let HirType::Tuple(source_slots) = source_pair.as_ref() else {
+                                        return Err(format!(
+                                            "Map constructor entries must be an array of [key, value] pairs, got {source_pair:?}"
+                                        ));
+                                    };
+                                    let [source_key, source_value] = source_slots.as_slice() else {
+                                        return Err(format!(
+                                            "Map constructor entries must be [key, value] pairs, got {source_pair:?}"
+                                        ));
+                                    };
+                                    (
+                                        source_pair.as_ref().clone(),
+                                        source_key.clone(),
+                                        source_value.clone(),
+                                    )
+                                };
+                            if explicit_target
+                                && matches!(&entries, HirExpr::ArrayLit(values) if values.is_empty())
+                            {
+                                source_array_type = target_entries_type.clone();
+                            }
                             return self.lower_map_or_set_from_iterable(
                                 entries,
-                                entries_type,
+                                source_array_type,
+                                source_pair_type,
                                 map_type,
                                 key_validator(&key_type)?,
                                 key_type,
-                                Some((value_type, pair_type)),
+                                Some((source_key_type, source_value_type)),
+                                true,
                             );
                         }
                         let explicit_type = match params {
@@ -3850,11 +3965,6 @@ impl<'a> FnLowerer<'a> {
                                         let element_type = explicit_type
                                             .clone()
                                             .unwrap_or_else(|| inferred_element.as_ref().clone());
-                                        if inferred_element.as_ref() != &element_type {
-                                            return Err(format!(
-                                                "Set constructor union member has element type {inferred_element:?}, expected {element_type:?}"
-                                            ));
-                                        }
                                         let set_type = HirType::Set(Box::new(element_type.clone()));
                                         branches.push(self.lower_map_or_set_from_iterable(
                                             HirExpr::UnionValue(
@@ -3863,10 +3973,12 @@ impl<'a> FnLowerer<'a> {
                                                 members.clone(),
                                             ),
                                             member.clone(),
+                                            inferred_element.as_ref().clone(),
                                             set_type,
                                             key_validator(&element_type)?,
                                             element_type,
                                             None,
+                                            true,
                                         )?);
                                     }
                                     let result = self.merge_union_array_method_branches(
@@ -3881,7 +3993,8 @@ impl<'a> FnLowerer<'a> {
                                 }
                             }
                         }
-                        let element_type = if let Some(element_type) = explicit_type {
+                        let explicit_target = explicit_type.is_some();
+                        let element_type = if let Some(element_type) = explicit_type.clone() {
                             element_type
                         } else {
                             let HirType::Array(element) = &actual_type else {
@@ -3895,26 +4008,62 @@ impl<'a> FnLowerer<'a> {
                         let set_type = if is_weak {
                             HirType::WeakSet(Box::new(element_type.clone()))
                         } else {
-                                HirType::Set(Box::new(element_type.clone()))
+                            HirType::Set(Box::new(element_type.clone()))
                         };
                         let iterable_type = HirType::Array(Box::new(element_type.clone()));
-                        if let Some((collected, _)) = self
+                        if is_weak {
+                            if let Some((collected, _)) = self
+                                .collect_generator_for_array_spread(iterable.clone(), &actual_type)?
+                            {
+                                iterable = collected;
+                            }
+                            self.expect_type(
+                                &iterable_type,
+                                &iterable,
+                                &format!("{} constructor iterable", class.sym),
+                            )?;
+                            return self.lower_map_or_set_from_iterable(
+                                iterable,
+                                iterable_type,
+                                element_type.clone(),
+                                set_type,
+                                key_validator(&element_type)?,
+                                element_type,
+                                None,
+                                false,
+                            );
+                        }
+
+                        let mut source_array_type = actual_type.clone();
+                        if let Some((collected, collected_type)) = self
                             .collect_generator_for_array_spread(iterable.clone(), &actual_type)?
                         {
                             iterable = collected;
+                            source_array_type = collected_type;
                         }
-                        self.expect_type(
-                            &iterable_type,
-                            &iterable,
-                            &format!("{} constructor iterable", class.sym),
-                        )?;
+                        let source_element_type =
+                            if explicit_target
+                                && matches!(&iterable, HirExpr::ArrayLit(values) if values.is_empty())
+                            {
+                                source_array_type = iterable_type.clone();
+                                element_type.clone()
+                            } else {
+                                let HirType::Array(source_element) = &source_array_type else {
+                                    return Err(format!(
+                                        "Set constructor iterable must be an array, got {source_array_type:?}"
+                                    ));
+                                };
+                                source_element.as_ref().clone()
+                            };
                         return self.lower_map_or_set_from_iterable(
                             iterable,
-                            iterable_type,
+                            source_array_type,
+                            source_element_type,
                             set_type,
                             key_validator(&element_type)?,
                             element_type,
                             None,
+                            true,
                         );
                     }
                     if class.sym == *"Date" {
@@ -4486,17 +4635,171 @@ impl<'a> FnLowerer<'a> {
     /// as the no-argument constructor), loops over `source` by index, and
     /// calls the matching `__thaw_map_{suffix}_set` intrinsic once per
     /// element -- for a `Map`, each element is itself a `[key, value]`
-    /// pair (`value_info` carries the value/pair types needed to read
-    /// both halves); for a `Set`, each element IS the key, with the value
+    /// pair (`source_element_type` and `value_info` carry its original
+    /// physical slot types); for a `Set`, each element IS the key, with the value
     /// half fixed at `0.0` (a dummy word, exactly like `.add()`).
+    fn constructor_slot_can_widen_to_json(source_type: &HirType) -> bool {
+        match source_type {
+            HirType::F64
+            | HirType::I64
+            | HirType::Str
+            | HirType::StrLiteral(_)
+            | HirType::Bool
+            | HirType::Null
+            | HirType::Undefined
+            | HirType::Json
+            | HirType::JsValue => true,
+            HirType::Object(_) => {
+                source_type != &date_object_type()
+                    && Self::fixed_object_supports_live_projection(source_type)
+            }
+            _ => false,
+        }
+    }
+
+    fn coerce_constructor_slot(
+        &mut self,
+        source_type: &HirType,
+        target_type: &HirType,
+        value: HirExpr,
+        context: &str,
+        allow_json_widening: bool,
+        is_key: bool,
+    ) -> Result<HirExpr, String> {
+        if source_type == target_type {
+            return Ok(value);
+        }
+        if allow_json_widening
+            && *target_type == HirType::Json
+            && Self::constructor_slot_can_widen_to_json(source_type)
+        {
+            let converted = if is_key {
+                self.coerce_map_key(target_type, value)?
+            } else {
+                self.coerce_to_declared(target_type, value)?
+            };
+            self.expect_type(target_type, &converted, context)?;
+            return Ok(converted);
+        }
+        self.expect_type(target_type, &value, context)?;
+        Ok(value)
+    }
+
+    fn lower_explicit_map_literal_entries(
+        &mut self,
+        entries: HirExpr,
+        key_type: &HirType,
+        value_type: &HirType,
+    ) -> Result<(HirExpr, HirType, HirType, HirType), String> {
+        let HirExpr::ArrayLit(pairs) = entries else {
+            unreachable!("literal constructor helper receives an ArrayLit")
+        };
+        let pair_type = HirType::Tuple(vec![key_type.clone(), value_type.clone()]);
+        let entries_type = HirType::Array(Box::new(pair_type.clone()));
+        let mut bindings = Vec::new();
+        let mut normalized_pairs = Vec::with_capacity(pairs.len());
+
+        for (pair_index, pair) in pairs.into_iter().enumerate() {
+            let (source_key, source_value) = match pair {
+                HirExpr::ArrayLit(slots) => {
+                    let [source_key, source_value] = slots.as_slice() else {
+                        return Err(format!(
+                            "Map constructor entries must be [key, value] pairs, got {} slots at index {pair_index}",
+                            slots.len()
+                        ));
+                    };
+                    (source_key.clone(), source_value.clone())
+                }
+                entry => {
+                    let entry_type = self.infer_expr_type(&entry)?;
+                    let HirType::Tuple(source_slots) = &entry_type else {
+                        return Err(format!(
+                            "Map constructor entries must be a two-slot native Tuple, got {entry_type:?} at index {pair_index}"
+                        ));
+                    };
+                    let [source_key_type, source_value_type] = source_slots.as_slice() else {
+                        return Err(format!(
+                            "Map constructor entries must be [key, value] pairs, got {} Tuple slots at index {pair_index}",
+                            source_slots.len()
+                        ));
+                    };
+                    let source_key_type = source_key_type.clone();
+                    let source_value_type = source_value_type.clone();
+                    let entry_name = format!(
+                        "__thaw_map_literal_pair_{pair_index}_{}",
+                        self.next_binding
+                    );
+                    self.next_binding += 1;
+                    self.scope.insert(entry_name.clone(), entry_type.clone());
+                    bindings.push((entry_name.clone(), entry_type, entry));
+                    (
+                        HirExpr::TypedIndex(
+                            Box::new(HirExpr::Var(entry_name.clone())),
+                            Box::new(HirExpr::Lit(HirLit::F64(0.0))),
+                            source_key_type,
+                        ),
+                        HirExpr::TypedIndex(
+                            Box::new(HirExpr::Var(entry_name)),
+                            Box::new(HirExpr::Lit(HirLit::F64(1.0))),
+                            source_value_type,
+                        ),
+                    )
+                }
+            };
+
+            let mut normalized_slots = Vec::with_capacity(2);
+            for (slot_index, (source, target, role)) in [
+                (&source_key, key_type, "key"),
+                (&source_value, value_type, "value"),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let source_type = self.infer_expr_type(source)?;
+                let name = format!(
+                    "__thaw_map_literal_{role}_{pair_index}_{slot_index}_{}",
+                    self.next_binding
+                );
+                self.next_binding += 1;
+                self.scope.insert(name.clone(), source_type.clone());
+                bindings.push((name.clone(), source_type.clone(), source.clone()));
+                normalized_slots.push(self.coerce_constructor_slot(
+                    &source_type,
+                    target,
+                    HirExpr::Var(name),
+                    &format!("Map constructor {role}"),
+                    true,
+                    slot_index == 0,
+                )?);
+            }
+            normalized_pairs.push(HirExpr::TypedClosure(
+                pair_type.clone(),
+                Box::new(HirExpr::ArrayLit(normalized_slots)),
+            ));
+        }
+
+        let normalized = HirExpr::TypedClosure(
+            entries_type.clone(),
+            Box::new(HirExpr::ArrayLit(normalized_pairs)),
+        );
+        Ok((
+            self.wrap_call_argument_bindings(normalized, &bindings)?,
+            pair_type,
+            key_type.clone(),
+            value_type.clone(),
+        ))
+    }
+
     fn lower_map_or_set_from_iterable(
         &mut self,
         source: HirExpr,
         source_type: HirType,
+        source_element_type: HirType,
         result_type: HirType,
         key_suffix: &'static str,
         key_type: HirType,
         value_info: Option<(HirType, HirType)>,
+        allow_json_widening: bool,
     ) -> Result<HirExpr, String> {
         let source_name = format!("__thaw_map_ctor_source_{}", self.next_binding);
         self.next_binding += 1;
@@ -4513,7 +4816,8 @@ impl<'a> FnLowerer<'a> {
         let var = |name: &str| HirExpr::Var(name.into());
 
         let (set_key_expr, set_value_expr, mut loop_body) =
-            if let Some((value_type, pair_type)) = value_info {
+            if let Some((source_key_type, source_value_type)) = value_info {
+                let pair_type = source_element_type.clone();
                 let pair_name = format!("__thaw_map_ctor_pair_{}", self.next_binding);
                 self.next_binding += 1;
                 self.scope.insert(pair_name.clone(), pair_type.clone());
@@ -4529,21 +4833,49 @@ impl<'a> FnLowerer<'a> {
                 let key_expr = HirExpr::TypedIndex(
                     Box::new(var(&pair_name)),
                     Box::new(HirExpr::Lit(HirLit::F64(0.0))),
-                    key_type.clone(),
+                    source_key_type.clone(),
                 );
                 let value_expr = HirExpr::TypedIndex(
                     Box::new(var(&pair_name)),
                     Box::new(HirExpr::Lit(HirLit::F64(1.0))),
-                    value_type,
+                    source_value_type.clone(),
                 );
-                (key_expr, value_expr, vec![pair_let])
+                let converted_key = self.coerce_constructor_slot(
+                    &source_key_type,
+                    &key_type,
+                    key_expr,
+                    "Map constructor key",
+                    allow_json_widening,
+                    true,
+                )?;
+                let target_value_type = match &result_type {
+                    HirType::Map(_, value) | HirType::WeakMap(_, value) => value.as_ref(),
+                    _ => return Err("Map constructor builder received a non-Map result".into()),
+                };
+                let converted_value = self.coerce_constructor_slot(
+                    &source_value_type,
+                    target_value_type,
+                    value_expr,
+                    "Map constructor value",
+                    allow_json_widening,
+                    false,
+                )?;
+                (converted_key, converted_value, vec![pair_let])
             } else {
                 let element_expr = HirExpr::TypedIndex(
                     Box::new(var(&source_name)),
                     Box::new(var(&index_name)),
-                    key_type,
+                    source_element_type.clone(),
                 );
-                (element_expr, HirExpr::Lit(HirLit::F64(0.0)), Vec::new())
+                let converted_element = self.coerce_constructor_slot(
+                    &source_element_type,
+                    &key_type,
+                    element_expr,
+                    "Set constructor element",
+                    allow_json_widening,
+                    true,
+                )?;
+                (converted_element, HirExpr::Lit(HirLit::F64(0.0)), Vec::new())
             };
         loop_body.push(HirStmt::Expr(HirExpr::Call(
             Box::new(HirExpr::Var(format!("__thaw_map_{key_suffix}_set"))),

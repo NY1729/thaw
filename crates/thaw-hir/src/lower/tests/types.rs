@@ -1525,6 +1525,360 @@ fn map_accepts_object_and_array_keys_but_rejects_function_keys() {
 }
 
 #[test]
+fn strong_map_set_json_constructors_coerce_original_slots() {
+    let program = lower(
+        r#"let sourceCalls = 0;
+        function makeEntries(): [{ id: number }, { id: number }][] {
+            sourceCalls++;
+            const key = { id: 1 };
+            const value = { id: 2 };
+            return [[key, value], [key, { id: 2 }]];
+        }
+        function makeTuplePair(key: { id: number }, value: { id: number }): [{ id: number }, { id: number }] {
+            sourceCalls++;
+            return [key, value];
+        }
+        function makeUnion(flag: boolean) {
+            sourceCalls++;
+            return flag
+                ? [[{ left: 1 }, 1]]
+                : [[{ right: 2 }, "two"]];
+        }
+        function makeUnionSet(flag: boolean) {
+            sourceCalls++;
+            return flag ? [{ left: 1 }] : ["right"];
+        }
+        function objectMap(key: { id: number }, value: { id: number }): Map<any, any> {
+            return new Map<any, any>([[key, value]]);
+        }
+        function keyProducer(): { id: number } { sourceCalls++; return { id: 3 }; }
+        function valueProducer(): { id: number } { sourceCalls++; return { id: 4 }; }
+        function main(): void {
+            const key = { id: 1 };
+            const duplicate = { id: 1 };
+            const value = { id: 2 };
+            const primitivePair: [number, string] = [5, "five"];
+            const objectPair: [{ id: number }, { id: number }] = [key, value];
+            const typedEntries: [{ id: number }, { id: number }][] = [
+                [key, value], [key, duplicate],
+            ];
+            const fromPrimitiveTuple = new Map<any, any>([primitivePair]);
+            const fromObjectTuple = new Map<any, any>([objectPair]);
+            const fromTupleFactory = new Map<any, any>([makeTuplePair(key, value)]);
+            const fromVariable = new Map<any, any>(typedEntries);
+            const fromFunction = new Map<any, any>(makeEntries());
+            const fromUnion = new Map<any, any>(makeUnion(true));
+            const setFromUnion = new Set<any>(makeUnionSet(false));
+            const objectSet = new Set<any>([key, key, duplicate]);
+            const literalOrder = new Map<any, any>([[keyProducer(), valueProducer()]]);
+            const objectLiteralMap = new Map<any, any>([[{ key: 1 }, { value: 2 }]]);
+            const primitiveMap = new Map<any, any>([
+                [1, "one"], ["one", true], [null, undefined],
+            ]);
+            const homogeneousNumeric = new Map<number, number>([[1, 2], [3, 4]]);
+            const homogeneousObjects = new Map<{ id: number }, { id: number }>([[key, value]]);
+            const typedStringValues = new Map<string, number>([["one", 1]]);
+            const typedObjectKeys = new Map<{ id: number }, number>([[key, 1]]);
+            const arrayKey: number[] = [1, 2];
+            const typedArrayKeys = new Map<number[], string>([[arrayKey, "array"]]);
+            const existingJson = new Map<any, any>([[JSON.parse("{}"), JSON.parse("{}")]]);
+            const emptyMap = new Map<any, any>([]);
+            const emptySet = new Set<any>([]);
+            const noArgumentMap = new Map<any, any>();
+            const noArgumentSet = new Set<any>();
+            const inferred = new Map([[key, 1]]);
+            console.log(
+                fromPrimitiveTuple.size + fromObjectTuple.size + fromTupleFactory.size
+                    + fromVariable.size + fromFunction.size + fromUnion.size
+                    + setFromUnion.size + objectSet.size + primitiveMap.size + existingJson.size
+                    + literalOrder.size + objectLiteralMap.size + homogeneousNumeric.size + homogeneousObjects.size
+                    + typedStringValues.size + typedObjectKeys.size + typedArrayKeys.size
+                    + emptyMap.size + emptySet.size + noArgumentMap.size
+                    + noArgumentSet.size + inferred.size + sourceCalls
+            );
+        }"#,
+    );
+    let main = program.functions.iter().find(|function| function.name == "main").unwrap();
+    #[derive(Default)]
+    struct Observed {
+        indexed_types: Vec<HirType>,
+        any_set_calls: Vec<Vec<HirExpr>>,
+        projection_calls: usize,
+        evaluated_calls: Vec<String>,
+        union_source_params: Vec<String>,
+        literal_slot_params: Vec<(String, HirType)>,
+        literal_pair_params: Vec<(String, HirType)>,
+        literal_pair_slot_reads: Vec<(String, HirType)>,
+        union_members: Vec<Vec<HirType>>,
+    }
+    fn visit_statement(statement: &HirStmt, observed: &mut Observed) {
+        match statement {
+            HirStmt::Expr(value) | HirStmt::Throw(value) => visit_expression(value, observed),
+            HirStmt::Return(value) => {
+                if let Some(value) = value { visit_expression(value, observed); }
+            }
+            HirStmt::Let(_, _, value) => visit_expression(value, observed),
+            HirStmt::If(test, yes, no) => {
+                visit_expression(test, observed);
+                for statement in yes.iter().chain(no) { visit_statement(statement, observed); }
+            }
+            HirStmt::While(test, body) => {
+                visit_expression(test, observed);
+                for statement in body { visit_statement(statement, observed); }
+            }
+            HirStmt::Try(body, _, catch, _) => {
+                for statement in body.iter().chain(catch) { visit_statement(statement, observed); }
+            }
+            HirStmt::Finally(body, _) => {
+                for statement in body { visit_statement(statement, observed); }
+            }
+            HirStmt::Break | HirStmt::Continue | HirStmt::BreakDepth(_) | HirStmt::ContinueDepth(_) => {}
+        }
+    }
+    fn visit_expression(expression: &HirExpr, observed: &mut Observed) {
+        match expression {
+            HirExpr::Call(callee, arguments) => {
+                if let HirExpr::Var(name) = callee.as_ref() {
+                    if name == "keyProducer" || name == "valueProducer" {
+                        observed.evaluated_calls.push(name.clone());
+                    }
+                    if name == "makeEntries" || name == "makeTuplePair" || name == "makeUnion" || name == "makeUnionSet" {
+                        observed.evaluated_calls.push(name.clone());
+                    }
+                    if name == "__thaw_map_any_set" {
+                        observed.any_set_calls.push(arguments.clone());
+                    }
+                    if name == "__thaw_json_from_consumed_dynamic" {
+                        observed.projection_calls += 1;
+                    }
+                }
+                if let HirExpr::Lambda(_, parameters, _, body) = callee.as_ref() {
+                    observed.union_source_params.extend(parameters.iter().filter_map(|parameter| {
+                        (parameter.name.starts_with("__thaw_union_map_source_")
+                            || parameter.name.starts_with("__thaw_union_set_source_"))
+                        .then(|| parameter.name.clone())
+                    }));
+                    observed.literal_slot_params.extend(parameters.iter().filter_map(|parameter| {
+                        (parameter.name.starts_with("__thaw_map_literal_")
+                            && !parameter.name.starts_with("__thaw_map_literal_pair_")).then(|| {
+                                (parameter.name.clone(), parameter.ty.clone())
+                            })
+                    }));
+                    observed.literal_pair_params.extend(parameters.iter().filter_map(|parameter| {
+                        parameter.name.starts_with("__thaw_map_literal_pair_")
+                            .then(|| (parameter.name.clone(), parameter.ty.clone()))
+                    }));
+                    for argument in arguments { visit_expression(argument, observed); }
+                    visit_expression(body, observed);
+                } else {
+                    visit_expression(callee, observed);
+                    for argument in arguments { visit_expression(argument, observed); }
+                }
+            }
+            HirExpr::Lambda(_, parameters, _, body) => {
+                observed.union_source_params.extend(parameters.iter().filter_map(|parameter| {
+                    (parameter.name.starts_with("__thaw_union_map_source_")
+                        || parameter.name.starts_with("__thaw_union_set_source_"))
+                    .then(|| parameter.name.clone())
+                }));
+                observed.literal_slot_params.extend(parameters.iter().filter_map(|parameter| {
+                    (parameter.name.starts_with("__thaw_map_literal_")
+                        && !parameter.name.starts_with("__thaw_map_literal_pair_")).then(|| {
+                            (parameter.name.clone(), parameter.ty.clone())
+                        })
+                }));
+                observed.literal_pair_params.extend(parameters.iter().filter_map(|parameter| {
+                    parameter.name.starts_with("__thaw_map_literal_pair_")
+                        .then(|| (parameter.name.clone(), parameter.ty.clone()))
+                }));
+                visit_expression(body, observed);
+            }
+            HirExpr::RecursiveClosure(_, _, body) | HirExpr::TypedClosure(_, body) => visit_expression(body, observed),
+            HirExpr::Block(statements) => {
+                for statement in statements { visit_statement(statement, observed); }
+            }
+            HirExpr::TypedIndex(array, index, ty) => {
+                observed.indexed_types.push(ty.clone());
+                if let HirExpr::Var(name) = array.as_ref() {
+                    if name.starts_with("__thaw_map_literal_pair_") {
+                        observed.literal_pair_slot_reads.push((name.clone(), ty.clone()));
+                    }
+                }
+                visit_expression(array, observed);
+                visit_expression(index, observed);
+            }
+            HirExpr::UnionValue(value, _, members) => {
+                observed.union_members.push(members.clone());
+                visit_expression(value, observed);
+            }
+            HirExpr::Conditional(test, consequent, alternate, _) => {
+                visit_expression(test, observed);
+                visit_expression(consequent, observed);
+                visit_expression(alternate, observed);
+            }
+            HirExpr::UnionTag(value, _) | HirExpr::UnionInject(value, _, _) => {
+                visit_expression(value, observed);
+            }
+            HirExpr::ArrayLit(values) => {
+                for value in values { visit_expression(value, observed); }
+            }
+            _ => {}
+        }
+    }
+    let mut observed = Observed::default();
+    for statement in &main.body {
+        visit_statement(statement, &mut observed);
+    }
+    let object_type = HirType::Object(vec![("id".into(), HirType::F64)]);
+    let source_pair_type = HirType::Tuple(vec![object_type.clone(), object_type.clone()]);
+    assert!(observed.indexed_types.contains(&source_pair_type), "tuple reads keep the actual source pair layout");
+    assert!(observed.indexed_types.iter().filter(|ty| *ty == &object_type).count() >= 2,
+        "key and value reads keep their actual native Object layouts");
+    let primitive_tuple = HirType::Tuple(vec![HirType::F64, HirType::Str]);
+    let object_tuple = HirType::Tuple(vec![object_type.clone(), object_type.clone()]);
+    assert!(observed.literal_pair_params.iter().any(|(_, ty)| ty == &primitive_tuple),
+        "a primitive Tuple entry keeps its actual source layout");
+    assert!(observed.literal_pair_params.iter().any(|(_, ty)| ty == &object_tuple),
+        "an Object Tuple entry keeps its actual source layout");
+    let primitive_pair_name = observed.literal_pair_params.iter()
+        .find(|(_, ty)| ty == &primitive_tuple).unwrap().0.clone();
+    assert!(observed.literal_pair_slot_reads.contains(&(primitive_pair_name.clone(), HirType::F64)));
+    assert!(observed.literal_pair_slot_reads.contains(&(primitive_pair_name.clone(), HirType::Str)));
+    let object_pair_name = observed.literal_pair_params.iter()
+        .find(|(_, ty)| ty == &object_tuple).unwrap().0.clone();
+    assert_eq!(observed.literal_pair_slot_reads.iter()
+        .filter(|(name, ty)| name == &object_pair_name && ty == &object_type).count(), 2,
+        "Object Tuple reads use both source slot layouts");
+    let union_left_pair = HirType::Tuple(vec![
+        HirType::Object(vec![("left".into(), HirType::F64)]),
+        HirType::F64,
+    ]);
+    let union_right_pair = HirType::Tuple(vec![
+        HirType::Object(vec![("right".into(), HirType::F64)]),
+        HirType::Str,
+    ]);
+    assert!(observed.indexed_types.contains(&union_left_pair));
+    assert!(observed.indexed_types.contains(&union_right_pair));
+    assert!(observed.indexed_types.contains(&HirType::Object(vec![("left".into(), HirType::F64)])));
+    assert!(observed.indexed_types.contains(&HirType::Str), "Set union branches retain their source element types");
+    let map_union_members = vec![
+        HirType::Array(Box::new(union_left_pair)),
+        HirType::Array(Box::new(union_right_pair)),
+    ];
+    let set_union_members = vec![
+        HirType::Array(Box::new(HirType::Object(vec![("left".into(), HirType::F64)]))),
+        HirType::Array(Box::new(HirType::Str)),
+    ];
+    assert!(observed.union_members.contains(&map_union_members));
+    assert!(observed.union_members.contains(&set_union_members));
+    assert!(observed.any_set_calls.iter().any(|arguments| {
+        arguments.len() == 3
+            && matches!(&arguments[1], HirExpr::TypedIndex(_, _, HirType::Json))
+            && matches!(&arguments[2], HirExpr::TypedIndex(_, _, HirType::Json))
+    }), "constructor insertion uses Json target slots after conversion");
+    assert!(observed.any_set_calls.iter().any(|arguments| {
+        arguments.len() == 3
+            && matches!(&arguments[1], HirExpr::Call(callee, _)
+                if matches!(callee.as_ref(), HirExpr::Var(name) if name == "__thaw_json_from_consumed_dynamic"))
+            && matches!(&arguments[2], HirExpr::Call(callee, _)
+                if matches!(callee.as_ref(), HirExpr::Var(name) if name == "__thaw_json_from_consumed_dynamic"))
+    }), "nonliteral native Object slots use the live projection at their insertion");
+    assert!(observed.any_set_calls.iter().any(|arguments| arguments.len() == 3
+        && matches!(&arguments[1], HirExpr::TypedIndex(_, _, HirType::Json))
+        && matches!(&arguments[2], HirExpr::Lit(HirLit::F64(0.0)))),
+        "Set union insertion keeps the Json target separate from its dummy value");
+    assert_eq!(observed.evaluated_calls.iter().filter(|name| *name == "makeEntries").count(), 1);
+    assert_eq!(observed.evaluated_calls.iter().filter(|name| *name == "makeTuplePair").count(), 1,
+        "a Tuple-returning entry factory is evaluated once");
+    assert_eq!(observed.evaluated_calls.iter().filter(|name| *name == "makeUnion").count(), 1);
+    assert_eq!(observed.evaluated_calls.iter().filter(|name| *name == "makeUnionSet").count(), 1);
+    assert_eq!(observed.evaluated_calls.iter().filter(|name| *name == "keyProducer").count(), 1);
+    assert_eq!(observed.evaluated_calls.iter().filter(|name| *name == "valueProducer").count(), 1);
+    assert_eq!(observed.union_source_params.iter().filter(|name| name.starts_with("__thaw_union_map_source_")).count(), 1);
+    assert_eq!(observed.union_source_params.iter().filter(|name| name.starts_with("__thaw_union_set_source_")).count(), 1);
+    let key_position = observed.evaluated_calls.iter().position(|name| name == "keyProducer").unwrap();
+    let value_position = observed.evaluated_calls.iter().position(|name| name == "valueProducer").unwrap();
+    assert!(key_position < value_position, "literal key producer precedes its value producer");
+    let object_map = program.functions.iter().find(|function| function.name == "objectMap").unwrap();
+    let mut object_map_observed = Observed::default();
+    for statement in &object_map.body {
+        visit_statement(statement, &mut object_map_observed);
+    }
+    assert_eq!(object_map_observed.projection_calls, 2, "the selected Object-to-Json slots use live projection");
+    assert_eq!(object_map_observed.literal_slot_params.iter().filter(|(_, ty)| *ty == object_type).count(), 2,
+        "literal key and value bindings retain their original Object layouts");
+    assert!(object_map_observed.any_set_calls.iter().any(|arguments| arguments.len() == 3
+        && matches!(&arguments[1], HirExpr::TypedIndex(_, _, HirType::Json))
+        && matches!(&arguments[2], HirExpr::TypedIndex(_, _, HirType::Json))));
+}
+
+#[test]
+fn strong_map_set_json_constructors_keep_shape_and_typed_mismatch_errors() {
+    for (source, expected) in [
+        (
+            "function main(): void { new Map<any, any>([[{ x: 1 }]]); }",
+            "Map constructor entries must be [key, value] pairs",
+        ),
+        (
+            "function main(): void { new Map<any, any>([[{ x: 1 }, 1, 2]]); }",
+            "Map constructor entries must be [key, value] pairs",
+        ),
+        (
+            "function main(): void { new Map<any, any>([1]); }",
+            "Map constructor entries must be a two-slot native Tuple",
+        ),
+        (
+            "function main(): void { new Map<any, any>(1); }",
+            "Map constructor entries must be an array of [key, value] pairs",
+        ),
+        (
+            "function main(): void { new Map<number, string>([[{ x: 1 }, 'value']]); }",
+            "Map constructor key has type",
+        ),
+        (
+            "function main(): void { new Map<string, number>([['key', 'value']]); }",
+            "Map constructor value has type",
+        ),
+        (
+            "function main(entries: [number, number][] | number[][]): void { new Map<any, any>(entries); }",
+            "Map constructor union member must contain [key, value] entries",
+        ),
+        (
+            "function main(): void { const entries: [number, number][] = []; new Map<any, any>(...entries); }",
+            "does not support spread arguments",
+        ),
+        (
+            "function main(): void { new Set<any>([], []); }",
+            "expects zero or one argument",
+        ),
+        (
+            "function main(): void { new Map<any, any>([[[1, 2], {}]]); }",
+            "Map constructor key has type",
+        ),
+        (
+            "function main(): void { new WeakSet<number>([1]); }",
+            "WeakMap/WeakSet keys must be a reference type",
+        ),
+        (
+            "function main(): void { const pair: [number] = [1]; new Map<any, any>([pair]); }",
+            "Map constructor entries must be [key, value] pairs",
+        ),
+        (
+            "function main(): void { const pair: [number, number, number] = [1, 2, 3]; new Map<any, any>([pair]); }",
+            "Map constructor entries must be [key, value] pairs",
+        ),
+        (
+            "function main(): void { const pair: number[] = [1, 2]; new Map<any, any>([pair]); }",
+            "Map constructor entries must be a two-slot native Tuple",
+        ),
+    ] {
+        let module = thaw_parser::parse_typescript(source).unwrap();
+        let error = lower_module(&module).unwrap_err();
+        assert!(error.contains(expected), "expected {expected:?}, got {error:?} for {source}");
+    }
+}
+
+#[test]
 fn weak_map_accepts_object_keys_but_rejects_primitive_keys() {
     let program = lower(
         r#"function main(): void {
