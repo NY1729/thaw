@@ -2708,7 +2708,14 @@ impl<'ctx> HirCompiler<'ctx> {
             .get_function(&symbol)
             .ok_or_else(|| format!("call to undeclared function `{name}`"))?;
 
-        self.build_call_with(function, args, name)
+        if self.is_proven_typed_quickjs_wrapper(name) {
+            self.with_typed_wrapper_argument_scope(
+                TypedJsonArgumentOwner::ProvenWrapper(name.to_string()),
+                |compiler| compiler.build_call_with(function, args, name),
+            )
+        } else {
+            self.build_call_with(function, args, name)
+        }
     }
 
 }

@@ -296,6 +296,39 @@ enum AsyncBlockExit {
     Rejected,
 }
 
+#[derive(Clone)]
+struct FreshEventKeyHandle<'ctx> {
+    handle: inkwell::values::IntValue<'ctx>,
+    active: inkwell::values::PointerValue<'ctx>,
+}
+
+#[derive(Clone, Copy)]
+struct FreshJsonArgument<'ctx> {
+    value: inkwell::values::PointerValue<'ctx>,
+    active: inkwell::values::PointerValue<'ctx>,
+}
+
+#[derive(Clone, Copy)]
+struct NativeHandleLedger<'ctx> {
+    buffer: inkwell::values::PointerValue<'ctx>,
+    capacity: inkwell::values::PointerValue<'ctx>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum TypedJsonArgumentOwner {
+    ProvenWrapper(String),
+    DirectQuickJs(String),
+}
+
+struct FreshEventKeyArgumentScope<'ctx> {
+    catch_depth: usize,
+    function_name: String,
+    typed_json_owner: Option<TypedJsonArgumentOwner>,
+    handles: Vec<FreshEventKeyHandle<'ctx>>,
+    json_values: Vec<FreshJsonArgument<'ctx>>,
+    native_handle_ledgers: Vec<NativeHandleLedger<'ctx>>,
+}
+
 /// A catch target and the physical Promise slots which remain live there.
 /// Keeping them in one private value prevents cleanup boundaries from
 /// drifting when a compiler context is isolated or suspended.
@@ -386,6 +419,7 @@ pub struct HirCompiler<'ctx> {
     function_ref_closures: HashMap<String, Vec<(FunctionType<'ctx>, PointerValue<'ctx>)>>,
     module_exception_roots: Vec<PointerValue<'ctx>>,
     function_return_types: HashMap<String, HirType>,
+    proven_typed_quickjs_wrappers: HashSet<String>,
     ffi_signatures: HashMap<String, FfiSignature>,
     /// Stack of enclosing `try` targets. `throw` and a failed nested Thaw
     /// call target the innermost entry; an empty stack propagates by returning
@@ -422,16 +456,100 @@ pub struct HirCompiler<'ctx> {
     /// handle has no meaning and should be rejected instead (console.log
     /// formatting, a `Dictionary` literal, an N-API call).
     compiling_quickjs_dynamic_arguments: bool,
+    /// Fresh native scalar handles and projection ledgers owned by active typed
+    /// dynamic-call argument scopes.
+    fresh_event_key_argument_scopes: Vec<FreshEventKeyArgumentScope<'ctx>>,
+    /// Function-local native-to-JS projection state; avoids carrying SSA values
+    /// across generated callback/adapter functions.
+    live_native_projection: Option<(String, NativeHandleLedger<'ctx>)>,
     /// Fresh JSON Box candidates emitted while compiling one whole expression
     /// statement. Only an exact final SSA result in the same LLVM function is
     /// eligible for discard cleanup.
     owned_json_discard_frames: Vec<OwnedJsonDiscardFrame<'ctx>>,
 }
 
-// Inspect completed HIR, including nested closures and module initializers,
-// before deciding whether native allocations need a deferred JS projection.
-// This is deliberately a call-site check: ordinary native objects never pull
-// the QuickJS adapter into modules that do not project an object to JS.
+// Prove that a generated typed QuickJS wrapper returns a newly retained
+// dynamic result on every normal path. A matching prefix alone does not
+// authorize releasing its arguments after the call.
+fn is_pure_wrapper_argument(expr: &HirExpr) -> bool {
+    match expr {
+        HirExpr::Var(_) | HirExpr::Lit(_) => true,
+        HirExpr::OptionalValue(value, _) => matches!(value.as_ref(), HirExpr::Var(_)),
+        _ => false,
+    }
+}
+
+fn is_pure_optional_wrapper_guard(expr: &HirExpr) -> bool {
+    matches!(
+        expr,
+        HirExpr::BinOp(
+            BinOp::EqEqEq,
+            absence,
+            literal,
+        ) if matches!(absence.as_ref(), HirExpr::OptionalIsNone(value, _) if matches!(value.as_ref(), HirExpr::Var(_)))
+            && matches!(literal.as_ref(), HirExpr::Lit(HirLit::Bool(false)))
+    )
+}
+
+fn returns_direct_quickjs_jsvalue(expr: &HirExpr) -> bool {
+    match expr {
+        HirExpr::DynamicCall(signature, args) => {
+            signature.backend == DynamicBackend::QuickJs
+                && signature.ret == HirType::JsValue
+                && args.iter().all(is_pure_wrapper_argument)
+        }
+        HirExpr::Conditional(test, yes, no, HirType::JsValue) => {
+            is_pure_optional_wrapper_guard(test)
+                && returns_direct_quickjs_jsvalue(yes)
+                && returns_direct_quickjs_jsvalue(no)
+        }
+        _ => false,
+    }
+}
+
+fn is_proven_typed_quickjs_wrapper(function: &HirFunction) -> bool {
+    if !function.name.starts_with("__thaw_typed_wrapper_js_")
+        || function.ret != HirType::JsValue
+    {
+        return false;
+    }
+
+    fn statements_return_quickjs_jsvalue(statements: &[HirStmt]) -> (bool, bool) {
+        let mut falls_through = true;
+        for statement in statements {
+            if !falls_through {
+                break;
+            }
+            match statement {
+                HirStmt::Return(Some(value)) => {
+                    if !returns_direct_quickjs_jsvalue(value) {
+                        return (false, false);
+                    }
+                    falls_through = false;
+                }
+                HirStmt::If(test, then_body, else_body) => {
+                    if !is_pure_optional_wrapper_guard(test) {
+                        return (false, true);
+                    }
+                    let (then_valid, then_falls) = statements_return_quickjs_jsvalue(then_body);
+                    let (else_valid, else_falls) = statements_return_quickjs_jsvalue(else_body);
+                    if !then_valid || !else_valid {
+                        return (false, true);
+                    }
+                    falls_through = then_falls || else_falls;
+                }
+                // Generated wrappers are straight-line pure forwarders. Even
+                // an unused expression or local can escape an input value.
+                _ => return (false, true),
+            }
+        }
+        (true, falls_through)
+    }
+
+    let (valid, falls_through) = statements_return_quickjs_jsvalue(&function.body);
+    valid && !falls_through
+}
+
 fn hir_contains_named_call(program: &HirProgram, name: &str) -> bool {
     fn stmts(body: &[HirStmt], name: &str) -> bool {
         body.iter().any(|stmt| match stmt {
@@ -618,6 +736,7 @@ impl<'ctx> HirCompiler<'ctx> {
             function_ref_closures: HashMap::new(),
             module_exception_roots: Vec::new(),
             function_return_types: HashMap::new(),
+            proven_typed_quickjs_wrappers: HashSet::new(),
             ffi_signatures: HashMap::new(),
             catch_stack: Vec::new(),
             loop_scopes: Vec::new(),
@@ -634,8 +753,14 @@ impl<'ctx> HirCompiler<'ctx> {
             tracks_physical_object_layouts: false,
             tracks_owned_json_roots: false,
             compiling_quickjs_dynamic_arguments: false,
+            fresh_event_key_argument_scopes: Vec::new(),
+            live_native_projection: None,
             owned_json_discard_frames: Vec::new(),
         }
+    }
+
+    fn is_proven_typed_quickjs_wrapper(&self, name: &str) -> bool {
+        self.proven_typed_quickjs_wrappers.contains(name)
     }
 
     pub fn compile_program(&mut self, program: &HirProgram) -> Result<(), String> {
@@ -651,6 +776,10 @@ impl<'ctx> HirCompiler<'ctx> {
             .functions
             .iter()
             .map(|function| (function.name.clone(), function.ret.clone()))
+            .collect();
+        self.proven_typed_quickjs_wrappers = program.functions.iter()
+            .filter(|function| is_proven_typed_quickjs_wrapper(function))
+            .map(|function| function.name.clone())
             .collect();
 
         self.ffi_signatures = program
@@ -1792,6 +1921,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 .build_conditional_branch(has_exception, propagate_bb, continue_bb)
                 .map_err(|e| e.to_string())?;
             self.builder.position_at_end(propagate_bb);
+            self.emit_fresh_event_key_cleanup_before_catch(Some(self.catch_stack.len() - 1))?;
             self.emit_stack_promise_cleanup_except(&catch.promise_boundary)?;
             self.builder
                 .build_unconditional_branch(catch.target)
@@ -1804,6 +1934,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 .build_conditional_branch(has_exception, propagate_bb, continue_bb)
                 .map_err(|e| e.to_string())?;
             self.builder.position_at_end(propagate_bb);
+            self.emit_fresh_event_key_cleanup_before_catch(None)?;
             if let Some(completion) = self.active_async_completion {
                 self.reject_promise_with_pending_exception(
                     completion,

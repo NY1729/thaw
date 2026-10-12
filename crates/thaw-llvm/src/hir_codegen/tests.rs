@@ -384,3 +384,95 @@ fn immediate_jsvalue_identity_lambda_reads_capture_without_retaining_environment
         "identity capture must not construct a closure: {function_ir}"
     );
 }
+
+#[test]
+fn typed_quickjs_wrapper_lease_requires_all_paths_to_return_native_jsvalue() {
+    let signature = thaw_hir::DynamicSignature {
+        backend: thaw_hir::DynamicBackend::QuickJs,
+        symbol: "__thaw_typed_js_test".into(),
+        params: Vec::new(),
+        ret: HirType::JsValue,
+    };
+    let dynamic_return = || {
+        HirStmt::Return(Some(HirExpr::DynamicCall(
+            signature.clone(),
+            Vec::new(),
+        )))
+    };
+    let proven = HirFunction {
+        name: "__thaw_typed_wrapper_js_proven".into(),
+        params: Vec::new(),
+        ret: HirType::JsValue,
+        is_async: false,
+        body: vec![
+            HirStmt::If(
+                HirExpr::BinOp(
+                    BinOp::EqEqEq,
+                    Box::new(HirExpr::OptionalIsNone(
+                        Box::new(HirExpr::Var("options".into())),
+                        HirType::JsValue,
+                    )),
+                    Box::new(HirExpr::Lit(HirLit::Bool(false))),
+                ),
+                vec![dynamic_return()],
+                Vec::new(),
+            ),
+            dynamic_return(),
+        ],
+    };
+    assert!(is_proven_typed_quickjs_wrapper(&proven));
+
+    let alias = HirFunction {
+        name: "__thaw_typed_wrapper_js_alias".into(),
+        params: vec![HirParam {
+            name: "value".into(),
+            ty: HirType::JsValue,
+        }],
+        ret: HirType::JsValue,
+        is_async: false,
+        body: vec![HirStmt::Return(Some(HirExpr::Var("value".into())))],
+    };
+    assert!(!is_proven_typed_quickjs_wrapper(&alias));
+
+    let json_alias = HirFunction {
+        name: "__thaw_typed_wrapper_js_json_alias".into(),
+        params: vec![HirParam {
+            name: "value".into(),
+            ty: HirType::Json,
+        }],
+        ret: HirType::Json,
+        is_async: false,
+        body: vec![HirStmt::Return(Some(HirExpr::Var("value".into())))],
+    };
+    assert!(!is_proven_typed_quickjs_wrapper(&json_alias));
+
+    let escaping_argument = HirFunction {
+        name: "__thaw_typed_wrapper_js_escaping_argument".into(),
+        params: Vec::new(),
+        ret: HirType::JsValue,
+        is_async: false,
+        body: vec![HirStmt::Return(Some(HirExpr::DynamicCall(
+            signature.clone(),
+            vec![HirExpr::Call(
+                Box::new(HirExpr::Var("store_and_return".into())),
+                vec![HirExpr::Var("borrowed".into())],
+            )],
+        )))],
+    };
+    assert!(!is_proven_typed_quickjs_wrapper(&escaping_argument));
+
+    let side_effecting_body = HirFunction {
+        name: "__thaw_typed_wrapper_js_side_effect".into(),
+        params: Vec::new(),
+        ret: HirType::JsValue,
+        is_async: false,
+        body: vec![
+            HirStmt::Expr(HirExpr::Call(
+                Box::new(HirExpr::Var("store_borrowed".into())),
+                vec![HirExpr::Var("borrowed".into())],
+            )),
+            dynamic_return(),
+        ],
+    };
+    assert!(!is_proven_typed_quickjs_wrapper(&side_effecting_body));
+}

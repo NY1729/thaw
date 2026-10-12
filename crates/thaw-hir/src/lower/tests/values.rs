@@ -3331,3 +3331,49 @@ fn array_and_string_end_arguments_default_only_for_undefined() {
     assert_source_order(&program, "endsSpreadOrder", &["stringReceiver", "stringArgs"]);
     assert_source_order(&program, "stringSliceSpreadOrder", &["stringReceiver", "stringSliceArgs"]);
 }
+
+
+
+#[test]
+fn json_backed_dictionary_is_not_treated_as_a_native_symbol_buffer() {
+    let program = lower(r#"
+        declare function accept(value: JsValue): void;
+        function main(value: Record<string, symbol>): void {
+            accept(value);
+        }
+    "#);
+    let body = format!("{program:#?}");
+    assert!(body.contains("retainDynamicJson"), "{body}");
+    assert!(!body.contains("retainDynamicNative"), "{body}");
+}
+
+#[test]
+fn ordinary_json_and_napi_calls_do_not_select_native_symbol_projection() {
+    let json_program = lower(r#"
+        declare function accept(value: Json): void;
+        function main(value: Json): void { accept(value); }
+    "#);
+    let json_body = format!("{json_program:#?}");
+    assert!(!json_body.contains("retainDynamicNative"), "{json_body}");
+
+    let napi_program = lower(r#"
+        declare function __thaw_typed_napi_616363657074(value: Json): void;
+        function main(value: Json): void { __thaw_typed_napi_616363657074(value); }
+    "#);
+    let napi_body = format!("{napi_program:#?}");
+    assert!(napi_body.contains("backend: Napi"), "{napi_body}");
+    assert!(!napi_body.contains("retainDynamicNative"), "{napi_body}");
+}
+
+#[test]
+fn symbol_bearing_native_composites_select_projection() {
+    let program = lower(r#"
+        declare function accept(value: JsValue): void;
+        function main(value: { close: symbol[] }, key: symbol): void {
+            accept(value);
+            accept({ close: [key] });
+        }
+    "#);
+    let body = format!("{program:#?}");
+    assert!(body.contains("retainDynamicNative"), "{body}");
+}

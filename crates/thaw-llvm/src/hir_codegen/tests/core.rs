@@ -19,6 +19,183 @@ fn compiles_and_runs_a_native_hello_world_binary() {
     assert_eq!(compile_and_run(source, "hello"), "Hello, Thaw!\n5\n");
 }
 
+fn assert_native_event_key_bridge(source: &str, module_name: &str) {
+    let module = thaw_parser::parse_typescript(source).unwrap();
+    let program = thaw_hir::lower_module(&module).unwrap();
+    let hir = format!("{program:#?}");
+    assert!(hir.contains("retainEventKey"), "{hir}");
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, module_name);
+    compiler.compile_program(&program).unwrap();
+    let ir = compiler.print_to_string();
+    assert!(ir.contains("@thaw_js_event_key_handle_result("), "{ir}");
+}
+
+#[test]
+fn typed_event_keys_transfer_native_wtf8_strings_and_live_symbols() {
+    let source = r#"
+        declare function __thaw_typed_js_73746f72654b6579(key: JsValue): void;
+        declare function __thaw_typed_js_6861734b6579(key: JsValue): boolean;
+        function main(): void {
+            loadScript("globalThis.__thaw_keys = []; globalThis.storeKey = key => { globalThis.__thaw_keys.push(key); }; globalThis.hasKey = key => globalThis.__thaw_keys.some(saved => saved === key);");
+            const nulKey = "left\u0000right";
+            const uniqueA = Symbol("same");
+            const uniqueB = Symbol("same");
+            const registeredA = Symbol.for("shared");
+            const registeredB = Symbol.for("shared");
+            const describedNul = Symbol("left\u0000right");
+            const loneSurrogateKey = "\uD800";
+            const loneSurrogateSymbol = Symbol("\uD800");
+            __thaw_typed_js_73746f72654b6579(nulKey);
+            __thaw_typed_js_73746f72654b6579(uniqueA);
+            __thaw_typed_js_73746f72654b6579(registeredA);
+            __thaw_typed_js_73746f72654b6579(describedNul);
+            __thaw_typed_js_73746f72654b6579(loneSurrogateKey);
+            __thaw_typed_js_73746f72654b6579(loneSurrogateSymbol);
+            console.log(
+                __thaw_typed_js_6861734b6579(nulKey),
+                __thaw_typed_js_6861734b6579(uniqueB),
+                __thaw_typed_js_6861734b6579(uniqueA),
+                __thaw_typed_js_6861734b6579(registeredB),
+                __thaw_typed_js_6861734b6579(describedNul),
+                __thaw_typed_js_6861734b6579(loneSurrogateKey),
+                __thaw_typed_js_6861734b6579(loneSurrogateSymbol),
+            );
+        }
+    "#;
+    assert_native_event_key_bridge(source, "typed_event_key_identity_hir_ir");
+    assert_eq!(compile_and_run(source, "typed_event_key_identity"), "true false true true true true true\n");
+}
+
+#[test]
+fn native_event_key_is_released_when_a_later_argument_throws() {
+    let source = r#"
+        declare function __thaw_typed_js_616363657074(key: JsValue, listener: JsValue): void;
+        function main(): void {
+            loadScript("globalThis.accept = () => { throw new Error('must not be invoked'); }; globalThis.__thaw_event_key_baseline = 0; globalThis.__thaw_event_key_mark = () => { globalThis.__thaw_event_key_baseline = __thaw_value_handle_refs.reduce((sum, refs) => sum + refs, 0); }; globalThis.__thaw_event_key_refs = () => __thaw_value_handle_refs.reduce((sum, refs) => sum + refs, 0) === globalThis.__thaw_event_key_baseline;");
+            const eventKeyRefs: JsValue = getDynamicValue("__thaw_event_key_refs");
+            loadScript("globalThis.__thaw_event_key_mark();");
+            function failListener(): JsValue { throw "later argument"; }
+            let caught = false;
+            try {
+                __thaw_typed_js_616363657074("native-key", failListener());
+            } catch (_) {
+                caught = true;
+            }
+            console.log(caught, callDynamicValue(eventKeyRefs, __thaw_json_argument_array()));
+        }
+    "#;
+    assert_native_event_key_bridge(source, "event_key_later_argument_hir_ir");
+    assert_eq!(compile_and_run(source, "event_key_later_argument_cleanup"), "true true\n");
+
+    let uncaught = r#"
+        declare function __thaw_typed_js_616363657074(key: JsValue, listener: JsValue): void;
+        function failListener(): JsValue { throw "uncaught later argument"; }
+        function main(): void {
+            loadScript("globalThis.accept = () => { throw new Error('must not be invoked'); };");
+            __thaw_typed_js_616363657074("native-key", failListener());
+        }
+    "#;
+    assert_native_event_key_bridge(uncaught, "event_key_uncaught_later_argument_hir_ir");
+    let (_stdout, stderr, code) = compile_and_run_failing(uncaught, "event_key_uncaught_later_argument_cleanup");
+    assert!(matches!(code, Some(status) if status != 0));
+    assert!(stderr.contains("uncaught later argument"), "{stderr}");
+}
+
+#[test]
+fn native_event_key_scalar_ownership_stays_in_nested_lambda_function() {
+    let source = r#"
+        declare function __thaw_typed_js_6f6e(key: JsValue, listener: () => void): void;
+        declare function __thaw_typed_js_66697265(): void;
+        function main(): void {
+            loadScript("globalThis.on = (key, listener) => { globalThis.__thaw_inner_listener = listener; }; globalThis.fire = () => globalThis.__thaw_inner_listener(); globalThis.__thaw_nested_key_mark = () => { globalThis.__thaw_nested_key_base = __thaw_value_handle_refs.reduce((sum, refs) => sum + refs, 0); }; globalThis.__thaw_nested_key_refs_match = () => __thaw_value_handle_refs.reduce((sum, refs) => sum + refs, 0) === globalThis.__thaw_nested_key_base;");
+            const mark: JsValue = getDynamicValue("__thaw_nested_key_mark");
+            const refsMatch: JsValue = getDynamicValue("__thaw_nested_key_refs_match");
+            __thaw_typed_js_6f6e("outer", () => {
+                const nested: JsValue = "inner";
+                releaseDynamicValue(nested);
+            });
+            callDynamicValue(mark, __thaw_json_argument_array());
+            __thaw_typed_js_66697265();
+            console.log(callDynamicValue(refsMatch, __thaw_json_argument_array()));
+        }
+    "#;
+    assert_native_event_key_bridge(source, "nested_event_key_lambda_ownership_hir_ir");
+    assert_eq!(compile_and_run(source, "nested_event_key_lambda_ownership"), "true\n");
+}
+
+#[test]
+fn native_event_key_quickjs_setter_transfers_handle_once() {
+    let source = r#"
+        declare function __thaw_typed_js_2473657474657224626f782476616c7565(receiver: JsValue, value: JsValue): void;
+        function main(): void {
+            loadScript("globalThis.box = {}; globalThis.__thaw_setter_saw_symbol = false; globalThis.__thaw_setter_throws = false; Object.defineProperty(box, 'value', { set(v) { globalThis.__thaw_setter_saw_symbol = typeof v === 'symbol'; if (globalThis.__thaw_setter_throws) throw new Error('setter marker failure'); } }); globalThis.__thaw_key_base = 0; globalThis.__thaw_key_mark = () => { globalThis.__thaw_key_base = __thaw_value_handle_refs.reduce((sum, refs) => sum + refs, 0); }; globalThis.__thaw_key_check = () => __thaw_setter_saw_symbol && __thaw_value_handle_refs.reduce((sum, refs) => sum + refs, 0) === globalThis.__thaw_key_base; globalThis.__thaw_setter_throw = () => { globalThis.__thaw_setter_throws = true; };");
+            const box: JsValue = getDynamicValue("box");
+            const mark: JsValue = getDynamicValue("__thaw_key_mark");
+            const check: JsValue = getDynamicValue("__thaw_key_check");
+            const makeThrow: JsValue = getDynamicValue("__thaw_setter_throw");
+            callDynamicValue(mark, __thaw_json_argument_array());
+            __thaw_typed_js_2473657474657224626f782476616c7565(box, Symbol("setter-value"));
+            console.log(callDynamicValue(check, __thaw_json_argument_array()));
+            callDynamicValue(makeThrow, __thaw_json_argument_array());
+            let caught = false;
+            try {
+                __thaw_typed_js_2473657474657224626f782476616c7565(box, Symbol("throwing-setter-value"));
+            } catch (error: any) {
+                caught = error.message === "setter marker failure";
+            }
+            console.log(caught, callDynamicValue(check, __thaw_json_argument_array()));
+        }
+    "#;
+    let module = thaw_parser::parse_typescript(source).unwrap();
+    let program = thaw_hir::lower_module(&module).unwrap();
+    let hir = format!("{program:#?}");
+    assert!(hir.contains("retainEventKey"), "{hir}");
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "typed_quickjs_event_key_setter");
+    compiler.compile_program(&program).unwrap();
+    let ir = compiler.print_to_string();
+    assert!(ir.contains("@thaw_js_event_key_handle_result("), "{ir}");
+    assert!(ir.contains("fresh_event_key_active"), "{ir}");
+    assert_eq!(compile_and_run(source, "typed_quickjs_event_key_setter"), "true\ntrue true\n");
+}
+
+#[test]
+fn native_event_key_graph_failure_releases_only_its_owned_handle() {
+    let source = r#"
+        declare function __thaw_typed_js_656d6974(key: JsValue, value: Json, arm: boolean): void;
+        declare function __thaw_typed_js_61726d5f6661756c74(): boolean;
+        declare function __thaw_typed_js_61726d6564(): boolean;
+        declare function __thaw_typed_js_726573746f72655f6661756c74(): boolean;
+        declare function __thaw_typed_js_656d69745f6e6f745f696e766f6b6564(): boolean;
+        declare function __thaw_typed_js_726566735f6d61746368(): boolean;
+        declare function __thaw_typed_js_6661756c745f686974(): boolean;
+        function main(): void {
+            loadScript("globalThis.__thaw_emit_invoked = false; globalThis.emit_not_invoked = () => !globalThis.__thaw_emit_invoked; globalThis.emit = () => { globalThis.__thaw_emit_invoked = true; throw new Error('graph path should fail before invocation'); }; globalThis.__thaw_key_host = {}; globalThis.__thaw_key_fault_armed = false; globalThis.__thaw_key_fault_hit = false; globalThis.__thaw_key_base = 0; globalThis.__thaw_key_mark = () => { globalThis.__thaw_key_base = __thaw_value_handle_refs.reduce((sum, refs) => sum + refs, 0); }; globalThis.refs_match = () => __thaw_value_handle_refs.reduce((sum, refs) => sum + refs, 0) === globalThis.__thaw_key_base; globalThis.arm_fault = () => { const refs = globalThis.__thaw_value_handle_refs; const handles = globalThis.__thaw_value_handles; const index = handles.findIndex(value => value === globalThis.__thaw_key_host); const descriptor = Object.getOwnPropertyDescriptor(refs, index); if (index < 0 || !descriptor || !('value' in descriptor) || !descriptor.writable || !descriptor.configurable) return false; const state = {index, descriptor, count: descriptor.value, faultHit: false}; globalThis.__thaw_key_fault_state = state; Object.defineProperty(refs, index, {configurable: descriptor.configurable, enumerable: descriptor.enumerable, get() { return state.count; }, set(next) { if (next > state.count) { state.faultHit = true; globalThis.__thaw_key_fault_hit = true; throw new Error('forced retain increment failure'); } state.count = next; }}); globalThis.__thaw_key_fault_armed = true; return true; }; globalThis.armed = () => globalThis.__thaw_key_fault_armed; globalThis.fault_hit = () => globalThis.__thaw_key_fault_hit; globalThis.restore_fault = () => { const refs = globalThis.__thaw_value_handle_refs; const state = globalThis.__thaw_key_fault_state; if (!state) return false; const saved = state.descriptor; const count = state.count; Object.defineProperty(refs, state.index, {...saved, value: count}); const restored = Object.getOwnPropertyDescriptor(refs, state.index); delete globalThis.__thaw_key_fault_state; return !!restored && restored.value === count && restored.writable === saved.writable && restored.enumerable === saved.enumerable && restored.configurable === saved.configurable; }; globalThis.__thaw_stale_source = globalThis.__thaw_key_host;");
+            const mark: JsValue = getDynamicValue("__thaw_key_mark");
+            const source: JsValue = getDynamicValue("__thaw_stale_source");
+            const value: Json = source;
+            const refsMatch: JsValue = getDynamicValue("refs_match");
+            callDynamicValue(mark, __thaw_json_argument_array());
+            let caught = false;
+            let restored = false;
+            try {
+                __thaw_typed_js_656d6974("graph-failure-key", value, __thaw_typed_js_61726d5f6661756c74());
+            } catch (_) {
+                caught = true;
+            } finally {
+                restored = __thaw_typed_js_726573746f72655f6661756c74();
+            }
+            const armed = __thaw_typed_js_61726d6564();
+            const emitNotInvoked = __thaw_typed_js_656d69745f6e6f745f696e766f6b6564();
+            const faultHit = __thaw_typed_js_6661756c745f686974();
+            console.log(caught, armed, restored, faultHit, emitNotInvoked, callDynamicValue(refsMatch, __thaw_json_argument_array()));
+        }
+    "#;
+    assert_native_event_key_bridge(source, "event_key_graph_failure_hir_ir");
+    assert_eq!(compile_and_run(source, "event_key_graph_failure_cleanup"), "true true true true true true\n");
+}
+
 #[test]
 fn console_log_accepts_multiple_arguments_after_evaluating_them_in_order() {
     let source = r#"
@@ -3828,4 +4005,73 @@ fn inline_nullish_comparison_callees_release_their_handles() {
         }
     "#;
     assert_eq!(compile_and_run(source, "inline_nullish_callee_lease"), "true\n");
+}
+
+#[test]
+fn native_typed_quickjs_jsvalue_json_argument_is_released_after_array_clone() {
+    let source = r#"
+        declare function __thaw_typed_js_6563686f(value: Json): JsValue;
+        declare function __thaw_typed_js_70616972(value: Json, key: JsValue): JsValue;
+        declare function __thaw_typed_wrapper_js_user_store(value: Json): Json;
+        function direct_owner(value: JsValue): void {
+            __thaw_typed_js_6563686f(value);
+        }
+        function main(): void {}
+        function nested_unproven_store(value: JsValue, key: JsValue): void {
+            __thaw_typed_js_70616972(__thaw_typed_wrapper_js_user_store(value), key);
+        }
+    "#;
+    let module = thaw_parser::parse_typescript(source).unwrap();
+    let program = thaw_hir::lower_module(&module).unwrap();
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "typed_quickjs_jsvalue_argument");
+    compiler.compile_program(&program).unwrap();
+    let ir = compiler.print_to_string();
+    let direct_owner = ir.find("define internal void @direct_owner(").expect(&ir);
+    let body = &ir[direct_owner..direct_owner + ir[direct_owner..].find("\n}").unwrap()];
+    let cloned = body.find("@thaw_json_array_push_json(").expect(body);
+    let release_block = body.find("release_typed_wrapper_json_argument:").expect(body);
+    let destroy = body[release_block..]
+        .find("@thaw_json_destroy(")
+        .map(|offset| release_block + offset)
+        .expect(body);
+    let exact_call = body
+        .find("@thaw_js_call_handle_mixed_exact_consuming_result(")
+        .expect(body);
+    assert!(cloned < release_block && release_block < destroy && destroy < exact_call, "{body}");
+
+    let nested = ir.find("define internal void @nested_unproven_store(").expect(&ir);
+    let nested_body = &ir[nested..nested + ir[nested..].find("\n}").unwrap()];
+    assert!(
+        !nested_body.contains("release_typed_wrapper_json_argument:"),
+        "unproven inner wrapper's borrowed Json must not be attached to the outer direct-call scope: {nested_body}"
+    );
+}
+
+
+// This runtime case checks alias usability. The adjacent HIR/IR control checks
+// the unproven-prefix marker owner mismatch without changing native Json
+// argument coercion to manufacture a marker in a local function.
+#[test]
+fn stored_json_alias_survives_nested_outer_quickjs_call() {
+    let source = r#"
+        declare function __thaw_typed_js_70616972(value: Json, key: JsValue): JsValue;
+        declare function __thaw_typed_js_766572696679(value: Json): boolean;
+        let saved: Json = null;
+        function __thaw_typed_wrapper_js_user_store(value: Json): Json {
+            saved = value;
+            return value;
+        }
+        function main(): void {
+            loadScript("globalThis.source = { value: 7 }; globalThis.pairValue = null; globalThis.pair = (value, key) => { globalThis.pairValue = value; return value; }; globalThis.verify = (value) => value.value === 7 && pairValue.value === 7;");
+            const sourceValue: JsValue = getDynamicValue("source");
+            const key: JsValue = Symbol("key");
+            const returned: JsValue = __thaw_typed_js_70616972(
+                __thaw_typed_wrapper_js_user_store(sourceValue), key,
+            );
+            console.log(__thaw_typed_js_766572696679(saved));
+            releaseDynamicValue(returned);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "nested_unproven_wrapper_owner"), "true\n");
 }

@@ -1,4 +1,47 @@
 impl<'a> FnLowerer<'a> {
+    fn is_ordinary_quickjs_typed_call(
+        backend: DynamicBackend,
+        symbol: &str,
+    ) -> bool {
+        backend == DynamicBackend::QuickJs
+            && ![
+                "$getter$",
+                "$setter$",
+                "$method$",
+                "$methodvoid$",
+                "$staticgetter$",
+                "$staticsetter$",
+                "$staticmethod$",
+                "$staticmethodvoid$",
+                "$new$",
+            ]
+            .iter()
+            .any(|prefix| symbol.starts_with(prefix))
+    }
+
+    fn contains_live_host_jsvalue_json_conversion(expr: &HirExpr) -> bool {
+        match expr {
+            HirExpr::JsValueAsJson(_) => true,
+            HirExpr::Conditional(_, yes, no, _) => {
+                Self::contains_live_host_jsvalue_json_conversion(yes)
+                    || Self::contains_live_host_jsvalue_json_conversion(no)
+            }
+            HirExpr::Call(callee, _) => match callee.as_ref() {
+                HirExpr::Lambda(_, _, _, body) => {
+                    Self::contains_live_host_jsvalue_json_conversion(body)
+                }
+                _ => false,
+            },
+            HirExpr::Block(statements) => statements.iter().any(|statement| match statement {
+                HirStmt::Expr(value) | HirStmt::Return(Some(value)) => {
+                    Self::contains_live_host_jsvalue_json_conversion(value)
+                }
+                _ => false,
+            }),
+            _ => false,
+        }
+    }
+
     fn lower_call(&mut self, call: &CallExpr) -> Result<HirExpr, String> {
         self.lower_call_with_class_guard(call, None)
     }
@@ -33,6 +76,14 @@ impl<'a> FnLowerer<'a> {
                 Box::new(HirExpr::Var("__thaw_error_frame".into())),
                 vec![HirExpr::Lit(HirLit::Str("ReferenceError".into())), message],
             ));
+        }
+        if matches!(
+            &call.callee,
+            Callee::Expr(callee)
+                if matches!(callee.as_ref(), Expr::Ident(ident)
+                    if ident.sym == "__thaw_mark_typed_wrapper_json_argument")
+        ) {
+            return Err("typed-wrapper JSON ownership marker is compiler-private".into());
         }
         if matches!(call.callee, Callee::Super(_)) {
             let (mut symbol, _base_type, base_name) = self
@@ -1068,6 +1119,9 @@ impl<'a> FnLowerer<'a> {
                     .into(),
             ),
         };
+        if callee_name == "__thaw_mark_typed_wrapper_json_argument" {
+            return Err("typed-wrapper JSON ownership marker is compiler-private".into());
+        }
 
         if matches!(
             callee_name.as_str(),
@@ -2218,10 +2272,16 @@ impl<'a> FnLowerer<'a> {
             }
         }
 
+        let direct_quickjs_typed_call = signature.as_ref().is_some_and(|signature| {
+            signature.is_extern
+                && dynamic_symbol(&callee_name).is_some_and(|(backend, symbol)| {
+                    Self::is_ordinary_quickjs_typed_call(backend, &symbol)
+                })
+        });
         let mut args = lowered_arguments
             .into_iter()
             .enumerate()
-            .map(|(i, value)| {
+            .map(|(i, value)| -> Result<HirExpr, String> {
                 match param_types
                     .as_ref()
                     .and_then(|p| p.get(i))
@@ -2235,6 +2295,8 @@ impl<'a> FnLowerer<'a> {
                         Ok(value)
                     }
                     Some(declared) => {
+                        let original_is_jsvalue = self.infer_expr_type(&value)? == HirType::JsValue;
+                        let is_generated_wrapper = callee_name.starts_with("__thaw_typed_wrapper_js_");
                         let value = if local_function.is_some()
                             && *declared == HirType::Json
                             && self.infer_expr_type(&value)? == HirType::JsValue
@@ -2246,9 +2308,33 @@ impl<'a> FnLowerer<'a> {
                         } else {
                             value
                         };
-                        self.coerce_primitive_array_argument(value, declared).map_err(|error| {
+                        let value = self.coerce_primitive_array_argument(value, declared).map_err(|error| {
                             format!("argument {} of `{callee_name}` is invalid: {error}", i + 1)
-                        })
+                        })?;
+                        if (is_generated_wrapper || direct_quickjs_typed_call)
+                            && *declared == HirType::Json
+                            && original_is_jsvalue
+                            && Self::contains_live_host_jsvalue_json_conversion(&value)
+                        {
+                            let owner_kind = if is_generated_wrapper { "wrapper" } else { "direct-quickjs" };
+                            let owner_key = if is_generated_wrapper {
+                                callee_name.clone()
+                            } else {
+                                dynamic_symbol(&callee_name)
+                                    .map(|(_, symbol)| symbol)
+                                    .ok_or_else(|| format!("internal direct QuickJS owner missing for `{callee_name}`"))?
+                            };
+                            Ok(HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_mark_typed_wrapper_json_argument".into())),
+                                vec![
+                                    HirExpr::Lit(HirLit::Str(owner_kind.into())),
+                                    HirExpr::Lit(HirLit::Str(owner_key)),
+                                    value,
+                                ],
+                            ))
+                        } else {
+                            Ok(value)
+                        }
                     }
                     None => Ok(value),
                 }
@@ -2451,6 +2537,7 @@ impl<'a> FnLowerer<'a> {
                 } else {
                     (sig.params, sig.ret)
                 };
+                let direct_quickjs_typed_call = Self::is_ordinary_quickjs_typed_call(backend, &symbol);
                 // Argument coercion was skipped for every generic
                 // function's call above (`param_types` there was still
                 // the pre-substitution, `Dynamic`-placeholder version --
@@ -2474,11 +2561,28 @@ impl<'a> FnLowerer<'a> {
                     .iter()
                     .take(fixed_count)
                     .enumerate()
-                    .map(|(i, declared)| {
+                    .map(|(i, declared)| -> Result<HirExpr, String> {
                         let value = args.next().expect("fixed_count <= args.len()");
-                        self.coerce_primitive_array_argument(value, declared).map_err(|error| {
+                        let original_is_jsvalue = self.infer_expr_type(&value)? == HirType::JsValue;
+                        let value = self.coerce_primitive_array_argument(value, declared).map_err(|error| {
                             format!("argument {} of `{callee_name}` is invalid: {error}", i + 1)
-                        })
+                        })?;
+                        if direct_quickjs_typed_call
+                            && *declared == HirType::Json
+                            && original_is_jsvalue
+                            && Self::contains_live_host_jsvalue_json_conversion(&value)
+                        {
+                            Ok(HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_mark_typed_wrapper_json_argument".into())),
+                                vec![
+                                    HirExpr::Lit(HirLit::Str("direct-quickjs".into())),
+                                    HirExpr::Lit(HirLit::Str(symbol.clone())),
+                                    value,
+                                ],
+                            ))
+                        } else {
+                            Ok(value)
+                        }
                     })
                     .collect::<Result<Vec<_>, String>>()?;
                 coerced_args.extend(args);

@@ -2759,7 +2759,9 @@ impl<'a> FnLowerer<'a> {
                         return Ok(HirType::JsValue)
                     }
                     "readDynamicValue" => return Ok(HirType::Json),
-                    "retainDynamicJson" => return Ok(HirType::JsValue),
+                    "retainDynamicJson" | "retainDynamicNative" => return Ok(HirType::JsValue),
+                    "retainEventKey" => return Ok(HirType::JsValue),
+                    "__thaw_mark_typed_wrapper_json_argument" => return Ok(HirType::Json),
                     "@@thaw_retain_borrowed_dynamic_handle" => return Ok(HirType::JsValue),
                     "callDynamicValueMixed" => return Ok(HirType::Json),
                     "callDynamicValueMixedExact" => return Ok(HirType::Json),

@@ -772,3 +772,104 @@ fn async_main_drains_napi_before_destroying_its_promise() {
     let destroy = ir[resume..].find("call void @thaw_promise_destroy").unwrap();
     assert!(drain < resume && destroy > 0);
 }
+
+#[test]
+fn napi_constructor_lookup_throw_releases_fresh_scalar_but_preserves_borrowed_handles() {
+    let dir = std::env::temp_dir().join(format!("thaw-hir-codegen-test-napi-lookup-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let addon_c = dir.join("throwing_getter.c");
+    let addon = dir.join("throwing-test.node");
+    std::fs::write(&addon_c, r#"
+        #include <stddef.h>
+        typedef void* napi_env;
+        typedef void* napi_value;
+        typedef void* napi_callback_info;
+        typedef int napi_status;
+        typedef napi_value (*napi_callback)(napi_env, napi_callback_info);
+        typedef struct {
+            const char* utf8name;
+            napi_value name;
+            napi_callback method;
+            napi_callback getter;
+            napi_callback setter;
+            napi_value value;
+            unsigned int attributes;
+            void* data;
+        } napi_property_descriptor;
+        extern napi_status napi_create_object(napi_env, napi_value*);
+        extern napi_status napi_define_properties(napi_env, napi_value, size_t, const napi_property_descriptor*);
+        extern napi_status napi_set_named_property(napi_env, napi_value, const char*, napi_value);
+        extern napi_status napi_throw_error(napi_env, const char*, const char*);
+        static napi_value throwing_client(napi_env env, napi_callback_info info) {
+            (void)info;
+            napi_throw_error(env, 0, "original constructor lookup failure");
+            return 0;
+        }
+        __attribute__((visibility("default"))) napi_value napi_register_module_v1(napi_env env, napi_value exports) {
+            napi_value outer = 0;
+            const napi_property_descriptor client = {
+                "Client", 0, 0, throwing_client, 0, 0, 0, 0
+            };
+            if (napi_create_object(env, &outer) != 0 ||
+                napi_define_properties(env, outer, 1, &client) != 0 ||
+                napi_set_named_property(env, exports, "Outer", outer) != 0) return 0;
+            return exports;
+        }
+    "#).unwrap();
+    assert!(cc_command().args(["-shared", "-fPIC"]).arg(&addon_c).arg("-o").arg(&addon).status().unwrap().success());
+
+    let source = format!(r#"
+        declare function __thaw_typed_napi_246e6577244f757465722e436c69656e7424617269747931(key: JsValue): JsValue;
+        function main(): void {{
+            loadScript("globalThis.__thaw_lookup_key_mark = () => {{ globalThis.__thaw_lookup_key_base = __thaw_value_handle_refs.reduce((sum, refs) => sum + refs, 0); }}; globalThis.__thaw_lookup_key_count_matches = () => __thaw_value_handle_refs.reduce((sum, refs) => sum + refs, 0) === globalThis.__thaw_lookup_key_base;");
+            const mark: JsValue = getDynamicValue("__thaw_lookup_key_mark");
+            const countMatches: JsValue = getDynamicValue("__thaw_lookup_key_count_matches");
+            if (!loadNativeAddon("{}")) {{
+                throw "test addon failed to load";
+            }}
+            callDynamicValue(mark, __thaw_json_argument_array());
+            let caught = false;
+            try {{
+                const ignored: JsValue = __thaw_typed_napi_246e6577244f757465722e436c69656e7424617269747931("fresh scalar key");
+                releaseDynamicValue(ignored);
+            }} catch (error) {{
+                caught = true;
+                console.log(error);
+            }}
+            // `countMatches` and `mark` are borrowed pre-existing handles. The
+            // result must equal the post-load baseline after the fresh scalar
+            // conversion was abandoned by the throwing N-API getter.
+            console.log(caught, callDynamicValue(countMatches, __thaw_json_argument_array()));
+            releaseDynamicValue(countMatches);
+            releaseDynamicValue(mark);
+        }}
+    "#, addon.display());
+    let module = thaw_parser::parse_typescript(&source).unwrap();
+    let program = thaw_hir::lower_module(&module).unwrap();
+    let hir = format!("{program:#?}");
+    assert!(hir.contains("retainEventKey"), "{hir}");
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "napi_constructor_lookup_owned_scalar_cleanup");
+    compiler.compile_program(&program).unwrap();
+    let ir = compiler.print_to_string();
+    assert!(ir.contains("@thaw_js_event_key_handle_result("), "{ir}");
+    let obj = dir.join("out.o");
+    let exe = dir.join("out");
+    compiler.write_object_file(&obj).unwrap();
+    let arena = build_staticlib("thaw-arena");
+    let std = build_staticlib("thaw-std");
+    let runtime = build_staticlib("thaw-runtime");
+    let napi = build_staticlib("thaw-napi");
+    let quickjs = build_staticlib("thaw-quickjs");
+    // Match the mixed runtime link order: QuickJS/N-API refer back to std and runtime.
+    assert!(cc_command().arg(&obj).arg(&arena).arg(&std).arg(&runtime)
+        .arg(&std).arg(&runtime).arg(&napi).arg(&quickjs).arg(&std).arg(&runtime)
+        .args(["-lm", "-ldl", "-lpthread", "-Wl,--export-dynamic", "-o"]).arg(&exe)
+        .status().unwrap().success());
+    let output = Command::new(&exe).output().unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("original constructor lookup failure"), "{stdout}");
+    assert!(stdout.ends_with("true true\n"), "{stdout}");
+    let _ = std::fs::remove_dir_all(dir);
+}

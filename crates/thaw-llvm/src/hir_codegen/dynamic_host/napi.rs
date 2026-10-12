@@ -34,7 +34,9 @@ impl<'ctx> HirCompiler<'ctx> {
             .params
             .get(usize::from(!is_static))
             .ok_or("typed N-API setter is missing its value type")?;
+        self.begin_fresh_event_key_argument_scope();
         let assigned_value = self.compile_expr(assigned)?;
+        let fresh_handles = self.finish_fresh_event_key_argument_scope()?;
         let array = self
             .builder
             .build_call(
@@ -65,7 +67,11 @@ impl<'ctx> HirCompiler<'ctx> {
             .try_as_basic_value()
             .basic()
             .unwrap();
-        let args_json = self.compile_check_json_stringify_error_with_cleanup(args_json, &[array])?;
+        let raw_fresh_handles = Self::fresh_event_key_raw_handles(&fresh_handles);
+        let args_json = self.compile_check_json_stringify_error_with_inputs_and_handles(
+            args_json, &[array], &[], &[], &raw_fresh_handles,
+        )?;
+        self.release_fresh_event_key_handles(&fresh_handles)?;
         let result = self
             .builder
             .build_call(
@@ -245,6 +251,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .unwrap();
         let outer_compiling_quickjs_dynamic_arguments = self.compiling_quickjs_dynamic_arguments;
         self.compiling_quickjs_dynamic_arguments = signature.backend == DynamicBackend::QuickJs;
+        self.begin_fresh_event_key_argument_scope();
         for (index, (argument, ty)) in marshalled_args
             .iter()
             .zip(signature.params.iter().skip(usize::from(!is_static)))
@@ -259,6 +266,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 .map_err(|error| format!("N-API method argument {}: {error}", index + 1))?;
         }
         self.compiling_quickjs_dynamic_arguments = outer_compiling_quickjs_dynamic_arguments;
+        let fresh_handles = self.finish_fresh_event_key_argument_scope()?;
         let method = dynamic_member_name(&signature.symbol, true)
             .ok_or("invalid typed N-API method symbol")?;
         let method = self
@@ -276,7 +284,11 @@ impl<'ctx> HirCompiler<'ctx> {
             .try_as_basic_value()
             .basic()
             .unwrap();
-        let args_json = self.compile_check_json_stringify_error_with_cleanup(args_json, &[array])?;
+        let raw_fresh_handles = Self::fresh_event_key_raw_handles(&fresh_handles);
+        let args_json = self.compile_check_json_stringify_error_with_inputs_and_handles(
+            args_json, &[array], &[], &[], &raw_fresh_handles,
+        )?;
+        self.release_fresh_event_key_handles(&fresh_handles)?;
         if signature.backend == DynamicBackend::QuickJs && signature.ret == HirType::JsValue {
             self.uses_quickjs_handles = true;
             let result = self
