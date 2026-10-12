@@ -45,6 +45,7 @@ use std::collections::{HashMap, HashSet};
 use std::ffi::{c_void, CString};
 use std::os::raw::c_char;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use thaw_arena::NativeStr as CStr;
 
 /// A live-shared native array -- `Rc` gives every read of the same
@@ -1394,29 +1395,62 @@ thread_local! {
     // address while a Host release callback reenters this thread.
     static NEXT_ARENA_OWNED_JSON_ROOT: Cell<u64> = const { Cell::new(0) };
     static ARENA_OWNED_JSON_ROOTS: RefCell<HashMap<usize, (usize, bool, u64)>> = RefCell::new(HashMap::new());
-    static EXCEPTION_JSON_ROOT_PINS: RefCell<HashMap<usize, (usize, bool)>> = RefCell::new(HashMap::new());
+    static JSON_ROOT_PINS: RefCell<HashMap<usize, (usize, bool)>> = RefCell::new(HashMap::new());
+    static JSON_ROOT_LEASES: RefCell<HashMap<u64, JsonRootLease>> = RefCell::new(HashMap::new());
+    static NEXT_JSON_ROOT_LEASE: Cell<u64> = const { Cell::new(0) };
+    static JSON_BINDING_OWNERS: RefCell<HashMap<JsonBindingOwnerKey, JsonBindingOwnerEntry>> =
+        RefCell::new(HashMap::new());
+    static JSON_GLOBAL_BINDINGS: RefCell<HashMap<u64, usize>> = RefCell::new(HashMap::new());
+    static JSON_GLOBAL_BINDING_IDS: RefCell<HashMap<usize, u64>> = RefCell::new(HashMap::new());
+    static JSON_GLOBAL_CLEANUP_ACTIVE: Cell<bool> = const { Cell::new(false) };
 }
 
-struct ExceptionJsonRootLease(usize);
+static NEXT_JSON_GLOBAL_BINDING: AtomicU64 = AtomicU64::new(1);
 
-impl Drop for ExceptionJsonRootLease {
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+enum JsonBindingOwnerKey {
+    Arena(thaw_arena::AllocationId, usize),
+    Global(u64),
+}
+
+#[derive(Clone, Copy)]
+struct JsonBindingOwnerEntry {
+    value: usize,
+    root_serial: u64,
+    slot: usize,
+    edge_owner: usize,
+}
+
+#[repr(C)]
+pub struct JsonBindingStoreResult {
+    pub value: *mut Value,
+    pub result_lease: u64,
+    pub error: *const c_char,
+}
+
+struct JsonRootLease {
+    value: usize,
+    _token_root: thaw_arena::ArenaRoot,
+}
+
+impl Drop for JsonRootLease {
     fn drop(&mut self) {
-        let destroy = EXCEPTION_JSON_ROOT_PINS.with(|pins| {
+        let destroy = JSON_ROOT_PINS.with(|pins| {
             let mut pins = pins.borrow_mut();
-            let Some((count, requested)) = pins.get_mut(&self.0) else {
+            let Some((count, requested)) = pins.get_mut(&self.value) else {
                 return false;
             };
             *count -= 1;
             if *count == 0 {
                 let requested = *requested;
-                pins.remove(&self.0);
+                pins.remove(&self.value);
                 requested
             } else {
                 false
             }
         });
         if destroy {
-            unsafe { thaw_json_destroy(self.0 as *mut Value) };
+            unsafe { thaw_json_destroy(self.value as *mut Value) };
         }
     }
 }
@@ -1424,14 +1458,40 @@ impl Drop for ExceptionJsonRootLease {
 /// Keeps a tracked Box<Value> alive independently of tracing arena resets.
 fn exception_json_root_lease(value: *const Value) -> Option<Box<dyn std::any::Any>> {
     let key = value as usize;
-    if !ARENA_OWNED_JSON_ROOTS.with(|roots| roots.borrow().contains_key(&key)) {
-        return None;
-    }
-    EXCEPTION_JSON_ROOT_PINS.with(|pins| {
+    let token = ARENA_OWNED_JSON_ROOTS.with(|roots| roots.borrow().get(&key).map(|entry| entry.0))?;
+    JSON_ROOT_PINS.with(|pins| {
         let mut pins = pins.borrow_mut();
         let entry = pins.entry(key).or_insert((0, false));
         entry.0 = entry.0.checked_add(1)?;
-        Some(Box::new(ExceptionJsonRootLease(key)) as Box<dyn std::any::Any>)
+        Some(Box::new(JsonRootLease {
+            value: key,
+            _token_root: thaw_arena::ArenaRoot::new(token),
+        }) as Box<dyn std::any::Any>)
+    })
+}
+
+fn acquire_json_root_lease(value: *const Value) -> Option<JsonRootLease> {
+    let key = value as usize;
+    let token = ARENA_OWNED_JSON_ROOTS.with(|roots| roots.borrow().get(&key).map(|entry| entry.0))?;
+    JSON_ROOT_PINS.with(|pins| {
+        let mut pins = pins.borrow_mut();
+        let entry = pins.entry(key).or_insert((0, false));
+        entry.0 = entry.0.checked_add(1)?;
+        Some(JsonRootLease { value: key, _token_root: thaw_arena::ArenaRoot::new(token) })
+    })
+}
+
+fn publish_json_root_lease(lease: JsonRootLease) -> Option<u64> {
+    JSON_ROOT_LEASES.with(|leases| {
+        let mut leases = leases.try_borrow_mut().ok()?;
+        leases.try_reserve(1).ok()?;
+        let id = NEXT_JSON_ROOT_LEASE.with(|next| {
+            let id = next.get().checked_add(1)?;
+            next.set(id);
+            Some(id)
+        })?;
+        leases.insert(id, lease);
+        Some(id)
     })
 }
 
@@ -1452,14 +1512,44 @@ unsafe fn consume_owned_json_value(value: *mut Value) -> Value {
 }
 
 fn exception_json_root_is_pinned(value: *const Value) -> bool {
-    EXCEPTION_JSON_ROOT_PINS.with(|pins| {
+    JSON_ROOT_PINS.with(|pins| {
         pins.borrow()
             .get(&(value as usize))
             .is_some_and(|(count, _)| *count != 0)
     })
 }
 
+/// Pins a tracked Json root as a temporary borrowed dependency. Interior
+/// pointers pass their owning parent root and keep that lease for the same
+/// expression lifetime.
+#[no_mangle]
+pub extern "C" fn thaw_json_root_pin(value: *const Value) -> u64 {
+    let Some(lease) = acquire_json_root_lease(value) else { return 0 };
+    match publish_json_root_lease(lease) {
+        Some(id) => id,
+        None => 0,
+    }
+}
+
+/// Releases a temporary borrowed-root pin returned by `thaw_json_root_pin`.
+#[no_mangle]
+pub extern "C" fn thaw_json_root_unpin(lease_id: u64) -> u8 {
+    let lease = JSON_ROOT_LEASES.with(|leases| leases.borrow_mut().remove(&lease_id));
+    u8::from(lease.is_some())
+}
+
 fn reset_arena_owned_json_roots(tracing: bool) {
+    if !tracing {
+        // A non-tracing reset is the terminal cleanup boundary. Retire global
+        // owners first so their registered slots are cleared/unregistered
+        // before any remaining Box roots are destroyed.
+        let global_ids = JSON_GLOBAL_BINDINGS.with(|bindings| bindings.borrow().keys().copied().collect::<Vec<_>>());
+        JSON_GLOBAL_CLEANUP_ACTIVE.with(|active| active.set(true));
+        for id in global_ids {
+            unsafe { thaw_json_release_global_binding(id) };
+        }
+        JSON_GLOBAL_CLEANUP_ACTIVE.with(|active| active.set(false));
+    }
     let dead = ARENA_OWNED_JSON_ROOTS.with(|roots| {
         roots
             .borrow()
@@ -1469,7 +1559,7 @@ fn reset_arena_owned_json_roots(tracing: bool) {
                 if !reclaimed {
                     return None;
                 }
-                EXCEPTION_JSON_ROOT_PINS.with(|pins| {
+                JSON_ROOT_PINS.with(|pins| {
                     let mut pins = pins.borrow_mut();
                     if let Some((count, requested)) = pins.get_mut(&value) {
                         if *count != 0 {
@@ -1542,6 +1632,270 @@ pub extern "C" fn thaw_json_track_arena_owned_root(value: *mut Value) -> *mut Va
         thaw_arena::replace_reference(value as usize, 0, token as usize);
     }
     value
+}
+
+fn register_json_binding_owner_reset() {
+    thaw_arena::register_metadata_reset_hook(reset_json_binding_owners);
+}
+
+fn reset_json_binding_owners(tracing: bool) {
+    JSON_BINDING_OWNERS.with(|owners| {
+        let mut owners = owners.borrow_mut();
+        let dead = owners.iter().filter_map(|(key, entry)| match key {
+            JsonBindingOwnerKey::Arena(id, _) if !tracing || thaw_arena::allocation_identity(id.base) != Some(*id) => {
+                Some((*key, entry.edge_owner, entry.value))
+            }
+            _ => None,
+        }).collect::<Vec<_>>();
+        for (key, edge_owner, value) in dead {
+            if let JsonBindingOwnerKey::Arena(id, _) = key {
+                // The arena edge key carries this exact allocation generation,
+                // so pruning cannot remove current edges at a reused address.
+                thaw_arena::remove_allocation_reference(id, edge_owner, value);
+            }
+            owners.remove(&key);
+        }
+    });
+}
+
+fn json_arena_binding_owner_key(
+    owner: *mut u8,
+    slot: *mut *mut Value,
+) -> Result<(JsonBindingOwnerKey, usize), String> {
+    if owner.is_null() || slot.is_null() {
+        return Err("Invalid Json binding owner".into());
+    }
+    let slot_address = slot as usize;
+    let Some(id) = thaw_arena::allocation_identity(owner as usize) else {
+        return Err("Json binding owner is not a live arena allocation".into());
+    };
+    let Some((slot_id, offset)) = thaw_arena::allocation_span_identity(
+        slot_address,
+        std::mem::size_of::<*mut Value>(),
+        std::mem::align_of::<*mut Value>(),
+    ) else {
+        return Err("Json binding slot does not fit an aligned owner allocation span".into());
+    };
+    if slot_id != id {
+        return Err("Json binding slot is outside its owner allocation".into());
+    }
+    Ok((JsonBindingOwnerKey::Arena(id, offset), owner as usize))
+}
+
+fn retire_arena_owned_json_root(value: usize, serial: u64) {
+    // Never let stale owner metadata request destruction of a new Box that
+    // happens to reuse this address.
+    if !ARENA_OWNED_JSON_ROOTS.with(|roots| roots.borrow().get(&value).is_some_and(|entry| entry.2 == serial)) {
+        return;
+    }
+    let pinned = JSON_ROOT_PINS.with(|pins| {
+        let mut pins = pins.borrow_mut();
+        let Some((count, requested)) = pins.get_mut(&value) else { return false };
+        if *count == 0 { return false; }
+        *requested = true;
+        true
+    });
+    if pinned { return; }
+    let removed = ARENA_OWNED_JSON_ROOTS.with(|roots| {
+        let mut roots = roots.borrow_mut();
+        if roots.get(&value).is_some_and(|entry| entry.2 == serial) {
+            roots.remove(&value)
+        } else {
+            None
+        }
+    });
+    if removed.is_some() {
+        thaw_arena::forget_references(value);
+        unsafe { thaw_json_destroy(value as *mut Value) };
+    }
+}
+
+/// Store one owned Json root in a shared binding cell. `mode` is 0 for a
+/// borrowed source (which is shallow-shared) and 1 for a fresh Box whose
+/// ownership transfers to this call, including on failure.
+///
+/// `owner` is the captured cell address or owning frame allocation. A global
+/// slot passes its own address for both `owner` and `slot`.
+unsafe fn store_json_binding(
+    key: JsonBindingOwnerKey,
+    slot: *mut *mut Value,
+    edge_owner: usize,
+    source: *mut Value,
+    mode: u8,
+) -> JsonBindingStoreResult {
+    let consume_source = |source: *mut Value| {
+        if mode == 1 && !source.is_null() { unsafe { thaw_json_destroy(source) }; }
+    };
+    let failure = |message: &str, source: *mut Value| {
+        set_host_error(message.to_string());
+        consume_source(source);
+        JsonBindingStoreResult { value: std::ptr::null_mut(), result_lease: 0, error: thaw_json_take_host_error() }
+    };
+    if source.is_null() || mode > 1 {
+        return failure("Invalid Json binding source", source);
+    }
+    let reserved = JSON_BINDING_OWNERS.with(|owners| {
+        let Ok(mut owners) = owners.try_borrow_mut() else { return false };
+        owners.contains_key(&key) || owners.try_reserve(1).is_ok()
+    }) && JSON_ROOT_LEASES.with(|leases| leases.try_borrow_mut().is_ok_and(|mut leases| leases.try_reserve(1).is_ok()));
+    if !reserved {
+        return failure("Unable to reserve Json binding owner", source);
+    }
+    register_json_binding_owner_reset();
+
+    let stored = if mode == 0 {
+        unsafe { thaw_json_share(source) }
+    } else {
+        source
+    };
+    if stored.is_null() {
+        return failure("Unable to share Json binding value", source);
+    }
+    let tracked = thaw_json_track_arena_owned_root(stored);
+    if tracked.is_null() {
+        return JsonBindingStoreResult { value: std::ptr::null_mut(), result_lease: 0, error: thaw_json_take_host_error() };
+    }
+    let Some(root_serial) = ARENA_OWNED_JSON_ROOTS.with(|roots| roots.borrow().get(&(tracked as usize)).map(|entry| entry.2)) else {
+        set_host_error("Json binding root was not tracked".into());
+        unsafe { thaw_json_destroy(tracked) };
+        return JsonBindingStoreResult { value: std::ptr::null_mut(), result_lease: 0, error: thaw_json_take_host_error() };
+    };
+    let Some(result_pin) = acquire_json_root_lease(tracked) else {
+        set_host_error("Unable to pin Json binding result".into());
+        retire_arena_owned_json_root(tracked as usize, root_serial);
+        return JsonBindingStoreResult { value: std::ptr::null_mut(), result_lease: 0, error: thaw_json_take_host_error() };
+    };
+    let Some(result_lease) = publish_json_root_lease(result_pin) else {
+        set_host_error("Unable to publish Json binding result lease".into());
+        retire_arena_owned_json_root(tracked as usize, root_serial);
+        return JsonBindingStoreResult { value: std::ptr::null_mut(), result_lease: 0, error: thaw_json_take_host_error() };
+    };
+
+    let previous = JSON_BINDING_OWNERS.with(|owners| {
+        let mut owners = owners.borrow_mut();
+        let previous = owners.insert(key, JsonBindingOwnerEntry {
+            value: tracked as usize,
+            root_serial,
+            slot: slot as usize,
+            edge_owner,
+        });
+        unsafe { slot.write(tracked); }
+        let previous_value = previous.map_or(0, |entry| entry.value);
+        match key {
+            JsonBindingOwnerKey::Arena(id, _) => {
+                thaw_arena::replace_allocation_reference(id, edge_owner, previous_value, tracked as usize);
+            }
+            JsonBindingOwnerKey::Global(_) => {
+                thaw_arena::replace_reference(edge_owner, previous_value, tracked as usize);
+            }
+        }
+        previous
+    });
+    if let Some(previous) = previous {
+        if previous.value != tracked as usize || previous.root_serial != root_serial {
+            retire_arena_owned_json_root(previous.value, previous.root_serial);
+        }
+    }
+    JsonBindingStoreResult { value: tracked, result_lease, error: std::ptr::null() }
+}
+
+/// Registers a static Json binding slot as an explicit arena root and returns
+/// its generation-safe process-local owner ID. The slot must remain valid
+/// until `thaw_json_release_global_binding` succeeds.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_json_register_global_binding(slot: *mut *mut Value) -> u64 {
+    if JSON_GLOBAL_CLEANUP_ACTIVE.with(Cell::get) {
+        set_host_error("Json global binding registration during terminal cleanup".into());
+        return 0;
+    }
+    if slot.is_null() {
+        set_host_error("Invalid Json global binding slot".into());
+        return 0;
+    }
+    let address = slot as usize;
+    if let Some(id) = JSON_GLOBAL_BINDING_IDS.with(|ids| ids.borrow().get(&address).copied()) {
+        return id;
+    }
+    let reserved = JSON_GLOBAL_BINDINGS.with(|bindings| bindings.try_borrow_mut().is_ok_and(|mut bindings| bindings.try_reserve(1).is_ok()))
+        && JSON_GLOBAL_BINDING_IDS.with(|ids| ids.try_borrow_mut().is_ok_and(|mut ids| ids.try_reserve(1).is_ok()));
+    if !reserved {
+        set_host_error("Unable to reserve Json global binding".into());
+        return 0;
+    }
+    // Terminal cleanup must know about a registered global even if its first
+    // store never runs (for example, module initialization throws).
+    register_json_binding_owner_reset();
+    thaw_arena::register_reset_hook(reset_arena_owned_json_roots);
+    let id = NEXT_JSON_GLOBAL_BINDING.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |next| next.checked_add(1));
+    let Ok(id) = id else {
+        set_host_error("Json global binding identity exhausted".into());
+        return 0;
+    };
+    unsafe { thaw_arena::thaw_arena_register_root(slot.cast()) };
+    JSON_GLOBAL_BINDINGS.with(|bindings| { bindings.borrow_mut().insert(id, address); });
+    JSON_GLOBAL_BINDING_IDS.with(|ids| { ids.borrow_mut().insert(address, id); });
+    id
+}
+
+/// Stores a Json value in a previously registered global binding.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_json_store_global_binding(
+    id: u64,
+    source: *mut Value,
+    mode: u8,
+) -> JsonBindingStoreResult {
+    let Some(slot_address) = JSON_GLOBAL_BINDINGS.with(|bindings| bindings.borrow().get(&id).copied()) else {
+        set_host_error("Json global binding is inactive".into());
+        if mode == 1 && !source.is_null() { unsafe { thaw_json_destroy(source) }; }
+        return JsonBindingStoreResult { value: std::ptr::null_mut(), result_lease: 0, error: thaw_json_take_host_error() };
+    };
+    unsafe {
+        store_json_binding(JsonBindingOwnerKey::Global(id), slot_address as *mut *mut Value,
+            slot_address, source, mode)
+    }
+}
+
+/// Retires a global Json binding before its JIT/module slot is released.
+/// Returns one for an active ID and zero for an already inactive ID.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_json_release_global_binding(id: u64) -> u8 {
+    let slot_address = JSON_GLOBAL_BINDINGS.with(|bindings| bindings.borrow_mut().remove(&id));
+    let Some(slot_address) = slot_address else { return 0 };
+    JSON_GLOBAL_BINDING_IDS.with(|ids| { ids.borrow_mut().remove(&slot_address); });
+    let slot = slot_address as *mut *mut Value;
+    unsafe { slot.write(std::ptr::null_mut()) };
+    let previous = JSON_BINDING_OWNERS.with(|owners| owners.borrow_mut().remove(&JsonBindingOwnerKey::Global(id)));
+    if let Some(previous) = previous {
+        if previous.value != 0 {
+            thaw_arena::replace_reference(previous.edge_owner, previous.value, 0);
+        }
+    }
+    unsafe { thaw_arena::thaw_arena_unregister_root(slot.cast()) };
+    if let Some(previous) = previous {
+        if previous.value != 0 {
+            retire_arena_owned_json_root(previous.value, previous.root_serial);
+        }
+    }
+    1
+}
+
+/// Stores a Json value in a shared arena binding cell.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_json_store_arena_binding(
+    owner: *mut u8,
+    slot: *mut *mut Value,
+    source: *mut Value,
+    mode: u8,
+) -> JsonBindingStoreResult {
+    let (key, edge_owner) = match json_arena_binding_owner_key(owner, slot) {
+        Ok(owner) => owner,
+        Err(error) => {
+            set_host_error(error);
+            if mode == 1 && !source.is_null() { unsafe { thaw_json_destroy(source) }; }
+            return JsonBindingStoreResult { value: std::ptr::null_mut(), result_lease: 0, error: thaw_json_take_host_error() };
+        }
+    };
+    unsafe { store_json_binding(key, slot, edge_owner, source, mode) }
 }
 
 /// Exposes the arena token which keeps a tracked Box<Value> alive so runtime
@@ -2439,7 +2793,7 @@ fn release_isolated_json_cycles(root: &Value) {
 #[no_mangle]
 pub unsafe extern "C" fn thaw_json_destroy(value: *mut Value) {
     if !value.is_null() {
-        let pinned = EXCEPTION_JSON_ROOT_PINS.with(|pins| {
+        let pinned = JSON_ROOT_PINS.with(|pins| {
             let mut pins = pins.borrow_mut();
             let Some((count, requested)) = pins.get_mut(&(value as usize)) else {
                 return false;
@@ -7981,6 +8335,240 @@ mod tests {
     use super::*;
 
     #[test]
+    fn stale_owner_metadata_does_not_clear_reused_allocation_edges() {
+        std::thread::spawn(|| {
+            thaw_arena::thaw_arena_enable_tracing();
+            let owner = thaw_arena::thaw_arena_alloc(2 * std::mem::size_of::<usize>(), 8);
+            let owner_root = thaw_arena::ArenaRoot::new(owner as usize);
+            let id = thaw_arena::allocation_identity(owner as usize).unwrap();
+            let stale = thaw_arena::AllocationId { base: id.base, serial: id.serial.wrapping_add(1) };
+            assert!(thaw_arena::replace_allocation_reference(id, owner as usize, 0, 101));
+            assert!(thaw_arena::replace_allocation_reference(id, owner as usize, 0, 202));
+            assert!(!thaw_arena::replace_allocation_reference(stale, owner as usize, 0, 999),
+                "stale generations cannot install edges into a reused owner address");
+            JSON_BINDING_OWNERS.with(|owners| {
+                owners.borrow_mut().insert(
+                    JsonBindingOwnerKey::Arena(stale, 0),
+                    JsonBindingOwnerEntry { value: 101, root_serial: 1, slot: owner as usize, edge_owner: owner as usize },
+                );
+            });
+            reset_json_binding_owners(true);
+            let edges = thaw_arena::snapshot_native_graph().unwrap().references;
+            assert_eq!(edges.get(&(owner as usize)).unwrap(), &vec![101, 202],
+                "stale metadata at a reused address cannot remove either current edge");
+            thaw_arena::remove_allocation_reference(id, owner as usize, 101);
+            thaw_arena::remove_allocation_reference(id, owner as usize, 202);
+            assert!(thaw_arena::snapshot_native_graph().unwrap().references.get(&(owner as usize)).is_none());
+            drop(owner_root);
+            thaw_arena::thaw_arena_reset();
+        }).join().unwrap();
+    }
+
+    #[test]
+    fn stale_root_serial_cannot_request_destruction_of_a_pinned_incarnation() {
+        std::thread::spawn(|| {
+            thaw_arena::thaw_arena_enable_tracing();
+            let value = leak(Value::shared_array(vec![Value::Null]));
+            assert_eq!(thaw_json_track_arena_owned_root(value), value);
+            let serial = ARENA_OWNED_JSON_ROOTS.with(|roots| roots.borrow()[&(value as usize)].2);
+            let lease = thaw_json_root_pin(value);
+            assert_ne!(lease, 0);
+            retire_arena_owned_json_root(value as usize, serial.wrapping_add(1));
+            assert_eq!(thaw_json_root_unpin(lease), 1);
+            assert!(arena_owned_json_root_token(value).is_some(),
+                "a stale retirement must not poison the live pinned root");
+            unsafe { thaw_json_destroy(value); }
+        }).join().unwrap();
+    }
+
+    #[test]
+    fn null_global_registration_is_terminally_retired_without_any_store() {
+        std::thread::spawn(|| {
+            thaw_arena::thaw_arena_enable_tracing();
+            let mut slot = std::ptr::null_mut::<Value>();
+            let address = &mut slot as *mut *mut Value;
+            let id = unsafe { thaw_json_register_global_binding(address) };
+            assert_ne!(id, 0);
+            reset_arena_owned_json_roots(false);
+            assert!(slot.is_null());
+            assert!(!JSON_GLOBAL_BINDINGS.with(|bindings| bindings.borrow().contains_key(&id)),
+                "registration alone installs terminal cleanup even before the first store");
+            let stale = unsafe { thaw_json_store_global_binding(id, std::ptr::null_mut(), 0) };
+            assert!(!stale.error.is_null(), "inactive IDs fail without dereferencing the slot");
+            unsafe { thaw_arena::destroy_string(stale.error.cast_mut()); }
+        }).join().unwrap();
+    }
+
+    #[test]
+    fn captured_json_binding_shares_borrows_and_retires_overwrites() {
+        std::thread::spawn(|| {
+            thaw_arena::thaw_arena_enable_tracing();
+            let source = leak(Value::shared_array(vec![Value::Null]));
+            let owner = thaw_arena::thaw_arena_alloc(std::mem::size_of::<*mut Value>(), 8);
+            assert!(!owner.is_null());
+            let slot = owner.cast::<*mut Value>();
+            unsafe { slot.write(std::ptr::null_mut()); }
+            let owner_root = thaw_arena::ArenaRoot::new(owner as usize);
+            let (owner_key, edge_owner) = json_arena_binding_owner_key(owner, slot).unwrap();
+
+            let first = unsafe { store_json_binding(owner_key, slot, edge_owner, source, 0) };
+            let first_value = first.value;
+            assert!(!first_value.is_null());
+            assert_ne!(first_value, source, "borrowed assignment acquires an independent Box");
+            let Value::Array(source_array) = (unsafe { &*source }) else { panic!("array source") };
+            let Value::Array(stored_array) = (unsafe { &*first_value }) else { panic!("array copy") };
+            assert!(Rc::ptr_eq(source_array, stored_array), "the shallow share preserves identity");
+            let first_token = arena_owned_json_root_token(first_value).unwrap();
+            thaw_arena::thaw_arena_reset();
+            assert_eq!(arena_owned_json_root_token(first_value), Some(first_token),
+                "captured cell reachability carries the first root across reset");
+
+            let replacement = leak(Value::Number(serde_json::Number::from(42)));
+            let second = unsafe { store_json_binding(owner_key, slot, edge_owner, replacement, 1) };
+            assert_eq!(second.value, replacement, "fresh assignment transfers its Box");
+            assert_eq!(unsafe { slot.read() }, second.value);
+            assert_eq!(thaw_json_root_unpin(first.result_lease), 1);
+            assert!(arena_owned_json_root_token(first_value).is_none(), "overwritten owner is retired once");
+            thaw_arena::thaw_arena_reset();
+            assert!(arena_owned_json_root_token(second.value).is_some());
+            assert_eq!(thaw_json_root_unpin(second.result_lease), 1);
+
+            unsafe { thaw_json_destroy(source); }
+            drop(owner_root);
+            thaw_arena::thaw_arena_reset();
+            assert!(arena_owned_json_root_token(second.value).is_none());
+            assert!(!JSON_BINDING_OWNERS.with(|owners| owners.borrow().contains_key(&owner_key)),
+                "dead cell identity is pruned before its root is finalized");
+        }).join().unwrap();
+    }
+
+    #[test]
+    fn assignment_result_lease_survives_same_cell_release_reentry() {
+        std::thread::spawn(|| {
+            thaw_arena::thaw_arena_enable_tracing();
+            REENTRANT_BINDING_ACTIVE.with(|active| active.set(false));
+            let owner = thaw_arena::thaw_arena_alloc(std::mem::size_of::<*mut Value>(), 8);
+            assert!(!owner.is_null());
+            let slot = owner.cast::<*mut Value>();
+            unsafe { slot.write(std::ptr::null_mut()); }
+            let owner_root = thaw_arena::ArenaRoot::new(owner as usize);
+            let (key, edge_owner) = json_arena_binding_owner_key(owner, slot).unwrap();
+
+            let old = leak(Value::Host(Rc::new(HostLease {
+                handle: 73,
+                release: release_and_overwrite_same_json_binding,
+            })));
+            let old_result = unsafe { store_json_binding(key, slot, edge_owner, old, 1) };
+            assert!(old_result.error.is_null());
+            assert_eq!(thaw_json_root_unpin(old_result.result_lease), 1);
+
+            let reentrant_source = leak(Value::Number(serde_json::Number::from(9)));
+            REENTRANT_BINDING_CELL.with(|cell| {
+                cell.set((owner as usize, slot as usize, reentrant_source as usize));
+            });
+            let outer_source = leak(Value::shared_array(vec![Value::Null]));
+            let outer = unsafe { store_json_binding(key, slot, edge_owner, outer_source, 1) };
+            assert!(outer.error.is_null());
+            assert_eq!(outer.value, outer_source, "the assignment result remains the outer RHS");
+            let current = unsafe { slot.read() };
+            assert_ne!(current, outer.value, "the release callback replaced the cell reentrantly");
+            assert!(matches!(unsafe { &*outer.value }, Value::Array(_)),
+                "the returned outer value remains live while its result lease is held");
+            assert!(matches!(unsafe { &*current }, Value::Number(number) if number.as_i64() == Some(9)));
+            assert!(arena_owned_json_root_token(outer.value).is_some());
+            assert_eq!(thaw_json_root_unpin(outer.result_lease), 1);
+            assert!(arena_owned_json_root_token(outer.value).is_none(),
+                "the outer value retires after its full-expression lease ends");
+
+            unsafe { thaw_json_destroy(reentrant_source); }
+            drop(owner_root);
+            thaw_arena::thaw_arena_reset();
+            assert!(arena_owned_json_root_token(current).is_none());
+            REENTRANT_BINDING_CELL.with(|cell| cell.set((0, 0, 0)));
+        }).join().unwrap();
+    }
+
+    #[test]
+    fn global_binding_id_is_generation_safe_and_released_before_slot_reuse() {
+        std::thread::spawn(|| {
+            thaw_arena::thaw_arena_enable_tracing();
+            let mut slot = std::ptr::null_mut::<Value>();
+            let slot_ptr = &mut slot as *mut *mut Value;
+            let first_id = unsafe { thaw_json_register_global_binding(slot_ptr) };
+            assert_ne!(first_id, 0);
+
+            let source = leak(Value::shared_array(vec![Value::Null]));
+            let first = unsafe { thaw_json_store_global_binding(first_id, source, 0) };
+            assert!(first.error.is_null());
+            assert_ne!(first.value, source);
+            assert_eq!(slot, first.value);
+            assert_eq!(thaw_json_root_unpin(first.result_lease), 1);
+            thaw_arena::thaw_arena_reset();
+            assert!(arena_owned_json_root_token(slot).is_some(),
+                "registered global side edges retain the Box and token across reset");
+
+            assert_eq!(unsafe { thaw_json_release_global_binding(first_id) }, 1);
+            assert!(slot.is_null());
+            assert_eq!(unsafe { thaw_json_release_global_binding(first_id) }, 0,
+                "release is checked and idempotent for an inactive generation");
+            assert!(arena_owned_json_root_token(first.value).is_none());
+
+            let second_id = unsafe { thaw_json_register_global_binding(slot_ptr) };
+            assert_ne!(second_id, 0);
+            assert_ne!(second_id, first_id, "a reused slot address receives a new generation ID");
+            let stale = unsafe { thaw_json_store_global_binding(first_id, source, 0) };
+            assert!(!stale.error.is_null(), "a stale ID is rejected before slot access");
+            assert!(thaw_json_take_host_error().is_null(),
+                "the store result owns the reported error string");
+            unsafe { thaw_arena::destroy_string(stale.error.cast_mut()); }
+            assert!(slot.is_null());
+            assert_eq!(unsafe { thaw_json_release_global_binding(second_id) }, 1);
+            let terminal_id = unsafe { thaw_json_register_global_binding(slot_ptr) };
+            assert_ne!(terminal_id, 0);
+            reset_arena_owned_json_roots(false);
+            assert!(slot.is_null(), "terminal reset releases active global IDs before root destruction");
+            assert_eq!(unsafe { thaw_json_release_global_binding(terminal_id) }, 0);
+            unsafe { thaw_json_destroy(source); }
+        }).join().unwrap();
+    }
+
+    #[test]
+    fn global_binding_ids_are_unique_across_runtime_threads() {
+        let left = std::thread::spawn(|| {
+            let mut slot = std::ptr::null_mut::<Value>();
+            let id = unsafe { thaw_json_register_global_binding(&mut slot) };
+            assert_ne!(id, 0);
+            assert_eq!(unsafe { thaw_json_release_global_binding(id) }, 1);
+            id
+        });
+        let right = std::thread::spawn(|| {
+            let mut slot = std::ptr::null_mut::<Value>();
+            let id = unsafe { thaw_json_register_global_binding(&mut slot) };
+            assert_ne!(id, 0);
+            assert_eq!(unsafe { thaw_json_release_global_binding(id) }, 1);
+            id
+        });
+        assert_ne!(left.join().unwrap(), right.join().unwrap());
+    }
+
+    #[test]
+    fn temporary_json_root_pin_defers_reset_destruction_until_unpin() {
+        std::thread::spawn(|| {
+            thaw_arena::thaw_arena_enable_tracing();
+            let value = thaw_json_track_arena_owned_root(leak(Value::Null));
+            let pin = thaw_json_root_pin(value);
+            assert_ne!(pin, 0, "tracked borrowed roots can be leased");
+
+            // A terminal reset requests destruction, but the expression guard
+            // still owns the dependency and its arena token.
+            reset_arena_owned_json_roots(false);
+            assert!(ARENA_OWNED_JSON_ROOTS.with(|roots| roots.borrow().contains_key(&(value as usize))));
+            assert_eq!(thaw_json_root_unpin(pin), 1);
+            assert!(!ARENA_OWNED_JSON_ROOTS.with(|roots| roots.borrow().contains_key(&(value as usize))));
+        }).join().unwrap();
+    }
+
+    #[test]
     fn native_wtf8_array_push_preserves_nul_surrogates_and_null() {
         let array = thaw_json_array_new();
         let native = thaw_arena::owned_string(b"left\0\xed\xa0\x80right");
@@ -8071,6 +8659,8 @@ mod tests {
         static NAPI_RELEASES: Cell<usize> = const { Cell::new(0) };
         static TRACKED_REENTRANT_ROOTS: Cell<(usize, usize)> = const { Cell::new((0, 0)) };
         static TRACKED_RELEASE_REENTERED: Cell<bool> = const { Cell::new(false) };
+        static REENTRANT_BINDING_CELL: Cell<(usize, usize, usize)> = const { Cell::new((0, 0, 0)) };
+        static REENTRANT_BINDING_ACTIVE: Cell<bool> = const { Cell::new(false) };
         static NESTED_ARENA_RELEASE_ARMED: Cell<bool> = const { Cell::new(false) };
         static NESTED_ARENA_FRESH: Cell<usize> = const { Cell::new(0) };
         static NESTED_ARENA_FRESH_TOKEN: Cell<usize> = const { Cell::new(0) };
@@ -8423,6 +9013,25 @@ mod tests {
             let other = if handle == 41 { second } else { first };
             assert_ne!(other, 0);
             unsafe { thaw_json_destroy(other as *mut Value) };
+        }
+        1
+    }
+
+    extern "C" fn release_and_overwrite_same_json_binding(_handle: u64) -> u8 {
+        if !REENTRANT_BINDING_ACTIVE.with(|active| active.replace(true)) {
+            let (owner, slot, source) = REENTRANT_BINDING_CELL.with(Cell::get);
+            assert_ne!(owner, 0);
+            assert_ne!(slot, 0);
+            assert_ne!(source, 0);
+            let owner = owner as *mut u8;
+            let slot = slot as *mut *mut Value;
+            let source = source as *mut Value;
+            let (key, edge_owner) = json_arena_binding_owner_key(owner, slot).unwrap();
+            let result = unsafe { store_json_binding(key, slot, edge_owner, source, 0) };
+            assert!(result.error.is_null());
+            assert_ne!(result.result_lease, 0);
+            assert_eq!(thaw_json_root_unpin(result.result_lease), 1);
+            REENTRANT_BINDING_ACTIVE.with(|active| active.set(false));
         }
         1
     }

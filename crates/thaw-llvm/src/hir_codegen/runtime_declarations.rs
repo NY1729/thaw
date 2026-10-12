@@ -6,6 +6,10 @@ impl<'ctx> HirCompiler<'ctx> {
         let i8_type = self.context.i8_type();
         let i32_type = self.context.i32_type();
         let i64_type = self.context.i64_type();
+        let json_binding_store_result = self.context.struct_type(
+            &[i8_ptr.into(), i64_type.into(), i8_ptr.into()],
+            false,
+        );
 
         let puts_type = i32_type.fn_type(&[i8_ptr.into()], false);
         self.module
@@ -301,6 +305,41 @@ impl<'ctx> HirCompiler<'ctx> {
         self.module.add_function(
             "thaw_json_track_arena_owned_root",
             i8_ptr.fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_store_arena_binding",
+            json_binding_store_result.fn_type(&[i8_ptr.into(), i8_ptr.into(), i8_ptr.into(), i8_type.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_store_global_binding",
+            json_binding_store_result.fn_type(&[i64_type.into(), i8_ptr.into(), i8_type.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_register_global_binding",
+            i64_type.fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_release_global_binding",
+            i8_type.fn_type(&[i64_type.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_arena_unregister_root",
+            i8_type.fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_root_pin",
+            i64_type.fn_type(&[i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
+            "thaw_json_root_unpin",
+            i8_type.fn_type(&[i64_type.into()], false),
             Some(Linkage::External),
         );
         self.module.add_function(

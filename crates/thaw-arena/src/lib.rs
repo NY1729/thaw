@@ -11,7 +11,7 @@
 
 use std::alloc::Layout;
 use std::cell::{Cell, RefCell};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use bumpalo::Bump;
 mod strings;
@@ -19,13 +19,60 @@ pub use strings::*;
 pub mod error_wire;
 pub mod exception;
 
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct AllocationId {
+    pub base: usize,
+    pub serial: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AllocationSnapshot {
+    pub id: AllocationId,
+    pub size: usize,
+    pub generation: usize,
+    pub pointer_words: Vec<usize>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NativeGraphSnapshot {
+    pub epoch: u64,
+    pub allocations: BTreeMap<usize, AllocationSnapshot>,
+    pub references: BTreeMap<usize, Vec<usize>>,
+    pub root_values: Vec<usize>,
+    /// Addresses of registered root slots, which may themselves be side-edge owners.
+    pub root_slots: Vec<usize>,
+    pub pinned_counts: BTreeMap<usize, usize>,
+    _thread_local: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct NativeMark {
+    pub allocation_starts: HashSet<usize>,
+    pub owner_nodes: HashSet<usize>,
+    pub retained_generations: HashSet<usize>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SnapshotError {
+    BorrowConflict,
+    IdentityUnavailable,
+}
+
 thread_local! {
     static ARENA: RefCell<Bump> = RefCell::new(Bump::new());
     static RETAINED: RefCell<Vec<Bump>> = const { RefCell::new(Vec::new()) };
     static ALLOCATIONS: RefCell<BTreeMap<usize, (usize, usize)>> = const { RefCell::new(BTreeMap::new()) };
+    static ALLOCATION_IDS: RefCell<BTreeMap<usize, u64>> = const { RefCell::new(BTreeMap::new()) };
+    static NEXT_ALLOCATION_ID: Cell<u64> = const { Cell::new(0) };
+    static GRAPH_EPOCH: Cell<Option<u64>> = const { Cell::new(Some(0)) };
     static ROOTS: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
     static RECLAIMED: RefCell<Vec<(usize, usize)>> = const { RefCell::new(Vec::new()) };
     static REFERENCES: RefCell<BTreeMap<usize, Vec<usize>>> = const { RefCell::new(BTreeMap::new()) };
+    /// Side edges owned by a specific allocation incarnation. Keys include
+    /// the byte-address node so multiple cell fields in one allocation remain
+    /// independent when a bump address is reused.
+    static ALLOCATION_REFERENCES: RefCell<HashMap<(AllocationId, usize), Vec<usize>>> =
+        RefCell::new(HashMap::new());
     static TRACING: Cell<bool> = const { Cell::new(false) };
     static PINNED: RefCell<BTreeMap<usize, usize>> = const { RefCell::new(BTreeMap::new()) };
     static RESET_HOOKS: RefCell<Vec<fn(bool)>> = const { RefCell::new(Vec::new()) };
@@ -120,6 +167,44 @@ pub fn forget_references(owner: usize) {
     });
 }
 
+/// Replaces one side-table edge owned by an exact live allocation generation.
+/// Returns false when the owner address no longer belongs to `identity`.
+pub fn replace_allocation_reference(
+    identity: AllocationId,
+    owner: usize,
+    previous: usize,
+    next: usize,
+) -> bool {
+    if allocation_identity(owner) != Some(identity) { return false; }
+    ALLOCATION_REFERENCES.with(|references| {
+        let mut references = references.borrow_mut();
+        let children = references.entry((identity, owner)).or_default();
+        if let Some(index) = children.iter().position(|&child| child == previous) {
+            children.remove(index);
+        }
+        if next != 0 { children.push(next); }
+        let empty = children.is_empty();
+        if empty { references.remove(&(identity, owner)); }
+    });
+    true
+}
+
+/// Removes one edge from a retired allocation generation without touching
+/// edges that may now occupy the same raw owner address.
+pub fn remove_allocation_reference(identity: AllocationId, owner: usize, child: usize) {
+    ALLOCATION_REFERENCES.with(|references| {
+        let mut references = references.borrow_mut();
+        let key = (identity, owner);
+        if let Some(children) = references.get_mut(&key) {
+            if let Some(index) = children.iter().position(|&value| value == child) {
+                children.remove(index);
+            }
+            let empty = children.is_empty();
+            if empty { references.remove(&key); }
+        }
+    });
+}
+
 /// Registers a process-lifetime pointer slot in generated module storage.
 /// # Safety
 /// `slot` must stay readable until process exit and contain an initialized
@@ -133,6 +218,29 @@ pub unsafe extern "C" fn thaw_arena_register_root(slot: *const usize) {
             roots.push(slot as usize);
         }
     });
+}
+
+/// Removes a process-lifetime root slot at module/JIT teardown.
+///
+/// # Safety
+/// `slot` must have been registered with `thaw_arena_register_root` and must
+/// remain readable for this call. The caller clears or releases its value
+/// before unregistering so the slot cannot publish a stale arena pointer.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_arena_unregister_root(slot: *const usize) -> u8 {
+    let address = slot as usize;
+    let removed = ROOTS.with(|roots| {
+        let mut roots = roots.borrow_mut();
+        let Some(index) = roots.iter().position(|root| *root == address) else {
+            return false;
+        };
+        roots.swap_remove(index);
+        true
+    });
+    if removed {
+        forget_references(address);
+    }
+    u8::from(removed)
 }
 
 /// Whether the last reset reclaimed the allocation containing this identity.
@@ -158,6 +266,116 @@ pub fn contains_allocation(pointer: usize) -> bool {
             .next_back()
             .is_some_and(|(&start, &(size, _))| pointer - start < size)
     })
+}
+
+/// Returns the stable identity of a tracked allocation containing `pointer`.
+pub fn allocation_identity(pointer: usize) -> Option<AllocationId> {
+    if pointer == 0 || !is_tracing() {
+        return None;
+    }
+    ALLOCATIONS.with(|allocations| {
+        let allocations = allocations.try_borrow().ok()?;
+        let (&base, &(size, _)) = allocations.range(..=pointer).next_back()?;
+        if pointer - base >= size {
+            return None;
+        }
+        let serial = ALLOCATION_IDS.with(|ids| ids.try_borrow().ok()?.get(&base).copied())?;
+        Some(AllocationId { base, serial })
+    })
+}
+
+/// Validates a complete, aligned byte range inside one tracked allocation and
+/// returns that allocation's generation-safe identity plus the range offset.
+/// Empty or overflowing ranges are rejected; callers must compare the returned
+/// identity with the expected owner before writing through the range.
+pub fn allocation_span_identity(
+    pointer: usize,
+    byte_len: usize,
+    alignment: usize,
+) -> Option<(AllocationId, usize)> {
+    if pointer == 0 || byte_len == 0 || alignment == 0 || !alignment.is_power_of_two()
+        || pointer % alignment != 0 || !is_tracing()
+    {
+        return None;
+    }
+    ALLOCATIONS.with(|allocations| {
+        let allocations = allocations.try_borrow().ok()?;
+        let (&base, &(size, _)) = allocations.range(..=pointer).next_back()?;
+        let offset = pointer.checked_sub(base)?;
+        let end = offset.checked_add(byte_len)?;
+        if end > size { return None; }
+        let serial = ALLOCATION_IDS.with(|ids| ids.try_borrow().ok()?.get(&base).copied())?;
+        Some((AllocationId { base, serial }, offset))
+    })
+}
+
+/// Copies native tracing metadata and initialized pointer words without changing
+/// roots, references, allocation metadata, or bump generations.
+pub fn snapshot_native_graph() -> Result<NativeGraphSnapshot, SnapshotError> {
+    let allocations = ALLOCATIONS.with(|allocations| {
+        let allocations = allocations.try_borrow().map_err(|_| SnapshotError::BorrowConflict)?;
+        ALLOCATION_IDS.with(|ids| {
+            let ids = ids.try_borrow().map_err(|_| SnapshotError::BorrowConflict)?;
+            let mut copied = BTreeMap::new();
+            for (&base, &(size, generation)) in allocations.iter() {
+                let serial = ids.get(&base).copied().ok_or(SnapshotError::IdentityUnavailable)?;
+                let mut pointer_words = Vec::new();
+                for offset in (0..size.saturating_sub(std::mem::size_of::<usize>() - 1))
+                    .step_by(std::mem::size_of::<usize>())
+                {
+                    pointer_words.push(unsafe { ((base + offset) as *const usize).read_unaligned() });
+                }
+                copied.insert(base, AllocationSnapshot {
+                    id: AllocationId { base, serial }, size, generation, pointer_words,
+                });
+            }
+            Ok(copied)
+        })
+    })?;
+    let mut references = REFERENCES.with(|references| references.try_borrow()
+        .map(|references| references.clone()).map_err(|_| SnapshotError::BorrowConflict))?;
+    ALLOCATION_REFERENCES.with(|edges| {
+        let edges = edges.try_borrow().map_err(|_| SnapshotError::BorrowConflict)?;
+        for (&(identity, owner), children) in edges.iter() {
+            if allocations.get(&identity.base).is_some_and(|allocation| allocation.id == identity) {
+                references.entry(owner).or_default().extend(children.iter().copied());
+            }
+        }
+        Ok::<(), SnapshotError>(())
+    })?;
+    let root_values = ROOTS.with(|roots| {
+        let roots = roots.try_borrow().map_err(|_| SnapshotError::BorrowConflict)?;
+        Ok(roots.iter().map(|&slot| unsafe { (slot as *const usize).read_unaligned() }).collect())
+    })?;
+    let root_slots = ROOTS.with(|roots| roots.try_borrow()
+        .map(|roots| roots.clone()).map_err(|_| SnapshotError::BorrowConflict))?;
+    let pinned_counts = PINNED.with(|pinned| pinned.try_borrow()
+        .map(|pinned| pinned.clone()).map_err(|_| SnapshotError::BorrowConflict))?;
+    let epoch = GRAPH_EPOCH.with(Cell::get).ok_or(SnapshotError::IdentityUnavailable)?;
+    Ok(NativeGraphSnapshot { epoch, allocations, references, root_values, root_slots, pinned_counts,
+        _thread_local: std::marker::PhantomData })
+}
+
+/// Computes native reachability using only copied snapshot data.
+pub fn mark_native_graph(snapshot: &NativeGraphSnapshot, roots: &[usize]) -> NativeMark {
+    let mut mark = NativeMark::default();
+    let mut pending = snapshot.root_values.iter().copied()
+        .chain(snapshot.root_slots.iter().copied())
+        .chain(snapshot.pinned_counts.keys().copied())
+        .chain(roots.iter().copied()).collect::<Vec<_>>();
+    while let Some(pointer) = pending.pop() {
+        if !mark.owner_nodes.insert(pointer) {
+            continue;
+        }
+        if let Some(children) = snapshot.references.get(&pointer) {
+            pending.extend(children.iter().copied());
+        }
+        let Some((&base, allocation)) = snapshot.allocations.range(..=pointer).next_back() else { continue; };
+        if pointer - base >= allocation.size || !mark.allocation_starts.insert(base) { continue; }
+        mark.retained_generations.insert(allocation.generation);
+        pending.extend(allocation.pointer_words.iter().copied());
+    }
+    mark
 }
 
 #[no_mangle]
@@ -226,9 +444,18 @@ pub extern "C" fn thaw_arena_alloc(size: usize, align: usize) -> *mut u8 {
         unsafe { pointer.write_bytes(0, size) };
         let generation = RETAINED.with(|retained| retained.borrow().len());
         ALLOCATIONS.with(|allocations| {
-            allocations
-                .borrow_mut()
-                .insert(pointer as usize, (size.max(1), generation));
+            let base = pointer as usize;
+            allocations.borrow_mut().insert(base, (size.max(1), generation));
+            ALLOCATION_IDS.with(|ids| {
+                let serial = NEXT_ALLOCATION_ID.with(|next| next.get().checked_add(1));
+                if let Some(serial) = serial {
+                    NEXT_ALLOCATION_ID.with(|next| next.set(serial));
+                    ids.borrow_mut().insert(base, serial);
+                } else {
+                    ids.borrow_mut().remove(&base);
+                }
+            });
+            GRAPH_EPOCH.with(|epoch| epoch.set(epoch.get().and_then(|value| value.checked_add(1))));
         });
     }
     pointer
@@ -248,6 +475,7 @@ pub extern "C" fn thaw_arena_reset() {
     if !is_tracing() {
         strings::reset_lengths(false);
         ARENA.with(|arena| arena.borrow_mut().reset());
+        ALLOCATION_REFERENCES.with(|references| references.borrow_mut().clear());
         run_metadata_reset_hooks(false);
         run_reset_hooks(false);
         return;
@@ -258,6 +486,10 @@ pub extern "C" fn thaw_arena_reset() {
             .iter()
             .map(|&slot| unsafe { (slot as *const usize).read_unaligned() })
             .collect::<Vec<_>>();
+        // A registered global slot can own side-table references (for
+        // example, a Json binding Box plus its root token). Visit the slot
+        // address as an owner node as well as visiting its current contents.
+        pending.extend(roots.iter().copied());
         PINNED.with(|pinned| pending.extend(pinned.borrow().keys().copied()));
         let mut live = HashSet::new();
         let mut owners = HashSet::new();
@@ -268,6 +500,20 @@ pub extern "C" fn thaw_arena_reset() {
                         pending.extend(children);
                     }
                 });
+                if let Some((&base, &(size, _))) = allocations.range(..=pointer).next_back() {
+                    if pointer - base < size {
+                        ALLOCATION_IDS.with(|ids| {
+                            if let Some(serial) = ids.borrow().get(&base).copied() {
+                                let identity = AllocationId { base, serial };
+                                ALLOCATION_REFERENCES.with(|references| {
+                                    if let Some(children) = references.borrow().get(&(identity, pointer)) {
+                                        pending.extend(children);
+                                    }
+                                });
+                            }
+                        });
+                    }
+                }
             }
             let Some((&start, &(size, _))) = allocations.range(..=pointer).next_back() else {
                 continue;
@@ -290,6 +536,18 @@ pub extern "C" fn thaw_arena_reset() {
                 .borrow_mut()
                 .retain(|owner, _| live.contains(owner) || owners.contains(owner))
         });
+        ALLOCATION_REFERENCES.with(|references| {
+            ALLOCATION_IDS.with(|ids| {
+                let ids = ids.borrow();
+                references.borrow_mut().retain(|(identity, owner), _| {
+                    live.contains(&identity.base)
+                        && ids.get(&identity.base) == Some(&identity.serial)
+                        && *owner >= identity.base
+                        && allocations.get(&identity.base)
+                            .is_some_and(|(size, _)| *owner - identity.base < *size)
+                });
+            });
+        });
         RECLAIMED.with(|ranges| {
             let mut ranges = ranges.borrow_mut();
             ranges.clear();
@@ -301,6 +559,7 @@ pub extern "C" fn thaw_arena_reset() {
                     false
                 }
             });
+            ALLOCATION_IDS.with(|ids| ids.borrow_mut().retain(|base, _| allocations.contains_key(base)));
         });
         RETAINED.with(|retained| {
             let mut retained = retained.borrow_mut();
@@ -349,6 +608,76 @@ mod tests {
         static NESTED_RESET_HOOK_COUNTS: RefCell<[usize; 2]> = const { RefCell::new([0; 2]) };
         static NESTED_RESET_METADATA_COUNT: Cell<usize> = const { Cell::new(0) };
         static NESTED_RESET_OLD: Cell<usize> = const { Cell::new(0) };
+    }
+
+    #[test]
+    fn allocation_span_requires_full_aligned_pointer_width_within_one_generation() {
+        std::thread::spawn(|| {
+            thaw_arena_enable_tracing();
+            let width = std::mem::size_of::<usize>();
+            let align = std::mem::align_of::<usize>();
+            let short = thaw_arena_alloc(width - 1, align) as usize;
+            assert!(allocation_span_identity(short, width, align).is_none());
+
+            let base = thaw_arena_alloc(width + 1, align) as usize;
+            let identity = allocation_identity(base).unwrap();
+            assert_eq!(allocation_span_identity(base, width, align), Some((identity, 0)));
+            assert!(allocation_span_identity(base + 1, width, align).is_none(),
+                "an unaligned pointer field cannot be published");
+            assert!(allocation_span_identity(base + width, width, 1).is_none(),
+                "a pointer-sized field cannot extend past the allocation end");
+            assert_ne!(allocation_span_identity(base, width, align).unwrap().0.serial, 0);
+        }).join().unwrap();
+    }
+
+    #[test]
+    fn registered_global_slot_side_edge_survives_reset() {
+        std::thread::spawn(|| {
+            let mut global_slot = 0usize;
+            let slot = &mut global_slot as *mut usize;
+            unsafe { thaw_arena_register_root(slot) };
+            unsafe { thaw_arena_register_root(slot) };
+
+            let child = thaw_arena_alloc(8, 8) as usize;
+            unsafe { (child as *mut usize).write(0); }
+            replace_reference(slot as usize, 0, child);
+            let snapshot = snapshot_native_graph().unwrap();
+            assert!(snapshot.root_slots.contains(&(slot as usize)));
+            assert!(mark_native_graph(&snapshot, &[]).owner_nodes.contains(&child));
+            thaw_arena_reset();
+            assert!(!was_reclaimed(child), "the global slot's side edge retains its child");
+
+            replace_reference(slot as usize, child, 0);
+            thaw_arena_reset();
+            assert!(was_reclaimed(child), "removing the global edge releases its child");
+            assert_eq!(unsafe { thaw_arena_unregister_root(slot) }, 1);
+            assert_eq!(unsafe { thaw_arena_unregister_root(slot) }, 0);
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    fn copied_mark_keeps_owner_nodes_distinct_from_allocation_starts() {
+        let snapshot = NativeGraphSnapshot {
+            epoch: 0,
+            allocations: BTreeMap::from([
+                (100, AllocationSnapshot { id: AllocationId { base: 100, serial: 1 }, size: 16,
+                    generation: 3, pointer_words: vec![205, 9999] }),
+                (200, AllocationSnapshot { id: AllocationId { base: 200, serial: 2 }, size: 8,
+                    generation: 4, pointer_words: vec![] }),
+            ]),
+            references: BTreeMap::from([(205, vec![200, 200])]),
+            root_values: vec![104],
+            root_slots: vec![],
+            pinned_counts: BTreeMap::new(),
+            _thread_local: std::marker::PhantomData,
+        };
+        let mark = mark_native_graph(&snapshot, &[]);
+        assert_eq!(mark.owner_nodes, HashSet::from([104, 205, 200, 9999]));
+        assert_eq!(mark.allocation_starts, HashSet::from([100, 200]));
+        assert_eq!(mark.retained_generations, HashSet::from([3, 4]));
+        assert_eq!(snapshot.references[&205], vec![200, 200]);
     }
 
     fn reset_test_metadata_hook(_: bool) {
