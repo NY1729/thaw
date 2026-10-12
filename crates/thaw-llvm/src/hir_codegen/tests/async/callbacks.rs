@@ -797,6 +797,7 @@ fn napi_constructor_lookup_throw_releases_fresh_scalar_but_preserves_borrowed_ha
             void* data;
         } napi_property_descriptor;
         extern napi_status napi_create_object(napi_env, napi_value*);
+        extern napi_status napi_create_function(napi_env, const char*, size_t, napi_callback, void*, napi_value*);
         extern napi_status napi_define_properties(napi_env, napi_value, size_t, const napi_property_descriptor*);
         extern napi_status napi_set_named_property(napi_env, napi_value, const char*, napi_value);
         extern napi_status napi_throw_error(napi_env, const char*, const char*);
@@ -805,13 +806,22 @@ fn napi_constructor_lookup_throw_releases_fresh_scalar_but_preserves_borrowed_ha
             napi_throw_error(env, 0, "original constructor lookup failure");
             return 0;
         }
+        static napi_value good_client(napi_env env, napi_callback_info info) {
+            (void)info;
+            napi_value result = 0;
+            if (napi_create_object(env, &result) != 0) return 0;
+            return result;
+        }
         __attribute__((visibility("default"))) napi_value napi_register_module_v1(napi_env env, napi_value exports) {
             napi_value outer = 0;
+            napi_value good = 0;
             const napi_property_descriptor client = {
                 "Client", 0, 0, throwing_client, 0, 0, 0, 0
             };
             if (napi_create_object(env, &outer) != 0 ||
                 napi_define_properties(env, outer, 1, &client) != 0 ||
+                napi_create_function(env, "Good", 4, good_client, 0, &good) != 0 ||
+                napi_set_named_property(env, outer, "Good", good) != 0 ||
                 napi_set_named_property(env, exports, "Outer", outer) != 0) return 0;
             return exports;
         }
@@ -820,14 +830,49 @@ fn napi_constructor_lookup_throw_releases_fresh_scalar_but_preserves_borrowed_ha
 
     let source = format!(r#"
         declare function __thaw_typed_napi_246e6577244f757465722e436c69656e7424617269747931(key: JsValue): JsValue;
+        declare function __thaw_typed_napi_246e6577244f757465722e436c69656e7424617269747932(value: Json, key: JsValue): JsValue;
+        declare function __thaw_typed_napi_246e6577244f757465722e476f6f6424617269747932(value: Json, key: JsValue): JsValue;
+        declare function __thaw_typed_js_766572696679(value: Json): boolean;
         function main(): void {{
-            loadScript("globalThis.__thaw_lookup_key_mark = () => {{ globalThis.__thaw_lookup_key_base = __thaw_value_handle_refs.reduce((sum, refs) => sum + refs, 0); }}; globalThis.__thaw_lookup_key_count_matches = () => __thaw_value_handle_refs.reduce((sum, refs) => sum + refs, 0) === globalThis.__thaw_lookup_key_base;");
+            loadScript("globalThis.__thaw_lookup_source = {{marker: 'source'}}; globalThis.__thaw_lookup_source_usable = () => globalThis.__thaw_lookup_source.marker === 'source'; globalThis.verify = value => value.marker === 'borrowed'; globalThis.__thaw_lookup_key_mark = () => {{ globalThis.__thaw_lookup_key_base = __thaw_value_handle_refs.reduce((sum, refs) => sum + refs, 0); }}; globalThis.__thaw_lookup_key_count_matches = () => __thaw_value_handle_refs.reduce((sum, refs) => sum + refs, 0) === globalThis.__thaw_lookup_key_base;");
             const mark: JsValue = getDynamicValue("__thaw_lookup_key_mark");
             const countMatches: JsValue = getDynamicValue("__thaw_lookup_key_count_matches");
+            const source: JsValue = getDynamicValue("__thaw_lookup_source");
+            const sourceUsable: JsValue = getDynamicValue("__thaw_lookup_source_usable");
             if (!loadNativeAddon("{}")) {{
                 throw "test addon failed to load";
             }}
             callDynamicValue(mark, __thaw_json_argument_array());
+            let objectCaught = 0;
+            for (let index = 0; index < 10; index++) {{
+                try {{
+                    const ignored: JsValue = __thaw_typed_napi_246e6577244f757465722e436c69656e7424617269747932(source, "fresh key");
+                    releaseDynamicValue(ignored);
+                }} catch (error) {{
+                    if (error instanceof Error && error.message === "original constructor lookup failure") objectCaught++;
+                }}
+            }}
+            if (objectCaught !== 10 || !callDynamicValue(countMatches, __thaw_json_argument_array()) || !callDynamicValue(sourceUsable, __thaw_json_argument_array())) {{
+                throw "fresh JSON constructor lookup cleanup failed";
+            }}
+            const borrowed: Json = JSON.parse('{{"marker":"borrowed"}}');
+            let borrowedCaught = 0;
+            for (let index = 0; index < 3; index++) {{
+                try {{
+                    const ignored: JsValue = __thaw_typed_napi_246e6577244f757465722e436c69656e7424617269747932(borrowed, "fresh key");
+                    releaseDynamicValue(ignored);
+                }} catch (error) {{
+                    if (error instanceof Error && error.message === "original constructor lookup failure") borrowedCaught++;
+                }}
+            }}
+            if (borrowedCaught !== 3 || !__thaw_typed_js_766572696679(borrowed) || !callDynamicValue(countMatches, __thaw_json_argument_array())) {{
+                throw "borrowed JSON constructor lookup cleanup failed";
+            }}
+            const constructed: JsValue = __thaw_typed_napi_246e6577244f757465722e476f6f6424617269747932(source, "success key");
+            releaseDynamicValue(constructed);
+            if (!callDynamicValue(countMatches, __thaw_json_argument_array()) || !callDynamicValue(sourceUsable, __thaw_json_argument_array())) {{
+                throw "successful constructor argument array cleanup failed";
+            }}
             let caught = false;
             try {{
                 const ignored: JsValue = __thaw_typed_napi_246e6577244f757465722e436c69656e7424617269747931("fresh scalar key");
@@ -842,17 +887,49 @@ fn napi_constructor_lookup_throw_releases_fresh_scalar_but_preserves_borrowed_ha
             console.log(caught, callDynamicValue(countMatches, __thaw_json_argument_array()));
             releaseDynamicValue(countMatches);
             releaseDynamicValue(mark);
+            releaseDynamicValue(source);
+            releaseDynamicValue(sourceUsable);
         }}
     "#, addon.display());
     let module = thaw_parser::parse_typescript(&source).unwrap();
     let program = thaw_hir::lower_module(&module).unwrap();
     let hir = format!("{program:#?}");
     assert!(hir.contains("retainEventKey"), "{hir}");
+    assert!(hir.contains("napi-constructor"), "{hir}");
+    assert!(hir.contains("$new$Outer.Client$arity2"), "{hir}");
     let context = Context::create();
     let mut compiler = HirCompiler::new(&context, "napi_constructor_lookup_owned_scalar_cleanup");
     compiler.compile_program(&program).unwrap();
     let ir = compiler.print_to_string();
     assert!(ir.contains("@thaw_js_event_key_handle_result("), "{ir}");
+    let user_main = ir.find("define internal void @thaw_user_main(").expect(&ir);
+    let body = &ir[user_main..user_main + ir[user_main..].find("\n}").unwrap()];
+    let source_release = body.find("\nrelease_typed_wrapper_json_argument").expect(body);
+    let lookup = body.find("@thaw_napi_get_export_typed_result(").expect(body);
+    let lookup_array_release = body[lookup..]
+        .find("\nrelease_typed_dynamic_argument_array")
+        .map(|offset| lookup + offset)
+        .expect(body);
+    let array_release_end = body[lookup_array_release..]
+        .find("\ntyped_dynamic_argument_array_released")
+        .map(|offset| lookup_array_release + offset)
+        .expect(body);
+    let array_release_block = &body[lookup_array_release..array_release_end];
+    assert!(
+        array_release_block.contains("call void @thaw_json_destroy(ptr"),
+        "{array_release_block}"
+    );
+    let successful_graph = body[lookup..]
+        .find("@thaw_json_graph_encode(")
+        .map(|offset| lookup + offset)
+        .expect(body);
+    let constructor_call = body[successful_graph..]
+        .find("@thaw_napi_construct_handle_typed_graph_args_result(")
+        .map(|offset| successful_graph + offset)
+        .expect(body);
+    assert!(source_release < lookup, "{body}");
+    assert!(lookup < lookup_array_release, "{body}");
+    assert!(successful_graph < constructor_call, "{body}");
     let obj = dir.join("out.o");
     let exe = dir.join("out");
     compiler.write_object_file(&obj).unwrap();

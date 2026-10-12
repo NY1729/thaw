@@ -308,6 +308,57 @@ fn marks_fresh_json_arguments_for_ordinary_quickjs_returns_only() {
 }
 
 #[test]
+fn marks_only_live_json_coercions_to_napi_constructors() {
+    let program = lower(
+        r#"
+        declare function __thaw_typed_napi_246e6577244f757465722e436c69656e7424617269747932(
+            value: Json, key: JsValue,
+        ): JsValue;
+        declare function __thaw_typed_napi_246e6577244f757465722e47656e6572696324617269747932<T extends Json>(
+            value: Json, key: JsValue,
+        ): JsValue;
+        declare function __thaw_typed_napi_666f6f(value: Json, key: JsValue): JsValue;
+        function direct(live: JsValue): void {
+            const ignored: JsValue = __thaw_typed_napi_246e6577244f757465722e436c69656e7424617269747932(live, "key");
+        }
+        function generic(live: JsValue): void {
+            const ignored: JsValue = __thaw_typed_napi_246e6577244f757465722e47656e6572696324617269747932<Json>(live, live);
+        }
+        function non_constructor(live: JsValue): void {
+            const ignored: JsValue = __thaw_typed_napi_666f6f(live, "key");
+        }
+        function borrowed(value: Json): void {
+            const ignored: JsValue = __thaw_typed_napi_246e6577244f757465722e436c69656e7424617269747932(value, "key");
+        }
+        function shadowed(live: JsValue): void {
+            const __thaw_typed_napi_246e6577244f757465722e436c69656e7424617269747932 =
+                (value: Json, key: JsValue): JsValue => live;
+            const ignored: JsValue = __thaw_typed_napi_246e6577244f757465722e436c69656e7424617269747932(live, "key");
+        }
+        "#,
+    );
+    let body = |name: &str| {
+        format!(
+            "{:?}",
+            program.functions.iter().find(|function| function.name == name).unwrap().body,
+        )
+    };
+    for (name, symbol) in [
+        ("direct", "$new$Outer.Client$arity2"),
+        ("generic", "$new$Outer.Generic$arity2"),
+    ] {
+        let body = body(name);
+        assert!(body.contains("Str(\"napi-constructor\")"), "{name}: {body}");
+        assert!(body.contains(&format!("Str(\"{symbol}\")")), "{name}: {body}");
+        assert!(body.contains("JsValueAsJson"), "{name}: {body}");
+    }
+    for name in ["non_constructor", "borrowed", "shadowed"] {
+        let body = body(name);
+        assert!(!body.contains("__thaw_mark_typed_wrapper_json_argument"), "{name}: {body}");
+    }
+}
+
+#[test]
 fn source_cannot_forge_typed_wrapper_json_ownership_marker() {
     let module = thaw_parser::parse_typescript(
         r#"declare function __thaw_mark_typed_wrapper_json_argument(ownerKind: string, ownerKey: string, value: Json): Json;

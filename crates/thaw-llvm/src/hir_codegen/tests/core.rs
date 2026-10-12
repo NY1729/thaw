@@ -4008,6 +4008,201 @@ fn inline_nullish_comparison_callees_release_their_handles() {
 }
 
 #[test]
+fn native_typed_quickjs_fresh_json_arguments_survive_all_return_lanes() {
+    let source = r#"
+        declare function __thaw_typed_js_73746f7265566f6964(value: Json): void;
+        declare function __thaw_typed_js_73746f7265426f6f6c(value: Json): boolean;
+        declare function __thaw_typed_js_73746f72654a736f6e(value: Json): Json;
+        declare function __thaw_typed_js_73746f72654a7356616c7565(value: Json): JsValue;
+        declare function __thaw_typed_js_7468726f77566f6964(value: Json): void;
+        declare function __thaw_typed_js_7468726f77426f6f6c(value: Json): boolean;
+        declare function __thaw_typed_js_7468726f774a736f6e(value: Json): Json;
+        declare function __thaw_typed_js_7468726f774a7356616c7565(value: Json): JsValue;
+        declare function __thaw_typed_js_73746f7265426f7468(left: Json, right: Json): void;
+        function borrowed_json_owner(value: Json): void {
+            __thaw_typed_js_73746f7265566f6964(value);
+        }
+        function two_fresh_json_owners(value: JsValue): void {
+            __thaw_typed_js_73746f7265426f7468(value, value);
+        }
+        function main(): void {
+            loadScript("globalThis.__thaw_saved = {}; globalThis.__thaw_source = {marker: 'live'}; globalThis.__thaw_store = (name, value) => { globalThis.__thaw_saved[name] = value; }; globalThis.storeVoid = value => { __thaw_store('storeVoid', value); }; globalThis.storeBoth = (left, right) => { __thaw_store('storeBothLeft', left); __thaw_store('storeBothRight', right); }; globalThis.storeBool = value => { __thaw_store('storeBool', value); return true; }; globalThis.storeJson = value => { __thaw_store('storeJson', value); return 'json-result'; }; globalThis.storeJsValue = value => { __thaw_store('storeJsValue', value); return true; }; globalThis.throwVoid = value => { __thaw_store('throwVoid', value); throw 'stored-argument'; }; globalThis.throwBool = value => { __thaw_store('throwBool', value); throw 'stored-argument'; }; globalThis.throwJson = value => { __thaw_store('throwJson', value); throw 'stored-argument'; }; globalThis.throwJsValue = value => { __thaw_store('throwJsValue', value); throw 'stored-argument'; }; globalThis.__thaw_saved_identity_ok = () => Object.keys(globalThis.__thaw_saved).length === 10 && Object.values(globalThis.__thaw_saved).every(value => value === globalThis.__thaw_source && value.marker === 'live'); globalThis.__thaw_refs = () => __thaw_value_handle_refs.reduce((sum, refs) => sum + refs, 0);");
+            const sourceValue: JsValue = getDynamicValue("__thaw_source");
+            const refs: JsValue = getDynamicValue("__thaw_refs");
+            const identity: JsValue = getDynamicValue("__thaw_saved_identity_ok");
+            const baseline = Number(callDynamicValue(refs, __thaw_json_argument_array()));
+            __thaw_typed_js_73746f7265566f6964(sourceValue);
+            two_fresh_json_owners(sourceValue);
+            const boolResult = __thaw_typed_js_73746f7265426f6f6c(sourceValue);
+            const jsonResult: Json = __thaw_typed_js_73746f72654a736f6e(sourceValue);
+            const jsValueResult: JsValue = __thaw_typed_js_73746f72654a7356616c7565(sourceValue);
+            releaseDynamicValue(jsValueResult);
+            let caughtVoid = false;
+            let caughtBool = false;
+            let caughtJson = false;
+            let caughtJsValue = false;
+            try { __thaw_typed_js_7468726f77566f6964(sourceValue); } catch (error) { caughtVoid = error === "stored-argument"; }
+            try { __thaw_typed_js_7468726f77426f6f6c(sourceValue); } catch (error) { caughtBool = error === "stored-argument"; }
+            try { __thaw_typed_js_7468726f774a736f6e(sourceValue); } catch (error) { caughtJson = error === "stored-argument"; }
+            try { __thaw_typed_js_7468726f774a7356616c7565(sourceValue); } catch (error) { caughtJsValue = error === "stored-argument"; }
+            const live = callDynamicValue(identity, __thaw_json_argument_array());
+            const after = Number(callDynamicValue(refs, __thaw_json_argument_array()));
+            console.log(boolResult, jsonResult === "json-result", caughtVoid, caughtBool, caughtJson, caughtJsValue, live, after === baseline);
+            releaseDynamicValue(sourceValue);
+            releaseDynamicValue(refs);
+            releaseDynamicValue(identity);
+        }
+    "#;
+
+    assert_eq!(compile_and_run(source, "typed_quickjs_all_return_lanes"), "true true true true true true true true\n");
+
+    let module = thaw_parser::parse_typescript(source).unwrap();
+    let program = thaw_hir::lower_module(&module).unwrap();
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "typed_quickjs_all_return_lanes_ir");
+    compiler.compile_program(&program).unwrap();
+    let ir = compiler.print_to_string();
+    let main = ir.find("define internal void @thaw_user_main(").expect(&ir);
+    let body = &ir[main..main + ir[main..].find("\n}").unwrap()];
+    let mut from = 0;
+    for _ in 0..8 {
+        let pushed = body[from..].find("@thaw_json_array_push_json(").map(|offset| from + offset).expect(body);
+        let released = body[pushed..]
+            .find("\nrelease_typed_wrapper_json_argument")
+            .map(|offset| pushed + offset + 1)
+            .expect(body);
+        let release_end = body[released..]
+            .find("\ntyped_wrapper_json_released")
+            .map(|offset| released + offset)
+            .expect(body);
+        let encoded = body[release_end..].find("@thaw_json_graph_encode(").map(|offset| release_end + offset).expect(body);
+        let called = body[encoded..].find("@thaw_js_call_handle_mixed_exact_").map(|offset| encoded + offset).expect(body);
+        let release_block = &body[released..release_end];
+        assert!(
+            pushed < released
+                && released < release_end
+                && release_end < encoded
+                && encoded < called
+                && release_block.contains("call void @thaw_json_destroy("),
+            "{body}"
+        );
+        from = called + 1;
+    }
+    let two_fresh = ir.find("define internal void @two_fresh_json_owners(").expect(&ir);
+    let two_fresh_body = &ir[two_fresh..two_fresh + ir[two_fresh..].find("\n}").unwrap()];
+    let pushes = two_fresh_body.matches("@thaw_json_array_push_json(").count();
+    let first_encode = two_fresh_body.find("@thaw_json_graph_encode(").expect(two_fresh_body);
+    let release_labels: Vec<usize> = two_fresh_body
+        .match_indices("\nrelease_typed_wrapper_json_argument")
+        .map(|(offset, _)| offset + 1)
+        .filter(|offset| {
+            let line_start = two_fresh_body[..*offset].rfind('\n').map(|index| index + 1).unwrap_or(0);
+            let line_end = two_fresh_body[*offset..]
+                .find('\n')
+                .map(|index| *offset + index)
+                .unwrap_or(two_fresh_body.len());
+            let label_line = &two_fresh_body[line_start..line_end];
+            *offset < first_encode
+                && two_fresh_body[..*offset].matches("@thaw_json_array_push_json(").count() == 2
+                && label_line.contains("; preds =")
+                && !label_line.contains("%propagate_exception")
+        })
+        .collect();
+    assert_eq!(pushes, 2, "{two_fresh_body}");
+    assert_eq!(release_labels.len(), 2, "{two_fresh_body}");
+    assert_eq!(two_fresh_body[..release_labels[0]].matches("@thaw_json_array_push_json(").count(), 2, "{two_fresh_body}");
+    for (index, released) in release_labels.iter().copied().enumerate() {
+        let release_end = two_fresh_body[released..]
+            .find("\ntyped_wrapper_json_released")
+            .map(|offset| released + offset)
+            .unwrap_or(first_encode);
+        assert!(released < release_end && release_end <= first_encode, "{two_fresh_body}");
+        assert!(two_fresh_body[released..release_end].contains("call void @thaw_json_destroy("), "{two_fresh_body}");
+        if index + 1 < release_labels.len() {
+            assert!(release_labels[index + 1] < first_encode, "{two_fresh_body}");
+        }
+    }
+    let borrowed = ir.find("define internal void @borrowed_json_owner(").expect(&ir);
+    let borrowed_body = &ir[borrowed..borrowed + ir[borrowed..].find("\n}").unwrap()];
+    assert!(!borrowed_body.contains("release_typed_wrapper_json_argument:"), "{borrowed_body}");
+}
+
+#[test]
+fn native_typed_quickjs_argument_array_is_released_when_later_argument_throws() {
+    let source = r#"
+        declare function __thaw_typed_js_616363657074(first: Json, second: JsValue): void;
+        declare function __thaw_typed_js_7468726f775f696e6e6572(): void;
+        declare function __thaw_typed_js_766572696679(value: Json): boolean;
+        declare function __thaw_typed_js_696e6e6572(first: Json, second: JsValue): JsValue;
+        function failSecond(): JsValue { throw "later argument"; }
+        function innerCaught(value: JsValue): JsValue {
+            try { __thaw_typed_js_7468726f775f696e6e6572(); } catch (_) {}
+            return value;
+        }
+        function main(): void {
+            loadScript("globalThis.__thaw_source = {marker: 'source'}; globalThis.__thaw_accept_calls = 0; globalThis.__thaw_inner_calls = 0; globalThis.__thaw_saved_first = undefined; globalThis.accept = (first, second) => { globalThis.__thaw_accept_calls++; globalThis.__thaw_saved_first = first; }; globalThis.inner = (first, second) => { globalThis.__thaw_inner_calls++; return first; }; globalThis.throw_inner = () => { throw 'inner'; }; globalThis.verify = value => !!value && value.marker === 'borrowed'; globalThis.__thaw_ref_total = () => __thaw_value_handle_refs.reduce((sum, refs) => sum + refs, 0); globalThis.__thaw_accept_identity = () => globalThis.__thaw_accept_calls === 1 && globalThis.__thaw_saved_first === globalThis.__thaw_source && globalThis.__thaw_saved_first.marker === 'source'; globalThis.__thaw_nested_untouched = () => globalThis.__thaw_accept_calls === 0 && globalThis.__thaw_inner_calls === 0 && globalThis.__thaw_source.marker === 'source';");
+            const sourceValue: JsValue = getDynamicValue("__thaw_source");
+            const refTotal: JsValue = getDynamicValue("__thaw_ref_total");
+            const acceptedIdentity: JsValue = getDynamicValue("__thaw_accept_identity");
+            const nestedUntouched: JsValue = getDynamicValue("__thaw_nested_untouched");
+            const baseline = Number(callDynamicValue(refTotal, __thaw_json_argument_array()));
+            let freshCaught = 0;
+            for (let index = 0; index < 20; index++) {
+                try { __thaw_typed_js_616363657074(sourceValue, failSecond()); }
+                catch (error) { if (error === "later argument") freshCaught++; }
+            }
+            const afterFresh = Number(callDynamicValue(refTotal, __thaw_json_argument_array()));
+            const borrowed: Json = JSON.parse('{"marker":"borrowed"}');
+            let borrowedCaught = 0;
+            for (let index = 0; index < 3; index++) {
+                try { __thaw_typed_js_616363657074(borrowed, failSecond()); }
+                catch (error) { if (error === "later argument") borrowedCaught++; }
+            }
+            const borrowedUsable = __thaw_typed_js_766572696679(borrowed);
+            const afterBorrowed = Number(callDynamicValue(refTotal, __thaw_json_argument_array()));
+            let nestedCaught = 0;
+            for (let index = 0; index < 10; index++) {
+                try { __thaw_typed_js_616363657074(sourceValue, __thaw_typed_js_696e6e6572(sourceValue, failSecond())); }
+                catch (error) { if (error === "later argument") nestedCaught++; }
+            }
+            const nestedTargetsUntouched = callDynamicValue(nestedUntouched, __thaw_json_argument_array());
+            const afterNestedFailures = Number(callDynamicValue(refTotal, __thaw_json_argument_array()));
+            __thaw_typed_js_616363657074(sourceValue, innerCaught(sourceValue));
+            const accepted = callDynamicValue(acceptedIdentity, __thaw_json_argument_array());
+            const afterNested = Number(callDynamicValue(refTotal, __thaw_json_argument_array()));
+            console.log(freshCaught === 20, afterFresh === baseline, borrowedCaught === 3, borrowedUsable, afterBorrowed === baseline, nestedCaught === 10, nestedTargetsUntouched, afterNestedFailures === baseline, accepted, afterNested === baseline);
+            releaseDynamicValue(sourceValue);
+            releaseDynamicValue(refTotal);
+            releaseDynamicValue(acceptedIdentity);
+            releaseDynamicValue(nestedUntouched);
+        }
+    "#;
+
+    assert_eq!(
+        compile_and_run(source, "typed_quickjs_argument_array_unwind"),
+        "true true true true true true true true true true\n"
+    );
+
+    let module = thaw_parser::parse_typescript(source).unwrap();
+    let program = thaw_hir::lower_module(&module).unwrap();
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "typed_quickjs_argument_array_unwind_ir");
+    compiler.compile_program(&program).unwrap();
+    let ir = compiler.print_to_string();
+    let main = ir.find("define internal void @thaw_user_main(").expect(&ir);
+    let body = &ir[main..main + ir[main..].find("\n}").unwrap()];
+    let release = body.find("\nrelease_typed_dynamic_argument_array").expect(body) + 1;
+    let released = body[release..]
+        .find("\ntyped_dynamic_argument_array_released")
+        .map(|offset| release + offset)
+        .expect(body);
+    let release_block = &body[release..released];
+    assert!(release_block.contains("call void @thaw_json_destroy(ptr "), "{body}");
+    assert!(release_block.contains("dynamic_args"), "{body}");
+    assert!(body.contains("typed_dynamic_argument_array_active"), "{body}");
+}
+
+#[test]
 fn native_typed_quickjs_jsvalue_json_argument_is_released_after_array_clone() {
     let source = r#"
         declare function __thaw_typed_js_6563686f(value: Json): JsValue;
