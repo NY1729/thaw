@@ -17,7 +17,27 @@ impl<'ctx> HirCompiler<'ctx> {
                 "{source_name} expects exactly two arguments (name, args)"
             ));
         };
+        if backend_symbol.starts_with("thaw_js_") {
+            return self.compile_with_owned_inline_dynamic_callee(
+                name,
+                "json_backend_callee_cleanup",
+                |this, name_val| {
+                    this.compile_json_backend_call_with_name(
+                        name_val, call_args, backend_symbol,
+                    )
+                },
+            );
+        }
         let name_val = self.compile_expr(name)?;
+        self.compile_json_backend_call_with_name(name_val, call_args, backend_symbol)
+    }
+
+    fn compile_json_backend_call_with_name(
+        &mut self,
+        name_val: BasicValueEnum<'ctx>,
+        call_args: &HirExpr,
+        backend_symbol: &str,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
         // See the matching comment on `compile_call_dynamic_method`: a
         // `JsValue`-typed element nested in `call_args` (e.g. a
         // `registerNativeCallback` result) needs this flag set while it's

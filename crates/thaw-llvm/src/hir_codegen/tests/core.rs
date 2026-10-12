@@ -3785,3 +3785,47 @@ fn retained_native_aggregate_keeps_nested_jsvalue_identity() {
         "true\ntrue\ntrue\ntrue\n"
     );
 }
+
+
+#[test]
+fn inline_nullish_comparison_callees_release_their_handles() {
+    let source = r#"
+        function main(): void {
+            loadScript("globalThis.__thaw_inline_value = {}; globalThis.__thaw_inline_sum = () => __thaw_value_handle_refs.reduce((sum, refs) => sum + refs, 0); globalThis.__thaw_inline_identity = value => true; globalThis.__thaw_inline_throw = () => { throw 'invocation failure'; };");
+            const sum: JsValue = getDynamicValue("__thaw_inline_sum");
+            const value: JsValue = getDynamicValue("__thaw_inline_value");
+            const baseline = Number(callDynamicValue(sum, __thaw_json_argument_array()));
+
+            for (let index = 0; index < 20; index++) {
+                const isNull = value === null;
+                const isUndefined = value === undefined;
+                if (isNull || isUndefined) throw "object matched null or undefined";
+            }
+
+            function failArgument(): JsValue { throw "argument failure"; }
+            let argumentCaught = false;
+            try {
+                callDynamicValueWithValue(getDynamicValue("__thaw_inline_identity"), failArgument());
+            } catch (error) {
+                argumentCaught = error === "argument failure";
+            }
+            let invocationCaught = false;
+            try {
+                callDynamicValueWithValue(getDynamicValue("__thaw_inline_throw"), value);
+            } catch (error) {
+                invocationCaught = error === "invocation failure";
+            }
+            if (!argumentCaught || !invocationCaught)
+                throw "inline callee exception path did not preserve the thrown value";
+
+            if (Number(callDynamicValue(sum, __thaw_json_argument_array())) !== baseline)
+                throw "inline nullish predicate handles leaked";
+            if (Number(callDynamicValue(sum, __thaw_json_argument_array())) !== baseline)
+                throw "borrowed callable Var was released";
+            releaseDynamicValue(value);
+            releaseDynamicValue(sum);
+            console.log(true);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "inline_nullish_callee_lease"), "true\n");
+}
