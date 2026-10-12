@@ -237,7 +237,9 @@ impl<'ctx> HirCompiler<'ctx> {
         self.builder.build_call(self.module.get_function("thaw_js_release_handle").unwrap(),
             &[handle.into()], "release_live_json_builder_handle")
             .map_err(|error| error.to_string())?;
-        self.compile_check_json_host_error(json, Some("thaw_json_destroy"))
+        let json = self.compile_check_json_host_error(json, Some("thaw_json_destroy"))?;
+        self.mark_fresh_owned_json_result(json)?;
+        Ok(json)
     }
 
     /// Consumes the freshly projected handle after the generic Json
@@ -267,7 +269,9 @@ impl<'ctx> HirCompiler<'ctx> {
             self.module.get_function("thaw_js_release_handle").unwrap(),
             &[handle.into()], "release_consumed_dynamic_projection",
         ).map_err(|error| error.to_string())?;
-        self.compile_check_json_host_error(json, Some("thaw_json_destroy"))
+        let json = self.compile_check_json_host_error(json, Some("thaw_json_destroy"))?;
+        self.mark_fresh_owned_json_result(json)?;
+        Ok(json)
     }
 
     fn compile_host_json_from_borrowed_dynamic(
@@ -288,7 +292,9 @@ impl<'ctx> HirCompiler<'ctx> {
             .ok_or("borrowed live JSON host conversion returned no value")?;
         // The source JsValue is borrowed. The std helper retained an
         // independent host lease; the lexical catch carrier keeps its own.
-        self.compile_check_json_host_error(json, Some("thaw_json_destroy"))
+        let json = self.compile_check_json_host_error(json, Some("thaw_json_destroy"))?;
+        self.mark_fresh_owned_json_result(json)?;
+        Ok(json)
     }
 
     /// The exact mixed call consumes each direct handle. A source JsValue is

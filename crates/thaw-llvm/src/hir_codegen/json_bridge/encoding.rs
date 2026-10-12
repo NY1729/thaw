@@ -130,6 +130,7 @@ impl<'ctx> HirCompiler<'ctx> {
             parsed
         };
 
+        self.mark_fresh_owned_json_result(parsed)?;
         Ok(parsed)
     }
 
@@ -284,6 +285,7 @@ impl<'ctx> HirCompiler<'ctx> {
         self.compile_json_object_set_native_with_undefined(
             object, key.as_pointer_value(), entries, &HirType::Json, preserve_undefined, true,
         )?;
+        self.mark_fresh_owned_json_result(object)?;
         Ok(object)
     }
 
@@ -495,6 +497,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 "propagate_object_state",
             )
             .map_err(|error| error.to_string())?;
+        self.mark_fresh_owned_json_result(json)?;
         Ok(json)
     }
 
@@ -724,6 +727,7 @@ impl<'ctx> HirCompiler<'ctx> {
         if owned && setter == "thaw_json_object_set_json" {
             setter = "thaw_json_object_set_json_owned";
         }
+        let consumes_json = setter == "thaw_json_object_set_json_owned";
         self.builder
             .build_call(
                 self.module.get_function(setter).unwrap(),
@@ -732,6 +736,9 @@ impl<'ctx> HirCompiler<'ctx> {
             )
             .map_err(|error| error.to_string())?;
         self.compile_check_json_host_error(json, None)?;
+        if consumes_json {
+            self.revoke_fresh_owned_json_result(value)?;
+        }
         Ok(())
     }
 
@@ -1244,6 +1251,7 @@ impl<'ctx> HirCompiler<'ctx> {
         index.add_incoming(&[(&next, body_end)]);
 
         self.builder.position_at_end(done);
+        self.mark_fresh_owned_json_result(json)?;
         Ok(json)
     }
 
@@ -1311,6 +1319,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 preserve_undefined,
             )?;
         }
+        self.mark_fresh_owned_json_result(json)?;
         Ok(json)
     }
 

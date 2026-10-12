@@ -51,6 +51,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 ).map_err(|error| error.to_string())?;
                 self.compile_throw_builtin_error("SyntaxError", "Unexpected token in JSON")?;
                 self.builder.position_at_end(valid);
+                self.mark_fresh_owned_json_result(result)?;
                 return Ok(result);
             }
             "JSON.stringify" => {
@@ -117,7 +118,9 @@ impl<'ctx> HirCompiler<'ctx> {
                     &[value.into()], "json_receiver_bool",
                 ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
                     .ok_or("JSON bool constructor returned no value")?;
-                return self.compile_check_json_host_error(result, Some("thaw_json_destroy"));
+                let result = self.compile_check_json_host_error(result, Some("thaw_json_destroy"))?;
+                self.mark_fresh_owned_json_result(result)?;
+                return Ok(result);
             }
             "__thaw_json_undefined" | "__thaw_json_null" => {
                 if !args.is_empty() {
@@ -132,13 +135,20 @@ impl<'ctx> HirCompiler<'ctx> {
                     self.module.get_function(symbol).unwrap(), &[], "json_receiver_constant",
                 ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
                     .ok_or("JSON constant constructor returned no value")?;
-                return self.compile_check_json_host_error(result, Some("thaw_json_destroy"));
+                let result = self.compile_check_json_host_error(result, Some("thaw_json_destroy"))?;
+                self.mark_fresh_owned_json_result(result)?;
+                return Ok(result);
             }
             "__thaw_json_track_owned" => {
                 let result = self.compile_single_arg_call(
                     "thaw_json_track_arena_owned_root", args, "owned catch JSON root",
                 )?;
                 return self.compile_check_json_host_error(result, None);
+            }
+            "__thaw_json_argument_array" => {
+                let result = self.compile_owned_json_argument_array(args)?;
+                self.mark_fresh_owned_json_result(result)?;
+                return Ok(result);
             }
             "__thaw_json_is_date_shape" => {
                 let [value] = args else {

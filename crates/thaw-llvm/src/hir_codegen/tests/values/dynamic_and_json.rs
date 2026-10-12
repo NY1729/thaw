@@ -2352,3 +2352,353 @@ fn object_to_string_dispatches_tagged_values_after_one_evaluation() {
     assert_eq!(compile_and_run(source, "object_tagged_to_string"),
         "[object String] [object Undefined]\n[object Number] [object Null]\n[object String] [object Number] [object Null] [object Undefined]\n[object Array] [object Null] [object Undefined]\n[object String] 1\n");
 }
+
+#[test]
+fn discarded_fresh_json_results_are_destroyed_but_borrowed_or_nested_values_are_not() {
+    let source = r#"
+        function discarded(): void {
+            JSON.parse("{}");
+        }
+        function borrowed(value: Json): void {
+            value;
+        }
+        function scalarWrapper(): void {
+            String(JSON.parse("1"));
+        }
+        function nestedLambda(): void {
+            (() => JSON.parse("{}"))();
+        }
+    "#;
+    let module = thaw_parser::parse_typescript(source).unwrap();
+    let program = thaw_hir::lower_module(&module).unwrap();
+    let context = inkwell::context::Context::create();
+    let mut compiler = crate::hir_codegen::HirCompiler::new(&context, "discarded_fresh_json");
+    compiler.compile_program(&program).unwrap();
+    let function_ir = |name: &str| {
+        inkwell::values::AnyValue::print_to_string(&compiler.module.get_function(name).unwrap()).to_string()
+    };
+    fn cleanup_blocks(body: &str) -> usize {
+        body.lines().filter(|line| {
+            let line = line.trim();
+            line.starts_with("destroy_untransferred_json_result") && line.contains(':')
+        }).count()
+    }
+
+    let discarded = function_ir("discarded");
+    assert!(discarded.contains("@thaw_json_destroy"), "fresh JSON.parse result must be destroyed at its discarded statement");
+    assert_eq!(cleanup_blocks(&discarded), 1, "fresh JSON.parse result gets one guarded cleanup block");
+
+    let borrowed = function_ir("borrowed");
+    assert!(!borrowed.contains("@thaw_json_destroy"), "borrowed Json parameter must remain borrowed");
+    assert_eq!(cleanup_blocks(&borrowed), 0, "borrowed Json parameter must not get a cleanup block");
+
+    let scalar = function_ir("scalarWrapper");
+    let destroys = scalar.matches("call void @thaw_json_destroy").count();
+    assert_eq!(destroys, 1, "only JSON.parse's invalid-input edge destroys; the scalar wrapper must not destroy its nested JSON temporary");
+    assert_eq!(cleanup_blocks(&scalar), 0, "nested JSON temporary is not the scalar wrapper's discarded result");
+
+    let nested = function_ir("nestedLambda");
+    assert_eq!(cleanup_blocks(&nested), 0,
+        "a fresh result emitted while compiling a nested lambda must not authorize cleanup of the outer unknown call");
+}
+
+#[test]
+fn json_discard_candidates_are_revoked_when_pure_wrappers_store_the_result() {
+    use thaw_hir::{HirExpr, HirFunction, HirLit, HirProgram, HirStmt, HirType};
+
+    fn json_object() -> HirExpr {
+        HirExpr::JsonObjectLit(
+            vec![("keep".into(), HirExpr::Lit(HirLit::Str("alive".into())))],
+            HirType::Json,
+        )
+    }
+    fn assignment(name: &str) -> HirExpr {
+        HirExpr::Assign(name.into(), Box::new(json_object()))
+    }
+    fn getter(name: &str) -> HirStmt {
+        HirStmt::Expr(HirExpr::JsonGet(Box::new(HirExpr::Var(name.into())), "keep".into()))
+    }
+    fn function(name: &str, wrapper: HirExpr) -> HirFunction {
+        HirFunction {
+            name: name.into(),
+            params: Vec::new(),
+            ret: HirType::Void,
+            is_async: false,
+            body: vec![
+                HirStmt::Let("stored".into(), HirType::Json, json_object()),
+                HirStmt::Expr(wrapper),
+                getter("stored"),
+            ],
+        }
+    }
+
+    let program = HirProgram {
+        globals: Vec::new(),
+        initializers: Vec::new(),
+        functions: vec![
+            function("typed", HirExpr::TypedClosure(HirType::Json, Box::new(assignment("stored")))),
+            function("eval_then", HirExpr::EvalThen(
+                Box::new(HirExpr::Lit(HirLit::Bool(true))), Box::new(assignment("stored")),
+            )),
+            function("block", HirExpr::Block(vec![HirStmt::Return(Some(assignment("stored")))])),
+        ],
+        extern_functions: Vec::new(),
+    };
+    let context = inkwell::context::Context::create();
+    let mut compiler = crate::hir_codegen::HirCompiler::new(&context, "json_discard_store_wrappers");
+    compiler.compile_program(&program).unwrap();
+    let function_ir = |name: &str| {
+        inkwell::values::AnyValue::print_to_string(&compiler.module.get_function(name).unwrap()).to_string()
+    };
+    fn cleanup_blocks(body: &str) -> usize {
+        body.lines().filter(|line| {
+            let line = line.trim();
+            line.starts_with("destroy_untransferred_json_result") && line.contains(':')
+        }).count()
+    }
+
+    for name in ["typed", "eval_then", "block"] {
+        let body = function_ir(name);
+        assert_eq!(cleanup_blocks(&body), 2,
+            "{name}: assignment and later property result each need a guarded cleanup site");
+        assert!(body.contains("discarded_json_still_owned"), "{name}: each cleanup is guarded by the transfer state");
+        assert!(body.contains("@thaw_json_destroy"), "{name}: fresh JSON results have a real destroy path");
+        assert!(body.contains("store i1 true"), "{name}: the assignment path must mark its candidate as transferred");
+        assert!(body.contains("@thaw_json_get"), "{name}: the stored object must remain usable after the wrapped assignment");
+    }
+}
+
+
+#[test]
+fn expression_type_tracks_assignment_values_and_explicit_block_tail() {
+    use thaw_hir::{HirExpr, HirLit, HirStmt, HirType};
+
+    let context = inkwell::context::Context::create();
+    let compiler = crate::hir_codegen::HirCompiler::new(&context, "expr_hir_type_values");
+    let json_value = || HirExpr::JsonObjectLit(Vec::new(), HirType::Json);
+    let json_result = HirType::Dictionary(Box::new(HirType::Json));
+    let object_type = HirType::Object(vec![("payload".into(), json_result.clone())]);
+
+    let field_assignment = HirExpr::PropAssign(
+        Box::new(HirExpr::Var("receiver".into())),
+        object_type,
+        "payload".into(),
+        Box::new(json_value()),
+    );
+    assert_eq!(compiler.expr_hir_type(&field_assignment), Some(json_result.clone()));
+
+    let index_assignment = HirExpr::IndexAssign(
+        Box::new(HirExpr::Var("receiver".into())),
+        Box::new(HirExpr::Lit(HirLit::F64(0.0))),
+        Box::new(json_value()),
+    );
+    assert_eq!(compiler.expr_hir_type(&index_assignment), Some(json_result.clone()));
+    let invalid_index_assignment = HirExpr::IndexAssign(
+        Box::new(HirExpr::Var("receiver".into())),
+        Box::new(HirExpr::Lit(HirLit::F64(-1.0))),
+        Box::new(json_value()),
+    );
+    assert_eq!(compiler.expr_hir_type(&invalid_index_assignment), Some(json_result.clone()));
+    for name in [
+        "__thaw_json_from_consumed_dynamic",
+        "__thaw_json_host_from_dynamic",
+        "__thaw_json_host_from_borrowed_dynamic",
+    ] {
+        let intrinsic = HirExpr::Call(
+            Box::new(HirExpr::Var(name.into())),
+            vec![HirExpr::Var("handle".into())],
+        );
+        assert_eq!(compiler.expr_hir_type(&intrinsic), Some(HirType::Json), "{name}");
+    }
+
+    let untyped_index_assignment = HirExpr::IndexAssign(
+        Box::new(HirExpr::Var("receiver".into())),
+        Box::new(HirExpr::Lit(HirLit::F64(0.0))),
+        Box::new(HirExpr::Var("unknown_rhs".into())),
+    );
+    assert_eq!(compiler.expr_hir_type(&untyped_index_assignment), None);
+
+    let returned_block = HirExpr::Block(vec![
+        HirStmt::Expr(HirExpr::Lit(HirLit::Bool(true))),
+        HirStmt::Return(Some(json_value())),
+    ]);
+    assert_eq!(compiler.expr_hir_type(&returned_block), Some(json_result));
+    assert_eq!(
+        compiler.expr_hir_type(&HirExpr::Block(vec![HirStmt::Return(None)])),
+        None,
+        "a block with no returned value has no expression type",
+    );
+    assert_eq!(
+        compiler.expr_hir_type(&HirExpr::Block(vec![HirStmt::Expr(json_value())])),
+        None,
+        "a block whose last statement is not Return(Some(..)) must not infer a tail type",
+    );
+}
+
+#[test]
+fn json_discard_candidates_are_revoked_by_field_index_and_json_writes() {
+    use thaw_hir::{HirExpr, HirFunction, HirLit, HirProgram, HirStmt, HirType};
+
+    fn json_object() -> HirExpr {
+        HirExpr::JsonObjectLit(
+            vec![("keep".into(), HirExpr::Lit(HirLit::Str("alive".into())))],
+            HirType::Json,
+        )
+    }
+    fn function(name: &str, local_type: HirType, init: HirExpr, write: HirExpr, read: HirExpr) -> HirFunction {
+        HirFunction {
+            name: name.into(), params: Vec::new(), ret: HirType::Void, is_async: false,
+            body: vec![
+                HirStmt::Let("holder".into(), local_type, init),
+                HirStmt::Expr(write),
+                HirStmt::Expr(read),
+            ],
+        }
+    }
+
+    let object_type = HirType::Object(vec![("keep".into(), HirType::Json)]);
+    let array_type = HirType::Array(Box::new(HirType::Json));
+    let program = HirProgram {
+        globals: Vec::new(), initializers: Vec::new(),
+        functions: vec![
+            function(
+                "field_write", object_type.clone(),
+                HirExpr::ObjectAlloc(object_type.clone()),
+                HirExpr::PropAssign(Box::new(HirExpr::Var("holder".into())), object_type.clone(),
+                    "keep".into(), Box::new(json_object())),
+                HirExpr::PropAccess(Box::new(HirExpr::Var("holder".into())), object_type.clone(), "keep".into()),
+            ),
+            function(
+                "index_write", array_type.clone(),
+                HirExpr::ArrayLit(vec![json_object()]),
+                HirExpr::IndexAssign(Box::new(HirExpr::Var("holder".into())),
+                    Box::new(HirExpr::Lit(HirLit::F64(0.0))), Box::new(json_object())),
+                HirExpr::TypedIndex(Box::new(HirExpr::Var("holder".into())),
+                    Box::new(HirExpr::Lit(HirLit::F64(0.0))), HirType::Json),
+            ),
+            function(
+                "invalid_index_write", array_type.clone(),
+                HirExpr::ArrayLit(vec![json_object()]),
+                HirExpr::IndexAssign(Box::new(HirExpr::Var("holder".into())),
+                    Box::new(HirExpr::Lit(HirLit::F64(-1.0))), Box::new(json_object())),
+                HirExpr::TypedIndex(Box::new(HirExpr::Var("holder".into())),
+                    Box::new(HirExpr::Lit(HirLit::F64(0.0))), HirType::Json),
+            ),
+            function(
+                "json_write", HirType::Json,
+                HirExpr::JsonObjectLit(vec![("keep".into(), json_object())], HirType::Json),
+                HirExpr::JsonSet(Box::new(HirExpr::Var("holder".into())),
+                    Box::new(HirExpr::Lit(HirLit::Str("keep".into()))), Box::new(json_object()),
+                    HirType::Json, false),
+                HirExpr::JsonGet(Box::new(HirExpr::Var("holder".into())), "keep".into()),
+            ),
+            HirFunction {
+                name: "owned_json_write".into(), params: Vec::new(), ret: HirType::Void, is_async: false,
+                body: vec![
+                    HirStmt::Let("__thaw_json_wrap_obj_owned".into(), HirType::Json, json_object()),
+                    HirStmt::Expr(HirExpr::JsonSet(
+                        Box::new(HirExpr::Var("__thaw_json_wrap_obj_owned".into())),
+                        Box::new(HirExpr::Lit(HirLit::Str("keep".into()))), Box::new(json_object()),
+                        HirType::Json, false,
+                    )),
+                    HirStmt::Expr(HirExpr::JsonGet(
+                        Box::new(HirExpr::Var("__thaw_json_wrap_obj_owned".into())), "keep".into(),
+                    )),
+                ],
+            },
+            HirFunction {
+                name: "consume_json".into(),
+                params: vec![thaw_hir::HirParam { name: "value".into(), ty: HirType::Json }],
+                ret: HirType::Void, is_async: false,
+                body: vec![HirStmt::Return(None)],
+            },
+            HirFunction {
+                name: "consumed_index_write".into(),
+                params: vec![thaw_hir::HirParam { name: "handle".into(), ty: HirType::JsValue }],
+                ret: HirType::Void, is_async: false,
+                body: vec![
+                    HirStmt::Let("holder".into(), array_type.clone(), HirExpr::ArrayLit(vec![json_object()])),
+                    HirStmt::Expr(HirExpr::IndexAssign(
+                        Box::new(HirExpr::Var("holder".into())),
+                        Box::new(HirExpr::Lit(HirLit::F64(0.0))),
+                        Box::new(HirExpr::Call(Box::new(HirExpr::Var("__thaw_json_from_consumed_dynamic".into())),
+                            vec![HirExpr::Var("handle".into())])),
+                    )),
+                    HirStmt::Expr(HirExpr::TypedIndex(Box::new(HirExpr::Var("holder".into())),
+                        Box::new(HirExpr::Lit(HirLit::F64(0.0))), HirType::Json)),
+                ],
+            },
+            HirFunction {
+                name: "consumed_json_return".into(),
+                params: vec![thaw_hir::HirParam { name: "handle".into(), ty: HirType::JsValue }],
+                ret: HirType::Json, is_async: false,
+                body: vec![HirStmt::Return(Some(HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_json_from_consumed_dynamic".into())),
+                    vec![HirExpr::Var("handle".into())],
+                )))],
+            },
+            HirFunction {
+                name: "consumed_json_call_argument".into(),
+                params: vec![thaw_hir::HirParam { name: "handle".into(), ty: HirType::JsValue }],
+                ret: HirType::Void, is_async: false,
+                body: vec![HirStmt::Expr(HirExpr::Call(
+                    Box::new(HirExpr::Var("consume_json".into())),
+                    vec![HirExpr::Call(Box::new(HirExpr::Var("__thaw_json_from_consumed_dynamic".into())),
+                        vec![HirExpr::Var("handle".into())])],
+                ))],
+            },
+        ],
+        extern_functions: Vec::new(),
+    };
+    let context = inkwell::context::Context::create();
+    let mut compiler = crate::hir_codegen::HirCompiler::new(&context, "json_discard_write_sites");
+    compiler.compile_program(&program).unwrap();
+    let function_ir = |name: &str| {
+        inkwell::values::AnyValue::print_to_string(&compiler.module.get_function(name).unwrap()).to_string()
+    };
+    fn cleanup_blocks(body: &str) -> usize {
+        body.lines().filter(|line| {
+            let line = line.trim();
+            line.starts_with("destroy_untransferred_json_result") && line.contains(':')
+        }).count()
+    }
+
+    for (name, expected_discard_mark, read_helper, transferred) in [
+        ("field_write", 1, "@thaw_object_property_flags", true),
+        ("index_write", 1, "@thaw_array_presence_mark", true),
+        // A rejected negative index skips ownership transfer; the fresh RHS
+        // still has the same guarded cleanup site in the generated IR.
+        ("invalid_index_write", 1, "@thaw_array_presence_mark", true),
+        // Normal JsonSet uses the cloning setter; its RHS remains owned by
+        // the expression and must be destroyed when discarded.
+        ("json_write", 2, "@thaw_json_get", false),
+        ("owned_json_write", 2, "@thaw_json_take", true),
+    ] {
+        let body = function_ir(name);
+        assert_eq!(cleanup_blocks(&body), expected_discard_mark,
+            "{name}: each fresh result gets a cleanup site, guarded by its runtime transfer flag");
+        assert!(body.contains("discarded_json_still_owned"), "{name}: cleanup must test the transfer flag before destroying");
+        assert!(body.contains("@thaw_json_destroy"), "{name}: fresh JSON results have a real destroy path");
+        assert_eq!(body.contains("store i1 true"), transferred,
+            "{name}: only stores that take ownership may mark the candidate transferred");
+        assert!(body.contains(read_helper), "{name}: the stored value must be read after its write");
+    }
+
+    let consumed_write = function_ir("consumed_index_write");
+    assert_eq!(cleanup_blocks(&consumed_write), 1,
+        "consumed dynamic conversion is a fresh JSON result and needs guarded cleanup");
+    assert!(consumed_write.contains("discarded_json_still_owned"));
+    assert!(consumed_write.contains("store i1 true"), "valid index transfer must keep the JSON host alive");
+    assert!(consumed_write.contains("@thaw_array_presence_mark"));
+    assert!(consumed_write.contains("@thaw_json_destroy"));
+
+    for name in ["consumed_json_return", "consumed_json_call_argument"] {
+        let body = function_ir(name);
+        // The intrinsic's own HostError cleanup may destroy a failed result;
+        // these uses must not add a statement-discard cleanup on success.
+        assert_eq!(cleanup_blocks(&body), 0,
+            "{name}: returned/passed JSON must remain available to its consumer");
+        assert!(!body.contains("destroy_untransferred_json_result"),
+            "{name}: no statement-discard cleanup belongs on this ownership path");
+    }
+}

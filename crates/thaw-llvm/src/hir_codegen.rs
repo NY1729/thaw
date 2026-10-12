@@ -23,7 +23,7 @@ use inkwell::targets::{
 };
 use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum, FunctionType};
 use inkwell::values::{
-    BasicMetadataValueEnum, BasicValue, BasicValueEnum, FloatValue, FunctionValue, IntValue,
+    AsValueRef, BasicMetadataValueEnum, BasicValue, BasicValueEnum, FloatValue, FunctionValue, IntValue,
     PointerValue, StructValue,
 };
 use inkwell::{AddressSpace, FloatPredicate, IntPredicate, OptimizationLevel};
@@ -34,6 +34,18 @@ use thaw_hir::{
     FfiSignature, FfiStringAbi, FfiVariadicAbi, HirExpr, HirFunction, HirInitStep, HirLit,
     HirParam, HirProgram, HirStmt, HirType,
 };
+
+#[derive(Clone)]
+struct OwnedJsonDiscardCandidate<'ctx> {
+    value: BasicValueEnum<'ctx>,
+    transferred: PointerValue<'ctx>,
+}
+
+#[derive(Clone)]
+struct OwnedJsonDiscardFrame<'ctx> {
+    function_name: String,
+    candidates: Vec<OwnedJsonDiscardCandidate<'ctx>>,
+}
 
 #[derive(Clone)]
 struct ExplicitFfiField {
@@ -410,6 +422,10 @@ pub struct HirCompiler<'ctx> {
     /// handle has no meaning and should be rejected instead (console.log
     /// formatting, a `Dictionary` literal, an N-API call).
     compiling_quickjs_dynamic_arguments: bool,
+    /// Fresh JSON Box candidates emitted while compiling one whole expression
+    /// statement. Only an exact final SSA result in the same LLVM function is
+    /// eligible for discard cleanup.
+    owned_json_discard_frames: Vec<OwnedJsonDiscardFrame<'ctx>>,
 }
 
 // Inspect completed HIR, including nested closures and module initializers,
@@ -618,6 +634,7 @@ impl<'ctx> HirCompiler<'ctx> {
             tracks_physical_object_layouts: false,
             tracks_owned_json_roots: false,
             compiling_quickjs_dynamic_arguments: false,
+            owned_json_discard_frames: Vec::new(),
         }
     }
 
@@ -1905,6 +1922,7 @@ include!("hir_codegen/async_frames/planning/validation.rs");
 include!("hir_codegen/async_frames/codegen.rs");
 
 include!("hir_codegen/statements.rs");
+include!("hir_codegen/json_discard.rs");
 
 include!("hir_codegen/values/expressions.rs");
 include!("hir_codegen/values/unions.rs");
