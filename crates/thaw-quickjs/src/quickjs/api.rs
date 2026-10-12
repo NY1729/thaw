@@ -4316,6 +4316,55 @@ pub extern "C" fn thaw_js_retain_json_result(value_json: *const c_char) -> ThawH
     }
 }
 
+/// Converts a native WTF-8 string or native Symbol token into an owned JS handle.
+/// `is_symbol` is explicit so token-shaped ordinary strings are never revived.
+#[no_mangle]
+pub extern "C" fn thaw_js_event_key_handle_result(
+    value_json: *const c_char,
+    is_symbol: u8,
+) -> ThawHandleResult {
+    let value_json = to_str(value_json);
+    let result: Result<u64, BoundaryError> = with_active_or_context(|ctx| {
+        if is_symbol > 1 {
+            return Err("invalid native scalar kind".into());
+        }
+        let parsed: Value = ctx.json_parse(value_json.as_bytes()).map_err(|error| match error {
+            rquickjs::Error::Exception => describe_tagged_exception(&ctx),
+            error => error.to_string().into(),
+        })?;
+        let values = parsed.as_array().ok_or("native scalar wire value must be an array")?;
+        if values.len() != 1 {
+            return Err("native scalar wire array must contain one string".into());
+        }
+        let value: Value = values.get(0).map_err(|error| error.to_string())?;
+        if is_symbol == 1 && !value.is_string() {
+            return Err("native Symbol wire element must be a string".into());
+        }
+        if is_symbol == 0 && !value.is_string() && !value.is_null() {
+            return Err("native scalar wire element must be a string or null".into());
+        }
+        let value = if is_symbol == 1 {
+            let decode: Function = ctx.globals().get("__thaw_property_key")
+                .map_err(|error| error.to_string())?;
+            let symbol: Value = decode.call((value,)).map_err(|error| match error {
+                rquickjs::Error::Exception => describe_tagged_exception(&ctx),
+                error => error.to_string().into(),
+            })?;
+            if !symbol.is_symbol() {
+                return Err("native Symbol token did not decode to a Symbol".into());
+            }
+            symbol
+        } else {
+            value
+        };
+        retain_value(&ctx, value)
+    });
+    match result {
+        Ok(value) => ThawHandleResult { value, error: std::ptr::null() },
+        Err(error) => ThawHandleResult { value: 0, error: owned_exception_error(error) },
+    }
+}
+
 /// Retains the value a graph wire encodes (a native `Json` that may hold live
 /// Host leases, e.g. a `JsValue` stored in an object literal). Unlike
 /// `thaw_js_retain_json_result`, which parses plain JSON text, the graph

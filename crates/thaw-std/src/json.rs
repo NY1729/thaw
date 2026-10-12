@@ -7079,6 +7079,19 @@ pub extern "C" fn thaw_json_array_push_string(array: *mut Value, value: *const c
     }
 }
 
+/// Pushes the complete registered native WTF-8 string, including embedded NUL bytes.
+#[no_mangle]
+pub extern "C" fn thaw_json_array_push_native_wtf8_string(array: *mut Value, value: *const c_char) {
+    if let Some(items) = (unsafe { array.as_ref() }).and_then(Value::as_array_mut) {
+        items.push(if value.is_null() {
+            Value::Null
+        } else {
+            let bytes = unsafe { thaw_arena::NativeStr::from_ptr(value) }.to_bytes().to_vec();
+            utf8_or_wtf8(bytes)
+        });
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn thaw_json_array_push_bool(array: *mut Value, value: u8) {
     if let Some(items) = (unsafe { array.as_ref() }).and_then(Value::as_array_mut) {
@@ -7966,6 +7979,24 @@ pub unsafe extern "C" fn thaw_json_object_assign(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_wtf8_array_push_preserves_nul_surrogates_and_null() {
+        let array = thaw_json_array_new();
+        let native = thaw_arena::owned_string(b"left\0\xed\xa0\x80right");
+        thaw_json_array_push_native_wtf8_string(array, native);
+        thaw_json_array_push_native_wtf8_string(array, std::ptr::null());
+        let items = unsafe { &*array }.as_array().unwrap();
+        match &items[0] {
+            Value::Wtf8(bytes) => assert_eq!(bytes, b"left\0\xed\xa0\x80right"),
+            _ => panic!("expected full native WTF-8 string"),
+        }
+        assert!(matches!(&items[1], Value::Null));
+        unsafe {
+            thaw_arena::destroy_string(native);
+            thaw_json_destroy(array);
+        }
+    }
 
     static TLS_DROP_HOST_RELEASES: std::sync::atomic::AtomicUsize =
         std::sync::atomic::AtomicUsize::new(0);

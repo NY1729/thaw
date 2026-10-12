@@ -14702,3 +14702,61 @@ fn collect_garbage_does_not_create_a_context_and_uses_an_existing_one() {
     .join()
     .unwrap();
 }
+
+#[test]
+fn native_string_and_symbol_bridge_keeps_kind_identity_and_cleans_up() {
+    // Exported bridge calls enter QuickJS themselves, so keep them outside
+    // an outer `with_context` borrow. Context entries below only read the count.
+    unsafe extern "C" { fn thaw_cstring_destroy(value: *mut std::ffi::c_char); }
+    let bootstrap = thaw_js_get_global(c"undefined".as_ptr());
+    assert!(bootstrap > 0);
+    assert_eq!(thaw_js_release_handle(bootstrap), 1);
+    let refs_total = || with_context(|ctx| ctx.eval::<u64, _>(
+        "globalThis.__thaw_value_handle_refs.reduce((total, refs) => total + refs, 0)"
+    ).unwrap());
+    let before = refs_total();
+    let wire = |value: &str| std::ffi::CString::new(serde_json::to_string(&[value]).unwrap()).unwrap();
+    let token = "\u{3}41:same";
+    let string_wire = wire(token);
+    let first_wire = wire(token);
+    let same_wire = wire(token);
+    let other_wire = wire("\u{3}42:same");
+    let registered_wire = wire("\u{3}R43:shared");
+    let string = thaw_js_event_key_handle_result(string_wire.as_ptr(), 0);
+    let first = thaw_js_event_key_handle_result(first_wire.as_ptr(), 1);
+    let same = thaw_js_event_key_handle_result(same_wire.as_ptr(), 1);
+    let other = thaw_js_event_key_handle_result(other_wire.as_ptr(), 1);
+    let registered_a = thaw_js_event_key_handle_result(registered_wire.as_ptr(), 1);
+    let registered_b = thaw_js_event_key_handle_result(registered_wire.as_ptr(), 1);
+    for result in [&string, &first, &same, &other, &registered_a, &registered_b] {
+        assert!(result.error.is_null());
+    }
+    assert_eq!(thaw_js_strict_equal_handles_result(string.value, first.value).value, 0);
+    assert_eq!(thaw_js_strict_equal_handles_result(first.value, same.value).value, 1);
+    assert_eq!(thaw_js_strict_equal_handles_result(first.value, other.value).value, 0);
+    assert_eq!(thaw_js_strict_equal_handles_result(registered_a.value, registered_b.value).value, 1);
+    let invalid = std::ffi::CString::new("[]").unwrap();
+    let failed = thaw_js_event_key_handle_result(invalid.as_ptr(), 2);
+    assert_eq!(failed.value, 0);
+    assert!(!failed.error.is_null());
+    unsafe { thaw_cstring_destroy(failed.error.cast_mut()) };
+    let ordinary = wire("not a Symbol token");
+    let wrong_kind = thaw_js_event_key_handle_result(ordinary.as_ptr(), 1);
+    assert_eq!(wrong_kind.value, 0);
+    assert!(!wrong_kind.error.is_null());
+    unsafe { thaw_cstring_destroy(wrong_kind.error.cast_mut()) };
+    let wrong_element = std::ffi::CString::new("[1]").unwrap();
+    let wrong_shape = thaw_js_event_key_handle_result(wrong_element.as_ptr(), 0);
+    assert_eq!(wrong_shape.value, 0);
+    assert!(!wrong_shape.error.is_null());
+    unsafe { thaw_cstring_destroy(wrong_shape.error.cast_mut()) };
+    let native_null_wire = std::ffi::CString::new("[null]").unwrap();
+    let native_null = thaw_js_event_key_handle_result(native_null_wire.as_ptr(), 0);
+    assert!(native_null.error.is_null());
+    for handle in [string.value, first.value, same.value, other.value, registered_a.value,
+        registered_b.value, native_null.value]
+    {
+        assert_eq!(thaw_js_release_handle(handle), 1);
+    }
+    assert_eq!(refs_total(), before, "native scalar bridge left retained handles behind");
+}
