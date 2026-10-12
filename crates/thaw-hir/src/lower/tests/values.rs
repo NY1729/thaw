@@ -1156,13 +1156,13 @@ fn string_split_defaults_undefined_separator_and_limit_lazily() {
             }
             HirExpr::Block(statements) => for statement in statements { visit_stmt(statement, visit); },
             HirExpr::BinOp(_, left, right) => { visit_expr(left, visit); visit_expr(right, visit); }
-            HirExpr::ArrayLit(values) | HirExpr::DynamicCall(_, values) => {
+            HirExpr::ArrayLit(values) | HirExpr::DynamicCall(_, values) | HirExpr::FfiCall(_, values) => {
                 for value in values { visit_expr(value, visit); }
             }
             HirExpr::JsValueAsJson(value) | HirExpr::JsonAsNumber(value)
             | HirExpr::JsonAsString(value) | HirExpr::JsonAsBool(value)
             | HirExpr::TypedIndex(value, _, _) | HirExpr::JsonIndex(value, _)
-            | HirExpr::Await(value) => visit_expr(value, visit),
+            | HirExpr::OptionalValue(value, _) | HirExpr::Await(value) => visit_expr(value, visit),
             HirExpr::EvalThen(first, second) | HirExpr::JsonKey(first, second) => {
                 visit_expr(first, visit);
                 visit_expr(second, visit);
@@ -1184,7 +1184,9 @@ fn string_split_defaults_undefined_separator_and_limit_lazily() {
     fn has_call(expr: &HirExpr, target: &str) -> bool {
         let mut found = false;
         visit_expr(expr, &mut |node| {
-            if matches!(node, HirExpr::Call(callee, _) if matches!(callee.as_ref(), HirExpr::Var(name) if name == target)) {
+            if matches!(node, HirExpr::Call(callee, _) if matches!(callee.as_ref(), HirExpr::Var(name) if name == target))
+                || matches!(node, HirExpr::FfiCall(signature, _) if signature.symbol == target)
+            {
                 found = true;
             }
         });
@@ -1214,6 +1216,32 @@ fn string_split_defaults_undefined_separator_and_limit_lazily() {
         found
     }
 
+    fn optional_none_bound<'a>(expr: &'a HirExpr, payload: &HirType) -> Option<&'a HirExpr> {
+        match expr {
+            HirExpr::OptionalIsNone(bound, ty) if ty == payload => Some(bound),
+            HirExpr::Conditional(test, yes, no, HirType::Bool)
+                if matches!(yes.as_ref(), HirExpr::Lit(HirLit::Bool(true)))
+                    && matches!(no.as_ref(), HirExpr::Lit(HirLit::Bool(false))) => optional_none_bound(test, payload),
+            _ => None,
+        }
+    }
+    fn optional_missing_guard_matches(test: &HirExpr, value_branch: &HirExpr) -> bool {
+        let Some(bound) = optional_none_bound(test, &HirType::F64) else { return false; };
+        let mut found = false;
+        visit_expr(value_branch, &mut |node| {
+            if matches!(node, HirExpr::OptionalValue(value, HirType::F64) if value.as_ref() == bound) {
+                found = true;
+            }
+        });
+        found
+    }
+    fn optional_separator_guard_matches(test: &HirExpr, fallback: &HirExpr, native: &HirExpr) -> bool {
+        optional_none_bound(test, &HirType::Str).is_some_and(|bound| {
+            matches!(bound, HirExpr::Var(name)
+                if has_var(native, name) && !has_call(fallback, "__thaw_string_split"))
+        })
+    }
+
     let explicit = conditionals(function(&program, "explicit"));
     assert!(explicit.iter().any(|node| matches!(node,
         HirExpr::Conditional(test, yes, no, HirType::Array(item))
@@ -1233,13 +1261,13 @@ fn string_split_defaults_undefined_separator_and_limit_lazily() {
     assert!(optional.iter().any(|node| matches!(node,
         HirExpr::Conditional(test, yes, no, HirType::F64)
             if matches!(yes.as_ref(), HirExpr::Lit(HirLit::F64(-1.0)))
-                && matches!(test.as_ref(), HirExpr::OptionalIsNone(..))
+                && optional_missing_guard_matches(test, no)
                 && !matches!(no.as_ref(), HirExpr::Lit(HirLit::F64(-1.0)))
     )), "optional undefined limit must lazily choose the unlimited sentinel: {optional:?}");
     assert!(conditionals(function(&program, "regex")).iter().any(|node| matches!(node,
-        HirExpr::Conditional(test, yes, _, HirType::F64)
+        HirExpr::Conditional(test, yes, no, HirType::F64)
             if matches!(yes.as_ref(), HirExpr::Lit(HirLit::F64(-1.0)))
-                && matches!(test.as_ref(), HirExpr::OptionalIsNone(..))
+                && optional_missing_guard_matches(test, no)
     )), "regex split must use the same undefined limit default");
     assert!(function(&program, "regex").body.iter().any(|statement| match statement {
         HirStmt::Return(Some(expr)) | HirStmt::Expr(expr) =>
@@ -1249,7 +1277,7 @@ fn string_split_defaults_undefined_separator_and_limit_lazily() {
     assert!(conditionals(function(&program, "optional")).iter().any(|node| matches!(node,
         HirExpr::Conditional(test, yes, no, HirType::Array(item))
             if **item == HirType::Str
-                && matches!(test.as_ref(), HirExpr::OptionalIsNone(..))
+                && optional_separator_guard_matches(test, yes, no)
                 && has_call(yes, "__thaw_math_trunc")
                 && has_call(no, "__thaw_string_split")
     )), "optional undefined separator must select the whole-string fallback lazily");
@@ -3148,6 +3176,26 @@ fn array_and_string_end_arguments_default_only_for_undefined() {
         visit_expr(expr, &mut |node| if matches!(node, HirExpr::Call(callee, _) if matches!(callee.as_ref(), HirExpr::Var(name) if name == target)) { found = true; });
         found
     }
+    fn has_live_dynamic_undefined_check(expr: &HirExpr) -> bool {
+        let mut found = false;
+        visit_expr(expr, &mut |node| {
+            if let HirExpr::JsonAsBool(value) = node {
+                if let HirExpr::Call(callee, arguments) = value.as_ref() {
+                    if matches!(callee.as_ref(), HirExpr::Var(name) if name == "callDynamicValueWithValue")
+                        && matches!(arguments.as_slice(), [
+                            HirExpr::Call(getter, names),
+                            _,
+                        ] if matches!(getter.as_ref(), HirExpr::Var(name) if name == "getDynamicValue")
+                            && matches!(names.as_slice(), [HirExpr::Lit(HirLit::Str(name))] if name == "__thaw_is_undefined_dynamic_value")
+                        )
+                    {
+                        found = true;
+                    }
+                }
+            }
+        });
+        found
+    }
     fn has_optional_guard(expr: &HirExpr) -> bool {
         let mut found = false;
         visit_expr(expr, &mut |node| if matches!(node, HirExpr::OptionalIsNone(..)) { found = true; });
@@ -3164,7 +3212,7 @@ fn array_and_string_end_arguments_default_only_for_undefined() {
     }
     raw_end_guard(function(&program, "arraySliceUnionEnd"), |test| has_union_guard(test) || has_optional_guard(test));
     raw_end_guard(function(&program, "arraySliceJson"), |test| has_call(test, "__thaw_json_is_undefined"));
-    raw_end_guard(function(&program, "arraySliceJsValue"), |test| has_call(test, "__thaw_is_undefined_dynamic_value"));
+    raw_end_guard(function(&program, "arraySliceJsValue"), has_live_dynamic_undefined_check);
     raw_end_guard(function(&program, "endsUndefined"), |test| has_call(test, "__thaw_json_is_undefined"));
     for name in ["arraySliceUnion", "arraySliceSpread", "arraySliceSpreadUnion", "fillUnion", "fillSpread", "copyUnion", "copySpread", "endsSpread", "stringSliceSpread"] {
         let f = function(&program, name);
