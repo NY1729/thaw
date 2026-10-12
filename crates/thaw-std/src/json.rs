@@ -8552,6 +8552,56 @@ mod tests {
     }
 
     #[test]
+    fn untracked_json_root_cannot_be_pinned_or_retired() {
+        std::thread::spawn(|| {
+            thaw_arena::thaw_arena_enable_tracing();
+            // This Box is deliberately outside the runtime's tracked-root map.
+            // The checked pin operation must reject it without treating its
+            // address as ownership authority or scheduling any retirement.
+            let untracked = Box::into_raw(Box::new(Value::Null));
+            assert_eq!(thaw_json_root_pin(untracked), 0);
+            assert!(!ARENA_OWNED_JSON_ROOTS.with(|roots| roots.borrow().contains_key(&(untracked as usize))));
+            unsafe { drop(Box::from_raw(untracked)); }
+            thaw_arena::thaw_arena_reset();
+        }).join().unwrap();
+    }
+
+    #[test]
+    fn captured_json_binding_self_assignment_keeps_the_same_root_once() {
+        std::thread::spawn(|| {
+            thaw_arena::thaw_arena_enable_tracing();
+            let owner = thaw_arena::thaw_arena_alloc(std::mem::size_of::<*mut Value>(), 8);
+            assert!(!owner.is_null());
+            let slot = owner.cast::<*mut Value>();
+            unsafe { slot.write(std::ptr::null_mut()); }
+            let owner_root = thaw_arena::ArenaRoot::new(owner as usize);
+            let (key, edge_owner) = json_arena_binding_owner_key(owner, slot).unwrap();
+            let initial = leak(Value::shared_array(vec![Value::Null]));
+            let first = unsafe { store_json_binding(key, slot, edge_owner, initial, 1) };
+            assert!(first.error.is_null());
+            assert_eq!(thaw_json_root_unpin(first.result_lease), 1);
+
+            // The source pointer aliases the cell's currently owned root.
+            let same = unsafe { slot.read() };
+            let second = unsafe { store_json_binding(key, slot, edge_owner, same, 1) };
+            assert!(second.error.is_null());
+            assert_eq!(second.value, same);
+            assert_eq!(unsafe { slot.read() }, same);
+            assert!(arena_owned_json_root_token(same).is_some(),
+                "self-assignment must not retire the root still owned by the cell");
+            assert_eq!(thaw_json_root_unpin(second.result_lease), 1);
+
+            thaw_arena::thaw_arena_reset();
+            assert!(arena_owned_json_root_token(same).is_some(),
+                "the cell edge keeps the self-assigned root alive through reset");
+            drop(owner_root);
+            thaw_arena::thaw_arena_reset();
+            assert!(arena_owned_json_root_token(same).is_none(),
+                "the one remaining cell owner retires the root exactly once");
+        }).join().unwrap();
+    }
+
+    #[test]
     fn temporary_json_root_pin_defers_reset_destruction_until_unpin() {
         std::thread::spawn(|| {
             thaw_arena::thaw_arena_enable_tracing();
@@ -10755,6 +10805,55 @@ mod tests {
         })
         .join()
         .unwrap();
+    }
+
+    extern "C" fn failing_json_host_set(
+        _: u64,
+        _: *const c_char,
+        _: *const c_char,
+    ) -> HostHandleResult {
+        HostHandleResult {
+            value: 0,
+            error: thaw_arena::owned_string(b"proxy setter exploded").cast_const(),
+        }
+    }
+
+    #[test]
+    fn owned_json_host_setter_error_preserves_error_and_retires_source_once() {
+        std::thread::spawn(|| {
+            HOST_RELEASES.with(|count| count.set(0));
+            HOST_OPERATIONS.with(|slot| slot.set(Some(HostOperations {
+                retain: retain_typed_scope_host,
+                release: count_host_release,
+                get: reentrant_typed_scope_get,
+                query: unused_typed_scope_text,
+                date_set: unused_typed_scope_date,
+                set: failing_json_host_set,
+                predicate: unused_typed_scope_predicate,
+                enumerate: unused_typed_scope_text,
+            })));
+            let receiver = leak(Value::Host(Rc::new(HostLease {
+                handle: 901,
+                release: count_host_release,
+            })));
+            let source = leak(Value::Host(Rc::new(HostLease {
+                handle: 902,
+                release: count_host_release,
+            })));
+
+            unsafe { thaw_json_object_set_json_owned(receiver, c"value".as_ptr(), source) };
+            let error = thaw_json_take_host_error();
+            assert!(!error.is_null(), "the host setter failure must survive ownership consumption");
+            assert_eq!(to_str(error), "proxy setter exploded");
+            unsafe { thaw_arena::destroy_string(error.cast_mut()) };
+            HOST_RELEASES.with(|count| assert_eq!(count.get(), 1,
+                "the consumed source wrapper is retired once even when host assignment fails"));
+
+            unsafe { thaw_json_destroy(receiver) };
+            HOST_RELEASES.with(|count| assert_eq!(count.get(), 2,
+                "the destination wrapper remains live until its own destruction"));
+            HOST_OPERATIONS.with(|slot| slot.set(None));
+        }).join().unwrap();
     }
 
     #[test]
