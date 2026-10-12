@@ -2914,7 +2914,7 @@ fn register_native_callback(
             drop(bridge);
             register.call::<_, ()>((wrapper.clone(), if method_mode {
                 method_token
-            } else { format!("{closure:x}") }))
+            } else { format!("{identity:x}") }))
                 .map_err(|error| error.to_string())?;
         }
         let handle = retain_value(&ctx, wrapper)?;
