@@ -12240,6 +12240,7 @@ fn atomics_notify_nonshared_waitable_arrays_delegate_to_native() {
 
 #[test]
 fn native_callback_cross_mode_identity_survives_released_handle() {
+    std::thread::spawn(|| {
     unsafe extern "C" fn callback(
         _context: *const c_void,
         _arguments: *const c_char,
@@ -12247,7 +12248,12 @@ fn native_callback_cross_mode_identity_survives_released_handle() {
         c"null".as_ptr()
     }
     let first_context = &1u8 as *const u8 as *const c_void;
+    let graph_adapter_context = &3u8 as *const u8 as *const c_void;
     let other_context = &2u8 as *const u8 as *const c_void;
+    unsafe extern "C" {
+        fn thaw_closure_alias_register(adapter: *const u8, original: *const u8) -> *const u8;
+    }
+    assert_eq!(unsafe { thaw_closure_alias_register(graph_adapter_context.cast(), first_context.cast()) }, graph_adapter_context.cast());
     let ordinary = thaw_js_register_native_callback(
         callback as *const c_void,
         first_context,
@@ -12259,7 +12265,7 @@ fn native_callback_cross_mode_identity_survives_released_handle() {
     );
     let graph = thaw_js_register_native_callback_graph(
         callback as *const c_void,
-        first_context,
+        graph_adapter_context,
         0,
         0,
         0,
@@ -12348,6 +12354,7 @@ fn native_callback_cross_mode_identity_survives_released_handle() {
             .set("__thaw_saved_callback_holder", Value::new_undefined(ctx))
             .unwrap();
     });
+    }).join().expect("native callback alias identity test thread");
 }
 
 #[test]
