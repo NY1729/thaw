@@ -341,6 +341,1261 @@ fn process_env_reads_the_host_environment() {
     );
 }
 
+struct ErrorBoundaryFixtureGuard {
+    handles: Vec<u64>,
+    strings: Vec<*mut std::ffi::c_char>,
+    restore_source: Option<String>,
+    decoder_source_installed: bool,
+    finished: bool,
+}
+
+impl ErrorBoundaryFixtureGuard {
+    fn new() -> Self {
+        Self {
+            handles: Vec::new(),
+            strings: Vec::new(),
+            restore_source: None,
+            decoder_source_installed: false,
+            finished: false,
+        }
+    }
+
+    fn restore_with(&mut self, source: &str) {
+        self.restore_source = Some(source.to_owned());
+    }
+
+    fn append_restore_with(&mut self, source: &str) {
+        let combined = match self.restore_source.take() {
+            Some(previous) => format!("(() => {{ {source}; {previous}; return 1; }})()"),
+            None => source.to_owned(),
+        };
+        self.restore_source = Some(combined);
+    }
+
+    fn preserve_globals(&mut self, names: &[&str]) {
+        let list = names.iter().map(|name| serde_json::to_string(name).unwrap())
+            .collect::<Vec<_>>().join(",");
+        let save = format!(
+            "globalThis.__errorBoundarySavedGlobalDescriptors = [{list}].map(name => [name, Object.getOwnPropertyDescriptor(globalThis, name)]); 1"
+        );
+        let restore = r#"
+          if (globalThis.__errorBoundarySavedGlobalDescriptors) {
+            for (const [name, descriptor] of globalThis.__errorBoundarySavedGlobalDescriptors) {
+              if (descriptor) Object.defineProperty(globalThis, name, descriptor);
+              else delete globalThis[name];
+            }
+            delete globalThis.__errorBoundarySavedGlobalDescriptors;
+          }
+          1
+        "#;
+        self.restore_with(restore);
+        assert_eq!(load(&save), 1, "save exact-boundary global descriptors");
+    }
+
+    fn install_decoder_source(&mut self, source: &str) {
+        with_context(|ctx| {
+            let source = ctx.eval::<Object<'_>, _>(source)
+                .expect("create isolated exact-boundary decoder source");
+            super::set_error_boundary_test_decoder_source(&ctx, source);
+        });
+        self.decoder_source_installed = true;
+    }
+
+    fn clear_decoder_source(&mut self) {
+        super::clear_error_boundary_test_decoder_source();
+        self.decoder_source_installed = false;
+    }
+
+    fn handle(&mut self, handle: u64) -> u64 {
+        if handle != 0 { self.handles.push(handle); }
+        handle
+    }
+
+    fn retained_handle(&mut self, handle: u64) {
+        assert_eq!(thaw_js_retain_handle(handle), 1);
+        self.handles.push(handle);
+    }
+
+    fn transferred_claim_retired(&mut self, handle: u64) {
+        let Some(index) = self.handles.iter().rposition(|candidate| *candidate == handle) else {
+            unreachable!("transferred claims are validated before wire creation");
+        };
+        self.handles.remove(index);
+    }
+
+    fn validate_transferred_claims(&self, transferred: &[u64]) {
+        for (index, handle) in transferred.iter().enumerate() {
+            let previous = transferred[..index].iter().filter(|candidate| *candidate == handle).count();
+            if previous == 0 {
+                let requested = transferred.iter().filter(|candidate| *candidate == handle).count();
+                let owned = self.handles.iter().filter(|candidate| *candidate == handle).count();
+                assert!(owned >= requested, "every transferred P claim is fixture-owned before graph creation");
+            }
+        }
+    }
+
+    fn capture_result(&mut self, result: ThawCallWithExceptionResult) -> ThawCallWithExceptionResult {
+        self.handle(result.value);
+        self.handle(result.exception_handle);
+        if !result.error.is_null() { self.strings.push(result.error.cast_mut()); }
+        let success = result.value != 0 && result.exception_handle == 0 && result.error.is_null();
+        let exception = result.value == 0 && result.exception_handle != 0 && result.error.is_null();
+        let bridge_error = result.value == 0 && result.exception_handle == 0 && !result.error.is_null();
+        assert_eq!(usize::from(success) + usize::from(exception) + usize::from(bridge_error), 1,
+            "exact boundary returns exactly one value, exception, or bridge-error lane");
+        assert!(result.exception_object_like <= 1);
+        if success || bridge_error { assert_eq!(result.exception_object_like, 0); }
+        result
+    }
+
+    fn capture_handle_result(&mut self, result: ThawHandleResult) -> ThawHandleResult {
+        self.handle(result.value);
+        if !result.error.is_null() { self.strings.push(result.error.cast_mut()); }
+        result
+    }
+
+    fn release_handle(&mut self, handle: u64) {
+        let Some(index) = self.handles.iter().rposition(|candidate| *candidate == handle) else {
+            panic!("release is not owned by this exact-boundary fixture guard");
+        };
+        self.handles.remove(index);
+        assert_eq!(thaw_js_release_handle(handle), 1);
+    }
+
+    fn cleanup(&mut self, verify: bool) {
+        if self.decoder_source_installed {
+            super::clear_error_boundary_test_decoder_source();
+            self.decoder_source_installed = false;
+        }
+        if let Some(source) = self.restore_source.take() {
+            if verify {
+                assert_eq!(load(&source), 1, "exact-boundary fixture restoration");
+            } else {
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| load(&source)));
+            }
+        }
+        while let Some(handle) = self.handles.pop() {
+            if verify {
+                assert_eq!(thaw_js_release_handle(handle), 1, "fixture-owned handle release");
+            } else {
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let _ = thaw_js_release_handle(handle);
+                }));
+            }
+        }
+        while let Some(string) = self.strings.pop() {
+            unsafe { thaw_arena::destroy_string(string) };
+        }
+    }
+
+    fn finish(mut self) {
+        self.cleanup(true);
+        self.finished = true;
+    }
+}
+
+impl Drop for ErrorBoundaryFixtureGuard {
+    fn drop(&mut self) {
+        if !self.finished { self.cleanup(false); }
+    }
+}
+
+struct ErrorBoundaryWire {
+    pointer: *const std::ffi::c_char,
+    grant_pending: bool,
+}
+
+impl ErrorBoundaryWire {
+    fn new(graph: &str) -> Option<Self> {
+        let pointer = owned_graph_wire(graph);
+        (!pointer.is_null()).then_some(Self {
+            pointer,
+            grant_pending: true,
+        })
+    }
+
+    fn invoke(&mut self, callee: u64, is_new: u8) -> ThawCallWithExceptionResult {
+        let result = thaw_js_invoke_handle_graph_exact_result(callee, self.pointer, is_new);
+        self.grant_pending = false;
+        result
+    }
+}
+
+impl Drop for ErrorBoundaryWire {
+    fn drop(&mut self) {
+        unsafe extern "C" { fn thaw_json_discard_graph_wire(source: *const std::ffi::c_char); }
+        if self.grant_pending { unsafe { thaw_json_discard_graph_wire(self.pointer) }; }
+        unsafe { thaw_arena::destroy_string(self.pointer.cast_mut()) };
+    }
+}
+
+fn install_error_boundary_host_operations() {
+    unsafe extern "C" {
+        fn thaw_json_register_host_operations(
+            retain: extern "C" fn(u64) -> u8,
+            release: extern "C" fn(u64) -> u8,
+            get: extern "C" fn(u64, *const std::ffi::c_char) -> ThawHandleResult,
+            query: extern "C" fn(u64, u8) -> ThawResult,
+            date_set: extern "C" fn(u64, f64) -> ThawResult,
+            set: extern "C" fn(u64, *const std::ffi::c_char, *const std::ffi::c_char) -> ThawHandleResult,
+            predicate: extern "C" fn(u64, *const std::ffi::c_char, u8) -> ThawHandleResult,
+            enumerate: extern "C" fn(u64, u8) -> ThawResult,
+        );
+    }
+    unsafe {
+        thaw_json_register_host_operations(
+            thaw_js_retain_handle,
+            thaw_js_release_handle,
+            thaw_js_get_property_json_key_result,
+            thaw_js_host_query_result,
+            thaw_js_host_date_set_result,
+            thaw_js_set_property_graph_result,
+            thaw_js_property_predicate_json_key_result,
+            thaw_js_host_enumerate_result,
+        );
+    }
+}
+
+fn error_boundary_registry_state(handle: u64) -> (u64, bool) {
+    with_context(|ctx| {
+        let refs: Array = ctx.globals().get("__thaw_value_handle_refs")
+            .expect("handle reference registry");
+        let live: Array = ctx.globals().get("__thaw_value_handle_live")
+            .expect("handle liveness registry");
+        let index = (handle - 1) as usize;
+        (
+            refs.get::<u64>(index).expect("read handle reference count"),
+            live.get::<bool>(index).expect("read handle liveness"),
+        )
+    })
+}
+
+fn error_boundary_invoke(
+    guard: &mut ErrorBoundaryFixtureGuard,
+    callee: u64,
+    graph: &str,
+    is_new: u8,
+) -> ThawCallWithExceptionResult {
+    error_boundary_invoke_with_leases(guard, callee, graph, is_new, &[])
+}
+
+fn error_boundary_invoke_with_leases(
+    guard: &mut ErrorBoundaryFixtureGuard,
+    callee: u64,
+    graph: &str,
+    is_new: u8,
+    transferred_claims: &[u64],
+) -> ThawCallWithExceptionResult {
+    guard.validate_transferred_claims(transferred_claims);
+    let result = {
+        let wire = ErrorBoundaryWire::new(graph);
+        for handle in transferred_claims {
+            guard.transferred_claim_retired(*handle);
+        }
+        if let Some(mut wire) = wire {
+            wire.invoke(callee, is_new)
+        } else {
+            ThawCallWithExceptionResult {
+                value: 0,
+                exception_handle: 0,
+                exception_object_like: 0,
+                error: thaw_arena::owned_string("failed to create registered graph wire").cast_const(),
+            }
+        }
+    };
+    guard.capture_result(result)
+}
+
+fn error_boundary_assert_exception_marker(
+    guard: &mut ErrorBoundaryFixtureGuard,
+    result: ThawCallWithExceptionResult,
+    expected_name: &str,
+    expected_object_like: bool,
+) {
+    assert!(result.error.is_null());
+    assert_eq!(result.value, 0);
+    assert_ne!(result.exception_handle, 0);
+    assert_eq!(result.exception_object_like, u8::from(expected_object_like));
+    let expected_name = CString::new(expected_name).unwrap();
+    let expected = guard.handle(thaw_js_get_global(expected_name.as_ptr()));
+    assert_ne!(expected, 0);
+    with_context(|ctx| {
+        let _active = ActiveNapiContext::enter(&ctx);
+        assert_eq!(
+            value_for_handle(&ctx, result.exception_handle).unwrap(),
+            value_for_handle(&ctx, expected).unwrap(),
+        );
+    });
+}
+
+fn error_boundary_assert_engine_error(handle: u64, name: &str, saved_constructor: &str) {
+    with_context(|ctx| {
+        let _active = ActiveNapiContext::enter(&ctx);
+        let error = value_for_handle(&ctx, handle).unwrap();
+        assert!(error.is_error());
+        ctx.globals().set("__errorBoundaryThrown", error).unwrap();
+        let source = format!(
+            "__errorBoundaryThrown.name === {name:?} && Object.getPrototypeOf(__errorBoundaryThrown) === {saved_constructor}.prototype"
+        );
+        assert!(ctx.eval::<bool, _>(source).unwrap());
+    });
+}
+
+#[test]
+fn error_exact_boundary_lookup_preserves_original_markers_and_one_get() {
+    let mut guard = ErrorBoundaryFixtureGuard::new();
+    guard.preserve_globals(&["Error", "__errorBoundaryMarkers", "__errorBoundaryMarker", "__errorBoundaryGetterCount"]);
+    assert_eq!(load(r#"
+        globalThis.__errorBoundaryMarkers = [
+          { tag: 'object' }, 'string marker', undefined,
+          function marker() {}, Symbol('marker')
+        ];
+        globalThis.__errorBoundaryMarker = undefined;
+        globalThis.__errorBoundaryGetterCount = 0;
+    "#), 1);
+    let cases = [(0, true), (1, false), (2, false), (3, true), (4, false)];
+    for (index, object_like) in cases {
+        assert_eq!(load(&format!(r#"
+            globalThis.__errorBoundaryMarker = __errorBoundaryMarkers[{index}];
+            globalThis.__errorBoundaryGetterCount = 0;
+            Object.defineProperty(globalThis, 'Error', {{
+              configurable: true,
+              get() {{ __errorBoundaryGetterCount++; throw __errorBoundaryMarker; }}
+            }});
+        "#)), 1);
+        let result = guard.capture_result(thaw_js_get_error_constructor_exact_result(c"Error".as_ptr()));
+        assert!(result.error.is_null());
+        assert_eq!(result.value, 0);
+        assert_ne!(result.exception_handle, 0);
+        assert_eq!(result.exception_object_like, u8::from(object_like));
+        let marker = guard.handle(thaw_js_get_global(c"__errorBoundaryMarker".as_ptr()));
+        with_context(|ctx| {
+            let _active = ActiveNapiContext::enter(&ctx);
+            assert_eq!(
+                value_for_handle(&ctx, result.exception_handle).unwrap(),
+                value_for_handle(&ctx, marker).unwrap(),
+            );
+            assert_eq!(ctx.eval::<u32, _>("__errorBoundaryGetterCount").unwrap(), 1);
+        });
+    }
+    assert_eq!(load(r#"
+        globalThis.__errorBoundaryGetterCount = 0;
+        Object.defineProperty(globalThis, 'Error', {
+          configurable: true, get() { __errorBoundaryGetterCount++; throw 'should not run'; }
+        });
+    "#), 1);
+    let invalid = guard.capture_result(thaw_js_get_error_constructor_exact_result(c"Error.prototype".as_ptr()));
+    assert!(!invalid.error.is_null());
+    assert_eq!(invalid.value, 0);
+    assert_eq!(invalid.exception_handle, 0);
+    assert_eq!(with_context(|ctx| ctx.eval::<u32, _>("__errorBoundaryGetterCount").unwrap()), 0);
+    guard.finish();
+}
+
+#[test]
+fn error_exact_boundary_lookup_distinguishes_absence_undefined_and_inherited() {
+    let mut guard = ErrorBoundaryFixtureGuard::new();
+    guard.preserve_globals(&[
+        "Error", "TypeError", "ReferenceError", "__errorBoundarySavedError",
+        "__errorBoundarySavedTypeError", "__errorBoundarySavedReferenceError",
+        "__errorBoundarySavedGlobalProto", "__errorBoundarySavedProtoError", "__errorBoundaryThrown",
+    ]);
+    guard.append_restore_with("if (__errorBoundarySavedGlobalProto) { if (__errorBoundarySavedProtoError) Object.defineProperty(__errorBoundarySavedGlobalProto, 'Error', __errorBoundarySavedProtoError); else delete __errorBoundarySavedGlobalProto.Error; } delete globalThis.__errorBoundarySavedGlobalProto; delete globalThis.__errorBoundarySavedProtoError; 1");
+    assert_eq!(load(r#"
+        globalThis.__errorBoundarySavedError = Object.getOwnPropertyDescriptor(globalThis, 'Error');
+        globalThis.__errorBoundarySavedTypeError = TypeError;
+        globalThis.__errorBoundarySavedReferenceError = ReferenceError;
+        globalThis.__errorBoundarySavedGlobalProto = Object.getPrototypeOf(globalThis);
+        globalThis.__errorBoundarySavedProtoError = Object.getOwnPropertyDescriptor(__errorBoundarySavedGlobalProto, 'Error');
+        delete globalThis.Error;
+        globalThis.ReferenceError = function ReplacedReferenceError() {};
+    "#), 1);
+    let missing = guard.capture_result(thaw_js_get_error_constructor_exact_result(c"Error".as_ptr()));
+    assert!(missing.error.is_null());
+    assert_eq!(missing.value, 0);
+    assert_ne!(missing.exception_handle, 0);
+    assert_eq!(missing.exception_object_like, 1);
+    error_boundary_assert_engine_error(
+        missing.exception_handle,
+        "ReferenceError",
+        "__errorBoundarySavedReferenceError",
+    );
+
+    assert_eq!(load(r#"
+        globalThis.Error = undefined;
+        globalThis.TypeError = function ReplacedTypeError() {};
+    "#), 1);
+    let undefined = guard.capture_result(thaw_js_get_error_constructor_exact_result(c"Error".as_ptr()));
+    assert!(undefined.error.is_null());
+    assert_ne!(undefined.value, 0);
+    assert_eq!(undefined.exception_handle, 0);
+    assert_eq!(undefined.exception_object_like, 0);
+    with_context(|ctx| {
+        let _active = ActiveNapiContext::enter(&ctx);
+        assert!(value_for_handle(&ctx, undefined.value).unwrap().is_undefined());
+    });
+    let empty = r#"{"root":{"r":0},"nodes":[{"a":[]}],"leases":[]}"#;
+    for is_new in [0, 1] {
+        let thrown = error_boundary_invoke(&mut guard, undefined.value, empty, is_new);
+        assert!(thrown.error.is_null());
+        assert_eq!(thrown.value, 0);
+        assert_ne!(thrown.exception_handle, 0);
+        assert_eq!(thrown.exception_object_like, 1);
+        error_boundary_assert_engine_error(
+            thrown.exception_handle,
+            "TypeError",
+            "__errorBoundarySavedTypeError",
+        );
+    }
+
+    assert_eq!(load(r#"
+        delete globalThis.Error;
+        Object.defineProperty(__errorBoundarySavedGlobalProto, 'Error', {
+          configurable: true, value: undefined
+        });
+    "#), 1);
+    let inherited = guard.capture_result(thaw_js_get_error_constructor_exact_result(c"Error".as_ptr()));
+    assert!(inherited.error.is_null());
+    assert_ne!(inherited.value, 0);
+    assert_eq!(inherited.exception_handle, 0);
+    with_context(|ctx| {
+        let _active = ActiveNapiContext::enter(&ctx);
+        assert!(value_for_handle(&ctx, inherited.value).unwrap().is_undefined());
+    });
+
+    let invalid = guard.capture_result(thaw_js_get_error_constructor_exact_result(c"Error.prototype".as_ptr()));
+    assert_eq!(invalid.value, 0);
+    assert_eq!(invalid.exception_handle, 0);
+    assert_eq!(invalid.exception_object_like, 0);
+    assert!(!invalid.error.is_null());
+    guard.finish();
+}
+
+#[test]
+fn error_exact_boundary_uses_selected_callee_and_call_new_rules() {
+    let mut guard = ErrorBoundaryFixtureGuard::new();
+    guard.preserve_globals(&[
+        "Error", "TypeError", "__errorBoundaryTrace", "__errorBoundaryReplacementCalls",
+        "__errorBoundarySelected", "__errorBoundaryReplacement", "__errorBoundaryConstructed",
+        "__errorBoundaryThrown", "__errorBoundaryExpectedValue", "__errorBoundaryExpectedConstructor",
+        "__errorBoundarySavedError", "__errorBoundarySavedTypeError",
+    ]);
+    assert_eq!(load(r#"
+        globalThis.__errorBoundarySavedError = Error;
+        globalThis.__errorBoundarySavedTypeError = TypeError;
+        globalThis.__errorBoundaryTrace = '';
+        globalThis.__errorBoundaryReplacementCalls = 0;
+        globalThis.__errorBoundarySelected = function Selected(arg) {
+          'use strict'; __errorBoundaryTrace += 'C';
+          return this === undefined ? arg + 35 : -1;
+        };
+        globalThis.__errorBoundaryReplacement = function Replacement() {
+          __errorBoundaryReplacementCalls++; return -1;
+        };
+        Object.defineProperty(globalThis, 'Error', {
+          configurable: true,
+          get() { __errorBoundaryTrace += 'G'; return __errorBoundarySelected; },
+          set(value) {
+            __errorBoundaryTrace += 'A';
+            Object.defineProperty(globalThis, 'Error', { value, writable: true, configurable: true });
+          }
+        });
+    "#), 1);
+    let selected = guard.capture_result(thaw_js_get_error_constructor_exact_result(c"Error".as_ptr()));
+    assert!(selected.error.is_null());
+    assert_ne!(selected.value, 0);
+    let selected_handle = selected.value;
+    assert_eq!(load("Error = __errorBoundaryReplacement;"), 1);
+    let one_number = r#"{"root":{"r":0},"nodes":[{"a":[{"v":7}]}],"leases":[]}"#;
+    let call_result = error_boundary_invoke(&mut guard, selected_handle, one_number, 0);
+    assert!(call_result.error.is_null());
+    assert_eq!(call_result.exception_handle, 0);
+    with_context(|ctx| {
+        let _active = ActiveNapiContext::enter(&ctx);
+        assert_eq!(value_for_handle(&ctx, call_result.value).unwrap().as_number(), Some(42.0));
+        assert_eq!(ctx.eval::<String, _>("__errorBoundaryTrace").unwrap(), "GAC");
+        assert_eq!(ctx.eval::<u32, _>("__errorBoundaryReplacementCalls").unwrap(), 0);
+    });
+
+    assert_eq!(load(r#"
+        globalThis.__errorBoundaryTrace = '';
+        globalThis.__errorBoundaryConstructed = function ExactConstructed(arg) {
+          this.arg = arg; this.sawNewTarget = new.target === ExactConstructed;
+          return 99;
+        };
+        Object.defineProperty(globalThis, 'Error', {
+          configurable: true, get() { __errorBoundaryTrace += 'G'; return __errorBoundaryConstructed; }
+        });
+    "#), 1);
+    let constructor = guard.capture_result(thaw_js_get_error_constructor_exact_result(c"Error".as_ptr()));
+    assert!(constructor.error.is_null());
+    let constructed = error_boundary_invoke(&mut guard, constructor.value, one_number, 1);
+    assert!(constructed.error.is_null());
+    assert_eq!(constructed.exception_handle, 0);
+    with_context(|ctx| {
+        let _active = ActiveNapiContext::enter(&ctx);
+        let constructed_value = value_for_handle(&ctx, constructed.value).unwrap();
+        let object = constructed_value.as_object().unwrap();
+        assert_eq!(object.get::<_, i32>("arg").unwrap(), 7);
+        assert!(object.get::<_, bool>("sawNewTarget").unwrap());
+        assert_eq!(ctx.eval::<String, _>("__errorBoundaryTrace").unwrap(), "G");
+    });
+
+    assert_eq!(load("Object.defineProperty(globalThis, 'Error', { value: __errorBoundarySavedError, writable: true, configurable: true });"), 1);
+    for name in ["Error", "EvalError", "RangeError", "ReferenceError", "SyntaxError", "TypeError", "URIError"] {
+        let name_c = CString::new(name).unwrap();
+        let constructor = guard.capture_result(thaw_js_get_error_constructor_exact_result(name_c.as_ptr()));
+        assert!(constructor.error.is_null(), "{name}");
+        assert_ne!(constructor.value, 0, "{name}");
+        for is_new in [0, 1] {
+            let result = error_boundary_invoke(&mut guard, constructor.value, r#"{"root":{"r":0},"nodes":[{"a":[]}],"leases":[]}"#, is_new);
+            assert!(result.error.is_null(), "{name} mode={is_new}");
+            assert_eq!(result.exception_handle, 0, "{name} mode={is_new}");
+            with_context(|ctx| {
+                let _active = ActiveNapiContext::enter(&ctx);
+                let value = value_for_handle(&ctx, result.value).unwrap();
+                assert!(value.is_error(), "{name} mode={is_new}");
+                let object = value.as_object().unwrap();
+                assert_eq!(object.get::<_, String>("name").unwrap(), name);
+                ctx.globals().set("__errorBoundaryExpectedValue", value).unwrap();
+                ctx.globals().set(
+                    "__errorBoundaryExpectedConstructor",
+                    value_for_handle(&ctx, constructor.value).unwrap(),
+                ).unwrap();
+                assert!(ctx.eval::<bool, _>(
+                    "Object.getPrototypeOf(__errorBoundaryExpectedValue) === __errorBoundaryExpectedConstructor.prototype"
+                ).unwrap(), "{name} mode={is_new}");
+            });
+        }
+    }
+
+    assert_eq!(load("globalThis.Error = (value) => value === 11 ? 12 : 0;"), 1);
+    let arrow = guard.capture_result(thaw_js_get_error_constructor_exact_result(c"Error".as_ptr()));
+    let arrow_call = error_boundary_invoke(&mut guard, arrow.value, r#"{"root":{"r":0},"nodes":[{"a":[{"v":11}]}],"leases":[]}"#, 0);
+    assert!(arrow_call.error.is_null());
+    with_context(|ctx| {
+        let _active = ActiveNapiContext::enter(&ctx);
+        assert_eq!(value_for_handle(&ctx, arrow_call.value).unwrap().as_number(), Some(12.0));
+    });
+    let arrow_new = error_boundary_invoke(&mut guard, arrow.value, r#"{"root":{"r":0},"nodes":[{"a":[{"v":11}]}],"leases":[]}"#, 1);
+    assert!(arrow_new.error.is_null());
+    error_boundary_assert_engine_error(arrow_new.exception_handle, "TypeError", "__errorBoundarySavedTypeError");
+
+    assert_eq!(load("globalThis.Error = 17;"), 1);
+    let non_callable = guard.capture_result(thaw_js_get_error_constructor_exact_result(c"Error".as_ptr()));
+    let failed_call = error_boundary_invoke(&mut guard, non_callable.value, r#"{"root":{"r":0},"nodes":[{"a":[]}],"leases":[]}"#, 0);
+    error_boundary_assert_engine_error(failed_call.exception_handle, "TypeError", "__errorBoundarySavedTypeError");
+    guard.finish();
+}
+
+static ERROR_BOUNDARY_NATIVE_CALLBACK_CALLS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+unsafe extern "C" fn error_boundary_native_callback(
+    _context: *const c_void,
+    _arguments: *const c_char,
+) -> *const c_char {
+    ERROR_BOUNDARY_NATIVE_CALLBACK_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    thaw_arena::owned_string(
+        r#"{"root":{"v":"native message"},"nodes":[],"leases":[]}"#,
+    ).cast_const()
+}
+
+#[test]
+fn error_exact_boundary_graph_callbacks_cleanup_and_promise_identity() {
+    let mut guard = ErrorBoundaryFixtureGuard::new();
+    guard.preserve_globals(&[
+        "__errorBoundaryTargetCalls", "__errorBoundaryCall", "__errorBoundaryNew",
+        "__errorBoundaryAlias", "__errorBoundaryNoArgs", "__errorBoundaryPending",
+        "__errorBoundaryThenCalls", "__errorBoundaryReturnPending", "__errorBoundaryMarker",
+        "__errorBoundaryTargetThrow", "__errorBoundaryThrownPromise", "__errorBoundaryAliasInput",
+        "__errorBoundaryReturnAlias", "__errorBoundaryThrowAlias",
+    ]);
+    install_error_boundary_host_operations();
+    assert_eq!(load(r#"
+        globalThis.__errorBoundaryTargetCalls = 0;
+        globalThis.__errorBoundaryCall = function(callback) { return callback(); };
+        globalThis.__errorBoundaryNew = function ExactGraphConstructor(callback) { this.message = callback(); };
+        globalThis.__errorBoundaryAlias = function(first, second) { return first === second; };
+        globalThis.__errorBoundaryAliasInput = { marker: 'owned input' };
+        globalThis.__errorBoundaryReturnAlias = function(value) { return value; };
+        globalThis.__errorBoundaryThrowAlias = function(value) { throw value; };
+        globalThis.__errorBoundaryNoArgs = function() { return arguments.length; };
+        globalThis.__errorBoundaryPending = new Promise(() => {});
+        globalThis.__errorBoundaryThenCalls = 0;
+        __errorBoundaryPending.then(() => __errorBoundaryThenCalls++, () => __errorBoundaryThenCalls++);
+        globalThis.__errorBoundaryReturnPending = function() { return __errorBoundaryPending; };
+    "#), 1);
+    ERROR_BOUNDARY_NATIVE_CALLBACK_CALLS.store(0, std::sync::atomic::Ordering::SeqCst);
+    let callback = guard.capture_handle_result(thaw_js_register_native_callback_graph(
+        error_boundary_native_callback as *const c_void,
+        std::ptr::null(), 0, 0, 0, std::ptr::null(), 0,
+    ));
+    assert!(callback.error.is_null());
+    assert_ne!(callback.value, 0);
+    let callback_owner = error_boundary_registry_state(callback.value);
+    assert_eq!(callback_owner, (1, true), "callback O starts as one live registry claim");
+    let call = guard.handle(thaw_js_get_global(c"__errorBoundaryCall".as_ptr()));
+    let construct = guard.handle(thaw_js_get_global(c"__errorBoundaryNew".as_ptr()));
+    let callback_node = format!(
+        r#"{{"root":{{"r":0}},"nodes":[{{"a":[{{"r":1}}]}},{{"hdl":{}}}],"leases":[{}]}}"#,
+        callback.value, callback.value
+    );
+    assert_eq!(load("globalThis.__errorBoundaryMarker = { tag: 'decoder lease failure' }; globalThis.__errorBoundaryTargetThrow = function(callback) { throw __errorBoundaryMarker; };"), 1);
+    let invalid_mode_graph = format!(
+        r#"{{"root":{{"r":0}},"nodes":[{{"a":[{{"r":1}}]}},{{"hdl":{}}}],"leases":[{}]}}"#,
+        callback.value, callback.value
+    );
+    guard.retained_handle(callback.value);
+    assert_eq!(error_boundary_registry_state(callback.value), (2, true), "wire producer P is explicit");
+    let invalid_mode = error_boundary_invoke_with_leases(&mut guard, call, &invalid_mode_graph, 2, &[callback.value]);
+    assert!(!invalid_mode.error.is_null());
+    assert_eq!(invalid_mode.value, 0);
+    assert_eq!(invalid_mode.exception_handle, 0);
+    assert_eq!(invalid_mode.exception_object_like, 0);
+    assert_eq!(error_boundary_registry_state(callback.value), callback_owner);
+
+    guard.retained_handle(callback.value);
+    assert_eq!(error_boundary_registry_state(callback.value), (2, true));
+    guard.install_decoder_source("({ get __thaw_json_graph_decode() { throw __errorBoundaryMarker; } })");
+    let decoder_lease_failure = error_boundary_invoke_with_leases(&mut guard, call, &callback_node, 0, &[callback.value]);
+    error_boundary_assert_exception_marker(&mut guard, decoder_lease_failure, "__errorBoundaryMarker", true);
+    guard.clear_decoder_source();
+    assert_eq!(error_boundary_registry_state(callback.value), callback_owner);
+
+    guard.retained_handle(callback.value);
+    assert_eq!(error_boundary_registry_state(callback.value), (2, true));
+    let throwing_target = guard.handle(thaw_js_get_global(c"__errorBoundaryTargetThrow".as_ptr()));
+    let target_lease_failure = error_boundary_invoke_with_leases(&mut guard, throwing_target, &callback_node, 0, &[callback.value]);
+    error_boundary_assert_exception_marker(&mut guard, target_lease_failure, "__errorBoundaryMarker", true);
+    assert_eq!(error_boundary_registry_state(callback.value), callback_owner);
+
+    guard.retained_handle(callback.value);
+    assert_eq!(error_boundary_registry_state(callback.value), (2, true));
+    let invalid_callee = error_boundary_invoke_with_leases(&mut guard, 0, &callback_node, 0, &[callback.value]);
+    assert!(!invalid_callee.error.is_null());
+    assert_eq!(invalid_callee.value, 0);
+    assert_eq!(invalid_callee.exception_handle, 0);
+    assert_eq!(error_boundary_registry_state(callback.value), callback_owner);
+
+    let alias_target = guard.handle(thaw_js_get_global(c"__errorBoundaryAlias".as_ptr()));
+    guard.retained_handle(callback.value);
+    assert_eq!(error_boundary_registry_state(callback.value), (2, true));
+    let repeated_alias = format!(
+        r#"{{"root":{{"r":0}},"nodes":[{{"a":[{{"r":1}},{{"r":1}}]}},{{"hdl":{}}}],"leases":[{}]}}"#,
+        callback.value, callback.value
+    );
+    let alias_result = error_boundary_invoke_with_leases(&mut guard, alias_target, &repeated_alias, 0, &[callback.value]);
+    assert!(alias_result.error.is_null());
+    with_context(|ctx| {
+        let _active = ActiveNapiContext::enter(&ctx);
+        assert_eq!(value_for_handle(&ctx, alias_result.value).unwrap().as_bool(), Some(true));
+    });
+    assert_eq!(error_boundary_registry_state(callback.value), callback_owner);
+
+    guard.retained_handle(callback.value);
+    assert_eq!(error_boundary_registry_state(callback.value), (2, true));
+    let returned = error_boundary_invoke_with_leases(&mut guard, call, &callback_node, 0, &[callback.value]);
+    assert!(returned.error.is_null());
+    assert_eq!(returned.exception_handle, 0);
+    with_context(|ctx| {
+        let _active = ActiveNapiContext::enter(&ctx);
+        let value = value_for_handle(&ctx, returned.value).unwrap();
+        assert_eq!(value.as_string().unwrap().to_string().unwrap(), "native message");
+    });
+    assert_eq!(ERROR_BOUNDARY_NATIVE_CALLBACK_CALLS.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+    guard.retained_handle(callback.value);
+    assert_eq!(error_boundary_registry_state(callback.value), (2, true));
+    let constructed = error_boundary_invoke_with_leases(&mut guard, construct, &callback_node, 1, &[callback.value]);
+    assert!(constructed.error.is_null());
+    with_context(|ctx| {
+        let _active = ActiveNapiContext::enter(&ctx);
+        let constructed_value = value_for_handle(&ctx, constructed.value).unwrap();
+        let object = constructed_value.as_object().unwrap();
+        assert_eq!(object.get::<_, String>("message").unwrap(), "native message");
+    });
+    assert_eq!(ERROR_BOUNDARY_NATIVE_CALLBACK_CALLS.load(std::sync::atomic::Ordering::SeqCst), 2);
+
+    let mut alias_input = guard.handle(thaw_js_get_global(c"__errorBoundaryAliasInput".as_ptr()));
+    let alias_owner = error_boundary_registry_state(alias_input);
+    assert_eq!(alias_owner, (1, true));
+    let return_alias = guard.handle(thaw_js_get_global(c"__errorBoundaryReturnAlias".as_ptr()));
+    let alias_graph = format!(
+        r#"{{"root":{{"r":0}},"nodes":[{{"a":[{{"r":1}}]}},{{"hdl":{alias_input}}}],"leases":[{alias_input}]}}"#
+    );
+    guard.retained_handle(alias_input);
+    let returned_alias = error_boundary_invoke_with_leases(
+        &mut guard, return_alias, &alias_graph, 0, &[alias_input],
+    );
+    assert!(returned_alias.error.is_null());
+    assert_eq!(returned_alias.exception_handle, 0);
+    assert_eq!(error_boundary_registry_state(alias_input), (2, true),
+        "O and the independent successful output remain after P is retired");
+    guard.release_handle(alias_input);
+    guard.release_handle(return_alias);
+    assert_eq!(error_boundary_registry_state(returned_alias.value), (1, true));
+    with_context(|ctx| {
+        let _active = ActiveNapiContext::enter(&ctx);
+        let output = value_for_handle(&ctx, returned_alias.value).unwrap();
+        let original: Value = ctx.globals().get("__errorBoundaryAliasInput").unwrap();
+        assert_eq!(output, original);
+    });
+    guard.release_handle(returned_alias.value);
+    assert_eq!(error_boundary_registry_state(alias_input), (0, false));
+
+    alias_input = guard.handle(thaw_js_get_global(c"__errorBoundaryAliasInput".as_ptr()));
+    let alias_owner = error_boundary_registry_state(alias_input);
+    assert_eq!(alias_owner, (1, true));
+    let alias_graph = format!(
+        r#"{{"root":{{"r":0}},"nodes":[{{"a":[{{"r":1}}]}},{{"hdl":{alias_input}}}],"leases":[{alias_input}]}}"#
+    );
+    let throw_alias = guard.handle(thaw_js_get_global(c"__errorBoundaryThrowAlias".as_ptr()));
+    guard.retained_handle(alias_input);
+    let thrown_alias = error_boundary_invoke_with_leases(
+        &mut guard, throw_alias, &alias_graph, 0, &[alias_input],
+    );
+    assert!(thrown_alias.error.is_null());
+    assert_eq!(thrown_alias.value, 0);
+    assert_eq!(thrown_alias.exception_object_like, 1);
+    assert_eq!(error_boundary_registry_state(alias_input), (2, true));
+    guard.release_handle(alias_input);
+    guard.release_handle(throw_alias);
+    assert_eq!(error_boundary_registry_state(thrown_alias.exception_handle), (1, true));
+    with_context(|ctx| {
+        let _active = ActiveNapiContext::enter(&ctx);
+        let thrown = value_for_handle(&ctx, thrown_alias.exception_handle).unwrap();
+        let original: Value = ctx.globals().get("__errorBoundaryAliasInput").unwrap();
+        assert_eq!(thrown, original);
+    });
+    guard.release_handle(thrown_alias.exception_handle);
+    assert_eq!(error_boundary_registry_state(alias_input), (0, false));
+
+    let no_args = guard.handle(thaw_js_get_global(c"__errorBoundaryNoArgs".as_ptr()));
+    let empty = error_boundary_invoke(&mut guard, no_args, r#"{"root":{"r":0},"nodes":[{"a":[]}],"leases":[]}"#, 0);
+    assert!(empty.error.is_null());
+    with_context(|ctx| {
+        let _active = ActiveNapiContext::enter(&ctx);
+        assert_eq!(value_for_handle(&ctx, empty.value).unwrap().as_number(), Some(0.0));
+    });
+    let own_undefined = error_boundary_invoke(&mut guard, no_args, r#"{"root":{"r":0},"nodes":[{"a":[{"u":1}]}],"leases":[]}"#, 0);
+    assert!(own_undefined.error.is_null());
+    with_context(|ctx| {
+        let _active = ActiveNapiContext::enter(&ctx);
+        assert_eq!(value_for_handle(&ctx, own_undefined.value).unwrap().as_number(), Some(1.0));
+    });
+
+    let promise_callee = guard.handle(thaw_js_get_global(c"__errorBoundaryReturnPending".as_ptr()));
+    let pending = guard.handle(thaw_js_get_global(c"__errorBoundaryPending".as_ptr()));
+    let promise_result = error_boundary_invoke(&mut guard, promise_callee, r#"{"root":{"r":0},"nodes":[{"a":[]}],"leases":[]}"#, 0);
+    assert!(promise_result.error.is_null());
+    with_context(|ctx| {
+        let _active = ActiveNapiContext::enter(&ctx);
+        let value = value_for_handle(&ctx, promise_result.value).unwrap();
+        assert_eq!(value, value_for_handle(&ctx, pending).unwrap());
+        assert_eq!(value.as_promise().unwrap().state(), rquickjs::promise::PromiseState::Pending);
+        assert_eq!(ctx.eval::<u32, _>("__errorBoundaryThenCalls").unwrap(), 0);
+    });
+    assert_eq!(error_boundary_registry_state(callback.value), callback_owner);
+
+    // The retained output survives release of the original callee and input callback.
+    with_context(|ctx| {
+        let _active = ActiveNapiContext::enter(&ctx);
+        assert_eq!(
+            value_for_handle(&ctx, returned.value).unwrap().as_string().unwrap().to_string().unwrap(),
+            "native message",
+        );
+    });
+    guard.release_handle(callback.value);
+    assert_eq!(error_boundary_registry_state(callback.value), (0, false));
+    assert_eq!(thaw_js_retain_handle(callback.value), 0,
+        "the producer O claim is the final callback registry reference");
+    guard.finish();
+}
+
+#[test]
+fn error_exact_boundary_invoke_retains_decode_and_target_markers() {
+    let mut guard = ErrorBoundaryFixtureGuard::new();
+    guard.preserve_globals(&[
+        "TypeError", "RangeError", "__errorBoundarySavedTypeError", "__errorBoundarySavedRangeError",
+        "__errorBoundaryMarkerSet", "__errorBoundaryMarker", "__errorBoundaryTargetCalls",
+        "__errorBoundaryTarget", "__errorBoundaryDecoderGetReads", "__errorBoundaryDecoderCalls",
+        "__errorBoundaryDecoderMode", "__errorBoundaryLengthMarker", "__errorBoundaryLengthReads",
+        "__errorBoundaryIndexReads", "__errorBoundaryIndexMarker", "__errorBoundaryIndexTrace",
+        "__errorBoundaryCoercionCalls", "__errorBoundaryThrownPromise",
+        "__errorBoundaryThrown",
+    ]);
+    install_error_boundary_host_operations();
+    assert_eq!(load(r#"
+        globalThis.__errorBoundarySavedTypeError = TypeError;
+        globalThis.__errorBoundarySavedRangeError = RangeError;
+        globalThis.__errorBoundaryMarkerSet = [
+          { tag: 'object' }, 'string marker', undefined,
+          function marker() {}, Symbol('marker')
+        ];
+        globalThis.__errorBoundaryMarker = undefined;
+        globalThis.__errorBoundaryTargetCalls = 0;
+        globalThis.__errorBoundaryDecoderGetReads = 0;
+        globalThis.__errorBoundaryDecoderCalls = 0;
+        globalThis.__errorBoundaryDecoderMode = 'getter';
+        globalThis.__errorBoundaryCoercionCalls = 0;
+        globalThis.__errorBoundaryLengthReads = 0;
+        globalThis.__errorBoundaryIndexReads = 0;
+        globalThis.__errorBoundaryTarget = function() { __errorBoundaryTargetCalls++; return 1; };
+    "#), 1);
+    let mut target = guard.handle(thaw_js_get_global(c"__errorBoundaryTarget".as_ptr()));
+    let empty = r#"{"root":{"r":0},"nodes":[{"a":[]}],"leases":[]}"#;
+    let forwarding_decoder = r#"({
+      get __thaw_json_graph_decode() {
+        __errorBoundaryDecoderGetReads++;
+        if (__errorBoundaryDecoderMode === 'getter') throw __errorBoundaryMarker;
+        return function(graph) {
+          __errorBoundaryDecoderCalls++;
+          if (__errorBoundaryDecoderMode === 'call') throw __errorBoundaryMarker;
+          return __thaw_json_graph_decode(graph);
+        };
+      }
+    })"#;
+    let cases = [(0, true), (1, false), (2, false), (3, true), (4, false)];
+    for (index, object_like) in cases {
+        assert_eq!(load(&format!("globalThis.__errorBoundaryMarker = __errorBoundaryMarkerSet[{index}]; __errorBoundaryTargetCalls = 0; __errorBoundaryDecoderGetReads = 0; __errorBoundaryDecoderCalls = 0; __errorBoundaryDecoderMode = 'getter';")), 1);
+        guard.install_decoder_source(forwarding_decoder);
+        let getter_throw = error_boundary_invoke(&mut guard, target, empty, 0);
+        error_boundary_assert_exception_marker(&mut guard, getter_throw, "__errorBoundaryMarker", object_like);
+        assert_eq!(with_context(|ctx| ctx.eval::<u32, _>("__errorBoundaryDecoderGetReads").unwrap()), 1);
+        assert_eq!(with_context(|ctx| ctx.eval::<u32, _>("__errorBoundaryDecoderCalls").unwrap()), 0);
+        assert_eq!(with_context(|ctx| ctx.eval::<u32, _>("__errorBoundaryTargetCalls").unwrap()), 0);
+        assert_eq!(load("__errorBoundaryDecoderGetReads = 0; __errorBoundaryDecoderCalls = 0; __errorBoundaryDecoderMode = 'call';"), 1);
+        let decoder_throw = error_boundary_invoke(&mut guard, target, empty, 0);
+        error_boundary_assert_exception_marker(&mut guard, decoder_throw, "__errorBoundaryMarker", object_like);
+        assert_eq!(with_context(|ctx| ctx.eval::<u32, _>("__errorBoundaryDecoderGetReads").unwrap()), 1);
+        assert_eq!(with_context(|ctx| ctx.eval::<u32, _>("__errorBoundaryDecoderCalls").unwrap()), 1);
+        assert_eq!(with_context(|ctx| ctx.eval::<u32, _>("__errorBoundaryTargetCalls").unwrap()), 0);
+    }
+    guard.clear_decoder_source();
+
+    assert_eq!(load("globalThis.__errorBoundaryTarget = function() { __errorBoundaryTargetCalls++; throw __errorBoundaryMarker; }; __errorBoundaryTargetCalls = 0;"), 1);
+    guard.release_handle(target);
+    target = guard.handle(thaw_js_get_global(c"__errorBoundaryTarget".as_ptr()));
+    for (index, object_like) in cases {
+        assert_eq!(load(&format!("globalThis.__errorBoundaryMarker = __errorBoundaryMarkerSet[{index}]; __errorBoundaryTargetCalls = 0;")), 1);
+        let call_throw = error_boundary_invoke(&mut guard, target, empty, 0);
+        error_boundary_assert_exception_marker(&mut guard, call_throw, "__errorBoundaryMarker", object_like);
+        let new_throw = error_boundary_invoke(&mut guard, target, empty, 1);
+        error_boundary_assert_exception_marker(&mut guard, new_throw, "__errorBoundaryMarker", object_like);
+        assert_eq!(with_context(|ctx| ctx.eval::<u32, _>("__errorBoundaryTargetCalls").unwrap()), 2);
+    }
+
+    let callback = guard.capture_handle_result(thaw_js_register_native_callback_graph(
+        error_boundary_native_callback as *const c_void,
+        std::ptr::null(), 0, 0, 0, std::ptr::null(), 0,
+    ));
+    assert!(callback.error.is_null());
+    assert_ne!(callback.value, 0);
+    let owner_state = error_boundary_registry_state(callback.value);
+    assert_eq!(owner_state, (1, true));
+    let leased_graph = format!(
+        r#"{{"root":{{"r":0}},"nodes":[{{"a":[{{"r":1}}]}},{{"hdl":{}}}],"leases":[{}]}}"#,
+        callback.value, callback.value,
+    );
+    target = guard.handle(thaw_js_get_global(c"__errorBoundaryTarget".as_ptr()));
+    for (index, object_like) in cases {
+        guard.retained_handle(callback.value);
+        assert_eq!(error_boundary_registry_state(callback.value), (2, true));
+        assert_eq!(load(&format!("globalThis.__errorBoundaryLengthMarker = __errorBoundaryMarkerSet[{index}]; __errorBoundaryLengthReads = 0; __errorBoundaryTargetCalls = 0;")), 1);
+        guard.install_decoder_source(r#"({ __thaw_json_graph_decode() {
+          return new Proxy([], { get(target, key, receiver) {
+            if (key === 'length') { __errorBoundaryLengthReads++; throw __errorBoundaryLengthMarker; }
+            return Reflect.get(target, key, receiver);
+          }});
+        }})"#);
+        let length_throw = error_boundary_invoke_with_leases(&mut guard, target, &leased_graph, 0, &[callback.value]);
+        error_boundary_assert_exception_marker(&mut guard, length_throw, "__errorBoundaryLengthMarker", object_like);
+        assert_eq!(with_context(|ctx| ctx.eval::<u32, _>("__errorBoundaryLengthReads").unwrap()), 1);
+        assert_eq!(with_context(|ctx| ctx.eval::<u32, _>("__errorBoundaryTargetCalls").unwrap()), 0);
+        assert_eq!(error_boundary_registry_state(callback.value), owner_state);
+    }
+
+    guard.retained_handle(callback.value);
+    assert_eq!(error_boundary_registry_state(callback.value), (2, true));
+    assert_eq!(load("__errorBoundaryIndexReads = 0; __errorBoundaryLengthReads = 0; __errorBoundaryTargetCalls = 0; __errorBoundaryIndexMarker = 'index marker';"), 1);
+    guard.install_decoder_source(r#"({ __thaw_json_graph_decode() {
+      return new Proxy([], { get(target, key, receiver) {
+        if (key === 'length') { __errorBoundaryLengthReads++; return 1; }
+        if (key === '0') { __errorBoundaryIndexReads++; throw __errorBoundaryIndexMarker; }
+        return Reflect.get(target, key, receiver);
+      }});
+    }})"#);
+    let index_throw = error_boundary_invoke_with_leases(&mut guard, target, &leased_graph, 0, &[callback.value]);
+    error_boundary_assert_exception_marker(&mut guard, index_throw, "__errorBoundaryIndexMarker", false);
+    assert_eq!(with_context(|ctx| ctx.eval::<u32, _>("__errorBoundaryLengthReads").unwrap()), 1);
+    assert_eq!(with_context(|ctx| ctx.eval::<u32, _>("__errorBoundaryIndexReads").unwrap()), 1);
+    assert_eq!(with_context(|ctx| ctx.eval::<u32, _>("__errorBoundaryTargetCalls").unwrap()), 0);
+    assert_eq!(error_boundary_registry_state(callback.value), owner_state);
+
+    assert_eq!(load(r#"
+        globalThis.__errorBoundaryIndexTrace = '';
+        globalThis.__errorBoundaryLengthReads = 0;
+        globalThis.__errorBoundaryTargetCalls = 0;
+        globalThis.__errorBoundaryTarget = function(a, b) {
+          __errorBoundaryTargetCalls++; __errorBoundaryIndexTrace += 'T';
+          return a === undefined ? 1 : a * 10 + b;
+        };
+    "#), 1);
+    guard.release_handle(target);
+    target = guard.handle(thaw_js_get_global(c"__errorBoundaryTarget".as_ptr()));
+    guard.retained_handle(callback.value);
+    assert_eq!(load("__errorBoundaryLengthReads = 0; __errorBoundaryIndexReads = 0;"), 1);
+    guard.install_decoder_source(r#"({ __thaw_json_graph_decode() {
+      return new Proxy([], { get(target, key, receiver) {
+        if (key === 'length') { __errorBoundaryLengthReads++; __errorBoundaryIndexTrace += 'L'; return 2; }
+        if (key === '0') { __errorBoundaryIndexTrace += '0'; return 4; }
+        if (key === '1') { __errorBoundaryIndexTrace += '1'; return 5; }
+        return Reflect.get(target, key, receiver);
+      }});
+    }})"#);
+    let proxy_result = error_boundary_invoke_with_leases(&mut guard, target, &leased_graph, 0, &[callback.value]);
+    assert!(proxy_result.error.is_null());
+    assert_eq!(proxy_result.exception_handle, 0);
+    with_context(|ctx| {
+        let _active = ActiveNapiContext::enter(&ctx);
+        assert_eq!(value_for_handle(&ctx, proxy_result.value).unwrap().as_number(), Some(45.0));
+        assert_eq!(ctx.eval::<String, _>("__errorBoundaryIndexTrace").unwrap(), "L01T");
+        assert_eq!(ctx.eval::<u32, _>("__errorBoundaryLengthReads").unwrap(), 1);
+        assert_eq!(ctx.eval::<u32, _>("__errorBoundaryTargetCalls").unwrap(), 1);
+    });
+    assert_eq!(error_boundary_registry_state(callback.value), owner_state);
+
+    guard.retained_handle(callback.value);
+    assert_eq!(load("__errorBoundaryLengthReads = 0; __errorBoundaryIndexTrace = ''; __errorBoundaryTargetCalls = 0;"), 1);
+    guard.install_decoder_source(r#"({ __thaw_json_graph_decode() {
+      return new Proxy([], { get(target, key, receiver) {
+        if (key === 'length') { __errorBoundaryLengthReads++; __errorBoundaryIndexTrace += 'L'; return 0; }
+        return Reflect.get(target, key, receiver);
+      }});
+    }})"#);
+    let empty_proxy = error_boundary_invoke_with_leases(&mut guard, target, &leased_graph, 0, &[callback.value]);
+    assert!(empty_proxy.error.is_null());
+    with_context(|ctx| {
+        let _active = ActiveNapiContext::enter(&ctx);
+        assert_eq!(value_for_handle(&ctx, empty_proxy.value).unwrap().as_number(), Some(1.0));
+        assert_eq!(ctx.eval::<String, _>("__errorBoundaryIndexTrace").unwrap(), "LT");
+        assert_eq!(ctx.eval::<u32, _>("__errorBoundaryLengthReads").unwrap(), 1);
+        assert_eq!(ctx.eval::<u32, _>("__errorBoundaryTargetCalls").unwrap(), 1);
+    });
+    assert_eq!(error_boundary_registry_state(callback.value), owner_state);
+
+    guard.retained_handle(callback.value);
+    guard.install_decoder_source(r#"({ __thaw_json_graph_decode() {
+      return new Proxy([], { get(target, key, receiver) {
+        if (key === 'length') return { valueOf() { __errorBoundaryCoercionCalls++; return 0; } };
+        return Reflect.get(target, key, receiver);
+      }});
+    }})"#);
+    let invalid_length = error_boundary_invoke_with_leases(&mut guard, target, &leased_graph, 0, &[callback.value]);
+    assert!(invalid_length.error.is_null());
+    assert_eq!(invalid_length.value, 0);
+    assert_ne!(invalid_length.exception_handle, 0);
+    error_boundary_assert_engine_error(invalid_length.exception_handle, "TypeError", "__errorBoundarySavedTypeError");
+    assert_eq!(with_context(|ctx| ctx.eval::<u32, _>("__errorBoundaryCoercionCalls").unwrap()), 0);
+    assert_eq!(with_context(|ctx| ctx.eval::<u32, _>("__errorBoundaryTargetCalls").unwrap()), 1);
+    assert_eq!(error_boundary_registry_state(callback.value), owner_state);
+
+    guard.retained_handle(callback.value);
+    guard.install_decoder_source(r#"({ __thaw_json_graph_decode() {
+      return new Proxy([], { get(target, key, receiver) {
+        if (key === 'length') { __errorBoundaryLengthReads++; return 65536; }
+        if (key === '0') { __errorBoundaryIndexReads++; return 0; }
+        return Reflect.get(target, key, receiver);
+      }});
+    }})"#);
+    assert_eq!(load("__errorBoundaryLengthReads = 0; __errorBoundaryIndexReads = 0; __errorBoundaryTargetCalls = 0;"), 1);
+    let too_many = error_boundary_invoke_with_leases(&mut guard, target, &leased_graph, 0, &[callback.value]);
+    assert!(too_many.error.is_null());
+    assert_eq!(too_many.value, 0);
+    error_boundary_assert_engine_error(too_many.exception_handle, "RangeError", "__errorBoundarySavedRangeError");
+    assert_eq!(with_context(|ctx| ctx.eval::<u32, _>("__errorBoundaryLengthReads").unwrap()), 1);
+    assert_eq!(with_context(|ctx| ctx.eval::<u32, _>("__errorBoundaryIndexReads").unwrap()), 0);
+    assert_eq!(with_context(|ctx| ctx.eval::<u32, _>("__errorBoundaryTargetCalls").unwrap()), 0);
+    assert_eq!(error_boundary_registry_state(callback.value), owner_state);
+
+    guard.clear_decoder_source();
+    assert_eq!(load(r#"
+        globalThis.__errorBoundaryThrownPromise = new Promise(() => {});
+        globalThis.__errorBoundaryTarget = function() { __errorBoundaryTargetCalls++; throw __errorBoundaryThrownPromise; };
+    "#), 1);
+    guard.release_handle(target);
+    target = guard.handle(thaw_js_get_global(c"__errorBoundaryTarget".as_ptr()));
+    let thrown_promise = error_boundary_invoke(&mut guard, target, empty, 0);
+    error_boundary_assert_exception_marker(&mut guard, thrown_promise, "__errorBoundaryThrownPromise", true);
+    let promise = guard.handle(thaw_js_get_global(c"__errorBoundaryThrownPromise".as_ptr()));
+    with_context(|ctx| {
+        let _active = ActiveNapiContext::enter(&ctx);
+        assert_eq!(value_for_handle(&ctx, promise).unwrap().as_promise().unwrap().state(), rquickjs::promise::PromiseState::Pending);
+    });
+    assert_eq!(error_boundary_registry_state(callback.value), owner_state);
+    guard.release_handle(callback.value);
+    assert_eq!(error_boundary_registry_state(callback.value), (0, false));
+    assert_eq!(thaw_js_retain_handle(callback.value), 0);
+    guard.finish();
+}
+
+#[test]
+fn error_exact_boundary_argument_array_brand_is_intrinsic_and_exact() {
+    let mut guard = ErrorBoundaryFixtureGuard::new();
+    install_error_boundary_host_operations();
+    guard.preserve_globals(&[
+        "Array", "TypeError", "__errorBoundarySavedTypeError",
+        "__errorBoundaryOriginalArray", "__errorBoundaryOriginalArrayIsArrayDescriptor",
+        "__errorBoundaryInput", "__errorBoundaryTarget", "__errorBoundaryTargetCalls",
+        "__errorBoundaryDecoderGetReads", "__errorBoundaryDecoderCalls",
+        "__errorBoundaryLengthReads", "__errorBoundaryIndexReads", "__errorBoundaryBrandTraps",
+        "__errorBoundaryPublicArrayReads", "__errorBoundaryThrown",
+    ]);
+    guard.append_restore_with(r#"
+      Object.defineProperty(
+        __errorBoundaryOriginalArray,
+        'isArray',
+        __errorBoundaryOriginalArrayIsArrayDescriptor,
+      );
+      const restored = Object.getOwnPropertyDescriptor(__errorBoundaryOriginalArray, 'isArray');
+      if (!restored || restored.value !== __errorBoundaryOriginalArrayIsArrayDescriptor.value ||
+          restored.get !== __errorBoundaryOriginalArrayIsArrayDescriptor.get ||
+          restored.set !== __errorBoundaryOriginalArrayIsArrayDescriptor.set ||
+          restored.writable !== __errorBoundaryOriginalArrayIsArrayDescriptor.writable ||
+          restored.enumerable !== __errorBoundaryOriginalArrayIsArrayDescriptor.enumerable ||
+          restored.configurable !== __errorBoundaryOriginalArrayIsArrayDescriptor.configurable) {
+        throw new Error('Array.isArray descriptor was not restored exactly');
+      }
+      1
+    "#);
+    assert_eq!(load(r#"
+      globalThis.__errorBoundarySavedTypeError = TypeError;
+      globalThis.__errorBoundaryOriginalArray = Array;
+      globalThis.__errorBoundaryOriginalArrayIsArrayDescriptor = Object.getOwnPropertyDescriptor(Array, 'isArray');
+      globalThis.__errorBoundaryInput = undefined;
+      globalThis.__errorBoundaryTargetCalls = 0;
+      globalThis.__errorBoundaryDecoderGetReads = 0;
+      globalThis.__errorBoundaryDecoderCalls = 0;
+      globalThis.__errorBoundaryLengthReads = 0;
+      globalThis.__errorBoundaryIndexReads = 0;
+      globalThis.__errorBoundaryBrandTraps = 0;
+      globalThis.__errorBoundaryPublicArrayReads = 0;
+      globalThis.__errorBoundaryTarget = function(value) {
+        __errorBoundaryTargetCalls++;
+        return value;
+      };
+    "#), 1);
+    guard.install_decoder_source(r#"({
+      get __thaw_json_graph_decode() {
+        __errorBoundaryDecoderGetReads++;
+        return function() { __errorBoundaryDecoderCalls++; return __errorBoundaryInput; };
+      }
+    })"#);
+
+    let mut callee = guard.handle(thaw_js_get_global(c"__errorBoundaryTarget".as_ptr()));
+    let callback = guard.capture_handle_result(thaw_js_register_native_callback_graph(
+        error_boundary_native_callback as *const c_void,
+        std::ptr::null(), 0, 0, 0, std::ptr::null(), 0,
+    ));
+    assert!(callback.error.is_null());
+    assert_ne!(callback.value, 0);
+    let owner_state = error_boundary_registry_state(callback.value);
+    assert_eq!(owner_state, (1, true));
+    let leased_graph = format!(
+        r#"{{"root":{{"r":0}},"nodes":[{{"a":[{{"r":1}}]}},{{"hdl":{}}}],"leases":[{}]}}"#,
+        callback.value, callback.value,
+    );
+    let mut invocations = 0;
+    macro_rules! invoke_current {
+        ($is_new:expr) => {{
+            guard.retained_handle(callback.value);
+            assert_eq!(error_boundary_registry_state(callback.value), (2, true));
+            let result = error_boundary_invoke_with_leases(
+                &mut guard, callee, &leased_graph, $is_new, &[callback.value],
+            );
+            invocations += 1;
+            assert_eq!(error_boundary_registry_state(callback.value), owner_state);
+            assert_eq!(with_context(|ctx| (
+                ctx.eval::<u32, _>("__errorBoundaryDecoderGetReads").unwrap(),
+                ctx.eval::<u32, _>("__errorBoundaryDecoderCalls").unwrap(),
+            )), (invocations, invocations));
+            result
+        }};
+    }
+    macro_rules! expect_intrinsic_type_error {
+        ($is_new:expr) => {{
+            let result = invoke_current!($is_new);
+            assert!(result.error.is_null());
+            assert_eq!(result.value, 0);
+            assert_ne!(result.exception_handle, 0);
+            assert_eq!(result.exception_object_like, 1);
+            error_boundary_assert_engine_error(
+                result.exception_handle, "TypeError", "__errorBoundarySavedTypeError",
+            );
+            guard.release_handle(result.exception_handle);
+        }};
+    }
+
+    // All false brands are rejected before their length, prototype, or other
+    // user properties can be observed.
+    for source in [
+        "globalThis.__errorBoundaryInput = { get length() { __errorBoundaryLengthReads++; return 0; } };",
+        "globalThis.__errorBoundaryInput = Object.create(Array.prototype);",
+        "globalThis.__errorBoundaryInput = new Uint8Array([3]);",
+        "globalThis.__errorBoundaryInput = 'not an array';",
+        "globalThis.__errorBoundaryInput = function notAnArray() {};",
+        "globalThis.__errorBoundaryInput = new Proxy(Object.create(null), { get() { __errorBoundaryBrandTraps++; return 0; }, getPrototypeOf() { __errorBoundaryBrandTraps++; return null; } });",
+    ] {
+        assert_eq!(load("__errorBoundaryLengthReads = 0; __errorBoundaryBrandTraps = 0; __errorBoundaryTargetCalls = 0;"), 1);
+        assert_eq!(load(source), 1);
+        expect_intrinsic_type_error!(0);
+        assert_eq!(with_context(|ctx| (
+            ctx.eval::<u32, _>("__errorBoundaryLengthReads").unwrap(),
+            ctx.eval::<u32, _>("__errorBoundaryBrandTraps").unwrap(),
+            ctx.eval::<u32, _>("__errorBoundaryTargetCalls").unwrap(),
+        )), (0, 0, 0));
+    }
+
+    // A genuine array Proxy is admitted, with exactly one length and index
+    // read, and nested proxies preserve the same call behavior.
+    assert_eq!(load(r#"
+      __errorBoundaryLengthReads = 0; __errorBoundaryIndexReads = 0; __errorBoundaryTargetCalls = 0;
+      const array = [17];
+      __errorBoundaryInput = new Proxy(array, { get(target, key, receiver) {
+        if (key === 'length') __errorBoundaryLengthReads++;
+        if (key === '0') __errorBoundaryIndexReads++;
+        return Reflect.get(target, key, receiver);
+      }});
+    "#), 1);
+    let proxy_call = invoke_current!(0);
+    assert!(proxy_call.error.is_null());
+    assert_eq!(proxy_call.exception_handle, 0);
+    with_context(|ctx| {
+        let _active = ActiveNapiContext::enter(&ctx);
+        assert_eq!(value_for_handle(&ctx, proxy_call.value).unwrap().as_number(), Some(17.0));
+        assert_eq!(ctx.eval::<u32, _>("__errorBoundaryLengthReads").unwrap(), 1);
+        assert_eq!(ctx.eval::<u32, _>("__errorBoundaryIndexReads").unwrap(), 1);
+        assert_eq!(ctx.eval::<u32, _>("__errorBoundaryTargetCalls").unwrap(), 1);
+    });
+    guard.release_handle(proxy_call.value);
+
+    assert_eq!(load(r#"
+      __errorBoundaryLengthReads = 0; __errorBoundaryIndexReads = 0; __errorBoundaryTargetCalls = 0;
+      const inner = new Proxy([23], { get(target, key, receiver) {
+        if (key === 'length') __errorBoundaryLengthReads++;
+        if (key === '0') __errorBoundaryIndexReads++;
+        return Reflect.get(target, key, receiver);
+      }});
+      __errorBoundaryInput = new Proxy(inner, { get(target, key, receiver) {
+        if (key === 'length') __errorBoundaryLengthReads++;
+        if (key === '0') __errorBoundaryIndexReads++;
+        return Reflect.get(target, key, receiver);
+      }});
+    "#), 1);
+    let nested_proxy_call = invoke_current!(0);
+    assert!(nested_proxy_call.error.is_null());
+    with_context(|ctx| {
+        let _active = ActiveNapiContext::enter(&ctx);
+        assert_eq!(value_for_handle(&ctx, nested_proxy_call.value).unwrap().as_number(), Some(23.0));
+        assert_eq!(ctx.eval::<u32, _>("__errorBoundaryLengthReads").unwrap(), 2);
+        assert_eq!(ctx.eval::<u32, _>("__errorBoundaryIndexReads").unwrap(), 2);
+        assert_eq!(ctx.eval::<u32, _>("__errorBoundaryTargetCalls").unwrap(), 1);
+    });
+    guard.release_handle(nested_proxy_call.value);
+
+    // Construction consumes the same authenticated proxy array and preserves
+    // the selected constructor's new.target behavior.
+    assert_eq!(load(r#"
+      __errorBoundaryTargetCalls = 0;
+      globalThis.__errorBoundaryTarget = function(value) {
+        __errorBoundaryTargetCalls++;
+        if (new.target) {
+          this.value = value;
+          this.wasNew = new.target === __errorBoundaryTarget;
+          return;
+        }
+        return value;
+      };
+      __errorBoundaryInput = new Proxy([31], {});
+    "#), 1);
+    guard.release_handle(callee);
+    callee = guard.handle(thaw_js_get_global(c"__errorBoundaryTarget".as_ptr()));
+    let proxy_construct = invoke_current!(1);
+    assert!(proxy_construct.error.is_null());
+    with_context(|ctx| {
+        let _active = ActiveNapiContext::enter(&ctx);
+        let instance_value = value_for_handle(&ctx, proxy_construct.value).unwrap();
+        let instance = instance_value.as_object().unwrap();
+        assert_eq!(instance.get::<_, u32>("value").unwrap(), 31);
+        assert!(instance.get::<_, bool>("wasNew").unwrap());
+        assert_eq!(ctx.eval::<u32, _>("__errorBoundaryTargetCalls").unwrap(), 1);
+    });
+    guard.release_handle(proxy_construct.value);
+
+    // JS_IsArray-equivalent behavior throws for revoked genuine proxies; the
+    // original exception lane is retained before any property read.
+    assert_eq!(load(r#"
+      __errorBoundaryLengthReads = 0; __errorBoundaryIndexReads = 0; __errorBoundaryTargetCalls = 0;
+      const revoked = Proxy.revocable([], {}); revoked.revoke(); __errorBoundaryInput = revoked.proxy;
+    "#), 1);
+    expect_intrinsic_type_error!(0);
+    assert_eq!(with_context(|ctx| (
+        ctx.eval::<u32, _>("__errorBoundaryLengthReads").unwrap(),
+        ctx.eval::<u32, _>("__errorBoundaryIndexReads").unwrap(),
+        ctx.eval::<u32, _>("__errorBoundaryTargetCalls").unwrap(),
+    )), (0, 0, 0));
+
+    // Later public replacements of Array.isArray or Array cannot affect the
+    // captured intrinsic kept in private context userdata.
+    assert_eq!(load(r#"
+      globalThis.__errorBoundaryPublicArrayReads = 0;
+      Object.defineProperty(__errorBoundaryOriginalArray, 'isArray', {
+        configurable: true,
+        get() { __errorBoundaryPublicArrayReads++; throw new Error('mutable public Array.isArray was observed'); }
+      });
+      globalThis.Array = function ReplacedArray() { __errorBoundaryPublicArrayReads++; };
+      __errorBoundaryInput = new Proxy([41], {});
+      __errorBoundaryTargetCalls = 0;
+    "#), 1);
+    let replaced_intrinsic_call = invoke_current!(0);
+    assert!(replaced_intrinsic_call.error.is_null());
+    assert_eq!(replaced_intrinsic_call.exception_handle, 0);
+    with_context(|ctx| {
+        let _active = ActiveNapiContext::enter(&ctx);
+        assert_eq!(value_for_handle(&ctx, replaced_intrinsic_call.value).unwrap().as_number(), Some(41.0));
+        assert_eq!(ctx.eval::<u32, _>("__errorBoundaryPublicArrayReads").unwrap(), 0);
+        assert_eq!(ctx.eval::<u32, _>("__errorBoundaryTargetCalls").unwrap(), 1);
+    });
+    guard.release_handle(replaced_intrinsic_call.value);
+    assert_eq!(load(r#"
+      __errorBoundaryInput = new Proxy([43], {});
+      __errorBoundaryTargetCalls = 0;
+    "#), 1);
+    let replaced_intrinsic_construct = invoke_current!(1);
+    assert!(replaced_intrinsic_construct.error.is_null());
+    with_context(|ctx| {
+        let _active = ActiveNapiContext::enter(&ctx);
+        let instance_value = value_for_handle(&ctx, replaced_intrinsic_construct.value).unwrap();
+        let instance = instance_value.as_object().unwrap();
+        assert_eq!(instance.get::<_, u32>("value").unwrap(), 43);
+        assert!(instance.get::<_, bool>("wasNew").unwrap());
+        assert_eq!(ctx.eval::<u32, _>("__errorBoundaryPublicArrayReads").unwrap(), 0);
+        assert_eq!(ctx.eval::<u32, _>("__errorBoundaryTargetCalls").unwrap(), 1);
+    });
+    guard.release_handle(replaced_intrinsic_construct.value);
+    assert_eq!(load("__errorBoundaryInput = { length: 0 }; __errorBoundaryTargetCalls = 0;"), 1);
+    expect_intrinsic_type_error!(0);
+    assert_eq!(with_context(|ctx| (
+        ctx.eval::<u32, _>("__errorBoundaryPublicArrayReads").unwrap(),
+        ctx.eval::<u32, _>("__errorBoundaryTargetCalls").unwrap(),
+    )), (0, 0));
+
+    guard.release_handle(callback.value);
+    assert_eq!(error_boundary_registry_state(callback.value), (0, false));
+    assert_eq!(thaw_js_retain_handle(callback.value), 0);
+    guard.finish();
+}
 #[test]
 fn console_methods_remain_callable_when_detached() {
     assert_eq!(

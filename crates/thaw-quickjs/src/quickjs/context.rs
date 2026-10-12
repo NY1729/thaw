@@ -228,6 +228,7 @@ struct NativeBundleOwner<'js> {
     origin_modules: RefCell<HashMap<String, NativeBundleOriginModule>>,
     then: Function<'js>,
     object_is: Function<'js>,
+    array_is_array: Function<'js>,
 }
 
 unsafe impl<'js> rquickjs::JsLifetime<'js> for NativeBundleOwner<'js> {
@@ -1049,6 +1050,8 @@ fn ensure_context() {
                     .expect("failed to capture intrinsic Promise.then");
                 let intrinsic_object_is: Function = ctx.eval("Object.is")
                     .expect("failed to capture intrinsic Object.is");
+                let intrinsic_array_is_array: Function = ctx.eval("Array.isArray")
+                    .expect("failed to capture intrinsic Array.isArray");
                 ctx.store_userdata(NativeBundleOwner {
                     next_sequence: Cell::new(0),
                     sources: RefCell::new(HashMap::new()),
@@ -1059,6 +1062,7 @@ fn ensure_context() {
                     origin_modules: RefCell::new(HashMap::new()),
                     then: intrinsic_then,
                     object_is: intrinsic_object_is,
+                    array_is_array: intrinsic_array_is_array,
                 }).expect("native bundle owner userdata is already borrowed");
                 ctx.globals().prop("__thaw_register_native_bundle",
                     Function::new(ctx.clone(), register_native_bundle)
