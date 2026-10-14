@@ -2265,9 +2265,13 @@ fn net_server_accepts_and_replies_to_a_real_tcp_client() {
     let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
     assert_eq!(
         result,
-        format!(
-            r#"[["listening:127.0.0.1:{port}","connection:IPv4","data:ping0","connection:IPv4","data:ping1","connection:IPv4","data:ping2","close"],false,{port},0,true,true]"#
-        )
+        {
+            // An omitted host binds the unspecified address: `::` (dual-stack, IPv4 peers appear as IPv6) when available, else `0.0.0.0`.
+            let (host, family) = if std::net::TcpListener::bind("[::1]:0").is_ok() { ("::", "IPv6") } else { ("0.0.0.0", "IPv4") };
+            format!(
+                r#"[["listening:{host}:{port}","connection:{family}","data:ping0","connection:{family}","data:ping1","connection:{family}","data:ping2","close"],false,{port},0,true,true]"#
+            )
+        }
     );
     assert_eq!(client.join().unwrap(), ["pong1", "pong2", "pong3"]);
     let _ = fs::remove_dir_all(&dir);
@@ -2736,7 +2740,7 @@ module.exports = async function() {
   }
   async function callbackFailure() {
     var failure = new Error('callback failure'), socket = new EventEmitter(), closes = 0, destroys = 0, finishes = 0, caught = false;
-    socket.write = function() {}; socket.destroy = function() { destroys++; return this; };
+    socket.write = function(data, done) { if (typeof done === 'function') done(); }; socket.destroy = function() { destroys++; return this; };
     var request = http.request('http://localhost/', { agent: false, _transport: { createConnection: function() { return socket; } } });
     request.on('close', function() { closes++; }); request.on('finish', function() { finishes++; }); request.end(function() { throw failure; });
     try { socket.emit('connect'); } catch (error) { caught = error === failure; } await Promise.resolve(); return [caught, closes, destroys, finishes];
@@ -3332,7 +3336,7 @@ module.exports = function() {
   var originalConnect = globalThis.__thaw_net_connect, originalPoll = globalThis.__thaw_net_poll_read, originalDestroy = globalThis.__thaw_net_destroy;
   var microtasks = [], timers = [], calls = Object.create(null), destroyedHandles = [];
   globalThis.queueMicrotask = function(task) { microtasks.push(task); };
-  globalThis.setTimeout = function(task) { timers.push(task); return timers.length; };
+  globalThis.setTimeout = function(task) { timers.push(task); return timers.length; }; var originalTimerRef = globalThis.__thaw_set_timeout_ref; globalThis.__thaw_set_timeout_ref = function(task) { timers.push(task); return timers.length; };
   globalThis.clearTimeout = function() {};
   globalThis.__thaw_net_connect = function() { return 'ok:' + (940001 + calls.connects++); };
   globalThis.__thaw_net_destroy = function(handle) { destroyedHandles.push(handle); return 'ok'; };
@@ -3377,7 +3381,7 @@ module.exports = function() {
     return [calls[940001], calls[940002], text.indexOf('old') === -1, text.indexOf('☃') === -1, text.indexOf('new') >= 0, events, socket.readableLength, socket.readableEnded, staleConnectEvents, staleSocket._handle, staleSocket.destroyed, destroyedHandles.indexOf(940003) >= 0];
   } finally {
     globalThis.queueMicrotask = originalQueue;
-    globalThis.setTimeout = originalTimer;
+    globalThis.setTimeout = originalTimer; globalThis.__thaw_set_timeout_ref = originalTimerRef;
     globalThis.clearTimeout = originalClear;
     globalThis.__thaw_net_connect = originalConnect;
     globalThis.__thaw_net_poll_read = originalPoll;
@@ -3418,7 +3422,7 @@ module.exports = function() {
   var originalQueue = globalThis.queueMicrotask, originalTimer = globalThis.setTimeout, originalConnect = globalThis.__thaw_net_connect, originalPoll = globalThis.__thaw_net_poll_read, originalDestroy = globalThis.__thaw_net_destroy;
   var microtasks = [], timers = [], calls = Object.create(null), marker = new Error('old end handler'), reconnected = false;
   globalThis.queueMicrotask = function(task) { microtasks.push(task); };
-  globalThis.setTimeout = function(task) { timers.push(task); return timers.length; };
+  globalThis.setTimeout = function(task) { timers.push(task); return timers.length; }; var originalTimerRef = globalThis.__thaw_set_timeout_ref; globalThis.__thaw_set_timeout_ref = function(task) { timers.push(task); return timers.length; };
   globalThis.__thaw_net_connect = function() { return 'ok:' + (calls.connects++ === 0 ? 960001 : 960002); };
   globalThis.__thaw_net_destroy = function() { return 'ok'; };
   globalThis.__thaw_net_poll_read = function(handle) {
@@ -3446,7 +3450,7 @@ module.exports = function() {
     return [caught, socket.destroyed, socket._handle, socket.readableEnded, data, events, calls[960001], calls[960002]];
   } finally {
     globalThis.queueMicrotask = originalQueue;
-    globalThis.setTimeout = originalTimer;
+    globalThis.setTimeout = originalTimer; globalThis.__thaw_set_timeout_ref = originalTimerRef;
     globalThis.__thaw_net_connect = originalConnect;
     globalThis.__thaw_net_poll_read = originalPoll;
     globalThis.__thaw_net_destroy = originalDestroy;

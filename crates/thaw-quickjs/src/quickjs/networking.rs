@@ -2,12 +2,17 @@ fn net_connect(host: &str, port: u16) -> String {
     match TcpStream::connect((host, port)) {
         Ok(stream) => {
             let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+            // The connected peer, not the requested host name: `ok:<handle>:<ip>:<port>` (IPv6 contains colons, so the port is the last field).
+            let peer = stream
+                .peer_addr()
+                .map(|peer| (peer.ip().to_string(), peer.port()))
+                .unwrap_or_else(|_| (host.to_string(), port));
             NET_STREAMS.with(|streams| {
                 let mut streams = streams.borrow_mut();
                 let handle = streams.0;
                 streams.0 = streams.0.wrapping_add(1).max(1);
                 streams.1.insert(handle, stream);
-                format!("ok:{handle}")
+                format!("ok:{handle}:{}:{}", peer.0, peer.1)
             })
         }
         Err(error) => format!("err:{error}"),
@@ -275,6 +280,16 @@ fn udp_connect(handle: u32, host: &str, port: u16) -> String {
         let sockets = sockets.borrow();
         let Some(socket) = sockets.1.get(&handle) else { return "err|EBADF|socket is closed".to_string(); };
         socket.connect((host, port))
+            .map(|()| "ok".to_string())
+            .unwrap_or_else(udp_error)
+    })
+}
+
+fn udp_set_broadcast(handle: u32, enabled: bool) -> String {
+    UDP_SOCKETS.with(|sockets| {
+        let sockets = sockets.borrow();
+        let Some(socket) = sockets.1.get(&handle) else { return "err|EBADF|socket is closed".to_string(); };
+        socket.set_broadcast(enabled)
             .map(|()| "ok".to_string())
             .unwrap_or_else(udp_error)
     })
@@ -943,6 +958,53 @@ pub(super) fn tls_alpn(handle: u32) -> String {
     })
 }
 
+/// Negotiated protocol version and cipher suite of a connected TLS stream, as JSON, in the names Node reports
+/// (`getProtocol()` / `getCipher()`); empty when the handle is unknown or the handshake has not finished.
+pub(super) fn tls_session_info(handle: u32) -> String {
+    fn describe(version: Option<rustls::ProtocolVersion>, suite: Option<rustls::SupportedCipherSuite>) -> String {
+        let (Some(version), Some(suite)) = (version, suite) else {
+            return String::new();
+        };
+        let protocol = match version {
+            rustls::ProtocolVersion::TLSv1_3 => "TLSv1.3".to_string(),
+            rustls::ProtocolVersion::TLSv1_2 => "TLSv1.2".to_string(),
+            other => format!("{other:?}"),
+        };
+        // rustls spells TLS 1.3 suites `TLS13_*`; the IANA/Node standard name is `TLS_*`.
+        let standard = format!("{:?}", suite.suite()).replacen("TLS13_", "TLS_", 1);
+        // OpenSSL's cipher name: `TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256` -> `ECDHE-RSA-AES128-GCM-SHA256`
+        // (TLS 1.3 suites keep their standard name).
+        let name = if protocol == "TLSv1.3" {
+            standard.clone()
+        } else {
+            let trimmed = standard.trim_start_matches("TLS_").replacen("WITH_", "", 1);
+            trimmed
+                .replacen("CHACHA20_POLY1305_SHA256", "CHACHA20_POLY1305", 1)
+                .replace('_', "-")
+                .replace("AES-128", "AES128")
+                .replace("AES-256", "AES256")
+        };
+        format!(r#"{{"protocol":"{protocol}","name":"{name}","standardName":"{standard}"}}"#)
+    }
+    let client = TLS_STREAMS.with(|streams| {
+        streams
+            .borrow()
+            .1
+            .get(&handle)
+            .map(|stream| describe(stream.conn.protocol_version(), stream.conn.negotiated_cipher_suite()))
+    });
+    client.unwrap_or_else(|| {
+        TLS_SERVER_STREAMS.with(|streams| {
+            streams
+                .borrow()
+                .1
+                .get(&handle)
+                .map(|stream| describe(stream.conn.protocol_version(), stream.conn.negotiated_cipher_suite()))
+                .unwrap_or_default()
+        })
+    })
+}
+
 fn tls_certificate_bytes(handle: u32, peer: bool) -> Option<Vec<u8>> {
     let read = |certificates: &HashMap<u32, TlsCertificates>| {
         certificates
@@ -1213,6 +1275,8 @@ fn tls_destroy(_: u32) {}
 #[cfg(not(feature = "tls"))]
 fn tls_alpn(_: u32) -> String { String::new() }
 #[cfg(not(feature = "tls"))]
+fn tls_session_info(_: u32) -> String { String::new() }
+#[cfg(not(feature = "tls"))]
 fn tls_certificate(_: u32, _: bool) -> String { String::new() }
 #[cfg(not(feature = "tls"))]
 fn tls_certificate_metadata(_: u32, _: bool) -> String { "{}".to_string() }
@@ -1232,7 +1296,7 @@ fn net_poll_read_retires_stream_after_peer_reset() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let connected = net_connect("127.0.0.1", port);
-    let handle: u32 = connected.strip_prefix("ok:").unwrap().parse().unwrap();
+    let handle: u32 = connected.strip_prefix("ok:").unwrap().split(':').next().unwrap().parse().unwrap();
     let (peer, _) = listener.accept().unwrap();
     let linger = libc::linger {
         l_onoff: 1,

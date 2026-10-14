@@ -2050,6 +2050,8 @@ fn ensure_context() {
                 let udp_connect_function = Function::new(ctx.clone(), |handle: u32, host: String, port: u32| {
                     match u16::try_from(port) { Ok(port) if port != 0 => udp_connect(handle, &host, port), _ => "err|EINVAL|invalid UDP port".to_string() }
                 }).expect("failed to create JavaScript UDP connector");
+                let udp_set_broadcast_function = Function::new(ctx.clone(), |handle: u32, enabled: bool| udp_set_broadcast(handle, enabled))
+                    .expect("failed to create JavaScript UDP broadcast setter");
                 let udp_disconnect_function = Function::new(ctx.clone(), |handle: u32| udp_disconnect(handle))
                     .expect("failed to create JavaScript UDP disconnector");
                 let udp_close_function =
@@ -2146,6 +2148,9 @@ fn ensure_context() {
                         .expect("failed to create JavaScript TLS closer");
                 let tls_alpn_function = Function::new(ctx.clone(), |handle: u32| tls_alpn(handle))
                     .expect("failed to create JavaScript TLS ALPN reader");
+                let tls_session_info_function =
+                    Function::new(ctx.clone(), |handle: u32| tls_session_info(handle))
+                        .expect("failed to create JavaScript TLS session info reader");
                 let tls_peer_certificate_function =
                     Function::new(ctx.clone(), |handle: u32| tls_certificate(handle, true))
                         .expect("failed to create JavaScript TLS peer certificate reader");
@@ -2853,6 +2858,9 @@ fn ensure_context() {
                     .set("__thaw_udp_connect", udp_connect_function)
                     .expect("failed to install JavaScript UDP connector");
                 ctx.globals()
+                    .set("__thaw_udp_set_broadcast", udp_set_broadcast_function)
+                    .expect("failed to install JavaScript UDP broadcast setter");
+                ctx.globals()
                     .set("__thaw_udp_disconnect", udp_disconnect_function)
                     .expect("failed to install JavaScript UDP disconnector");
                 ctx.globals()
@@ -2891,6 +2899,9 @@ fn ensure_context() {
                 ctx.globals()
                     .set("__thaw_tls_alpn", tls_alpn_function)
                     .expect("failed to install JavaScript TLS ALPN reader");
+                ctx.globals()
+                    .set("__thaw_tls_session_info", tls_session_info_function)
+                    .expect("failed to install JavaScript TLS session info reader");
                 ctx.globals()
                     .set("__thaw_tls_peer_certificate", tls_peer_certificate_function)
                     .expect("failed to install JavaScript TLS peer certificate reader");
