@@ -1653,21 +1653,9 @@ fn strong_map_set_json_constructors_coerce_original_slots() {
                     }
                 }
                 if let HirExpr::Lambda(_, parameters, _, body) = callee.as_ref() {
-                    observed.union_source_params.extend(parameters.iter().filter_map(|parameter| {
-                        (parameter.name.starts_with("__thaw_union_map_source_")
-                            || parameter.name.starts_with("__thaw_union_set_source_"))
-                        .then(|| parameter.name.clone())
-                    }));
-                    observed.literal_slot_params.extend(parameters.iter().filter_map(|parameter| {
-                        (parameter.name.starts_with("__thaw_map_literal_")
-                            && !parameter.name.starts_with("__thaw_map_literal_pair_")).then(|| {
-                                (parameter.name.clone(), parameter.ty.clone())
-                            })
-                    }));
-                    observed.literal_pair_params.extend(parameters.iter().filter_map(|parameter| {
-                        parameter.name.starts_with("__thaw_map_literal_pair_")
-                            .then(|| (parameter.name.clone(), parameter.ty.clone()))
-                    }));
+                    observed.union_source_params.extend(parameters.iter().filter(|parameter| parameter.name.starts_with("__thaw_union_map_source_") || parameter.name.starts_with("__thaw_union_set_source_")).map(|parameter| parameter.name.clone()));
+                    observed.literal_slot_params.extend(parameters.iter().filter(|parameter| parameter.name.starts_with("__thaw_map_literal_") && !parameter.name.starts_with("__thaw_map_literal_pair_")).map(|parameter| (parameter.name.clone(), parameter.ty.clone())));
+                    observed.literal_pair_params.extend(parameters.iter().filter(|parameter| parameter.name.starts_with("__thaw_map_literal_pair_")).map(|parameter| (parameter.name.clone(), parameter.ty.clone())));
                     for argument in arguments { visit_expression(argument, observed); }
                     visit_expression(body, observed);
                 } else {
@@ -1676,21 +1664,9 @@ fn strong_map_set_json_constructors_coerce_original_slots() {
                 }
             }
             HirExpr::Lambda(_, parameters, _, body) => {
-                observed.union_source_params.extend(parameters.iter().filter_map(|parameter| {
-                    (parameter.name.starts_with("__thaw_union_map_source_")
-                        || parameter.name.starts_with("__thaw_union_set_source_"))
-                    .then(|| parameter.name.clone())
-                }));
-                observed.literal_slot_params.extend(parameters.iter().filter_map(|parameter| {
-                    (parameter.name.starts_with("__thaw_map_literal_")
-                        && !parameter.name.starts_with("__thaw_map_literal_pair_")).then(|| {
-                            (parameter.name.clone(), parameter.ty.clone())
-                        })
-                }));
-                observed.literal_pair_params.extend(parameters.iter().filter_map(|parameter| {
-                    parameter.name.starts_with("__thaw_map_literal_pair_")
-                        .then(|| (parameter.name.clone(), parameter.ty.clone()))
-                }));
+                observed.union_source_params.extend(parameters.iter().filter(|parameter| parameter.name.starts_with("__thaw_union_map_source_") || parameter.name.starts_with("__thaw_union_set_source_")).map(|parameter| parameter.name.clone()));
+                observed.literal_slot_params.extend(parameters.iter().filter(|parameter| parameter.name.starts_with("__thaw_map_literal_") && !parameter.name.starts_with("__thaw_map_literal_pair_")).map(|parameter| (parameter.name.clone(), parameter.ty.clone())));
+                observed.literal_pair_params.extend(parameters.iter().filter(|parameter| parameter.name.starts_with("__thaw_map_literal_pair_")).map(|parameter| (parameter.name.clone(), parameter.ty.clone())));
                 visit_expression(body, observed);
             }
             HirExpr::RecursiveClosure(_, _, body) | HirExpr::TypedClosure(_, body) => visit_expression(body, observed),

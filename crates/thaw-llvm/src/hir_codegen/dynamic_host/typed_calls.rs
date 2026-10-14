@@ -230,11 +230,7 @@ impl<'ctx> HirCompiler<'ctx> {
     fn finish_typed_wrapper_argument_scope_for_constructor(
         &mut self,
         expected_owner: &TypedJsonArgumentOwner,
-    ) -> Result<(
-        Vec<FreshEventKeyHandle<'ctx>>,
-        Vec<FreshJsonArgument<'ctx>>,
-        Option<FreshJsonArgumentArray<'ctx>>,
-    ), String> {
+    ) -> Result<FreshConstructorArguments<'ctx>, String> {
         if !matches!(expected_owner, TypedJsonArgumentOwner::NapiConstructor(_)) {
             return Err("constructor argument scope has the wrong JSON owner kind".into());
         }

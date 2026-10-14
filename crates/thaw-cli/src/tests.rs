@@ -196,7 +196,8 @@ fn compiles_and_runs_a_program_that_constructs_new_intl_classes() {
 
 #[test]
 fn path_builtin_named_values_compile_with_default_and_subpath_imports() {
-    let directory = std::env::temp_dir().join(format!("thaw-cli-path-exports-{}", std::process::id()));
+    let directory =
+        std::env::temp_dir().join(format!("thaw-cli-path-exports-{}", std::process::id()));
     std::fs::create_dir_all(&directory).unwrap();
     let input = directory.join("main.ts");
     let output = directory.join("app");
@@ -1796,10 +1797,8 @@ fn embedded_compat_and_package_bundle_names_are_logical_sources() {
 
 #[test]
 fn text_encoding_named_util_and_globals_compile_and_run() {
-    let directory = std::env::temp_dir().join(format!(
-        "thaw-cli-text-encoding-{}",
-        std::process::id()
-    ));
+    let directory =
+        std::env::temp_dir().join(format!("thaw-cli-text-encoding-{}", std::process::id()));
     std::fs::create_dir_all(&directory).unwrap();
     let input = directory.join("main.ts");
     let output = directory.join("app");

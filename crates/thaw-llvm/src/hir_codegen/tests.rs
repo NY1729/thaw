@@ -369,7 +369,10 @@ fn immediate_jsvalue_identity_lambda_reads_capture_without_retaining_environment
     let ir = compiler.print_to_string();
     let symbol = ir.find("@immediate_capture(").unwrap();
     let start = ir[..symbol].rfind("define ").unwrap();
-    let end = ir[symbol..].find("\n}").map(|offset| symbol + offset).unwrap();
+    let end = ir[symbol..]
+        .find("\n}")
+        .map(|offset| symbol + offset)
+        .unwrap();
     let function_ir = &ir[start..end];
     assert!(
         function_ir.contains("load i64"),
@@ -393,12 +396,8 @@ fn typed_quickjs_wrapper_lease_requires_all_paths_to_return_native_jsvalue() {
         params: Vec::new(),
         ret: HirType::JsValue,
     };
-    let dynamic_return = || {
-        HirStmt::Return(Some(HirExpr::DynamicCall(
-            signature.clone(),
-            Vec::new(),
-        )))
-    };
+    let dynamic_return =
+        || HirStmt::Return(Some(HirExpr::DynamicCall(signature.clone(), Vec::new())));
     let proven = HirFunction {
         name: "__thaw_typed_wrapper_js_proven".into(),
         params: Vec::new(),

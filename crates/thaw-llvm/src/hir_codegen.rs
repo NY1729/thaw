@@ -23,8 +23,8 @@ use inkwell::targets::{
 };
 use inkwell::types::{BasicMetadataTypeEnum, BasicType, BasicTypeEnum, FunctionType};
 use inkwell::values::{
-    AsValueRef, BasicMetadataValueEnum, BasicValue, BasicValueEnum, FloatValue, FunctionValue, IntValue,
-    PointerValue, StructValue,
+    AsValueRef, BasicMetadataValueEnum, BasicValue, BasicValueEnum, FloatValue, FunctionValue,
+    IntValue, PointerValue, StructValue,
 };
 use inkwell::{AddressSpace, FloatPredicate, IntPredicate, OptimizationLevel};
 
@@ -309,7 +309,7 @@ struct FreshJsonArgument<'ctx> {
 }
 
 #[derive(Clone, Copy)]
-struct NativeHandleLedger<'ctx> {
+pub(crate) struct NativeHandleLedger<'ctx> {
     buffer: inkwell::values::PointerValue<'ctx>,
     capacity: inkwell::values::PointerValue<'ctx>,
 }
@@ -326,6 +326,12 @@ struct FreshJsonArgumentArray<'ctx> {
     value: PointerValue<'ctx>,
     active: PointerValue<'ctx>,
 }
+
+type FreshConstructorArguments<'ctx> = (
+    Vec<FreshEventKeyHandle<'ctx>>,
+    Vec<FreshJsonArgument<'ctx>>,
+    Option<FreshJsonArgumentArray<'ctx>>,
+);
 
 struct FreshEventKeyArgumentScope<'ctx> {
     catch_depth: usize,
@@ -516,9 +522,7 @@ fn returns_direct_quickjs_jsvalue(expr: &HirExpr) -> bool {
 }
 
 fn is_proven_typed_quickjs_wrapper(function: &HirFunction) -> bool {
-    if !function.name.starts_with("__thaw_typed_wrapper_js_")
-        || function.ret != HirType::JsValue
-    {
+    if !function.name.starts_with("__thaw_typed_wrapper_js_") || function.ret != HirType::JsValue {
         return false;
     }
 
@@ -785,7 +789,9 @@ impl<'ctx> HirCompiler<'ctx> {
             .iter()
             .map(|function| (function.name.clone(), function.ret.clone()))
             .collect();
-        self.proven_typed_quickjs_wrappers = program.functions.iter()
+        self.proven_typed_quickjs_wrappers = program
+            .functions
+            .iter()
             .filter(|function| is_proven_typed_quickjs_wrapper(function))
             .map(|function| function.name.clone())
             .collect();

@@ -4294,7 +4294,10 @@ fn installed_declarations_resolve_multihop_function_aliases_and_explicit_module_
     add_installed(&registry, &scratch.join("node_modules"), "alias-kit").unwrap();
     let declarations = resolve(&registry, "alias-kit").unwrap().dts_source;
     assert!(declarations.contains("declare function api(value: string): string"), "{declarations}");
-    assert!(declarations.contains("function original(value: number): number"), "{declarations}");
+    // `null` is not a legal function name, so the declaration carries a
+    // private public-alias name and is exported as `null` below.
+    assert!(declarations.contains("function __thaw_public_6e756c6c_"), "{declarations}");
+    assert!(declarations.contains("(value: number): number;"), "{declarations}");
     assert!(declarations.contains("export { __thaw_public_6e756c6c_"), "{declarations}");
     assert!(declarations.contains(" as null };"), "{declarations}");
     assert!(!declarations.contains("function null("), "{declarations}");
@@ -4393,9 +4396,13 @@ fn callable_const_alias_extracts_only_its_own_declarator() {
     add_installed(&registry, &scratch.join("node_modules"), "multidecl-kit").unwrap();
     let declarations = resolve(&registry, "multidecl-kit").unwrap().dts_source;
     assert!(declarations.contains("const c: () => string;"), "{declarations}");
-    assert!(declarations.contains("const ic: StringCall;"), "{declarations}");
+    // `StringCall` is private to `impl.d.ts`, so the declarator's reference is
+    // spelled through that file's support namespace.
+    assert!(declarations.contains("const ic: __thaw_support_"), "{declarations}");
+    assert!(declarations.contains(".StringCall;"), "{declarations}");
     assert!(declarations.contains("let lc: () => string;"), "{declarations}");
-    assert!(declarations.contains("var vc: StringCall;"), "{declarations}");
+    assert!(declarations.contains("var vc: __thaw_support_"), "{declarations}");
+    assert!(!declarations.contains("NumberCall"), "{declarations}");
     assert!(declarations.contains("let __thaw_public_766f6964_"), "{declarations}");
     assert!(declarations.contains(" as void };"), "{declarations}");
     assert!(declarations.contains("var __thaw_public_6e756c6c_"), "{declarations}");
@@ -4949,10 +4956,14 @@ fn retained_entry_and_appended_types_rewrite_after_import_removal() {
         "interface LeafId { value: number; }\nexport interface LeafModel { id: LeafId; }\n",
     ).unwrap();
     let output = dts_source_with_reexported_functions(&entry, source).unwrap();
-    assert!(output.contains("class EntryModel extends __thaw_support_"), "{output}");
-    assert!(output.contains(".Base { id: __thaw_support_"), "{output}");
+    // The removed default import is materialized under its local binding (as
+    // in the default-import-extends and named-class-alias tests), so only the
+    // two private id types move to support namespaces.
+    assert!(output.contains("class EntryModel extends Base { id: __thaw_support_"), "{output}");
+    assert!(output.contains("declare class Base { ready(): boolean; }"), "{output}");
+    assert!(output.contains("export type { Base };"), "{output}");
     assert!(output.contains("interface LeafModel { id: __thaw_support_"), "{output}");
-    assert_eq!(output.matches("type __thaw_private_support_marker__ = never").count(), 3, "{output}");
+    assert_eq!(output.matches("type __thaw_private_support_marker__ = never").count(), 2, "{output}");
     assert!(thaw_parser::parse_declarations(&output).is_ok(), "{output}");
     let _ = fs::remove_dir_all(dir);
 }

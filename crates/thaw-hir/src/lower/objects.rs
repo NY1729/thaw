@@ -265,7 +265,7 @@ impl<'a> FnLowerer<'a> {
         Some(name)
     }
 
-    fn is_compiler_symbol_property(&self, property: &PropName) -> bool {
+    pub(super) fn is_compiler_symbol_property(&self, property: &PropName) -> bool {
         matches!(property, PropName::Computed(computed)
             if self.builtin_symbol_member_name(&computed.expr).is_some())
     }
@@ -732,9 +732,21 @@ impl<'a> FnLowerer<'a> {
                             self.coerce_primitive_to_string(key)?
                         }
                     };
-                    let value = self.lower_object_lit_field_value(value, None)?;
-                    let value = self.coerce_to_declared(&HirType::Json, value)?;
-                    ("data", key, Some(value), None)
+                    // A function expression keeps its dynamic `this` exactly like
+                    // method syntax, so it is built as a receiver-forwarding callback.
+                    if let Expr::Fn(function) = value.as_ref() {
+                        let callback = self.lower_object_function(
+                            &function.function,
+                            HirType::JsValue,
+                            None,
+                            true,
+                        )?;
+                        ("method", key, None, Some(callback))
+                    } else {
+                        let value = self.lower_object_lit_field_value(value, None)?;
+                        let value = self.coerce_to_declared(&HirType::Json, value)?;
+                        ("data", key, Some(value), None)
+                    }
                 }
                 Prop::Shorthand(ident) => {
                     let value = self.lower_expr(&Expr::Ident(ident.clone()))?;
@@ -1300,8 +1312,7 @@ impl<'a> FnLowerer<'a> {
                         Prop::KeyValue(KeyValueProp {
                             key: PropName::Computed(computed),
                             ..
-                        }) => self.static_object_property_name(&PropName::Computed(computed.clone())).is_none()
-                            || self.is_compiler_symbol_property(&PropName::Computed(computed.clone())),
+                        }) => self.static_object_property_name(&PropName::Computed(computed.clone())).is_none(),
                         Prop::Method(property) => {
                             self.is_compiler_symbol_property(&property.key)
                                 || self.static_object_property_name(&property.key).is_none()

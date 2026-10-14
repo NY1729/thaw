@@ -2394,6 +2394,8 @@ function main(): void {
     const parser = parse({ columns: true });
     parser.write("x,y\n7,8\n");
     parser.end();
+    // Node only emits "end" once the buffered records are consumed.
+    parser.on("data", function () {});
     parser.on("end", function () {
         console.log("done");
     });

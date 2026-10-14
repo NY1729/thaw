@@ -328,6 +328,7 @@ fn flat_map_normalizes_sparse_wrapped_json_before_runtime_flattening() {
         source: HirExpr,
         body: HirExpr,
     }
+    type MapElementBinding = (String, HirType, Vec<(String, HirType)>);
     #[derive(Clone)]
     struct MapRoute {
         receiver_name: String,
@@ -336,7 +337,7 @@ fn flat_map_normalizes_sparse_wrapped_json_before_runtime_flattening() {
         callback_bindings: Vec<CallbackBinding>,
         callback_calls: Vec<(String, Vec<HirExpr>)>,
         typed_indices: Vec<(String, HirType)>,
-        map_element_bindings: Vec<(String, HirType, Vec<(String, HirType)>)>,
+        map_element_bindings: Vec<MapElementBinding>,
         optional_none_names: Vec<String>,
         optional_value_names: Vec<String>,
     }
@@ -344,7 +345,7 @@ fn flat_map_normalizes_sparse_wrapped_json_before_runtime_flattening() {
     struct Observed {
         normalizers: Vec<(HirType, HirType)>,
         typed_indices: Vec<(String, HirType)>,
-        map_element_bindings: Vec<(String, HirType, Vec<(String, HirType)>)>,
+        map_element_bindings: Vec<MapElementBinding>,
         map_callback_bindings: Vec<CallbackBinding>,
         map_callback_calls: Vec<(String, Vec<HirExpr>)>,
         map_routes: Vec<MapRoute>,
@@ -592,7 +593,7 @@ fn flat_map_normalizes_sparse_wrapped_json_before_runtime_flattening() {
             _ => None,
         }
     }
-    fn selected_return_flat<'a>(expression: &'a HirExpr) -> Option<(String, HirType, &'a HirExpr, String, HirType, &'a HirExpr)> {
+    fn selected_return_flat(expression: &HirExpr) -> Option<(String, HirType, &HirExpr, String, HirType, &HirExpr)> {
         let HirExpr::Call(callee, arguments) = expression else { return None };
         let HirExpr::Lambda(_, parameters, _, body) = callee.as_ref() else { return None };
         let Some(receiver) = parameters.first().filter(|parameter|
@@ -940,7 +941,7 @@ fn string_normalize_defaults_undefined_forms_lazily() {
     fn function<'a>(program: &'a HirProgram, name: &str) -> &'a HirFunction {
         program.functions.iter().find(|function| function.name == name).unwrap()
     }
-    fn form_source<'a>(expression: &'a HirExpr) -> Option<&'a HirExpr> {
+    fn form_source(expression: &HirExpr) -> Option<&HirExpr> {
         match expression {
             HirExpr::Call(callee, arguments) => {
                 if let HirExpr::Lambda(_, parameters, _, body) = callee.as_ref() {
@@ -1206,7 +1207,7 @@ fn string_split_defaults_undefined_separator_and_limit_lazily() {
         });
         found
     }
-    fn conditionals<'a>(function: &'a HirFunction) -> Vec<&'a HirExpr> {
+    fn conditionals(function: &HirFunction) -> Vec<&HirExpr> {
         let mut found = Vec::new();
         for statement in &function.body {
             visit_stmt(statement, &mut |node| {
@@ -3208,7 +3209,7 @@ fn array_and_string_end_arguments_default_only_for_undefined() {
     }
 
     for name in ["arraySliceOptional", "fillUndefined", "copyUndefined", "stringSliceUndefined", "substringUndefined", "substrUndefined"] {
-        raw_end_guard(function(&program, name), |test| has_optional_guard(test));
+        raw_end_guard(function(&program, name), has_optional_guard);
     }
     raw_end_guard(function(&program, "arraySliceUnionEnd"), |test| has_union_guard(test) || has_optional_guard(test));
     raw_end_guard(function(&program, "arraySliceJson"), |test| has_call(test, "__thaw_json_is_undefined"));

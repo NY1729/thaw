@@ -301,8 +301,6 @@ fn capture_pipe(
     mut pipe: impl std::io::Read,
     capture: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
 ) -> std::io::Result<()> {
-    use std::io::Read as _;
-
     let mut chunk = [0u8; 8192];
     loop {
         let count = match pipe.read(&mut chunk) {
@@ -315,12 +313,7 @@ fn capture_pipe(
         }
         capture
             .lock()
-            .map_err(|_| {
-                std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    "output capture lock poisoned",
-                )
-            })?
+            .map_err(|_| std::io::Error::other("output capture lock poisoned"))?
             .extend_from_slice(&chunk[..count]);
     }
 }

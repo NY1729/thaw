@@ -175,16 +175,22 @@ pub fn replace_allocation_reference(
     previous: usize,
     next: usize,
 ) -> bool {
-    if allocation_identity(owner) != Some(identity) { return false; }
+    if allocation_identity(owner) != Some(identity) {
+        return false;
+    }
     ALLOCATION_REFERENCES.with(|references| {
         let mut references = references.borrow_mut();
         let children = references.entry((identity, owner)).or_default();
         if let Some(index) = children.iter().position(|&child| child == previous) {
             children.remove(index);
         }
-        if next != 0 { children.push(next); }
+        if next != 0 {
+            children.push(next);
+        }
         let empty = children.is_empty();
-        if empty { references.remove(&(identity, owner)); }
+        if empty {
+            references.remove(&(identity, owner));
+        }
     });
     true
 }
@@ -200,7 +206,9 @@ pub fn remove_allocation_reference(identity: AllocationId, owner: usize, child: 
                 children.remove(index);
             }
             let empty = children.is_empty();
-            if empty { references.remove(&key); }
+            if empty {
+                references.remove(&key);
+            }
         }
     });
 }
@@ -293,8 +301,12 @@ pub fn allocation_span_identity(
     byte_len: usize,
     alignment: usize,
 ) -> Option<(AllocationId, usize)> {
-    if pointer == 0 || byte_len == 0 || alignment == 0 || !alignment.is_power_of_two()
-        || pointer % alignment != 0 || !is_tracing()
+    if pointer == 0
+        || byte_len == 0
+        || alignment == 0
+        || !alignment.is_power_of_two()
+        || !pointer.is_multiple_of(alignment)
+        || !is_tracing()
     {
         return None;
     }
@@ -303,7 +315,9 @@ pub fn allocation_span_identity(
         let (&base, &(size, _)) = allocations.range(..=pointer).next_back()?;
         let offset = pointer.checked_sub(base)?;
         let end = offset.checked_add(byte_len)?;
-        if end > size { return None; }
+        if end > size {
+            return None;
+        }
         let serial = ALLOCATION_IDS.with(|ids| ids.try_borrow().ok()?.get(&base).copied())?;
         Some((AllocationId { base, serial }, offset))
     })
@@ -313,56 +327,108 @@ pub fn allocation_span_identity(
 /// roots, references, allocation metadata, or bump generations.
 pub fn snapshot_native_graph() -> Result<NativeGraphSnapshot, SnapshotError> {
     let allocations = ALLOCATIONS.with(|allocations| {
-        let allocations = allocations.try_borrow().map_err(|_| SnapshotError::BorrowConflict)?;
+        let allocations = allocations
+            .try_borrow()
+            .map_err(|_| SnapshotError::BorrowConflict)?;
         ALLOCATION_IDS.with(|ids| {
-            let ids = ids.try_borrow().map_err(|_| SnapshotError::BorrowConflict)?;
+            let ids = ids
+                .try_borrow()
+                .map_err(|_| SnapshotError::BorrowConflict)?;
             let mut copied = BTreeMap::new();
             for (&base, &(size, generation)) in allocations.iter() {
-                let serial = ids.get(&base).copied().ok_or(SnapshotError::IdentityUnavailable)?;
+                let serial = ids
+                    .get(&base)
+                    .copied()
+                    .ok_or(SnapshotError::IdentityUnavailable)?;
                 let mut pointer_words = Vec::new();
                 for offset in (0..size.saturating_sub(std::mem::size_of::<usize>() - 1))
                     .step_by(std::mem::size_of::<usize>())
                 {
-                    pointer_words.push(unsafe { ((base + offset) as *const usize).read_unaligned() });
+                    pointer_words
+                        .push(unsafe { ((base + offset) as *const usize).read_unaligned() });
                 }
-                copied.insert(base, AllocationSnapshot {
-                    id: AllocationId { base, serial }, size, generation, pointer_words,
-                });
+                copied.insert(
+                    base,
+                    AllocationSnapshot {
+                        id: AllocationId { base, serial },
+                        size,
+                        generation,
+                        pointer_words,
+                    },
+                );
             }
             Ok(copied)
         })
     })?;
-    let mut references = REFERENCES.with(|references| references.try_borrow()
-        .map(|references| references.clone()).map_err(|_| SnapshotError::BorrowConflict))?;
+    let mut references = REFERENCES.with(|references| {
+        references
+            .try_borrow()
+            .map(|references| references.clone())
+            .map_err(|_| SnapshotError::BorrowConflict)
+    })?;
     ALLOCATION_REFERENCES.with(|edges| {
-        let edges = edges.try_borrow().map_err(|_| SnapshotError::BorrowConflict)?;
+        let edges = edges
+            .try_borrow()
+            .map_err(|_| SnapshotError::BorrowConflict)?;
         for (&(identity, owner), children) in edges.iter() {
-            if allocations.get(&identity.base).is_some_and(|allocation| allocation.id == identity) {
-                references.entry(owner).or_default().extend(children.iter().copied());
+            if allocations
+                .get(&identity.base)
+                .is_some_and(|allocation| allocation.id == identity)
+            {
+                references
+                    .entry(owner)
+                    .or_default()
+                    .extend(children.iter().copied());
             }
         }
         Ok::<(), SnapshotError>(())
     })?;
     let root_values = ROOTS.with(|roots| {
-        let roots = roots.try_borrow().map_err(|_| SnapshotError::BorrowConflict)?;
-        Ok(roots.iter().map(|&slot| unsafe { (slot as *const usize).read_unaligned() }).collect())
+        let roots = roots
+            .try_borrow()
+            .map_err(|_| SnapshotError::BorrowConflict)?;
+        Ok(roots
+            .iter()
+            .map(|&slot| unsafe { (slot as *const usize).read_unaligned() })
+            .collect())
     })?;
-    let root_slots = ROOTS.with(|roots| roots.try_borrow()
-        .map(|roots| roots.clone()).map_err(|_| SnapshotError::BorrowConflict))?;
-    let pinned_counts = PINNED.with(|pinned| pinned.try_borrow()
-        .map(|pinned| pinned.clone()).map_err(|_| SnapshotError::BorrowConflict))?;
-    let epoch = GRAPH_EPOCH.with(Cell::get).ok_or(SnapshotError::IdentityUnavailable)?;
-    Ok(NativeGraphSnapshot { epoch, allocations, references, root_values, root_slots, pinned_counts,
-        _thread_local: std::marker::PhantomData })
+    let root_slots = ROOTS.with(|roots| {
+        roots
+            .try_borrow()
+            .map(|roots| roots.clone())
+            .map_err(|_| SnapshotError::BorrowConflict)
+    })?;
+    let pinned_counts = PINNED.with(|pinned| {
+        pinned
+            .try_borrow()
+            .map(|pinned| pinned.clone())
+            .map_err(|_| SnapshotError::BorrowConflict)
+    })?;
+    let epoch = GRAPH_EPOCH
+        .with(Cell::get)
+        .ok_or(SnapshotError::IdentityUnavailable)?;
+    Ok(NativeGraphSnapshot {
+        epoch,
+        allocations,
+        references,
+        root_values,
+        root_slots,
+        pinned_counts,
+        _thread_local: std::marker::PhantomData,
+    })
 }
 
 /// Computes native reachability using only copied snapshot data.
 pub fn mark_native_graph(snapshot: &NativeGraphSnapshot, roots: &[usize]) -> NativeMark {
     let mut mark = NativeMark::default();
-    let mut pending = snapshot.root_values.iter().copied()
+    let mut pending = snapshot
+        .root_values
+        .iter()
+        .copied()
         .chain(snapshot.root_slots.iter().copied())
         .chain(snapshot.pinned_counts.keys().copied())
-        .chain(roots.iter().copied()).collect::<Vec<_>>();
+        .chain(roots.iter().copied())
+        .collect::<Vec<_>>();
     while let Some(pointer) = pending.pop() {
         if !mark.owner_nodes.insert(pointer) {
             continue;
@@ -370,8 +436,12 @@ pub fn mark_native_graph(snapshot: &NativeGraphSnapshot, roots: &[usize]) -> Nat
         if let Some(children) = snapshot.references.get(&pointer) {
             pending.extend(children.iter().copied());
         }
-        let Some((&base, allocation)) = snapshot.allocations.range(..=pointer).next_back() else { continue; };
-        if pointer - base >= allocation.size || !mark.allocation_starts.insert(base) { continue; }
+        let Some((&base, allocation)) = snapshot.allocations.range(..=pointer).next_back() else {
+            continue;
+        };
+        if pointer - base >= allocation.size || !mark.allocation_starts.insert(base) {
+            continue;
+        }
         mark.retained_generations.insert(allocation.generation);
         pending.extend(allocation.pointer_words.iter().copied());
     }
@@ -445,7 +515,9 @@ pub extern "C" fn thaw_arena_alloc(size: usize, align: usize) -> *mut u8 {
         let generation = RETAINED.with(|retained| retained.borrow().len());
         ALLOCATIONS.with(|allocations| {
             let base = pointer as usize;
-            allocations.borrow_mut().insert(base, (size.max(1), generation));
+            allocations
+                .borrow_mut()
+                .insert(base, (size.max(1), generation));
             ALLOCATION_IDS.with(|ids| {
                 let serial = NEXT_ALLOCATION_ID.with(|next| next.get().checked_add(1));
                 if let Some(serial) = serial {
@@ -506,7 +578,9 @@ pub extern "C" fn thaw_arena_reset() {
                             if let Some(serial) = ids.borrow().get(&base).copied() {
                                 let identity = AllocationId { base, serial };
                                 ALLOCATION_REFERENCES.with(|references| {
-                                    if let Some(children) = references.borrow().get(&(identity, pointer)) {
+                                    if let Some(children) =
+                                        references.borrow().get(&(identity, pointer))
+                                    {
                                         pending.extend(children);
                                     }
                                 });
@@ -543,7 +617,8 @@ pub extern "C" fn thaw_arena_reset() {
                     live.contains(&identity.base)
                         && ids.get(&identity.base) == Some(&identity.serial)
                         && *owner >= identity.base
-                        && allocations.get(&identity.base)
+                        && allocations
+                            .get(&identity.base)
                             .is_some_and(|(size, _)| *owner - identity.base < *size)
                 });
             });
@@ -559,7 +634,10 @@ pub extern "C" fn thaw_arena_reset() {
                     false
                 }
             });
-            ALLOCATION_IDS.with(|ids| ids.borrow_mut().retain(|base, _| allocations.contains_key(base)));
+            ALLOCATION_IDS.with(|ids| {
+                ids.borrow_mut()
+                    .retain(|base, _| allocations.contains_key(base))
+            });
         });
         RETAINED.with(|retained| {
             let mut retained = retained.borrow_mut();
@@ -621,13 +699,28 @@ mod tests {
 
             let base = thaw_arena_alloc(width + 1, align) as usize;
             let identity = allocation_identity(base).unwrap();
-            assert_eq!(allocation_span_identity(base, width, align), Some((identity, 0)));
-            assert!(allocation_span_identity(base + 1, width, align).is_none(),
-                "an unaligned pointer field cannot be published");
-            assert!(allocation_span_identity(base + width, width, 1).is_none(),
-                "a pointer-sized field cannot extend past the allocation end");
-            assert_ne!(allocation_span_identity(base, width, align).unwrap().0.serial, 0);
-        }).join().unwrap();
+            assert_eq!(
+                allocation_span_identity(base, width, align),
+                Some((identity, 0))
+            );
+            assert!(
+                allocation_span_identity(base + 1, width, align).is_none(),
+                "an unaligned pointer field cannot be published"
+            );
+            assert!(
+                allocation_span_identity(base + width, width, 1).is_none(),
+                "a pointer-sized field cannot extend past the allocation end"
+            );
+            assert_ne!(
+                allocation_span_identity(base, width, align)
+                    .unwrap()
+                    .0
+                    .serial,
+                0
+            );
+        })
+        .join()
+        .unwrap();
     }
 
     #[test]
@@ -639,17 +732,27 @@ mod tests {
             unsafe { thaw_arena_register_root(slot) };
 
             let child = thaw_arena_alloc(8, 8) as usize;
-            unsafe { (child as *mut usize).write(0); }
+            unsafe {
+                (child as *mut usize).write(0);
+            }
             replace_reference(slot as usize, 0, child);
             let snapshot = snapshot_native_graph().unwrap();
             assert!(snapshot.root_slots.contains(&(slot as usize)));
-            assert!(mark_native_graph(&snapshot, &[]).owner_nodes.contains(&child));
+            assert!(mark_native_graph(&snapshot, &[])
+                .owner_nodes
+                .contains(&child));
             thaw_arena_reset();
-            assert!(!was_reclaimed(child), "the global slot's side edge retains its child");
+            assert!(
+                !was_reclaimed(child),
+                "the global slot's side edge retains its child"
+            );
 
             replace_reference(slot as usize, child, 0);
             thaw_arena_reset();
-            assert!(was_reclaimed(child), "removing the global edge releases its child");
+            assert!(
+                was_reclaimed(child),
+                "removing the global edge releases its child"
+            );
             assert_eq!(unsafe { thaw_arena_unregister_root(slot) }, 1);
             assert_eq!(unsafe { thaw_arena_unregister_root(slot) }, 0);
         })
@@ -662,10 +765,30 @@ mod tests {
         let snapshot = NativeGraphSnapshot {
             epoch: 0,
             allocations: BTreeMap::from([
-                (100, AllocationSnapshot { id: AllocationId { base: 100, serial: 1 }, size: 16,
-                    generation: 3, pointer_words: vec![205, 9999] }),
-                (200, AllocationSnapshot { id: AllocationId { base: 200, serial: 2 }, size: 8,
-                    generation: 4, pointer_words: vec![] }),
+                (
+                    100,
+                    AllocationSnapshot {
+                        id: AllocationId {
+                            base: 100,
+                            serial: 1,
+                        },
+                        size: 16,
+                        generation: 3,
+                        pointer_words: vec![205, 9999],
+                    },
+                ),
+                (
+                    200,
+                    AllocationSnapshot {
+                        id: AllocationId {
+                            base: 200,
+                            serial: 2,
+                        },
+                        size: 8,
+                        generation: 4,
+                        pointer_words: vec![],
+                    },
+                ),
             ]),
             references: BTreeMap::from([(205, vec![200, 200])]),
             root_values: vec![104],

@@ -3045,7 +3045,7 @@ fn drain_native_graph_releases() {
 
 fn drain_native_graph_release_queue() {
     let Ok(entered) = NATIVE_GRAPH_RELEASES_DRAINING.try_with(|draining| {
-        if draining.replace(true) { false } else { true }
+        !draining.replace(true)
     }) else { return; };
     if !entered { return; }
     struct DrainGuard;
@@ -3054,10 +3054,9 @@ fn drain_native_graph_release_queue() {
     }
     let _guard = DrainGuard;
     let mut failed = Vec::new();
-    loop {
-        let Some(batch) = PENDING_NATIVE_GRAPH_RELEASES.try_with(|pending| {
-            pending.try_borrow_mut().ok().map(|mut pending| std::mem::take(&mut *pending))
-        }).ok().flatten() else { break; };
+    while let Some(batch) = PENDING_NATIVE_GRAPH_RELEASES.try_with(|pending| {
+        pending.try_borrow_mut().ok().map(|mut pending| std::mem::take(&mut *pending))
+    }).ok().flatten() {
         if batch.is_empty() { break; }
         for release in batch {
             let success = release.callback.is_some_and(|callback| callback(release.token) != 0);

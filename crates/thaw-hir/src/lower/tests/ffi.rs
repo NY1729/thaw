@@ -290,7 +290,8 @@ fn marks_fresh_json_arguments_for_ordinary_quickjs_returns_only() {
             "{name}: {body}"
         );
     }
-    for name in ["borrowed"] {
+    {
+        let name = "borrowed";
         let body = function_body(name);
         assert!(
             !body.contains("__thaw_mark_typed_wrapper_json_argument"),

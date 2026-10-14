@@ -1655,7 +1655,7 @@ mod process_credential_tests {
 
     #[test]
     fn async_invalid_native_options_queue_error_then_terminal_exit_only() {
-        let (commands, command_receiver) = mpsc::channel();
+        let (_commands, command_receiver) = mpsc::channel();
         let (events_sender, events_receiver) = mpsc::channel();
         let worker = std::thread::spawn(move || {
             run_host_child("/path/not/started".into(), Vec::new(), "[]".into(), command_receiver, events_sender);
@@ -1870,7 +1870,7 @@ mod process_credential_tests {
         let output = String::from_utf8(stdout).unwrap();
         let identity = output.lines().find_map(|line| line.strip_prefix("THAW_CREDENTIAL_IDENTITY=")).expect("async identity helper output");
         let observed: Vec<u32> = identity.split(',').map(|part| part.parse().unwrap()).collect();
-        assert_eq!(&observed[..4], &[uid as u32, uid as u32, gid as u32, gid as u32], "async command must apply both requested credentials");
+        assert_eq!(&observed[..4], &[uid, uid, gid, gid], "async command must apply both requested credentials");
         assert_eq!((unsafe { libc::getuid() }, unsafe { libc::geteuid() }, unsafe { libc::getgid() }, unsafe { libc::getegid() }), parent, "credential application must not mutate the parent");
         assert!(!events.iter().any(|event| event["type"] == "error"));
         assert!(!host_children_active(), "terminal poll must release the child handle");

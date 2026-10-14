@@ -373,8 +373,11 @@ impl ErrorBoundaryFixtureGuard {
     }
 
     fn preserve_globals(&mut self, names: &[&str]) {
-        let list = names.iter().map(|name| serde_json::to_string(name).unwrap())
-            .collect::<Vec<_>>().join(",");
+        let list = names
+            .iter()
+            .map(|name| serde_json::to_string(name).unwrap())
+            .collect::<Vec<_>>()
+            .join(",");
         let save = format!(
             "globalThis.__errorBoundarySavedGlobalDescriptors = [{list}].map(name => [name, Object.getOwnPropertyDescriptor(globalThis, name)]); 1"
         );
@@ -394,7 +397,8 @@ impl ErrorBoundaryFixtureGuard {
 
     fn install_decoder_source(&mut self, source: &str) {
         with_context(|ctx| {
-            let source = ctx.eval::<Object<'_>, _>(source)
+            let source = ctx
+                .eval::<Object<'_>, _>(source)
                 .expect("create isolated exact-boundary decoder source");
             super::set_error_boundary_test_decoder_source(&ctx, source);
         });
@@ -407,7 +411,9 @@ impl ErrorBoundaryFixtureGuard {
     }
 
     fn handle(&mut self, handle: u64) -> u64 {
-        if handle != 0 { self.handles.push(handle); }
+        if handle != 0 {
+            self.handles.push(handle);
+        }
         handle
     }
 
@@ -417,7 +423,11 @@ impl ErrorBoundaryFixtureGuard {
     }
 
     fn transferred_claim_retired(&mut self, handle: u64) {
-        let Some(index) = self.handles.iter().rposition(|candidate| *candidate == handle) else {
+        let Some(index) = self
+            .handles
+            .iter()
+            .rposition(|candidate| *candidate == handle)
+        else {
             unreachable!("transferred claims are validated before wire creation");
         };
         self.handles.remove(index);
@@ -425,37 +435,67 @@ impl ErrorBoundaryFixtureGuard {
 
     fn validate_transferred_claims(&self, transferred: &[u64]) {
         for (index, handle) in transferred.iter().enumerate() {
-            let previous = transferred[..index].iter().filter(|candidate| *candidate == handle).count();
+            let previous = transferred[..index]
+                .iter()
+                .filter(|candidate| *candidate == handle)
+                .count();
             if previous == 0 {
-                let requested = transferred.iter().filter(|candidate| *candidate == handle).count();
-                let owned = self.handles.iter().filter(|candidate| *candidate == handle).count();
-                assert!(owned >= requested, "every transferred P claim is fixture-owned before graph creation");
+                let requested = transferred
+                    .iter()
+                    .filter(|candidate| *candidate == handle)
+                    .count();
+                let owned = self
+                    .handles
+                    .iter()
+                    .filter(|candidate| *candidate == handle)
+                    .count();
+                assert!(
+                    owned >= requested,
+                    "every transferred P claim is fixture-owned before graph creation"
+                );
             }
         }
     }
 
-    fn capture_result(&mut self, result: ThawCallWithExceptionResult) -> ThawCallWithExceptionResult {
+    fn capture_result(
+        &mut self,
+        result: ThawCallWithExceptionResult,
+    ) -> ThawCallWithExceptionResult {
         self.handle(result.value);
         self.handle(result.exception_handle);
-        if !result.error.is_null() { self.strings.push(result.error.cast_mut()); }
+        if !result.error.is_null() {
+            self.strings.push(result.error.cast_mut());
+        }
         let success = result.value != 0 && result.exception_handle == 0 && result.error.is_null();
         let exception = result.value == 0 && result.exception_handle != 0 && result.error.is_null();
-        let bridge_error = result.value == 0 && result.exception_handle == 0 && !result.error.is_null();
-        assert_eq!(usize::from(success) + usize::from(exception) + usize::from(bridge_error), 1,
-            "exact boundary returns exactly one value, exception, or bridge-error lane");
+        let bridge_error =
+            result.value == 0 && result.exception_handle == 0 && !result.error.is_null();
+        assert_eq!(
+            usize::from(success) + usize::from(exception) + usize::from(bridge_error),
+            1,
+            "exact boundary returns exactly one value, exception, or bridge-error lane"
+        );
         assert!(result.exception_object_like <= 1);
-        if success || bridge_error { assert_eq!(result.exception_object_like, 0); }
+        if success || bridge_error {
+            assert_eq!(result.exception_object_like, 0);
+        }
         result
     }
 
     fn capture_handle_result(&mut self, result: ThawHandleResult) -> ThawHandleResult {
         self.handle(result.value);
-        if !result.error.is_null() { self.strings.push(result.error.cast_mut()); }
+        if !result.error.is_null() {
+            self.strings.push(result.error.cast_mut());
+        }
         result
     }
 
     fn release_handle(&mut self, handle: u64) {
-        let Some(index) = self.handles.iter().rposition(|candidate| *candidate == handle) else {
+        let Some(index) = self
+            .handles
+            .iter()
+            .rposition(|candidate| *candidate == handle)
+        else {
             panic!("release is not owned by this exact-boundary fixture guard");
         };
         self.handles.remove(index);
@@ -476,7 +516,11 @@ impl ErrorBoundaryFixtureGuard {
         }
         while let Some(handle) = self.handles.pop() {
             if verify {
-                assert_eq!(thaw_js_release_handle(handle), 1, "fixture-owned handle release");
+                assert_eq!(
+                    thaw_js_release_handle(handle),
+                    1,
+                    "fixture-owned handle release"
+                );
             } else {
                 let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     let _ = thaw_js_release_handle(handle);
@@ -496,7 +540,9 @@ impl ErrorBoundaryFixtureGuard {
 
 impl Drop for ErrorBoundaryFixtureGuard {
     fn drop(&mut self) {
-        if !self.finished { self.cleanup(false); }
+        if !self.finished {
+            self.cleanup(false);
+        }
     }
 }
 
@@ -523,8 +569,12 @@ impl ErrorBoundaryWire {
 
 impl Drop for ErrorBoundaryWire {
     fn drop(&mut self) {
-        unsafe extern "C" { fn thaw_json_discard_graph_wire(source: *const std::ffi::c_char); }
-        if self.grant_pending { unsafe { thaw_json_discard_graph_wire(self.pointer) }; }
+        unsafe extern "C" {
+            fn thaw_json_discard_graph_wire(source: *const std::ffi::c_char);
+        }
+        if self.grant_pending {
+            unsafe { thaw_json_discard_graph_wire(self.pointer) };
+        }
         unsafe { thaw_arena::destroy_string(self.pointer.cast_mut()) };
     }
 }
@@ -537,7 +587,11 @@ fn install_error_boundary_host_operations() {
             get: extern "C" fn(u64, *const std::ffi::c_char) -> ThawHandleResult,
             query: extern "C" fn(u64, u8) -> ThawResult,
             date_set: extern "C" fn(u64, f64) -> ThawResult,
-            set: extern "C" fn(u64, *const std::ffi::c_char, *const std::ffi::c_char) -> ThawHandleResult,
+            set: extern "C" fn(
+                u64,
+                *const std::ffi::c_char,
+                *const std::ffi::c_char,
+            ) -> ThawHandleResult,
             predicate: extern "C" fn(u64, *const std::ffi::c_char, u8) -> ThawHandleResult,
             enumerate: extern "C" fn(u64, u8) -> ThawResult,
         );
@@ -558,9 +612,13 @@ fn install_error_boundary_host_operations() {
 
 fn error_boundary_registry_state(handle: u64) -> (u64, bool) {
     with_context(|ctx| {
-        let refs: Array = ctx.globals().get("__thaw_value_handle_refs")
+        let refs: Array = ctx
+            .globals()
+            .get("__thaw_value_handle_refs")
             .expect("handle reference registry");
-        let live: Array = ctx.globals().get("__thaw_value_handle_live")
+        let live: Array = ctx
+            .globals()
+            .get("__thaw_value_handle_live")
             .expect("handle liveness registry");
         let index = (handle - 1) as usize;
         (
@@ -599,7 +657,8 @@ fn error_boundary_invoke_with_leases(
                 value: 0,
                 exception_handle: 0,
                 exception_object_like: 0,
-                error: thaw_arena::owned_string("failed to create registered graph wire").cast_const(),
+                error: thaw_arena::owned_string("failed to create registered graph wire")
+                    .cast_const(),
             }
         }
     };
@@ -644,26 +703,43 @@ fn error_boundary_assert_engine_error(handle: u64, name: &str, saved_constructor
 #[test]
 fn error_exact_boundary_lookup_preserves_original_markers_and_one_get() {
     let mut guard = ErrorBoundaryFixtureGuard::new();
-    guard.preserve_globals(&["Error", "__errorBoundaryMarkers", "__errorBoundaryMarker", "__errorBoundaryGetterCount"]);
-    assert_eq!(load(r#"
+    guard.preserve_globals(&[
+        "Error",
+        "__errorBoundaryMarkers",
+        "__errorBoundaryMarker",
+        "__errorBoundaryGetterCount",
+    ]);
+    assert_eq!(
+        load(
+            r#"
         globalThis.__errorBoundaryMarkers = [
           { tag: 'object' }, 'string marker', undefined,
           function marker() {}, Symbol('marker')
         ];
         globalThis.__errorBoundaryMarker = undefined;
         globalThis.__errorBoundaryGetterCount = 0;
-    "#), 1);
+    "#
+        ),
+        1
+    );
     let cases = [(0, true), (1, false), (2, false), (3, true), (4, false)];
     for (index, object_like) in cases {
-        assert_eq!(load(&format!(r#"
+        assert_eq!(
+            load(&format!(
+                r#"
             globalThis.__errorBoundaryMarker = __errorBoundaryMarkers[{index}];
             globalThis.__errorBoundaryGetterCount = 0;
             Object.defineProperty(globalThis, 'Error', {{
               configurable: true,
               get() {{ __errorBoundaryGetterCount++; throw __errorBoundaryMarker; }}
             }});
-        "#)), 1);
-        let result = guard.capture_result(thaw_js_get_error_constructor_exact_result(c"Error".as_ptr()));
+        "#
+            )),
+            1
+        );
+        let result = guard.capture_result(thaw_js_get_error_constructor_exact_result(
+            c"Error".as_ptr(),
+        ));
         assert!(result.error.is_null());
         assert_eq!(result.value, 0);
         assert_ne!(result.exception_handle, 0);
@@ -678,17 +754,27 @@ fn error_exact_boundary_lookup_preserves_original_markers_and_one_get() {
             assert_eq!(ctx.eval::<u32, _>("__errorBoundaryGetterCount").unwrap(), 1);
         });
     }
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
         globalThis.__errorBoundaryGetterCount = 0;
         Object.defineProperty(globalThis, 'Error', {
           configurable: true, get() { __errorBoundaryGetterCount++; throw 'should not run'; }
         });
-    "#), 1);
-    let invalid = guard.capture_result(thaw_js_get_error_constructor_exact_result(c"Error.prototype".as_ptr()));
+    "#
+        ),
+        1
+    );
+    let invalid = guard.capture_result(thaw_js_get_error_constructor_exact_result(
+        c"Error.prototype".as_ptr(),
+    ));
     assert!(!invalid.error.is_null());
     assert_eq!(invalid.value, 0);
     assert_eq!(invalid.exception_handle, 0);
-    assert_eq!(with_context(|ctx| ctx.eval::<u32, _>("__errorBoundaryGetterCount").unwrap()), 0);
+    assert_eq!(
+        with_context(|ctx| ctx.eval::<u32, _>("__errorBoundaryGetterCount").unwrap()),
+        0
+    );
     guard.finish();
 }
 
@@ -696,12 +782,20 @@ fn error_exact_boundary_lookup_preserves_original_markers_and_one_get() {
 fn error_exact_boundary_lookup_distinguishes_absence_undefined_and_inherited() {
     let mut guard = ErrorBoundaryFixtureGuard::new();
     guard.preserve_globals(&[
-        "Error", "TypeError", "ReferenceError", "__errorBoundarySavedError",
-        "__errorBoundarySavedTypeError", "__errorBoundarySavedReferenceError",
-        "__errorBoundarySavedGlobalProto", "__errorBoundarySavedProtoError", "__errorBoundaryThrown",
+        "Error",
+        "TypeError",
+        "ReferenceError",
+        "__errorBoundarySavedError",
+        "__errorBoundarySavedTypeError",
+        "__errorBoundarySavedReferenceError",
+        "__errorBoundarySavedGlobalProto",
+        "__errorBoundarySavedProtoError",
+        "__errorBoundaryThrown",
     ]);
     guard.append_restore_with("if (__errorBoundarySavedGlobalProto) { if (__errorBoundarySavedProtoError) Object.defineProperty(__errorBoundarySavedGlobalProto, 'Error', __errorBoundarySavedProtoError); else delete __errorBoundarySavedGlobalProto.Error; } delete globalThis.__errorBoundarySavedGlobalProto; delete globalThis.__errorBoundarySavedProtoError; 1");
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
         globalThis.__errorBoundarySavedError = Object.getOwnPropertyDescriptor(globalThis, 'Error');
         globalThis.__errorBoundarySavedTypeError = TypeError;
         globalThis.__errorBoundarySavedReferenceError = ReferenceError;
@@ -709,8 +803,13 @@ fn error_exact_boundary_lookup_distinguishes_absence_undefined_and_inherited() {
         globalThis.__errorBoundarySavedProtoError = Object.getOwnPropertyDescriptor(__errorBoundarySavedGlobalProto, 'Error');
         delete globalThis.Error;
         globalThis.ReferenceError = function ReplacedReferenceError() {};
-    "#), 1);
-    let missing = guard.capture_result(thaw_js_get_error_constructor_exact_result(c"Error".as_ptr()));
+    "#
+        ),
+        1
+    );
+    let missing = guard.capture_result(thaw_js_get_error_constructor_exact_result(
+        c"Error".as_ptr(),
+    ));
     assert!(missing.error.is_null());
     assert_eq!(missing.value, 0);
     assert_ne!(missing.exception_handle, 0);
@@ -721,18 +820,27 @@ fn error_exact_boundary_lookup_distinguishes_absence_undefined_and_inherited() {
         "__errorBoundarySavedReferenceError",
     );
 
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
         globalThis.Error = undefined;
         globalThis.TypeError = function ReplacedTypeError() {};
-    "#), 1);
-    let undefined = guard.capture_result(thaw_js_get_error_constructor_exact_result(c"Error".as_ptr()));
+    "#
+        ),
+        1
+    );
+    let undefined = guard.capture_result(thaw_js_get_error_constructor_exact_result(
+        c"Error".as_ptr(),
+    ));
     assert!(undefined.error.is_null());
     assert_ne!(undefined.value, 0);
     assert_eq!(undefined.exception_handle, 0);
     assert_eq!(undefined.exception_object_like, 0);
     with_context(|ctx| {
         let _active = ActiveNapiContext::enter(&ctx);
-        assert!(value_for_handle(&ctx, undefined.value).unwrap().is_undefined());
+        assert!(value_for_handle(&ctx, undefined.value)
+            .unwrap()
+            .is_undefined());
     });
     let empty = r#"{"root":{"r":0},"nodes":[{"a":[]}],"leases":[]}"#;
     for is_new in [0, 1] {
@@ -748,22 +856,33 @@ fn error_exact_boundary_lookup_distinguishes_absence_undefined_and_inherited() {
         );
     }
 
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
         delete globalThis.Error;
         Object.defineProperty(__errorBoundarySavedGlobalProto, 'Error', {
           configurable: true, value: undefined
         });
-    "#), 1);
-    let inherited = guard.capture_result(thaw_js_get_error_constructor_exact_result(c"Error".as_ptr()));
+    "#
+        ),
+        1
+    );
+    let inherited = guard.capture_result(thaw_js_get_error_constructor_exact_result(
+        c"Error".as_ptr(),
+    ));
     assert!(inherited.error.is_null());
     assert_ne!(inherited.value, 0);
     assert_eq!(inherited.exception_handle, 0);
     with_context(|ctx| {
         let _active = ActiveNapiContext::enter(&ctx);
-        assert!(value_for_handle(&ctx, inherited.value).unwrap().is_undefined());
+        assert!(value_for_handle(&ctx, inherited.value)
+            .unwrap()
+            .is_undefined());
     });
 
-    let invalid = guard.capture_result(thaw_js_get_error_constructor_exact_result(c"Error.prototype".as_ptr()));
+    let invalid = guard.capture_result(thaw_js_get_error_constructor_exact_result(
+        c"Error.prototype".as_ptr(),
+    ));
     assert_eq!(invalid.value, 0);
     assert_eq!(invalid.exception_handle, 0);
     assert_eq!(invalid.exception_object_like, 0);
@@ -775,12 +894,22 @@ fn error_exact_boundary_lookup_distinguishes_absence_undefined_and_inherited() {
 fn error_exact_boundary_uses_selected_callee_and_call_new_rules() {
     let mut guard = ErrorBoundaryFixtureGuard::new();
     guard.preserve_globals(&[
-        "Error", "TypeError", "__errorBoundaryTrace", "__errorBoundaryReplacementCalls",
-        "__errorBoundarySelected", "__errorBoundaryReplacement", "__errorBoundaryConstructed",
-        "__errorBoundaryThrown", "__errorBoundaryExpectedValue", "__errorBoundaryExpectedConstructor",
-        "__errorBoundarySavedError", "__errorBoundarySavedTypeError",
+        "Error",
+        "TypeError",
+        "__errorBoundaryTrace",
+        "__errorBoundaryReplacementCalls",
+        "__errorBoundarySelected",
+        "__errorBoundaryReplacement",
+        "__errorBoundaryConstructed",
+        "__errorBoundaryThrown",
+        "__errorBoundaryExpectedValue",
+        "__errorBoundaryExpectedConstructor",
+        "__errorBoundarySavedError",
+        "__errorBoundarySavedTypeError",
     ]);
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
         globalThis.__errorBoundarySavedError = Error;
         globalThis.__errorBoundarySavedTypeError = TypeError;
         globalThis.__errorBoundaryTrace = '';
@@ -800,8 +929,13 @@ fn error_exact_boundary_uses_selected_callee_and_call_new_rules() {
             Object.defineProperty(globalThis, 'Error', { value, writable: true, configurable: true });
           }
         });
-    "#), 1);
-    let selected = guard.capture_result(thaw_js_get_error_constructor_exact_result(c"Error".as_ptr()));
+    "#
+        ),
+        1
+    );
+    let selected = guard.capture_result(thaw_js_get_error_constructor_exact_result(
+        c"Error".as_ptr(),
+    ));
     assert!(selected.error.is_null());
     assert_ne!(selected.value, 0);
     let selected_handle = selected.value;
@@ -812,12 +946,26 @@ fn error_exact_boundary_uses_selected_callee_and_call_new_rules() {
     assert_eq!(call_result.exception_handle, 0);
     with_context(|ctx| {
         let _active = ActiveNapiContext::enter(&ctx);
-        assert_eq!(value_for_handle(&ctx, call_result.value).unwrap().as_number(), Some(42.0));
-        assert_eq!(ctx.eval::<String, _>("__errorBoundaryTrace").unwrap(), "GAC");
-        assert_eq!(ctx.eval::<u32, _>("__errorBoundaryReplacementCalls").unwrap(), 0);
+        assert_eq!(
+            value_for_handle(&ctx, call_result.value)
+                .unwrap()
+                .as_number(),
+            Some(42.0)
+        );
+        assert_eq!(
+            ctx.eval::<String, _>("__errorBoundaryTrace").unwrap(),
+            "GAC"
+        );
+        assert_eq!(
+            ctx.eval::<u32, _>("__errorBoundaryReplacementCalls")
+                .unwrap(),
+            0
+        );
     });
 
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
         globalThis.__errorBoundaryTrace = '';
         globalThis.__errorBoundaryConstructed = function ExactConstructed(arg) {
           this.arg = arg; this.sawNewTarget = new.target === ExactConstructed;
@@ -826,8 +974,13 @@ fn error_exact_boundary_uses_selected_callee_and_call_new_rules() {
         Object.defineProperty(globalThis, 'Error', {
           configurable: true, get() { __errorBoundaryTrace += 'G'; return __errorBoundaryConstructed; }
         });
-    "#), 1);
-    let constructor = guard.capture_result(thaw_js_get_error_constructor_exact_result(c"Error".as_ptr()));
+    "#
+        ),
+        1
+    );
+    let constructor = guard.capture_result(thaw_js_get_error_constructor_exact_result(
+        c"Error".as_ptr(),
+    ));
     assert!(constructor.error.is_null());
     let constructed = error_boundary_invoke(&mut guard, constructor.value, one_number, 1);
     assert!(constructed.error.is_null());
@@ -842,13 +995,27 @@ fn error_exact_boundary_uses_selected_callee_and_call_new_rules() {
     });
 
     assert_eq!(load("Object.defineProperty(globalThis, 'Error', { value: __errorBoundarySavedError, writable: true, configurable: true });"), 1);
-    for name in ["Error", "EvalError", "RangeError", "ReferenceError", "SyntaxError", "TypeError", "URIError"] {
+    for name in [
+        "Error",
+        "EvalError",
+        "RangeError",
+        "ReferenceError",
+        "SyntaxError",
+        "TypeError",
+        "URIError",
+    ] {
         let name_c = CString::new(name).unwrap();
-        let constructor = guard.capture_result(thaw_js_get_error_constructor_exact_result(name_c.as_ptr()));
+        let constructor =
+            guard.capture_result(thaw_js_get_error_constructor_exact_result(name_c.as_ptr()));
         assert!(constructor.error.is_null(), "{name}");
         assert_ne!(constructor.value, 0, "{name}");
         for is_new in [0, 1] {
-            let result = error_boundary_invoke(&mut guard, constructor.value, r#"{"root":{"r":0},"nodes":[{"a":[]}],"leases":[]}"#, is_new);
+            let result = error_boundary_invoke(
+                &mut guard,
+                constructor.value,
+                r#"{"root":{"r":0},"nodes":[{"a":[]}],"leases":[]}"#,
+                is_new,
+            );
             assert!(result.error.is_null(), "{name} mode={is_new}");
             assert_eq!(result.exception_handle, 0, "{name} mode={is_new}");
             with_context(|ctx| {
@@ -857,11 +1024,15 @@ fn error_exact_boundary_uses_selected_callee_and_call_new_rules() {
                 assert!(value.is_error(), "{name} mode={is_new}");
                 let object = value.as_object().unwrap();
                 assert_eq!(object.get::<_, String>("name").unwrap(), name);
-                ctx.globals().set("__errorBoundaryExpectedValue", value).unwrap();
-                ctx.globals().set(
-                    "__errorBoundaryExpectedConstructor",
-                    value_for_handle(&ctx, constructor.value).unwrap(),
-                ).unwrap();
+                ctx.globals()
+                    .set("__errorBoundaryExpectedValue", value)
+                    .unwrap();
+                ctx.globals()
+                    .set(
+                        "__errorBoundaryExpectedConstructor",
+                        value_for_handle(&ctx, constructor.value).unwrap(),
+                    )
+                    .unwrap();
                 assert!(ctx.eval::<bool, _>(
                     "Object.getPrototypeOf(__errorBoundaryExpectedValue) === __errorBoundaryExpectedConstructor.prototype"
                 ).unwrap(), "{name} mode={is_new}");
@@ -869,22 +1040,57 @@ fn error_exact_boundary_uses_selected_callee_and_call_new_rules() {
         }
     }
 
-    assert_eq!(load("globalThis.Error = (value) => value === 11 ? 12 : 0;"), 1);
-    let arrow = guard.capture_result(thaw_js_get_error_constructor_exact_result(c"Error".as_ptr()));
-    let arrow_call = error_boundary_invoke(&mut guard, arrow.value, r#"{"root":{"r":0},"nodes":[{"a":[{"v":11}]}],"leases":[]}"#, 0);
+    assert_eq!(
+        load("globalThis.Error = (value) => value === 11 ? 12 : 0;"),
+        1
+    );
+    let arrow = guard.capture_result(thaw_js_get_error_constructor_exact_result(
+        c"Error".as_ptr(),
+    ));
+    let arrow_call = error_boundary_invoke(
+        &mut guard,
+        arrow.value,
+        r#"{"root":{"r":0},"nodes":[{"a":[{"v":11}]}],"leases":[]}"#,
+        0,
+    );
     assert!(arrow_call.error.is_null());
     with_context(|ctx| {
         let _active = ActiveNapiContext::enter(&ctx);
-        assert_eq!(value_for_handle(&ctx, arrow_call.value).unwrap().as_number(), Some(12.0));
+        assert_eq!(
+            value_for_handle(&ctx, arrow_call.value)
+                .unwrap()
+                .as_number(),
+            Some(12.0)
+        );
     });
-    let arrow_new = error_boundary_invoke(&mut guard, arrow.value, r#"{"root":{"r":0},"nodes":[{"a":[{"v":11}]}],"leases":[]}"#, 1);
+    let arrow_new = error_boundary_invoke(
+        &mut guard,
+        arrow.value,
+        r#"{"root":{"r":0},"nodes":[{"a":[{"v":11}]}],"leases":[]}"#,
+        1,
+    );
     assert!(arrow_new.error.is_null());
-    error_boundary_assert_engine_error(arrow_new.exception_handle, "TypeError", "__errorBoundarySavedTypeError");
+    error_boundary_assert_engine_error(
+        arrow_new.exception_handle,
+        "TypeError",
+        "__errorBoundarySavedTypeError",
+    );
 
     assert_eq!(load("globalThis.Error = 17;"), 1);
-    let non_callable = guard.capture_result(thaw_js_get_error_constructor_exact_result(c"Error".as_ptr()));
-    let failed_call = error_boundary_invoke(&mut guard, non_callable.value, r#"{"root":{"r":0},"nodes":[{"a":[]}],"leases":[]}"#, 0);
-    error_boundary_assert_engine_error(failed_call.exception_handle, "TypeError", "__errorBoundarySavedTypeError");
+    let non_callable = guard.capture_result(thaw_js_get_error_constructor_exact_result(
+        c"Error".as_ptr(),
+    ));
+    let failed_call = error_boundary_invoke(
+        &mut guard,
+        non_callable.value,
+        r#"{"root":{"r":0},"nodes":[{"a":[]}],"leases":[]}"#,
+        0,
+    );
+    error_boundary_assert_engine_error(
+        failed_call.exception_handle,
+        "TypeError",
+        "__errorBoundarySavedTypeError",
+    );
     guard.finish();
 }
 
@@ -896,23 +1102,33 @@ unsafe extern "C" fn error_boundary_native_callback(
     _arguments: *const c_char,
 ) -> *const c_char {
     ERROR_BOUNDARY_NATIVE_CALLBACK_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    thaw_arena::owned_string(
-        r#"{"root":{"v":"native message"},"nodes":[],"leases":[]}"#,
-    ).cast_const()
+    thaw_arena::owned_string(r#"{"root":{"v":"native message"},"nodes":[],"leases":[]}"#)
+        .cast_const()
 }
 
 #[test]
 fn error_exact_boundary_graph_callbacks_cleanup_and_promise_identity() {
     let mut guard = ErrorBoundaryFixtureGuard::new();
     guard.preserve_globals(&[
-        "__errorBoundaryTargetCalls", "__errorBoundaryCall", "__errorBoundaryNew",
-        "__errorBoundaryAlias", "__errorBoundaryNoArgs", "__errorBoundaryPending",
-        "__errorBoundaryThenCalls", "__errorBoundaryReturnPending", "__errorBoundaryMarker",
-        "__errorBoundaryTargetThrow", "__errorBoundaryThrownPromise", "__errorBoundaryAliasInput",
-        "__errorBoundaryReturnAlias", "__errorBoundaryThrowAlias",
+        "__errorBoundaryTargetCalls",
+        "__errorBoundaryCall",
+        "__errorBoundaryNew",
+        "__errorBoundaryAlias",
+        "__errorBoundaryNoArgs",
+        "__errorBoundaryPending",
+        "__errorBoundaryThenCalls",
+        "__errorBoundaryReturnPending",
+        "__errorBoundaryMarker",
+        "__errorBoundaryTargetThrow",
+        "__errorBoundaryThrownPromise",
+        "__errorBoundaryAliasInput",
+        "__errorBoundaryReturnAlias",
+        "__errorBoundaryThrowAlias",
     ]);
     install_error_boundary_host_operations();
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
         globalThis.__errorBoundaryTargetCalls = 0;
         globalThis.__errorBoundaryCall = function(callback) { return callback(); };
         globalThis.__errorBoundaryNew = function ExactGraphConstructor(callback) { this.message = callback(); };
@@ -925,16 +1141,28 @@ fn error_exact_boundary_graph_callbacks_cleanup_and_promise_identity() {
         globalThis.__errorBoundaryThenCalls = 0;
         __errorBoundaryPending.then(() => __errorBoundaryThenCalls++, () => __errorBoundaryThenCalls++);
         globalThis.__errorBoundaryReturnPending = function() { return __errorBoundaryPending; };
-    "#), 1);
+    "#
+        ),
+        1
+    );
     ERROR_BOUNDARY_NATIVE_CALLBACK_CALLS.store(0, std::sync::atomic::Ordering::SeqCst);
     let callback = guard.capture_handle_result(thaw_js_register_native_callback_graph(
         error_boundary_native_callback as *const c_void,
-        std::ptr::null(), 0, 0, 0, std::ptr::null(), 0,
+        std::ptr::null(),
+        0,
+        0,
+        0,
+        std::ptr::null(),
+        0,
     ));
     assert!(callback.error.is_null());
     assert_ne!(callback.value, 0);
     let callback_owner = error_boundary_registry_state(callback.value);
-    assert_eq!(callback_owner, (1, true), "callback O starts as one live registry claim");
+    assert_eq!(
+        callback_owner,
+        (1, true),
+        "callback O starts as one live registry claim"
+    );
     let call = guard.handle(thaw_js_get_global(c"__errorBoundaryCall".as_ptr()));
     let construct = guard.handle(thaw_js_get_global(c"__errorBoundaryNew".as_ptr()));
     let callback_node = format!(
@@ -947,36 +1175,78 @@ fn error_exact_boundary_graph_callbacks_cleanup_and_promise_identity() {
         callback.value, callback.value
     );
     guard.retained_handle(callback.value);
-    assert_eq!(error_boundary_registry_state(callback.value), (2, true), "wire producer P is explicit");
-    let invalid_mode = error_boundary_invoke_with_leases(&mut guard, call, &invalid_mode_graph, 2, &[callback.value]);
+    assert_eq!(
+        error_boundary_registry_state(callback.value),
+        (2, true),
+        "wire producer P is explicit"
+    );
+    let invalid_mode = error_boundary_invoke_with_leases(
+        &mut guard,
+        call,
+        &invalid_mode_graph,
+        2,
+        &[callback.value],
+    );
     assert!(!invalid_mode.error.is_null());
     assert_eq!(invalid_mode.value, 0);
     assert_eq!(invalid_mode.exception_handle, 0);
     assert_eq!(invalid_mode.exception_object_like, 0);
-    assert_eq!(error_boundary_registry_state(callback.value), callback_owner);
+    assert_eq!(
+        error_boundary_registry_state(callback.value),
+        callback_owner
+    );
 
     guard.retained_handle(callback.value);
     assert_eq!(error_boundary_registry_state(callback.value), (2, true));
-    guard.install_decoder_source("({ get __thaw_json_graph_decode() { throw __errorBoundaryMarker; } })");
-    let decoder_lease_failure = error_boundary_invoke_with_leases(&mut guard, call, &callback_node, 0, &[callback.value]);
-    error_boundary_assert_exception_marker(&mut guard, decoder_lease_failure, "__errorBoundaryMarker", true);
+    guard.install_decoder_source(
+        "({ get __thaw_json_graph_decode() { throw __errorBoundaryMarker; } })",
+    );
+    let decoder_lease_failure =
+        error_boundary_invoke_with_leases(&mut guard, call, &callback_node, 0, &[callback.value]);
+    error_boundary_assert_exception_marker(
+        &mut guard,
+        decoder_lease_failure,
+        "__errorBoundaryMarker",
+        true,
+    );
     guard.clear_decoder_source();
-    assert_eq!(error_boundary_registry_state(callback.value), callback_owner);
+    assert_eq!(
+        error_boundary_registry_state(callback.value),
+        callback_owner
+    );
 
     guard.retained_handle(callback.value);
     assert_eq!(error_boundary_registry_state(callback.value), (2, true));
     let throwing_target = guard.handle(thaw_js_get_global(c"__errorBoundaryTargetThrow".as_ptr()));
-    let target_lease_failure = error_boundary_invoke_with_leases(&mut guard, throwing_target, &callback_node, 0, &[callback.value]);
-    error_boundary_assert_exception_marker(&mut guard, target_lease_failure, "__errorBoundaryMarker", true);
-    assert_eq!(error_boundary_registry_state(callback.value), callback_owner);
+    let target_lease_failure = error_boundary_invoke_with_leases(
+        &mut guard,
+        throwing_target,
+        &callback_node,
+        0,
+        &[callback.value],
+    );
+    error_boundary_assert_exception_marker(
+        &mut guard,
+        target_lease_failure,
+        "__errorBoundaryMarker",
+        true,
+    );
+    assert_eq!(
+        error_boundary_registry_state(callback.value),
+        callback_owner
+    );
 
     guard.retained_handle(callback.value);
     assert_eq!(error_boundary_registry_state(callback.value), (2, true));
-    let invalid_callee = error_boundary_invoke_with_leases(&mut guard, 0, &callback_node, 0, &[callback.value]);
+    let invalid_callee =
+        error_boundary_invoke_with_leases(&mut guard, 0, &callback_node, 0, &[callback.value]);
     assert!(!invalid_callee.error.is_null());
     assert_eq!(invalid_callee.value, 0);
     assert_eq!(invalid_callee.exception_handle, 0);
-    assert_eq!(error_boundary_registry_state(callback.value), callback_owner);
+    assert_eq!(
+        error_boundary_registry_state(callback.value),
+        callback_owner
+    );
 
     let alias_target = guard.handle(thaw_js_get_global(c"__errorBoundaryAlias".as_ptr()));
     guard.retained_handle(callback.value);
@@ -985,37 +1255,70 @@ fn error_exact_boundary_graph_callbacks_cleanup_and_promise_identity() {
         r#"{{"root":{{"r":0}},"nodes":[{{"a":[{{"r":1}},{{"r":1}}]}},{{"hdl":{}}}],"leases":[{}]}}"#,
         callback.value, callback.value
     );
-    let alias_result = error_boundary_invoke_with_leases(&mut guard, alias_target, &repeated_alias, 0, &[callback.value]);
+    let alias_result = error_boundary_invoke_with_leases(
+        &mut guard,
+        alias_target,
+        &repeated_alias,
+        0,
+        &[callback.value],
+    );
     assert!(alias_result.error.is_null());
     with_context(|ctx| {
         let _active = ActiveNapiContext::enter(&ctx);
-        assert_eq!(value_for_handle(&ctx, alias_result.value).unwrap().as_bool(), Some(true));
+        assert_eq!(
+            value_for_handle(&ctx, alias_result.value)
+                .unwrap()
+                .as_bool(),
+            Some(true)
+        );
     });
-    assert_eq!(error_boundary_registry_state(callback.value), callback_owner);
+    assert_eq!(
+        error_boundary_registry_state(callback.value),
+        callback_owner
+    );
 
     guard.retained_handle(callback.value);
     assert_eq!(error_boundary_registry_state(callback.value), (2, true));
-    let returned = error_boundary_invoke_with_leases(&mut guard, call, &callback_node, 0, &[callback.value]);
+    let returned =
+        error_boundary_invoke_with_leases(&mut guard, call, &callback_node, 0, &[callback.value]);
     assert!(returned.error.is_null());
     assert_eq!(returned.exception_handle, 0);
     with_context(|ctx| {
         let _active = ActiveNapiContext::enter(&ctx);
         let value = value_for_handle(&ctx, returned.value).unwrap();
-        assert_eq!(value.as_string().unwrap().to_string().unwrap(), "native message");
+        assert_eq!(
+            value.as_string().unwrap().to_string().unwrap(),
+            "native message"
+        );
     });
-    assert_eq!(ERROR_BOUNDARY_NATIVE_CALLBACK_CALLS.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(
+        ERROR_BOUNDARY_NATIVE_CALLBACK_CALLS.load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
 
     guard.retained_handle(callback.value);
     assert_eq!(error_boundary_registry_state(callback.value), (2, true));
-    let constructed = error_boundary_invoke_with_leases(&mut guard, construct, &callback_node, 1, &[callback.value]);
+    let constructed = error_boundary_invoke_with_leases(
+        &mut guard,
+        construct,
+        &callback_node,
+        1,
+        &[callback.value],
+    );
     assert!(constructed.error.is_null());
     with_context(|ctx| {
         let _active = ActiveNapiContext::enter(&ctx);
         let constructed_value = value_for_handle(&ctx, constructed.value).unwrap();
         let object = constructed_value.as_object().unwrap();
-        assert_eq!(object.get::<_, String>("message").unwrap(), "native message");
+        assert_eq!(
+            object.get::<_, String>("message").unwrap(),
+            "native message"
+        );
     });
-    assert_eq!(ERROR_BOUNDARY_NATIVE_CALLBACK_CALLS.load(std::sync::atomic::Ordering::SeqCst), 2);
+    assert_eq!(
+        ERROR_BOUNDARY_NATIVE_CALLBACK_CALLS.load(std::sync::atomic::Ordering::SeqCst),
+        2
+    );
 
     let mut alias_input = guard.handle(thaw_js_get_global(c"__errorBoundaryAliasInput".as_ptr()));
     let alias_owner = error_boundary_registry_state(alias_input);
@@ -1026,15 +1329,25 @@ fn error_exact_boundary_graph_callbacks_cleanup_and_promise_identity() {
     );
     guard.retained_handle(alias_input);
     let returned_alias = error_boundary_invoke_with_leases(
-        &mut guard, return_alias, &alias_graph, 0, &[alias_input],
+        &mut guard,
+        return_alias,
+        &alias_graph,
+        0,
+        &[alias_input],
     );
     assert!(returned_alias.error.is_null());
     assert_eq!(returned_alias.exception_handle, 0);
-    assert_eq!(error_boundary_registry_state(alias_input), (2, true),
-        "O and the independent successful output remain after P is retired");
+    assert_eq!(
+        error_boundary_registry_state(alias_input),
+        (2, true),
+        "O and the independent successful output remain after P is retired"
+    );
     guard.release_handle(alias_input);
     guard.release_handle(return_alias);
-    assert_eq!(error_boundary_registry_state(returned_alias.value), (1, true));
+    assert_eq!(
+        error_boundary_registry_state(returned_alias.value),
+        (1, true)
+    );
     with_context(|ctx| {
         let _active = ActiveNapiContext::enter(&ctx);
         let output = value_for_handle(&ctx, returned_alias.value).unwrap();
@@ -1052,16 +1365,18 @@ fn error_exact_boundary_graph_callbacks_cleanup_and_promise_identity() {
     );
     let throw_alias = guard.handle(thaw_js_get_global(c"__errorBoundaryThrowAlias".as_ptr()));
     guard.retained_handle(alias_input);
-    let thrown_alias = error_boundary_invoke_with_leases(
-        &mut guard, throw_alias, &alias_graph, 0, &[alias_input],
-    );
+    let thrown_alias =
+        error_boundary_invoke_with_leases(&mut guard, throw_alias, &alias_graph, 0, &[alias_input]);
     assert!(thrown_alias.error.is_null());
     assert_eq!(thrown_alias.value, 0);
     assert_eq!(thrown_alias.exception_object_like, 1);
     assert_eq!(error_boundary_registry_state(alias_input), (2, true));
     guard.release_handle(alias_input);
     guard.release_handle(throw_alias);
-    assert_eq!(error_boundary_registry_state(thrown_alias.exception_handle), (1, true));
+    assert_eq!(
+        error_boundary_registry_state(thrown_alias.exception_handle),
+        (1, true)
+    );
     with_context(|ctx| {
         let _active = ActiveNapiContext::enter(&ctx);
         let thrown = value_for_handle(&ctx, thrown_alias.exception_handle).unwrap();
@@ -1072,44 +1387,81 @@ fn error_exact_boundary_graph_callbacks_cleanup_and_promise_identity() {
     assert_eq!(error_boundary_registry_state(alias_input), (0, false));
 
     let no_args = guard.handle(thaw_js_get_global(c"__errorBoundaryNoArgs".as_ptr()));
-    let empty = error_boundary_invoke(&mut guard, no_args, r#"{"root":{"r":0},"nodes":[{"a":[]}],"leases":[]}"#, 0);
+    let empty = error_boundary_invoke(
+        &mut guard,
+        no_args,
+        r#"{"root":{"r":0},"nodes":[{"a":[]}],"leases":[]}"#,
+        0,
+    );
     assert!(empty.error.is_null());
     with_context(|ctx| {
         let _active = ActiveNapiContext::enter(&ctx);
-        assert_eq!(value_for_handle(&ctx, empty.value).unwrap().as_number(), Some(0.0));
+        assert_eq!(
+            value_for_handle(&ctx, empty.value).unwrap().as_number(),
+            Some(0.0)
+        );
     });
-    let own_undefined = error_boundary_invoke(&mut guard, no_args, r#"{"root":{"r":0},"nodes":[{"a":[{"u":1}]}],"leases":[]}"#, 0);
+    let own_undefined = error_boundary_invoke(
+        &mut guard,
+        no_args,
+        r#"{"root":{"r":0},"nodes":[{"a":[{"u":1}]}],"leases":[]}"#,
+        0,
+    );
     assert!(own_undefined.error.is_null());
     with_context(|ctx| {
         let _active = ActiveNapiContext::enter(&ctx);
-        assert_eq!(value_for_handle(&ctx, own_undefined.value).unwrap().as_number(), Some(1.0));
+        assert_eq!(
+            value_for_handle(&ctx, own_undefined.value)
+                .unwrap()
+                .as_number(),
+            Some(1.0)
+        );
     });
 
     let promise_callee = guard.handle(thaw_js_get_global(c"__errorBoundaryReturnPending".as_ptr()));
     let pending = guard.handle(thaw_js_get_global(c"__errorBoundaryPending".as_ptr()));
-    let promise_result = error_boundary_invoke(&mut guard, promise_callee, r#"{"root":{"r":0},"nodes":[{"a":[]}],"leases":[]}"#, 0);
+    let promise_result = error_boundary_invoke(
+        &mut guard,
+        promise_callee,
+        r#"{"root":{"r":0},"nodes":[{"a":[]}],"leases":[]}"#,
+        0,
+    );
     assert!(promise_result.error.is_null());
     with_context(|ctx| {
         let _active = ActiveNapiContext::enter(&ctx);
         let value = value_for_handle(&ctx, promise_result.value).unwrap();
         assert_eq!(value, value_for_handle(&ctx, pending).unwrap());
-        assert_eq!(value.as_promise().unwrap().state(), rquickjs::promise::PromiseState::Pending);
+        assert_eq!(
+            value.as_promise().unwrap().state(),
+            rquickjs::promise::PromiseState::Pending
+        );
         assert_eq!(ctx.eval::<u32, _>("__errorBoundaryThenCalls").unwrap(), 0);
     });
-    assert_eq!(error_boundary_registry_state(callback.value), callback_owner);
+    assert_eq!(
+        error_boundary_registry_state(callback.value),
+        callback_owner
+    );
 
     // The retained output survives release of the original callee and input callback.
     with_context(|ctx| {
         let _active = ActiveNapiContext::enter(&ctx);
         assert_eq!(
-            value_for_handle(&ctx, returned.value).unwrap().as_string().unwrap().to_string().unwrap(),
+            value_for_handle(&ctx, returned.value)
+                .unwrap()
+                .as_string()
+                .unwrap()
+                .to_string()
+                .unwrap(),
             "native message",
         );
     });
     guard.release_handle(callback.value);
     assert_eq!(error_boundary_registry_state(callback.value), (0, false));
-    assert_eq!(thaw_js_retain_handle(callback.value), 0,
-        "the producer O claim is the final callback registry reference");
+    assert_eq!(
+        thaw_js_retain_handle(callback.value),
+        0,
+        "the producer O claim is the final callback registry reference"
+    );
     guard.finish();
 }
 
@@ -1117,16 +1469,30 @@ fn error_exact_boundary_graph_callbacks_cleanup_and_promise_identity() {
 fn error_exact_boundary_invoke_retains_decode_and_target_markers() {
     let mut guard = ErrorBoundaryFixtureGuard::new();
     guard.preserve_globals(&[
-        "TypeError", "RangeError", "__errorBoundarySavedTypeError", "__errorBoundarySavedRangeError",
-        "__errorBoundaryMarkerSet", "__errorBoundaryMarker", "__errorBoundaryTargetCalls",
-        "__errorBoundaryTarget", "__errorBoundaryDecoderGetReads", "__errorBoundaryDecoderCalls",
-        "__errorBoundaryDecoderMode", "__errorBoundaryLengthMarker", "__errorBoundaryLengthReads",
-        "__errorBoundaryIndexReads", "__errorBoundaryIndexMarker", "__errorBoundaryIndexTrace",
-        "__errorBoundaryCoercionCalls", "__errorBoundaryThrownPromise",
+        "TypeError",
+        "RangeError",
+        "__errorBoundarySavedTypeError",
+        "__errorBoundarySavedRangeError",
+        "__errorBoundaryMarkerSet",
+        "__errorBoundaryMarker",
+        "__errorBoundaryTargetCalls",
+        "__errorBoundaryTarget",
+        "__errorBoundaryDecoderGetReads",
+        "__errorBoundaryDecoderCalls",
+        "__errorBoundaryDecoderMode",
+        "__errorBoundaryLengthMarker",
+        "__errorBoundaryLengthReads",
+        "__errorBoundaryIndexReads",
+        "__errorBoundaryIndexMarker",
+        "__errorBoundaryIndexTrace",
+        "__errorBoundaryCoercionCalls",
+        "__errorBoundaryThrownPromise",
         "__errorBoundaryThrown",
     ]);
     install_error_boundary_host_operations();
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
         globalThis.__errorBoundarySavedTypeError = TypeError;
         globalThis.__errorBoundarySavedRangeError = RangeError;
         globalThis.__errorBoundaryMarkerSet = [
@@ -1142,7 +1508,10 @@ fn error_exact_boundary_invoke_retains_decode_and_target_markers() {
         globalThis.__errorBoundaryLengthReads = 0;
         globalThis.__errorBoundaryIndexReads = 0;
         globalThis.__errorBoundaryTarget = function() { __errorBoundaryTargetCalls++; return 1; };
-    "#), 1);
+    "#
+        ),
+        1
+    );
     let mut target = guard.handle(thaw_js_get_global(c"__errorBoundaryTarget".as_ptr()));
     let empty = r#"{"root":{"r":0},"nodes":[{"a":[]}],"leases":[]}"#;
     let forwarding_decoder = r#"({
@@ -1161,16 +1530,48 @@ fn error_exact_boundary_invoke_retains_decode_and_target_markers() {
         assert_eq!(load(&format!("globalThis.__errorBoundaryMarker = __errorBoundaryMarkerSet[{index}]; __errorBoundaryTargetCalls = 0; __errorBoundaryDecoderGetReads = 0; __errorBoundaryDecoderCalls = 0; __errorBoundaryDecoderMode = 'getter';")), 1);
         guard.install_decoder_source(forwarding_decoder);
         let getter_throw = error_boundary_invoke(&mut guard, target, empty, 0);
-        error_boundary_assert_exception_marker(&mut guard, getter_throw, "__errorBoundaryMarker", object_like);
-        assert_eq!(with_context(|ctx| ctx.eval::<u32, _>("__errorBoundaryDecoderGetReads").unwrap()), 1);
-        assert_eq!(with_context(|ctx| ctx.eval::<u32, _>("__errorBoundaryDecoderCalls").unwrap()), 0);
-        assert_eq!(with_context(|ctx| ctx.eval::<u32, _>("__errorBoundaryTargetCalls").unwrap()), 0);
+        error_boundary_assert_exception_marker(
+            &mut guard,
+            getter_throw,
+            "__errorBoundaryMarker",
+            object_like,
+        );
+        assert_eq!(
+            with_context(|ctx| ctx
+                .eval::<u32, _>("__errorBoundaryDecoderGetReads")
+                .unwrap()),
+            1
+        );
+        assert_eq!(
+            with_context(|ctx| ctx.eval::<u32, _>("__errorBoundaryDecoderCalls").unwrap()),
+            0
+        );
+        assert_eq!(
+            with_context(|ctx| ctx.eval::<u32, _>("__errorBoundaryTargetCalls").unwrap()),
+            0
+        );
         assert_eq!(load("__errorBoundaryDecoderGetReads = 0; __errorBoundaryDecoderCalls = 0; __errorBoundaryDecoderMode = 'call';"), 1);
         let decoder_throw = error_boundary_invoke(&mut guard, target, empty, 0);
-        error_boundary_assert_exception_marker(&mut guard, decoder_throw, "__errorBoundaryMarker", object_like);
-        assert_eq!(with_context(|ctx| ctx.eval::<u32, _>("__errorBoundaryDecoderGetReads").unwrap()), 1);
-        assert_eq!(with_context(|ctx| ctx.eval::<u32, _>("__errorBoundaryDecoderCalls").unwrap()), 1);
-        assert_eq!(with_context(|ctx| ctx.eval::<u32, _>("__errorBoundaryTargetCalls").unwrap()), 0);
+        error_boundary_assert_exception_marker(
+            &mut guard,
+            decoder_throw,
+            "__errorBoundaryMarker",
+            object_like,
+        );
+        assert_eq!(
+            with_context(|ctx| ctx
+                .eval::<u32, _>("__errorBoundaryDecoderGetReads")
+                .unwrap()),
+            1
+        );
+        assert_eq!(
+            with_context(|ctx| ctx.eval::<u32, _>("__errorBoundaryDecoderCalls").unwrap()),
+            1
+        );
+        assert_eq!(
+            with_context(|ctx| ctx.eval::<u32, _>("__errorBoundaryTargetCalls").unwrap()),
+            0
+        );
     }
     guard.clear_decoder_source();
 
@@ -1180,15 +1581,33 @@ fn error_exact_boundary_invoke_retains_decode_and_target_markers() {
     for (index, object_like) in cases {
         assert_eq!(load(&format!("globalThis.__errorBoundaryMarker = __errorBoundaryMarkerSet[{index}]; __errorBoundaryTargetCalls = 0;")), 1);
         let call_throw = error_boundary_invoke(&mut guard, target, empty, 0);
-        error_boundary_assert_exception_marker(&mut guard, call_throw, "__errorBoundaryMarker", object_like);
+        error_boundary_assert_exception_marker(
+            &mut guard,
+            call_throw,
+            "__errorBoundaryMarker",
+            object_like,
+        );
         let new_throw = error_boundary_invoke(&mut guard, target, empty, 1);
-        error_boundary_assert_exception_marker(&mut guard, new_throw, "__errorBoundaryMarker", object_like);
-        assert_eq!(with_context(|ctx| ctx.eval::<u32, _>("__errorBoundaryTargetCalls").unwrap()), 2);
+        error_boundary_assert_exception_marker(
+            &mut guard,
+            new_throw,
+            "__errorBoundaryMarker",
+            object_like,
+        );
+        assert_eq!(
+            with_context(|ctx| ctx.eval::<u32, _>("__errorBoundaryTargetCalls").unwrap()),
+            2
+        );
     }
 
     let callback = guard.capture_handle_result(thaw_js_register_native_callback_graph(
         error_boundary_native_callback as *const c_void,
-        std::ptr::null(), 0, 0, 0, std::ptr::null(), 0,
+        std::ptr::null(),
+        0,
+        0,
+        0,
+        std::ptr::null(),
+        0,
     ));
     assert!(callback.error.is_null());
     assert_ne!(callback.value, 0);
@@ -1209,31 +1628,67 @@ fn error_exact_boundary_invoke_retains_decode_and_target_markers() {
             return Reflect.get(target, key, receiver);
           }});
         }})"#);
-        let length_throw = error_boundary_invoke_with_leases(&mut guard, target, &leased_graph, 0, &[callback.value]);
-        error_boundary_assert_exception_marker(&mut guard, length_throw, "__errorBoundaryLengthMarker", object_like);
-        assert_eq!(with_context(|ctx| ctx.eval::<u32, _>("__errorBoundaryLengthReads").unwrap()), 1);
-        assert_eq!(with_context(|ctx| ctx.eval::<u32, _>("__errorBoundaryTargetCalls").unwrap()), 0);
+        let length_throw = error_boundary_invoke_with_leases(
+            &mut guard,
+            target,
+            &leased_graph,
+            0,
+            &[callback.value],
+        );
+        error_boundary_assert_exception_marker(
+            &mut guard,
+            length_throw,
+            "__errorBoundaryLengthMarker",
+            object_like,
+        );
+        assert_eq!(
+            with_context(|ctx| ctx.eval::<u32, _>("__errorBoundaryLengthReads").unwrap()),
+            1
+        );
+        assert_eq!(
+            with_context(|ctx| ctx.eval::<u32, _>("__errorBoundaryTargetCalls").unwrap()),
+            0
+        );
         assert_eq!(error_boundary_registry_state(callback.value), owner_state);
     }
 
     guard.retained_handle(callback.value);
     assert_eq!(error_boundary_registry_state(callback.value), (2, true));
     assert_eq!(load("__errorBoundaryIndexReads = 0; __errorBoundaryLengthReads = 0; __errorBoundaryTargetCalls = 0; __errorBoundaryIndexMarker = 'index marker';"), 1);
-    guard.install_decoder_source(r#"({ __thaw_json_graph_decode() {
+    guard.install_decoder_source(
+        r#"({ __thaw_json_graph_decode() {
       return new Proxy([], { get(target, key, receiver) {
         if (key === 'length') { __errorBoundaryLengthReads++; return 1; }
         if (key === '0') { __errorBoundaryIndexReads++; throw __errorBoundaryIndexMarker; }
         return Reflect.get(target, key, receiver);
       }});
-    }})"#);
-    let index_throw = error_boundary_invoke_with_leases(&mut guard, target, &leased_graph, 0, &[callback.value]);
-    error_boundary_assert_exception_marker(&mut guard, index_throw, "__errorBoundaryIndexMarker", false);
-    assert_eq!(with_context(|ctx| ctx.eval::<u32, _>("__errorBoundaryLengthReads").unwrap()), 1);
-    assert_eq!(with_context(|ctx| ctx.eval::<u32, _>("__errorBoundaryIndexReads").unwrap()), 1);
-    assert_eq!(with_context(|ctx| ctx.eval::<u32, _>("__errorBoundaryTargetCalls").unwrap()), 0);
+    }})"#,
+    );
+    let index_throw =
+        error_boundary_invoke_with_leases(&mut guard, target, &leased_graph, 0, &[callback.value]);
+    error_boundary_assert_exception_marker(
+        &mut guard,
+        index_throw,
+        "__errorBoundaryIndexMarker",
+        false,
+    );
+    assert_eq!(
+        with_context(|ctx| ctx.eval::<u32, _>("__errorBoundaryLengthReads").unwrap()),
+        1
+    );
+    assert_eq!(
+        with_context(|ctx| ctx.eval::<u32, _>("__errorBoundaryIndexReads").unwrap()),
+        1
+    );
+    assert_eq!(
+        with_context(|ctx| ctx.eval::<u32, _>("__errorBoundaryTargetCalls").unwrap()),
+        0
+    );
     assert_eq!(error_boundary_registry_state(callback.value), owner_state);
 
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
         globalThis.__errorBoundaryIndexTrace = '';
         globalThis.__errorBoundaryLengthReads = 0;
         globalThis.__errorBoundaryTargetCalls = 0;
@@ -1241,11 +1696,17 @@ fn error_exact_boundary_invoke_retains_decode_and_target_markers() {
           __errorBoundaryTargetCalls++; __errorBoundaryIndexTrace += 'T';
           return a === undefined ? 1 : a * 10 + b;
         };
-    "#), 1);
+    "#
+        ),
+        1
+    );
     guard.release_handle(target);
     target = guard.handle(thaw_js_get_global(c"__errorBoundaryTarget".as_ptr()));
     guard.retained_handle(callback.value);
-    assert_eq!(load("__errorBoundaryLengthReads = 0; __errorBoundaryIndexReads = 0;"), 1);
+    assert_eq!(
+        load("__errorBoundaryLengthReads = 0; __errorBoundaryIndexReads = 0;"),
+        1
+    );
     guard.install_decoder_source(r#"({ __thaw_json_graph_decode() {
       return new Proxy([], { get(target, key, receiver) {
         if (key === 'length') { __errorBoundaryLengthReads++; __errorBoundaryIndexTrace += 'L'; return 2; }
@@ -1254,13 +1715,22 @@ fn error_exact_boundary_invoke_retains_decode_and_target_markers() {
         return Reflect.get(target, key, receiver);
       }});
     }})"#);
-    let proxy_result = error_boundary_invoke_with_leases(&mut guard, target, &leased_graph, 0, &[callback.value]);
+    let proxy_result =
+        error_boundary_invoke_with_leases(&mut guard, target, &leased_graph, 0, &[callback.value]);
     assert!(proxy_result.error.is_null());
     assert_eq!(proxy_result.exception_handle, 0);
     with_context(|ctx| {
         let _active = ActiveNapiContext::enter(&ctx);
-        assert_eq!(value_for_handle(&ctx, proxy_result.value).unwrap().as_number(), Some(45.0));
-        assert_eq!(ctx.eval::<String, _>("__errorBoundaryIndexTrace").unwrap(), "L01T");
+        assert_eq!(
+            value_for_handle(&ctx, proxy_result.value)
+                .unwrap()
+                .as_number(),
+            Some(45.0)
+        );
+        assert_eq!(
+            ctx.eval::<String, _>("__errorBoundaryIndexTrace").unwrap(),
+            "L01T"
+        );
         assert_eq!(ctx.eval::<u32, _>("__errorBoundaryLengthReads").unwrap(), 1);
         assert_eq!(ctx.eval::<u32, _>("__errorBoundaryTargetCalls").unwrap(), 1);
     });
@@ -1274,64 +1744,119 @@ fn error_exact_boundary_invoke_retains_decode_and_target_markers() {
         return Reflect.get(target, key, receiver);
       }});
     }})"#);
-    let empty_proxy = error_boundary_invoke_with_leases(&mut guard, target, &leased_graph, 0, &[callback.value]);
+    let empty_proxy =
+        error_boundary_invoke_with_leases(&mut guard, target, &leased_graph, 0, &[callback.value]);
     assert!(empty_proxy.error.is_null());
     with_context(|ctx| {
         let _active = ActiveNapiContext::enter(&ctx);
-        assert_eq!(value_for_handle(&ctx, empty_proxy.value).unwrap().as_number(), Some(1.0));
-        assert_eq!(ctx.eval::<String, _>("__errorBoundaryIndexTrace").unwrap(), "LT");
+        assert_eq!(
+            value_for_handle(&ctx, empty_proxy.value)
+                .unwrap()
+                .as_number(),
+            Some(1.0)
+        );
+        assert_eq!(
+            ctx.eval::<String, _>("__errorBoundaryIndexTrace").unwrap(),
+            "LT"
+        );
         assert_eq!(ctx.eval::<u32, _>("__errorBoundaryLengthReads").unwrap(), 1);
         assert_eq!(ctx.eval::<u32, _>("__errorBoundaryTargetCalls").unwrap(), 1);
     });
     assert_eq!(error_boundary_registry_state(callback.value), owner_state);
 
     guard.retained_handle(callback.value);
-    guard.install_decoder_source(r#"({ __thaw_json_graph_decode() {
+    guard.install_decoder_source(
+        r#"({ __thaw_json_graph_decode() {
       return new Proxy([], { get(target, key, receiver) {
         if (key === 'length') return { valueOf() { __errorBoundaryCoercionCalls++; return 0; } };
         return Reflect.get(target, key, receiver);
       }});
-    }})"#);
-    let invalid_length = error_boundary_invoke_with_leases(&mut guard, target, &leased_graph, 0, &[callback.value]);
+    }})"#,
+    );
+    let invalid_length =
+        error_boundary_invoke_with_leases(&mut guard, target, &leased_graph, 0, &[callback.value]);
     assert!(invalid_length.error.is_null());
     assert_eq!(invalid_length.value, 0);
     assert_ne!(invalid_length.exception_handle, 0);
-    error_boundary_assert_engine_error(invalid_length.exception_handle, "TypeError", "__errorBoundarySavedTypeError");
-    assert_eq!(with_context(|ctx| ctx.eval::<u32, _>("__errorBoundaryCoercionCalls").unwrap()), 0);
-    assert_eq!(with_context(|ctx| ctx.eval::<u32, _>("__errorBoundaryTargetCalls").unwrap()), 1);
+    error_boundary_assert_engine_error(
+        invalid_length.exception_handle,
+        "TypeError",
+        "__errorBoundarySavedTypeError",
+    );
+    assert_eq!(
+        with_context(|ctx| ctx.eval::<u32, _>("__errorBoundaryCoercionCalls").unwrap()),
+        0
+    );
+    assert_eq!(
+        with_context(|ctx| ctx.eval::<u32, _>("__errorBoundaryTargetCalls").unwrap()),
+        1
+    );
     assert_eq!(error_boundary_registry_state(callback.value), owner_state);
 
     guard.retained_handle(callback.value);
-    guard.install_decoder_source(r#"({ __thaw_json_graph_decode() {
+    guard.install_decoder_source(
+        r#"({ __thaw_json_graph_decode() {
       return new Proxy([], { get(target, key, receiver) {
         if (key === 'length') { __errorBoundaryLengthReads++; return 65536; }
         if (key === '0') { __errorBoundaryIndexReads++; return 0; }
         return Reflect.get(target, key, receiver);
       }});
-    }})"#);
+    }})"#,
+    );
     assert_eq!(load("__errorBoundaryLengthReads = 0; __errorBoundaryIndexReads = 0; __errorBoundaryTargetCalls = 0;"), 1);
-    let too_many = error_boundary_invoke_with_leases(&mut guard, target, &leased_graph, 0, &[callback.value]);
+    let too_many =
+        error_boundary_invoke_with_leases(&mut guard, target, &leased_graph, 0, &[callback.value]);
     assert!(too_many.error.is_null());
     assert_eq!(too_many.value, 0);
-    error_boundary_assert_engine_error(too_many.exception_handle, "RangeError", "__errorBoundarySavedRangeError");
-    assert_eq!(with_context(|ctx| ctx.eval::<u32, _>("__errorBoundaryLengthReads").unwrap()), 1);
-    assert_eq!(with_context(|ctx| ctx.eval::<u32, _>("__errorBoundaryIndexReads").unwrap()), 0);
-    assert_eq!(with_context(|ctx| ctx.eval::<u32, _>("__errorBoundaryTargetCalls").unwrap()), 0);
+    error_boundary_assert_engine_error(
+        too_many.exception_handle,
+        "RangeError",
+        "__errorBoundarySavedRangeError",
+    );
+    assert_eq!(
+        with_context(|ctx| ctx.eval::<u32, _>("__errorBoundaryLengthReads").unwrap()),
+        1
+    );
+    assert_eq!(
+        with_context(|ctx| ctx.eval::<u32, _>("__errorBoundaryIndexReads").unwrap()),
+        0
+    );
+    assert_eq!(
+        with_context(|ctx| ctx.eval::<u32, _>("__errorBoundaryTargetCalls").unwrap()),
+        0
+    );
     assert_eq!(error_boundary_registry_state(callback.value), owner_state);
 
     guard.clear_decoder_source();
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
         globalThis.__errorBoundaryThrownPromise = new Promise(() => {});
         globalThis.__errorBoundaryTarget = function() { __errorBoundaryTargetCalls++; throw __errorBoundaryThrownPromise; };
-    "#), 1);
+    "#
+        ),
+        1
+    );
     guard.release_handle(target);
     target = guard.handle(thaw_js_get_global(c"__errorBoundaryTarget".as_ptr()));
     let thrown_promise = error_boundary_invoke(&mut guard, target, empty, 0);
-    error_boundary_assert_exception_marker(&mut guard, thrown_promise, "__errorBoundaryThrownPromise", true);
+    error_boundary_assert_exception_marker(
+        &mut guard,
+        thrown_promise,
+        "__errorBoundaryThrownPromise",
+        true,
+    );
     let promise = guard.handle(thaw_js_get_global(c"__errorBoundaryThrownPromise".as_ptr()));
     with_context(|ctx| {
         let _active = ActiveNapiContext::enter(&ctx);
-        assert_eq!(value_for_handle(&ctx, promise).unwrap().as_promise().unwrap().state(), rquickjs::promise::PromiseState::Pending);
+        assert_eq!(
+            value_for_handle(&ctx, promise)
+                .unwrap()
+                .as_promise()
+                .unwrap()
+                .state(),
+            rquickjs::promise::PromiseState::Pending
+        );
     });
     assert_eq!(error_boundary_registry_state(callback.value), owner_state);
     guard.release_handle(callback.value);
@@ -1345,14 +1870,24 @@ fn error_exact_boundary_argument_array_brand_is_intrinsic_and_exact() {
     let mut guard = ErrorBoundaryFixtureGuard::new();
     install_error_boundary_host_operations();
     guard.preserve_globals(&[
-        "Array", "TypeError", "__errorBoundarySavedTypeError",
-        "__errorBoundaryOriginalArray", "__errorBoundaryOriginalArrayIsArrayDescriptor",
-        "__errorBoundaryInput", "__errorBoundaryTarget", "__errorBoundaryTargetCalls",
-        "__errorBoundaryDecoderGetReads", "__errorBoundaryDecoderCalls",
-        "__errorBoundaryLengthReads", "__errorBoundaryIndexReads", "__errorBoundaryBrandTraps",
-        "__errorBoundaryPublicArrayReads", "__errorBoundaryThrown",
+        "Array",
+        "TypeError",
+        "__errorBoundarySavedTypeError",
+        "__errorBoundaryOriginalArray",
+        "__errorBoundaryOriginalArrayIsArrayDescriptor",
+        "__errorBoundaryInput",
+        "__errorBoundaryTarget",
+        "__errorBoundaryTargetCalls",
+        "__errorBoundaryDecoderGetReads",
+        "__errorBoundaryDecoderCalls",
+        "__errorBoundaryLengthReads",
+        "__errorBoundaryIndexReads",
+        "__errorBoundaryBrandTraps",
+        "__errorBoundaryPublicArrayReads",
+        "__errorBoundaryThrown",
     ]);
-    guard.append_restore_with(r#"
+    guard.append_restore_with(
+        r#"
       Object.defineProperty(
         __errorBoundaryOriginalArray,
         'isArray',
@@ -1368,8 +1903,11 @@ fn error_exact_boundary_argument_array_brand_is_intrinsic_and_exact() {
         throw new Error('Array.isArray descriptor was not restored exactly');
       }
       1
-    "#);
-    assert_eq!(load(r#"
+    "#,
+    );
+    assert_eq!(
+        load(
+            r#"
       globalThis.__errorBoundarySavedTypeError = TypeError;
       globalThis.__errorBoundaryOriginalArray = Array;
       globalThis.__errorBoundaryOriginalArrayIsArrayDescriptor = Object.getOwnPropertyDescriptor(Array, 'isArray');
@@ -1385,18 +1923,28 @@ fn error_exact_boundary_argument_array_brand_is_intrinsic_and_exact() {
         __errorBoundaryTargetCalls++;
         return value;
       };
-    "#), 1);
-    guard.install_decoder_source(r#"({
+    "#
+        ),
+        1
+    );
+    guard.install_decoder_source(
+        r#"({
       get __thaw_json_graph_decode() {
         __errorBoundaryDecoderGetReads++;
         return function() { __errorBoundaryDecoderCalls++; return __errorBoundaryInput; };
       }
-    })"#);
+    })"#,
+    );
 
     let mut callee = guard.handle(thaw_js_get_global(c"__errorBoundaryTarget".as_ptr()));
     let callback = guard.capture_handle_result(thaw_js_register_native_callback_graph(
         error_boundary_native_callback as *const c_void,
-        std::ptr::null(), 0, 0, 0, std::ptr::null(), 0,
+        std::ptr::null(),
+        0,
+        0,
+        0,
+        std::ptr::null(),
+        0,
     ));
     assert!(callback.error.is_null());
     assert_ne!(callback.value, 0);
@@ -1412,14 +1960,22 @@ fn error_exact_boundary_argument_array_brand_is_intrinsic_and_exact() {
             guard.retained_handle(callback.value);
             assert_eq!(error_boundary_registry_state(callback.value), (2, true));
             let result = error_boundary_invoke_with_leases(
-                &mut guard, callee, &leased_graph, $is_new, &[callback.value],
+                &mut guard,
+                callee,
+                &leased_graph,
+                $is_new,
+                &[callback.value],
             );
             invocations += 1;
             assert_eq!(error_boundary_registry_state(callback.value), owner_state);
-            assert_eq!(with_context(|ctx| (
-                ctx.eval::<u32, _>("__errorBoundaryDecoderGetReads").unwrap(),
-                ctx.eval::<u32, _>("__errorBoundaryDecoderCalls").unwrap(),
-            )), (invocations, invocations));
+            assert_eq!(
+                with_context(|ctx| (
+                    ctx.eval::<u32, _>("__errorBoundaryDecoderGetReads")
+                        .unwrap(),
+                    ctx.eval::<u32, _>("__errorBoundaryDecoderCalls").unwrap(),
+                )),
+                (invocations, invocations)
+            );
             result
         }};
     }
@@ -1431,7 +1987,9 @@ fn error_exact_boundary_argument_array_brand_is_intrinsic_and_exact() {
             assert_ne!(result.exception_handle, 0);
             assert_eq!(result.exception_object_like, 1);
             error_boundary_assert_engine_error(
-                result.exception_handle, "TypeError", "__errorBoundarySavedTypeError",
+                result.exception_handle,
+                "TypeError",
+                "__errorBoundarySavedTypeError",
             );
             guard.release_handle(result.exception_handle);
         }};
@@ -1459,7 +2017,9 @@ fn error_exact_boundary_argument_array_brand_is_intrinsic_and_exact() {
 
     // A genuine array Proxy is admitted, with exactly one length and index
     // read, and nested proxies preserve the same call behavior.
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
       __errorBoundaryLengthReads = 0; __errorBoundaryIndexReads = 0; __errorBoundaryTargetCalls = 0;
       const array = [17];
       __errorBoundaryInput = new Proxy(array, { get(target, key, receiver) {
@@ -1467,20 +2027,30 @@ fn error_exact_boundary_argument_array_brand_is_intrinsic_and_exact() {
         if (key === '0') __errorBoundaryIndexReads++;
         return Reflect.get(target, key, receiver);
       }});
-    "#), 1);
+    "#
+        ),
+        1
+    );
     let proxy_call = invoke_current!(0);
     assert!(proxy_call.error.is_null());
     assert_eq!(proxy_call.exception_handle, 0);
     with_context(|ctx| {
         let _active = ActiveNapiContext::enter(&ctx);
-        assert_eq!(value_for_handle(&ctx, proxy_call.value).unwrap().as_number(), Some(17.0));
+        assert_eq!(
+            value_for_handle(&ctx, proxy_call.value)
+                .unwrap()
+                .as_number(),
+            Some(17.0)
+        );
         assert_eq!(ctx.eval::<u32, _>("__errorBoundaryLengthReads").unwrap(), 1);
         assert_eq!(ctx.eval::<u32, _>("__errorBoundaryIndexReads").unwrap(), 1);
         assert_eq!(ctx.eval::<u32, _>("__errorBoundaryTargetCalls").unwrap(), 1);
     });
     guard.release_handle(proxy_call.value);
 
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
       __errorBoundaryLengthReads = 0; __errorBoundaryIndexReads = 0; __errorBoundaryTargetCalls = 0;
       const inner = new Proxy([23], { get(target, key, receiver) {
         if (key === 'length') __errorBoundaryLengthReads++;
@@ -1492,12 +2062,20 @@ fn error_exact_boundary_argument_array_brand_is_intrinsic_and_exact() {
         if (key === '0') __errorBoundaryIndexReads++;
         return Reflect.get(target, key, receiver);
       }});
-    "#), 1);
+    "#
+        ),
+        1
+    );
     let nested_proxy_call = invoke_current!(0);
     assert!(nested_proxy_call.error.is_null());
     with_context(|ctx| {
         let _active = ActiveNapiContext::enter(&ctx);
-        assert_eq!(value_for_handle(&ctx, nested_proxy_call.value).unwrap().as_number(), Some(23.0));
+        assert_eq!(
+            value_for_handle(&ctx, nested_proxy_call.value)
+                .unwrap()
+                .as_number(),
+            Some(23.0)
+        );
         assert_eq!(ctx.eval::<u32, _>("__errorBoundaryLengthReads").unwrap(), 2);
         assert_eq!(ctx.eval::<u32, _>("__errorBoundaryIndexReads").unwrap(), 2);
         assert_eq!(ctx.eval::<u32, _>("__errorBoundaryTargetCalls").unwrap(), 1);
@@ -1506,7 +2084,9 @@ fn error_exact_boundary_argument_array_brand_is_intrinsic_and_exact() {
 
     // Construction consumes the same authenticated proxy array and preserves
     // the selected constructor's new.target behavior.
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
       __errorBoundaryTargetCalls = 0;
       globalThis.__errorBoundaryTarget = function(value) {
         __errorBoundaryTargetCalls++;
@@ -1518,7 +2098,10 @@ fn error_exact_boundary_argument_array_brand_is_intrinsic_and_exact() {
         return value;
       };
       __errorBoundaryInput = new Proxy([31], {});
-    "#), 1);
+    "#
+        ),
+        1
+    );
     guard.release_handle(callee);
     callee = guard.handle(thaw_js_get_global(c"__errorBoundaryTarget".as_ptr()));
     let proxy_construct = invoke_current!(1);
@@ -1535,20 +2118,30 @@ fn error_exact_boundary_argument_array_brand_is_intrinsic_and_exact() {
 
     // JS_IsArray-equivalent behavior throws for revoked genuine proxies; the
     // original exception lane is retained before any property read.
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
       __errorBoundaryLengthReads = 0; __errorBoundaryIndexReads = 0; __errorBoundaryTargetCalls = 0;
       const revoked = Proxy.revocable([], {}); revoked.revoke(); __errorBoundaryInput = revoked.proxy;
-    "#), 1);
+    "#
+        ),
+        1
+    );
     expect_intrinsic_type_error!(0);
-    assert_eq!(with_context(|ctx| (
-        ctx.eval::<u32, _>("__errorBoundaryLengthReads").unwrap(),
-        ctx.eval::<u32, _>("__errorBoundaryIndexReads").unwrap(),
-        ctx.eval::<u32, _>("__errorBoundaryTargetCalls").unwrap(),
-    )), (0, 0, 0));
+    assert_eq!(
+        with_context(|ctx| (
+            ctx.eval::<u32, _>("__errorBoundaryLengthReads").unwrap(),
+            ctx.eval::<u32, _>("__errorBoundaryIndexReads").unwrap(),
+            ctx.eval::<u32, _>("__errorBoundaryTargetCalls").unwrap(),
+        )),
+        (0, 0, 0)
+    );
 
     // Later public replacements of Array.isArray or Array cannot affect the
     // captured intrinsic kept in private context userdata.
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
       globalThis.__errorBoundaryPublicArrayReads = 0;
       Object.defineProperty(__errorBoundaryOriginalArray, 'isArray', {
         configurable: true,
@@ -1557,21 +2150,38 @@ fn error_exact_boundary_argument_array_brand_is_intrinsic_and_exact() {
       globalThis.Array = function ReplacedArray() { __errorBoundaryPublicArrayReads++; };
       __errorBoundaryInput = new Proxy([41], {});
       __errorBoundaryTargetCalls = 0;
-    "#), 1);
+    "#
+        ),
+        1
+    );
     let replaced_intrinsic_call = invoke_current!(0);
     assert!(replaced_intrinsic_call.error.is_null());
     assert_eq!(replaced_intrinsic_call.exception_handle, 0);
     with_context(|ctx| {
         let _active = ActiveNapiContext::enter(&ctx);
-        assert_eq!(value_for_handle(&ctx, replaced_intrinsic_call.value).unwrap().as_number(), Some(41.0));
-        assert_eq!(ctx.eval::<u32, _>("__errorBoundaryPublicArrayReads").unwrap(), 0);
+        assert_eq!(
+            value_for_handle(&ctx, replaced_intrinsic_call.value)
+                .unwrap()
+                .as_number(),
+            Some(41.0)
+        );
+        assert_eq!(
+            ctx.eval::<u32, _>("__errorBoundaryPublicArrayReads")
+                .unwrap(),
+            0
+        );
         assert_eq!(ctx.eval::<u32, _>("__errorBoundaryTargetCalls").unwrap(), 1);
     });
     guard.release_handle(replaced_intrinsic_call.value);
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
       __errorBoundaryInput = new Proxy([43], {});
       __errorBoundaryTargetCalls = 0;
-    "#), 1);
+    "#
+        ),
+        1
+    );
     let replaced_intrinsic_construct = invoke_current!(1);
     assert!(replaced_intrinsic_construct.error.is_null());
     with_context(|ctx| {
@@ -1580,16 +2190,27 @@ fn error_exact_boundary_argument_array_brand_is_intrinsic_and_exact() {
         let instance = instance_value.as_object().unwrap();
         assert_eq!(instance.get::<_, u32>("value").unwrap(), 43);
         assert!(instance.get::<_, bool>("wasNew").unwrap());
-        assert_eq!(ctx.eval::<u32, _>("__errorBoundaryPublicArrayReads").unwrap(), 0);
+        assert_eq!(
+            ctx.eval::<u32, _>("__errorBoundaryPublicArrayReads")
+                .unwrap(),
+            0
+        );
         assert_eq!(ctx.eval::<u32, _>("__errorBoundaryTargetCalls").unwrap(), 1);
     });
     guard.release_handle(replaced_intrinsic_construct.value);
-    assert_eq!(load("__errorBoundaryInput = { length: 0 }; __errorBoundaryTargetCalls = 0;"), 1);
+    assert_eq!(
+        load("__errorBoundaryInput = { length: 0 }; __errorBoundaryTargetCalls = 0;"),
+        1
+    );
     expect_intrinsic_type_error!(0);
-    assert_eq!(with_context(|ctx| (
-        ctx.eval::<u32, _>("__errorBoundaryPublicArrayReads").unwrap(),
-        ctx.eval::<u32, _>("__errorBoundaryTargetCalls").unwrap(),
-    )), (0, 0));
+    assert_eq!(
+        with_context(|ctx| (
+            ctx.eval::<u32, _>("__errorBoundaryPublicArrayReads")
+                .unwrap(),
+            ctx.eval::<u32, _>("__errorBoundaryTargetCalls").unwrap(),
+        )),
+        (0, 0)
+    );
 
     guard.release_handle(callback.value);
     assert_eq!(error_boundary_registry_state(callback.value), (0, false));
@@ -3250,7 +3871,11 @@ fn blob_file_readonly_private_bytes_and_brand_checks() {
 
 #[test]
 fn blob_file_endings_use_captured_host_platform() {
-    let native_newline = if cfg!(target_os = "windows") { "\r\n" } else { "\n" };
+    let native_newline = if cfg!(target_os = "windows") {
+        "\r\n"
+    } else {
+        "\n"
+    };
     let expected_native = format!("a{native_newline}b{native_newline}c{native_newline}d");
     let expected_split = format!("{native_newline}{native_newline}");
     assert_eq!(
@@ -4739,7 +5364,9 @@ fn event_target_dispatches_listeners_and_cancellation() {
 
 #[test]
 fn event_target_capture_passive_and_reentrant_dispatch_contracts() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
       function eventTargetCaptureRecords() {
         const target = new EventTarget(), calls = [], callback = () => calls.push('same');
         target.addEventListener('x', callback);
@@ -4908,11 +5535,26 @@ fn event_target_capture_passive_and_reentrant_dispatch_contracts() {
           cleanupResults.every(result => result[0] && result[1]),
           cleanupOnlyPropagated, reusedAfterCleanupOnly];
       }
-    "#), 1);
-    assert_eq!(call("eventTargetCaptureRecords", "[]"), r#"["same,same,same,same",1,0,1,"same,same,same",1,1]"#);
-    assert_eq!(call("eventTargetOptionsReentry", "[]"), r#"[4,1,1,0,true,"capture,once,passive,signal","1,1,1,1",1]"#);
-    assert_eq!(call("eventTargetPassiveAndRedispatch", "[]"), r#"[false,true,true,false,"InvalidStateError,InvalidStateError,true",true,true,true,false,false,false,true]"#);
-    assert_eq!(call("eventTargetThrowCleanup", "[]"), "[true,false,true,true,true]");
+    "#
+        ),
+        1
+    );
+    assert_eq!(
+        call("eventTargetCaptureRecords", "[]"),
+        r#"["same,same,same,same",1,0,1,"same,same,same",1,1]"#
+    );
+    assert_eq!(
+        call("eventTargetOptionsReentry", "[]"),
+        r#"[4,1,1,0,true,"capture,once,passive,signal","1,1,1,1",1]"#
+    );
+    assert_eq!(
+        call("eventTargetPassiveAndRedispatch", "[]"),
+        r#"[false,true,true,false,"InvalidStateError,InvalidStateError,true",true,true,true,false,false,false,true]"#
+    );
+    assert_eq!(
+        call("eventTargetThrowCleanup", "[]"),
+        "[true,false,true,true,true]"
+    );
 }
 
 #[test]
@@ -4950,7 +5592,9 @@ fn abort_controller_dispatches_once_and_timeout_aborts() {
 
 #[test]
 fn event_target_signal_option_contracts() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
       function eventTargetSignalBrands() {
         const target = new EventTarget(), fake = Object.create(AbortSignal.prototype);
         const proxied = new Proxy(new AbortController().signal, {});
@@ -5143,18 +5787,38 @@ fn event_target_signal_option_contracts() {
           return [signaled, ordinary];
         } finally { channel.port1.close(); channel.port2.close(); }
       }
-    "#), 1);
-    assert_eq!(call("eventTargetSignalBrands", "[]"), "[true,1,0,true,true,1,1]");
-    assert_eq!(call("eventTargetSignalExactRecords", "[]"), r#"["call",1,1,0,1,true,true,0,true,0]"#);
-    assert_eq!(call("eventTargetSignalPublicInterference", "[]"), "[[0,false,true,0],[0,true,true,0],[0,true,true,0],[0,false,true,0]]");
-    assert_eq!(call("eventTargetSignalDependentOrder", "[]"), r#"["published,dependent-0-true,dependent-1-true,dependent-2-true,dependent-3-true","1,1,1,1",true,true]"#);
-    assert_eq!(call("eventTargetSignalObserverCleanup", "[]"), "[1,true,true,true,0,1,0,2,1,0,1,true]");
+    "#
+        ),
+        1
+    );
+    assert_eq!(
+        call("eventTargetSignalBrands", "[]"),
+        "[true,1,0,true,true,1,1]"
+    );
+    assert_eq!(
+        call("eventTargetSignalExactRecords", "[]"),
+        r#"["call",1,1,0,1,true,true,0,true,0]"#
+    );
+    assert_eq!(
+        call("eventTargetSignalPublicInterference", "[]"),
+        "[[0,false,true,0],[0,true,true,0],[0,true,true,0],[0,false,true,0]]"
+    );
+    assert_eq!(
+        call("eventTargetSignalDependentOrder", "[]"),
+        r#"["published,dependent-0-true,dependent-1-true,dependent-2-true,dependent-3-true","1,1,1,1",true,true]"#
+    );
+    assert_eq!(
+        call("eventTargetSignalObserverCleanup", "[]"),
+        "[1,true,true,true,0,1,0,2,1,0,1,true]"
+    );
     assert_eq!(call("messageChannelSignalCleanup", "[]"), "[0,1]");
 }
 
 #[test]
 fn abort_signal_timeout_enforce_range_and_unclamped_delay() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
       function abortTimeoutBoundaries() {
         const sentinel = __thaw_set_timeout_ref(() => {}, 60000, true);
         let invalidTypes, noInvalidTimer;
@@ -5222,14 +5886,21 @@ fn abort_signal_timeout_enforce_range_and_unclamped_delay() {
           __thaw_test_mock_timers_reset(clock);
         }
       }
-    "#), 1);
-    assert_eq!(call("abortTimeoutBoundaries", "[]"),
-        "[true,true,true,true,true,true,true,true,true,true,true,true]");
+    "#
+        ),
+        1
+    );
+    assert_eq!(
+        call("abortTimeoutBoundaries", "[]"),
+        "[true,true,true,true,true,true,true,true,true,true,true,true]"
+    );
 }
 
 #[test]
 fn abort_signal_any_brands_and_observer_bookkeeping() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
       function abortAnyBrandsAndObservers() {
         const root = new AbortController().signal;
         const child = new (class ChildSignal extends AbortSignal {})();
@@ -5404,14 +6075,19 @@ fn abort_signal_any_brands_and_observer_bookkeeping() {
           replacedHandler, clearedHandler, abortCountUnaffected, settledOnce,
           onceRemovedBeforeEventReturns];
       }
-    "#), 1);
+    "#
+        ),
+        1
+    );
     assert_eq!(call("abortAnyBrandsAndObservers", "[]"),
         "[true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true,true]");
 }
 
 #[test]
 fn abort_signal_flattened_propagation_and_cleanup() {
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
       function abortPropagationAndCleanup() {
         const a = new AbortController().signal;
         const b = new AbortController().signal;
@@ -5484,9 +6160,14 @@ fn abort_signal_flattened_propagation_and_cleanup() {
           firstDependent.aborted && secondDependent.aborted,
           firstDependent.reason === null && secondDependent.reason === null];
       }
-    "#), 1);
-    assert_eq!(call("abortPropagationAndCleanup", "[]"),
-        "[true,true,true,true,true,true,true,true,true]");
+    "#
+        ),
+        1
+    );
+    assert_eq!(
+        call("abortPropagationAndCleanup", "[]"),
+        "[true,true,true,true,true,true,true,true,true]"
+    );
 }
 
 #[test]
@@ -11713,7 +12394,8 @@ fn retain_handle_clears_only_its_own_reference_registry_exceptions() {
         "__retainHandleRefsDescriptor",
         "__retainHandleArrayDescriptor",
     ]);
-    guard.append_restore_with(r#"
+    guard.append_restore_with(
+        r#"
       (() => {
         const index = globalThis.__retainHandleTestHandle - 1;
         const refs = globalThis.__thaw_value_handle_refs;
@@ -11729,12 +12411,15 @@ fn retain_handle_clears_only_its_own_reference_registry_exceptions() {
         delete globalThis.__retainHandleExceptionCaught;
         return 1;
       })()
-    "#);
+    "#,
+    );
     assert_eq!(load("globalThis.__retainHandleTestObject = {}; globalThis.__retainHandleExceptionSentinel = new Error('handle getter sentinel'); 1"), 1);
     let handle = thaw_js_get_global(c"__retainHandleTestObject".as_ptr());
     guard.handle(handle);
     assert_ne!(handle, 0);
-    assert_eq!(load(&format!(r#"
+    assert_eq!(
+        load(&format!(
+            r#"
       (() => {{
         const index = {index};
         const refs = globalThis.__thaw_value_handle_refs;
@@ -11743,11 +12428,28 @@ fn retain_handle_clears_only_its_own_reference_registry_exceptions() {
         Object.defineProperty(refs, index, {{ ...globalThis.__retainHandleRefsDescriptor, writable: false }});
         return 1;
       }})()
-    "#, index = handle - 1)), 1);
-    assert_eq!(thaw_js_retain_handle(handle), 0, "readonly refs slot is a status failure");
-    assert!(!with_context(|ctx| ctx.has_exception()), "a retain refs.set failure must not leave a QuickJS exception pending");
-    assert_eq!(load("1 + 1"), 1, "the context remains usable after the nonthrowing retain failure");
-    assert_eq!(load(r#"
+    "#,
+            index = handle - 1
+        )),
+        1
+    );
+    assert_eq!(
+        thaw_js_retain_handle(handle),
+        0,
+        "readonly refs slot is a status failure"
+    );
+    assert!(
+        !with_context(|ctx| ctx.has_exception()),
+        "a retain refs.set failure must not leave a QuickJS exception pending"
+    );
+    assert_eq!(
+        load("1 + 1"),
+        1,
+        "the context remains usable after the nonthrowing retain failure"
+    );
+    assert_eq!(
+        load(
+            r#"
       (() => {
         const index = globalThis.__retainHandleTestHandle - 1;
         const refs = globalThis.__thaw_value_handle_refs;
@@ -11761,11 +12463,23 @@ fn retain_handle_clears_only_its_own_reference_registry_exceptions() {
         });
         return 1;
       })()
-    "#), 1);
-    assert_eq!(thaw_js_retain_handle(handle), 0, "a refs getter exception is a status failure");
-    assert!(!with_context(|ctx| ctx.has_exception()), "a retain refs.get exception must be caught at its nonthrowing boundary");
+    "#
+        ),
+        1
+    );
+    assert_eq!(
+        thaw_js_retain_handle(handle),
+        0,
+        "a refs getter exception is a status failure"
+    );
+    assert!(
+        !with_context(|ctx| ctx.has_exception()),
+        "a retain refs.get exception must be caught at its nonthrowing boundary"
+    );
     assert_eq!(load("1 + 1"), 1);
-    assert_eq!(load(r#"
+    assert_eq!(
+        load(
+            r#"
       (() => {
         const index = globalThis.__retainHandleTestHandle - 1;
         const refs = globalThis.__thaw_value_handle_refs;
@@ -11780,14 +12494,31 @@ fn retain_handle_clears_only_its_own_reference_registry_exceptions() {
         });
         return 1;
       })()
-    "#), 1);
-    assert_eq!(thaw_js_retain_handle(handle), 0, "the live handle lookup fails");
-    assert!(with_context(|ctx| ctx.has_exception()), "a handle-array getter exception is outside the refs status boundary");
+    "#
+        ),
+        1
+    );
+    assert_eq!(
+        thaw_js_retain_handle(handle),
+        0,
+        "the live handle lookup fails"
+    );
+    assert!(
+        with_context(|ctx| ctx.has_exception()),
+        "a handle-array getter exception is outside the refs status boundary"
+    );
     with_context(|ctx| {
         let thrown = ctx.catch();
-        ctx.globals().set("__retainHandleExceptionCaught", thrown).unwrap();
-        assert!(ctx.eval::<bool, _>("__retainHandleExceptionCaught === __retainHandleExceptionSentinel").unwrap(),
-            "the original handle getter exception is preserved by identity");
+        ctx.globals()
+            .set("__retainHandleExceptionCaught", thrown)
+            .unwrap();
+        assert!(
+            ctx.eval::<bool, _>(
+                "__retainHandleExceptionCaught === __retainHandleExceptionSentinel"
+            )
+            .unwrap(),
+            "the original handle getter exception is preserved by identity"
+        );
     });
     assert_eq!(load("1 + 1"), 1);
     guard.finish();
@@ -12331,120 +13062,127 @@ fn atomics_notify_nonshared_waitable_arrays_delegate_to_native() {
 #[test]
 fn native_callback_cross_mode_identity_survives_released_handle() {
     std::thread::spawn(|| {
-    unsafe extern "C" fn callback(
-        _context: *const c_void,
-        _arguments: *const c_char,
-    ) -> *const c_char {
-        c"null".as_ptr()
-    }
-    let first_context = &1u8 as *const u8 as *const c_void;
-    let graph_adapter_context = &3u8 as *const u8 as *const c_void;
-    let other_context = &2u8 as *const u8 as *const c_void;
-    unsafe extern "C" {
-        fn thaw_closure_alias_register(adapter: *const u8, original: *const u8) -> *const u8;
-    }
-    assert_eq!(unsafe { thaw_closure_alias_register(graph_adapter_context.cast(), first_context.cast()) }, graph_adapter_context.cast());
-    let ordinary = thaw_js_register_native_callback(
-        callback as *const c_void,
-        first_context,
-        0,
-        0,
-        0,
-        std::ptr::null(),
-        0,
-    );
-    let graph = thaw_js_register_native_callback_graph(
-        callback as *const c_void,
-        graph_adapter_context,
-        0,
-        0,
-        0,
-        std::ptr::null(),
-        0,
-    );
-    let unrelated = thaw_js_register_native_callback(
-        callback as *const c_void,
-        other_context,
-        0,
-        0,
-        0,
-        std::ptr::null(),
-        0,
-    );
-    assert!(ordinary.error.is_null() && graph.error.is_null() && unrelated.error.is_null());
-    assert_ne!(ordinary.value, graph.value);
-    with_context(|ctx| {
-        let first = value_for_handle(&ctx, ordinary.value).unwrap();
-        let graph_value = value_for_handle(&ctx, graph.value).unwrap();
-        let other = value_for_handle(&ctx, unrelated.value).unwrap();
-        let query: Function = ctx.globals().get("__thaw_same_native_callback").unwrap();
-        assert!(query
-            .call::<_, bool>((first.clone(), graph_value.clone()))
-            .unwrap());
-        assert!(query
-            .call::<_, bool>((graph_value.clone(), first.clone()))
-            .unwrap());
-        let strict: Function = ctx.globals().get("__thaw_strict_equal_dynamic").unwrap();
-        let loose: Function = ctx.globals().get("__thaw_native_loose_equal").unwrap();
-        assert!(strict
-            .call::<_, bool>((first.clone(), graph_value.clone(), 3.0, 0.0))
-            .unwrap());
-        assert!(loose
-            .call::<_, bool>((graph_value.clone(), first.clone(), 0.0, 3.0))
-            .unwrap());
-        assert!(!query.call::<_, bool>((first.clone(), other)).unwrap());
-        let holder = Object::new(ctx.clone()).unwrap();
-        holder.set("saved", graph_value).unwrap();
-        ctx.globals()
-            .set("__thaw_saved_callback_holder", holder)
-            .unwrap();
-    });
-    assert_eq!(thaw_js_release_handle(graph.value), 1);
-    let replacement = thaw_js_register_native_callback_graph(
-        callback as *const c_void,
-        other_context,
-        0,
-        0,
-        0,
-        std::ptr::null(),
-        0,
-    );
-    assert!(replacement.error.is_null());
-    // The freed numeric slot can be reused for another closure; the saved
-    // JS function retains its original private identity independently.
-    assert_eq!(replacement.value, graph.value);
-    with_context(|ctx| {
-        let first = value_for_handle(&ctx, ordinary.value).unwrap();
-        let replacement_value = value_for_handle(&ctx, replacement.value).unwrap();
-        let holder: Object = ctx.globals().get("__thaw_saved_callback_holder").unwrap();
-        let saved: Value = holder.get("saved").unwrap();
-        let reacquired = retain_value(&ctx, saved.clone()).unwrap();
-        let query: Function = ctx.globals().get("__thaw_same_native_callback").unwrap();
-        assert!(query
-            .call::<_, bool>((first.clone(), saved.clone()))
-            .unwrap());
-        assert!(!query.call::<_, bool>((first, replacement_value)).unwrap());
-        assert!(query
-            .call::<_, bool>((saved.clone(), value_for_handle(&ctx, reacquired).unwrap()))
-            .unwrap());
-        assert!(!query
-            .call::<_, bool>((saved.clone(), Value::new_undefined(ctx.clone())))
-            .unwrap());
-        let descriptor: Object = ctx
-            .globals()
-            .get::<_, Object>("Object")
-            .unwrap()
-            .get::<_, Function>("getOwnPropertyDescriptor")
-            .unwrap()
-            .call((ctx.globals(), "__thaw_same_native_callback"))
-            .unwrap();
-        assert!(!descriptor.get::<_, bool>("writable").unwrap());
-        assert!(!descriptor.get::<_, bool>("configurable").unwrap());
-        ctx.globals()
-            .set("__thaw_saved_callback_holder", Value::new_undefined(ctx))
-            .unwrap();
-    });
-    }).join().expect("native callback alias identity test thread");
+        unsafe extern "C" fn callback(
+            _context: *const c_void,
+            _arguments: *const c_char,
+        ) -> *const c_char {
+            c"null".as_ptr()
+        }
+        let first_context = &1u8 as *const u8 as *const c_void;
+        let graph_adapter_context = &3u8 as *const u8 as *const c_void;
+        let other_context = &2u8 as *const u8 as *const c_void;
+        unsafe extern "C" {
+            fn thaw_closure_alias_register(adapter: *const u8, original: *const u8) -> *const u8;
+        }
+        assert_eq!(
+            unsafe {
+                thaw_closure_alias_register(graph_adapter_context.cast(), first_context.cast())
+            },
+            graph_adapter_context.cast()
+        );
+        let ordinary = thaw_js_register_native_callback(
+            callback as *const c_void,
+            first_context,
+            0,
+            0,
+            0,
+            std::ptr::null(),
+            0,
+        );
+        let graph = thaw_js_register_native_callback_graph(
+            callback as *const c_void,
+            graph_adapter_context,
+            0,
+            0,
+            0,
+            std::ptr::null(),
+            0,
+        );
+        let unrelated = thaw_js_register_native_callback(
+            callback as *const c_void,
+            other_context,
+            0,
+            0,
+            0,
+            std::ptr::null(),
+            0,
+        );
+        assert!(ordinary.error.is_null() && graph.error.is_null() && unrelated.error.is_null());
+        assert_ne!(ordinary.value, graph.value);
+        with_context(|ctx| {
+            let first = value_for_handle(&ctx, ordinary.value).unwrap();
+            let graph_value = value_for_handle(&ctx, graph.value).unwrap();
+            let other = value_for_handle(&ctx, unrelated.value).unwrap();
+            let query: Function = ctx.globals().get("__thaw_same_native_callback").unwrap();
+            assert!(query
+                .call::<_, bool>((first.clone(), graph_value.clone()))
+                .unwrap());
+            assert!(query
+                .call::<_, bool>((graph_value.clone(), first.clone()))
+                .unwrap());
+            let strict: Function = ctx.globals().get("__thaw_strict_equal_dynamic").unwrap();
+            let loose: Function = ctx.globals().get("__thaw_native_loose_equal").unwrap();
+            assert!(strict
+                .call::<_, bool>((first.clone(), graph_value.clone(), 3.0, 0.0))
+                .unwrap());
+            assert!(loose
+                .call::<_, bool>((graph_value.clone(), first.clone(), 0.0, 3.0))
+                .unwrap());
+            assert!(!query.call::<_, bool>((first.clone(), other)).unwrap());
+            let holder = Object::new(ctx.clone()).unwrap();
+            holder.set("saved", graph_value).unwrap();
+            ctx.globals()
+                .set("__thaw_saved_callback_holder", holder)
+                .unwrap();
+        });
+        assert_eq!(thaw_js_release_handle(graph.value), 1);
+        let replacement = thaw_js_register_native_callback_graph(
+            callback as *const c_void,
+            other_context,
+            0,
+            0,
+            0,
+            std::ptr::null(),
+            0,
+        );
+        assert!(replacement.error.is_null());
+        // The freed numeric slot can be reused for another closure; the saved
+        // JS function retains its original private identity independently.
+        assert_eq!(replacement.value, graph.value);
+        with_context(|ctx| {
+            let first = value_for_handle(&ctx, ordinary.value).unwrap();
+            let replacement_value = value_for_handle(&ctx, replacement.value).unwrap();
+            let holder: Object = ctx.globals().get("__thaw_saved_callback_holder").unwrap();
+            let saved: Value = holder.get("saved").unwrap();
+            let reacquired = retain_value(&ctx, saved.clone()).unwrap();
+            let query: Function = ctx.globals().get("__thaw_same_native_callback").unwrap();
+            assert!(query
+                .call::<_, bool>((first.clone(), saved.clone()))
+                .unwrap());
+            assert!(!query.call::<_, bool>((first, replacement_value)).unwrap());
+            assert!(query
+                .call::<_, bool>((saved.clone(), value_for_handle(&ctx, reacquired).unwrap()))
+                .unwrap());
+            assert!(!query
+                .call::<_, bool>((saved.clone(), Value::new_undefined(ctx.clone())))
+                .unwrap());
+            let descriptor: Object = ctx
+                .globals()
+                .get::<_, Object>("Object")
+                .unwrap()
+                .get::<_, Function>("getOwnPropertyDescriptor")
+                .unwrap()
+                .call((ctx.globals(), "__thaw_same_native_callback"))
+                .unwrap();
+            assert!(!descriptor.get::<_, bool>("writable").unwrap());
+            assert!(!descriptor.get::<_, bool>("configurable").unwrap());
+            ctx.globals()
+                .set("__thaw_saved_callback_holder", Value::new_undefined(ctx))
+                .unwrap();
+        });
+    })
+    .join()
+    .expect("native callback alias identity test thread");
 }
 
 #[test]
@@ -14707,15 +15445,23 @@ fn collect_garbage_does_not_create_a_context_and_uses_an_existing_one() {
 fn native_string_and_symbol_bridge_keeps_kind_identity_and_cleans_up() {
     // Exported bridge calls enter QuickJS themselves, so keep them outside
     // an outer `with_context` borrow. Context entries below only read the count.
-    unsafe extern "C" { fn thaw_cstring_destroy(value: *mut std::ffi::c_char); }
+    unsafe extern "C" {
+        fn thaw_cstring_destroy(value: *mut std::ffi::c_char);
+    }
     let bootstrap = thaw_js_get_global(c"undefined".as_ptr());
     assert!(bootstrap > 0);
     assert_eq!(thaw_js_release_handle(bootstrap), 1);
-    let refs_total = || with_context(|ctx| ctx.eval::<u64, _>(
-        "globalThis.__thaw_value_handle_refs.reduce((total, refs) => total + refs, 0)"
-    ).unwrap());
+    let refs_total = || {
+        with_context(|ctx| {
+            ctx.eval::<u64, _>(
+                "globalThis.__thaw_value_handle_refs.reduce((total, refs) => total + refs, 0)",
+            )
+            .unwrap()
+        })
+    };
     let before = refs_total();
-    let wire = |value: &str| std::ffi::CString::new(serde_json::to_string(&[value]).unwrap()).unwrap();
+    let wire =
+        |value: &str| std::ffi::CString::new(serde_json::to_string(&[value]).unwrap()).unwrap();
     let token = "\u{3}41:same";
     let string_wire = wire(token);
     let first_wire = wire(token);
@@ -14731,10 +15477,22 @@ fn native_string_and_symbol_bridge_keeps_kind_identity_and_cleans_up() {
     for result in [&string, &first, &same, &other, &registered_a, &registered_b] {
         assert!(result.error.is_null());
     }
-    assert_eq!(thaw_js_strict_equal_handles_result(string.value, first.value).value, 0);
-    assert_eq!(thaw_js_strict_equal_handles_result(first.value, same.value).value, 1);
-    assert_eq!(thaw_js_strict_equal_handles_result(first.value, other.value).value, 0);
-    assert_eq!(thaw_js_strict_equal_handles_result(registered_a.value, registered_b.value).value, 1);
+    assert_eq!(
+        thaw_js_strict_equal_handles_result(string.value, first.value).value,
+        0
+    );
+    assert_eq!(
+        thaw_js_strict_equal_handles_result(first.value, same.value).value,
+        1
+    );
+    assert_eq!(
+        thaw_js_strict_equal_handles_result(first.value, other.value).value,
+        0
+    );
+    assert_eq!(
+        thaw_js_strict_equal_handles_result(registered_a.value, registered_b.value).value,
+        1
+    );
     let invalid = std::ffi::CString::new("[]").unwrap();
     let failed = thaw_js_event_key_handle_result(invalid.as_ptr(), 2);
     assert_eq!(failed.value, 0);
@@ -14753,10 +15511,20 @@ fn native_string_and_symbol_bridge_keeps_kind_identity_and_cleans_up() {
     let native_null_wire = std::ffi::CString::new("[null]").unwrap();
     let native_null = thaw_js_event_key_handle_result(native_null_wire.as_ptr(), 0);
     assert!(native_null.error.is_null());
-    for handle in [string.value, first.value, same.value, other.value, registered_a.value,
-        registered_b.value, native_null.value]
-    {
+    for handle in [
+        string.value,
+        first.value,
+        same.value,
+        other.value,
+        registered_a.value,
+        registered_b.value,
+        native_null.value,
+    ] {
         assert_eq!(thaw_js_release_handle(handle), 1);
     }
-    assert_eq!(refs_total(), before, "native scalar bridge left retained handles behind");
+    assert_eq!(
+        refs_total(),
+        before,
+        "native scalar bridge left retained handles behind"
+    );
 }
