@@ -950,6 +950,25 @@ fn configure_child_command(
             }
         }
     }
+    #[cfg(unix)]
+    {
+        // Like libuv, hand the child default signal dispositions and an empty signal mask so an
+        // ignored/blocked signal in the host (nohup, `trap '' INT`) cannot make a child unkillable.
+        // SAFETY: signal and sigprocmask are async-signal-safe and the closure allocates nothing.
+        unsafe {
+            child.pre_exec(|| {
+                for signal in 1..32 {
+                    if signal != libc::SIGKILL && signal != libc::SIGSTOP {
+                        libc::signal(signal, libc::SIG_DFL);
+                    }
+                }
+                let mut mask: libc::sigset_t = std::mem::zeroed();
+                libc::sigemptyset(&mut mask);
+                libc::sigprocmask(libc::SIG_SETMASK, &mask, std::ptr::null_mut());
+                Ok(())
+            });
+        }
+    }
     #[cfg(all(unix, not(target_os = "l4re")))]
     {
         if let Some(gid) = gid {
@@ -1689,6 +1708,22 @@ fn sync_child_within_limits_reports_neither_flag() {
     assert_eq!(record["maxBufferExceeded"], false);
     assert_eq!(hex_decode(record["stdout"].as_str().unwrap()), b"abc");
     assert_eq!(hex_decode(record["stderr"].as_str().unwrap()), b"def");
+}
+
+#[cfg(all(test, unix))]
+#[test]
+fn spawned_children_get_default_signal_dispositions() {
+    // A host started under nohup (SIGINT ignored) must not hand that to children, as in libuv.
+    // SAFETY: only this test touches SIGINT's disposition, and it restores the previous one.
+    let previous = unsafe { libc::signal(libc::SIGINT, libc::SIG_IGN) };
+    let record: serde_json::Value = serde_json::from_str(&run_child_process(
+        "/bin/sh".into(),
+        serde_json::json!(["-c", "kill -INT $$; echo survived"]).to_string(),
+        "{}".into(),
+    )).unwrap();
+    unsafe { libc::signal(libc::SIGINT, previous) };
+    assert_eq!(record["signal"], 2);
+    assert!(hex_decode(record["stdout"].as_str().unwrap()).is_empty());
 }
 
 #[cfg(all(test, unix))]
