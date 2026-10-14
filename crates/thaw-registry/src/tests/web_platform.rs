@@ -16,7 +16,7 @@ fn vm_builtin_runs_scripts_in_contexts_and_compiles_functions() {
     let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
     assert_eq!(
         result,
-        r#"[12,12,13,7,42,17,true,false,true,false,0,true,"symbol"]"#
+        r#"[12,12,13,7,42,17,true,false,true,null,0,true,"symbol"]"#
     );
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);

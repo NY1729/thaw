@@ -1,7 +1,7 @@
 pub(super) fn source(name: &str) -> Option<&'static str> {
     match name {
         "tty" => Some(
-            "function isatty(fd) { return false; }\n\
+            "function isatty(fd) { fd = Number(fd); return Number.isInteger(fd) && fd >= 0 && typeof __thaw_process_is_tty === 'function' && Boolean(__thaw_process_is_tty(fd)); }\n\
              function ReadStream(fd, options) { if (!(this instanceof ReadStream)) return new ReadStream(fd, options); this.fd = Number(fd); this.isRaw = false; this.isTTY = true; this.readable = true; this.destroyed = false; }\n\
              ReadStream.prototype.setRawMode = function(mode) { this.isRaw = Boolean(mode); return this; }; ReadStream.prototype.ref = function() { return this; }; ReadStream.prototype.unref = function() { return this; };\n\
              function WriteStream(fd) { if (!(this instanceof WriteStream)) return new WriteStream(fd); this.fd = Number(fd); this.isTTY = true; this.columns = 80; this.rows = 24; this.writable = true; this.destroyed = false; this._output = ''; }\n\
