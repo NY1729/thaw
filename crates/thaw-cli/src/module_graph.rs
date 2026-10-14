@@ -174,7 +174,9 @@ fn dependency_specifiers(module: &Module) -> Result<Vec<(String, bool, bool)>, S
     let mut runtime = HashSet::new();
     let mut static_runtime = HashSet::new();
     for item in &module.body {
-        let ModuleItem::ModuleDecl(decl) = item else { continue };
+        let ModuleItem::ModuleDecl(decl) = item else {
+            continue;
+        };
         let source = match decl {
             ModuleDecl::Import(import) => Some((&import.src, !import.type_only
                 && (import.specifiers.is_empty() || import.specifiers.iter().any(|specifier| {
@@ -189,22 +191,35 @@ fn dependency_specifiers(module: &Module) -> Result<Vec<(String, bool, bool)>, S
             _ => None,
         };
         if let Some((source, is_runtime)) = source {
-            let specifier = source.value.as_str().ok_or_else(|| "module specifiers must be valid UTF-8".to_string())?;
-            if !specs.iter().any(|existing| existing == specifier) { specs.push(specifier.to_string()); }
+            let specifier = source
+                .value
+                .as_str()
+                .ok_or_else(|| "module specifiers must be valid UTF-8".to_string())?;
+            if !specs.iter().any(|existing| existing == specifier) {
+                specs.push(specifier.to_string());
+            }
             if is_runtime {
                 runtime.insert(specifier.to_string());
                 static_runtime.insert(specifier.to_string());
             }
         }
     }
-    struct DynamicImportSpecs { specs: Vec<String> }
+    struct DynamicImportSpecs {
+        specs: Vec<String>,
+    }
     impl Visit for DynamicImportSpecs {
         fn visit_call_expr(&mut self, call: &thaw_parser::ast::CallExpr) {
             if matches!(call.callee, Callee::Import(_)) {
                 if let Some(specifier) = call.args.first().and_then(|argument| {
-                    argument.spread.is_none().then(|| constant_string(&argument.expr)).flatten()
+                    argument
+                        .spread
+                        .is_none()
+                        .then(|| constant_string(&argument.expr))
+                        .flatten()
                 }) {
-                    if !self.specs.contains(&specifier) { self.specs.push(specifier); }
+                    if !self.specs.contains(&specifier) {
+                        self.specs.push(specifier);
+                    }
                 }
             }
             call.visit_children_with(self);
@@ -214,19 +229,26 @@ fn dependency_specifiers(module: &Module) -> Result<Vec<(String, bool, bool)>, S
     module.visit_with(&mut dynamic_imports);
     for specifier in dynamic_imports.specs {
         runtime.insert(specifier.clone());
-        if !specs.contains(&specifier) { specs.push(specifier); }
+        if !specs.contains(&specifier) {
+            specs.push(specifier);
+        }
     }
-    Ok(specs.into_iter().map(|specifier| {
-        let is_runtime = runtime.contains(&specifier);
-        let is_static = static_runtime.contains(&specifier);
-        (specifier, is_runtime, is_static)
-    }).collect())
+    Ok(specs
+        .into_iter()
+        .map(|specifier| {
+            let is_runtime = runtime.contains(&specifier);
+            let is_static = static_runtime.contains(&specifier);
+            (specifier, is_runtime, is_static)
+        })
+        .collect())
 }
 
 #[derive(Default)]
 struct IdentifierNames(HashSet<String>);
 impl Visit for IdentifierNames {
-    fn visit_ident(&mut self, ident: &Ident) { self.0.insert(ident.sym.to_string()); }
+    fn visit_ident(&mut self, ident: &Ident) {
+        self.0.insert(ident.sym.to_string());
+    }
     fn visit_binding_ident(&mut self, binding: &thaw_parser::ast::BindingIdent) {
         self.0.insert(binding.id.sym.to_string());
     }
@@ -244,7 +266,9 @@ enum BindingRole {
 type BindingFrame = HashMap<String, BindingRole>;
 
 #[derive(Default)]
-struct LexicalBindingCollector { names: HashSet<String> }
+struct LexicalBindingCollector {
+    names: HashSet<String>,
+}
 impl Visit for LexicalBindingCollector {
     fn visit_block_stmt(&mut self, _: &thaw_parser::ast::BlockStmt) {}
     fn visit_function(&mut self, _: &thaw_parser::ast::Function) {}
@@ -257,7 +281,9 @@ impl Visit for LexicalBindingCollector {
     fn visit_var_decl(&mut self, declaration: &thaw_parser::ast::VarDecl) {
         if declaration.kind != thaw_parser::ast::VarDeclKind::Var {
             for binding in &declaration.decls {
-                binding.name.visit_with(&mut PatternBindingCollector(&mut self.names));
+                binding
+                    .name
+                    .visit_with(&mut PatternBindingCollector(&mut self.names));
             }
         }
     }
@@ -270,18 +296,32 @@ impl Visit for LexicalBindingCollector {
 }
 
 fn nearest_role(scopes: &[BindingFrame], name: &str) -> Option<BindingRole> {
-    scopes.iter().rev().find_map(|scope| scope.get(name).copied())
+    scopes
+        .iter()
+        .rev()
+        .find_map(|scope| scope.get(name).copied())
 }
 
 fn creator_role(expr: &Expr, scopes: &[BindingFrame]) -> Option<BindingRole> {
     let Expr::Call(call) = expr else { return None };
-    let Callee::Expr(callee) = &call.callee else { return None };
+    let Callee::Expr(callee) = &call.callee else {
+        return None;
+    };
     match callee.as_ref() {
-        Expr::Ident(function) if nearest_role(scopes, function.sym.as_ref()) == Some(BindingRole::ImportedCreator) => Some(BindingRole::CreatedImmutable),
+        Expr::Ident(function)
+            if nearest_role(scopes, function.sym.as_ref())
+                == Some(BindingRole::ImportedCreator) =>
+        {
+            Some(BindingRole::CreatedImmutable)
+        }
         Expr::Member(member) => match (member.obj.as_ref(), &member.prop) {
             (Expr::Ident(namespace), MemberProp::Ident(method))
                 if method.sym == *"createRequire"
-                    && nearest_role(scopes, namespace.sym.as_ref()) == Some(BindingRole::ImportedModuleNamespace) => Some(BindingRole::CreatedImmutable),
+                    && nearest_role(scopes, namespace.sym.as_ref())
+                        == Some(BindingRole::ImportedModuleNamespace) =>
+            {
+                Some(BindingRole::CreatedImmutable)
+            }
             _ => None,
         },
         _ => None,
@@ -307,17 +347,28 @@ impl Visit for HoistedVarAliases {
     fn visit_class_expr(&mut self, _: &thaw_parser::ast::ClassExpr) {}
     fn visit_block_stmt(&mut self, block: &thaw_parser::ast::BlockStmt) {
         let mut locals = LexicalBindingCollector::default();
-        for statement in &block.stmts { statement.visit_with(&mut locals); }
-        let frame = locals.names.into_iter().map(|name| (name, BindingRole::Ordinary)).collect();
+        for statement in &block.stmts {
+            statement.visit_with(&mut locals);
+        }
+        let frame = locals
+            .names
+            .into_iter()
+            .map(|name| (name, BindingRole::Ordinary))
+            .collect();
         self.with_scope(frame, |this| block.visit_children_with(this));
     }
     fn visit_var_decl(&mut self, declaration: &thaw_parser::ast::VarDecl) {
         if declaration.kind == thaw_parser::ast::VarDeclKind::Var {
             for binding in &declaration.decls {
-                let Pat::Ident(alias) = &binding.name else { continue };
-                let Some(init) = binding.init.as_deref() else { continue };
+                let Pat::Ident(alias) = &binding.name else {
+                    continue;
+                };
+                let Some(init) = binding.init.as_deref() else {
+                    continue;
+                };
                 if creator_role(init, &self.scopes).is_some() {
-                    self.roles.insert(alias.id.sym.to_string(), BindingRole::CreatedMutable);
+                    self.roles
+                        .insert(alias.id.sym.to_string(), BindingRole::CreatedMutable);
                 }
             }
         }
@@ -352,8 +403,16 @@ impl Visit for HoistedVarAliases {
     }
     fn visit_switch_stmt(&mut self, statement: &thaw_parser::ast::SwitchStmt) {
         let mut locals = LexicalBindingCollector::default();
-        for case in &statement.cases { for consequent in &case.cons { consequent.visit_with(&mut locals); } }
-        let frame = locals.names.into_iter().map(|name| (name, BindingRole::Ordinary)).collect();
+        for case in &statement.cases {
+            for consequent in &case.cons {
+                consequent.visit_with(&mut locals);
+            }
+        }
+        let frame = locals
+            .names
+            .into_iter()
+            .map(|name| (name, BindingRole::Ordinary))
+            .collect();
         self.with_scope(frame, |this| statement.visit_children_with(this));
     }
 }
@@ -379,20 +438,33 @@ struct CreatedRequireCallRewriter<'a> {
 impl CreatedRequireCallRewriter<'_> {
     fn collect_function_body_scope(&self, body: &thaw_parser::ast::FunctionBody) -> BindingFrame {
         let mut lexical = LexicalBindingCollector::default();
-        for statement in &body.stmts { statement.visit_with(&mut lexical); }
+        for statement in &body.stmts {
+            statement.visit_with(&mut lexical);
+        }
         let mut hoisted = HoistedBindingCollector::default();
         body.visit_with(&mut hoisted);
         lexical.names.extend(hoisted.0.names);
-        let mut frame: BindingFrame = lexical.names.into_iter()
-            .map(|name| (name, BindingRole::Ordinary)).collect();
+        let mut frame: BindingFrame = lexical
+            .names
+            .into_iter()
+            .map(|name| (name, BindingRole::Ordinary))
+            .collect();
         let mut outer = self.scopes.clone();
         outer.push(frame.clone());
-        let mut aliases = ScopeCreatedAliases { scopes: &outer, roles: HashMap::new() };
-        for statement in &body.stmts { statement.visit_with(&mut aliases); }
+        let mut aliases = ScopeCreatedAliases {
+            scopes: &outer,
+            roles: HashMap::new(),
+        };
+        for statement in &body.stmts {
+            statement.visit_with(&mut aliases);
+        }
         frame.extend(aliases.roles);
         let mut outer = self.scopes.clone();
         outer.push(frame.clone());
-        let mut hoisted_vars = HoistedVarAliases { scopes: outer, roles: HashMap::new() };
+        let mut hoisted_vars = HoistedVarAliases {
+            scopes: outer,
+            roles: HashMap::new(),
+        };
         body.visit_with(&mut hoisted_vars);
         frame.extend(hoisted_vars.roles);
         frame
@@ -400,12 +472,23 @@ impl CreatedRequireCallRewriter<'_> {
 
     fn collect_scope(&self, statements: &[thaw_parser::ast::Stmt]) -> BindingFrame {
         let mut locals = LexicalBindingCollector::default();
-        for statement in statements { statement.visit_with(&mut locals); }
-        let mut frame: BindingFrame = locals.names.into_iter().map(|name| (name, BindingRole::Ordinary)).collect();
+        for statement in statements {
+            statement.visit_with(&mut locals);
+        }
+        let mut frame: BindingFrame = locals
+            .names
+            .into_iter()
+            .map(|name| (name, BindingRole::Ordinary))
+            .collect();
         let mut outer = self.scopes.clone();
         outer.push(frame.clone());
-        let mut aliases = ScopeCreatedAliases { scopes: &outer, roles: HashMap::new() };
-        for statement in statements { statement.visit_with(&mut aliases); }
+        let mut aliases = ScopeCreatedAliases {
+            scopes: &outer,
+            roles: HashMap::new(),
+        };
+        for statement in statements {
+            statement.visit_with(&mut aliases);
+        }
         frame.extend(aliases.roles);
         frame
     }
@@ -422,17 +505,27 @@ impl Visit for ScopeCreatedAliases<'_> {
     fn visit_catch_clause(&mut self, _: &thaw_parser::ast::CatchClause) {}
     fn visit_class_decl(&mut self, declaration: &thaw_parser::ast::ClassDecl) {
         let frame = HashMap::from([(declaration.ident.sym.to_string(), BindingRole::Ordinary)]);
-        let mut scopes = self.scopes.to_vec(); scopes.push(frame);
-        let mut nested = ScopeCreatedAliases { scopes: &scopes, roles: HashMap::new() };
+        let mut scopes = self.scopes.to_vec();
+        scopes.push(frame);
+        let mut nested = ScopeCreatedAliases {
+            scopes: &scopes,
+            roles: HashMap::new(),
+        };
         declaration.class.visit_with(&mut nested);
         self.roles.extend(nested.roles);
     }
     fn visit_class_expr(&mut self, expression: &thaw_parser::ast::ClassExpr) {
         let mut scopes = self.scopes.to_vec();
         if let Some(name) = &expression.ident {
-            scopes.push(HashMap::from([(name.sym.to_string(), BindingRole::Ordinary)]));
+            scopes.push(HashMap::from([(
+                name.sym.to_string(),
+                BindingRole::Ordinary,
+            )]));
         }
-        let mut nested = ScopeCreatedAliases { scopes: &scopes, roles: HashMap::new() };
+        let mut nested = ScopeCreatedAliases {
+            scopes: &scopes,
+            roles: HashMap::new(),
+        };
         expression.class.visit_with(&mut nested);
         self.roles.extend(nested.roles);
     }
@@ -441,17 +534,25 @@ impl Visit for ScopeCreatedAliases<'_> {
     fn visit_for_of_stmt(&mut self, _: &thaw_parser::ast::ForOfStmt) {}
     fn visit_switch_stmt(&mut self, _: &thaw_parser::ast::SwitchStmt) {}
     fn visit_var_decl(&mut self, declaration: &thaw_parser::ast::VarDecl) {
-        if declaration.kind == thaw_parser::ast::VarDeclKind::Var { return; }
+        if declaration.kind == thaw_parser::ast::VarDeclKind::Var {
+            return;
+        }
         for binding in &declaration.decls {
-            let Pat::Ident(alias) = &binding.name else { continue };
-            let Some(init) = binding.init.as_deref() else { continue };
+            let Pat::Ident(alias) = &binding.name else {
+                continue;
+            };
+            let Some(init) = binding.init.as_deref() else {
+                continue;
+            };
             let mut role = creator_role(init, self.scopes);
             if role.is_some() {
-                role = Some(if declaration.kind == thaw_parser::ast::VarDeclKind::Const {
-                    BindingRole::CreatedImmutable
-                } else {
-                    BindingRole::CreatedMutable
-                });
+                role = Some(
+                    if declaration.kind == thaw_parser::ast::VarDeclKind::Const {
+                        BindingRole::CreatedImmutable
+                    } else {
+                        BindingRole::CreatedMutable
+                    },
+                );
                 self.roles.insert(alias.id.sym.to_string(), role.unwrap());
             }
         }
@@ -462,16 +563,35 @@ impl VisitMut for CreatedRequireCallRewriter<'_> {
     fn visit_mut_module(&mut self, module: &mut Module) {
         let mut frame = BindingFrame::new();
         for item in &module.body {
-            let ModuleItem::ModuleDecl(ModuleDecl::Import(import)) = item else { continue };
-            if import.type_only || !matches!(import.src.value.as_str(), Some("module" | "node:module")) { continue; }
+            let ModuleItem::ModuleDecl(ModuleDecl::Import(import)) = item else {
+                continue;
+            };
+            if import.type_only
+                || !matches!(import.src.value.as_str(), Some("module" | "node:module"))
+            {
+                continue;
+            }
             for specifier in &import.specifiers {
                 match specifier {
                     ImportSpecifier::Named(named) if !named.is_type_only => {
-                        let imported = named.imported.as_ref().map(export_name).transpose().ok().flatten()
+                        let imported = named
+                            .imported
+                            .as_ref()
+                            .map(export_name)
+                            .transpose()
+                            .ok()
+                            .flatten()
                             .unwrap_or_else(|| named.local.sym.to_string());
-                        if imported == "createRequire" { frame.insert(named.local.sym.to_string(), BindingRole::ImportedCreator); }
+                        if imported == "createRequire" {
+                            frame.insert(named.local.sym.to_string(), BindingRole::ImportedCreator);
+                        }
                     }
-                    ImportSpecifier::Namespace(namespace) => { frame.insert(namespace.local.sym.to_string(), BindingRole::ImportedModuleNamespace); }
+                    ImportSpecifier::Namespace(namespace) => {
+                        frame.insert(
+                            namespace.local.sym.to_string(),
+                            BindingRole::ImportedModuleNamespace,
+                        );
+                    }
                     _ => {}
                 }
             }
@@ -481,12 +601,24 @@ impl VisitMut for CreatedRequireCallRewriter<'_> {
         let mut hoisted = HoistedBindingCollector::default();
         module.visit_with(&mut hoisted);
         locals.names.extend(hoisted.0.names);
-        for name in locals.names { frame.entry(name).or_insert(BindingRole::Ordinary); }
-        let mut aliases = ScopeCreatedAliases { scopes: std::slice::from_ref(&frame), roles: HashMap::new() };
-        for item in &module.body { item.visit_with(&mut aliases); }
+        for name in locals.names {
+            frame.entry(name).or_insert(BindingRole::Ordinary);
+        }
+        let mut aliases = ScopeCreatedAliases {
+            scopes: std::slice::from_ref(&frame),
+            roles: HashMap::new(),
+        };
+        for item in &module.body {
+            item.visit_with(&mut aliases);
+        }
         frame.extend(aliases.roles);
-        let mut hoisted_vars = HoistedVarAliases { scopes: vec![frame.clone()], roles: HashMap::new() };
-        for item in &module.body { item.visit_with(&mut hoisted_vars); }
+        let mut hoisted_vars = HoistedVarAliases {
+            scopes: vec![frame.clone()],
+            roles: HashMap::new(),
+        };
+        for item in &module.body {
+            item.visit_with(&mut hoisted_vars);
+        }
         frame.extend(hoisted_vars.roles);
         self.scopes.push(frame);
         module.visit_mut_children_with(self);
@@ -502,10 +634,14 @@ impl VisitMut for CreatedRequireCallRewriter<'_> {
     fn visit_mut_function(&mut self, function: &mut thaw_parser::ast::Function) {
         let mut parameters = HashSet::new();
         for parameter in &function.params {
-            parameter.pat.visit_with(&mut PatternBindingCollector(&mut parameters));
+            parameter
+                .pat
+                .visit_with(&mut PatternBindingCollector(&mut parameters));
         }
-        let frame: BindingFrame = parameters.into_iter()
-            .map(|name| (name, BindingRole::Ordinary)).collect();
+        let frame: BindingFrame = parameters
+            .into_iter()
+            .map(|name| (name, BindingRole::Ordinary))
+            .collect();
         self.scopes.push(frame);
         function.visit_mut_children_with(self);
         self.scopes.pop();
@@ -543,8 +679,10 @@ impl VisitMut for CreatedRequireCallRewriter<'_> {
         for parameter in &arrow.params {
             parameter.visit_with(&mut PatternBindingCollector(&mut parameters));
         }
-        let frame: BindingFrame = parameters.into_iter()
-            .map(|name| (name, BindingRole::Ordinary)).collect();
+        let frame: BindingFrame = parameters
+            .into_iter()
+            .map(|name| (name, BindingRole::Ordinary))
+            .collect();
         self.scopes.push(frame);
         arrow.visit_mut_children_with(self);
         self.scopes.pop();
@@ -570,7 +708,10 @@ impl VisitMut for CreatedRequireCallRewriter<'_> {
             frame.extend(locals.into_iter().map(|name| (name, BindingRole::Ordinary)));
             let mut outer = self.scopes.clone();
             outer.push(frame.clone());
-            let mut aliases = ScopeCreatedAliases { scopes: &outer, roles: HashMap::new() };
+            let mut aliases = ScopeCreatedAliases {
+                scopes: &outer,
+                roles: HashMap::new(),
+            };
             declaration.visit_with(&mut aliases);
             frame.extend(aliases.roles);
         }
@@ -580,20 +721,38 @@ impl VisitMut for CreatedRequireCallRewriter<'_> {
     }
     fn visit_mut_for_in_stmt(&mut self, statement: &mut thaw_parser::ast::ForInStmt) {
         self.scopes.push(loop_left_frame(&statement.left));
-        statement.visit_mut_children_with(self); self.scopes.pop();
+        statement.visit_mut_children_with(self);
+        self.scopes.pop();
     }
     fn visit_mut_for_of_stmt(&mut self, statement: &mut thaw_parser::ast::ForOfStmt) {
         self.scopes.push(loop_left_frame(&statement.left));
-        statement.visit_mut_children_with(self); self.scopes.pop();
+        statement.visit_mut_children_with(self);
+        self.scopes.pop();
     }
     fn visit_mut_switch_stmt(&mut self, statement: &mut thaw_parser::ast::SwitchStmt) {
         statement.discriminant.visit_mut_with(self);
         let mut locals = LexicalBindingCollector::default();
-        for case in &statement.cases { for consequent in &case.cons { consequent.visit_with(&mut locals); } }
-        let mut frame: BindingFrame = locals.names.into_iter().map(|name| (name, BindingRole::Ordinary)).collect();
-        let mut outer = self.scopes.clone(); outer.push(frame.clone());
-        let mut aliases = ScopeCreatedAliases { scopes: &outer, roles: HashMap::new() };
-        for case in &statement.cases { for consequent in &case.cons { consequent.visit_with(&mut aliases); } }
+        for case in &statement.cases {
+            for consequent in &case.cons {
+                consequent.visit_with(&mut locals);
+            }
+        }
+        let mut frame: BindingFrame = locals
+            .names
+            .into_iter()
+            .map(|name| (name, BindingRole::Ordinary))
+            .collect();
+        let mut outer = self.scopes.clone();
+        outer.push(frame.clone());
+        let mut aliases = ScopeCreatedAliases {
+            scopes: &outer,
+            roles: HashMap::new(),
+        };
+        for case in &statement.cases {
+            for consequent in &case.cons {
+                consequent.visit_with(&mut aliases);
+            }
+        }
         frame.extend(aliases.roles);
         self.scopes.push(frame);
         statement.cases.visit_mut_with(self);
@@ -608,21 +767,48 @@ impl VisitMut for CreatedRequireCallRewriter<'_> {
                 },
                 _ => None,
             };
-            if matches!(role, Some(BindingRole::CreatedImmutable | BindingRole::CreatedMutable)) {
-                if let Some(specifier) = call.args.first().filter(|arg| arg.spread.is_none()).and_then(|arg| constant_string(&arg.expr)) {
-                    if !self.specifiers.contains(&specifier) { self.specifiers.push(specifier); }
+            if matches!(
+                role,
+                Some(BindingRole::CreatedImmutable | BindingRole::CreatedMutable)
+            ) {
+                if let Some(specifier) = call
+                    .args
+                    .first()
+                    .filter(|arg| arg.spread.is_none())
+                    .and_then(|arg| constant_string(&arg.expr))
+                {
+                    if !self.specifiers.contains(&specifier) {
+                        self.specifiers.push(specifier);
+                    }
                 }
-                if role == Some(BindingRole::CreatedImmutable) && call.args.len() == 1 && call.args[0].spread.is_none() {
+                if role == Some(BindingRole::CreatedImmutable)
+                    && call.args.len() == 1
+                    && call.args[0].spread.is_none()
+                {
                     let original = call.clone();
-                    let callee = match original.callee { Callee::Expr(callee) => callee, _ => unreachable!() };
+                    let callee = match original.callee {
+                        Callee::Expr(callee) => callee,
+                        _ => unreachable!(),
+                    };
                     let argument = original.args[0].expr.clone();
                     *expr = Expr::Call(thaw_parser::ast::CallExpr {
-                        span: original.span, ctxt: Default::default(),
-                        callee: Callee::Expr(Box::new(Expr::Ident(Ident::new_no_ctxt(self.helper.to_string().into(), original.span)))),
+                        span: original.span,
+                        ctxt: Default::default(),
+                        callee: Callee::Expr(Box::new(Expr::Ident(Ident::new_no_ctxt(
+                            self.helper.to_string().into(),
+                            original.span,
+                        )))),
                         args: vec![
-                            thaw_parser::ast::ExprOrSpread { spread: None, expr: callee },
-                            thaw_parser::ast::ExprOrSpread { spread: None, expr: argument },
-                        ], type_args: None,
+                            thaw_parser::ast::ExprOrSpread {
+                                spread: None,
+                                expr: callee,
+                            },
+                            thaw_parser::ast::ExprOrSpread {
+                                spread: None,
+                                expr: argument,
+                            },
+                        ],
+                        type_args: None,
                     });
                     self.used = true;
                 }
@@ -682,11 +868,17 @@ fn load_module(
         helper = format!("{stem}_{suffix}");
     }
     let mut created_calls = CreatedRequireCallRewriter {
-        helper: &helper, scopes: Vec::new(), specifiers: Vec::new(), used: false,
+        helper: &helper,
+        scopes: Vec::new(),
+        specifiers: Vec::new(),
+        used: false,
     };
     module.visit_mut_with(&mut created_calls);
     for specifier in created_calls.specifiers {
-        if let Some(existing) = specifiers.iter().position(|(name, _, _)| name == &specifier) {
+        if let Some(existing) = specifiers
+            .iter()
+            .position(|(name, _, _)| name == &specifier)
+        {
             specifiers[existing].1 = true;
             specifiers[existing].2 = true;
         } else {
@@ -1467,10 +1659,18 @@ pub fn source_paths(entry: &Path) -> Result<(Vec<PathBuf>, bool), String> {
 pub fn uses_created_require_live_result(entry: &Path, entry_source: &str) -> Result<bool, String> {
     let mut modules = Vec::new();
     load_module(
-        entry.canonicalize().map_err(|error| format!("failed to resolve `{}`: {error}", entry.display()))?,
-        Some(entry_source), None, &mut modules, &mut HashMap::new(), &mut HashSet::new(),
+        entry
+            .canonicalize()
+            .map_err(|error| format!("failed to resolve `{}`: {error}", entry.display()))?,
+        Some(entry_source),
+        None,
+        &mut modules,
+        &mut HashMap::new(),
+        &mut HashSet::new(),
     )?;
-    Ok(modules.iter().any(|module| module.created_require_helper.is_some()))
+    Ok(modules
+        .iter()
+        .any(|module| module.created_require_helper.is_some()))
 }
 
 pub fn external_specifiers(
@@ -2529,13 +2729,18 @@ pub(crate) fn bundle_with_named_source_transform(
         }
     }
 
-    for helper in modules.iter().filter_map(|module| module.created_require_helper.as_ref()) {
+    for helper in modules
+        .iter()
+        .filter_map(|module| module.created_require_helper.as_ref())
+    {
         let helper_source = format!(
             "function {helper}(callable: JsValue, specifier: string): JsValue {{ return callDynamicValueHandle(callable, JSON.parse(JSON.stringify([specifier]))); }}"
         );
         let (helper_module, _) = thaw_parser::parse_typescript_with_source_map_named(
             &helper_source,
-            thaw_parser::common::FileName::Custom("generated created-require result helper.ts".into()),
+            thaw_parser::common::FileName::Custom(
+                "generated created-require result helper.ts".into(),
+            ),
         )?;
         bundled_items.extend(helper_module.body);
     }

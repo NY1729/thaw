@@ -3871,7 +3871,8 @@ impl<'a> FnLowerer<'a> {
                                 .collect_generator_for_array_spread(entries.clone(), &actual_type)?
                             {
                                 entries = collected;
-                                source_array_type = collected_type;
+                                // The collector reports the element type.
+                                source_array_type = HirType::Array(Box::new(collected_type));
                             }
                             let (source_pair_type, source_key_type, source_value_type) =
                                 if explicit_target
@@ -4039,7 +4040,8 @@ impl<'a> FnLowerer<'a> {
                             .collect_generator_for_array_spread(iterable.clone(), &actual_type)?
                         {
                             iterable = collected;
-                            source_array_type = collected_type;
+                            // The collector reports the element type.
+                            source_array_type = HirType::Array(Box::new(collected_type));
                         }
                         let source_element_type =
                             if explicit_target
@@ -4790,6 +4792,7 @@ impl<'a> FnLowerer<'a> {
         ))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn lower_map_or_set_from_iterable(
         &mut self,
         source: HirExpr,
@@ -4993,9 +4996,15 @@ impl<'a> FnLowerer<'a> {
             // A method/accessor-bearing `any` literal needs one live storage
             // identity for its receiver, property writes and aliases. Reuse
             // the dynamic object builder's actual JS `this` representation.
+            // A `Symbol.iterator`-style key must also stay a real symbol there:
+            // the typed object form would store it under a string sentinel.
             if object.props.iter().any(|property| matches!(property,
-                swc_ecma_ast::PropOrSpread::Prop(property) if matches!(property.as_ref(),
-                    swc_ecma_ast::Prop::Method(_) | swc_ecma_ast::Prop::Getter(_) | swc_ecma_ast::Prop::Setter(_)))) {
+                swc_ecma_ast::PropOrSpread::Prop(property) if match property.as_ref() {
+                    swc_ecma_ast::Prop::Method(_) | swc_ecma_ast::Prop::Getter(_) | swc_ecma_ast::Prop::Setter(_) => true,
+                    swc_ecma_ast::Prop::KeyValue(swc_ecma_ast::KeyValueProp { key, .. }) =>
+                        self.is_compiler_symbol_property(key),
+                    _ => false,
+                })) {
                 return self.lower_dynamic_accessor_object_lit(object, true);
             }
         }

@@ -12113,6 +12113,38 @@ fn exact_iterator_catch_preserves_thrown_identity() {
 }
 
 #[test]
+fn set_constructor_collects_an_explicitly_typed_map_values_iterator() {
+    let source = r#"
+        function main(): void {
+            const map = new Map<string, number>([['a', 20], ['b', 22]]);
+            const set = new Set<number>(map.values());
+            const entries = new Map<string, number>(map.entries());
+            let total = 0;
+            for (const value of set) total += value;
+            console.log(map.get('a'), set.has(22), total, entries.get('b'));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "set_constructor_map_values_iterator"),
+        "20 true 42 22\n"
+    );
+}
+
+#[test]
+fn unannotated_symbol_iterator_function_property_drives_for_of() {
+    let source = r#"
+        function* inner(): Generator<number> { yield 2; yield 3; }
+        function main(): void {
+            const iterable = { [Symbol.iterator]: function(): Generator<number> { return inner(); } };
+            let total = 0;
+            for (const value of iterable) total += value;
+            console.log(total);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "symbol_iterator_function_property"), "5\n");
+}
+
+#[test]
 fn symbol_iterator_builder_key_preserves_lookalike_string_property() {
     let source = r#"
         function main(): void {

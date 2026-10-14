@@ -1687,6 +1687,23 @@ impl OwnedDeclaration {
     }
 
     fn with_snippet(mut self, snippet: String) -> Self {
+        // A rewritten namespace-bearing snippet (for example an imported class
+        // renamed to its local binding) no longer contains some children's
+        // original text. Those children keep their owner and scope but take
+        // the text that will actually be emitted, so they can still be located.
+        fn refresh_children(children: &mut [OwnedDeclaration], fresh: Vec<OwnedDeclaration>, container: &str) {
+            if children.len() != fresh.len() { return; }
+            for (child, fresh) in children.iter_mut().zip(fresh) {
+                if container.contains(child.snippet.trim()) { continue; }
+                let nested = source_namespace_children(&child.origin, &fresh.snippet);
+                refresh_children(&mut child.children, nested, &fresh.snippet);
+                child.snippet = fresh.snippet;
+            }
+        }
+        if !self.children.is_empty() && self.snippet != snippet {
+            let fresh = source_namespace_children(&self.origin, &snippet);
+            refresh_children(&mut self.children, fresh, &snippet);
+        }
         self.snippet = snippet;
         self
     }
@@ -1773,13 +1790,18 @@ fn emitted_public_names(snippet: &str, local_name: Option<&str>, selected: Optio
         && declaration_identity(snippet).as_deref() == Some(local_name) {
         names.push(local_name.to_string());
     }
+    let structural = declaration_identity(snippet);
     if let Ok(module) = parse_labeled_declarations(snippet, "owned public aliases".to_string()) {
         for item in &module.body {
             let ModuleItem::ModuleDecl(ModuleDecl::ExportNamed(export)) = item else { continue };
             for specifier in &export.specifiers {
                 let ExportSpecifier::Named(named) = specifier else { continue };
                 let ModuleExportName::Ident(original) = &named.orig else { continue };
-                if original.sym.as_ref() != local_name { continue; }
+                // A declaration renamed in its snippet (an imported class
+                // materialized under its local binding) is exported by its
+                // structural name while keeping its source identity.
+                if original.sym.as_ref() != local_name
+                    && Some(original.sym.as_ref()) != structural.as_deref() { continue; }
                 let ModuleExportName::Ident(public) = named.exported.as_ref().unwrap_or(&named.orig) else { continue };
                 names.push(public.sym.to_string());
             }
@@ -3432,9 +3454,14 @@ fn referenced_private_type_closure_with_views(
         let owner = (declaration.origin.clone(), declaration.source_scope.clone(), local_name.clone());
         if !visited.insert((owner, declaration.snippet.clone())) { continue; }
         for edge in owned_type_reference_edges_with_views(&declaration, views)? {
+            let has_type_declaration = edge.fragments.iter()
+                .any(|fragment| is_type_declaration_snippet(&fragment.snippet));
             let has_public = public.get(&edge.terminal).is_some_and(|occurrences|
-                occurrences.iter().any(|occurrence|
-                    edge.kind == TypeReferenceKind::Type || occurrence.value_export));
+                occurrences.iter().any(|occurrence| if edge.kind == TypeReferenceKind::Type {
+                    !(occurrence.value_only && has_type_declaration)
+                } else {
+                    occurrence.value_export
+                }));
             if has_public { continue; }
             let selected = match edge.kind {
                 TypeReferenceKind::Type => support.types.entry(edge.terminal).or_default(),
@@ -3480,11 +3507,23 @@ fn rewritten_owned_type_snippet(
     let mut edits = Vec::<(usize, usize, String)>::new();
     for edge in owned_type_reference_edges_with_views(declaration, views)? {
         let public_replacement = public.get(&edge.terminal).and_then(|occurrences| {
-            occurrences.iter().filter(|occurrence|
-                edge.kind == TypeReferenceKind::Type || occurrence.value_export)
-                .find(|occurrence| occurrence.scope.as_deref() == emitted_scope)
-                .or_else(|| occurrences.iter().find(|occurrence|
-                    edge.kind == TypeReferenceKind::Type || occurrence.value_export))
+            let has_type_declaration = edge.fragments.iter()
+                .any(|fragment| is_type_declaration_snippet(&fragment.snippet));
+            let usable = |occurrence: &&PublicTypeOccurrence| if edge.kind == TypeReferenceKind::Type {
+                !(occurrence.value_only && has_type_declaration)
+            } else {
+                occurrence.value_export
+            };
+            // A class selected under an alias also carries a type-only marker
+            // for its structural name; the value export is the spelling the
+            // package actually exposes, so it wins when both are available.
+            fn preferred(candidates: Vec<&PublicTypeOccurrence>) -> Option<&PublicTypeOccurrence> {
+                candidates.iter().copied().find(|occurrence| occurrence.value_export)
+                    .or_else(|| candidates.first().copied())
+            }
+            preferred(occurrences.iter().filter(usable)
+                .filter(|occurrence| occurrence.scope.as_deref() == emitted_scope).collect())
+                .or_else(|| preferred(occurrences.iter().filter(usable).collect()))
                 .map(|occurrence| occurrence.type_reference_from(emitted_scope))
         });
         let replacement = public_replacement.or_else(|| {
@@ -3660,6 +3699,10 @@ struct PublicTypeOccurrence {
     structural_name: String,
     public_name: String,
     value_export: bool,
+    // A `const`/`let`/`var`/function binding has no type meaning: a type
+    // reference of the same source name must not resolve to it (a synthetic
+    // `const Item: Item` shares its key with the interface `Item`).
+    value_only: bool,
 }
 
 impl PublicTypeOccurrence {
@@ -3750,6 +3793,7 @@ fn public_type_occurrences(
                 value_export: !is_type_only_namespace_binding(&record.declaration, public_name)
                     && (record.metadata_only
                         || public_name_has_value_export(&record.declaration.snippet, public_name)),
+                value_only: is_value_only_declaration_snippet(&record.declaration.snippet),
             };
             if !entries.contains(&occurrence) { entries.push(occurrence); }
         }
@@ -3779,6 +3823,7 @@ fn add_owned_origin_occurrences(
             structural_name: structural_name.clone(),
             public_name: structural_name,
             value_export: is_runtime_declaration_snippet(&record.declaration.snippet),
+            value_only: is_value_only_declaration_snippet(&record.declaration.snippet),
         };
         let entries = available.entry((record.declaration.origin.clone(),
             record.declaration.source_scope.clone(), local.clone())).or_default();
@@ -4202,6 +4247,10 @@ fn is_type_declaration_snippet(snippet: &str) -> bool {
             Some(Decl::Class(_) | Decl::TsInterface(_) | Decl::TsTypeAlias(_)
                 | Decl::TsEnum(_) | Decl::TsModule(_)))
     })
+}
+
+fn is_value_only_declaration_snippet(snippet: &str) -> bool {
+    is_runtime_declaration_snippet(snippet) && !is_type_declaration_snippet(snippet)
 }
 
 fn is_runtime_declaration_snippet(snippet: &str) -> bool {

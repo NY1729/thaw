@@ -323,10 +323,31 @@ struct RecordingServerVerifier {
     algorithms: rustls::crypto::WebPkiSupportedAlgorithms,
 }
 
+/// Node reports `socket.authorizationError` as the OpenSSL X509 verify code, not rustls's message.
+#[cfg(feature = "tls")]
+fn node_authorization_error(error: &RustlsError) -> String {
+    use rustls::CertificateError as C;
+    let RustlsError::InvalidCertificate(reason) = error else {
+        return error.to_string();
+    };
+    match reason {
+        C::UnknownIssuer => "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
+        C::Expired | C::ExpiredContext { .. } => "CERT_HAS_EXPIRED",
+        C::NotValidYet | C::NotValidYetContext { .. } => "CERT_NOT_YET_VALID",
+        C::Revoked => "CERT_REVOKED",
+        C::BadSignature => "CERT_SIGNATURE_FAILURE",
+        C::NotValidForName | C::NotValidForNameContext { .. } => "ERR_TLS_CERT_ALTNAME_INVALID",
+        _ => return error.to_string(),
+    }
+    .to_string()
+}
+
 #[cfg(feature = "tls")]
 impl std::fmt::Debug for RecordingServerVerifier {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.debug_struct("RecordingServerVerifier").finish_non_exhaustive()
+        formatter
+            .debug_struct("RecordingServerVerifier")
+            .finish_non_exhaustive()
     }
 }
 
@@ -354,13 +375,15 @@ impl rustls::client::danger::ServerCertVerifier for RecordingServerVerifier {
             }
             Ok(())
         })();
-        let error = validation.as_ref().err().map(ToString::to_string);
+        let error = validation.as_ref().err().map(node_authorization_error);
         if let Ok(mut result) = self.result.lock() {
             *result = error.clone();
         }
         match validation {
             Ok(()) => Ok(rustls::client::danger::ServerCertVerified::assertion()),
-            Err(_error) if self.allow_invalid => Ok(rustls::client::danger::ServerCertVerified::assertion()),
+            Err(_error) if self.allow_invalid => {
+                Ok(rustls::client::danger::ServerCertVerified::assertion())
+            }
             Err(error) => Err(error),
         }
     }

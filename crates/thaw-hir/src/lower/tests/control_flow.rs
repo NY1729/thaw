@@ -573,7 +573,7 @@ fn thaw_for_advance_precedes_only_continues_that_leave_the_for_loop() {
             _ => false,
         })
     }
-    assert!(has_update_before_plain_continue(&nested.functions[0].body) == false);
+    assert!(!has_update_before_plain_continue(&nested.functions[0].body));
 }
 
 #[test]

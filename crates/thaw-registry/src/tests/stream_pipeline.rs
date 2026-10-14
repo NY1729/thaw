@@ -114,7 +114,7 @@ fn finished_defers_callbacks_and_honors_cleanup_and_error_options() {
     let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
     assert_eq!(
         result,
-        r#"[["after","finish","finished"],["own:ignored","ok"],["after",["AbortError","ABORT_ERR","stop"]],[1,1,1,1],[0,0,0,0]]"#
+        r#"[["after","finish","finished"],["own:ignored","ok"],["after",["AbortError","ABORT_ERR","stop"]],[1,1,1,1],[1,1,1,1]]"#
     );
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);

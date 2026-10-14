@@ -1014,7 +1014,7 @@ fn internal_http_and_tls_modules_share_public_implementations() {
     let empty_node_modules = temp_registry("builtin_internal_http_tls_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    assert_eq!(file_count, 14);
+    assert_eq!(file_count, 15);
     let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseInternalHttpTls = module.exports;");
     let source = CString::new(script).unwrap();
     assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
@@ -2216,7 +2216,7 @@ module.exports = async function() {
     var liveError = await livePending.then(function() { return null; }, function(error) { return error; });
     var afterAbortError = await liveIterator.next().then(function() { return null; }, function(error) { return error; });
     check(abortInfo(liveError, 'aborted') && abortInfo(afterAbortError, 'aborted') && liveSignal.adds() === 1 &&
-      liveSignal.removes() === 2 && liveSignal.sameListener() && clearCount(liveRecord.handle) === 1 &&
+      liveSignal.removes() === 1 && liveSignal.sameListener() && clearCount(liveRecord.handle) === 1 &&
       count('setInterval') === liveCount + 1,
       'abort rejects waiters, clears timer and removes listener');
 
@@ -2226,7 +2226,7 @@ module.exports = async function() {
     bufferedRecord.callback();
     bufferedSignal.abort('buffered abort');
     var discardedBufferError = await bufferedIterator.next().then(function() { return null; }, function(error) { return error; });
-    check(abortInfo(discardedBufferError, 'buffered abort') && bufferedSignal.removes() === 2 &&
+    check(abortInfo(discardedBufferError, 'buffered abort') && bufferedSignal.removes() === 1 &&
       bufferedSignal.sameListener() && clearCount(bufferedRecord.handle) === 1, 'abort discards buffered values');
 
     var failureSignal = trackedSignal(false), failureIterator = trackIterator(promises.setInterval(60000, 'failure', { signal: failureSignal.signal }));
@@ -2248,7 +2248,7 @@ module.exports = async function() {
     var coercionAbortRetry = await coercionAbortIterator.next().then(function() { return null; }, function(error) { return error; });
     check(abortCoercionRan && abortInfo(coercionAbortResult, 'during delay') && abortInfo(coercionAbortRetry, 'during delay') &&
       count('setInterval') === abortCoercionCount + 1 && clearCount(coercionAbortRecord.handle) === 1 &&
-      coercionAbortSignal.adds() === 1 && coercionAbortSignal.removes() === 2,
+      coercionAbortSignal.adds() === 1 && coercionAbortSignal.removes() === 1,
       'abort during delay coercion clears the subsequently created handle');
 
     var coercionReturnSignal = trackedSignal(false), coercionReturnIterator, returnCoercionRan = false;
@@ -2285,7 +2285,7 @@ module.exports = async function() {
     for (var falseyIndex = 0; falseyIndex < falseyIntervalResults.length; falseyIndex++) {
       var falsey = falseyIntervalResults[falseyIndex], waiterError = await falsey[0], nextError = await falsey[1];
       check(abortInfo(waiterError, falsey[4]) && abortInfo(nextError, falsey[4]) && clearCount(falsey[2].handle) === 1 &&
-        falsey[3].adds() === 1 && falsey[3].removes() === 2, 'falsey interval abort remains a failure');
+        falsey[3].adds() === 1 && falsey[3].removes() === 1, 'falsey interval abort remains a failure');
     }
     for (var falseyIndex = 0; falseyIndex < falseyResults.length; falseyIndex++) {
       var falsey = falseyResults[falseyIndex];

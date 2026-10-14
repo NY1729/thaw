@@ -363,6 +363,7 @@ impl<'a> FnLowerer<'a> {
         self.lower_array_map_mode(receiver, array_type, element_type, callback_element_type, callback, this_arg, true)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn lower_array_map_mode(
         &mut self,
         receiver: HirExpr,

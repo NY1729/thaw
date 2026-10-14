@@ -1375,7 +1375,7 @@ fn switch_cases_do_not_inherit_presence_guards_from_other_entries() {
     lower("function read(x: number | undefined, key: number): number { switch (key) { case 0: if (x === undefined) return 0; return x; default: if (x === undefined) return 0; return x; } }");
 }
 
-fn find_test_normalized_adapter<'a>(expr: &'a HirExpr) -> Option<(&'a [HirParam], &'a HirExpr)> {
+fn find_test_normalized_adapter(expr: &HirExpr) -> Option<(&[HirParam], &HirExpr)> {
     match expr {
         HirExpr::Lambda(_, params, _, body)
             if params.iter().any(|param| param.name.starts_with("__thaw_promise_argument_")) =>
@@ -1394,7 +1394,7 @@ fn find_test_normalized_adapter<'a>(expr: &'a HirExpr) -> Option<(&'a [HirParam]
     }
 }
 
-fn find_test_callback_alias_in_expr<'a>(expr: &'a HirExpr) -> Option<(&'a [HirParam], &'a HirExpr, &'a HirExpr)> {
+fn find_test_callback_alias_in_expr(expr: &HirExpr) -> Option<(&[HirParam], &HirExpr, &HirExpr)> {
     if let HirExpr::Call(callee, args) = expr {
         if matches!(callee.as_ref(), HirExpr::Var(name) if name == "__thaw_closure_alias") {
             if let [adapted, original] = args.as_slice() {
@@ -1424,7 +1424,7 @@ fn find_test_callback_alias_in_expr<'a>(expr: &'a HirExpr) -> Option<(&'a [HirPa
     }
 }
 
-fn find_test_normalized_adapter_in_stmt<'a>(statement: &'a HirStmt) -> Option<(&'a [HirParam], &'a HirExpr)> {
+fn find_test_normalized_adapter_in_stmt(statement: &HirStmt) -> Option<(&[HirParam], &HirExpr)> {
     match statement {
         HirStmt::Expr(expr) | HirStmt::Return(Some(expr)) | HirStmt::Throw(expr)
         | HirStmt::Let(_, _, expr) => find_test_normalized_adapter(expr),
@@ -1440,7 +1440,7 @@ fn find_test_normalized_adapter_in_stmt<'a>(statement: &'a HirStmt) -> Option<(&
     }
 }
 
-fn find_test_callback_alias_in_stmt<'a>(statement: &'a HirStmt) -> Option<(&'a [HirParam], &'a HirExpr, &'a HirExpr)> {
+fn find_test_callback_alias_in_stmt(statement: &HirStmt) -> Option<(&[HirParam], &HirExpr, &HirExpr)> {
     match statement {
         HirStmt::Expr(expr) | HirStmt::Return(Some(expr)) | HirStmt::Throw(expr) => {
             find_test_callback_alias_in_expr(expr)
