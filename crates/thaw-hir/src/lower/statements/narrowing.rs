@@ -136,7 +136,94 @@ impl<'a> FnLowerer<'a> {
         lowered
     }
 
+    /// JavaScript hoists a block's function declarations to its start. A
+    /// declaration is moved up only when it names no `let`/`const`/`class`/
+    /// `var` of the same block (those cells do not exist yet), and
+    /// declarations are ordered so each one follows the siblings it calls.
+    fn hoist_function_declarations(stmts: &[Stmt]) -> std::borrow::Cow<'_, [Stmt]> {
+        use swc_ecma_visit::{Visit, VisitWith};
+        #[derive(Default)]
+        struct Names(HashSet<String>);
+        impl Visit for Names {
+            fn visit_ident(&mut self, ident: &swc_ecma_ast::Ident) {
+                self.0.insert(ident.sym.to_string());
+            }
+        }
+        let function_count = stmts
+            .iter()
+            .filter(|stmt| matches!(stmt, Stmt::Decl(Decl::Fn(_))))
+            .count();
+        if function_count == 0 {
+            return std::borrow::Cow::Borrowed(stmts);
+        }
+        let mut block_cells = Vec::new();
+        for stmt in stmts {
+            match stmt {
+                Stmt::Decl(Decl::Var(var)) => {
+                    for declarator in &var.decls {
+                        Self::collect_pattern_bindings(&declarator.name, &mut block_cells);
+                    }
+                }
+                Stmt::Decl(Decl::Using(using)) => {
+                    for declarator in &using.decls {
+                        Self::collect_pattern_bindings(&declarator.name, &mut block_cells);
+                    }
+                }
+                Stmt::Decl(Decl::Class(class)) => block_cells.push(class.ident.sym.to_string()),
+                _ => {}
+            }
+        }
+        let mut functions: Vec<(usize, String, HashSet<String>)> = Vec::new();
+        for (index, stmt) in stmts.iter().enumerate() {
+            let Stmt::Decl(Decl::Fn(function)) = stmt else { continue };
+            let mut names = Names::default();
+            function.function.visit_with(&mut names);
+            if block_cells.iter().any(|cell| names.0.contains(cell)) {
+                continue;
+            }
+            functions.push((index, function.ident.sym.to_string(), names.0));
+        }
+        if functions.is_empty() {
+            return std::borrow::Cow::Borrowed(stmts);
+        }
+        // Dependencies first; a cycle keeps source order for the rest.
+        let sibling_names: HashSet<String> =
+            functions.iter().map(|(_, name, _)| name.clone()).collect();
+        let mut ordered: Vec<usize> = Vec::new();
+        let mut placed: HashSet<String> = HashSet::new();
+        let mut remaining: Vec<usize> = (0..functions.len()).collect();
+        while !remaining.is_empty() {
+            let ready = remaining.iter().position(|&candidate| {
+                let (_, name, references) = &functions[candidate];
+                references.iter().all(|reference| {
+                    reference == name
+                        || !sibling_names.contains(reference)
+                        || placed.contains(reference)
+                })
+            });
+            let next = ready.unwrap_or(0);
+            let candidate = remaining.remove(next);
+            placed.insert(functions[candidate].1.clone());
+            ordered.push(candidate);
+        }
+        let hoisted: HashSet<usize> = functions.iter().map(|(index, _, _)| *index).collect();
+        let mut result: Vec<Stmt> = ordered
+            .into_iter()
+            .map(|candidate| stmts[functions[candidate].0].clone())
+            .collect();
+        result.extend(
+            stmts
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| !hoisted.contains(index))
+                .map(|(_, stmt)| stmt.clone()),
+        );
+        std::borrow::Cow::Owned(result)
+    }
+
     fn lower_stmts(&mut self, stmts: &[Stmt]) -> Result<Vec<HirStmt>, String> {
+        let hoisted = Self::hoist_function_declarations(stmts);
+        let stmts: &[Stmt] = &hoisted;
         #[derive(Default)]
         struct BindingConsumers {
             members: HashSet<Symbol>,

@@ -393,7 +393,7 @@ fn fs_cp_recursively_copies_directories_across_api_styles() {
         arguments.as_ptr(),
     );
     let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
-    assert_eq!(result, r#"[["EEXIST","EEXIST","EEXIST"],"kept","copied","copied","EEXIST"]"#);
+    assert_eq!(result, r#"[["ERR_FS_CP_EEXIST","ERR_FS_CP_EEXIST","ERR_FS_CP_EEXIST"],"kept","copied","copied","ERR_FS_CP_EEXIST"]"#);
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
 }
@@ -424,7 +424,7 @@ fn fs_cp_honors_filters_links_and_timestamp_options() {
     let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
     assert_eq!(
         result,
-        r#"[true,false,"keep.txt",true,6,"keep",false,5,true,false,6,"ERR_FS_EISDIR","TypeError","EEXIST","EEXIST","keep"]"#
+        r#"[true,false,"keep.txt",true,6,"keep",false,5,true,false,6,"ERR_FS_EISDIR","TypeError","ERR_FS_CP_EINVAL","ERR_FS_CP_EINVAL","keep"]"#
     );
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
@@ -1886,9 +1886,10 @@ fn fs_cp_rejects_canonical_aliases_before_removal_or_recursive_creation() {
     let result = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
     let parsed: serde_json::Value = serde_json::from_str(&unsafe { CStr::from_ptr(result) }.to_string_lossy()).unwrap();
     let values = parsed.as_array().unwrap();
-    assert!(values[..6].iter().all(|value| value == "EEXIST"));
-    assert_eq!(values[7], "EEXIST");
-    assert_eq!(values[8], "EEXIST");
+    // node 22: ERR_FS_CP_EINVAL for every alias / same-inode / copy-into-self case (a symlink cycle with dereference does not fail in node; Thaw still refuses it).
+    assert!(values[..6].iter().all(|value| value == "ERR_FS_CP_EINVAL"));
+    assert_eq!(values[7], "ERR_FS_CP_EINVAL");
+    assert_eq!(values[8], "ERR_FS_CP_EINVAL");
     assert_eq!(values[9], "intact");
     assert_eq!(values[10], "intact");
     assert!(values[11..17].iter().all(|value| value == false));

@@ -7,7 +7,9 @@ impl<'a> FnLowerer<'a> {
         let source_break_depths = std::mem::take(&mut self.source_break_depths);
         let source_continue_depths = std::mem::take(&mut self.source_continue_depths);
         let labels = std::mem::take(&mut self.labels);
+        let function_var_names = std::mem::take(&mut self.function_var_names);
         let result = lower(self);
+        self.function_var_names = function_var_names;
         self.loop_depth = loop_depth;
         self.source_break_depths = source_break_depths;
         self.source_continue_depths = source_continue_depths;

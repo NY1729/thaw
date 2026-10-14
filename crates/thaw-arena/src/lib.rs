@@ -78,7 +78,16 @@ thread_local! {
     static RESET_HOOKS: RefCell<Vec<fn(bool)>> = const { RefCell::new(Vec::new()) };
     static METADATA_RESET_HOOKS: RefCell<Vec<fn(bool)>> = const { RefCell::new(Vec::new()) };
     static RESET_ACTIVE: Cell<bool> = const { Cell::new(false) };
+    /// Bytes handed out since the last reset, and the amount after which
+    /// `reset_if_grown` reclaims again.
+    static BYTES_SINCE_RESET: Cell<usize> = const { Cell::new(0) };
+    static NEXT_AUTO_RESET: Cell<usize> = const { Cell::new(AUTO_RESET_FLOOR) };
 }
+
+/// Smallest allocation volume between two automatic resets. Each reset marks
+/// the whole live native graph, so the threshold also doubles with the
+/// surviving bytes (see `reset_if_grown`) to keep the amortized cost linear.
+const AUTO_RESET_FLOOR: usize = 1 << 20;
 
 struct ResetGuard;
 
@@ -510,6 +519,7 @@ pub extern "C" fn thaw_arena_alloc(size: usize, align: usize) -> *mut u8 {
     let Ok(pointer) = pointer else {
         return std::ptr::null_mut();
     };
+    BYTES_SINCE_RESET.with(|bytes| bytes.set(bytes.get().saturating_add(size)));
     if is_tracing() {
         unsafe { pointer.write_bytes(0, size) };
         let generation = RETAINED.with(|retained| retained.borrow().len());
@@ -533,6 +543,23 @@ pub extern "C" fn thaw_arena_alloc(size: usize, align: usize) -> *mut u8 {
     pointer
 }
 
+/// Reclaims at a quiescent point of a long-lived program (an event loop turn
+/// with no native frame holding arena pointers), the counterpart of the
+/// per-invocation reset in Lambda programs. It only acts when tracing is on --
+/// a plain bulk reset would free live values -- and only after the arena has
+/// handed out `NEXT_AUTO_RESET` bytes, which then doubles with the surviving
+/// bytes so a large live graph is not re-marked on every turn.
+#[no_mangle]
+pub extern "C" fn thaw_arena_reset_if_grown() {
+    if !is_tracing() || BYTES_SINCE_RESET.with(Cell::get) < NEXT_AUTO_RESET.with(Cell::get) {
+        return;
+    }
+    thaw_arena_reset();
+    let surviving: usize =
+        ALLOCATIONS.with(|allocations| allocations.borrow().values().map(|&(size, _)| size).sum());
+    NEXT_AUTO_RESET.with(|next| next.set(AUTO_RESET_FLOOR.max(surviving.saturating_mul(2))));
+}
+
 /// Reclaims generations with no values reachable from registered global roots.
 /// With tracing disabled this is a plain bulk reset.
 /// A same-thread reset called from a reset hook is ignored; callback allocations
@@ -543,6 +570,7 @@ pub extern "C" fn thaw_arena_reset() {
     let Some(_reset_guard) = ResetGuard::acquire() else {
         return;
     };
+    BYTES_SINCE_RESET.with(|bytes| bytes.set(0));
     let roots = ROOTS.with(|roots| roots.borrow().clone());
     if !is_tracing() {
         strings::reset_lengths(false);
@@ -970,6 +998,44 @@ mod tests {
     #[test]
     fn rejects_non_power_of_two_alignment() {
         assert!(thaw_arena_alloc(8, 3).is_null());
+    }
+
+    #[test]
+    fn reset_if_grown_reclaims_only_after_enough_traced_allocation() {
+        std::thread::spawn(|| {
+            thaw_arena_enable_tracing();
+            let garbage = thaw_arena_alloc(64, 8) as usize;
+            thaw_arena_reset_if_grown();
+            assert!(
+                !was_reclaimed(garbage),
+                "below the threshold nothing is reclaimed"
+            );
+            let kept = ArenaRoot::new(thaw_arena_alloc(64, 8) as usize);
+            for _ in 0..(AUTO_RESET_FLOOR / 4096 + 1) {
+                thaw_arena_alloc(4096, 8);
+            }
+            thaw_arena_reset_if_grown();
+            assert!(was_reclaimed(garbage));
+            assert!(!was_reclaimed(kept.0));
+            drop(kept);
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    fn reset_if_grown_is_inert_without_tracing() {
+        std::thread::spawn(|| {
+            let value = thaw_arena_alloc(8, 8).cast::<u64>();
+            unsafe { value.write(7) };
+            for _ in 0..(AUTO_RESET_FLOOR / 4096 + 1) {
+                thaw_arena_alloc(4096, 8);
+            }
+            thaw_arena_reset_if_grown();
+            assert_eq!(unsafe { value.read() }, 7);
+        })
+        .join()
+        .unwrap();
     }
 
     #[test]

@@ -723,6 +723,36 @@ fn resolve_type_with_interfaces(
 /// with a destructured parameter (`function milliseconds({ years, ... }:
 /// Duration)`) used to silently delete every other function in that file
 /// from `parse_dts`'s result.
+/// The name of a constrained, default-less type parameter that is both the
+/// whole return type and the bare type of a parameter
+/// (`<T extends X>(stream: T): T`): the call site infers `T` from the
+/// argument, so the constraint is only what the parameter accepts. A type
+/// parameter that no parameter mentions (`nanoid<Type extends string>(): Type`)
+/// is chosen by the caller, and its constraint stays the best description.
+fn inferred_return_type_param(return_type: &TsType, func: &Function) -> Option<String> {
+    let bare = |ty: &TsType| match ty {
+        TsType::TsTypeRef(reference) if reference.type_params.is_none() => match &reference.type_name {
+            TsEntityName::Ident(id) => Some(id.sym.to_string()),
+            _ => None,
+        },
+        _ => None,
+    };
+    let name = bare(return_type)?;
+    let parameter = func.type_params.as_ref()?.params.iter().find(|parameter| {
+        parameter.name.sym == name.as_str() && parameter.constraint.is_some() && parameter.default.is_none()
+    })?;
+    func.params
+        .iter()
+        .any(|param| match &param.pat {
+            Pat::Ident(binding) => binding
+                .type_ann
+                .as_ref()
+                .is_some_and(|annotation| bare(&annotation.type_ann).as_deref() == Some(name.as_str())),
+            _ => false,
+        })
+        .then(|| parameter.name.sym.to_string())
+}
+
 fn lower_dts_function(
     name: &str,
     func: &Function,
@@ -871,7 +901,24 @@ fn lower_dts_function(
         .collect::<Vec<_>>();
 
     let ret = match &func.return_type {
-        Some(ann) => classify(&ann.type_ann),
+        Some(ann) => match inferred_return_type_param(&ann.type_ann, func) {
+            // `query<T extends Submittable>(stream: T): T`: the constraint
+            // only bounds what the parameter accepts; the return type is
+            // whatever the call site infers `T` to be, so decoding it as the
+            // constraint rejects the real result (a Promise for `query("sql")`).
+            Some(name) => {
+                let mut inferred = substitution.clone();
+                inferred.insert(name, HirType::JsValue);
+                resolve_ts_type_with_substitution(
+                    &ann.type_ann,
+                    &inferred,
+                    interfaces,
+                    generic_interfaces,
+                    &mut Vec::new(),
+                )
+            }
+            None => classify(&ann.type_ann),
+        },
         None => DtsType::Native(HirType::Void),
     };
 

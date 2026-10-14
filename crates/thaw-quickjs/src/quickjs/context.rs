@@ -1897,13 +1897,15 @@ fn ensure_context() {
                     ctx.clone(),
                     |operation: String,
                      format: String,
-                     value: String|
+                     value: String,
+                     options: rquickjs::function::Opt<String>|
                      -> rquickjs::Result<String> {
                         let input = hex_decode(&value);
+                        let options = ZlibOptions::parse(options.0.as_deref().unwrap_or(""));
                         let result = if operation == "compress" {
-                            compress_bytes(&format, &input)
+                            compress_bytes_with(&format, &input, &options)
                         } else {
-                            decompress_bytes(&format, &input)
+                            decompress_bytes_with(&format, &input, &options)
                         };
                         result.map(|bytes| hex_encode(&bytes)).map_err(|error| {
                             rquickjs::Error::new_from_js_message(
@@ -1915,6 +1917,10 @@ fn ensure_context() {
                     },
                 )
                 .expect("failed to create JavaScript compression function");
+                // `vm.Script` / `runInThisContext`: evaluate (or only compile) classic-script source under the caller's
+                // filename so syntax errors and stacks name it, and so script-only grammar (no top-level `return`) applies.
+                let vm_eval = Function::new(ctx.clone(), host_vm_eval)
+                .expect("failed to create JavaScript vm evaluator");
                 let web_zlib_streams = Rc::new(RefCell::new(HashMap::<u32, WebZlibStream>::new()));
                 let next_web_zlib_stream = Rc::new(Cell::new(1u32));
                 let create_web_zlib_stream = {
@@ -1922,9 +1928,13 @@ fn ensure_context() {
                     let next = Rc::clone(&next_web_zlib_stream);
                     Function::new(
                         ctx.clone(),
-                        move |operation: String, format: String| -> rquickjs::Result<u32> {
+                        move |operation: String,
+                              format: String,
+                              options: rquickjs::function::Opt<String>|
+                              -> rquickjs::Result<u32> {
+                            let options = ZlibOptions::parse(options.0.as_deref().unwrap_or(""));
                             let stream =
-                                WebZlibStream::new(&operation, &format).map_err(|error| {
+                                WebZlibStream::new(&operation, &format, &options).map_err(|error| {
                                     rquickjs::Error::new_from_js_message(
                                         "zlib stream",
                                         "handle",
@@ -2803,6 +2813,12 @@ fn ensure_context() {
                 ctx.globals()
                     .set("__thaw_hpack_huffman_decode", hpack_huffman_decode)
                     .expect("failed to install HPACK Huffman decoder");
+                ctx.globals()
+                    .set("__thaw_memory_usage", Function::new(ctx.clone(), host_memory_usage).expect("failed to create heap accounting function"))
+                    .expect("failed to install heap accounting function");
+                ctx.globals()
+                    .set("__thaw_vm_eval", vm_eval)
+                    .expect("failed to install JavaScript vm evaluator");
                 ctx.globals()
                     .set("__thaw_zlib_hex", zlib_hex)
                     .expect("failed to install JavaScript compression function");

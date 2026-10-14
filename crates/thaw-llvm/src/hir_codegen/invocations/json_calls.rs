@@ -200,6 +200,28 @@ impl<'ctx> HirCompiler<'ctx> {
                     .map(Into::into)
                     .map_err(|error| error.to_string());
             }
+            "__thaw_json_is_not_iterable" => {
+                let [value] = args else {
+                    return Err("__thaw_json_is_not_iterable expects one argument".into());
+                };
+                let value = self.compile_expr(value)?;
+                let function = self.module.get_function("thaw_json_is_not_iterable").unwrap();
+                let call = self
+                    .builder
+                    .build_call(function, &[value.into()], "json_is_not_iterable_u8")
+                    .map_err(|error| error.to_string())?;
+                let u8_val = call
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("thaw_json_is_not_iterable did not return a value")?
+                    .into_int_value();
+                let zero = self.context.i8_type().const_int(0, false);
+                return self
+                    .builder
+                    .build_int_compare(inkwell::IntPredicate::NE, u8_val, zero, "json_is_not_iterable")
+                    .map(Into::into)
+                    .map_err(|error| error.to_string());
+            }
             "__thaw_json_is_live_iterable" => {
                 let [value] = args else {
                     return Err("__thaw_json_is_live_iterable expects one argument".into());
@@ -646,7 +668,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     .basic()
                     .ok_or_else(|| "thaw_json_index_get_mut returned no value".to_string());
             }
-            "__thaw_json_keys" | "__thaw_json_own_keys" => {
+            "__thaw_json_keys" | "__thaw_json_for_in_keys" | "__thaw_json_own_keys" => {
                 return self.compile_json_enumeration(name.trim_start_matches("__"), args);
             }
             "__thaw_array_keys" => {

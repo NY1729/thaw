@@ -172,9 +172,17 @@ impl<'a> FnLowerer<'a> {
                 Box::new(false_lit()),
             )),
             HirType::Json => Ok(HirExpr::JsonAsBool(Box::new(value))),
+            // Truthiness is asked of the live engine value: a function (or any object
+            // whose JSON projection is empty) is truthy, which a JSON round trip loses.
             HirType::JsValue => Ok(HirExpr::JsonAsBool(Box::new(HirExpr::Call(
-                Box::new(HirExpr::Var("readDynamicValue".into())),
-                vec![value],
+                Box::new(HirExpr::Var("callDynamicValueWithValue".into())),
+                vec![
+                    HirExpr::Call(
+                        Box::new(HirExpr::Var("getDynamicValue".into())),
+                        vec![HirExpr::Lit(HirLit::Str("__thaw_is_truthy_dynamic_value".into()))],
+                    ),
+                    value,
+                ],
             )))),
             HirType::Null | HirType::Undefined => Ok(false_lit()),
             // Only ever seen here for a still-unresolved generic type
@@ -869,6 +877,23 @@ impl<'a> FnLowerer<'a> {
             vec![HirStmt::Return(Some(present))],
         )]);
         self.wrap_call_argument_bindings(result, &[(name, lhs_type, lhs)])
+    }
+
+    /// ToString of an operand (template substitution, implicit concatenation):
+    /// unlike a property-key conversion, a Symbol operand throws a TypeError.
+    fn coerce_operand_to_string(&mut self, value: HirExpr) -> Result<HirExpr, String> {
+        if self.infer_expr_type(&value)? == HirType::Symbol {
+            return Ok(HirExpr::EvalThen(
+                Box::new(value),
+                Box::new(HirExpr::ThrowValue(
+                    Box::new(HirExpr::Lit(HirLit::Str(
+                        "\u{1}TypeError\u{1}Cannot convert a Symbol value to a string".into(),
+                    ))),
+                    Box::new(HirExpr::Lit(HirLit::Str(String::new()))),
+                )),
+            ));
+        }
+        self.coerce_primitive_to_string(value)
     }
 
     fn coerce_primitive_to_string(&mut self, value: HirExpr) -> Result<HirExpr, String> {
@@ -2111,6 +2136,59 @@ impl<'a> FnLowerer<'a> {
     ) -> Result<HirExpr, String> {
         let lhs_type = self.infer_expr_type(&lhs)?;
         let rhs_type = self.infer_expr_type(&rhs)?;
+        if lhs_type == HirType::Json && rhs_type == HirType::Json {
+            // Two dynamic values may hold different primitive kinds, so `==`
+            // is not `===`: nullish pairs are equal and a string, number or
+            // boolean compares numerically against a different kind.
+            let left_name = format!("__thaw_loose_json_left_{}", self.next_binding);
+            let right_name = format!("__thaw_loose_json_right_{}", self.next_binding);
+            self.next_binding += 1;
+            self.scope.insert(left_name.clone(), HirType::Json);
+            self.scope.insert(right_name.clone(), HirType::Json);
+            let left = HirExpr::Var(left_name.clone());
+            let right = HirExpr::Var(right_name.clone());
+            let typeof_of = |value: &HirExpr| HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_json_typeof".into())),
+                vec![value.clone()],
+            );
+            let is_kind = |value: &HirExpr, kind: &str| HirExpr::BinOp(
+                BinOp::EqEqEq,
+                Box::new(typeof_of(value)),
+                Box::new(HirExpr::Lit(HirLit::Str(kind.into()))),
+            );
+            let strict = HirExpr::BinOp(
+                BinOp::EqEqEq, Box::new(left.clone()), Box::new(right.clone()),
+            );
+            let nullish = |value: &HirExpr| HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_json_is_nullish".into())),
+                vec![value.clone()],
+            );
+            let both_nullish = self.lower_logical_expr(nullish(&left), nullish(&right), true)?;
+            let mut primitive_pairs: Option<HirExpr> = None;
+            for (a, b) in [
+                ("string", "number"), ("number", "string"),
+                ("boolean", "number"), ("number", "boolean"),
+                ("boolean", "string"), ("string", "boolean"),
+            ] {
+                let pair = self.lower_logical_expr(is_kind(&left, a), is_kind(&right, b), true)?;
+                primitive_pairs = Some(match primitive_pairs {
+                    None => pair,
+                    Some(previous) => self.lower_logical_expr(previous, pair, false)?,
+                });
+            }
+            let numeric_equal = HirExpr::BinOp(
+                BinOp::EqEqEq,
+                Box::new(self.coerce_primitive_to_number(left.clone())?),
+                Box::new(self.coerce_primitive_to_number(right.clone())?),
+            );
+            let mixed = self.lower_logical_expr(primitive_pairs.expect("pairs"), numeric_equal, true)?;
+            let equal = self.lower_logical_expr(strict, both_nullish, false)?;
+            let equal = self.lower_logical_expr(equal, mixed, false)?;
+            return self.wrap_call_argument_bindings(
+                equal,
+                &[(left_name, HirType::Json, lhs), (right_name, HirType::Json, rhs)],
+            );
+        }
         if lhs_type == rhs_type {
             return Ok(HirExpr::BinOp(BinOp::EqEqEq, Box::new(lhs), Box::new(rhs)));
         }
@@ -3074,6 +3152,57 @@ impl<'a> FnLowerer<'a> {
                 )),
                 vec![lhs, rhs],
             ));
+        }
+        // Dynamic operands compare as strings when both runtime values are
+        // strings (code-unit order) and numerically otherwise.
+        let string_or_json = |ty: &HirType| matches!(ty, HirType::Str | HirType::Json);
+        if (lhs_type == HirType::Json || rhs_type == HirType::Json)
+            && string_or_json(&lhs_type)
+            && string_or_json(&rhs_type)
+        {
+            let left_name = format!("__thaw_relational_left_{}", self.next_binding);
+            let right_name = format!("__thaw_relational_right_{}", self.next_binding);
+            self.next_binding += 1;
+            self.scope.insert(left_name.clone(), lhs_type.clone());
+            self.scope.insert(right_name.clone(), rhs_type.clone());
+            let left = HirExpr::Var(left_name.clone());
+            let right = HirExpr::Var(right_name.clone());
+            let both_strings = {
+                let left_is = self.add_operand_has_primitive_type(left.clone(), &lhs_type, "string");
+                let right_is = self.add_operand_has_primitive_type(right.clone(), &rhs_type, "string");
+                self.lower_logical_expr(left_is, right_is, true)?
+            };
+            let text = |value: HirExpr, ty: &HirType| {
+                if *ty == HirType::Json { HirExpr::JsonAsString(Box::new(value)) } else { value }
+            };
+            let string_compare = HirExpr::Call(
+                Box::new(HirExpr::Var(
+                    match op {
+                        BinOp::Lt => "__thaw_string_lt",
+                        BinOp::Gt => "__thaw_string_gt",
+                        BinOp::LtEq => "__thaw_string_lte",
+                        BinOp::GtEq => "__thaw_string_gte",
+                        _ => unreachable!(),
+                    }
+                    .to_string(),
+                )),
+                vec![text(left.clone(), &lhs_type), text(right.clone(), &rhs_type)],
+            );
+            let numeric = HirExpr::BinOp(
+                op,
+                Box::new(self.coerce_primitive_to_number(left)?),
+                Box::new(self.coerce_primitive_to_number(right)?),
+            );
+            let result = HirExpr::Conditional(
+                Box::new(both_strings),
+                Box::new(string_compare),
+                Box::new(numeric),
+                HirType::Bool,
+            );
+            return self.wrap_call_argument_bindings(
+                result,
+                &[(left_name, lhs_type, lhs), (right_name, rhs_type, rhs)],
+            );
         }
         Ok(HirExpr::BinOp(
             op,

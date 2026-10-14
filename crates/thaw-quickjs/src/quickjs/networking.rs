@@ -5,8 +5,63 @@ fn checked_port(port: u32) -> Result<u16, String> {
         .map_err(|_| format!("err:port should be >= 0 and < 65536. Received {port}"))
 }
 
+/// libuv/Node error names for the `errno` values a TCP connect can fail with.
+fn errno_name(errno: i32) -> Option<&'static str> {
+    Some(match errno {
+        1 => "EPERM",
+        13 => "EACCES",
+        24 => "EMFILE",
+        98 => "EADDRINUSE",
+        99 => "EADDRNOTAVAIL",
+        101 => "ENETUNREACH",
+        103 => "ECONNABORTED",
+        104 => "ECONNRESET",
+        110 => "ETIMEDOUT",
+        111 => "ECONNREFUSED",
+        113 => "EHOSTUNREACH",
+        _ => return None,
+    })
+}
+
+/// `err:<CODE>|<errno>|<syscall>|<address>|<message>`: the structured failure the JS sockets turn into a Node-shaped error
+/// (`code`, `errno`, `syscall`, `address`, `port` / `hostname`).
+fn connect_failure_wire(error: &io::Error, address: &str) -> String {
+    let errno = error.raw_os_error();
+    let name = errno.and_then(errno_name).unwrap_or(match error.kind() {
+        io::ErrorKind::TimedOut => "ETIMEDOUT",
+        io::ErrorKind::ConnectionReset => "ECONNRESET",
+        io::ErrorKind::PermissionDenied => "EACCES",
+        _ => "ECONNREFUSED",
+    });
+    let number = errno.map(|errno| -errno).unwrap_or(match name {
+        "ETIMEDOUT" => -110,
+        "ECONNRESET" => -104,
+        "EACCES" => -13,
+        _ => -111,
+    });
+    format!("err:{name}|{number}|connect|{address}|{error}")
+}
+
+/// Resolves and connects like Node: a name that does not resolve is `ENOTFOUND` (`getaddrinfo`), a refused or unreachable
+/// address keeps the OS error.
+fn tcp_connect_structured(host: &str, port: u16) -> Result<TcpStream, String> {
+    use std::net::ToSocketAddrs;
+    let addresses: Vec<std::net::SocketAddr> = match (host, port).to_socket_addrs() {
+        Ok(addresses) => addresses.collect(),
+        Err(error) => return Err(format!("err:ENOTFOUND|-3008|getaddrinfo|{host}|{error}")),
+    };
+    let mut last = None;
+    for address in addresses {
+        match TcpStream::connect(address) {
+            Ok(stream) => return Ok(stream),
+            Err(error) => last = Some(connect_failure_wire(&error, &address.ip().to_string())),
+        }
+    }
+    Err(last.unwrap_or_else(|| format!("err:ENOTFOUND|-3008|getaddrinfo|{host}|no addresses for {host}")))
+}
+
 fn net_connect(host: &str, port: u16) -> String {
-    match TcpStream::connect((host, port)) {
+    match tcp_connect_structured(host, port) {
         Ok(stream) => {
             let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
             // The connected peer, not the requested host name: `ok:<handle>:<ip>:<port>` (IPv6 contains colons, so the port is the last field).
@@ -22,7 +77,7 @@ fn net_connect(host: &str, port: u16) -> String {
                 format!("ok:{handle}:{}:{}", peer.0, peer.1)
             })
         }
-        Err(error) => format!("err:{error}"),
+        Err(wire) => wire,
     }
 }
 
@@ -520,9 +575,9 @@ pub(super) fn tls_connect(options: TlsClientOptions<'_>) -> String {
         Ok(name) => name,
         Err(error) => return format!("err:{error}"),
     };
-    let mut socket = match TcpStream::connect((host, port)) {
+    let mut socket = match tcp_connect_structured(host, port) {
         Ok(socket) => socket,
-        Err(error) => return format!("err:{error}"),
+        Err(wire) => return wire,
     };
     let _ = socket.set_read_timeout(Some(Duration::from_secs(5)));
     let mut connection = match ClientConnection::new(config, name) {

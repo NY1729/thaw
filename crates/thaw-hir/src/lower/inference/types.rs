@@ -2183,7 +2183,9 @@ impl<'a> FnLowerer<'a> {
                         let [object] = args.as_slice() else {
                             return Err("Object.getPrototypeOf expects one operand".into());
                         };
-                        self.expect_type(&HirType::Json, object, "Object.getPrototypeOf operand")?;
+                        if !matches!(self.infer_expr_type(object)?, HirType::Dictionary(_)) {
+                            self.expect_type(&HirType::Json, object, "Object.getPrototypeOf operand")?;
+                        }
                         return Ok(HirType::Json);
                     }
                     "__thaw_json_get_mut" => {
@@ -2209,7 +2211,7 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&HirType::Json, value, "structuredClone JSON operand")?;
                         return Ok(HirType::Json);
                     }
-                    "__thaw_json_keys" | "__thaw_json_own_keys" => {
+                    "__thaw_json_keys" | "__thaw_json_for_in_keys" | "__thaw_json_own_keys" => {
                         let [value] = args.as_slice() else {
                             return Err("Object.keys expects one operand".into());
                         };
@@ -2507,7 +2509,7 @@ impl<'a> FnLowerer<'a> {
                         return Ok(HirType::I64);
                     }
                     "__thaw_json_is_date_shape" => return Ok(HirType::Bool),
-                    "__thaw_json_is_buffer_shape" | "__thaw_json_is_live_iterable" => return Ok(HirType::Bool),
+                    "__thaw_json_is_buffer_shape" | "__thaw_json_is_live_iterable" | "__thaw_json_is_not_iterable" => return Ok(HirType::Bool),
                     "__thaw_console_bytes" => return Ok(HirType::Array(Box::new(HirType::F64))),
                     "__thaw_json_date_timestamp" => return Ok(HirType::F64),
                     "__thaw_json_date_set_timestamp" => return Ok(HirType::F64),

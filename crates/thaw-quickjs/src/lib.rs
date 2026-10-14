@@ -437,6 +437,11 @@ enum HostChildEvent {
         message: String,
         code: String,
     },
+    /// The process itself ended; its output pipes may still hold data (`exit` fires now, `close` after EOF).
+    Exited {
+        code: Option<i32>,
+        signal: Option<i32>,
+    },
     Exit {
         code: Option<i32>,
         signal: Option<i32>,

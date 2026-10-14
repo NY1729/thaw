@@ -61,7 +61,7 @@ fn readline_splits_lines_and_supports_callback_and_promise_questions() {
     let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
     assert_eq!(
         result,
-        r#"["alice",["alice","next"],["next","alice"],true,"42","42",["\u001b[4;3H","\u001b[2K"],true,true]"#
+        r#"["alice",["alice","next"],["next","alice"],true,"42","tail",["\u001b[4;3H","\u001b[2K"],true,true]"#
     );
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
@@ -1261,7 +1261,7 @@ fn child_process_sync_apis_execute_and_report_node_shaped_results() {
     let empty_node_modules = temp_registry("builtin_child_process_sync_node_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    assert_eq!(file_count, 4);
+    assert_eq!(file_count, 6);
     let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseChildProcessSync = module.exports;");
     let source = CString::new(script).unwrap();
     assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
@@ -1291,7 +1291,7 @@ fn child_process_async_apis_stream_and_emit_lifecycle_events() {
     let empty_node_modules = temp_registry("builtin_child_process_async_node_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    assert_eq!(file_count, 4);
+    assert_eq!(file_count, 6);
     let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseChildProcessAsync = module.exports;");
     let source = CString::new(script).unwrap();
     assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
@@ -1319,7 +1319,7 @@ fn child_process_spawn_honors_stdio_timeout_abort_and_detached_options() {
     let empty_node_modules = temp_registry("builtin_child_process_options_node_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    assert_eq!(file_count, 4);
+    assert_eq!(file_count, 6);
     let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseChildProcessOptions = module.exports;");
     let source = CString::new(script).unwrap();
     assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
@@ -1352,7 +1352,7 @@ fn child_process_fork_exchanges_ipc_messages_and_disconnects() {
     let empty_node_modules = temp_registry("builtin_child_process_fork_node_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    assert_eq!(file_count, 4);
+    assert_eq!(file_count, 6);
     let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseChildProcessFork = module.exports;");
     let source = CString::new(script).unwrap();
     assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);

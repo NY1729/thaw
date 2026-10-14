@@ -218,7 +218,7 @@ fn streaming_zlib_takes_flushed_output_and_preserves_codec_state() {
     let payload = b"first chunksecond chunkfinish tail";
 
     for format in formats {
-        let mut encoder = WebZlibStream::new("compress", format).unwrap();
+        let mut encoder = WebZlibStream::new("compress", format, &ZlibOptions::default()).unwrap();
         let mut encoded = Vec::new();
         for input in [&b""[..], &b"first chunk"[..], &b"second chunk"[..]] {
             encoded.extend(encoder.write_and_flush(input).unwrap());
@@ -228,7 +228,8 @@ fn streaming_zlib_takes_flushed_output_and_preserves_codec_state() {
 
         let first = encoded.len() / 3;
         let second = 2 * encoded.len() / 3;
-        let mut decoder = WebZlibStream::new("decompress", format).unwrap();
+        let mut decoder =
+            WebZlibStream::new("decompress", format, &ZlibOptions::default()).unwrap();
         let mut decoded = Vec::new();
         for input in [&b""[..], &encoded[..first], &encoded[first..second]] {
             decoded.extend(decoder.write_and_flush(input).unwrap());
@@ -237,7 +238,7 @@ fn streaming_zlib_takes_flushed_output_and_preserves_codec_state() {
         decoded.extend(decoder.finish(&encoded[second..]).unwrap());
         assert_eq!(decoded, payload, "{format}");
 
-        let mut empty = WebZlibStream::new("compress", format).unwrap();
+        let mut empty = WebZlibStream::new("compress", format, &ZlibOptions::default()).unwrap();
         let mut empty_encoded = empty.write_and_flush(&[]).unwrap();
         assert_zlib_stream_sink_released(&mut empty);
         empty_encoded.extend(empty.finish(&[]).unwrap());
@@ -247,7 +248,7 @@ fn streaming_zlib_takes_flushed_output_and_preserves_codec_state() {
     let mut gzip = compress_bytes("gzip", payload).unwrap();
     let crc_byte = gzip.len() - 8;
     gzip[crc_byte] ^= 1;
-    let mut decoder = WebZlibStream::new("decompress", "gzip").unwrap();
+    let mut decoder = WebZlibStream::new("decompress", "gzip", &ZlibOptions::default()).unwrap();
     let split = gzip.len() - 8;
     let first = decoder.write_and_flush(&gzip[..split]);
     let invalid = match first {

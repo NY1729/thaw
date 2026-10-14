@@ -628,8 +628,32 @@ unsafe fn detach_promise(
     subscribed
 }
 
+/// Keeps a combinator's output Promise allocated for as long as its callback
+/// state exists. The consumer of the output may release it before the inputs
+/// settle (an expired invocation abandons its awaiting handler); a late input
+/// then settles a still-valid, unobserved Promise instead of freed memory.
+struct OutputRef(*mut ThawPromise);
+
+impl OutputRef {
+    fn new(output: *mut ThawPromise) -> Self {
+        if !output.is_null() {
+            unsafe { retain_native_promise_internal(output) };
+        }
+        Self(output)
+    }
+}
+
+impl Drop for OutputRef {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            unsafe { release_native_promise_internal(self.0) };
+        }
+    }
+}
+
 struct PromiseChainState {
     output: *mut ThawPromise,
+    _output: OutputRef,
     input: *mut ThawPromise,
     fulfilled: Option<(PromiseTransformFn, *mut u8)>,
     rejected: Option<(PromiseTransformFn, *mut u8)>,
@@ -715,6 +739,7 @@ unsafe fn promise_chain_with_handlers(
         .collect();
     let state = Box::into_raw(Box::new(PromiseChainState {
         output,
+        _output: OutputRef::new(output),
         input,
         fulfilled,
         rejected,
@@ -725,6 +750,7 @@ unsafe fn promise_chain_with_handlers(
 
 struct PromiseAdoptState {
     output: *mut ThawPromise,
+    _output: OutputRef,
     input: *mut ThawPromise,
 }
 
@@ -756,13 +782,18 @@ pub unsafe extern "C" fn thaw_promise_adopt(
         reject_native_text(output, PROMISE_CYCLE_ERROR.as_ptr());
         return 0;
     }
-    let state = Box::into_raw(Box::new(PromiseAdoptState { output, input }));
+    let state = Box::into_raw(Box::new(PromiseAdoptState {
+        output,
+        _output: OutputRef::new(output),
+        input,
+    }));
     thaw_promise_subscribe(input, resume_promise_adopt, state.cast());
     1
 }
 
 struct PromiseFinallyState {
     output: *mut ThawPromise,
+    _output: OutputRef,
     input: *mut ThawPromise,
     callback: PromiseFinallyFn,
     context: *mut u8,
@@ -801,6 +832,7 @@ pub unsafe extern "C" fn thaw_promise_finally(
     }
     let state = Box::into_raw(Box::new(PromiseFinallyState {
         output,
+        _output: OutputRef::new(output),
         input,
         callback,
         context,
@@ -817,6 +849,10 @@ thread_local! {
     static PROMISE_FINALLY_ADOPT_STATES: RefCell<Vec<*mut PromiseFinallyAdoptState>> =
         const { RefCell::new(Vec::new()) };
     static PROMISE_ANY_STATES: RefCell<Vec<*mut PromiseAnyState>> =
+        const { RefCell::new(Vec::new()) };
+    static PROMISE_RACE_STATES: RefCell<Vec<*mut PromiseRaceState>> =
+        const { RefCell::new(Vec::new()) };
+    static PROMISE_ALL_SETTLED_STATES: RefCell<Vec<*mut PromiseAllSettledState>> =
         const { RefCell::new(Vec::new()) };
 }
 
@@ -844,10 +880,19 @@ fn cancel_pending_aggregate_states() {
         state.reason_roots.clear();
         state.output_root = None;
     }
+    // allSettled writes its result into request-arena slots, which a purge
+    // reclaims: a late child must treat the state as inert.
+    let settled_states = PROMISE_ALL_SETTLED_STATES.with(|states| {
+        std::mem::take(&mut *states.borrow_mut())
+    });
+    for pointer in settled_states {
+        unsafe { (*pointer).cancelled = true };
+    }
 }
 
 struct PromiseFinallyAdoptState {
     output: *mut ThawPromise,
+    _output: OutputRef,
     input: *mut ThawPromise,
     original: *const u8,
     original_rejected: bool,
@@ -1021,6 +1066,7 @@ unsafe fn finally_adopt_with_source(
     }
     let state = Box::into_raw(Box::new(PromiseFinallyAdoptState {
         output,
+        _output: OutputRef::new(output),
         input,
         original,
         original_rejected: original_rejected != 0,
@@ -1058,10 +1104,16 @@ fn uncount_pending_promise_all_states_for_invocation() {
             unsafe { (*pointer).join_counted = false };
         }
     });
+    PROMISE_RACE_STATES.with(|states| {
+        for pointer in states.borrow().iter().copied() {
+            unsafe { (*pointer).join_counted = false };
+        }
+    });
 }
 
 struct PromiseAllState {
     output: *mut ThawPromise,
+    _output: OutputRef,
     remaining: usize,
     rejected: bool,
     result: *mut u8,
@@ -1229,6 +1281,7 @@ pub unsafe extern "C" fn thaw_promise_all_typed(
     }
     let state = Box::into_raw(Box::new(PromiseAllState {
         output,
+        _output: OutputRef::new(output),
         remaining: grouped.len(),
         rejected: invalid,
         result,
@@ -1279,8 +1332,10 @@ pub unsafe extern "C" fn thaw_promise_all_f64(
 
 struct PromiseRaceState {
     output: *mut ThawPromise,
+    _output: OutputRef,
     remaining: usize,
     settled: bool,
+    join_counted: bool,
 }
 
 struct PromiseRaceChild {
@@ -1302,7 +1357,10 @@ extern "C" fn resume_promise_race_child(frame: *mut u8, result: *const u8) {
     unsafe { thaw_promise_destroy(child.promise) };
     state.remaining -= 1;
     if state.remaining == 0 {
-        ACTIVE_PROMISE_JOINS.with(|active| active.set(active.get() - 1));
+        PROMISE_RACE_STATES.with(|states| states.borrow_mut().retain(|current| *current != child.state));
+        if state.join_counted {
+            ACTIVE_PROMISE_JOINS.with(|active| active.set(active.get() - 1));
+        }
         unsafe { drop(Box::from_raw(child.state)) };
     }
 }
@@ -1339,10 +1397,13 @@ pub unsafe extern "C" fn thaw_promise_race(
     }
     let state = Box::into_raw(Box::new(PromiseRaceState {
         output,
+        _output: OutputRef::new(output),
         remaining: unique.len(),
         settled: invalid,
+        join_counted: !unique.is_empty(),
     }));
     if !unique.is_empty() {
+        PROMISE_RACE_STATES.with(|states| states.borrow_mut().push(state));
         ACTIVE_PROMISE_JOINS.with(|active| active.set(active.get() + 1));
     }
     if invalid {
@@ -1440,6 +1501,7 @@ fn promise_any_errors(reasons: &[Option<PromiseAnyReason>]) -> *const u8 {
 
 struct PromiseAnyState {
     output: *mut ThawPromise,
+    _output: OutputRef,
     remaining: usize,
     fulfilled: bool,
     reasons: Vec<Option<PromiseAnyReason>>,
@@ -1541,6 +1603,7 @@ pub unsafe extern "C" fn thaw_promise_any(
     }
     let state = Box::into_raw(Box::new(PromiseAnyState {
         output,
+        _output: OutputRef::new(output),
         remaining: grouped.len(),
         fulfilled: false,
         reasons: vec![None; len],
@@ -1559,12 +1622,14 @@ pub unsafe extern "C" fn thaw_promise_any(
 
 struct PromiseAllSettledState {
     output: *mut ThawPromise,
+    _output: OutputRef,
     remaining: usize,
     result_slot: *mut *const u8,
     result: *mut u64,
     objects: *mut u8,
     element_size: usize,
     object_stride: usize,
+    cancelled: bool,
 }
 
 struct PromiseAllSettledChild {
@@ -1576,6 +1641,16 @@ struct PromiseAllSettledChild {
 extern "C" fn resume_promise_all_settled_child(frame: *mut u8, value: *const u8) {
     let child = unsafe { Box::from_raw(frame.cast::<PromiseAllSettledChild>()) };
     let state = unsafe { &mut *child.state };
+    if state.cancelled {
+        // Purge reclaimed the request arena and reset the join count: a late
+        // child only releases itself.
+        unsafe { thaw_promise_destroy(child.promise) };
+        state.remaining -= 1;
+        if state.remaining == 0 {
+            unsafe { drop(Box::from_raw(child.state)) };
+        }
+        return;
+    }
     let rejected = unsafe { thaw_promise_state(child.promise) } == 2;
     for index in &child.indices {
         let object = unsafe { state.objects.add(index * state.object_stride) };
@@ -1603,6 +1678,7 @@ extern "C" fn resume_promise_all_settled_child(frame: *mut u8, value: *const u8)
     state.remaining -= 1;
     if state.remaining == 0 {
         thaw_promise_resolve(state.output, state.result_slot.cast());
+        PROMISE_ALL_SETTLED_STATES.with(|states| states.borrow_mut().retain(|current| *current != child.state));
         ACTIVE_PROMISE_JOINS.with(|active| active.set(active.get() - 1));
         unsafe { drop(Box::from_raw(child.state)) };
     }
@@ -1716,13 +1792,16 @@ pub unsafe extern "C" fn thaw_promise_all_settled(
     let objects_root = thaw_arena::ArenaRoot::new(objects as usize);
     let state = Box::into_raw(Box::new(PromiseAllSettledState {
         output,
+        _output: OutputRef::new(output),
         remaining: grouped.len(),
         result_slot,
         result,
         objects,
         element_size,
         object_stride,
+        cancelled: false,
     }));
+    PROMISE_ALL_SETTLED_STATES.with(|states| states.borrow_mut().push(state));
     ACTIVE_PROMISE_JOINS.with(|active| active.set(active.get() + 1));
     for (promise, indices) in grouped {
         let child = Box::into_raw(Box::new(PromiseAllSettledChild {
