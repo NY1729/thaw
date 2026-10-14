@@ -1064,8 +1064,8 @@ impl<'ctx> HirCompiler<'ctx> {
             let suspends = match body {
                 HirExpr::Block(statements) => statements
                     .iter()
-                    .any(|statement| Self::stmt_awaits_frame_source(statement, &frame_functions)),
-                expression => Self::expr_awaits_frame_source(expression, &frame_functions),
+                    .any(|statement| self.stmt_awaits_frame_source(statement, &frame_functions)),
+                expression => self.expr_awaits_frame_source(expression, &frame_functions),
             };
             if suspends {
                 return self.compile_async_lambda(captures, params, resolved, body);

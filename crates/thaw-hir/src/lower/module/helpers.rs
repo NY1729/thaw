@@ -188,12 +188,17 @@ fn is_hidden_accessor_field(name: &str) -> bool {
     name.starts_with("__thaw_getter_") || name.starts_with("__thaw_setter_")
 }
 
+/// A class `#private` member is lowered to a field with this prefix; it is
+/// storage only and is never an own property (keys, JSON, spread, clone).
+const PRIVATE_SLOT_PREFIX: &str = "__thaw_private_";
+
 fn ecmascript_field_order<T>(fields: &[(Symbol, T)]) -> Vec<usize> {
     let mut indices = fields
         .iter()
         .enumerate()
         .filter_map(|(index, (name, _))| {
-            (!is_hidden_accessor_field(name)).then_some((index, array_index_key(name)))
+            (!is_hidden_accessor_field(name) && !name.starts_with(PRIVATE_SLOT_PREFIX))
+                .then_some((index, array_index_key(name)))
         })
         .collect::<Vec<_>>();
     indices.sort_by_key(|(index, array_index)| {

@@ -456,14 +456,8 @@ impl<'a> FnLowerer<'a> {
             HirExpr::Var(receiver_name.clone()),
         ];
         // `thisArg` becomes the `this` of a receiver-taking mapper.
-        let this_binding = if let (HirType::FunctionWithThis(..), Some(this_arg)) =
-            (&callback_type, this_arg.as_ref())
-        {
-            let ty = self.infer_expr_type(this_arg)?;
-            let name = format!("__thaw_map_this_{}", self.next_binding);
-            self.next_binding += 1;
-            self.scope.insert(name.clone(), ty.clone());
-            Some((name, ty, this_arg.clone()))
+        let this_binding = if matches!(callback_type, HirType::FunctionWithThis(..)) {
+            self.bind_array_callback_this("map", &callback_type, &this_arg)?
         } else { None };
         let callback_call = if let Some((name, _, _)) = &this_binding {
             self.lower_array_from_mapper_call(
@@ -620,7 +614,9 @@ impl<'a> FnLowerer<'a> {
                 ty,
             )
         };
-        let HirType::Function(params, _) = &callback_type else {
+        let this_binding = self.bind_array_callback_this("filter", &callback_type, &this_arg)?;
+        let (signature, call_this) = Self::array_callback_signature(&callback_type, &this_binding);
+        let HirType::Function(params, returned) = &signature else {
             unreachable!("array filter was validated as a function")
         };
         let available = [
@@ -628,8 +624,9 @@ impl<'a> FnLowerer<'a> {
             HirExpr::Var(index_name.clone()),
             HirExpr::Var(receiver_name.clone()),
         ];
-        let callback_call =
-            self.lower_array_callback_call(&callback_name, params, &available)?;
+        let callback_call = self.lower_array_from_mapper_call(
+            &callback_name, params, returned, &available, call_this.as_deref(),
+        )?;
         let callback_truthy = self.array_callback_truthy(callback_call)?;
         let increment = |name: &str| {
             HirStmt::Expr(HirExpr::Assign(
@@ -738,13 +735,7 @@ impl<'a> FnLowerer<'a> {
             (receiver_name, array_type, receiver),
             (callback_name, callback_type, callback),
         ];
-        if let Some(this_arg) = this_arg {
-            let ty = self.infer_expr_type(&this_arg)?;
-            let name = format!("__thaw_filter_this_{}", self.next_binding);
-            self.next_binding += 1;
-            self.scope.insert(name.clone(), ty.clone());
-            bindings.push((name, ty, this_arg));
-        }
+        bindings.extend(this_binding);
         self.wrap_call_argument_bindings(body, &bindings)
     }
 

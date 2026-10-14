@@ -433,7 +433,7 @@ impl<'a> FnLowerer<'a> {
                         };
                         let range_error = || {
                             HirStmt::Throw(HirExpr::Lit(HirLit::Str(
-                                "toString() radix argument must be between 2 and 36".into(),
+                                "\u{1}RangeError\u{1}toString() radix argument must be between 2 and 36".into(),
                             )))
                         };
                         let body = HirExpr::Block(vec![

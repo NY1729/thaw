@@ -72,7 +72,11 @@ impl<'ctx> HirCompiler<'ctx> {
             HirExpr::Lit(HirLit::Bool(_)) => Some(HirType::Bool),
             HirExpr::Lit(HirLit::Undefined | HirLit::ArrayHole) => Some(HirType::Undefined),
             HirExpr::Lit(HirLit::Null) => Some(HirType::Null),
-            HirExpr::Var(name) => self.variable_hir_types.get(name).cloned(),
+            HirExpr::Var(name) => self
+                .variable_hir_types
+                .get(name)
+                .cloned()
+                .or_else(|| self.planning_var_types.borrow().get(name).cloned()),
             HirExpr::Assign(_, value)
             | HirExpr::IndexAssign(_, _, value)
             | HirExpr::PropAssign(_, _, _, value) => self.expr_hir_type(value),

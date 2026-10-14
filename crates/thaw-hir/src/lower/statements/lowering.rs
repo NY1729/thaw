@@ -2374,6 +2374,11 @@ impl<'a> FnLowerer<'a> {
                             call
                         })
                     };
+                    // IteratorClose runs only for an abrupt exit; an exhausted
+                    // iterator (`done: true`) is never asked to `return()`.
+                    let exhausted_name = format!("__thaw_for_of_exhausted_{}", self.next_binding);
+                    self.next_binding += 1;
+                    self.scope.insert(exhausted_name.clone(), HirType::Bool);
                     let mut body = Vec::new();
                     if generator_producer.is_some() {
                         body.extend([
@@ -2389,7 +2394,13 @@ impl<'a> FnLowerer<'a> {
                                     )))),
                                     Box::new(HirExpr::Lit(HirLit::F64(0.0))),
                                 ),
-                                vec![HirStmt::Break],
+                                vec![
+                                    HirStmt::Expr(HirExpr::Assign(
+                                        exhausted_name.clone(),
+                                        Box::new(HirExpr::Lit(HirLit::Bool(true))),
+                                    )),
+                                    HirStmt::Break,
+                                ],
                                 Vec::new(),
                             ),
                         ]);
@@ -2430,6 +2441,7 @@ impl<'a> FnLowerer<'a> {
                     };
                     let loop_stmt = HirStmt::While(condition, body);
                     let mut exception_prelude = None;
+                    let mut close_prelude = None;
                     let loop_stmt = if generator_producer.is_some() {
                         let close = HirStmt::Expr(resume_generator(1)?);
                         let exception = self.bind_local(
@@ -2439,7 +2451,20 @@ impl<'a> FnLowerer<'a> {
                         exception_prelude = Some(crate::caught_exception_carrier_prelude(
                             exception.clone(),
                         ));
-                        let mut failure_body = vec![close.clone()];
+                        // The body's own exception wins over one thrown by `return()`.
+                        let swallowed = self.bind_local(
+                            "__thaw_for_of_close_exception",
+                            crate::caught_exception_carrier_type(),
+                        );
+                        close_prelude = Some(crate::caught_exception_carrier_prelude(
+                            swallowed.clone(),
+                        ));
+                        let mut failure_body = vec![HirStmt::Try(
+                            vec![close.clone()],
+                            swallowed,
+                            Vec::new(),
+                            None,
+                        )];
                         failure_body.extend(self.lower_throw_value_statements(
                             HirExpr::Var(exception.clone()), crate::caught_exception_carrier_type(),
                         )?);
@@ -2461,9 +2486,25 @@ impl<'a> FnLowerer<'a> {
                         ),
                     ];
                     if let Some(prelude) = exception_prelude { statements.push(prelude); }
+                    if let Some(prelude) = close_prelude { statements.push(prelude); }
+                    if generator_producer.is_some() {
+                        statements.insert(0, HirStmt::Let(
+                            exhausted_name.clone(),
+                            HirType::Bool,
+                            HirExpr::Lit(HirLit::Bool(false)),
+                        ));
+                    }
                     statements.push(loop_stmt);
                     if generator_producer.is_some() {
-                        statements.push(HirStmt::Expr(resume_generator(1)?));
+                        statements.push(HirStmt::If(
+                            HirExpr::BinOp(
+                                BinOp::EqEqEq,
+                                Box::new(HirExpr::Var(exhausted_name)),
+                                Box::new(HirExpr::Lit(HirLit::Bool(false))),
+                            ),
+                            vec![HirStmt::Expr(resume_generator(1)?)],
+                            Vec::new(),
+                        ));
                     }
                     let Some((producer, producer_type, init, _)) = generator_producer else {
                         return Ok(statements);
