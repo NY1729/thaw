@@ -1709,6 +1709,30 @@ impl<'a> FnLowerer<'a> {
                         receiver = self.coerce_primitive_to_string(receiver)?;
                         receiver_type = HirType::Str;
                     }
+                    // `String.prototype.includes/startsWith/endsWith` reject a RegExp
+                    // argument (the regex literal's record shape) instead of searching
+                    // for its text.
+                    if matches!(property.sym.as_ref(), "includes" | "startsWith" | "endsWith")
+                        && receiver_type == HirType::Str
+                        && matches!(
+                            self.infer_expr_type(&arguments[0])?,
+                            HirType::Object(fields)
+                                if fields.len() == 3
+                                    && ["source", "flags", "lastIndex"]
+                                        .iter()
+                                        .all(|name| fields.iter().any(|(field, _)| field == name))
+                        )
+                    {
+                        let message = format!(
+                            "\u{1}TypeError\u{1}First argument to String.prototype.{} must not be a regular expression",
+                            property.sym
+                        );
+                        let result = HirExpr::ThrowValue(
+                            Box::new(HirExpr::Lit(HirLit::Str(message))),
+                            Box::new(HirExpr::Lit(HirLit::Bool(false))),
+                        );
+                        return self.wrap_call_argument_bindings(result, &spread_bindings);
+                    }
                     if receiver_type == HirType::Json {
                         // A dynamic receiver is a string or an array only at run time:
                         // search the string natively, or walk the JSON array comparing

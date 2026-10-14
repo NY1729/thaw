@@ -853,3 +853,33 @@ fn named_declaration_helpers_keep_one_source_map_identity_through_reparses() {
     assert!(type_only_namespace_names_named(malformed, &filename).is_empty());
     assert!(nested_namespace_members_named(malformed, &filename).is_empty());
 }
+
+/// `query<T extends Submittable>(stream: T): T` only bounds what the
+/// parameter accepts; the return type is whatever the call site infers `T`
+/// to be. Decoding it as the constraint (an object with a `submit` function)
+/// made `client.query("SELECT 1")` fail: the real result is a Promise.
+#[test]
+fn a_bare_constrained_type_parameter_return_is_not_the_constraint() {
+    let classes = parse_dts_classes(
+        r#"
+            interface Submittable { submit: (connection: string) => void; }
+            export class ClientBase {
+                query<T extends Submittable>(queryStream: T): T;
+                query(text: string): Promise<number>;
+            }
+            "#,
+    )
+    .unwrap();
+    let queries = classes[0]
+        .methods
+        .iter()
+        .filter(|method| method.name == "query")
+        .collect::<Vec<_>>();
+    assert_eq!(queries.len(), 2);
+    assert_eq!(
+        queries[0].ret,
+        DtsType::Native(thaw_hir::HirType::JsValue),
+        "{:?}",
+        queries[0].ret
+    );
+}

@@ -1276,7 +1276,11 @@ fn run_event_loop_turn() -> std::ops::ControlFlow<i32> {
 pub extern "C" fn thaw_js_run_event_loop() -> i32 {
     loop {
         match run_event_loop_turn() {
-            std::ops::ControlFlow::Continue(()) => {}
+            // A turn boundary is a quiescent point: no native frame is
+            // live, and everything the program keeps is rooted. Reclaim the
+            // per-turn garbage a long-running server would otherwise
+            // accumulate for its whole lifetime.
+            std::ops::ControlFlow::Continue(()) => thaw_arena::thaw_arena_reset_if_grown(),
             std::ops::ControlFlow::Break(code) => return code,
         }
     }
@@ -5095,6 +5099,69 @@ fn describe_promise_exception<'js>(ctx: &Ctx<'js>, label: &str, preserve_error: 
         body.push_str(&properties);
     }
     BoundaryError { text: body, packet }
+}
+
+/// `vm.Script` / `runInThisContext`: evaluates (or only compiles) classic-script source under the caller's filename.
+fn host_vm_eval<'js>(ctx: Ctx<'js>, source: String, filename: String, compile_only: bool) -> rquickjs::Result<Value<'js>> {
+    let source = std::ffi::CString::new(source)
+        .map_err(|_| rquickjs::Error::new_from_js_message("source", "script", "source contains a NUL byte"))?;
+    let filename = std::ffi::CString::new(filename.replace('\0', "")).unwrap_or_default();
+    let flags = rquickjs::qjs::JS_EVAL_TYPE_GLOBAL as i32
+        | if compile_only { rquickjs::qjs::JS_EVAL_FLAG_COMPILE_ONLY as i32 } else { 0 };
+    // SAFETY: `ctx` is the live context of this call; JS_Eval returns an owned value or the exception marker.
+    let raw = unsafe {
+        rquickjs::qjs::JS_Eval(ctx.as_raw().as_ptr(), source.as_ptr(), source.as_bytes().len() as _, filename.as_ptr(), flags)
+    };
+    let value = unsafe { Value::from_raw(ctx.clone(), raw) };
+    if value.is_exception() {
+        return Err(rquickjs::Error::Exception);
+    }
+    Ok(if compile_only { Value::new_undefined(ctx) } else { value })
+}
+
+/// QuickJS heap accounting (`JS_ComputeMemoryUsage`) as JSON, behind `v8.getHeapStatistics()` / `vm.measureMemory()`.
+fn host_memory_usage(ctx: Ctx<'_>) -> String {
+    let mut usage = std::mem::MaybeUninit::<rquickjs::qjs::JSMemoryUsage>::zeroed();
+    // SAFETY: the context is live; JS_ComputeMemoryUsage fully initialises the struct it is given.
+    let usage = unsafe {
+        let runtime = rquickjs::qjs::JS_GetRuntime(ctx.as_raw().as_ptr());
+        rquickjs::qjs::JS_ComputeMemoryUsage(runtime, usage.as_mut_ptr());
+        usage.assume_init()
+    };
+    serde_json::json!({
+        "malloc_size": usage.malloc_size,
+        "malloc_limit": usage.malloc_limit,
+        "memory_used_size": usage.memory_used_size,
+        "malloc_count": usage.malloc_count,
+        "memory_used_count": usage.memory_used_count,
+        "js_func_code_size": usage.js_func_code_size,
+        "js_func_pc2line_size": usage.js_func_pc2line_size,
+    })
+    .to_string()
+}
+
+/// Marker for an uncaught Worker exception carried as structured JSON (`__thaw_worker_error_wire`) instead of a bare message.
+const WORKER_ERROR_WIRE: char = '\u{6}';
+
+fn describe_worker_exception(ctx: &Ctx<'_>) -> String {
+    let exc = ctx.catch();
+    if let Ok(wire) = ctx.globals().get::<_, Function>("__thaw_worker_error_wire") {
+        if let Ok(wire) = wire.call::<_, String>((exc.clone(),)) {
+            return format!("{WORKER_ERROR_WIRE}{wire}");
+        }
+    }
+    ctx.throw(exc);
+    describe_exception_with_stack(ctx)
+}
+
+/// Evaluates a Worker's own script; an uncaught exception keeps its class, stack and properties for the parent.
+fn load_worker_script(ctx: &Ctx<'_>, source: &str) -> Result<(), String> {
+    let mut options = rquickjs::context::EvalOptions::default();
+    options.strict = false;
+    ctx.eval_with_options::<(), _>(source, options).map_err(|e| match e {
+        rquickjs::Error::Exception => describe_worker_exception(ctx),
+        e => e.to_string(),
+    })
 }
 
 fn describe_exception_with_stack(ctx: &Ctx<'_>) -> String {

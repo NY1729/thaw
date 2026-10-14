@@ -385,8 +385,8 @@ fn run_host_worker(
             &host_worker_bootstrap(&start.worker_data_json, &start.config_json, start.thread_id),
         )?;
         let _ = events.send(HostWorkerEvent::Online);
-        load_impl(
-            ctx.clone(),
+        load_worker_script(
+            &ctx,
             &format!("(function() {{\n{}\n}}).call(globalThis);", start.source),
         )?;
         Ok(())
@@ -416,7 +416,7 @@ fn run_host_worker(
                 // script) deliver through the same platform-event poll as the main thread.
                 if let Ok(poll) = ctx.globals().get::<_, Function>("__thaw_poll_platform_events") {
                     poll.call::<_, ()>(()).map_err(|error| match error {
-                        rquickjs::Error::Exception => describe_exception(&ctx),
+                        rquickjs::Error::Exception => describe_worker_exception(&ctx),
                         error => error.to_string(),
                     })?;
                 }
@@ -452,7 +452,7 @@ fn run_host_worker(
                                     .get("__thaw_host_worker_deliver")
                                     .map_err(|error| error.to_string())?;
                                 deliver.call::<_, ()>((payload,)).map_err(|error| match error {
-                                    rquickjs::Error::Exception => describe_exception(&ctx),
+                                    rquickjs::Error::Exception => describe_worker_exception(&ctx),
                                     error => error.to_string(),
                                 })?;
                             }
@@ -1138,16 +1138,17 @@ fn run_host_child(
         }
     };
     drop(stdin);
-    let _ = stdout_thread.join();
-    let _ = stderr_thread.join();
     #[cfg(unix)]
     let signal = status.as_ref().and_then(std::process::ExitStatus::signal);
     #[cfg(not(unix))]
     let signal: Option<i32> = None;
-    let _ = events.send(HostChildEvent::Exit {
-        code: status.and_then(|status| status.code()),
-        signal,
-    });
+    let code = status.and_then(|status| status.code());
+    // `exit` is the process ending; `close` (the final Exit event) waits for the output pipes to reach EOF, which a
+    // detached grandchild holding them open can delay.
+    let _ = events.send(HostChildEvent::Exited { code, signal });
+    let _ = stdout_thread.join();
+    let _ = stderr_thread.join();
+    let _ = events.send(HostChildEvent::Exit { code, signal });
 }
 
 fn spawn_host_child(command: String, arguments_json: String, options_json: String) -> u32 {
@@ -1312,6 +1313,9 @@ fn poll_host_children() -> String {
                     }
                     Ok(HostChildEvent::Error { message, code }) => {
                         output.push(serde_json::json!({ "handle": handle, "type": "error", "message": message, "code": code }));
+                    }
+                    Ok(HostChildEvent::Exited { code, signal }) => {
+                        output.push(serde_json::json!({ "handle": handle, "type": "exited", "code": code, "signal": signal }));
                     }
                     Ok(HostChildEvent::Exit { code, signal }) => {
                         output.push(serde_json::json!({ "handle": handle, "type": "exit", "code": code, "signal": signal }));

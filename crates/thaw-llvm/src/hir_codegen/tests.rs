@@ -102,8 +102,10 @@ fn compile_and_run_output_with_env(
     let output = compile_and_run_raw(source, test_name, envs);
     assert!(
         output.status.success(),
-        "binary exited {:?}: {}",
+        "binary exited {:?} (terminated by signal {:?}): stdout: {} stderr: {}",
         output.status.code(),
+        std::os::unix::process::ExitStatusExt::signal(&output.status),
+        String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
     (
@@ -339,6 +341,7 @@ include!("tests/ffi.rs");
 include!("tests/types.rs");
 include!("tests/values.rs");
 include!("tests/f_contracts.rs");
+include!("tests/i_contracts.rs");
 
 #[test]
 fn immediate_jsvalue_identity_lambda_reads_capture_without_retaining_environment() {

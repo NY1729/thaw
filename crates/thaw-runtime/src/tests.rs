@@ -1351,6 +1351,84 @@ fn expired_invocation_abandons_race_children_instead_of_draining_them() {
 }
 
 #[test]
+fn aggregates_survive_their_output_being_released_before_the_children_settle() {
+    // The consumer of an aggregate's output may drop it (an abandoned await);
+    // children that settle later must find a valid, unobserved Promise and the
+    // join count must unwind. Covers race, allSettled, all and any.
+    type Build = unsafe extern "C" fn(*const *mut ThawPromise, usize) -> *mut ThawPromise;
+    unsafe extern "C" fn all_f64(p: *const *mut ThawPromise, n: usize) -> *mut ThawPromise {
+        unsafe { thaw_promise_all_f64(p, n) }
+    }
+    unsafe extern "C" fn settled_f64(p: *const *mut ThawPromise, n: usize) -> *mut ThawPromise {
+        unsafe { thaw_promise_all_settled(p, n, size_of::<f64>()) }
+    }
+    let builds: [(&str, Build); 4] = [
+        ("race", thaw_promise_race),
+        ("any", thaw_promise_any),
+        ("all", all_f64),
+        ("allSettled", settled_f64),
+    ];
+    for (name, build) in builds {
+        let children = [timed_value(15, 1.0), timed_value(25, 2.0)];
+        let aggregate = unsafe { build(children.as_ptr(), children.len()) };
+        unsafe { thaw_promise_destroy(aggregate) };
+        thaw_runtime_drain_detached();
+        assert_eq!(
+            ACTIVE_PROMISE_JOINS.with(Cell::get),
+            0,
+            "{name}: join count"
+        );
+        assert!(
+            TIMERS.with(|timers| timers.borrow().is_empty()),
+            "{name}: timers"
+        );
+    }
+}
+
+#[test]
+fn aggregates_whose_children_never_settle_unwind_on_purge() {
+    // R2: a child that never settles keeps the aggregate state alive; the
+    // invocation purge must still reset the join count and leave no timers.
+    type Build = unsafe extern "C" fn(*const *mut ThawPromise, usize) -> *mut ThawPromise;
+    unsafe extern "C" fn all_f64(p: *const *mut ThawPromise, n: usize) -> *mut ThawPromise {
+        unsafe { thaw_promise_all_f64(p, n) }
+    }
+    unsafe extern "C" fn settled_f64(p: *const *mut ThawPromise, n: usize) -> *mut ThawPromise {
+        unsafe { thaw_promise_all_settled(p, n, size_of::<f64>()) }
+    }
+    let builds: [(&str, Build); 4] = [
+        ("race", thaw_promise_race),
+        ("any", thaw_promise_any),
+        ("all", all_f64),
+        ("allSettled", settled_f64),
+    ];
+    for (name, build) in builds {
+        let never = thaw_promise_new();
+        let aggregate = unsafe { build([never].as_ptr(), 1) };
+        unsafe { thaw_promise_destroy(aggregate) };
+        purge_pending_async_state();
+        assert_eq!(
+            ACTIVE_PROMISE_JOINS.with(Cell::get),
+            0,
+            "{name}: join count"
+        );
+        // The purged state must tolerate the child settling afterwards.
+        let value = 3.0f64;
+        assert_eq!(
+            thaw_promise_resolve(never, (&value as *const f64).cast()),
+            1,
+            "{name}"
+        );
+        thaw_runtime_run_until_idle();
+        assert_eq!(
+            ACTIVE_PROMISE_JOINS.with(Cell::get),
+            0,
+            "{name}: after late settle"
+        );
+    }
+}
+
+#[test]
 fn invocation_deadline_does_not_affect_a_promise_that_settles_in_time() {
     set_invocation_deadline(Some(500));
     let fast = timed_value(10, 42.0);
@@ -5001,4 +5079,61 @@ fn promise_slot_retains_settled_arena_result_until_owner_is_released() {
         assert!(thaw_arena::was_reclaimed(owner as usize));
         assert!(thaw_arena::was_reclaimed(payload as usize));
     });
+}
+
+/// An abandoned combinator output (its consumer released it before any child
+/// settled) must not be written to by a child that settles later: the freed
+/// allocation is reused by the next Promise, which has to stay pending.
+fn assert_abandoned_output_is_not_settled_by_late_child(
+    combine: impl FnOnce(*const *mut ThawPromise, usize) -> *mut ThawPromise,
+) {
+    let first = thaw_promise_new();
+    let second = thaw_promise_new();
+    let children = [first, second];
+    let output = combine(children.as_ptr(), children.len());
+    unsafe { thaw_promise_destroy(output) };
+    let reused = thaw_promise_new();
+    let value = 1.0f64;
+    thaw_promise_resolve(first, (&value as *const f64).cast());
+    thaw_promise_resolve(second, (&value as *const f64).cast());
+    thaw_runtime_run_until_idle();
+    assert_eq!(
+        thaw_promise_state(reused),
+        0,
+        "a late child settled an output the consumer had already released"
+    );
+    unsafe { thaw_promise_destroy(reused) };
+    thaw_runtime_drain_detached();
+    purge_pending_async_state();
+}
+
+#[test]
+fn late_race_child_does_not_settle_a_released_output() {
+    assert_abandoned_output_is_not_settled_by_late_child(|p, n| unsafe { thaw_promise_race(p, n) });
+}
+
+#[test]
+fn late_all_settled_child_does_not_settle_a_released_output() {
+    assert_abandoned_output_is_not_settled_by_late_child(|p, n| unsafe {
+        thaw_promise_all_settled(p, n, size_of::<f64>())
+    });
+}
+
+#[test]
+fn late_any_child_does_not_settle_a_released_output() {
+    assert_abandoned_output_is_not_settled_by_late_child(|p, n| unsafe { thaw_promise_any(p, n) });
+}
+
+#[test]
+fn late_adopted_input_does_not_settle_a_released_output() {
+    let input = thaw_promise_new();
+    let output = thaw_promise_new();
+    assert_eq!(unsafe { thaw_promise_adopt(output, input) }, 1);
+    unsafe { thaw_promise_destroy(output) };
+    let reused = thaw_promise_new();
+    let value = 1.0f64;
+    thaw_promise_resolve(input, (&value as *const f64).cast());
+    thaw_runtime_run_until_idle();
+    assert_eq!(thaw_promise_state(reused), 0);
+    unsafe { thaw_promise_destroy(reused) };
 }

@@ -11,6 +11,9 @@ struct NarrowingSnapshot {
 struct FnLowerer<'a> {
     scope: HashMap<Symbol, HirType>,
     immutable_bindings: HashSet<Symbol>,
+    /// `var` names already declared in the current function, mapped to the
+    /// HIR binding they own; a redeclaration reuses that binding.
+    function_var_names: HashMap<String, Symbol>,
     /// Declared (annotated) function/method parameters whose type may be `undefined`/`null`:
     /// an un-narrowed property read on one is a compile error, as in `tsc`.
     strict_nullable_bindings: HashSet<Symbol>,

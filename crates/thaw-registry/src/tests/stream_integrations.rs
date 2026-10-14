@@ -437,7 +437,7 @@ module.exports = async function() {
         };
         let _ = fs::remove_dir_all(&dir);
         let _ = fs::remove_dir_all(&empty_node_modules);
-        assert_eq!(file_count, 5);
+        assert_eq!(file_count, 7);
         assert!(loaded);
         assert_eq!(result.as_deref(), Some(r#"[[true,true,true,true,true,true,true,true],["exec-out","exec-err",true,true,0,0],[true,[10],0,true,0],[true,[102,105,108,101,45,111,117,116],true,[102,105,108,101,45,101,114,114],0],[7,"exec-bad-out","exec-bad-err",true,7,7],[8,"file-bad-out","file-bad-err",true,8,8],["ENOENT","","",null,null],[true,1,[true,"callback-out","callback-err"],0],[true,1,[true,"callback-file",""],0],true]"#));
     })
@@ -509,7 +509,7 @@ module.exports = function() {
         };
         let _ = fs::remove_dir_all(&dir);
         let _ = fs::remove_dir_all(&empty_node_modules);
-        assert_eq!(file_count, 4);
+        assert_eq!(file_count, 6);
         assert!(loaded);
         assert_eq!(
             result.as_deref(),
@@ -649,7 +649,7 @@ module.exports = async function() {
         };
         let _ = fs::remove_dir_all(&dir);
         let _ = fs::remove_dir_all(&empty_node_modules);
-        assert_eq!(file_count, 5);
+        assert_eq!(file_count, 7);
         assert!(loaded);
         assert_eq!(
             result.as_deref(),

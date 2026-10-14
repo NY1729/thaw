@@ -79,6 +79,7 @@
   globalThis.__thaw_strict_equal_null_dynamic = value => value === null;
   globalThis.__thaw_strict_equal_undefined_dynamic = value => value === undefined;
   globalThis.__thaw_typeof_dynamic_value = value => typeof value;
+  globalThis.__thaw_is_truthy_dynamic_value = value => !!value;
   globalThis.__thaw_is_undefined_dynamic_value = value => value === undefined;
   globalThis.__thaw_is_null_dynamic_value = value => value === null;
   globalThis.__thaw_is_nullish_dynamic_value = value => value == null;
@@ -2216,6 +2217,26 @@
       }
     }
     return JSON.stringify(out);
+  };
+  // An uncaught Worker exception crosses to the parent as `\u0006` + this JSON, so the 'error' event can carry the
+  // same class, message, stack, own properties and cause the Worker saw (`worker_threads`, registry workers.rs).
+  globalThis.__thaw_worker_error_wire = function (error) {
+    if (error === null || (typeof error !== 'object' && typeof error !== 'function')) {
+      return JSON.stringify({ thrown: typeof error === 'string' ? error : String(error), primitive: typeof error });
+    }
+    let properties = {};
+    try { properties = JSON.parse(globalThis.__thaw_error_properties_json(error) || '{}'); } catch (_) {}
+    const text = value => (typeof value === 'string' ? value : undefined);
+    const name = text(error.name), message = text(error.message);
+    let stack = text(error.stack);
+    // QuickJS stacks carry only the frames; Node's start with the `Name: message` header.
+    if (stack !== undefined && name !== undefined) {
+      const header = message ? `${name}: ${message}` : name;
+      if (!stack.startsWith(header)) stack = `${header}\n${stack}`;
+    }
+    const wire = { name, message, stack, properties };
+    if (error.cause !== undefined) wire.cause = JSON.parse(globalThis.__thaw_worker_error_wire(error.cause));
+    return JSON.stringify(wire);
   };
   globalThis.__thaw_instanceof_dynamic_value = (value, target) =>
     typeof target === 'function' ? value instanceof target : false;

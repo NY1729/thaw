@@ -1368,7 +1368,7 @@ impl<'a> FnLowerer<'a> {
                     }
                     if let Some(expression) = template.exprs.get(index) {
                         let mut value = self.lower_expr(expression)?;
-                        value = self.coerce_primitive_to_string(value)?;
+                        value = self.coerce_operand_to_string(value)?;
                         parts.push(value);
                     }
                 }

@@ -1884,6 +1884,20 @@ impl<'a> FnLowerer<'a> {
                         self.scope = saved_scope;
                         let array_loop = branches.pop().unwrap();
                         let live_loop = branches.pop().unwrap();
+                        // A value that is neither an array, a string, a live
+                        // iterable nor a Map/Set carrier throws, as `for...of` does.
+                        let not_iterable = HirStmt::If(
+                            HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_json_is_not_iterable".into())),
+                                vec![HirExpr::Var(source.clone())],
+                            ),
+                            vec![HirStmt::Throw(HirExpr::Lit(HirLit::Str(
+                                "\u{1}TypeError\u{1}value is not iterable".into(),
+                            )))],
+                            Vec::new(),
+                        );
+                        let mut array_loop = array_loop;
+                        array_loop.insert(0, not_iterable);
                         return Ok(vec![
                             HirStmt::Let(source.clone(), HirType::Json, right),
                             HirStmt::If(
@@ -1938,15 +1952,33 @@ impl<'a> FnLowerer<'a> {
                         values = self.lower_map_iterator(values, values_type.clone(), item_type, mode)?;
                         values_type = self.infer_expr_type(&values)?;
                     }
-                    if matches!(values_type, HirType::Object(_))
-                        && matches!(for_of.right.as_ref(), Expr::Ident(_))
-                    {
+                    if matches!(values_type, HirType::Object(_)) {
+                        // The iterable is evaluated once: a non-identifier operand
+                        // (`new Range()`, `makeRange()`) is bound to a temporary
+                        // that the synthesized `[Symbol.iterator]()` call reads.
+                        let (receiver, bound) = if matches!(for_of.right.as_ref(), Expr::Ident(_)) {
+                            (for_of.right.as_ref().clone(), None)
+                        } else {
+                            let source_name = format!("__thaw_for_of_iterable_{}", self.next_binding);
+                            self.next_binding += 1;
+                            self.scope.insert(source_name.clone(), values_type.clone());
+                            self.bindings
+                                .entry(source_name.clone())
+                                .or_default()
+                                .push(source_name.clone());
+                            let ident = Expr::Ident(swc_ecma_ast::Ident::new(
+                                source_name.as_str().into(),
+                                swc_common::DUMMY_SP,
+                                Default::default(),
+                            ));
+                            (ident, Some((source_name, values.clone())))
+                        };
                         let iterator = Expr::Call(CallExpr {
                             span: swc_common::DUMMY_SP,
                             ctxt: Default::default(),
                             callee: Callee::Expr(Box::new(Expr::Member(MemberExpr {
                                 span: swc_common::DUMMY_SP,
-                                obj: Box::new(for_of.right.as_ref().clone()),
+                                obj: Box::new(receiver),
                                 prop: MemberProp::Ident(swc_ecma_ast::IdentName::new(
                                     "__thaw_symbol_iterator".into(),
                                     swc_common::DUMMY_SP,
@@ -1955,7 +1987,18 @@ impl<'a> FnLowerer<'a> {
                             args: Vec::new(),
                             type_args: None,
                         });
-                        values = self.lower_expr(&iterator)?;
+                        let call = self.lower_expr(&iterator)?;
+                        values = match bound {
+                            None => call,
+                            Some((name, source)) => {
+                                let source_type = self.infer_expr_type(&source)?;
+                                self.bindings.entry(name.clone()).or_default().pop();
+                                HirExpr::Block(vec![
+                                    HirStmt::Let(name, source_type, source),
+                                    HirStmt::Return(Some(call)),
+                                ])
+                            }
+                        };
                         values_type = self.infer_expr_type(&values)?;
                     }
                     if matches!(values_type, HirType::Object(_)) {
@@ -2135,6 +2178,28 @@ impl<'a> FnLowerer<'a> {
                     let mut iteration_disposals = Vec::new();
                     let mut iteration_using_flags = Vec::new();
                     let item_stmts = match &for_of.left {
+                        ForHead::VarDecl(decl)
+                            if decl.decls.len() == 1
+                                && self.reusable_var_binding(decl, &decl.decls[0].name).is_some()
+                                && decl.decls[0].init.is_none() =>
+                        {
+                            // `for (var x of ...)` over a `var x` already declared in this
+                            // function assigns to that variable instead of shadowing it.
+                            let item_name = self
+                                .reusable_var_binding(decl, &decl.decls[0].name)
+                                .expect("checked above");
+                            let item_ty = self.scope.get(&item_name).cloned().ok_or("unknown `var` binding")?;
+                            if item_ty != item_type {
+                                return Err(format!(
+                                    "`for...of` var binding has type {item_ty:?}, expected {item_type:?}"
+                                ));
+                            }
+                            self.record_binding_write(&item_name);
+                            vec![HirStmt::Expr(HirExpr::Assign(
+                                item_name,
+                                Box::new(item_value()),
+                            ))]
+                        }
                         ForHead::VarDecl(decl) => {
                             let [declarator] = decl.decls.as_slice() else {
                                 return Err("`for...of` requires exactly one loop binding".into());
@@ -2588,9 +2653,9 @@ impl<'a> FnLowerer<'a> {
                     let object = self.lower_expr(&for_in.right)?;
                     let object_type = self.infer_expr_type(&object)?;
                     let keys = match &object_type {
-                        HirType::Object(fields) => fields
-                            .iter()
-                            .map(|(name, _)| HirExpr::Lit(HirLit::Str(name.clone())))
+                        HirType::Object(fields) => ecmascript_field_order(fields)
+                            .into_iter()
+                            .map(|index| HirExpr::Lit(HirLit::Str(fields[index].0.clone())))
                             .collect::<Vec<_>>(),
                         HirType::Json | HirType::Dictionary(_) => Vec::new(),
                         _ => {
@@ -2611,7 +2676,7 @@ impl<'a> FnLowerer<'a> {
                     );
                     let keys = if matches!(object_type, HirType::Json | HirType::Dictionary(_)) {
                         HirExpr::Call(
-                            Box::new(HirExpr::Var("__thaw_json_keys".into())),
+                            Box::new(HirExpr::Var("__thaw_json_for_in_keys".into())),
                             vec![HirExpr::Var(object_name.clone())],
                         )
                     } else {
@@ -2628,6 +2693,20 @@ impl<'a> FnLowerer<'a> {
                         )
                     };
                     let binding_stmt = match &for_in.left {
+                        ForHead::VarDecl(decl)
+                            if decl.decls.len() == 1
+                                && self.reusable_var_binding(decl, &decl.decls[0].name).is_some()
+                                && decl.decls[0].init.is_none() =>
+                        {
+                            let binding_name = self
+                                .reusable_var_binding(decl, &decl.decls[0].name)
+                                .expect("checked above");
+                            if self.scope.get(&binding_name) != Some(&HirType::Str) {
+                                return Err("`for...in` var binding must be Str".into());
+                            }
+                            self.record_binding_write(&binding_name);
+                            HirStmt::Expr(HirExpr::Assign(binding_name, Box::new(key_value())))
+                        }
                         ForHead::VarDecl(decl) => {
                             let [declarator] = decl.decls.as_slice() else {
                                 return Err("`for...in` requires exactly one loop binding".into());
@@ -2702,7 +2781,17 @@ impl<'a> FnLowerer<'a> {
                         )),
                     );
                     let mut body = vec![binding_stmt];
-                    body.extend(self.lower_loop_body(&for_in.body)?);
+                    let loop_body = self.lower_loop_body(&for_in.body)?;
+                    if matches!(object_type, HirType::Json | HirType::Dictionary(_)) {
+                        // A key deleted before it is reached is not visited.
+                        let still_present = HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_json_has".into())),
+                            vec![HirExpr::Var(object_name.clone()), key_value()],
+                        );
+                        body.push(HirStmt::If(still_present, loop_body, Vec::new()));
+                    } else {
+                        body.extend(loop_body);
+                    }
                     body = inject_for_update_before_continue(body, &update);
                     body.push(HirStmt::Expr(update));
                     Ok(vec![

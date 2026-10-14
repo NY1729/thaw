@@ -63,6 +63,23 @@ fn lower_callable_default_wrappers(
                 .push(params[0].name.clone());
         }
         let mut body = Vec::new();
+        // A later default expression may name a binding destructured out of an
+        // earlier supplied parameter (`({ x }, y = x)`): bind those first.
+        for (index, pattern) in patterns.iter().enumerate().take(arity) {
+            let parameter = &params[receiver_count + index];
+            let destructured = match pattern {
+                Pat::Assign(default) => default.left.as_ref(),
+                other => other,
+            };
+            if matches!(destructured, Pat::Object(_) | Pat::Array(_)) {
+                lowerer.lower_binding_pattern(
+                    destructured,
+                    HirExpr::Var(parameter.name.clone()),
+                    &parameter.ty,
+                    &mut body,
+                )?;
+            }
+        }
         for (index, pattern) in patterns.iter().enumerate().skip(arity) {
             let parameter = &params[receiver_count + index];
             let value = match pattern {
@@ -103,6 +120,16 @@ fn lower_callable_default_wrappers(
                 .entry(parameter.name.clone())
                 .or_default()
                 .push(parameter.name.clone());
+            if let Pat::Assign(default) = pattern {
+                if matches!(default.left.as_ref(), Pat::Object(_) | Pat::Array(_)) {
+                    lowerer.lower_binding_pattern(
+                        default.left.as_ref(),
+                        HirExpr::Var(parameter.name.clone()),
+                        &parameter.ty,
+                        &mut body,
+                    )?;
+                }
+            }
         }
         let call = HirExpr::Call(
             Box::new(HirExpr::Var(symbol.to_string())),
@@ -209,6 +236,19 @@ fn lower_callable_omitted_parameter_wrappers(
                     .entry(parameter.name.clone())
                     .or_default()
                     .push(parameter.name.clone());
+                // Later defaults may name bindings destructured from this parameter.
+                let destructured = match pattern {
+                    Pat::Assign(default) => default.left.as_ref(),
+                    other => other,
+                };
+                if matches!(destructured, Pat::Object(_) | Pat::Array(_)) {
+                    lowerer.lower_binding_pattern(
+                        destructured,
+                        HirExpr::Var(parameter.name.clone()),
+                        &parameter.ty,
+                        &mut body,
+                    )?;
+                }
                 continue;
             }
             let value = match pattern {
@@ -245,6 +285,16 @@ fn lower_callable_omitted_parameter_wrappers(
                 .entry(parameter.name.clone())
                 .or_default()
                 .push(parameter.name.clone());
+            if let Pat::Assign(default) = pattern {
+                if matches!(default.left.as_ref(), Pat::Object(_) | Pat::Array(_)) {
+                    lowerer.lower_binding_pattern(
+                        default.left.as_ref(),
+                        HirExpr::Var(parameter.name.clone()),
+                        &parameter.ty,
+                        &mut body,
+                    )?;
+                }
+            }
         }
         let call = HirExpr::Call(
             Box::new(HirExpr::Var(symbol.to_string())),

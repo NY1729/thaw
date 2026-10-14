@@ -6230,6 +6230,26 @@ pub extern "C" fn thaw_json_is_live_iterable(value: *const Value) -> u8 {
     )
 }
 
+/// A dynamic value that `for...of` can never iterate: a number, boolean,
+/// BigInt, null/undefined, or a plain object that is neither a Buffer nor a
+/// Map/Set carrier. Arrays and strings (and live hosts) iterate.
+#[no_mangle]
+pub extern "C" fn thaw_json_is_not_iterable(value: *const Value) -> u8 {
+    let Some(value) = (unsafe { value.as_ref() }) else {
+        return 1;
+    };
+    match value {
+        Value::Array(_) | Value::String(_) | Value::Wtf8(_) | Value::Host(_) => 0,
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::BigInt(_) => 1,
+        Value::Object(object) => {
+            let fields = shared_object_ref(object);
+            let carrier = fields.contains_key(b"__thaw_map_entries__".as_slice())
+                || fields.contains_key(b"__thaw_set_values__".as_slice());
+            u8::from(!carrier && thaw_json_is_buffer_shape(value) == 0)
+        }
+    }
+}
+
 /// Recognize a trusted native or graph Date wrapper, or a live Host value
 /// with a genuine Date internal slot. A plain user `{timestamp: ...}` object
 /// is not enough to establish Date origin.
@@ -7027,6 +7047,44 @@ pub unsafe extern "C" fn thaw_json_keys(value: *const Value) -> *mut u8 {
         .into_iter()
         .map(|(key, _)| key)
         .collect::<Vec<_>>();
+    alloc_pointer_array(
+        keys.into_iter()
+            .map(|key| thaw_arena::owned_string(key).cast())
+            .collect(),
+    )
+}
+
+/// `for...in` key list: the object's own enumerable string keys, then each
+/// enumerable key of the prototypes recorded by `Object.create` /
+/// `Object.setPrototypeOf` that no earlier link already named.
+///
+/// # Safety
+/// `value` must be null or point to a valid JSON `Value`.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_json_for_in_keys(value: *const Value) -> *mut u8 {
+    if matches!(unsafe { value.as_ref() }, Some(Value::Host(_))) {
+        return unsafe { thaw_json_keys(value) };
+    }
+    let mut keys: Vec<Vec<u8>> = Vec::new();
+    let mut seen_keys = HashSet::new();
+    let mut seen_links = HashSet::new();
+    let mut current = unsafe { value.as_ref() }.cloned();
+    while let Some(link) = current {
+        for (key, _) in enumerable_string_entries(&link) {
+            if seen_keys.insert(key.clone()) {
+                keys.push(key);
+            }
+        }
+        let Some(identity) = object_identity_key(&link) else {
+            break;
+        };
+        if !seen_links.insert(identity) {
+            break;
+        }
+        current = PROTOTYPES
+            .with(|table| table.borrow().get(&identity).cloned())
+            .filter(|prototype| !matches!(prototype, Value::Null));
+    }
     alloc_pointer_array(
         keys.into_iter()
             .map(|key| thaw_arena::owned_string(key).cast())
