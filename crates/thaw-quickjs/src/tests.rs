@@ -6758,6 +6758,58 @@ fn webassembly_finalizers_release_unreachable_modules_and_instances() {
 }
 
 #[test]
+fn webassembly_finalizers_release_unreachable_standalone_resources() {
+    assert_eq!(
+            load(
+                "function wasmStandaloneCreate() {\n\
+                   globalThis.__thawWasmStandaloneBaseline = JSON.parse(__thaw_wasm_reference_stats());\n\
+                   (function () { new WebAssembly.Memory({ initial: 1 }); new WebAssembly.Global({ value: 'i32' }, 1); new WebAssembly.Table({ element: 'anyfunc', initial: 1 }); })();\n\
+                   const during = JSON.parse(__thaw_wasm_reference_stats()), base = globalThis.__thawWasmStandaloneBaseline;\n\
+                   return [during.memories - base.memories, during.globals - base.globals, during.tables - base.tables];\n\
+                 }\n\
+                 async function wasmStandaloneRelease() {\n\
+                   for (let index = 0; index < 6; index++) { __thaw_gc(); await Promise.resolve(); }\n\
+                   const after = JSON.parse(__thaw_wasm_reference_stats()), base = globalThis.__thawWasmStandaloneBaseline;\n\
+                   return [after.memories === base.memories, after.globals === base.globals, after.tables === base.tables];\n\
+                 }"
+            ),
+            1
+        );
+    assert_eq!(call("wasmStandaloneCreate", "[]"), "[1,1,1]");
+    assert_eq!(call("wasmStandaloneRelease", "[]"), "[true,true,true]");
+}
+
+#[test]
+fn webassembly_exports_outlive_their_unreachable_instance() {
+    assert_eq!(
+            load(
+                "function wasmExportsCreate() {\n\
+                   const source = new TextEncoder().encode(`(module\n\
+                     (func $seven (export \"seven\") (result i32) i32.const 7)\n\
+                     (elem declare func $seven)\n\
+                     (global (export \"fn\") (mut funcref) (ref.func $seven))\n\
+                     (global (export \"count\") (mut i32) (i32.const 5))\n\
+                     (table (export \"items\") 2 funcref)\n\
+                     (memory (export \"memory\") 1))`);\n\
+                   (function () {\n\
+                     const instance = new WebAssembly.Instance(new WebAssembly.Module(source)), exports = instance.exports;\n\
+                     globalThis.__thawKept = { fn: exports.fn, count: exports.count, items: exports.items, memory: exports.memory };\n\
+                   })();\n\
+                   return true;\n\
+                 }\n\
+                 async function wasmExportsAfterGc() {\n\
+                   for (let index = 0; index < 6; index++) { __thaw_gc(); await Promise.resolve(); }\n\
+                   const kept = globalThis.__thawKept;\n\
+                   return [kept.fn.value(), kept.count.value, kept.items.length, kept.memory.buffer.byteLength];\n\
+                 }"
+            ),
+            1
+        );
+    assert_eq!(call("wasmExportsCreate", "[]"), "true");
+    assert_eq!(call("wasmExportsAfterGc", "[]"), r#"[7,5,2,65536]"#);
+}
+
+#[test]
 fn webassembly_link_failures_release_pending_imports_and_externrefs() {
     assert_eq!(
             load(

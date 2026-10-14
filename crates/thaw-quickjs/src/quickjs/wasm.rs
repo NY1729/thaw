@@ -499,12 +499,15 @@ fn wasm_restore_value<'js>(ctx: Ctx<'js>, handle: u32) -> rquickjs::Result<Value
 fn wasm_reference_stats() -> String {
     let imports = WASM_JS_IMPORTS.with(|imports| imports.borrow().1.len());
     let values = WASM_JS_VALUES.with(|values| values.borrow().1.len());
-    let (modules, instances, store_externrefs) = WASM.with(|table| {
+    let (modules, instances, store_externrefs, memories, globals, tables) = WASM.with(|table| {
         let table = table.borrow();
         (
             table.modules.len(),
             table.instances.len(),
             table.shared_store.run(|context| context.data().externrefs.len()),
+            table.memories.len(),
+            table.globals.len(),
+            table.tables.len(),
         )
     });
     serde_json::json!({
@@ -513,6 +516,9 @@ fn wasm_reference_stats() -> String {
         "modules": modules,
         "instances": instances,
         "storeExternrefs": store_externrefs,
+        "memories": memories,
+        "globals": globals,
+        "tables": tables,
     })
     .to_string()
 }

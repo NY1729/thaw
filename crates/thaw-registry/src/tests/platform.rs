@@ -971,6 +971,36 @@ fn worker_terminate_resolves_with_one_shared_exit_code() {
 }
 
 #[test]
+fn worker_process_exit_and_chdir_are_worker_local() {
+    use std::ffi::{CStr, CString};
+    let dir = temp_registry("builtin_worker_process_exit");
+    fs::write(
+            dir.join("index.js"),
+            "var Worker = require('node:worker_threads').Worker; module.exports = async function () { var cwd = process.cwd(); var worker = new Worker(\"var wt = require('node:worker_threads'); process.on('exit', function(c) { wt.parentPort.postMessage('exit-handler:' + c); }); var r; try { process.chdir('/'); } catch (e) { r = [e.name, e.code, e.message]; } wt.parentPort.postMessage(r); setTimeout(function() { wt.parentPort.postMessage('never'); }, 50); process.exit(7); wt.parentPort.postMessage('after');\", { eval: true }); var messages = []; worker.on('message', function(m) { messages.push(m); }); var code = await new Promise(function(resolve) { worker.on('exit', resolve); }); return [code, messages, process.cwd() === cwd]; };",
+        )
+        .unwrap();
+    let node_modules = temp_registry("builtin_worker_process_exit_node_modules");
+    let (bundle, _, file_count, _) =
+        bundle_commonjs_package(&node_modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(file_count, 4);
+    let script = CString::new(format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseWorkerProcessExit = module.exports;")).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(script.as_ptr()), 1);
+    let function = CString::new("exerciseWorkerProcessExit").unwrap();
+    let arguments = CString::new("[]").unwrap();
+    let result = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+    let result = unsafe { CStr::from_ptr(result) }.to_string_lossy();
+    // Verified against node 22.22.2: the exit code is the Worker's, chdir is
+    // unsupported, the timer scheduled before exit never fires, and the parent
+    // process (this test) survives.
+    assert_eq!(
+        result,
+        r#"[7,[["TypeError","ERR_WORKER_UNSUPPORTED_OPERATION","process.chdir() is not supported in workers"],"exit-handler:7"],true]"#
+    );
+    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(node_modules);
+}
+
+#[test]
 fn worker_diagnostics_follow_running_state() {
     use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_worker_diagnostics");

@@ -1170,6 +1170,12 @@ fn ensure_context() {
                     .expect("failed to create process stdin poller");
                 let stdin_active = Function::new(ctx.clone(), host_stdin_active)
                     .expect("failed to create process stdin activity probe");
+                ignore_sigpipe();
+                let stdin_set_ref = Function::new(ctx.clone(), set_host_stdin_ref)
+                    .expect("failed to create process stdin ref switch");
+                ctx.globals()
+                    .set("__thaw_process_set_stdin_ref", stdin_set_ref)
+                    .expect("failed to install process stdin ref switch");
                 ctx.globals()
                     .set("__thaw_process_start_stdin", stdin_start)
                     .expect("failed to install process stdin starter");

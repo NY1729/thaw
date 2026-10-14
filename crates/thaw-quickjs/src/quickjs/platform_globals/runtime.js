@@ -2770,8 +2770,8 @@
     removeListener(name, listener) { return this.off(name, listener); },
     resume() { stdinPaused = false; startStdin(); nextTick(drainStdin); return this; },
     pause() { stdinPaused = true; return this; },
-    ref() { return this; },
-    unref() { return this; }
+    ref() { globalThis.__thaw_process_set_stdin_ref(true); return this; },
+    unref() { globalThis.__thaw_process_set_stdin_ref(false); return this; }
   };
   if (stdin.isTTY) {
     stdin.isRaw = false;

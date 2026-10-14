@@ -2220,3 +2220,44 @@ fn generator_close_runs_after_a_labeled_switch_exit() {
     "#;
     assert_eq!(compile_and_run(source, "generator_labeled_switch_close"), "first\nsecond\nclosed\n");
 }
+
+/// `return` inside a loop over a generator must leave the enclosing function
+/// (the loop is lowered into a synthetic Void lambda), and a `return` in a
+/// `try` body reading a loop-scoped binding must keep working with `finally`.
+/// Expected output taken from node 22.
+#[test]
+fn return_inside_loops_leaves_the_enclosing_function() {
+    let source = r#"function* gen(): Generator<number> { try { yield 1; yield 2; yield 3; } finally { console.log('gen-closed'); } }
+function v(): void {
+  for (const x of gen()) { console.log('v', x); if (x === 2) return; }
+  console.log('after-v');
+}
+function s(): string {
+  for (const x of gen()) { if (x === 2) return `got${x}`; }
+  return 'none';
+}
+function nested(): number {
+  for (const a of gen()) { for (const b of gen()) { if (b === 2) return a * 10 + b; } }
+  return -1;
+}
+function tf(): number {
+  try { for (const x of gen()) { if (x === 1) return 42; } } finally { console.log('tf-fin'); }
+  return -1;
+}
+function noret(): number {
+  let n = 0;
+  for (const x of gen()) { n += x; }
+  return n;
+}
+
+function f8(): number {
+  try { for (const x of [5, 6]) { return x; } } finally { console.log('fin'); }
+  return -1;
+}
+function main(): void { v(); console.log(s()); console.log(nested()); console.log(tf(), noret(), f8()); }
+"#;
+    assert_eq!(
+        compile_and_run(source, "return_inside_generator_loops"),
+        "v 1\nv 2\ngen-closed\ngen-closed\ngot2\ngen-closed\ngen-closed\n12\ngen-closed\ntf-fin\ngen-closed\nfin\n42 6 5\n"
+    );
+}

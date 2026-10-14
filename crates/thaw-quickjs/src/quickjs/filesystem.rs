@@ -966,6 +966,7 @@ thread_local! {
     static HOST_WORKERS: RefCell<HostWorkerTable> = RefCell::new(HostWorkerTable { next_handle: 1, workers: HashMap::new(), shared_env: Arc::new(Mutex::new(HashMap::new())) });
     static HOST_CHILDREN: RefCell<HostChildTable> = RefCell::new(HostChildTable { next_handle: 1, children: HashMap::new() });
     static HOST_STDIN: RefCell<Option<HostStdin>> = const { RefCell::new(None) };
+    static HOST_STDIN_UNREFED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     #[cfg(feature = "wasm")]
     static WASM: RefCell<WasmTable> = RefCell::new(WasmTable::default());
     #[cfg(feature = "wasm")]

@@ -612,6 +612,13 @@ pub extern "C" fn thaw_runtime_shutdown_wait() {
 pub extern "C" fn thaw_runtime_drain_detached() -> usize {
     let mut count = 0;
     while ACTIVE_PROMISE_JOINS.with(Cell::get) != 0 {
+        // Past its deadline the invocation is abandoned: the awaiting handler
+        // and its completion promise are already released, so resuming the
+        // remaining children would settle freed outputs. The caller's purge
+        // discards them instead.
+        if invocation_deadline_remaining() == Some(Duration::ZERO) {
+            break;
+        }
         if thaw_runtime_poll_one() != 0 {
             count += 1;
             continue;
