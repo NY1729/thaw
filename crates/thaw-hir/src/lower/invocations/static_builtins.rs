@@ -4248,7 +4248,15 @@ impl<'a> FnLowerer<'a> {
                                 HirType::Bool => "__thaw_json_object_is_bool",
                                 _ => "",
                             };
-                            if runtime.is_empty() {
+                            if matches!(native_type, HirType::Null | HirType::Undefined) {
+                                // `null`/`undefined` operands compare by SameValue against the
+                                // dynamic value's own null/undefined state.
+                                let native = self.coerce_to_declared(&HirType::Json, native)?;
+                                HirExpr::Call(
+                                    Box::new(HirExpr::Var("__thaw_json_object_is".into())),
+                                    vec![json, native],
+                                )
+                            } else if runtime.is_empty() {
                                 HirExpr::Lit(HirLit::Bool(false))
                             } else {
                                 HirExpr::Call(
@@ -4796,6 +4804,44 @@ impl<'a> FnLowerer<'a> {
                             );
                             bindings.push((name, ty, value));
                             return self.wrap_call_argument_bindings(result, &bindings);
+                        }
+                        if let HirType::Nullable(inner) | HirType::Nullish(inner) = &ty {
+                            if **inner == HirType::F64 {
+                                // `number | null` / `number | null | undefined`: the number
+                                // arm runs the predicate, every other arm is `false`.
+                                let name = format!("__thaw_number_predicate_{}", self.next_binding);
+                                self.next_binding += 1;
+                                self.scope.insert(name.clone(), ty.clone());
+                                let bound = HirExpr::Var(name.clone());
+                                let (is_none, present) = if matches!(ty, HirType::Nullable(_)) {
+                                    (
+                                        HirExpr::NullableIsNone(Box::new(bound.clone()), HirType::F64),
+                                        HirExpr::NullableValue(Box::new(bound), HirType::F64),
+                                    )
+                                } else {
+                                    (
+                                        HirExpr::NullishIsNone(Box::new(bound.clone()), HirType::F64),
+                                        HirExpr::NullishValue(Box::new(bound), HirType::F64),
+                                    )
+                                };
+                                let result = HirExpr::Conditional(
+                                    Box::new(is_none),
+                                    Box::new(HirExpr::Lit(HirLit::Bool(false))),
+                                    Box::new(HirExpr::Call(
+                                        Box::new(HirExpr::Var(match property.sym.as_ref() {
+                                            "isNaN" => "__thaw_number_is_nan",
+                                            "isFinite" => "__thaw_number_is_finite",
+                                            "isInteger" => "__thaw_number_is_integer",
+                                            "isSafeInteger" => "__thaw_number_is_safe_integer",
+                                            _ => unreachable!(),
+                                        }.into())),
+                                        vec![present],
+                                    )),
+                                    HirType::Bool,
+                                );
+                                bindings.push((name, ty, value));
+                                return self.wrap_call_argument_bindings(result, &bindings);
+                            }
                         }
                         let name = format!("__thaw_number_predicate_{}", self.next_binding);
                         self.next_binding += 1;

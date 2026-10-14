@@ -3072,15 +3072,18 @@ impl<'ctx> HirCompiler<'ctx> {
             }
             // A decoded JSON result that the declaration types as `JsValue`
             // (`Session.post(): Promise<JsValue>`): re-materialize it as a
-            // live handle, the same way `retainDynamicJson` does.
+            // live handle, the same way `retainDynamicJson` does: through the
+            // origin-aware graph pair, so an ordinary `{timestamp}` / Symbol-
+            // or Error-looking string keeps its type instead of being revived
+            // from untyped legacy bytes.
             HirType::JsValue => {
                 let text = self.builder.build_call(
-                    self.module.get_function("thaw_json_stringify").unwrap(),
+                    self.module.get_function("thaw_json_graph_encode").unwrap(),
                     &[json.into()], "typed_dynamic_js_value_json",
                 ).map_err(|error| error.to_string())?.try_as_basic_value().basic().unwrap();
                 let text = self.compile_check_json_stringify_error(text)?;
                 let result = self.builder.build_call(
-                    self.module.get_function("thaw_js_retain_json_result").unwrap(),
+                    self.module.get_function("thaw_js_retain_graph_result").unwrap(),
                     &[text.into()], "typed_dynamic_js_value_retain",
                 ).map_err(|error| error.to_string())?.try_as_basic_value().basic().unwrap()
                     .into_struct_value();

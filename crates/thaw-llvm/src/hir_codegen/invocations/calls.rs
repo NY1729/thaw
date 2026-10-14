@@ -4,10 +4,24 @@ impl<'ctx> HirCompiler<'ctx> {
         callee: &HirExpr,
         args: &[HirExpr],
     ) -> Result<BasicValueEnum<'ctx>, String> {
-        let HirExpr::Var(name) = callee else {
-            return self.compile_expression_call(callee, args);
-        };
+        // Keep this dispatcher small: chains of immediately-invoked lambdas (one per
+        // argument binding) recurse through here, and `compile_named_call` has a
+        // frame of ~100 KiB in debug builds.
+        match callee {
+            HirExpr::Var(_) => self.compile_named_call(callee, args),
+            _ => self.compile_expression_call(callee, args),
+        }
+    }
 
+    #[inline(never)]
+    fn compile_named_call(
+        &mut self,
+        callee: &HirExpr,
+        args: &[HirExpr],
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let HirExpr::Var(name) = callee else {
+            unreachable!("compile_named_call is only reached for a variable callee");
+        };
         if let Some(result) = self.compile_dynamic_named_call(name, args) {
             return result;
         }

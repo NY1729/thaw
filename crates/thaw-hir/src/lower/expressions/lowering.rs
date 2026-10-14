@@ -1472,6 +1472,31 @@ impl<'a> FnLowerer<'a> {
                     | HirExpr::FunctionRefThis(name, _, _, _) => Some(name.as_str()),
                     _ => None,
                 };
+                // Positional arguments convert to the tag's declared parameter
+                // types (`strings: any` receives a dynamic array, not the raw
+                // native buffer).
+                let declared_params = tag_name
+                    .and_then(|name| self.signatures.get(name))
+                    .filter(|signature| signature.generic_type_params.is_empty())
+                    .map(|signature| signature.params.clone());
+                let args = if let Some(declared) = declared_params {
+                    let rest_slot = tag_name
+                        .and_then(|name| self.signatures.get(name))
+                        .is_some_and(|signature| signature.native_rest.is_some());
+                    let positional = declared.len() - usize::from(rest_slot);
+                    args.into_iter()
+                        .enumerate()
+                        .map(|(index, value)| {
+                            if index < positional && index < declared.len() {
+                                self.coerce_to_declared(&declared[index], value)
+                            } else {
+                                Ok(value)
+                            }
+                        })
+                        .collect::<Result<Vec<_>, String>>()?
+                } else {
+                    args
+                };
                 let args = if let Some(name) = tag_name {
                     match self.signatures.get(name).map(|signature| {
                         (signature.params.len(), signature.native_rest.clone())

@@ -808,11 +808,9 @@ fn decode_argument_array<'js>(ctx: &Ctx<'js>, text: &str, graph: bool) -> Result
             error => error.to_string().into(),
         })
     } else {
-        let json: Object = ctx.globals().get("JSON").map_err(|error| error.to_string())?;
-        let parse: Function = json.get("parse").map_err(|error| error.to_string())?;
-        let reviver: Function = ctx.globals().get("__thaw_json_date_reviver")
+        let parse: Function = ctx.globals().get("__thaw_json_parse_legacy")
             .map_err(|error| error.to_string())?;
-        parse.call((text, reviver)).map_err(|error| error.to_string().into())
+        parse.call((text,)).map_err(|error| error.to_string().into())
     }
 }
 
@@ -923,7 +921,7 @@ fn invoke_impl<'js>(
     if graph_result {
         resolve_value_graph_impl(ctx, result, label, preserve_error)
     } else {
-        resolve_value_impl(ctx, result, label, preserve_error)
+        resolve_value_impl(ctx, result, label, preserve_error, false)
     }
 }
 
@@ -977,6 +975,7 @@ fn resolve_value_impl<'js>(
     result: Value<'js>,
     label: &str,
     preserve_error: bool,
+    mark_undefined: bool,
 ) -> Result<String, BoundaryError> {
     let result = resolve_promise_value(&ctx, result, label, preserve_error)?;
 
@@ -1009,8 +1008,13 @@ fn resolve_value_impl<'js>(
         .get("__thaw_json_safe_stringify")
         .map_err(|e| format!("failed to JSON-encode the result: {e}"))?;
     Ok(stringify
-        .call::<_, Option<String>>((result,))
-        .map_err(|e| format!("failed to JSON-encode the result: {e}"))?
+        .call::<_, Option<String>>((result, mark_undefined))
+        .map_err(|e| match e {
+            // A getter or toJSON that throws while the result is encoded:
+            // keep the original JS exception (name, message, properties).
+            rquickjs::Error::Exception => describe_tagged_exception(&ctx),
+            e => format!("failed to JSON-encode the result: {e}").into(),
+        })?
         .unwrap_or_else(|| r#"{"$__thaw_napi_undefined$":true}"#.to_string()))
 }
 
@@ -1022,7 +1026,10 @@ fn resolve_value_wire_impl<'js>(
     preserve_error: bool, graph_result: bool,
 ) -> Result<String, BoundaryError> {
     if graph_result { resolve_value_graph_impl(ctx, result, label, preserve_error) }
-    else { resolve_value_impl(ctx, result, label, preserve_error) }
+    // Compiled legacy calls mark a nested `undefined` so it stays distinct
+    // from `null` and from an absent property; the by-name public text ABI
+    // (`invoke_impl`) keeps plain `JSON.stringify` projection.
+    else { resolve_value_impl(ctx, result, label, preserve_error, true) }
 }
 
 fn resolve_value_graph_impl<'js>(
@@ -2936,7 +2943,7 @@ fn register_native_callback(
              throw globalThis.__thaw_error_from_tagged(result.slice(1)); \
              }} \
              if ({void_result} && result.slice(0, 8) !== 'promise:') return undefined; \
-             if (result.slice(0, 8) !== 'promise:') return {graph_mode} ? globalThis.__thaw_json_graph_decode_owned(result) : JSON.parse(result, globalThis.__thaw_json_date_reviver); \
+             if (result.slice(0, 8) !== 'promise:') return {graph_mode} ? globalThis.__thaw_json_graph_decode_owned(result) : globalThis.__thaw_json_parse_legacy(result); \
              return new Promise(function(resolve, reject) {{ \
              function check() {{ \
              var settled; \
@@ -2945,7 +2952,7 @@ fn register_native_callback(
              if (!settled) return setTimeout(check, 0); \
              if (settled.slice(0, 6) === 'error:') return reject(globalThis.__thaw_error_from_tagged(settled.slice(6))); \
              if ({void_result}) return resolve(undefined); \
-             try {{ resolve({graph_mode} ? globalThis.__thaw_json_graph_decode_owned(settled) : JSON.parse(settled, globalThis.__thaw_json_date_reviver)); }} catch (error) {{ reject(error); }} \
+             try {{ resolve({graph_mode} ? globalThis.__thaw_json_graph_decode_owned(settled) : globalThis.__thaw_json_parse_legacy(settled)); }} catch (error) {{ reject(error); }} \
              }} \
              check(); \
              }}); \
@@ -4353,14 +4360,12 @@ pub extern "C" fn thaw_js_instanceof_handles_result(
 pub extern "C" fn thaw_js_retain_json_result(value_json: *const c_char) -> ThawHandleResult {
     let value_json = to_str(value_json);
     let result = with_active_or_context(|ctx| -> Result<u64, BoundaryError> {
-        let json: Object = ctx.globals().get("JSON").map_err(|error| error.to_string())?;
-        let parse: Function = json.get("parse").map_err(|error| error.to_string())?;
-        let reviver: Function = ctx
+        let parse: Function = ctx
             .globals()
-            .get("__thaw_json_date_reviver")
+            .get("__thaw_json_parse_legacy")
             .map_err(|error| error.to_string())?;
         let value: Value = parse
-            .call((value_json.as_str(), reviver))
+            .call((value_json.as_str(),))
             .map_err(|error| error.to_string())?;
         retain_value(&ctx, value)
     });

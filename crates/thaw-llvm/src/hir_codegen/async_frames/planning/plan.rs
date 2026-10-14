@@ -106,11 +106,44 @@ impl<'ctx> HirCompiler<'ctx> {
         }
     }
 
+    fn collect_declared_local_types(
+        stmts: &[HirStmt],
+        types: &mut HashMap<String, HirType>,
+    ) {
+        for stmt in stmts {
+            match stmt {
+                HirStmt::Let(name, ty, _) => {
+                    types.entry(name.clone()).or_insert_with(|| ty.clone());
+                }
+                HirStmt::If(_, then_body, else_body) => {
+                    Self::collect_declared_local_types(then_body, types);
+                    Self::collect_declared_local_types(else_body, types);
+                }
+                HirStmt::While(_, body) | HirStmt::Finally(body, _) => {
+                    Self::collect_declared_local_types(body, types);
+                }
+                HirStmt::Try(body, _, catch_body, _) => {
+                    Self::collect_declared_local_types(body, types);
+                    Self::collect_declared_local_types(catch_body, types);
+                }
+                _ => {}
+            }
+        }
+    }
+
     fn frame_await_plan(&self, func: &HirFunction) -> Result<Option<FrameAsyncPlan>, String> {
         if !self.frame_async_functions.contains_key(&func.name) {
             return Ok(None);
         }
         let normalized_body = self.flatten_async_finally_only_tries(&func.body)?;
+        {
+            let mut types = self.planning_var_types.borrow_mut();
+            types.clear();
+            for param in &func.params {
+                types.insert(param.name.clone(), param.ty.clone());
+            }
+            Self::collect_declared_local_types(&normalized_body, &mut types);
+        }
         {
             let mut names = self.async_carrier_catch_names.borrow_mut();
             names.clear();
@@ -125,7 +158,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .collect::<std::collections::HashSet<_>>();
         let will_split = normalized_body
             .iter()
-            .any(|stmt| Self::stmt_awaits_frame_source(stmt, &frame_names));
+            .any(|stmt| self.stmt_awaits_frame_source(stmt, &frame_names));
         let mut segments = vec![AsyncSegment {
             stmts: Vec::new(),
             awaited: None,
@@ -151,7 +184,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 if try_body
                     .iter()
                     .chain(catch_body)
-                    .any(|nested| Self::stmt_awaits_frame_source(nested, &frame_names))
+                    .any(|nested| self.stmt_awaits_frame_source(nested, &frame_names))
                 {
                     found = true;
                     let try_guard = format!("__thaw_try_{next_guard}");
@@ -420,10 +453,10 @@ impl<'ctx> HirCompiler<'ctx> {
                     .chain(self.promise_returning_functions.iter())
                     .cloned()
                     .collect::<std::collections::HashSet<_>>();
-                let condition_awaits = Self::expr_awaits_frame_source(cond, &frame_names);
+                let condition_awaits = self.expr_awaits_frame_source(cond, &frame_names);
                 let body_awaits = body
                     .iter()
-                    .any(|nested| Self::stmt_awaits_frame_source(nested, &frame_names));
+                    .any(|nested| self.stmt_awaits_frame_source(nested, &frame_names));
                 if condition_awaits || body_awaits {
                     let sleep_zero = || {
                         HirExpr::Call(
@@ -614,7 +647,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 let branches_await = then_body
                     .iter()
                     .chain(else_body)
-                    .any(|nested| Self::stmt_awaits_frame_source(nested, &frame_names));
+                    .any(|nested| self.stmt_awaits_frame_source(nested, &frame_names));
                 let branches_exit = then_body
                     .iter()
                     .chain(else_body)
@@ -779,7 +812,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     .chain(self.promise_returning_functions.iter())
                     .cloned()
                     .collect::<std::collections::HashSet<_>>();
-                if Self::stmt_awaits_frame_source(stmt, &frame_names) {
+                if self.stmt_awaits_frame_source(stmt, &frame_names) {
                     let mut rewritten = stmt.clone();
                     loop {
                         let temporary = format!("__thaw_await_{next_temporary}");

@@ -404,7 +404,7 @@ impl<'a> FnLowerer<'a> {
                     };
                     let range_error = || {
                         HirStmt::Throw(HirExpr::Lit(HirLit::Str(
-                            "toFixed() digits argument must be between 0 and 100".into(),
+                            "\u{1}RangeError\u{1}toFixed() digits argument must be between 0 and 100".into(),
                         )))
                     };
                     let body = HirExpr::Block(vec![
@@ -489,7 +489,7 @@ impl<'a> FnLowerer<'a> {
                     };
                     let range_error = || {
                         HirStmt::Throw(HirExpr::Lit(HirLit::Str(
-                            "toPrecision() argument must be between 1 and 100".into(),
+                            "\u{1}RangeError\u{1}toPrecision() argument must be between 1 and 100".into(),
                         )))
                     };
                     let body = HirExpr::Block(vec![
@@ -596,7 +596,7 @@ impl<'a> FnLowerer<'a> {
                     };
                     let range_error = || {
                         HirStmt::Throw(HirExpr::Lit(HirLit::Str(
-                            "toExponential() argument must be between 0 and 100".into(),
+                            "\u{1}RangeError\u{1}toExponential() argument must be between 0 and 100".into(),
                         )))
                     };
                     let body = HirExpr::Block(vec![

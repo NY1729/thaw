@@ -2797,7 +2797,9 @@ impl<'ctx> HirCompiler<'ctx> {
         self.module.add_function(
             "thaw_js_native_object_pointer",
             handle_result_type.fn_type(&[self.context.i64_type().into(), i8_ptr.into()], false),
-            Some(Linkage::External),
+            // Weak: the tagged `this` entry that calls it is reachable only from a JS
+            // callback; a pure-native program emits it but never enters it.
+            Some(Linkage::ExternalWeak),
         );
         self.module.add_function(
             "thaw_js_call_selected_method_graph_result",

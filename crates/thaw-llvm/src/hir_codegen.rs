@@ -412,6 +412,10 @@ pub struct HirCompiler<'ctx> {
     /// Catch names of the async function being planned whose binding HIR already
     /// declared as the caught-exception carrier (`caught_exception_carrier_prelude`).
     async_carrier_catch_names: std::cell::RefCell<std::collections::HashSet<String>>,
+    /// Declared types of the async function being planned (parameters and
+    /// every `let`), so a bare `await promiseVariable` is recognised as a
+    /// suspension point before any of its locals have been compiled.
+    planning_var_types: std::cell::RefCell<HashMap<String, HirType>>,
     variable_hir_types: HashMap<String, HirType>,
     /// Set while `console.log` converts a typed value for inspection: an `Optional` field with no
     /// value is a property that was never set, so it is omitted instead of printed as `undefined`.
@@ -736,6 +740,7 @@ impl<'ctx> HirCompiler<'ctx> {
             variables: HashMap::new(),
             catch_native_text: HashMap::new(),
             async_carrier_catch_names: std::cell::RefCell::new(std::collections::HashSet::new()),
+            planning_var_types: std::cell::RefCell::new(HashMap::new()),
             variable_hir_types: HashMap::new(),
             console_omit_absent_fields: false,
             arena_variables: HashSet::new(),
@@ -1299,29 +1304,30 @@ impl<'ctx> HirCompiler<'ctx> {
     }
 
     fn stmt_awaits_frame_source(
+        &self,
         stmt: &HirStmt,
         frame_functions: &std::collections::HashSet<String>,
     ) -> bool {
         match stmt {
             HirStmt::Expr(expr) | HirStmt::Throw(expr) | HirStmt::Let(_, _, expr) => {
-                Self::expr_awaits_frame_source(expr, frame_functions)
+                self.expr_awaits_frame_source(expr, frame_functions)
             }
-            HirStmt::Return(Some(expr)) => Self::expr_awaits_frame_source(expr, frame_functions),
+            HirStmt::Return(Some(expr)) => self.expr_awaits_frame_source(expr, frame_functions),
             HirStmt::Return(None) => false,
             HirStmt::If(cond, then_body, else_body) => {
-                Self::expr_awaits_frame_source(cond, frame_functions)
+                self.expr_awaits_frame_source(cond, frame_functions)
                     || then_body
                         .iter()
-                        .any(|stmt| Self::stmt_awaits_frame_source(stmt, frame_functions))
+                        .any(|stmt| self.stmt_awaits_frame_source(stmt, frame_functions))
                     || else_body
                         .iter()
-                        .any(|stmt| Self::stmt_awaits_frame_source(stmt, frame_functions))
+                        .any(|stmt| self.stmt_awaits_frame_source(stmt, frame_functions))
             }
             HirStmt::While(cond, body) => {
-                Self::expr_awaits_frame_source(cond, frame_functions)
+                self.expr_awaits_frame_source(cond, frame_functions)
                     || body
                         .iter()
-                        .any(|stmt| Self::stmt_awaits_frame_source(stmt, frame_functions))
+                        .any(|stmt| self.stmt_awaits_frame_source(stmt, frame_functions))
             }
             HirStmt::Break
             | HirStmt::Continue
@@ -1329,22 +1335,27 @@ impl<'ctx> HirCompiler<'ctx> {
             | HirStmt::ContinueDepth(_) => false,
             HirStmt::Finally(body, _) => body
                 .iter()
-                .any(|stmt| Self::stmt_awaits_frame_source(stmt, frame_functions)),
+                .any(|stmt| self.stmt_awaits_frame_source(stmt, frame_functions)),
             HirStmt::Try(body, _, catch_body, _) => body
                 .iter()
                 .chain(catch_body)
-                .any(|stmt| Self::stmt_awaits_frame_source(stmt, frame_functions)),
+                .any(|stmt| self.stmt_awaits_frame_source(stmt, frame_functions)),
         }
     }
 
     fn expr_awaits_frame_source(
+        &self,
         expr: &HirExpr,
         frame_functions: &std::collections::HashSet<String>,
     ) -> bool {
         match expr {
             HirExpr::AwaitPromise(_, _) => true,
             HirExpr::Await(inner) => {
-                matches!(
+                // A bare promise-typed variable/field (`await p;` with
+                // `p: Promise<void>`) suspends like any other source.
+                matches!(inner.as_ref(), HirExpr::Var(_))
+                    && matches!(self.expr_hir_type(inner), Some(HirType::Promise(_)))
+                    || matches!(
                     inner.as_ref(),
                     HirExpr::PromiseNew(_, _, _, _)
                         | HirExpr::PromiseNewMixed(_, _, _)
@@ -1367,22 +1378,22 @@ impl<'ctx> HirCompiler<'ctx> {
                     || matches!(inner.as_ref(), HirExpr::Call(callee, _)
                         if matches!(callee.as_ref(), HirExpr::Lambda(_, _, HirType::Promise(_), body)
                             if matches!(body.as_ref(), HirExpr::PromiseNew(..))))
-                    || Self::expr_awaits_frame_source(inner, frame_functions)
+                    || self.expr_awaits_frame_source(inner, frame_functions)
             }
             HirExpr::BinOp(_, left, right)
             | HirExpr::EvalThen(left, right)
             | HirExpr::Index(left, right)
             | HirExpr::TypedIndex(left, right, _)
             | HirExpr::DynamicPropAccess(left, right, _, _) => {
-                Self::expr_awaits_frame_source(left, frame_functions)
-                    || Self::expr_awaits_frame_source(right, frame_functions)
+                self.expr_awaits_frame_source(left, frame_functions)
+                    || self.expr_awaits_frame_source(right, frame_functions)
             }
-            HirExpr::Assign(_, value) => Self::expr_awaits_frame_source(value, frame_functions),
+            HirExpr::Assign(_, value) => self.expr_awaits_frame_source(value, frame_functions),
             HirExpr::Call(callee, args) => {
-                Self::expr_awaits_frame_source(callee, frame_functions)
+                self.expr_awaits_frame_source(callee, frame_functions)
                     || args
                         .iter()
-                        .any(|arg| Self::expr_awaits_frame_source(arg, frame_functions))
+                        .any(|arg| self.expr_awaits_frame_source(arg, frame_functions))
             }
             HirExpr::FfiCall(_, args)
             | HirExpr::DynamicCall(_, args)
@@ -1394,33 +1405,33 @@ impl<'ctx> HirCompiler<'ctx> {
             | HirExpr::PromiseAny(args, _)
             | HirExpr::PromiseAllSettled(args, _) => args
                 .iter()
-                .any(|arg| Self::expr_awaits_frame_source(arg, frame_functions)),
+                .any(|arg| self.expr_awaits_frame_source(arg, frame_functions)),
             HirExpr::IndexAssign(a, b, c) => {
-                Self::expr_awaits_frame_source(a, frame_functions)
-                    || Self::expr_awaits_frame_source(b, frame_functions)
-                    || Self::expr_awaits_frame_source(c, frame_functions)
+                self.expr_awaits_frame_source(a, frame_functions)
+                    || self.expr_awaits_frame_source(b, frame_functions)
+                    || self.expr_awaits_frame_source(c, frame_functions)
             }
             HirExpr::JsonSet(object, key, value, _, _)
             | HirExpr::JsonIndexSet(object, key, value) => [object, key, value]
                 .iter()
-                .any(|value| Self::expr_awaits_frame_source(value, frame_functions)),
+                .any(|value| self.expr_awaits_frame_source(value, frame_functions)),
             HirExpr::ObjectLit(fields) | HirExpr::JsonObjectLit(fields, _) => fields
                 .iter()
-                .any(|(_, value)| Self::expr_awaits_frame_source(value, frame_functions)),
+                .any(|(_, value)| self.expr_awaits_frame_source(value, frame_functions)),
             HirExpr::PropAccess(obj, _, _)
             | HirExpr::ArrayLen(obj)
             | HirExpr::EnumReverseLookup(obj, _)
             | HirExpr::JsonAsNumber(obj)
             | HirExpr::JsonAsString(obj)
-            | HirExpr::JsonAsBool(obj) => Self::expr_awaits_frame_source(obj, frame_functions),
+            | HirExpr::JsonAsBool(obj) => self.expr_awaits_frame_source(obj, frame_functions),
             HirExpr::PropAssign(obj, _, _, value)
             | HirExpr::JsonIndex(obj, value)
             | HirExpr::JsonKey(obj, value)
             | HirExpr::JsonDelete(obj, value) => {
-                Self::expr_awaits_frame_source(obj, frame_functions)
-                    || Self::expr_awaits_frame_source(value, frame_functions)
+                self.expr_awaits_frame_source(obj, frame_functions)
+                    || self.expr_awaits_frame_source(value, frame_functions)
             }
-            HirExpr::JsonGet(obj, _) => Self::expr_awaits_frame_source(obj, frame_functions),
+            HirExpr::JsonGet(obj, _) => self.expr_awaits_frame_source(obj, frame_functions),
             _ => false,
         }
     }

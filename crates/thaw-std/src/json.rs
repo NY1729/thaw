@@ -2218,6 +2218,13 @@ fn ordered_object_fields(fields: &indexmap::IndexMap<Vec<u8>, Value>) -> Vec<(&V
         .collect()
 }
 
+/// A class `#private` member projected into a dynamic object keeps its mangled
+/// slot name so brand checks and class round trips still find it, but it is
+/// never an own property: public enumeration and `JSON.stringify` skip it.
+fn is_private_slot_key(key: &[u8]) -> bool {
+    key.starts_with(b"__thaw_private_")
+}
+
 fn ordered_object_fields_shared(fields: &SharedObject) -> Vec<(&Vec<u8>, &Value)> {
     ordered_object_fields(unsafe { &*fields.get() })
 }
@@ -2296,7 +2303,7 @@ fn ordered_json_omitting_undefined(value: &Value) -> Value {
         Value::Object(fields) => Value::shared_object(
             ordered_object_fields_shared(fields)
                 .into_iter()
-                .filter(|(_, value)| !is_napi_undefined(value))
+                .filter(|(key, value)| !is_private_slot_key(key) && !is_napi_undefined(value))
                 .map(|(key, value)| {
                     let value = if non_finite_number(value).is_some() {
                         Value::Null
@@ -6919,6 +6926,7 @@ fn enumerable_entries(value: &Value) -> Vec<(Vec<u8>, Value)> {
         Value::Host(lease) => host_enumerable_entries(lease),
         Value::Object(fields) => ordered_object_fields_shared(fields)
             .into_iter()
+            .filter(|(key, _)| !is_private_slot_key(key))
             .map(|(key, value)| (key.clone(), value.clone()))
             .collect(),
         Value::Array(items) => shared_array_ref(items)

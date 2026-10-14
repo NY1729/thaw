@@ -568,6 +568,43 @@ impl<'a> FnLowerer<'a> {
     /// `.forEach()` on a possibly-sparse array pass an `Optional` value's
     /// runtime layout to a callback compiled to expect the bare payload,
     /// which LLVM's module verifier rejects as a parameter type mismatch.
+    /// `thisArg` is evaluated once into a binding. A receiver-taking callback
+    /// (`function (this: T, ...)`) is invoked with it as `this`; any other
+    /// callback ignores it, as in JavaScript.
+    fn bind_array_callback_this(
+        &mut self,
+        label: &str,
+        callback_type: &HirType,
+        this_arg: &Option<HirExpr>,
+    ) -> Result<Option<(String, HirType, HirExpr)>, String> {
+        let Some(this_arg) = this_arg else { return Ok(None) };
+        let declared_receiver = match callback_type {
+            HirType::FunctionWithThis(receiver, _) => Some(receiver.as_ref()),
+            _ => None,
+        };
+        let this_arg = &self.coerce_this_for_receiver(declared_receiver, this_arg.clone())?;
+        let ty = self.infer_expr_type(this_arg)?;
+        let name = format!("__thaw_{label}_this_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(name.clone(), ty.clone());
+        Ok(Some((name, ty, this_arg.clone())))
+    }
+
+    /// The visible signature of an array callback and the `this` binding to
+    /// call it with (only for a `FunctionWithThis` callback).
+    fn array_callback_signature(
+        callback_type: &HirType,
+        this_binding: &Option<(String, HirType, HirExpr)>,
+    ) -> (HirType, Option<String>) {
+        match callback_type {
+            HirType::FunctionWithThis(_, inner) => (
+                inner.as_ref().clone(),
+                this_binding.as_ref().map(|(name, _, _)| name.clone()),
+            ),
+            other => (other.clone(), None),
+        }
+    }
+
     fn lower_array_callback_call(
         &mut self,
         callback_name: &str,

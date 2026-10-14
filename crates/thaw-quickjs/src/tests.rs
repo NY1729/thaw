@@ -15749,3 +15749,232 @@ fn recorded_web_platform_contracts_match() {
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+#[test]
+fn date_wire_legacy_parse_preserves_own_undefined() {
+    assert_eq!(
+        load(
+            r#"function undefinedPresence(object, list, nested, absent, nul) {
+              return [
+                Object.hasOwn(object, 'x'), 'x' in object, typeof object.x, Object.keys(object).join(),
+                list.length, Object.hasOwn(list, 0), list.map(() => 1).length,
+                Object.hasOwn(nested.y, 'x'), Object.hasOwn(nested.y.z, 0),
+                Object.hasOwn(absent, 'x'), Object.hasOwn(nul, 'x'), nul.x === null,
+              ];
+            }"#
+        ),
+        1
+    );
+    let undefined = r#"{"$__thaw_napi_undefined$":true}"#;
+    let args = format!(
+        r#"[{{"x":{undefined}}},[{undefined}],{{"y":{{"x":{undefined},"z":[{undefined}]}}}},{{}},{{"x":null}}]"#
+    );
+    assert_eq!(
+        call("undefinedPresence", &args),
+        r#"[true,true,"undefined","x",1,true,1,true,true,false,true,true]"#
+    );
+}
+
+/// Compiled legacy method calls (`resolve_value_wire_impl`) mark a nested
+/// `undefined` so it stays distinct from `null` and from an absent property.
+fn wire_method_call(host: &str, method: &str) -> String {
+    let host = CString::new(host).unwrap();
+    let handle = thaw_js_get_global(host.as_ptr());
+    assert_ne!(handle, 0);
+    let method = CString::new(method).unwrap();
+    let result = thaw_js_call_method_result(handle, method.as_ptr(), c"[]".as_ptr());
+    assert!(
+        result.error.is_null(),
+        "{}",
+        unsafe { CStr::from_ptr(result.error) }.to_string_lossy()
+    );
+    unsafe { CStr::from_ptr(result.value) }
+        .to_string_lossy()
+        .into_owned()
+}
+
+#[test]
+fn date_wire_legacy_results_preserve_nested_undefined() {
+    assert_eq!(
+        load(
+            r#"globalThis.wireHost = {
+                 nestedObject() { return { x: undefined }; },
+                 nestedArray() { return [undefined]; },
+                 nestedMixed() { return { a: [undefined, { b: undefined, c: null }], d: 1 }; },
+                 nestedAbsent() { return {}; },
+                 nestedNull() { return { x: null }; },
+                 nestedSparse() { return [, 1]; },
+                 nestedOmitted() { return { f() {}, s: Symbol('s'), u: undefined }; },
+                 nestedFunctionInArray() { return [function () {}, undefined]; },
+               };"#
+        ),
+        1
+    );
+    let undefined = r#"{"$__thaw_napi_undefined$":true}"#;
+    assert_eq!(
+        wire_method_call("wireHost", "nestedObject"),
+        format!(r#"{{"x":{undefined}}}"#)
+    );
+    assert_eq!(
+        wire_method_call("wireHost", "nestedArray"),
+        format!("[{undefined}]")
+    );
+    assert_eq!(
+        wire_method_call("wireHost", "nestedMixed"),
+        format!(r#"{{"a":[{undefined},{{"b":{undefined},"c":null}}],"d":1}}"#)
+    );
+    assert_eq!(wire_method_call("wireHost", "nestedAbsent"), "{}");
+    assert_eq!(wire_method_call("wireHost", "nestedNull"), r#"{"x":null}"#);
+    assert_eq!(wire_method_call("wireHost", "nestedSparse"), "[null,1]");
+    assert_eq!(
+        wire_method_call("wireHost", "nestedOmitted"),
+        format!(r#"{{"u":{undefined}}}"#)
+    );
+    assert_eq!(
+        wire_method_call("wireHost", "nestedFunctionInArray"),
+        format!("[null,{undefined}]")
+    );
+}
+
+#[test]
+fn date_wire_public_by_name_abi_keeps_plain_json_projection() {
+    assert_eq!(
+        load(
+            "function plainProjection() { return { a: [undefined, 1], b: undefined, c: null }; }\n\
+             function plainUndefined() { return undefined; }"
+        ),
+        1
+    );
+    assert_eq!(call("plainProjection", "[]"), r#"{"a":[null,1],"c":null}"#);
+    let result = thaw_js_call_result(c"plainUndefined".as_ptr(), c"[]".as_ptr());
+    assert_eq!(
+        unsafe { CStr::from_ptr(result.value) }.to_str().unwrap(),
+        r#"{"$__thaw_napi_undefined$":true}"#
+    );
+}
+
+#[test]
+fn date_wire_legacy_getters_are_acquired_once() {
+    assert_eq!(
+        load(
+            r#"globalThis.getterReads = {};
+               const read = name => { globalThis.getterReads[name] = (globalThis.getterReads[name] || 0) + 1; };
+               const once = name => { read(name); if (globalThis.getterReads[name] > 1) throw new Error('read twice'); };
+               globalThis.getterHost = {
+                 getterOnce() {
+                   return {
+                     get x() { once('x'); return 7; },
+                     get when() { once('when'); return new Date(0); },
+                     get bytes() { once('bytes'); return new Uint8Array([1, 2]); },
+                     get nan() { once('nan'); return NaN; },
+                     get missing() { once('missing'); return undefined; },
+                   };
+                 },
+                 getterReadCounts() { return Object.values(globalThis.getterReads); },
+                 getterThrowsFirst() { return { get boom() { throw new RangeError('first-call marker'); } }; },
+               };"#
+        ),
+        1
+    );
+    assert_eq!(
+        wire_method_call("getterHost", "getterOnce"),
+        concat!(
+            r#"{"x":7,"when":{"timestamp":0},"bytes":{"type":"Buffer","data":[1,2]},"#,
+            r#""nan":{"$__thaw_non_finite$":"NaN"},"missing":{"$__thaw_napi_undefined$":true}}"#
+        )
+    );
+    assert_eq!(
+        wire_method_call("getterHost", "getterReadCounts"),
+        "[1,1,1,1,1]"
+    );
+    let host = thaw_js_get_global(c"getterHost".as_ptr());
+    let failure = thaw_js_call_method_result(host, c"getterThrowsFirst".as_ptr(), c"[]".as_ptr());
+    assert!(!failure.error.is_null());
+    let message = unsafe { CStr::from_ptr(failure.error) }.to_string_lossy();
+    assert!(message.contains("first-call marker"), "{message}");
+}
+
+#[test]
+fn date_wire_legacy_custom_to_json_runs_once_with_key_and_receiver() {
+    assert_eq!(
+        load(
+            r#"globalThis.toJsonLog = [];
+               function customToJson() {
+                 const inner = { toJSON(key) { globalThis.toJsonLog.push([key, this === inner]); return { kept: key }; } };
+                 return { inner, list: [inner] };
+               }
+               function toJsonCalls() { return globalThis.toJsonLog; }"#
+        ),
+        1
+    );
+    assert_eq!(
+        call("customToJson", "[]"),
+        r#"{"inner":{"kept":"inner"},"list":[{"kept":"0"}]}"#
+    );
+    assert_eq!(call("toJsonCalls", "[]"), r#"[["inner",true],["0",true]]"#);
+}
+
+#[test]
+fn date_wire_callback_sync_result_preserves_own_undefined() {
+    unsafe extern "C" fn callback(
+        _context: *const c_void,
+        _arguments: *const c_char,
+    ) -> *const c_char {
+        thaw_arena::owned_string(
+            br#"{"x":{"$__thaw_napi_undefined$":true},"l":[{"$__thaw_napi_undefined$":true}]}"#,
+        )
+    }
+    let context = &0u8 as *const u8 as *const c_void;
+    let registered = thaw_js_register_native_callback(
+        callback as *const c_void,
+        context,
+        0,
+        0,
+        0,
+        std::ptr::null(),
+        0,
+    );
+    assert!(registered.error.is_null());
+    with_context(|ctx| {
+        let function = value_for_handle(&ctx, registered.value).unwrap();
+        ctx.globals()
+            .set("legacyUndefinedCallback", function)
+            .unwrap();
+    });
+    assert_eq!(
+        load(
+            "function callbackPresence() { const v = legacyUndefinedCallback(); \
+             return [Object.hasOwn(v, 'x'), typeof v.x, Object.hasOwn(v.l, 0), v.l.length]; }"
+        ),
+        1
+    );
+    assert_eq!(
+        call("callbackPresence", "[]"),
+        r#"[true,"undefined",true,1]"#
+    );
+}
+
+#[test]
+fn date_wire_retain_json_result_preserves_own_undefined() {
+    let encoded = CString::new(
+        r#"{"x":{"$__thaw_napi_undefined$":true},"l":[{"$__thaw_napi_undefined$":true}]}"#,
+    )
+    .unwrap();
+    let retained = thaw_js_retain_json_result(encoded.as_ptr());
+    assert!(retained.error.is_null());
+    with_context(|ctx| {
+        let value = value_for_handle(&ctx, retained.value).unwrap();
+        ctx.globals().set("retainedUndefined", value).unwrap();
+    });
+    assert_eq!(
+        load(
+            "function retainedPresence() { const v = retainedUndefined; \
+             return [Object.hasOwn(v, 'x'), typeof v.x, Object.hasOwn(v.l, 0), v.l.length]; }"
+        ),
+        1
+    );
+    assert_eq!(
+        call("retainedPresence", "[]"),
+        r#"[true,"undefined",true,1]"#
+    );
+}

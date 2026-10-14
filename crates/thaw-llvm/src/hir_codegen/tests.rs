@@ -338,6 +338,7 @@ include!("tests/native_builtins.rs");
 include!("tests/ffi.rs");
 include!("tests/types.rs");
 include!("tests/values.rs");
+include!("tests/f_contracts.rs");
 
 #[test]
 fn immediate_jsvalue_identity_lambda_reads_capture_without_retaining_environment() {
