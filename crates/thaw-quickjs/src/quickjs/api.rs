@@ -278,26 +278,15 @@ fn report_unhandled_js_rejections(ctx: &Ctx<'_>) -> Option<i32> {
     None
 }
 
-thread_local! {
-    /// Compiled `new Function(...)` results, keyed by the JSON array of
-    /// its string arguments (so repeated identical sources reuse the same
-    /// JS function object instead of re-parsing/re-compiling each time).
-    static DYNAMIC_FUNCTIONS: std::cell::RefCell<std::collections::HashMap<String, u64>> =
-        std::cell::RefCell::new(std::collections::HashMap::new());
-}
-
-/// `new Function(...args)` via the JS realm's own `Function` constructor,
-/// with a source-keyed cache of the retained function handles. `args_json`
+/// `new Function(...args)` via the JS realm's own `Function` constructor.
+/// Every call makes a fresh function object (identity, properties and
+/// `prototype` are per call), so nothing is cached. `args_json`
 /// is the JSON array of the constructor's string arguments (the last is
 /// the body). Returns a live function handle (with an error on failure).
 #[no_mangle]
 pub extern "C" fn thaw_js_new_function(args_json: *const c_char) -> ThawHandleResult {
     let args_json = to_str(args_json);
     let result = with_active_or_context(|ctx| -> Result<u64, BoundaryError> {
-        if let Some(handle) = DYNAMIC_FUNCTIONS.with(|cache| cache.borrow().get(&args_json).copied())
-        {
-            return Ok(handle);
-        }
         let json: Object = ctx.globals().get("JSON").map_err(|e| e.to_string())?;
         let parse: Function = json.get("parse").map_err(|e| e.to_string())?;
         let arguments: Array = parse
@@ -313,9 +302,7 @@ pub extern "C" fn thaw_js_new_function(args_json: *const c_char) -> ThawHandleRe
             rquickjs::Error::Exception => describe_tagged_exception(&ctx),
             error => error.to_string().into(),
         })?;
-        let handle = retain_value(&ctx, function)?;
-        DYNAMIC_FUNCTIONS.with(|cache| cache.borrow_mut().insert(args_json.clone(), handle));
-        Ok(handle)
+        retain_value(&ctx, function)
     });
     match result {
         Ok(value) => ThawHandleResult {
@@ -616,22 +603,28 @@ fn load_impl(ctx: Ctx<'_>, source: &str) -> Result<(), String> {
         .globals()
         .get::<_, rquickjs::Promise>("__thaw_module_ready")
     {
-        finish_with_platform_events(&ctx, &ready).map_err(|error| match error {
-            rquickjs::Error::Exception => describe_exception(&ctx),
-            error => format!("module initialization failed: {error}"),
-        })?;
-        loop {
-            drain_next_tick_queue(&ctx).map_err(|error| match error {
-                rquickjs::Error::Exception => describe_exception_with_stack(&ctx),
-                error => error.to_string(),
+        // The pending-initialization promise must be cleared whether it settles or fails,
+        // or the next load in this shared context would wait on the stale rejection.
+        let initialized = (|| -> Result<(), String> {
+            finish_with_platform_events(&ctx, &ready).map_err(|error| match error {
+                rquickjs::Error::Exception => describe_exception(&ctx),
+                error => format!("module initialization failed: {error}"),
             })?;
-            if !ctx.execute_pending_job() {
-                break;
+            loop {
+                drain_next_tick_queue(&ctx).map_err(|error| match error {
+                    rquickjs::Error::Exception => describe_exception_with_stack(&ctx),
+                    error => error.to_string(),
+                })?;
+                if !ctx.execute_pending_job() {
+                    break;
+                }
             }
-        }
+            Ok(())
+        })();
         let _ = ctx
             .globals()
             .set("__thaw_module_ready", Value::new_undefined(ctx.clone()));
+        initialized?;
     }
     Ok(())
 }

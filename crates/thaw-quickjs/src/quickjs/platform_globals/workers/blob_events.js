@@ -344,7 +344,8 @@
             try {
               if (typeof entry.callback === 'function') apply(entry.callback, this, [event]);
               else apply(entry.callback.handleEvent, entry.callback, [event]);
-            } finally { state.inPassiveListener = false; }
+            } catch (error) { globalThis.__thaw_report_uncaught(error); }
+            finally { state.inPassiveListener = false; }
             if (event.__thawImmediateStopped) break;
           }
           result = !event.defaultPrevented;

@@ -1,0 +1,147 @@
+{
+ "n40": {
+  "source": "const sentinel = new Error('cancel-fail');\nconst ts = new TransformStream({ cancel() { throw sentinel; } });\nconst out = {};\ntry { await ts.readable.cancel('x'); out.cancel = 'resolved'; } catch (e) { out.cancel = e === sentinel; }\ntry { await ts.writable.getWriter().closed; out.closed = 'resolved'; } catch (e) { out.closed = e === sentinel; }\ntry { await ts.writable.getWriter().write(1); out.write = 'ok'; } catch (e) { out.write = e === sentinel; }\nreturn out;\n",
+  "expected": "{\"cancel\":true,\"closed\":true,\"write\":false}",
+  "node": true
+ },
+ "n41": {
+  "source": "const sentinel = new Error('start-fail');\nconst ts = new TransformStream({ start() { return Promise.reject(sentinel); } });\nconst out = {};\ntry { await ts.readable.getReader().read(); out.read = 'resolved'; } catch (e) { out.read = e === sentinel; }\ntry { await ts.writable.getWriter().ready; out.ready = 'resolved'; } catch (e) { out.ready = e === sentinel; }\nconst ts2 = new TransformStream({ start() { return Promise.reject(sentinel); } });\ntry { await ts2.readable.getReader().closed; out.closed = 'resolved'; } catch (e) { out.closed = e === sentinel; }\nreturn out;\n",
+  "expected": "{\"read\":true,\"ready\":true,\"closed\":true}",
+  "node": true
+ },
+ "n42": {
+  "source": "const out = {};\nfor (const f of [() => new ReadableStream({}, { highWaterMark: Infinity }).getReader() && 'ok', () => new WritableStream({}, { highWaterMark: Infinity }).getWriter().desiredSize, () => new ReadableStream({}, { highWaterMark: NaN }), () => new ReadableStream({}, { highWaterMark: -1 }), () => new TransformStream({}, { highWaterMark: Infinity }, { highWaterMark: Infinity }).readable && 'ok']) {\n  try { out[String(Object.keys(out).length)] = String(f()); } catch (e) { out[String(Object.keys(out).length)] = e.constructor.name; }\n}\nreturn out;\n",
+  "expected": "{\"0\":\"ok\",\"1\":\"Infinity\",\"2\":\"RangeError\",\"3\":\"RangeError\",\"4\":\"ok\"}",
+  "node": true
+ },
+ "n63": {
+  "source": "const t = new EventTarget(); const order = [];\nconst errs = [];\nconst onU = e => errs.push(e.message); process.on('uncaughtException', onU);\nt.addEventListener('x', () => { order.push(1); throw new Error('boom'); });\nt.addEventListener('x', () => { order.push(2); });\nt.dispatchEvent(new Event('x'));\nawait new Promise(r => setTimeout(r, 20));\nprocess.off('uncaughtException', onU);\nreturn [order, errs];\n",
+  "expected": "[[1,2],[\"boom\"]]",
+  "node": true
+ },
+ "n59": {
+  "source": "const ch = new MessageChannel(); const order = [];\nch.port2.onmessage = e => { order.push('onmessage'); e.stopImmediatePropagation(); };\nch.port2.addEventListener('message', () => order.push('listener'));\nch.port1.postMessage(1);\nawait new Promise(r => setTimeout(r, 30));\nch.port1.close();\nreturn order;\n",
+  "expected": "[\"onmessage\"]",
+  "node": true
+ },
+ "n57": {
+  "source": "const ch = new MessageChannel(); const out = {};\ntry { ch.port1.postMessage('x', [ch.port1]); out.self = 'no-throw'; } catch (e) { out.self = e.name; }\ntry { ch.port1.postMessage('x', { transfer: [] }); out.opts = 'ok'; } catch (e) { out.opts = e.name; }\ntry { ch.port1.postMessage(()=>{}); out.fn = 'no-throw'; } catch (e) { out.fn = e.name; }\nch.port1.close(); ch.port2.close();\nreturn out;\n",
+  "expected": "{\"self\":\"DataCloneError\",\"opts\":\"ok\",\"fn\":\"DataCloneError\"}",
+  "node": true
+ },
+ "n60": {
+  "source": "const ch = new MessageChannel(); const ev = [];\nch.port1.onclose = () => ev.push('p1close'); ch.port2.onclose = () => ev.push('p2close');\nch.port1.addEventListener('close', () => ev.push('p1close-l')); ch.port2.addEventListener('close', () => ev.push('p2close-l'));\nch.port1.close();\nawait new Promise(r => setTimeout(r, 30));\nreturn ev.sort();\n",
+  "expected": "[\"p1close-l\",\"p2close-l\"]",
+  "node": true
+ },
+ "n62": {
+  "source": "const a = new BroadcastChannel('c'), b = new BroadcastChannel('c'), c = new BroadcastChannel('c');\nconst got = [];\nconst obj = { x: 1 };\nb.onmessage = e => got.push(['b', e.data === obj, e.data.x]);\nc.onmessage = e => got.push(['c', e.data === obj, e.data.x]);\na.postMessage(obj);\nawait new Promise(r => setTimeout(r, 30));\nlet same = null;\nconst g2 = [];\nb.onmessage = e => g2.push(e.data); c.onmessage = e => g2.push(e.data);\na.postMessage({ y: 1 });\nawait new Promise(r => setTimeout(r, 30));\na.close(); b.close(); c.close();\nreturn [got.sort(), g2[0] !== g2[1]];\n",
+  "expected": "[[[\"b\",false,1],[\"c\",false,1]],true]",
+  "node": true
+ },
+ "n6": {
+  "source": "const errs=[]; const onU=e=>errs.push(e.message), onR=e=>errs.push('UR:'+e.message); process.on('uncaughtException', onU); process.on('unhandledRejection', onR);\nqueueMicrotask(()=>{throw new Error('qm')});\nawait new Promise(r=>setTimeout(r,30));\nprocess.off('uncaughtException', onU); process.off('unhandledRejection', onR);\nreturn errs;\n",
+  "expected": "[\"qm\"]",
+  "node": true
+ },
+ "n64": {
+  "source": "const out = []; let t = setTimeout(() => out.push('fired'), 5);\nawait new Promise(r => setTimeout(r, 30));\nt.refresh();\nawait new Promise(r => setTimeout(r, 30));\nclearTimeout(t);\nconst big = setTimeout(() => {}, 2**31); clearTimeout(big);\nconst bg = setTimeout(() => out.push('big'), 2**31 + 5);\nawait new Promise(r => setTimeout(r, 30)); clearTimeout(bg);\nout.push(typeof big.hasRef === 'function');\nreturn out;\n",
+  "expected": "[\"fired\",\"fired\",\"big\",true]",
+  "node": true
+ },
+ "n65": {
+  "source": "const out = []; const w=[]; process.on('warning', x=>w.push(x.name));\nconst t = setTimeout(() => out.push('fired'), 2**31); clearTimeout(t);\nconst t2 = setTimeout(() => out.push('fired2'), Infinity); clearTimeout(t2);\nconst t3 = setTimeout(() => out.push('fired3'), 1e12);\nawait new Promise(r => setTimeout(r, 40)); clearTimeout(t3);\nreturn out;\n",
+  "expected": "[\"fired3\"]",
+  "node": true
+ },
+ "n66": {
+  "source": "const keep = setInterval(() => {}, 50);\nconst ia = new Int32Array(new SharedArrayBuffer(16)); const out = [];\nconst r = Atomics.waitAsync(ia, 0, 0, 5);\nout.push(await r.value);\nout.push(Atomics.notify(ia, 0));\nconst r2 = Atomics.waitAsync(ia, 0, 0, 1000);\nout.push(Atomics.notify(ia, 0, 1), await r2.value);\nclearInterval(keep); return out;\n",
+  "expected": "[\"timed-out\",0,1,\"ok\"]",
+  "node": true
+ },
+ "n67": {
+  "source": "const ia = new Int32Array(new SharedArrayBuffer(16)); const out = [];\nfor (const idx of [1.5, '1', -0.5, undefined, NaN, null, true, -1, 4, 2**53, Infinity, {valueOf(){return 2}}]) {\n  try { const r = Atomics.waitAsync(ia, idx, 1, 0); out.push(r.value); } catch (e) { out.push(e.constructor.name); }\n}\nreturn out;\n",
+  "expected": "[\"not-equal\",\"not-equal\",\"not-equal\",\"not-equal\",\"not-equal\",\"not-equal\",\"not-equal\",\"RangeError\",\"RangeError\",\"RangeError\",\"RangeError\",\"not-equal\"]",
+  "node": true
+ },
+ "n68": {
+  "source": "const ia = new Int32Array(new SharedArrayBuffer(16)); const log = [];\nconst t = { valueOf() { log.push('timeout'); return 0; } }, v = { valueOf() { log.push('value'); return 5; } };\nconst r = Atomics.waitAsync(ia, 0, v, t);\nconst c = { valueOf() { log.push('count'); return 1; } };\nAtomics.notify(ia, 0, c);\nconst r2 = Atomics.waitAsync(ia, 0, '0', 0);\nreturn [log, r.value, r2.value];\n",
+  "expected": "[[\"value\",\"timeout\",\"count\"],\"not-equal\",\"timed-out\"]",
+  "node": true
+ },
+ "n70": {
+  "source": "const ia = new Int32Array(new SharedArrayBuffer(16)); const b = new BigInt64Array(new SharedArrayBuffer(16)); const out=[];\nout.push(Atomics.waitAsync(ia, 0, '0', 0).value, Atomics.waitAsync(ia, 0, 2**32, 0).value, Atomics.waitAsync(ia, 0, 1.9, 0).value);\nfor (const x of [1, 0n, '0']) { try { out.push(Atomics.waitAsync(b, 0, x, 0).value); } catch (e) { out.push(e.constructor.name); } }\nreturn out;\n",
+  "expected": "[\"timed-out\",\"timed-out\",\"not-equal\",\"TypeError\",\"timed-out\",\"timed-out\"]",
+  "node": true
+ },
+ "n76": {
+  "source": "const out = [];\nconst both = { [Symbol.iterator]() { out.push('sync'); return [1][Symbol.iterator](); }, [Symbol.asyncIterator]() { out.push('async'); let d = false; return { next() { if (d) return Promise.resolve({ done: true }); d = true; return Promise.resolve({ value: 'a', done: false }); } }; } };\nfor await (const x of both) out.push(x);\nconst syncOnly = [Promise.resolve('p'), 'q'];\nfor await (const x of syncOnly) out.push(x);\nconst s = new ReadableStream({ start(c) { c.enqueue('r'); c.close(); } });\nfor await (const x of s) out.push(x);\nreturn out;\n",
+  "expected": "[\"async\",\"a\",\"p\",\"q\",\"r\"]",
+  "node": true
+ },
+ "n53": {
+  "source": "const out = [];\nconst obs = new PerformanceObserver(list => out.push('observer:' + list.getEntries().length));\nobs.observe({ entryTypes: ['mark'] });\nperformance.mark('a');\nPromise.resolve().then(() => out.push('promise'));\nout.push('sync');\nawait new Promise(r => setTimeout(r, 30));\nobs.disconnect();\nreturn out;\n",
+  "expected": "[\"sync\",\"promise\",\"observer:1\"]",
+  "node": true
+ },
+ "n34": {
+  "source": "const collect = async (readable) => { const parts = []; const r = readable.getReader(); for (;;) { const { value, done } = await r.read(); if (done) break; parts.push(...value); } return Uint8Array.from(parts); };\nconst run = async (format, op, bytes) => { const s = new Blob([bytes]).stream().pipeThrough(new (op === 'c' ? CompressionStream : DecompressionStream)(format)); return collect(s); };\nconst out = {};\nconst text = new TextEncoder().encode('hello world '.repeat(50));\nfor (const format of ['gzip', 'deflate', 'deflate-raw']) {\n  const full = await run(format, 'c', text);\n  for (const cut of [0, 1, 5]) {\n    const input = full.slice(0, full.length - cut);\n    try { const res = await run(format, 'd', input); out[format + cut] = res.length === text.length ? 'ok' : 'short:' + res.length; } catch (e) { out[format + cut] = e.name; }\n  }\n}\nreturn out;\n",
+  "expected": "{\"gzip0\":\"ok\",\"gzip1\":\"TypeError\",\"gzip5\":\"TypeError\",\"deflate0\":\"ok\",\"deflate1\":\"TypeError\",\"deflate5\":\"TypeError\",\"deflate-raw0\":\"ok\",\"deflate-raw1\":\"TypeError\",\"deflate-raw5\":\"TypeError\"}",
+  "node": true
+ },
+ "n56w": {
+  "source": "// thaw-only: [true,true,false,true,true]\nconst r = __thaw_worker_decode(__thaw_worker_encode({ a: -0, b: [-0], c: new Map([[-0, -0]]), d: 0 }));\nreturn [Object.is(r.a, -0), Object.is(r.b[0], -0), Object.is(Array.from(r.c)[0][0], -0), Object.is(Array.from(r.c)[0][1], -0), Object.is(r.d, 0)];\n",
+  "expected": "[true,true,false,true,true]",
+  "node": false
+ },
+ "f44": {
+  "source": "// thaw-only: [\"value with --XBOUND inside\",\"line1\\r\\nmid--XBOUNDtail\",\"x.txt\"]\nconst boundary = 'XBOUND';\nconst body = `--${boundary}\\r\\nContent-Disposition: form-data; name=\"a\"\\r\\n\\r\\nvalue with --${boundary} inside\\r\\n--${boundary}\\r\\nContent-Disposition: form-data; name=\"f\"; filename=\"x.txt\"\\r\\nContent-Type: text/plain\\r\\n\\r\\nline1\\r\\nmid--${boundary}tail\\r\\n--${boundary}--\\r\\n`;\nconst r = new Response(body, { headers: { 'content-type': `multipart/form-data; boundary=${boundary}` } });\nconst fd = await r.formData();\nreturn [fd.get('a'), await fd.get('f').text(), fd.get('f').name];\n",
+  "expected": "[\"value with --XBOUND inside\",\"line1\\r\\nmid--XBOUNDtail\",\"x.txt\"]",
+  "node": false
+ },
+ "f45": {
+  "source": "const out = [];\nfor (const type of ['application/x-www-form-urlencoded', 'application/x-www-form-urlencoded; charset=utf-8', 'application/x-www-form-urlencoded-extra', 'text/plain', 'APPLICATION/X-WWW-FORM-URLENCODED']) {\n  try { const fd = await new Response('a=1', { headers: { 'content-type': type } }).formData(); out.push(fd.get('a')); } catch (e) { out.push(e.name); }\n}\nreturn out;\n",
+  "expected": "[\"1\",\"1\",\"TypeError\",\"TypeError\",\"1\"]",
+  "node": true
+ },
+ "f46": {
+  "source": "const out = [];\nfor (const v of ['ok', 'é', 'あ', 'Ā', 'a\\u0000b', ' trim ']) {\n  const r = [];\n  try { new Headers({ x: v }); r.push('ctor'); } catch (e) { r.push(e.name); }\n  try { new Headers().append('x', v); r.push('append'); } catch (e) { r.push(e.name); }\n  try { new Headers().set('x', v); r.push('set'); } catch (e) { r.push(e.name); }\n  out.push(r.join(','));\n}\nreturn out;\n",
+  "expected": "[\"ctor,append,set\",\"ctor,append,set\",\"TypeError,TypeError,TypeError\",\"TypeError,TypeError,TypeError\",\"TypeError,TypeError,TypeError\",\"ctor,append,set\"]",
+  "node": true
+ },
+ "f47": {
+  "source": "const out = [];\nfor (const chunk of ['str', new ArrayBuffer(2), new Uint16Array(2), new Uint8Array([1, 2]), 5, null]) {\n  const s = new ReadableStream({ start(c) { c.enqueue(chunk); c.close(); } });\n  try { const buf = await new Response(s).arrayBuffer(); out.push(buf.byteLength); } catch (e) { out.push(e.name); }\n}\nreturn out;\n",
+  "expected": "[\"TypeError\",\"TypeError\",\"TypeError\",2,\"TypeError\",\"TypeError\"]",
+  "node": true
+ },
+ "f48": {
+  "source": "// thaw-only: [\"AaBbCc\",\"AaBbCc\"]\nconst out = [];\nconst buf = new Uint8Array(2); let i = 0;\nconst mk = () => { i = 0; return new ReadableStream({ pull(c) { if (i === 3) { c.close(); return; } buf[0] = 65 + i; buf[1] = 97 + i; i++; c.enqueue(buf); } }); };\nout.push(await new Response(mk()).text());\nout.push(await new Request('http://x.test/', { method: 'POST', body: mk(), duplex: 'half' }).text());\nreturn out;\n",
+  "expected": "[\"AaBbCc\",\"AaBbCc\"]",
+  "node": false
+ },
+ "f49": {
+  "source": "const out = [];\nconst mk = (init) => { try { new Request('http://x.test/', { method: 'POST', body: new ReadableStream({ start(c) { c.close(); } }), duplex: 'half', ...init }); return 'ok'; } catch (e) { return e.name; } };\nout.push(mk({}), mk({ keepalive: true }), mk({ mode: 'no-cors' }), mk({ mode: 'cors' }), mk({ mode: 'same-origin' }));\nreturn out;\n",
+  "expected": "[\"ok\",\"TypeError\",\"TypeError\",\"ok\",\"ok\"]",
+  "node": true
+ },
+ "f51": {
+  "source": "const out = [];\ntry { const e = Response.error(); const c = e.clone(); out.push(c.type, c.status, c.ok); } catch (e) { out.push(e.name); }\nreturn out;\n",
+  "expected": "[\"error\",0,false]",
+  "node": true
+ },
+ "f52": {
+  "source": "const out = [];\nconst orig = new Request('http://x.test/', { method: 'POST', body: 'hello' });\nfor (const init of [{ body: null }, { body: undefined }, {}]) {\n  try { const r = new Request(new Request('http://x.test/', { method: 'POST', body: 'hello' }), init); out.push(await r.text()); } catch (e) { out.push(e.name); }\n}\nreturn out;\n",
+  "expected": "[\"hello\",\"hello\",\"hello\"]",
+  "node": true
+ },
+ "f103": {
+  "source": "const out = [];\nconst orig = new Request('http://x.test/', { method: 'POST', body: 'hello' });\ntry { new Request(orig, { method: 'GET', body: 'x' }); out.push('no-throw'); } catch (e) { out.push(e.name); }\nout.push(orig.bodyUsed);\ntry { new Request(orig, { mode: 'navigate' }); out.push('no-throw'); } catch (e) { out.push(e.name); }\nout.push(orig.bodyUsed, await orig.text());\nreturn out;\n",
+  "expected": "[\"TypeError\",false,\"TypeError\",false,\"hello\"]",
+  "node": true
+ },
+ "n60b": {
+  "source": "const ch = new MessageChannel(); const ev = [];\nch.port2.onmessage = e => ev.push('msg:' + e.data);\nch.port2.addEventListener('close', () => ev.push('p2close'));\nch.port1.addEventListener('close', () => ev.push('p1close'));\nch.port1.postMessage('a'); ch.port1.postMessage('b');\nch.port1.close();\nawait new Promise(r => setTimeout(r, 300));\nreturn [ev.filter(x => x.startsWith('msg')), ev.includes('p1close'), ev.includes('p2close'), ev.indexOf('p2close') > ev.indexOf('msg:b')];\n",
+  "expected": "[[\"msg:a\",\"msg:b\"],true,true,true]",
+  "node": true
+ }
+}

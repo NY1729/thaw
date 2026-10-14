@@ -2001,7 +2001,7 @@ fn ensure_context() {
                     .expect("failed to create JavaScript filesystem function")
                 };
                 let tcp_connect = Function::new(ctx.clone(), |host: String, port: u32| {
-                    net_connect(&host, port as u16)
+                    match checked_port(port) { Ok(port) => net_connect(&host, port), Err(error) => error }
                 })
                 .expect("failed to create JavaScript TCP connector");
                 let tcp_write = Function::new(ctx.clone(), |handle: u32, value: String| {
@@ -2020,7 +2020,7 @@ fn ensure_context() {
                 let tcp_destroy = Function::new(ctx.clone(), |handle: u32| net_destroy(handle))
                     .expect("failed to create JavaScript TCP closer");
                 let tcp_listen = Function::new(ctx.clone(), |host: String, port: u32| {
-                    net_listen(&host, port as u16)
+                    match checked_port(port) { Ok(port) => net_listen(&host, port), Err(error) => error }
                 })
                 .expect("failed to create JavaScript TCP listener");
                 let tcp_accept = Function::new(ctx.clone(), |handle: u32| net_accept(handle))
@@ -2061,9 +2061,10 @@ fn ensure_context() {
                     ctx.clone(),
                     |host: String, port: u32, server_name: String, ca: Value<'_>| {
                         let ca_spec = match tls_ca_spec(ca) { Ok(value) => value, Err(error) => return format!("err:{error}") };
+                        let port = match checked_port(port) { Ok(port) => port, Err(error) => return error };
                         tls_connect(TlsClientOptions {
                             host: &host,
-                            port: port as u16,
+                            port,
                             server_name: &server_name,
                             ca_spec: ca_spec.as_deref(),
                             cert_spec: "",
@@ -2085,9 +2086,10 @@ fn ensure_context() {
                      cert: String,
                      key: String| {
                         let ca_spec = match tls_ca_spec(ca) { Ok(value) => value, Err(error) => return format!("err:{error}") };
+                        let port = match checked_port(port) { Ok(port) => port, Err(error) => return error };
                         tls_connect(TlsClientOptions {
                             host: &host,
-                            port: port as u16,
+                            port,
                             server_name: &server_name,
                             ca_spec: ca_spec.as_deref(),
                             cert_spec: &cert,
@@ -2114,9 +2116,10 @@ fn ensure_context() {
                         let verification = option_parts.next().unwrap_or("1");
                         let alpn = option_parts.next().unwrap_or("");
                         let defer_name_verification = option_parts.next() == Some("1");
+                        let port = match checked_port(port) { Ok(port) => port, Err(error) => return error };
                         tls_connect(TlsClientOptions {
                             host: &host,
-                            port: port as u16,
+                            port,
                             server_name: &server_name,
                             ca_spec: ca_spec.as_deref(),
                             cert_spec: &cert,
@@ -2176,9 +2179,10 @@ fn ensure_context() {
                 let tls_server_listen_function = Function::new(
                     ctx.clone(),
                     |host: String, port: u32, cert: String, key: String| {
+                        let port = match checked_port(port) { Ok(port) => port, Err(error) => return error };
                         tls_server_listen(TlsServerOptions {
                             host: &host,
-                            port: port as u16,
+                            port,
                             cert_spec: &cert,
                             key_spec: &key,
                             ca_spec: None,
@@ -2198,9 +2202,10 @@ fn ensure_context() {
                      ca: Value<'_>,
                      reject_unauthorized: bool| {
                         let ca_spec = match tls_ca_spec(ca) { Ok(value) => value, Err(error) => return format!("err:{error}") };
+                        let port = match checked_port(port) { Ok(port) => port, Err(error) => return error };
                         tls_server_listen(TlsServerOptions {
                             host: &host,
-                            port: port as u16,
+                            port,
                             cert_spec: &cert,
                             key_spec: &key,
                             ca_spec: ca_spec.as_deref(),
@@ -2221,9 +2226,10 @@ fn ensure_context() {
                      flags: u32,
                      alpn: String| {
                         let ca_spec = match tls_ca_spec(ca) { Ok(value) => value, Err(error) => return format!("err:{error}") };
+                        let port = match checked_port(port) { Ok(port) => port, Err(error) => return error };
                         tls_server_listen(TlsServerOptions {
                             host: &host,
-                            port: port as u16,
+                            port,
                             cert_spec: &cert,
                             key_spec: &key,
                             ca_spec: ca_spec.as_deref(),

@@ -49,12 +49,63 @@ enum WebZlibWriter {
     ZlibEncoder(flate2::write::ZlibEncoder<Vec<u8>>),
     DeflateEncoder(flate2::write::DeflateEncoder<Vec<u8>>),
     GzipDecoder(flate2::write::GzDecoder<Vec<u8>>),
-    ZlibDecoder(flate2::write::ZlibDecoder<Vec<u8>>),
-    DeflateDecoder(flate2::write::DeflateDecoder<Vec<u8>>),
+    ZlibDecoder(Inflate),
+    DeflateDecoder(Inflate),
     #[cfg(feature = "brotli")]
     BrotliEncoder(Box<brotli::CompressorWriter<Vec<u8>>>),
     #[cfg(feature = "brotli")]
     BrotliDecoder(Box<brotli::DecompressorWriter<Vec<u8>>>),
+}
+
+/// Streaming inflate that remembers whether the end of the compressed stream
+/// was reached: flate2's write-side decoders report success at `finish()` for
+/// a truncated input, which a decompressor must reject.
+struct Inflate {
+    decompress: flate2::Decompress,
+    sink: Vec<u8>,
+    ended: bool,
+}
+
+impl Inflate {
+    fn new(zlib_header: bool) -> Self {
+        Self { decompress: flate2::Decompress::new(zlib_header), sink: Vec::new(), ended: false }
+    }
+
+    fn get_mut(&mut self) -> &mut Vec<u8> {
+        &mut self.sink
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn write_all(&mut self, mut input: &[u8]) -> io::Result<()> {
+        use flate2::{FlushDecompress, Status};
+        while !self.ended {
+            if self.sink.capacity() - self.sink.len() < 4096 {
+                self.sink.reserve(32 * 1024);
+            }
+            let before = self.decompress.total_in();
+            let status = self
+                .decompress
+                .decompress_vec(input, &mut self.sink, FlushDecompress::None)
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+            input = &input[(self.decompress.total_in() - before) as usize..];
+            if status == Status::StreamEnd {
+                self.ended = true;
+            } else if input.is_empty() && self.sink.len() < self.sink.capacity() {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    fn finish(self) -> io::Result<Vec<u8>> {
+        if !self.ended {
+            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "unexpected end of file"));
+        }
+        Ok(self.sink)
+    }
 }
 
 struct WebZlibStream {
@@ -79,12 +130,8 @@ impl WebZlibStream {
             ("decompress", "gzip") => {
                 WebZlibWriter::GzipDecoder(flate2::write::GzDecoder::new(Vec::new()))
             }
-            ("decompress", "deflateRaw") => {
-                WebZlibWriter::DeflateDecoder(flate2::write::DeflateDecoder::new(Vec::new()))
-            }
-            ("decompress", "deflate") => {
-                WebZlibWriter::ZlibDecoder(flate2::write::ZlibDecoder::new(Vec::new()))
-            }
+            ("decompress", "deflateRaw") => WebZlibWriter::DeflateDecoder(Inflate::new(false)),
+            ("decompress", "deflate") => WebZlibWriter::ZlibDecoder(Inflate::new(true)),
             #[cfg(feature = "brotli")]
             ("compress", "brotli") => WebZlibWriter::BrotliEncoder(Box::new(
                 brotli::CompressorWriter::new(Vec::new(), 4096, 5, 22),

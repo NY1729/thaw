@@ -2345,15 +2345,26 @@
   };
   const normalizeDelay = value => {
     const number = Number(value);
-    if (!Number.isFinite(number) || number < 0) return 0;
-    return Math.min(Math.trunc(number), 2147483647);
+    // Like Node, a delay beyond the 32-bit limit fires after 1ms (with a warning), it is not clamped.
+    if (number > 2147483647) {
+      if (typeof process !== 'undefined' && process.emitWarning) process.emitWarning(`${number} does not fit into a 32-bit signed integer.\nTimeout duration was set to 1.`, 'TimeoutOverflowWarning');
+      return 1;
+    }
+    if (!(number >= 0)) return 0;
+    return Math.trunc(number);
   };
-  const timerHandle = id => ({
+  const timerHandle = (id, record) => ({
     ref() { const timer = timers.get(id); if (timer && !timer.clock) timer.refed = true; return this; },
     unref() { const timer = timers.get(id); if (timer && !timer.clock) timer.refed = false; return this; },
     hasRef() { const timer = timers.get(id); return Boolean(timer && (timer.clock || timer.refed)); },
-    refresh() { const timer = timers.get(id); if (timer && !timer.clock) timer.due = nativeDateNow() + timer.milliseconds; return this; },
-    close() { timers.delete(id); },
+    // A one-shot timer that already fired can be re-armed; a cleared one cannot.
+    refresh() {
+      let timer = timers.get(id);
+      if (!timer && record && !record.cancelled && !record.repeat) { timer = record; timers.set(id, timer); }
+      if (timer && !timer.clock) timer.due = nativeDateNow() + timer.milliseconds;
+      return this;
+    },
+    close() { const timer = timers.get(id); if (timer) timer.cancelled = true; else if (record) record.cancelled = true; timers.delete(id); },
     [Symbol.toPrimitive]() { return id; }
   });
   const schedule = (callback, delay, repeat, args, refed = true, api = 'setTimeout', forceReal = false, alreadyValidatedDelay = false) => {
@@ -2363,14 +2374,15 @@
     const id = nextTimerId++;
     const milliseconds = alreadyValidatedDelay ? delay : normalizeDelay(delay);
     const clock = forceReal ? null : activeMockClock(api);
-    timers.set(id, { callback, args, repeat, milliseconds, refed,
+    const record = { callback, args, repeat, milliseconds, refed,
                      asyncContext: thawAsyncContext.get(),
-                     clock, due: (clock ? clock.now : nativeDateNow()) + (clock && api === 'setImmediate' ? -1 : milliseconds) });
-    return timerHandle(id);
+                     clock, due: (clock ? clock.now : nativeDateNow()) + (clock && api === 'setImmediate' ? -1 : milliseconds) };
+    timers.set(id, record);
+    return timerHandle(id, record);
   };
   globalThis.setTimeout = (callback, delay = 0, ...args) =>
     schedule(callback, delay, false, args, true, 'setTimeout');
-  globalThis.clearTimeout = id => { timers.delete(Number(id)); };
+  globalThis.clearTimeout = id => { const key = Number(id), timer = timers.get(key); if (timer) timer.cancelled = true; timers.delete(key); };
   globalThis.setInterval = (callback, delay = 0, ...args) =>
     schedule(callback, delay, true, args, true, 'setInterval');
   globalThis.clearInterval = globalThis.clearTimeout;
@@ -2461,11 +2473,22 @@
     refreshMockDate();
   };
   globalThis.__thaw_test_real_now = nativeDateNow;
+  // An exception that no caller can receive (a microtask, an event listener)
+  // is an uncaught exception: give 'uncaughtException' handlers the first
+  // chance, otherwise rethrow from a timer turn so the host sees it.
+  const reportUncaught = error => {
+    if (typeof process !== 'undefined' && process.emit) {
+      process.emit('uncaughtExceptionMonitor', error, 'uncaughtException');
+      if (process.emit('uncaughtException', error, 'uncaughtException')) return;
+    }
+    schedule(() => { throw error; }, 0, false, [], true, 'setImmediate', true);
+  };
+  Object.defineProperty(globalThis, '__thaw_report_uncaught', { value: reportUncaught, writable: true, configurable: true });
   globalThis.queueMicrotask = callback => {
     if (typeof callback !== 'function') {
       throw new TypeError('microtask callback must be a function');
     }
-    Promise.resolve().then(callback);
+    Promise.resolve().then(() => { try { callback(); } catch (error) { reportUncaught(error); } });
   };
   const consoleInspect = value => {
     if (typeof value === 'string') return value;

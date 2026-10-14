@@ -1,3 +1,10 @@
+/// Ports arrive from JavaScript as 32-bit numbers; narrowing without a range
+/// check would silently turn 65536 into 0 ("any free port").
+fn checked_port(port: u32) -> Result<u16, String> {
+    u16::try_from(port)
+        .map_err(|_| format!("err:port should be >= 0 and < 65536. Received {port}"))
+}
+
 fn net_connect(host: &str, port: u16) -> String {
     match TcpStream::connect((host, port)) {
         Ok(stream) => {

@@ -3326,7 +3326,7 @@ fn performance_timeline_marks_measures_and_observes_entries() {
                    performance.clearMarks(); performance.clearMeasures();\n\
                    performance.mark('start', { startTime: 10, detail: { id: 1 } });\n\
                    const observed = []; const observer = new PerformanceObserver(list => observed.push(...list.getEntries().map(entry => entry.name)));\n\
-                   observer.observe({ type: 'mark', buffered: true }); performance.mark('end', { startTime: 25 }); await Promise.resolve();\n\
+                   observer.observe({ type: 'mark', buffered: true }); performance.mark('end', { startTime: 25 }); await new Promise(resolve => setImmediate(resolve));\n\
                    const measure = performance.measure('work', { start: 'start', end: 'end', detail: 'detail' });\n\
                    const wrapped = performance.timerify(function double(value) { return value * 2; }); const result = wrapped(4);\n\
                    const asyncWrapped = performance.timerify(async function later(value) { await Promise.resolve(); return value + 1; }); const asyncResult = await asyncWrapped(4);\n\
@@ -5012,7 +5012,7 @@ fn structured_clone_failure_keeps_staged_transfers_attached() {
     );
     assert_eq!(
         call("failedTransferIsAtomic", "[]"),
-        "[true,1,[false,true,true,3],[true,true],true,[false,true,true,false]]"
+        "[true,1,[false,true,true,3],[true,true],true,[false,true,true,true]]"
     );
 }
 
@@ -5467,14 +5467,20 @@ fn event_target_capture_passive_and_reentrant_dispatch_contracts() {
           noncancelable.defaultPrevented, duplicateEvent.defaultPrevented, outerActive.defaultPrevented];
       }
       function eventTargetThrowCleanup() {
+        // Like Node, a listener's exception is reported as an uncaught exception
+        // and never propagates out of dispatchEvent.
+        const reported = [], originalReport = globalThis.__thaw_report_uncaught;
+        globalThis.__thaw_report_uncaught = error => reported.push(error);
+        try {
         const target = new EventTarget(), errors = [false, undefined, {}], results = [];
         for (const sentinel of errors) {
           const event = new Event('x');
           const listener = () => { throw sentinel; };
           target.addEventListener('x', listener);
-          try { target.dispatchEvent(event); } catch (error) {
-            results.push(error === sentinel && event.currentTarget === null);
-          }
+          reported.length = 0;
+          let escaped = false;
+          try { target.dispatchEvent(event); } catch (error) { escaped = true; }
+          results.push(!escaped && reported.length === 1 && reported[0] === sentinel && event.currentTarget === null);
           target.removeEventListener('x', listener);
           results.push(target.dispatchEvent(event));
         }
@@ -5493,9 +5499,10 @@ fn event_target_capture_passive_and_reentrant_dispatch_contracts() {
         const passiveTarget = new EventTarget(), passiveEvent = new Event('throw-passive', { cancelable: true });
         const passiveError = {}, passiveListener = () => { throw passiveError; };
         passiveTarget.addEventListener('throw-passive', passiveListener, { passive: true });
-        try { passiveTarget.dispatchEvent(passiveEvent); } catch (error) {
-          results.push(error === passiveError && passiveEvent.currentTarget === null);
-        }
+        reported.length = 0;
+        let passiveEscaped = false;
+        try { passiveTarget.dispatchEvent(passiveEvent); } catch (error) { passiveEscaped = true; }
+        results.push(!passiveEscaped && reported[0] === passiveError && passiveEvent.currentTarget === null);
         passiveTarget.removeEventListener('throw-passive', passiveListener);
         results.push(passiveTarget.dispatchEvent(passiveEvent));
 
@@ -5510,9 +5517,11 @@ fn event_target_capture_passive_and_reentrant_dispatch_contracts() {
             throw original;
           };
           cleanupTarget.addEventListener('cleanup', cleanupListener);
+          reported.length = 0;
           let originalPreserved = false;
+          // The listener's own exception is reported; a failing cleanup step is the only thing that propagates.
           try { cleanupTarget.dispatchEvent(cleanupEvent); }
-          catch (error) { originalPreserved = error === original; }
+          catch (error) { originalPreserved = error === currentTargetError && reported.length === 1 && reported[0] === original; }
           Object.defineProperty(cleanupEvent, 'currentTarget', { configurable: true, writable: true, value: null });
           Object.defineProperty(cleanupEvent, '__thawImmediateStopped', { configurable: true, writable: true, value: false });
           cleanupTarget.removeEventListener('cleanup', cleanupListener);
@@ -5534,6 +5543,7 @@ fn event_target_capture_passive_and_reentrant_dispatch_contracts() {
         return [results.every(Boolean), outer.defaultPrevented,
           cleanupResults.every(result => result[0] && result[1]),
           cleanupOnlyPropagated, reusedAfterCleanupOnly];
+        } finally { globalThis.__thaw_report_uncaught = originalReport; }
       }
     "#
         ),
@@ -5674,18 +5684,26 @@ fn event_target_signal_option_contracts() {
             target.removeEventListener = () => { calls.count++; };
           }
         ];
+        // Like Node, a throwing abort handler/listener is reported as an uncaught
+        // exception and abort() itself does not throw.
+        const reported = [], originalReport = globalThis.__thaw_report_uncaught;
+        globalThis.__thaw_report_uncaught = error => reported.push(error);
+        try {
         const results = cases.map((setup, index) => {
           const controller = new AbortController(), target = new EventTarget();
           const listener = () => {}, replacementCalls = { count: 0 };
           setup(controller.signal, target, replacementCalls);
           target.addEventListener('x', listener, { signal: controller.signal });
-          let caught = false, value;
-          try { controller.abort(); } catch (error) { caught = true; value = error; }
+          reported.length = 0;
+          let caught = false;
+          try { controller.abort(); } catch (error) { caught = true; }
           return [target.__thawListeners.get('x').length, caught,
-            index < 3 ? index === 0 || value === (index === 1 ? undefined : false) : true,
+            index === 1 ? reported.length === 1 && reported[0] === undefined
+              : index === 2 ? reported.length === 1 && reported[0] === false : true,
             replacementCalls.count];
         });
         return results;
+        } finally { globalThis.__thaw_report_uncaught = originalReport; }
       }
       function eventTargetSignalDependentOrder() {
         const root = new AbortController(), other = new AbortController();
@@ -5713,6 +5731,9 @@ fn event_target_signal_option_contracts() {
         root.abort(reason);
         const listsCleared = rootTarget.__thawListeners.get('x').length === 0
           && targets.every(target => target.__thawListeners.get('x').length === 0);
+        // A listener's exception is reported as uncaught (Node), never thrown out of abort().
+        const reported = [], originalReport = globalThis.__thaw_report_uncaught;
+        globalThis.__thaw_report_uncaught = error => reported.push(error);
         const throwResults = [false, undefined].map(sentinel => {
           const throwingRoot = new AbortController(), otherRoot = new AbortController();
           const child = AbortSignal.any([throwingRoot.signal, otherRoot.signal]);
@@ -5723,10 +5744,12 @@ fn event_target_signal_option_contracts() {
             otherRoot.abort(); throwingRoot.abort(); throw sentinel;
           });
           let identity = false;
-          try { throwingRoot.abort(); } catch (error) { identity = error === sentinel; }
+          reported.length = 0;
+          try { throwingRoot.abort(); identity = reported.length === 1 && reported[0] === sentinel; } catch (error) { identity = false; }
           return identity && child.aborted && later.aborted
             && targets.every(target => target.__thawListeners.get('x').length === 0);
         });
+        globalThis.__thaw_report_uncaught = originalReport;
         return [order.join(','), calls.join(','), listsCleared, throwResults.every(Boolean)];
       }
       function eventTargetSignalObserverCleanup() {
@@ -5801,7 +5824,7 @@ fn event_target_signal_option_contracts() {
     );
     assert_eq!(
         call("eventTargetSignalPublicInterference", "[]"),
-        "[[0,false,true,0],[0,true,true,0],[0,true,true,0],[0,false,true,0]]"
+        "[[0,false,true,0],[0,false,true,0],[0,false,true,0],[0,false,true,0]]"
     );
     assert_eq!(
         call("eventTargetSignalDependentOrder", "[]"),
@@ -6150,10 +6173,14 @@ fn abort_signal_flattened_propagation_and_cleanup() {
         throwingRoot.addEventListener('abort', () => delivery.push('root-listener'));
         firstDependent.addEventListener('abort', () => { delivery.push('first'); throw false; });
         secondDependent.addEventListener('abort', () => delivery.push('second'));
-        let caught = false, caughtUndefined = false;
-        try { throwingRoot.__thawAbort(null); }
-        catch (error) { caught = true; caughtUndefined = error === undefined; }
-        const throwsAndContinues = caught && caughtUndefined
+        // Handler and listener exceptions are reported as uncaught (Node) while delivery continues.
+        const reported = [], originalReport = globalThis.__thaw_report_uncaught;
+        globalThis.__thaw_report_uncaught = error => reported.push(error);
+        let caught = false;
+        try { throwingRoot.__thawAbort(null); } catch (error) { caught = true; }
+        globalThis.__thaw_report_uncaught = originalReport;
+        const throwsAndContinues = !caught && reported.length === 2
+          && reported[0] === undefined && reported[1] === false
           && delivery.join(',') === 'root-listener,first,second';
         return [allOnce, stopped, winnerStable, directCleanup, zeroReasonPreserved,
           dependentOnabortDelivered, throwsAndContinues,
@@ -15613,4 +15640,112 @@ fn native_string_and_symbol_bridge_keeps_kind_identity_and_cleans_up() {
         before,
         "native scalar bridge left retained handles behind"
     );
+}
+
+#[test]
+fn os_tmpdir_follows_node_environment_precedence() {
+    let env = |pairs: &'static [(&'static str, &'static str)]| {
+        move |name: &str| {
+            pairs
+                .iter()
+                .find(|pair| pair.0 == name)
+                .map(|pair| pair.1.to_string())
+        }
+    };
+    assert_eq!(os_tmpdir_from(env(&[])), "/tmp");
+    assert_eq!(os_tmpdir_from(env(&[("TEMP", "/t/e")])), "/t/e");
+    assert_eq!(
+        os_tmpdir_from(env(&[("TEMP", "/t/e"), ("TMP", "/t/m")])),
+        "/t/m"
+    );
+    assert_eq!(
+        os_tmpdir_from(env(&[
+            ("TEMP", "/t/e"),
+            ("TMP", "/t/m"),
+            ("TMPDIR", "/t/d/")
+        ])),
+        "/t/d"
+    );
+    assert_eq!(
+        os_tmpdir_from(env(&[("TMPDIR", ""), ("TMP", "/t/m")])),
+        "/t/m"
+    );
+    assert_eq!(os_tmpdir_from(env(&[("TMPDIR", "/")])), "/");
+}
+
+#[cfg(unix)]
+#[test]
+fn os_user_info_describes_the_effective_user() {
+    let info = os_user_info("/fallback");
+    assert_eq!(info["uid"], unsafe { libc::geteuid() });
+    assert_eq!(info["gid"], unsafe { libc::getegid() });
+    assert!(!info["username"].as_str().unwrap().is_empty() || info["homedir"] == "/fallback");
+    assert!(network_interfaces_json().is_ok());
+}
+
+#[test]
+fn new_function_returns_a_fresh_function_object_every_time() {
+    let arguments = CString::new(r#"["return 1"]"#).unwrap();
+    let first = thaw_js_new_function(arguments.as_ptr());
+    assert!(first.error.is_null());
+    assert_eq!(thaw_js_release_handle(first.value), 1);
+    // A released handle must never be handed out again for the same source.
+    let second = thaw_js_new_function(arguments.as_ptr());
+    let third = thaw_js_new_function(arguments.as_ptr());
+    assert!(second.error.is_null() && third.error.is_null());
+    assert_ne!(second.value, third.value);
+    assert_eq!(thaw_js_release_handle(second.value), 1);
+    assert_eq!(thaw_js_release_handle(third.value), 1);
+}
+
+#[test]
+fn failed_module_initialization_does_not_poison_the_next_load() {
+    assert_eq!(
+        load("globalThis.__thaw_module_ready = Promise.reject(new Error('init failed'));"),
+        0
+    );
+    assert_eq!(load("globalThis.__e_after_failed_init = 1;"), 1);
+}
+
+#[test]
+fn host_net_functions_reject_ports_outside_the_u16_range() {
+    assert_eq!(
+        load(
+            r#"function portRange() {
+              const results = [];
+              for (const port of [65536, 70000, 4294967295]) {
+                results.push(__thaw_net_listen('127.0.0.1', port).startsWith('err:'),
+                             __thaw_net_connect('127.0.0.1', port).startsWith('err:'));
+              }
+              return results;
+            }"#
+        ),
+        1
+    );
+    assert_eq!(call("portRange", "[]"), "[true,true,true,true,true,true]");
+}
+
+/// Web-platform contracts recorded from real Node 22 (`"node": true`) or from
+/// the WHATWG specification where Node's own undici deviates (`"node": false`).
+#[test]
+fn recorded_web_platform_contracts_match() {
+    let cases: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/e_contracts.json")).unwrap();
+    let mut failures = Vec::new();
+    for (name, case) in cases.as_object().unwrap() {
+        let function = format!("__e_{}", name);
+        let source = format!(
+            "async function {function}() {{ {}\n}}",
+            case["source"].as_str().unwrap()
+        );
+        assert_eq!(load(&source), 1, "{name} must load");
+        let actual = call(&function, "[]");
+        if actual != case["expected"].as_str().unwrap() {
+            failures.push(format!(
+                "{name}: expected {} got {actual}",
+                case["expected"]
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

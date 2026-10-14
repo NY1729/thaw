@@ -110,8 +110,8 @@
         const onabort = signal.onabort;
         if (typeof onabort === 'function') dispatchApply(onabort, signal, [event]);
       } catch (error) {
-        thrown = true;
-        firstError = error;
+        // An event-handler exception is an uncaught exception, not an abort() failure.
+        globalThis.__thaw_report_uncaught(error);
       }
       try {
         dispatchApply(dispatchAbortEvent, signal, [event]);
