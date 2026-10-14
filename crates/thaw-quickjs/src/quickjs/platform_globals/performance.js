@@ -223,7 +223,7 @@
       observer._records.push(entry);
       if (!observer._queued) {
         observer._queued = true;
-        queueMicrotask(() => {
+        setImmediate(() => {
           observer._queued = false;
           const records = observer.takeRecords();
           if (records.length) observer._callback(new PerformanceObserverEntryList(records), observer);
@@ -272,7 +272,7 @@
       this._records.push(...bufferedRecords);
       if (this._records.length && !this._queued) {
         this._queued = true;
-        queueMicrotask(() => { this._queued = false; const records = this.takeRecords(); if (records.length) this._callback(new PerformanceObserverEntryList(records), this); });
+        setImmediate(() => { this._queued = false; const records = this.takeRecords(); if (records.length) this._callback(new PerformanceObserverEntryList(records), this); });
       }
     }
     disconnect() { performanceObservers.delete(this); this._records = []; this._types.clear(); }

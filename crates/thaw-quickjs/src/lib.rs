@@ -1213,12 +1213,72 @@ fn os_arch() -> &'static str {
     }
 }
 
+/// `os.tmpdir()`: the first non-empty of TMPDIR, TMP, TEMP, else `/tmp`,
+/// without a trailing slash (unless the path is just `/`).
+fn os_tmpdir_from(variable: impl Fn(&str) -> Option<String>) -> String {
+    let mut path = ["TMPDIR", "TMP", "TEMP"]
+        .iter()
+        .find_map(|name| variable(name).filter(|value| !value.is_empty()))
+        .unwrap_or_else(|| "/tmp".to_string());
+    if path.len() > 1 && path.ends_with('/') {
+        path.pop();
+    }
+    path
+}
+
+/// `os.userInfo()` describes the effective user, as `getpwuid_r(geteuid())`
+/// sees it; environment variables are only a fallback when the password
+/// database has no entry.
+#[cfg(unix)]
+fn os_user_info(home_fallback: &str) -> serde_json::Value {
+    use std::ffi::CStr;
+    let uid = unsafe { libc::geteuid() };
+    let gid = unsafe { libc::getegid() };
+    let mut buffer = vec![0 as libc::c_char; 16 * 1024];
+    let mut passwd: libc::passwd = unsafe { std::mem::zeroed() };
+    let mut found: *mut libc::passwd = std::ptr::null_mut();
+    let status = unsafe {
+        libc::getpwuid_r(
+            uid,
+            &mut passwd,
+            buffer.as_mut_ptr(),
+            buffer.len(),
+            &mut found,
+        )
+    };
+    let text = |pointer: *const libc::c_char| {
+        if pointer.is_null() {
+            String::new()
+        } else {
+            unsafe { CStr::from_ptr(pointer) }
+                .to_string_lossy()
+                .into_owned()
+        }
+    };
+    if status == 0 && !found.is_null() {
+        return serde_json::json!({
+            "username": text(passwd.pw_name), "homedir": text(passwd.pw_dir),
+            "shell": text(passwd.pw_shell), "uid": uid, "gid": gid,
+        });
+    }
+    serde_json::json!({
+        "username": std::env::var("USER").unwrap_or_default(), "homedir": home_fallback,
+        "shell": std::env::var("SHELL").unwrap_or_default(), "uid": uid, "gid": gid,
+    })
+}
+
+#[cfg(not(unix))]
+fn os_user_info(home_fallback: &str) -> serde_json::Value {
+    serde_json::json!({
+        "username": std::env::var("USER").unwrap_or_default(), "homedir": home_fallback,
+        "shell": std::env::var("SHELL").unwrap_or_default(), "uid": 0, "gid": 0,
+    })
+}
+
 fn os_static_info() -> serde_json::Value {
     let platform = os_platform();
     let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
-    let tmp = std::env::var("TMPDIR")
-        .or_else(|_| std::env::var("TMP"))
-        .unwrap_or_else(|_| "/tmp".to_string());
+    let tmp = os_tmpdir_from(|name| std::env::var(name).ok());
     let mut hostname = std::fs::read_to_string("/etc/hostname")
         .unwrap_or_else(|_| "localhost".to_string())
         .trim()
@@ -1235,8 +1295,7 @@ fn os_static_info() -> serde_json::Value {
         "version": std::fs::read_to_string("/proc/sys/kernel/version").unwrap_or_default().trim(),
         "machine": std::env::consts::ARCH,
         "endianness": if cfg!(target_endian = "little") { "LE" } else { "BE" },
-        "userInfo": { "username": std::env::var("USER").unwrap_or_default(),
-            "homedir": home, "shell": std::env::var("SHELL").unwrap_or_default(), "uid": 0, "gid": 0 },
+        "userInfo": os_user_info(&home),
         "glibcVersionRuntime": glibc_version_runtime(),
     })
 }
@@ -1658,7 +1717,7 @@ fn glibc_version_runtime() -> Option<String> {
 /// `AF_PACKET` entries, confirmed against real Node's own output for
 /// every interface on a real multi-NIC machine, loopback (all zero)
 /// included.
-fn network_interfaces_json() -> String {
+fn network_interfaces_json() -> rquickjs::Result<String> {
     use std::ffi::CStr;
     use std::net::{Ipv4Addr, Ipv6Addr};
 
@@ -1666,7 +1725,12 @@ fn network_interfaces_json() -> String {
         std::collections::BTreeMap::new();
     let mut head: *mut libc::ifaddrs = std::ptr::null_mut();
     if unsafe { libc::getifaddrs(&mut head) } != 0 {
-        return "{}".to_string();
+        // Node throws a system error here; an empty result would read as "no interfaces".
+        return Err(rquickjs::Error::new_from_js_message(
+            "os",
+            "network interfaces",
+            format!("getifaddrs failed: {}", std::io::Error::last_os_error()),
+        ));
     }
     let mut entry = head;
     while !entry.is_null() {
@@ -1720,7 +1784,7 @@ fn network_interfaces_json() -> String {
         }
     }
     unsafe { libc::freeifaddrs(head) };
-    serde_json::to_string(&groups).unwrap_or_else(|_| "{}".to_string())
+    Ok(serde_json::to_string(&groups).unwrap_or_else(|_| "{}".to_string()))
 }
 
 /// Real DNS resolution for `node:dns`'s `lookup`/`resolve`/`resolve4`/

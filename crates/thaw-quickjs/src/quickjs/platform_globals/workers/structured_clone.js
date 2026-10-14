@@ -11,7 +11,7 @@
         throw new DOMException('value cannot be cloned', 'DataCloneError');
       }
       if (input === undefined) return { p: 'undefined' };
-      if (typeof input === 'number' && !Number.isFinite(input)) return { p: String(input) };
+      if (typeof input === 'number' && (!Number.isFinite(input) || Object.is(input, -0))) return { p: String(input === 0 ? '-0' : input) };
       if (typeof input === 'bigint') return { p: 'bigint', v: String(input) };
       if (typeof input === 'symbol') throw new DOMException('value cannot be cloned', 'DataCloneError');
       if (input === null || (typeof input !== 'object' && typeof input !== 'function')) return { v: input };
@@ -55,6 +55,7 @@
     const primitive = item => {
       if ('r' in item) return values[item.r];
       if (item.p === 'undefined') return undefined;
+      if (item.p === '-0') return -0;
       if (item.p === 'NaN') return NaN;
       if (item.p === 'Infinity') return Infinity;
       if (item.p === '-Infinity') return -Infinity;

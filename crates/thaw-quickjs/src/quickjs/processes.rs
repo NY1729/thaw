@@ -1340,13 +1340,16 @@ fn run_child_process(command: String, arguments_json: String, options_json: Stri
         }).to_string(),
     };
     child.stdout(Stdio::piped()).stderr(Stdio::piped());
-    let input = options
-        .get("input")
-        .and_then(|value| value.as_str())
-        .map(hex_decode);
-    if input.is_some() {
-        child.stdin(Stdio::piped());
-    }
+    // Like Node's default `stdio: 'pipe'`, stdin is always a pipe that is closed after
+    // the (possibly empty) input, so the child never inherits the parent's stdin.
+    let input = Some(
+        options
+            .get("input")
+            .and_then(|value| value.as_str())
+            .map(hex_decode)
+            .unwrap_or_default(),
+    );
+    child.stdin(Stdio::piped());
     let timeout = options
         .get("timeout")
         .and_then(serde_json::Value::as_u64)
@@ -2035,4 +2038,17 @@ mod process_credential_tests {
         let error = configure_child_command("/missing/credential-command", &[], &options).unwrap_err();
         assert_eq!(child_spawn_error_code(&error), "ENOTSUP");
     }
+}
+
+#[cfg(all(test, unix))]
+#[test]
+fn sync_child_without_input_gets_a_closed_stdin_pipe_not_the_parents() {
+    // The child reports whether its stdin is a pipe it can read EOF from.
+    let record: serde_json::Value = serde_json::from_str(&run_child_process(
+        "/bin/sh".into(),
+        serde_json::json!(["-c", "cat >/dev/null; printf eof"]).to_string(),
+        serde_json::json!({"timeout": 5000}).to_string(),
+    )).unwrap();
+    assert_eq!(record["timedOut"], false);
+    assert_eq!(hex_decode(record["stdout"].as_str().unwrap()), b"eof");
 }
