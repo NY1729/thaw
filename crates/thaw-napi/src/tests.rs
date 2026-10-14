@@ -2720,6 +2720,116 @@ fn live_quickjs_graph_handle_survives_lease_and_roundtrips_mutation() {
     assert_eq!(thaw_quickjs::thaw_js_release_handle(handle), 0);
 }
 
+// Native addons read elements of an array argument that crossed as a live
+// JavaScript handle (sqlite3 binds `[42]` this way), so element reads must go
+// through QuickJS like every other property read on a handle.
+#[cfg(feature = "quickjs")]
+#[test]
+fn live_quickjs_array_handle_elements_are_readable_through_napi_get_element() {
+    assert_eq!(
+        thaw_quickjs::thaw_js_load(c"globalThis.napiElementArray = [42, 'x'];".as_ptr()),
+        1
+    );
+    let handle = thaw_quickjs::thaw_js_get_global(c"napiElementArray".as_ptr());
+    assert_ne!(handle, 0);
+    assert_eq!(thaw_quickjs::thaw_js_retain_handle(handle), 1);
+    let graph = format!(
+        r#"{{"root":{{"r":0}},"nodes":[{{"a":[{{"r":1}}]}},{{"hdl":{handle}}}],"leases":[{handle}]}}"#
+    );
+    let mut env = Env::new();
+    let root = unsafe { parse_napi_graph_value(&mut env as NapiEnv, &graph) }.unwrap();
+    let Value::Array(children) = unsafe { value_ref(root) }.unwrap() else {
+        panic!("array root")
+    };
+    let live = children[0].unwrap();
+    let mut is_array = false;
+    let mut length = 0_u32;
+    let mut element = ptr::null_mut();
+    let mut number = 0.0_f64;
+    unsafe {
+        assert_eq!(napi_is_array(&mut env, live, &mut is_array), NAPI_OK);
+        assert!(is_array);
+        assert_eq!(napi_get_array_length(&mut env, live, &mut length), NAPI_OK);
+        assert_eq!(length, 2);
+        assert_eq!(napi_get_element(&mut env, live, 0, &mut element), NAPI_OK);
+        assert_eq!(
+            napi_get_value_double(&mut env, element, &mut number),
+            NAPI_OK
+        );
+        assert_eq!(number, 42.0);
+    }
+    drop(env);
+    assert_eq!(thaw_quickjs::thaw_js_release_handle(handle), 1);
+}
+
+// A retained JavaScript function called by native code with a live JavaScript
+// value has no JSON form for that argument. The call escalates to graph
+// transport, delivering `this` and the live value, instead of being dropped.
+#[cfg(feature = "quickjs")]
+#[test]
+fn quickjs_reference_call_with_a_live_argument_uses_graph_transport() {
+    assert_eq!(
+        thaw_quickjs::thaw_js_load(c"globalThis.napiLiveArgument = [42]; globalThis.napiLiveReceiver = { tag: 'receiver' }; globalThis.__thaw_napi_reference_746291203 = function(meta, receiver, argument) { return (meta === true && receiver.tag === 'receiver' && argument === globalThis.napiLiveArgument) ? 'graph-ok' : 'graph-bad'; };".as_ptr()),
+        1
+    );
+    let argument = thaw_quickjs::thaw_js_get_global(c"napiLiveArgument".as_ptr());
+    let receiver = thaw_quickjs::thaw_js_get_global(c"napiLiveReceiver".as_ptr());
+    assert_ne!(argument, 0);
+    assert_ne!(receiver, 0);
+    assert_eq!(thaw_quickjs::thaw_js_retain_handle(argument), 1);
+    assert_eq!(thaw_quickjs::thaw_js_retain_handle(receiver), 1);
+    let graph = format!(
+        r#"{{"root":{{"r":0}},"nodes":[{{"a":[{{"r":1}},{{"r":2}}]}},{{"hdl":{argument}}},{{"hdl":{receiver}}}],"leases":[{argument},{receiver}]}}"#
+    );
+    let mut env = Env::new();
+    let root = unsafe { parse_napi_graph_value(&mut env as NapiEnv, &graph) }.unwrap();
+    let Value::Array(children) = unsafe { value_ref(root) }.unwrap() else {
+        panic!("array root")
+    };
+    let (live_argument, live_receiver) = (children[0].unwrap(), children[1].unwrap());
+    let bridge = Rc::new(ThawCallbackBridge {
+        callback: ThawCallback::QuickJs(thaw_quickjs::thaw_js_call_reference),
+        context: 746291203,
+        _context_root: None,
+    });
+    let mut info = CallbackInfo {
+        args: vec![live_argument],
+        this_arg: live_receiver,
+        new_target: ptr::null_mut(),
+        data: Rc::as_ptr(&bridge) as *mut c_void,
+    };
+    let result = unsafe { thaw_compiled_callback(&mut env as NapiEnv, &mut info) };
+    assert!(
+        !result.is_null(),
+        "the live argument must not drop the call"
+    );
+    assert!(
+        matches!(unsafe { value_ref(result) }, Ok(Value::String(value)) if value == "graph-ok")
+    );
+    drop(env);
+    assert_eq!(thaw_quickjs::thaw_js_release_handle(argument), 1);
+    assert_eq!(thaw_quickjs::thaw_js_release_handle(receiver), 1);
+}
+
+// A proxy finalizer can run after its addon environment is gone (shutdown).
+// Releasing a handle nobody owns any more is a no-op, not a thrown error.
+#[cfg(feature = "quickjs")]
+#[test]
+fn releasing_a_handle_whose_environment_is_gone_is_a_no_op() {
+    let response = unsafe {
+        thaw_napi_handle_bridge(
+            c"release_handle".as_ptr(),
+            c"123456789".as_ptr(),
+            c"".as_ptr(),
+            c"[]".as_ptr(),
+        )
+    };
+    let text = unsafe { CStr::from_ptr(response) }.to_str().unwrap();
+    let parsed: JsonValue = serde_json::from_str(text).unwrap();
+    assert!(parsed.get("__thaw_error__").is_none(), "{text}");
+    assert_eq!(parsed["value"], true);
+}
+
 // Unrun ownership/order control: a JS getter/setter installed on a native
 // object retains its callbacks after the defining graph packet is gone.
 // Replacing the descriptor releases those roots after the native mutation

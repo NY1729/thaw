@@ -638,6 +638,10 @@ pub unsafe extern "C" fn napi_get_element(
         return record_status(env, NAPI_INVALID_ARG);
     }
     let key = PropertyKey::String(index.to_string());
+    #[cfg(feature = "quickjs")]
+    if let Some(handle) = qjs_handle(object) {
+        return qjs_get_property(env, handle, &key, out);
+    }
     if !matches!(value_ref(object), Ok(value) if is_object_value(value)) {
         return record_status(env, NAPI_OBJECT_EXPECTED);
     }
