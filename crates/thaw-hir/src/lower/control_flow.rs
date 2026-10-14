@@ -551,7 +551,18 @@ fn inject_finally_before_exits_at(
     skip_handlers: usize,
 ) -> Result<Vec<HirStmt>, String> {
     let mut out = Vec::new();
+    // Block-scoped locals (loop items, `const`s) have left `self.scope` by the
+    // time the finally is injected, but a `return` inside the block may still
+    // read them: expose each `Let` seen so far to type inference.
+    let mut exposed = Vec::new();
+    let result = (|| {
     for stmt in stmts {
+        if let HirStmt::Let(name, ty, _) = &stmt {
+            if !self.scope.contains_key(name) {
+                self.scope.insert(name.clone(), ty.clone());
+                exposed.push(name.clone());
+            }
+        }
         match stmt {
             HirStmt::Return(Some(value)) => {
                 let ty = self.infer_expr_type_inner(&value)?;
@@ -610,6 +621,12 @@ fn inject_finally_before_exits_at(
             other => out.push(other),
         }
     }
+    Ok::<(), String>(())
+    })();
+    for name in exposed {
+        self.scope.remove(&name);
+    }
+    result?;
     Ok(out)
 }
 

@@ -1900,7 +1900,7 @@ impl<'a> FnLowerer<'a> {
                 }
                 let json_mode = self.for_of_json_mode;
                 let saved = self.bindings.clone();
-                let saved_scope = self.scope.clone();
+                let mut saved_scope = self.scope.clone();
                 let saved_correlations = self.destructured_union_correlations.clone();
                 let lowered = (|| -> Result<Vec<HirStmt>, String> {
                     let item_discriminants =
@@ -2468,6 +2468,43 @@ impl<'a> FnLowerer<'a> {
                     let Some((producer, producer_type, init, _)) = generator_producer else {
                         return Ok(statements);
                     };
+                    // `return` inside the loop must leave the enclosing function,
+                    // not just this synthetic Void lambda: route it through a
+                    // captured flag (+ value slot) and re-issue it after the call.
+                    let mut escape = Vec::new();
+                    let mut after_call = Vec::new();
+                    if statements_contain_return(&statements) {
+                        let flag = format!("__thaw_loop_returned_{}", self.next_binding);
+                        self.next_binding += 1;
+                        saved_scope.insert(flag.clone(), HirType::Bool);
+                        escape.push(HirStmt::Let(
+                            flag.clone(),
+                            HirType::Bool,
+                            HirExpr::Lit(HirLit::Bool(false)),
+                        ));
+                        let ret_type = self.ret_type.clone();
+                        let slot = if ret_type == HirType::Void {
+                            None
+                        } else {
+                            let slot = format!("__thaw_loop_return_{}", self.next_binding);
+                            self.next_binding += 1;
+                            saved_scope.insert(slot.clone(), ret_type.clone());
+                            escape.push(HirStmt::Let(
+                                slot.clone(),
+                                ret_type.clone(),
+                                generator_placeholder(&ret_type).ok_or_else(|| {
+                                    format!("return type {ret_type:?} has no default value")
+                                })?,
+                            ));
+                            Some(slot)
+                        };
+                        redirect_returns(&mut statements, &flag, slot.as_deref());
+                        after_call.push(HirStmt::If(
+                            HirExpr::Var(flag),
+                            vec![HirStmt::Return(slot.map(HirExpr::Var))],
+                            Vec::new(),
+                        ));
+                    }
                     statements.push(HirStmt::Return(None));
                     let lambda_body = HirExpr::Block(statements);
                     let mut referenced = BTreeSet::new();
@@ -2481,7 +2518,7 @@ impl<'a> FnLowerer<'a> {
                                 .map(|ty| HirParam { name, ty })
                         })
                         .collect();
-                    Ok(vec![HirStmt::Expr(HirExpr::Call(
+                    escape.push(HirStmt::Expr(HirExpr::Call(
                         Box::new(HirExpr::Lambda(
                             captures,
                             vec![HirParam {
@@ -2492,7 +2529,9 @@ impl<'a> FnLowerer<'a> {
                             Box::new(lambda_body),
                         )),
                         vec![init],
-                    ))])
+                    )));
+                    escape.extend(after_call);
+                    Ok(escape)
                 })();
                 self.for_of_prelowered = None;
                 self.bindings = saved;
@@ -2994,4 +3033,58 @@ impl<'a> FnLowerer<'a> {
         }
     }
 
+}
+
+/// Whether a `return` occurs at statement level (nested lambdas keep their own).
+fn statements_contain_return(stmts: &[HirStmt]) -> bool {
+    stmts.iter().any(|stmt| match stmt {
+        HirStmt::Return(_) => true,
+        HirStmt::If(_, then_body, else_body) => {
+            statements_contain_return(then_body) || statements_contain_return(else_body)
+        }
+        HirStmt::While(_, body) | HirStmt::Finally(body, _) => statements_contain_return(body),
+        HirStmt::Try(body, _, catch_body, _) => {
+            statements_contain_return(body) || statements_contain_return(catch_body)
+        }
+        _ => false,
+    })
+}
+
+/// Rewrite statement-level `return [v]` into "record, flag, leave the lambda".
+fn redirect_returns(stmts: &mut Vec<HirStmt>, flag: &str, slot: Option<&str>) {
+    let mut rewritten = Vec::with_capacity(stmts.len());
+    for stmt in std::mem::take(stmts) {
+        match stmt {
+            HirStmt::Return(value) => {
+                if let (Some(slot), Some(value)) = (slot, value) {
+                    rewritten.push(HirStmt::Expr(HirExpr::Assign(slot.to_string(), Box::new(value))));
+                }
+                rewritten.push(HirStmt::Expr(HirExpr::Assign(
+                    flag.to_string(),
+                    Box::new(HirExpr::Lit(HirLit::Bool(true))),
+                )));
+                rewritten.push(HirStmt::Return(None));
+            }
+            HirStmt::If(cond, mut then_body, mut else_body) => {
+                redirect_returns(&mut then_body, flag, slot);
+                redirect_returns(&mut else_body, flag, slot);
+                rewritten.push(HirStmt::If(cond, then_body, else_body));
+            }
+            HirStmt::While(cond, mut body) => {
+                redirect_returns(&mut body, flag, slot);
+                rewritten.push(HirStmt::While(cond, body));
+            }
+            HirStmt::Finally(mut body, skipped) => {
+                redirect_returns(&mut body, flag, slot);
+                rewritten.push(HirStmt::Finally(body, skipped));
+            }
+            HirStmt::Try(mut body, name, mut catch_body, hidden) => {
+                redirect_returns(&mut body, flag, slot);
+                redirect_returns(&mut catch_body, flag, slot);
+                rewritten.push(HirStmt::Try(body, name, catch_body, hidden));
+            }
+            other => rewritten.push(other),
+        }
+    }
+    *stmts = rewritten;
 }

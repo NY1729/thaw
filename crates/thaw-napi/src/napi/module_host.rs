@@ -4962,6 +4962,19 @@ fn text_result(result: Result<String, String>) -> ThawResult {
     }
 }
 
+/// Like [`text_result`], for a graph wire: the producer grants the exact
+/// returned pointer so the consumer's decode may take over the napi/host
+/// leases the wire names (an ungranted wire can transfer none).
+fn graph_text_result(result: Result<String, String>, graph: bool) -> ThawResult {
+    let result = text_result(result);
+    if graph && !result.value.is_null() && !unsafe { thaw_arena::register_owned_graph_wire(result.value) } {
+        // ponytail: leases named by an ungrantable wire leak; arena id exhaustion is the only cause.
+        unsafe { thaw_arena::destroy_string(result.value) };
+        return ThawResult { value: ptr::null_mut(), error: thaw_arena::owned_string("graph wire registration failed") };
+    }
+    result
+}
+
 unsafe fn callback_result(env: NapiEnv, value: NapiValue) -> NapiValue {
     if value.is_null() {
         env_mut(env).unwrap().alloc(Value::Undefined)
@@ -4987,9 +5000,9 @@ pub unsafe extern "C" fn thaw_napi_call_graph_result(
 ) -> ThawResult {
     let args_text = text(args);
     let graph_input = args_text.as_ref().ok().map(|text| NapiGraphInput::parse(text));
-    text_result(text(name).and_then(|name| {
+    graph_text_result(text(name).and_then(|name| {
         args_text.and_then(|args| call_impl(&name, &args, false, true, graph_input.as_ref()))
-    }))
+    }), true)
 }
 
 #[no_mangle]
@@ -5015,9 +5028,9 @@ pub unsafe extern "C" fn thaw_napi_call_typed_graph_result(
 ) -> ThawResult {
     let args_text = text(args);
     let graph_input = args_text.as_ref().ok().map(|text| NapiGraphInput::parse(text));
-    text_result(text(name).and_then(|name| {
+    graph_text_result(text(name).and_then(|name| {
         args_text.and_then(|args| call_impl(&name, &args, true, true, graph_input.as_ref()))
-    }))
+    }), true)
 }
 
 #[no_mangle]
@@ -5398,8 +5411,8 @@ pub unsafe extern "C" fn thaw_napi_call_with_functions_typed_graph_result(
 ) -> ThawResult {
     let _dispatch = ForeignCallbackGuard::new();
     let graph_input = graph_input_for_args(args, true);
-    text_result(call_export_with_functions(name, args, functions, function_count, true, graph_input.as_ref())
-        .and_then(|value| encode_napi_result(value, true, true)))
+    graph_text_result(call_export_with_functions(name, args, functions, function_count, true, graph_input.as_ref())
+        .and_then(|value| encode_napi_result(value, true, true)), true)
 }
 
 #[no_mangle]
@@ -5408,8 +5421,8 @@ pub unsafe extern "C" fn thaw_napi_call_handle_typed_graph_result(
 ) -> ThawResult {
     let _dispatch = ForeignCallbackGuard::new();
     let graph_input = graph_input_for_args(args, true);
-    text_result(call_function_handle(callable, args, true, true, graph_input.as_ref())
-        .and_then(|value| encode_napi_result(value, true, true)))
+    graph_text_result(call_function_handle(callable, args, true, true, graph_input.as_ref())
+        .and_then(|value| encode_napi_result(value, true, true)), true)
 }
 
 // `napi_create_error`/`napi_create_type_error`/etc. record the error's class
@@ -5581,8 +5594,8 @@ unsafe fn call_method_impl(
 ) -> ThawResult {
     let _dispatch = ForeignCallbackGuard::new();
     let graph_input = graph_input_for_args(args, graph_result);
-    text_result(call_method_value_impl(receiver, method, args, preserve_undefined, graph_result, graph_input.as_ref())
-        .and_then(|value| encode_napi_result(value, preserve_undefined, graph_result)))
+    graph_text_result(call_method_value_impl(receiver, method, args, preserve_undefined, graph_result, graph_input.as_ref())
+        .and_then(|value| encode_napi_result(value, preserve_undefined, graph_result)), graph_result)
 }
 
 #[no_mangle]
@@ -5638,7 +5651,7 @@ unsafe fn get_property_impl(
         let value = wait_for_promise(value)?;
         encode_napi_result(value, preserve_undefined, graph_result)
     })();
-    text_result(result)
+    graph_text_result(result, graph_result)
 }
 
 #[no_mangle]
@@ -5696,7 +5709,7 @@ unsafe fn set_property_impl(
             encode_napi_result(*value, preserve_undefined, graph_result)
         }
     })();
-    text_result(result)
+    graph_text_result(result, graph_result)
 }
 
 #[no_mangle]
@@ -6154,7 +6167,7 @@ unsafe fn call_method_with_callback_impl(
             encode_napi_result(value, true, graph_result)
         }
     })();
-    text_result(result)
+    graph_text_result(result, graph_result)
 }
 
 #[no_mangle]

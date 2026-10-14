@@ -513,7 +513,7 @@ module.exports = function() {
         assert!(loaded);
         assert_eq!(
             result.as_deref(),
-            Some(r#"[["ENOBUFS",null,"☃",""],[0,"☃"],[0,"6162"],["ENOBUFS",null,"6162"],[0,true,[65,66,67]],["ENOBUFS",null,true,[65,66,67]],[0,"","ee"],["ENOBUFS",null,"o","e"],["ENOBUFS","o","e",[null,"o","e"],true],["ENOBUFS","x","y",[null,"x","y"],true],"☃","☃",["ENOENT",null],[6,true,"x"]]"#)
+            Some(r#"[["ENOBUFS",0,"☃",""],[0,"☃"],[0,"6162"],["ENOBUFS",0,"6162"],[0,true,[65,66,67]],["ENOBUFS",0,true,[65,66,67]],[0,"","ee"],["ENOBUFS",0,"o","e"],["ENOBUFS","o","e",[null,"o","e"],true],["ENOBUFS","x","y",[null,"x","y"],true],"☃","☃",["ENOENT",null],[6,true,"x"]]"#)
         );
     })
     .join()
@@ -653,7 +653,7 @@ module.exports = async function() {
         assert!(loaded);
         assert_eq!(
             result.as_deref(),
-            Some(r#"[[true,"abc","def",1,0],["abc","def",true,0],["ERR_CHILD_PROCESS_STDIO_MAXBUFFER",true,true,true,"abcd","x",1,0],["ERR_CHILD_PROCESS_STDIO_MAXBUFFER",true,"x","abcd",0],["ERR_CHILD_PROCESS_STDIO_MAXBUFFER","☃","",0],[true,"☃",0],["6162",4,0],[true,true,[255],true,[254],0],[true,[255],true,[254],0],[true,true,[255],true,[254],0],[true,"☃",0],[5,true,[255],true,[254],true]]"#)
+            Some(r#"[[true,"abc","def",1,0],["abc","def",true,0],["ERR_CHILD_PROCESS_STDIO_MAXBUFFER",true,true,true,"abc","",1,0],["ERR_CHILD_PROCESS_STDIO_MAXBUFFER",true,"x","abc",0],["ERR_CHILD_PROCESS_STDIO_MAXBUFFER","☃","",0],[true,"☃",0],["6162",4,0],[true,true,[255],true,[254],0],[true,[255],true,[254],0],[true,true,[255],true,[254],0],[true,"☃",0],[5,true,[255],true,[254],true]]"#)
         );
     })
     .join()

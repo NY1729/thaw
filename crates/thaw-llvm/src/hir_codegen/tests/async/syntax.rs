@@ -864,3 +864,58 @@ fn compiles_for_of_and_for_await_destructuring() {
     );
 }
 
+
+/// One Promise handle awaited, aggregated (all/allSettled/any/race) and chained
+/// several times must stay alive until its last consumer is done: aggregate
+/// children and continuations each hold their own reference. Expected output
+/// taken from node 22.
+#[test]
+fn a_shared_promise_survives_every_aggregate_and_subscriber() {
+    let source = r#"async function delayed(v: number, ms: number): Promise<number> {
+  await new Promise<void>(r => setTimeout(r, ms));
+  return v;
+}
+async function slowFail(ms: number): Promise<number> {
+  await new Promise<void>(r => setTimeout(r, ms));
+  throw new Error('boom');
+}
+async function main(): Promise<void> {
+  const p = delayed(5, 10);
+  const a = await p;
+  const b = await p;
+  console.log('twice', a, b);
+
+  const q = delayed(7, 10);
+  const [x, y] = await Promise.all([q, q]);
+  console.log('all-dup', x, y);
+
+  const s = delayed(3, 10);
+  const both = await Promise.all([Promise.all([s]), Promise.all([s]), s]);
+  console.log('shared-aggs', JSON.stringify(both));
+
+  const t = delayed(9, 10);
+  const r = await Promise.race([t, delayed(1, 30)]);
+  const again = await t;
+  console.log('race-then-await', r, again);
+
+  const u = delayed(4, 10);
+  const settled = await Promise.allSettled([u, u]);
+  const anyv = await Promise.any([u, delayed(2, 40)]);
+  console.log('settled-any', settled.map(o => o.status).join(','), anyv, await u);
+
+  const f = slowFail(10);
+  const outcomes = await Promise.allSettled([f, f]);
+  let caught = '';
+  try { await f; } catch (e) { caught = (e as Error).message; }
+  console.log('fail-shared', outcomes.map(o => o.status).join(','), caught);
+
+  const w = delayed(8, 10);
+  const chained = await Promise.all([w.then(v => v + 1), w.then(v => v + 2), w]);
+  console.log('then-subs', JSON.stringify(chained));
+}
+"#;
+    assert_eq!(
+        compile_and_run(source, "shared_promise_lifetime"),
+        "twice 5 5\nall-dup 7 7\nshared-aggs [[3],[3],3]\nrace-then-await 9 9\nsettled-any fulfilled,fulfilled 4 4\nfail-shared rejected,rejected boom\nthen-subs [9,10,8]\n"
+    );
+}

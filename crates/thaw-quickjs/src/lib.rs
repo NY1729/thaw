@@ -425,7 +425,8 @@ fn run_quickjs_gc(ctx: Ctx<'_>) {
 enum HostChildCommand {
     Stdin(Vec<u8>),
     StdinEnd,
-    Kill(i32),
+    /// Signal number plus a reply channel carrying whether the signal was delivered.
+    Kill(i32, Sender<bool>),
 }
 
 enum HostChildEvent {

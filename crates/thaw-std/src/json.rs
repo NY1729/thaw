@@ -3064,6 +3064,60 @@ pub extern "C" fn thaw_json_brand_handle_placeholder(value: *mut Value) -> *mut 
     }
 }
 
+type NativeDateTwin = (
+    std::rc::Weak<SharedValue<indexmap::IndexMap<Vec<u8>, Value>>>,
+    thaw_arena::ArenaRoot,
+);
+
+thread_local! {
+    /// Native Date record address -> its live Json twin. The ArenaRoot keeps the
+    /// record (and so its address) alive for as long as the twin can be found.
+    static NATIVE_DATE_TWINS: RefCell<HashMap<usize, NativeDateTwin>> =
+        RefCell::new(HashMap::new());
+}
+
+/// Gives one native Date record one Json twin: when `json` is a fresh
+/// conversion of a record that already has a live twin, `json` becomes that
+/// twin (timestamp refreshed), otherwise it is remembered as the record's twin.
+///
+/// # Safety
+/// `native` is the Date record `json` was just converted from; `json` is a
+/// valid `Value`.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_json_adopt_native_date(
+    native: *const std::ffi::c_void,
+    json: *mut Value,
+    trusted: bool,
+) {
+    let Some(slot) = (unsafe { json.as_mut() }) else {
+        return;
+    };
+    let Value::Object(fresh) = slot else { return };
+    if !trusted || native.is_null() {
+        return;
+    }
+    let key = native as usize;
+    let fresh = fresh.clone();
+    NATIVE_DATE_TWINS.with(|twins| {
+        let mut twins = twins.borrow_mut();
+        if let Some(twin) = twins.get(&key).and_then(|(weak, _)| weak.upgrade()) {
+            if let Some(timestamp) = unsafe { &*fresh.get() }
+                .get(b"timestamp".as_slice())
+                .cloned()
+            {
+                unsafe { &mut *twin.get() }.insert(b"timestamp".to_vec(), timestamp);
+            }
+            *slot = Value::Object(twin);
+            return;
+        }
+        twins.retain(|_, (weak, _)| weak.strong_count() > 0);
+        twins.insert(
+            key,
+            (Rc::downgrade(&fresh), thaw_arena::ArenaRoot::new(key)),
+        );
+    });
+}
+
 #[no_mangle]
 pub extern "C" fn thaw_json_brand_wrapper_if(
     value: *mut Value,

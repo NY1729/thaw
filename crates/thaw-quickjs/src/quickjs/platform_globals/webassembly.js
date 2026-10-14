@@ -217,6 +217,9 @@
         // Function-reference carrier lifetime still uses the existing instance path.
         if (global.type === 'funcref') {
           this.__thawInstance = descriptor.instance; this.__thawName = descriptor.name;
+          // The global reads through the instance's store: keep that Instance (and
+          // so its finalizer's resources) alive for as long as this export lives.
+          Object.defineProperty(this, '__thawOwner', { value: descriptor.owner });
           return;
         }
         const retained = wasmResult(__thaw_wasm_global_retain(descriptor.instance, descriptor.name));
@@ -414,7 +417,7 @@
             if (!imported) resources.push({ value: memory });
           }
           exports[item.name] = memory;
-        } else if (item.kind === 'global') exports[item.name] = new WasmGlobal({ instance: this.__thawHandle, name: item.name }, undefined, true);
+        } else if (item.kind === 'global') exports[item.name] = new WasmGlobal({ instance: this.__thawHandle, name: item.name, owner: this }, undefined, true);
         else if (item.kind === 'table') { const table = new WasmTable({ instance: this.__thawHandle, name: item.name }, null, true); resources.push({ value: table }); exports[item.name] = table; }
       }
       Object.defineProperty(this, 'exports', { value: Object.freeze(exports), enumerable: true });

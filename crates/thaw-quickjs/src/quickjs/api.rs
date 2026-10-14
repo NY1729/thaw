@@ -170,6 +170,23 @@ fn reconstitute_exception_packet<'js>(
             }
         }
     }
+    // A thrown primitive (`throw 0`, `throw false`, ...) has no object identity
+    // and its type travels in the packet's value tag (1 f64, 2 i64, 3 bool,
+    // 4 string, 5 undefined, 6 null): rebuild that exact value, not an Error.
+    if packet.object == 0 && packet.native == 0 && packet.aggregate == 0 {
+        match packet.tag {
+            1 => return Ok(Value::new_number(ctx.clone(), f64::from_bits(packet.number))),
+            2 => return Ok(Value::new_number(ctx.clone(), packet.bigint as i64 as f64)),
+            3 => return Ok(Value::new_bool(ctx.clone(), packet.boolean != 0)),
+            // Tagged `\u{1}Name\u{1}message` text is a native Error, not a string.
+            4 if packet.native_text != 0 && !text.starts_with('\u{1}') => {
+                return Ok(rquickjs::String::from_str(ctx.clone(), text)?.into_value());
+            }
+            5 => return Ok(Value::new_undefined(ctx.clone())),
+            6 => return Ok(Value::new_null(ctx.clone())),
+            _ => {}
+        }
+    }
     let bridge = ctx.userdata::<NativeExceptionBridge>()
         .ok_or_else(|| rquickjs::Error::new_from_js_message(
             "native exception bridge", "Function", "Exception bridge is unavailable"))?;
@@ -734,7 +751,7 @@ pub extern "C" fn thaw_js_call_graph_result(
         invoke_impl(ctx, target, &func_name, &args_json, true, true)
     });
     match result {
-        Ok(text) => ThawResult { value: thaw_arena::owned_string(text), error: std::ptr::null() },
+        Ok(text) => graph_ok_result(text, true),
         Err(reason) => ThawResult {
             value: std::ptr::null(),
             error: owned_exception_error(reason),
@@ -807,6 +824,21 @@ fn owned_graph_wire_with_registration(
         return std::ptr::null_mut();
     }
     wire
+}
+
+/// A successful result: a graph wire is granted to its exact pointer (so the
+/// decoder may take over the leases it names); any other text is returned as is.
+fn graph_ok_result(text: String, graph: bool) -> ThawResult {
+    if !graph {
+        return ThawResult { value: thaw_arena::owned_string(text), error: std::ptr::null() };
+    }
+    let wire = owned_graph_wire(&text);
+    if wire.is_null() {
+        ThawResult { value: std::ptr::null(),
+            error: thaw_arena::owned_string("Unable to register JavaScript graph result") }
+    } else {
+        ThawResult { value: wire, error: std::ptr::null() }
+    }
 }
 
 fn owned_graph_wire(text: &str) -> *mut c_char {
@@ -1924,10 +1956,7 @@ unsafe fn thaw_js_call_handle_mixed_result_impl(
         resolve_value_wire_impl(ctx, value, &format!("JavaScript value #{handle}"), true, graph_result)
     });
     match result {
-        Ok(value) => ThawResult {
-            value: thaw_arena::owned_string(value),
-            error: std::ptr::null(),
-        },
+        Ok(value) => graph_ok_result(value, graph_result),
         Err(error) => ThawResult {
             value: std::ptr::null(),
             error: owned_exception_error(error),
@@ -1980,10 +2009,7 @@ unsafe fn thaw_js_call_handle_mixed_native_json_result_impl(
         resolve_value_wire_impl(ctx, result, &format!("JavaScript value #{handle}"), true, graph_result)
     });
     match result {
-        Ok(value) => ThawResult {
-            value: thaw_arena::owned_string(value),
-            error: std::ptr::null(),
-        },
+        Ok(value) => graph_ok_result(value, graph_result),
         Err(error) => ThawResult {
             value: std::ptr::null(),
             error: owned_exception_error(error),
@@ -3153,10 +3179,7 @@ fn thaw_js_call_handle_value_result_impl(handle: u64, argument: u64, graph_resul
         resolve_value_wire_impl(ctx, value, &format!("JavaScript value #{handle}"), true, graph_result)
     });
     match result {
-        Ok(text) => ThawResult {
-            value: thaw_arena::owned_string(text),
-            error: std::ptr::null(),
-        },
+        Ok(text) => graph_ok_result(text, graph_result),
         Err(error) => ThawResult {
             value: std::ptr::null(),
             error: owned_exception_error(error),
@@ -4470,10 +4493,7 @@ fn set_property_json_result_impl(
         Ok(returned)
     });
     match result {
-        Ok(value) => ThawResult {
-            value: thaw_arena::owned_string(value),
-            error: std::ptr::null(),
-        },
+        Ok(value) => graph_ok_result(value, graph_result),
         Err(error) => ThawResult {
             value: std::ptr::null(),
             error: owned_exception_error(error),
@@ -4614,7 +4634,7 @@ pub extern "C" fn thaw_js_call_selected_method_graph_result(
         resolve_value_wire_impl(ctx, value, &format!("JavaScript method `{name}`"), true, true)
     });
     match result {
-        Ok(value) => ThawResult { value: thaw_arena::owned_string(value), error: std::ptr::null() },
+        Ok(value) => graph_ok_result(value, true),
         Err(error) => ThawResult { value: std::ptr::null(), error: owned_exception_error(error) },
     }
 }
@@ -4686,10 +4706,7 @@ fn thaw_js_call_method_result_impl(
         resolve_value_wire_impl(ctx, value, &format!("JavaScript method `{name}`"), true, graph_result)
     });
     match result {
-        Ok(value) => ThawResult {
-            value: thaw_arena::owned_string(value),
-            error: std::ptr::null(),
-        },
+        Ok(value) => graph_ok_result(value, graph_result),
         Err(error) => ThawResult {
             value: std::ptr::null(),
             error: owned_exception_error(error),
@@ -4766,10 +4783,7 @@ fn thaw_js_resolve_handle_result_impl(handle: u64, graph_result: bool) -> ThawRe
         resolve_value_wire_impl(ctx, value, &format!("JavaScript value #{handle}"), true, graph_result)
     });
     match result {
-        Ok(value) => ThawResult {
-            value: thaw_arena::owned_string(value),
-            error: std::ptr::null(),
-        },
+        Ok(value) => graph_ok_result(value, graph_result),
         Err(error) => ThawResult {
             value: std::ptr::null(),
             error: owned_exception_error(error),
@@ -4821,10 +4835,7 @@ fn call_handle_result_impl(handle: u64, args_json: *const c_char, graph_result: 
         )
     });
     match result {
-        Ok(text) => ThawResult {
-            value: thaw_arena::owned_string(text),
-            error: std::ptr::null(),
-        },
+        Ok(text) => graph_ok_result(text, graph_result),
         Err(reason) => ThawResult {
             value: std::ptr::null(),
             error: owned_exception_error(reason),
@@ -4873,9 +4884,7 @@ pub extern "C" fn thaw_js_call_handle_with_this_graph_wire_result(
             &format!("JavaScript value #{handle}"), true)
     });
     match result {
-        Ok(text) => ThawResult {
-            value: thaw_arena::owned_string(text), error: std::ptr::null(),
-        },
+        Ok(text) => graph_ok_result(text, true),
         Err(reason) => ThawResult {
             value: std::ptr::null(), error: owned_exception_error(reason),
         },

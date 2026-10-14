@@ -1974,6 +1974,71 @@ unsafe extern "C" fn close_and_free_uv_handle(handle: *mut c_void) {
 
 #[cfg(target_os = "linux")]
 #[test]
+fn polling_keeps_call_envs_while_a_registered_libuv_loop_is_referenced() {
+    let _guard = lock_async_test();
+    unsafe {
+        type UvLoopSize = unsafe extern "C" fn() -> usize;
+        type UvLoopInit = unsafe extern "C" fn(*mut c_void) -> i32;
+        type UvLoopClose = unsafe extern "C" fn(*mut c_void) -> i32;
+        type UvHandleSize = unsafe extern "C" fn(i32) -> usize;
+        type UvTimerInit = unsafe extern "C" fn(*mut c_void, *mut c_void) -> i32;
+        type UvTimerStart = unsafe extern "C" fn(
+            *mut c_void, Option<unsafe extern "C" fn(*mut c_void)>, u64, u64,
+        ) -> i32;
+        type UvClose = unsafe extern "C" fn(
+            *mut c_void, Option<unsafe extern "C" fn(*mut c_void)>,
+        );
+        let library = libc::dlopen(c"libuv.so.1".as_ptr(), libc::RTLD_NOW | libc::RTLD_GLOBAL);
+        assert!(!library.is_null());
+        macro_rules! uv_symbol {
+            ($name:literal, $ty:ty) => {{
+                let symbol = libc::dlsym(libc::RTLD_DEFAULT, $name.as_ptr());
+                assert!(!symbol.is_null());
+                std::mem::transmute::<*mut c_void, $ty>(symbol)
+            }};
+        }
+        let loop_size = uv_symbol!(c"uv_loop_size", UvLoopSize);
+        let loop_init = uv_symbol!(c"uv_loop_init", UvLoopInit);
+        let loop_close = uv_symbol!(c"uv_loop_close", UvLoopClose);
+        let handle_size = uv_symbol!(c"uv_handle_size", UvHandleSize);
+        let timer_init = uv_symbol!(c"uv_timer_init", UvTimerInit);
+        let timer_start = uv_symbol!(c"uv_timer_start", UvTimerStart);
+        let close = uv_symbol!(c"uv_close", UvClose);
+        let event_loop = libc::calloc(1, loop_size());
+        assert_eq!(loop_init(event_loop), 0);
+        assert_eq!(thaw_napi_register_uv_loop(event_loop), NAPI_OK);
+        const UV_TIMER: i32 = 13;
+        let timer = libc::calloc(1, handle_size(UV_TIMER));
+        assert_eq!(timer_init(event_loop, timer), 0);
+        // A referenced timer which the addon scheduled from a call: nothing is
+        // counted as async work or a threadsafe function, only libuv knows.
+        assert_eq!(timer_start(timer, Some(test_uv_timer_callback), 10_000, 0), 0);
+        HOST.with(|host| host.borrow_mut().pending_call_envs.push(Box::new(Env::new())));
+        thaw_napi_poll_async_work();
+        assert!(
+            HOST.with(|host| {
+                let host = host.borrow();
+                host.pending_call_envs.len() == 1 && !host.pending_call_envs[0].finalized
+            }),
+            "the call Env must outlive the libuv timer that may still call back into it"
+        );
+        close(timer, Some(close_and_free_uv_handle));
+        for _ in 0..100 {
+            poll_uv_loop();
+            if !uv_handles_open() { break; }
+        }
+        assert_eq!(thaw_napi_unregister_uv_loop(event_loop), NAPI_OK);
+        thaw_napi_poll_async_work();
+        assert!(HOST.with(|host| host.borrow().pending_call_envs[0].finalized));
+        HOST.with(|host| host.borrow_mut().pending_call_envs.clear());
+        assert_eq!(loop_close(event_loop), 0);
+        libc::free(event_loop);
+        libc::dlclose(library);
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
 fn shutdown_waits_for_unreferenced_and_closing_registered_handles() {
     let _guard = lock_async_test();
     unsafe {

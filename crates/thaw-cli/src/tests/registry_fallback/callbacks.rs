@@ -893,7 +893,8 @@ async function main(): Promise<void> {
         await new Promise<void>((resolve): void => resolve());
         console.log(holder.check((value: string): string => value));
     });
-    console.log(await runRejected(async (): Promise<void> => { throw "boom"; }));
+    // An Error (not a bare string, whose `.message` is `undefined` in Node too).
+    console.log(await runRejected(async (): Promise<void> => { throw new Error("boom"); }));
 }
 "#,
     )

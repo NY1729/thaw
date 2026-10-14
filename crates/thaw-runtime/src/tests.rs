@@ -1327,6 +1327,30 @@ fn invocation_deadline_rejects_a_pending_promise_without_waiting_for_it() {
 }
 
 #[test]
+fn expired_invocation_abandons_race_children_instead_of_draining_them() {
+    // A handler awaiting Promise.race hit its deadline: the race output is
+    // rejected and released, but its children are still pending. Draining
+    // detached work must not sleep through them nor resume them into the
+    // released output.
+    let children = [timed_value(300, 1.0), timed_value(400, 2.0)];
+    let raced = unsafe { thaw_promise_race(children.as_ptr(), children.len()) };
+    set_invocation_deadline(Some(20));
+    thaw_runtime_run_until_resolved(raced);
+    assert_eq!(thaw_promise_state(raced), 2);
+    unsafe { thaw_promise_destroy(raced) };
+
+    let started = Instant::now();
+    thaw_runtime_drain_detached();
+    assert!(
+        started.elapsed() < Duration::from_millis(200),
+        "an expired invocation must not wait for abandoned children: {:?}",
+        started.elapsed()
+    );
+    purge_pending_async_state();
+    assert!(TIMERS.with(|timers| timers.borrow().is_empty()));
+}
+
+#[test]
 fn invocation_deadline_does_not_affect_a_promise_that_settles_in_time() {
     set_invocation_deadline(Some(500));
     let fast = timed_value(10, 42.0);

@@ -18,6 +18,28 @@ fn host_worker_bootstrap(worker_data_json: &str, config_json: &str, thread_id: u
         const __thaw_define_property = Object.defineProperty;
         const __thaw_live_children_key = Symbol.for('thaw.worker.liveChildren');
         if (globalThis.process && !__thaw_has_own.call(globalThis.process, __thaw_live_children_key)) __thaw_define_property(globalThis.process, __thaw_live_children_key, {{ value: 0, writable: true, configurable: true }});
+        // process.exit()/chdir() are Worker-local: exit ends only this Worker
+        // (reported through the Exit event); chdir is unsupported, as in Node.
+        globalThis.__thaw_host_worker_exit_code = undefined;
+        const __thaw_worker_exit_marker = {{ __thawWorkerExit: true }};
+        if (globalThis.process) {{
+          const __thaw_process = globalThis.process;
+          __thaw_define_property(__thaw_process, 'chdir', {{ value: function chdir() {{
+            const error = new TypeError('process.chdir() is not supported in workers');
+            error.code = 'ERR_WORKER_UNSUPPORTED_OPERATION';
+            throw error;
+          }}, writable: true, configurable: true }});
+          __thaw_define_property(__thaw_process, 'exit', {{ value: function exit(code) {{
+            const status = code === undefined ? Number(__thaw_process.exitCode || 0) : Number(code);
+            __thaw_process.exitCode = status;
+            if (globalThis.__thaw_host_worker_exit_code === undefined) {{
+              globalThis.__thaw_host_worker_exit_code = status;
+              if (typeof __thaw_process.emit === 'function') __thaw_process.emit('exit', status);
+            }}
+            globalThis.__thaw_host_worker_closed = true;
+            throw __thaw_worker_exit_marker;
+          }}, writable: true, configurable: true }});
+        }}
         const __thaw_map_get = Map.prototype.get;
         const __thaw_map_set = Map.prototype.set;
         const __thaw_map_delete = Map.prototype.delete;
@@ -485,6 +507,20 @@ fn run_host_worker(
                 Err(mpsc::RecvTimeoutError::Disconnected) => break Ok(1),
             }
         }
+    };
+    // process.exit() inside the Worker unwinds as a marker exception; its
+    // recorded status replaces whatever the unwinding reported.
+    let exit_code = with_context(|ctx| {
+        let code = ctx.globals().get::<_, Option<f64>>("__thaw_host_worker_exit_code").ok().flatten();
+        if code.is_some() {
+            // Messages posted before (and by) process.exit() still reach the parent.
+            let _ = drain_host_worker_events(&ctx, &events);
+        }
+        code
+    });
+    let work = match exit_code {
+        Some(code) => Ok(code as _),
+        None => work,
     };
     let shutdown = close_worker_napi();
     let result = match (work, shutdown) {
@@ -1036,24 +1072,36 @@ fn run_host_child(
             }
         }
     });
-    let mut stdin = process.stdin.take();
+    // Writes go through their own thread: a child that stops reading stdin
+    // must never keep this control loop from handling kill/exit.
+    let mut stdin = process.stdin.take().map(|mut pipe| {
+        let (sender, chunks) = mpsc::channel::<Vec<u8>>();
+        std::thread::spawn(move || {
+            while let Ok(chunk) = chunks.recv() {
+                if pipe.write_all(&chunk).and_then(|()| pipe.flush()).is_err() {
+                    break;
+                }
+            }
+        });
+        sender
+    });
     let status = loop {
         match commands.recv_timeout(Duration::from_millis(2)) {
             Ok(HostChildCommand::Stdin(value)) => {
-                if let Some(input) = &mut stdin {
-                    let _ = input.write_all(&value);
-                    let _ = input.flush();
+                if let Some(input) = &stdin {
+                    let _ = input.send(value);
                 }
             }
             Ok(HostChildCommand::StdinEnd) => stdin = None,
-            Ok(HostChildCommand::Kill(signal)) => {
+            Ok(HostChildCommand::Kill(signal, delivered)) => {
                 #[cfg(unix)]
-                unsafe {
-                    libc::kill(process.id() as libc::pid_t, signal);
-                }
+                let sent = unsafe { libc::kill(process.id() as libc::pid_t, signal) } == 0;
                 #[cfg(not(unix))]
-                let _ = process.kill();
-                stdin = None;
+                let sent = process.kill().is_ok();
+                let _ = delivered.send(sent);
+                if signal != 0 {
+                    stdin = None;
+                }
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => stdin = None,
@@ -1124,14 +1172,18 @@ fn send_host_child_stdin(handle: u32, value: String, end: bool) -> bool {
     })
 }
 
+/// `ChildProcess.kill()`: true only when the signal was really delivered, as
+/// reported by the control loop that owns the child (no pid-reuse race).
 fn kill_host_child(handle: u32, signal: i32) -> bool {
-    HOST_CHILDREN.with(|table| {
+    let (delivered, reply) = mpsc::channel();
+    let sent = HOST_CHILDREN.with(|table| {
         table
             .borrow()
             .children
             .get(&handle)
-            .is_some_and(|child| child.commands.send(HostChildCommand::Kill(signal)).is_ok())
-    })
+            .is_some_and(|child| child.commands.send(HostChildCommand::Kill(signal, delivered)).is_ok())
+    });
+    sent && reply.recv_timeout(Duration::from_secs(1)).unwrap_or(false)
 }
 
 fn host_children_active() -> bool {
@@ -1169,8 +1221,26 @@ fn start_host_stdin() {
     });
 }
 
+/// Like Node (libuv), never die of SIGPIPE: a write to a pipe whose reader is
+/// gone (a killed child's stdin, a closed stdout) must surface as EPIPE.
+fn ignore_sigpipe() {
+    #[cfg(unix)]
+    {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| unsafe {
+            libc::signal(libc::SIGPIPE, libc::SIG_IGN);
+        });
+    }
+}
+
 fn host_stdin_active() -> bool {
-    HOST_STDIN.with(|slot| slot.borrow().is_some())
+    !HOST_STDIN_UNREFED.with(std::cell::Cell::get) && HOST_STDIN.with(|slot| slot.borrow().is_some())
+}
+
+/// `process.stdin.ref()` / `unref()`: an unref'd stdin keeps delivering data
+/// but no longer keeps the event loop alive.
+fn set_host_stdin_ref(refed: bool) {
+    HOST_STDIN_UNREFED.with(|flag| flag.set(!refed));
 }
 
 fn poll_host_stdin() -> String {
@@ -1277,8 +1347,20 @@ fn run_child_process(command: String, arguments_json: String, options_json: Stri
     if input.is_some() {
         child.stdin(Stdio::piped());
     }
-    let spawned = child.spawn();
-    let mut child = match spawned {
+    let timeout = options
+        .get("timeout")
+        .and_then(serde_json::Value::as_u64)
+        .filter(|milliseconds| *milliseconds > 0)
+        .map(Duration::from_millis);
+    let max_buffer = options
+        .get("maxBuffer")
+        .and_then(serde_json::Value::as_u64)
+        .map(|bytes| bytes as usize);
+    let kill_signal = options
+        .get("killSignal")
+        .and_then(serde_json::Value::as_i64)
+        .map_or(15, |signal| signal as i32);
+    let mut child = match child.spawn() {
         Ok(child) => child,
         Err(error) => {
             return serde_json::json!({
@@ -1291,234 +1373,203 @@ fn run_child_process(command: String, arguments_json: String, options_json: Stri
         }
     };
     let pid = child.id();
-    if let Some(input) = input {
-        let failure = |error: &io::Error, code: &str| {
-            serde_json::json!({
-                "error": error.to_string(),
-                "code": code,
-                "pid": pid,
-            })
-            .to_string()
-        };
-        let stop_child = |child: &mut std::process::Child| {
-            let _ = child.kill();
-            let _ = child.wait();
-        };
-        let capture_cleanup_failed =
-            |thread: std::thread::JoinHandle<io::Result<Vec<u8>>>| {
-                thread.join().map_or(true, |result| result.is_err())
+    let failure = |error: &io::Error, code: &str| {
+        serde_json::json!({ "error": error.to_string(), "code": code, "pid": pid }).to_string()
+    };
+    let stop_child = |child: &mut std::process::Child| {
+        let _ = child.kill();
+        let _ = child.wait();
+    };
+    // Each pipe is drained by its own thread into a shared buffer so that the
+    // supervisor below can enforce `timeout`/`maxBuffer` while the child is
+    // still running and can still return what was captured.
+    // Like libuv's spawnSync, `maxBuffer` bounds stdout and stderr together.
+    let total_output = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let capture = |pipe: Option<Box<dyn Read + Send>>| -> io::Result<std::sync::Arc<SyncPipeCapture>> {
+        let shared = std::sync::Arc::new(SyncPipeCapture::default());
+        let mut pipe = pipe.ok_or_else(|| io::Error::other("missing child output pipe"))?;
+        let reader = shared.clone();
+        let total_output = total_output.clone();
+        std::thread::Builder::new().spawn(move || {
+            let mut chunk = [0u8; 8192];
+            loop {
+                match pipe.read(&mut chunk) {
+                    Ok(0) => break,
+                    // Past the limit the child is being stopped: keep draining (and
+                    // discarding) so it dies of our signal, not of a closed pipe.
+                    Ok(length) => {
+                        if reader.exceeded.load(std::sync::atomic::Ordering::SeqCst) {
+                            continue;
+                        }
+                        let mut data = reader.data.lock().unwrap_or_else(|poison| poison.into_inner());
+                        data.extend_from_slice(&chunk[..length]);
+                        let total = total_output.fetch_add(length, std::sync::atomic::Ordering::SeqCst) + length;
+                        if max_buffer.is_some_and(|limit| total > limit) {
+                            reader.exceeded.store(true, std::sync::atomic::Ordering::SeqCst);
+                        }
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                    Err(error) => {
+                        *reader.error.lock().unwrap_or_else(|poison| poison.into_inner()) = Some(error);
+                        break;
+                    }
+                }
+            }
+            reader.finished.store(true, std::sync::atomic::Ordering::SeqCst);
+        })?;
+        Ok(shared)
+    };
+    let stdout_pipe: Option<Box<dyn Read + Send>> = child.stdout.take().map(|pipe| Box::new(pipe) as _);
+    let stderr_pipe: Option<Box<dyn Read + Send>> = child.stderr.take().map(|pipe| Box::new(pipe) as _);
+    let stdout = match capture(stdout_pipe) {
+        Ok(shared) => shared,
+        Err(error) => {
+            stop_child(&mut child);
+            return failure(&error, "UNKNOWN");
+        }
+    };
+    let stderr = match capture(stderr_pipe) {
+        Ok(shared) => shared,
+        Err(error) => {
+            stop_child(&mut child);
+            return failure(&error, "UNKNOWN");
+        }
+    };
+    let writer_receiver = match input {
+        None => None,
+        Some(input) => {
+            let Some(stdin) = child.stdin.take() else {
+                stop_child(&mut child);
+                return failure(&io::Error::other("missing child stdin pipe"), "UNKNOWN");
             };
-        let include_cleanup_failure = |error: io::Error, failed: bool| {
-            if failed {
-                io::Error::other(format!("{error}; output capture cleanup failed"))
-            } else {
-                error
-            }
-        };
-        let Some(stdout) = child.stdout.take() else {
-            let error = io::Error::other("missing child stdout pipe");
-            stop_child(&mut child);
-            return failure(&error, "UNKNOWN");
-        };
-        let Some(stderr) = child.stderr.take() else {
-            let error = io::Error::other("missing child stderr pipe");
-            stop_child(&mut child);
-            return failure(&error, "UNKNOWN");
-        };
-        let mut stdout_thread = Some(match std::thread::Builder::new().spawn(move || {
-            let mut output = Vec::new();
-            let mut stdout = stdout;
-            stdout.read_to_end(&mut output)?;
-            Ok::<_, io::Error>(output)
-        }) {
-            Ok(thread) => thread,
-            Err(error) => {
+            let (sender, receiver) = mpsc::sync_channel(1);
+            let spawned = std::thread::Builder::new().spawn(move || {
+                let mut stdin = stdin;
+                let result = stdin.write_all(&input);
+                drop(stdin);
+                let _ = sender.send(result);
+            });
+            if let Err(error) = spawned {
                 stop_child(&mut child);
                 return failure(&error, "UNKNOWN");
             }
-        });
-        let mut stderr_thread = Some(match std::thread::Builder::new().spawn(move || {
-            let mut output = Vec::new();
-            let mut stderr = stderr;
-            stderr.read_to_end(&mut output)?;
-            Ok::<_, io::Error>(output)
-        }) {
-            Ok(thread) => thread,
-            Err(error) => {
-                stop_child(&mut child);
-                let error = include_cleanup_failure(
-                    error,
-                    capture_cleanup_failed(stdout_thread.take().unwrap()),
-                );
-                return failure(&error, "UNKNOWN");
-            }
-        });
-        let Some(stdin) = child.stdin.take() else {
-            let error = io::Error::other("missing child stdin pipe");
-            stop_child(&mut child);
-            let stdout_failed = capture_cleanup_failed(stdout_thread.take().unwrap());
-            let stderr_failed = capture_cleanup_failed(stderr_thread.take().unwrap());
-            let error = include_cleanup_failure(error, stdout_failed || stderr_failed);
-            return failure(&error, "UNKNOWN");
-        };
-        let (writer_result_sender, writer_result_receiver) = mpsc::sync_channel(1);
-        let writer_thread = match std::thread::Builder::new().spawn(move || {
-            let mut stdin = stdin;
-            let result = stdin.write_all(&input);
-            drop(stdin);
-            let _ = writer_result_sender.send(result);
-        }) {
-            Ok(thread) => thread,
-            Err(error) => {
-                stop_child(&mut child);
-                let stdout_failed = capture_cleanup_failed(stdout_thread.take().unwrap());
-                let stderr_failed = capture_cleanup_failed(stderr_thread.take().unwrap());
-                let error = include_cleanup_failure(error, stdout_failed || stderr_failed);
-                return failure(&error, "UNKNOWN");
-            }
-        };
+            Some(receiver)
+        }
+    };
 
-        let mut writer_result = None;
-        let mut status = None;
-        let mut supervisor_error = None;
-        let mut stdout = None;
-        let mut stderr = None;
-        loop {
-            if writer_result.is_none() {
-                match writer_result_receiver.try_recv() {
+    let started = std::time::Instant::now();
+    let mut signalled_at: Option<std::time::Instant> = None;
+    let mut timed_out = false;
+    let mut writer_done = writer_receiver.is_none();
+    let mut write_error = None;
+    let mut status = None;
+    let mut supervisor_error = None;
+    let signal_child = |child: &mut std::process::Child| {
+        #[cfg(unix)]
+        unsafe {
+            libc::kill(child.id() as libc::pid_t, kill_signal);
+        }
+        #[cfg(not(unix))]
+        let _ = child.kill();
+    };
+    loop {
+        if let Some(receiver) = &writer_receiver {
+            if !writer_done {
+                match receiver.try_recv() {
                     Ok(result) => {
-                        writer_result = Some(result);
-                        if writer_result.as_ref().is_some_and(Result::is_err) {
-                            break;
+                        writer_done = true;
+                        // A write failure caused by our own kill is not an input error.
+                        if signalled_at.is_none() {
+                            write_error = result.err();
+                            if write_error.is_some() {
+                                break;
+                            }
                         }
                     }
                     Err(mpsc::TryRecvError::Disconnected) => {
-                        supervisor_error = Some(io::Error::other(
-                            "stdin writer result channel disconnected",
-                        ));
+                        supervisor_error =
+                            Some(io::Error::other("stdin writer result channel disconnected"));
                         break;
                     }
                     Err(mpsc::TryRecvError::Empty) => {}
                 }
             }
-            if stdout.is_none()
-                && stdout_thread
-                    .as_ref()
-                    .is_some_and(std::thread::JoinHandle::is_finished)
-            {
-                let result = stdout_thread.take().unwrap().join()
-                    .map_err(|_| io::Error::other("stdout capture thread panicked"))
-                    .and_then(|result| result);
-                match result {
-                    Ok(output) => stdout = Some(output),
-                    Err(error) => {
-                        supervisor_error = Some(error);
-                        break;
-                    }
+        }
+        if status.is_none() {
+            match child.try_wait() {
+                Ok(exit_status) => status = exit_status,
+                Err(error) => {
+                    supervisor_error = Some(error);
+                    break;
                 }
             }
-            if stderr.is_none()
-                && stderr_thread
-                    .as_ref()
-                    .is_some_and(std::thread::JoinHandle::is_finished)
-            {
-                let result = stderr_thread.take().unwrap().join()
-                    .map_err(|_| io::Error::other("stderr capture thread panicked"))
-                    .and_then(|result| result);
-                match result {
-                    Ok(output) => stderr = Some(output),
-                    Err(error) => {
-                        supervisor_error = Some(error);
-                        break;
-                    }
-                }
-            }
-            if status.is_none() {
-                match child.try_wait() {
-                    Ok(Some(exit_status)) => status = Some(exit_status),
-                    Ok(None) => {}
-                    Err(error) => {
-                        supervisor_error = Some(error);
-                        break;
-                    }
-                }
-            }
-            if status.is_some() && writer_result.is_some() && stdout.is_some() && stderr.is_some() {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(2));
         }
-
-        let write_error = writer_result.and_then(Result::err);
-        if write_error.is_some() || supervisor_error.is_some() {
-            stop_child(&mut child);
+        let exceeded = stdout.exceeded.load(std::sync::atomic::Ordering::SeqCst)
+            || stderr.exceeded.load(std::sync::atomic::Ordering::SeqCst);
+        if status.is_none() && signalled_at.is_none() {
+            if timeout.is_some_and(|limit| started.elapsed() >= limit) {
+                timed_out = true;
+                signal_child(&mut child);
+                signalled_at = Some(std::time::Instant::now());
+            } else if exceeded {
+                signal_child(&mut child);
+                signalled_at = Some(std::time::Instant::now());
+            }
         }
-        let writer_join = writer_thread.join();
-        let stdout_result = stdout_thread
-            .take()
-            .map(|thread| {
-                thread
-                    .join()
-                    .map_err(|_| io::Error::other("stdout capture thread panicked"))
-                    .and_then(|result| result)
-            })
-            .unwrap_or_else(|| stdout.ok_or_else(|| io::Error::other("stdout capture result unavailable")));
-        let stderr_result = stderr_thread
-            .take()
-            .map(|thread| {
-                thread
-                    .join()
-                    .map_err(|_| io::Error::other("stderr capture thread panicked"))
-                    .and_then(|result| result)
-            })
-            .unwrap_or_else(|| stderr.ok_or_else(|| io::Error::other("stderr capture result unavailable")));
-
-        if let Some(error) = write_error {
-            return failure(&error, "EPIPE");
+        let readers_finished = stdout.finished.load(std::sync::atomic::Ordering::SeqCst)
+            && stderr.finished.load(std::sync::atomic::Ordering::SeqCst);
+        // After we killed the child, a grandchild may keep the pipes open
+        // forever: stop waiting for them shortly after the child is gone.
+        let abandon_readers = signalled_at.is_some_and(|at| at.elapsed() > Duration::from_millis(100));
+        if status.is_some() && (writer_done || signalled_at.is_some()) && (readers_finished || abandon_readers) {
+            break;
         }
-        if let Some(error) = supervisor_error {
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    if write_error.is_some() || supervisor_error.is_some() {
+        stop_child(&mut child);
+    }
+    if let Some(error) = write_error {
+        return failure(&error, "EPIPE");
+    }
+    if let Some(error) = supervisor_error {
+        return failure(&error, "UNKNOWN");
+    }
+    for pipe in [&stdout, &stderr] {
+        if let Some(error) = pipe.error.lock().unwrap_or_else(|poison| poison.into_inner()).take() {
             return failure(&error, "UNKNOWN");
         }
-        if writer_join.is_err() {
-            return failure(&io::Error::other("stdin writer thread panicked"), "UNKNOWN");
-        }
-        let stdout = match stdout_result {
-            Ok(output) => output,
-            Err(error) => return failure(&error, "UNKNOWN"),
-        };
-        let stderr = match stderr_result {
-            Ok(output) => output,
-            Err(error) => return failure(&error, "UNKNOWN"),
-        };
-        let Some(status) = status else {
-            return failure(&io::Error::other("child status unavailable"), "UNKNOWN");
-        };
-        Ok(std::process::Output { status, stdout, stderr })
-    } else {
-        child.wait_with_output()
     }
-    .map(|output| {
-        #[cfg(unix)]
-        let signal = output.status.signal();
-        #[cfg(not(unix))]
-        let signal: Option<i32> = None;
-        serde_json::json!({
-            "pid": pid,
-            "status": output.status.code(),
-            "signal": signal,
-            "stdout": hex_encode(&output.stdout),
-            "stderr": hex_encode(&output.stderr),
-        })
-        .to_string()
+    let Some(status) = status else {
+        return failure(&io::Error::other("child status unavailable"), "UNKNOWN");
+    };
+    let take = |pipe: &SyncPipeCapture| {
+        std::mem::take(&mut *pipe.data.lock().unwrap_or_else(|poison| poison.into_inner()))
+    };
+    let max_buffer_exceeded = stdout.exceeded.load(std::sync::atomic::Ordering::SeqCst)
+        || stderr.exceeded.load(std::sync::atomic::Ordering::SeqCst);
+    #[cfg(unix)]
+    let signal = status.signal();
+    #[cfg(not(unix))]
+    let signal: Option<i32> = None;
+    serde_json::json!({
+        "pid": pid,
+        "status": status.code(),
+        "signal": signal,
+        "stdout": hex_encode(&take(&stdout)),
+        "stderr": hex_encode(&take(&stderr)),
+        "timedOut": timed_out,
+        "maxBufferExceeded": max_buffer_exceeded,
     })
-    .unwrap_or_else(|error| {
-        serde_json::json!({
-            "error": error.to_string(),
-            "code": "UNKNOWN",
-            "pid": pid,
-        })
-        .to_string()
-    })
+    .to_string()
+}
+
+#[derive(Default)]
+struct SyncPipeCapture {
+    data: std::sync::Mutex<Vec<u8>>,
+    error: std::sync::Mutex<Option<io::Error>>,
+    exceeded: std::sync::atomic::AtomicBool,
+    finished: std::sync::atomic::AtomicBool,
 }
 
 
@@ -1589,6 +1640,78 @@ fn sync_input_epipe_kills_direct_child() {
     )).unwrap();
     assert_eq!(record["code"], "EPIPE");
     assert!(record["pid"].as_u64().is_some());
+}
+
+#[cfg(all(test, unix))]
+#[test]
+fn sync_timeout_and_kill_signal_stop_a_child_that_never_exits() {
+    let started = std::time::Instant::now();
+    let record: serde_json::Value = serde_json::from_str(&run_child_process(
+        "/bin/sleep".into(),
+        serde_json::json!(["30"]).to_string(),
+        serde_json::json!({"timeout": 200, "killSignal": 9}).to_string(),
+    )).unwrap();
+    assert!(started.elapsed() < Duration::from_secs(10));
+    assert_eq!(record["timedOut"], true);
+    assert_eq!(record["signal"], 9);
+    assert!(record["status"].is_null());
+}
+
+#[cfg(all(test, unix))]
+#[test]
+fn sync_max_buffer_stops_a_child_that_keeps_writing() {
+    let started = std::time::Instant::now();
+    let record: serde_json::Value = serde_json::from_str(&run_child_process(
+        "/bin/sh".into(),
+        serde_json::json!(["-c", "while :; do echo xxxxxxxxxxxxxxxx; done"]).to_string(),
+        serde_json::json!({"maxBuffer": 1000, "killSignal": 15}).to_string(),
+    )).unwrap();
+    assert!(started.elapsed() < Duration::from_secs(10));
+    assert_eq!(record["maxBufferExceeded"], true);
+    assert_eq!(record["timedOut"], false);
+    assert_eq!(record["signal"], 15);
+    assert!(hex_decode(record["stdout"].as_str().unwrap()).len() > 1000);
+}
+
+#[cfg(all(test, unix))]
+#[test]
+fn sync_child_within_limits_reports_neither_flag() {
+    let record: serde_json::Value = serde_json::from_str(&run_child_process(
+        "/bin/sh".into(),
+        serde_json::json!(["-c", "printf abc; printf def >&2"]).to_string(),
+        serde_json::json!({"timeout": 5000, "maxBuffer": 1000}).to_string(),
+    )).unwrap();
+    assert_eq!(record["status"], 0);
+    assert_eq!(record["timedOut"], false);
+    assert_eq!(record["maxBufferExceeded"], false);
+    assert_eq!(hex_decode(record["stdout"].as_str().unwrap()), b"abc");
+    assert_eq!(hex_decode(record["stderr"].as_str().unwrap()), b"def");
+}
+
+#[cfg(all(test, unix))]
+#[test]
+fn async_kill_is_handled_while_a_stdin_backlog_cannot_drain() {
+    ignore_sigpipe();
+    let handle = spawn_host_child("/bin/sleep".into(), serde_json::json!(["30"]).to_string(), "{}".into());
+    // `sleep` never reads stdin: far more than a pipe buffer stays queued.
+    for _ in 0..16 {
+        assert!(send_host_child_stdin(handle, hex_encode(&vec![b'z'; 256 * 1024]), false));
+    }
+    let started = std::time::Instant::now();
+    assert!(kill_host_child(handle, 0), "signal 0 probes a live child without stopping it");
+    assert!(kill_host_child(handle, 15));
+    let mut exit = None;
+    while exit.is_none() {
+        for event in serde_json::from_str::<Vec<serde_json::Value>>(&poll_host_children()).unwrap() {
+            if event["type"] == "exit" {
+                exit = Some(event);
+            }
+        }
+        assert!(started.elapsed() < Duration::from_secs(5), "kill was blocked by the stdin backlog");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert_eq!(exit.unwrap()["signal"], 15);
+    assert!(!kill_host_child(handle, 15), "a released handle reports no delivery");
 }
 
 #[cfg(test)]

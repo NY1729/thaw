@@ -466,6 +466,13 @@ impl<'ctx> HirCompiler<'ctx> {
         }
         }
         if let Some(identity) = date_identity {
+            // One native Date keeps one Json twin while that twin is alive,
+            // so `a === a` and shared Date nodes survive the conversion.
+            self.builder.build_call(
+                self.module.get_function("thaw_json_adopt_native_date").unwrap(),
+                &[object.into(), json.into(), identity.into()],
+                "adopt_native_date_json",
+            ).map_err(|error| error.to_string())?;
             self.builder.build_call(
                 self.module.get_function("thaw_json_brand_wrapper_if").unwrap(),
                 &[json.into(), identity.into()],

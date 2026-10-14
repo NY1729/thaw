@@ -217,6 +217,50 @@ fn net_socket_exchanges_bytes_with_a_real_tcp_peer() {
 }
 
 #[test]
+fn net_socket_end_delivers_bytes_received_before_a_reset() {
+    use std::ffi::{CStr, CString};
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::os::fd::AsRawFd;
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = Vec::new();
+        stream.read_to_end(&mut request).unwrap();
+        stream.write_all(b"par").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        // SO_LINGER{on, 0}: closing sends RST instead of FIN (Linux values).
+        extern "C" {
+            fn setsockopt(fd: i32, level: i32, name: i32, value: *const i32, length: u32) -> i32;
+        }
+        let linger = [1_i32, 0_i32];
+        unsafe { setsockopt(stream.as_raw_fd(), 1, 13, linger.as_ptr(), 8) };
+        drop(stream);
+    });
+
+    let dir = temp_registry("builtin_net_socket_partial");
+    fs::write(dir.join("index.js"), "var net = require('node:net'); module.exports = async function (port) { var events = []; var socket = new net.Socket(); socket.on('connect', function() { events.push('connect'); }); socket.on('data', function(chunk) { events.push('data:' + chunk.toString()); }); socket.on('end', function() { events.push('end'); }); var completed = new Promise(function(resolve) { socket.on('error', function(error) { events.push('error:' + error.code); }); socket.on('close', function(hadError) { events.push('close:' + hadError); resolve(); }); }); socket.connect(port, '127.0.0.1'); socket.end('ping'); await completed; return events; };").unwrap();
+    let empty_node_modules = temp_registry("builtin_net_socket_partial_node_modules");
+    let (bundle, _, file_count, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(file_count, 3);
+    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseNetPartial = module.exports;");
+    let source = CString::new(script).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let function = CString::new("exerciseNetPartial").unwrap();
+    let arguments = CString::new(format!("[{port}]")).unwrap();
+    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    // Same sequence as node 22 against a half-open server that resets.
+    assert_eq!(result, r#"["connect","data:par","error:ECONNRESET","close:true"]"#);
+    server.join().unwrap();
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+}
+
+#[test]
 fn net_socket_reads_while_its_write_side_remains_open() {
     use std::ffi::{CStr, CString};
     use std::io::{Read, Write};
@@ -1229,7 +1273,7 @@ fn child_process_sync_apis_execute_and_report_node_shaped_results() {
     let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
     assert_eq!(
         result,
-        r#"[3,null,"out","err","out",true,true,"stdin",0,"env-ok","shell-ok",null,"ENOENT","/thaw/does-not-exist",[7,"bad","",true],null,"ENOBUFS"]"#
+        r#"[3,null,"out","err","out",true,true,"stdin",0,"env-ok","shell-ok",null,"ENOENT","/thaw/does-not-exist",[7,"bad","",true],0,"ENOBUFS"]"#
     );
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);

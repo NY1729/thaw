@@ -38,6 +38,8 @@ fn net_finish(handle: u32) -> String {
         let mut value = Vec::new();
         match stream.read_to_end(&mut value) {
             Ok(_) => format!("ok:{}", hex_encode(&value)),
+            // Bytes received before the failure still belong to the reader.
+            Err(error) if !value.is_empty() => format!("data-err:{}:{error}", hex_encode(&value)),
             Err(error) => format!("err:{error}"),
         }
     })
