@@ -8046,6 +8046,40 @@ fn retains_and_calls_a_callable_javascript_value() {
     );
 }
 
+// Awaiting a result that is already settled must not turn the event loop:
+// host callbacks queued by earlier native calls may not run in the middle of
+// the caller's synchronous code, as they would in Node.
+#[test]
+fn settled_method_result_does_not_turn_the_event_loop() {
+    assert_eq!(
+        load("globalThis.__pollTally = 0; (function() { var original = globalThis.__thaw_poll_platform_events; globalThis.__thaw_poll_platform_events = function() { globalThis.__pollTally++; return original ? original.apply(this, arguments) : undefined; }; })(); globalThis.__pollHolder = { plain() { return 7; }, later() { return new Promise(function(resolve) { setTimeout(function() { resolve(1); }, 1); }); } };"),
+        1
+    );
+    let holder = thaw_js_get_global(c"__pollHolder".as_ptr());
+    assert_ne!(holder, 0);
+    let empty = CString::new("[]").unwrap();
+    let plain = thaw_js_call_method_result(holder, c"plain".as_ptr(), empty.as_ptr());
+    assert!(plain.error.is_null());
+    assert_eq!(
+        unsafe { CStr::from_ptr(plain.value) }.to_str().unwrap(),
+        "7"
+    );
+    assert_eq!(
+        eval_json("globalThis.__pollTally").unwrap().as_deref(),
+        Some("0")
+    );
+    let later = thaw_js_call_method_result(holder, c"later".as_ptr(), empty.as_ptr());
+    assert!(later.error.is_null());
+    assert_eq!(
+        unsafe { CStr::from_ptr(later.value) }.to_str().unwrap(),
+        "1"
+    );
+    assert_ne!(
+        eval_json("globalThis.__pollTally").unwrap().as_deref(),
+        Some("0")
+    );
+}
+
 #[test]
 fn iterator_from_works_through_dynamic_handles() {
     let iterator_name = CString::new("Iterator").unwrap();

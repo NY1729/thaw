@@ -714,6 +714,43 @@ pub unsafe extern "C" fn thaw_js_call_reference(
     CString::new(text).unwrap_or_default().into_raw()
 }
 
+/// Graph-transport companion of [`thaw_js_call_reference`] for calls whose
+/// arguments (or receiver) hold live values that have no JSON form. The
+/// argument wire is `[true, receiver, ...arguments]`; the reference wrapper
+/// takes the receiver from its first argument when its meta is `true`.
+///
+/// # Safety
+///
+/// Same contract as [`thaw_js_call_reference`]; `args_json` is a graph wire.
+#[no_mangle]
+pub unsafe extern "C" fn thaw_js_call_reference_graph(
+    context: *mut std::ffi::c_void,
+    args_json: *const c_char,
+) -> *const c_char {
+    let name = format!("__thaw_napi_reference_{}", context as usize);
+    let args_json = to_str(args_json);
+    let result = with_active_or_context(|ctx| {
+        let target: Function = before_graph_decode(&ctx, &args_json, true, || {
+            ctx.globals().get(name.as_str())
+                .map_err(|_| format!("no such function `{name}` (was it loaded via loadScript?)"))
+        })?;
+        invoke_impl(ctx, target, &name, &args_json, true, true)
+    });
+    match result {
+        Ok(text) => {
+            let wire = owned_graph_wire(&text);
+            if wire.is_null() {
+                CString::new(format!("\u{2}{}", json_escape_string("Unable to register JavaScript graph result")))
+                    .unwrap_or_default().into_raw()
+            } else {
+                wire
+            }
+        }
+        Err(reason) => CString::new(format!("\u{2}{}", json_escape_string(&reason.text)))
+            .unwrap_or_default().into_raw(),
+    }
+}
+
 /// Result-ABI companion to [`thaw_js_call`]. Unlike the legacy JSON error
 /// object API, failures occupy the error channel so generated Thaw code can
 /// route JavaScript throws and Promise rejections through `try`/`catch`.
@@ -1020,6 +1057,13 @@ fn finish_with_platform_events<'js>(
     ctx: &Ctx<'js>,
     promise: &rquickjs::Promise<'js>,
 ) -> rquickjs::Result<Value<'js>> {
+    // Awaiting a value that is already settled (a non-thenable result, say)
+    // never turns the event loop: host callbacks queued by earlier native
+    // calls must not run in the middle of the caller's synchronous code.
+    if let Some(result) = promise.result() {
+        mark_js_rejection_consumed(promise.as_value());
+        return result;
+    }
     loop {
         dispatch_pending_process_signal(ctx);
         if let Ok(poll_platform_events) = ctx

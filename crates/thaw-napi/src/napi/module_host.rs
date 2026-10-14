@@ -414,8 +414,12 @@ unsafe extern "C" fn thaw_napi_handle_bridge(
             let handle = target
                 .parse::<u64>()
                 .map_err(|_| "invalid native addon handle")?;
-            let env = live_graph_owner_env(handle)
-                .ok_or("native addon handle is no longer live")?;
+            // A proxy finalizer may run after its addon environment has been
+            // torn down (process shutdown). Everything it owned is already
+            // released, so the release is an idempotent no-op, not an error.
+            let Some(env) = live_graph_owner_env(handle) else {
+                return Ok(serde_json::json!({ "kind": "value", "value": true }));
+            };
             dispatch_input.ensure_dispatch_scope(env)?;
             let count = unsafe { (*env).proxy_live_counts.get(&(handle as usize)).copied().unwrap_or(0) };
             if count > 1 {
@@ -5787,6 +5791,80 @@ impl Drop for CallbackGraphArguments {
     }
 }
 
+/// Calls a retained QuickJS function with arguments that need graph transport.
+/// The wire is `[true, receiver, ...arguments]`, the receiver-carrying form the
+/// reference wrapper understands.
+#[cfg(feature = "quickjs")]
+unsafe fn call_quickjs_reference_graph(
+    env: NapiEnv, info: &CallbackInfo, context: usize,
+) -> NapiValue {
+    let (marker, receiver, arguments) = {
+        let Ok(env_ref) = env_mut(env) else { return ptr::null_mut() };
+        let marker = env_ref.alloc(Value::Bool(true));
+        let receiver = if info.this_arg.is_null() {
+            env_ref.alloc(Value::Undefined)
+        } else {
+            info.this_arg
+        };
+        let mut items = vec![Some(marker), Some(receiver)];
+        items.extend(info.args.iter().copied().map(Some));
+        (marker, receiver, env_ref.alloc(Value::Array(items)))
+    };
+    let arguments_guard = CallbackGraphArguments { env, value: arguments };
+    let encoded = napi_arguments_graph_for_env(env, arguments);
+    drop(arguments_guard);
+    if let Ok(env_ref) = env_mut(env) {
+        for synthetic in [marker, receiver] {
+            if synthetic != info.this_arg {
+                if let Some(index) = env_ref.values.iter().position(|value| *value == synthetic) {
+                    env_ref.values.swap_remove(index);
+                    drop(Box::from_raw(synthetic));
+                }
+            }
+        }
+    }
+    let fail = |message: String| {
+        if let Ok(env_ref) = env_mut(env) {
+            env_ref.exception = Some(env_ref.alloc(Value::Error(message)));
+        }
+        ptr::null_mut()
+    };
+    let encoded = match encoded {
+        Ok(encoded) => encoded,
+        Err(message) => return fail(message),
+    };
+    let Ok(encoded) = CString::new(encoded) else {
+        return fail("JavaScript callback arguments contain NUL".into());
+    };
+    let result = thaw_quickjs::thaw_js_call_reference_graph(context as *mut c_void, encoded.as_ptr());
+    let Ok(result) = text(result) else {
+        return fail("invalid QuickJS callback response".into());
+    };
+    if let Some(message) = result.strip_prefix('\u{2}') {
+        let message = serde_json::from_str::<String>(message)
+            .unwrap_or_else(|_| "invalid QuickJS callback error response".into());
+        let framed = thaw_arena::error_wire::parse_tagged(message.as_bytes())
+            .and_then(|frame| {
+                let name = std::str::from_utf8(frame.chain).ok()?;
+                let body = std::str::from_utf8(frame.original.unwrap_or(frame.display)).ok()?;
+                Some((name, body))
+            });
+        let (name, body) = framed.unwrap_or_else(|| message.strip_prefix('\u{1}')
+            .and_then(|tagged| tagged.split_once('\u{1}'))
+            .filter(|(name, _)| !name.is_empty())
+            .unwrap_or(("Error", message.as_str())));
+        if let Ok(env_ref) = env_mut(env) {
+            let error = alloc_error(env_ref, name, body.into(), None);
+            env_ref.exception = Some(error);
+        }
+        return ptr::null_mut();
+    }
+    match parse_napi_graph_value(env, &result) {
+        Ok(value) => value,
+        Err(message) => fail(message),
+    }
+}
+
 unsafe extern "C" fn thaw_compiled_callback(_env: NapiEnv, info: NapiCallbackInfo) -> NapiValue {
     let _dispatch = ForeignCallbackGuard::new();
     let Some(info) = info.as_ref() else {
@@ -5858,6 +5936,12 @@ unsafe extern "C" fn thaw_compiled_callback(_env: NapiEnv, info: NapiCallbackInf
         } else {
             args
         };
+        // Live JavaScript values have no JSON form: escalate this call to
+        // graph transport instead of failing it silently.
+        #[cfg(feature = "quickjs")]
+        if _is_quickjs && args.as_ref().is_err_and(|message| message.contains("requires graph transport")) {
+            return call_quickjs_reference_graph(_env, info, bridge.context);
+        }
         let args = args.and_then(|args| {
             serde_json::to_string(&args).map_err(|error| error.to_string())
         });

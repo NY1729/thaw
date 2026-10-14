@@ -1634,14 +1634,18 @@ fn threadsafe_function_serializes_multiple_producers() {
 // loop cannot see its queued work and would return before a slow worker pushes
 // the completion. Wait for that completion event first.
 fn wait_for_ready_completion() {
+    wait_for_ready_completions(1);
+}
+
+fn wait_for_ready_completions(count: usize) {
     let owner = std::thread::current().id();
     for _ in 0..5_000 {
         let ready = ready_events().lock().unwrap_or_else(|poisoned| poisoned.into_inner())
-            .iter().any(|event| unsafe { event.owner() == owner });
-        if ready { return; }
+            .iter().filter(|event| unsafe { event.owner() == owner }).count();
+        if ready >= count { return; }
         std::thread::sleep(Duration::from_millis(1));
     }
-    panic!("async completion was never queued");
+    panic!("async completions were never queued");
 }
 
 #[test]
@@ -1753,6 +1757,9 @@ fn async_work_executes_on_a_worker_and_completes_on_the_draining_thread() {
     gate_state.1 = true;
     gate.changed.notify_all();
     drop(gate_state);
+    // The unregistered Env is invisible to the drain loop: wait until every
+    // released worker has queued its completion (plus the cancelled one).
+    wait_for_ready_completions(worker_count + 1);
     assert_eq!(thaw_napi_run_async_work(), worker_count + 1);
     let cancel_probe = unsafe { Box::from_raw(cancel_probe) };
     assert!(!cancel_probe.executed.load(Ordering::Acquire));
