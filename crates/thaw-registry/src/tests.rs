@@ -1512,3 +1512,4 @@ fn resolved_declaration_origin_distinguishes_installed_file_and_builtin_text() {
 }
 
 include!("tests/network_contracts.rs");
+include!("tests/d_contracts.rs");

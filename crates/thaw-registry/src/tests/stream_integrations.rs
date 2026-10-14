@@ -36,7 +36,7 @@ fn diagnostics_channels_publish_bind_stores_and_trace() {
     let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
     assert_eq!(
         result,
-        r#"[true,7,true,false,5,6,"bad",["store:4","store:10","work:5","store:12","start:","end:5","start:","asyncStart:6","asyncEnd:6","end:6","start:","error:bad","end:bad"]]"#
+        r#"[true,7,true,true,5,6,"bad",["store:4","work:2","work:2","work:5","work:5","work:6","start:","end:5","start:","end:","asyncStart:6","asyncEnd:6","start:","error:bad","end:bad"]]"#
     );
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
