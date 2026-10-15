@@ -937,6 +937,16 @@
       "name": "connection handler can call methods on its any socket",
       "expect": "matched",
       "source": "import net from 'node:net';\nfunction main(): void {\n  const server = net.createServer((socket: any) => {\n    socket.on('data', (d: any) => { console.log('data', String(d)); socket.end('bye'); });\n    socket.on('error', (e: any) => console.log('err', e && e.code));\n  });\n  server.listen(0, '127.0.0.1', () => {\n    const port = (server.address() as any).port;\n    const c = net.connect(port, '127.0.0.1', () => c.write('hello'));\n    c.on('data', (d: any) => { console.log('client got', String(d)); });\n    c.on('close', () => { console.log('closed'); server.close(); });\n  });\n}\n"
+    },
+    {
+      "name": "byte stream byob reads transfer the view buffer and report done at the end",
+      "expect": "matched",
+      "source": "import { ReadableStream } from 'node:stream/web'; async function main(): Promise<void> { const run: any = new Function('return (async () => { const stream = new ReadableStream({ type: \\'bytes\\', start(c) { c.enqueue(new Uint8Array([1, 2, 3])); c.close(); } });const reader = stream.getReader({ mode: \\'byob\\' }); const buffer = new ArrayBuffer(8); const view = new Uint8Array(buffer);const first = await reader.read(view); const out = [first.done, first.value.byteLength, first.value.buffer === buffer, buffer.byteLength, view.byteLength].join(\\' \\');const last = await reader.read(new Uint8Array(2)); return out + \\'\\\\n\\' + [last.done, last.value.byteLength].join(\\' \\'); })()'); console.log(await run()); }"
+    },
+    {
+      "name": "byte stream tee gives byob and default branches independent chunks",
+      "expect": "matched",
+      "source": "import { ReadableStream } from 'node:stream/web'; async function main(): Promise<void> { const run: any = new Function('return (async () => { const stream = new ReadableStream({ type: \\'bytes\\', start(c) { c.enqueue(new Uint8Array([1, 2, 3, 4, 5])); c.close(); } });const branches = stream.tee(); const a = branches[0].getReader({ mode: \\'byob\\' }); const b = branches[1].getReader();const x = await a.read(new Uint8Array(8), { min: 5 }); const y = await b.read();return [x.value.byteLength, y.value.byteLength, x.value.buffer !== y.value.buffer].join(\\' \\'); })()'); console.log(await run()); }"
     }
   ]
 }

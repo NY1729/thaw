@@ -129,52 +129,305 @@
       }
       get desiredSize() { return this._stream._state === 'readable' ? this._stream._highWaterMark - this._stream._queueTotalSize : null; }
     }
-    const byobResultView = (view, byteLength) => view instanceof DataView
-      ? new DataView(view.buffer, view.byteOffset, byteLength)
-      : new view.constructor(view.buffer, view.byteOffset, Math.floor(byteLength / view.BYTES_PER_ELEMENT));
+    // WHATWG Streams, "ReadableByteStreamController" algorithms. The controller owns the byte queue
+    // ({ buffer, byteOffset, byteLength } entries) and the pull-into descriptors; the stream only keeps the
+    // state, the reader and the read / read-into request lists (`_reads`, `_byobReads`).
+    const webIllegalConstructor = () => new TypeError('Illegal constructor');
+    const webRangeError = message => { const error = new RangeError(message); error.code = 'ERR_INVALID_ARG_VALUE'; return error; };
+    const webTypeError = message => { const error = new TypeError(message); error.code = 'ERR_INVALID_ARG_VALUE'; return error; };
+    const webDetached = buffer => buffer.detached === true;
+    const webTransfer = buffer => { if (webDetached(buffer)) throw webTypeError('The ArrayBuffer is detached'); return buffer.transfer(); };
+    const webEnforceRange = (value, name) => {
+      const number = Number(value);
+      if (!Number.isFinite(number)) throw webTypeError(`${name} must be a finite number`);
+      const integer = Math.trunc(number);
+      if (integer < 0 || integer > Number.MAX_SAFE_INTEGER) throw webTypeError(`${name} is out of range`);
+      return integer;
+    };
+    const webTypedArrayTag = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(Uint8Array.prototype), Symbol.toStringTag).get;
+    const webTypedArrayConstructors = { Int8Array, Uint8Array, Uint8ClampedArray, Int16Array, Uint16Array, Int32Array, Uint32Array, Float32Array, Float64Array, BigInt64Array, BigUint64Array };
+    if (typeof Float16Array === 'function') webTypedArrayConstructors.Float16Array = Float16Array;
+    const webViewKind = view => {
+      if (view instanceof DataView) return { constructor: DataView, elementSize: 1 };
+      const constructor = webTypedArrayConstructors[webTypedArrayTag.call(view)];
+      return { constructor, elementSize: constructor.BYTES_PER_ELEMENT };
+    };
+    const webByobRequestToken = {};
+    const webStreamClose = stream => {
+      stream._state = 'closed';
+      const reader = stream._reader;
+      if (!reader) return;
+      reader._closedRecord.resolve();
+      if (reader instanceof ReadableStreamDefaultReader) while (stream._reads.length) stream._reads.shift().resolve({ value: undefined, done: true });
+    };
+    const webStreamError = (stream, error) => {
+      stream._state = 'errored'; stream._error = error; stream._rejectCapacity(error);
+      const reader = stream._reader;
+      if (!reader) return;
+      reader._closedRecord.reject(error);
+      if (reader instanceof ReadableStreamDefaultReader) while (stream._reads.length) stream._reads.shift().reject(error);
+      else while (stream._byobReads.length) stream._byobReads.shift().reject(error);
+    };
     class ReadableStreamBYOBRequest {
-      constructor(stream, read) { this._stream = stream; this._read = read; this.view = read.view; }
+      constructor(token) { if (token !== webByobRequestToken) throw webIllegalConstructor(); this._controller = undefined; this._view = null; }
+      get view() { return this._view; }
       respond(bytesWritten) {
-        const stream = this._stream, read = this._read, length = Number(bytesWritten);
-        if (!stream || stream._byobRequest !== this) throw webInvalidState('This BYOB request has been invalidated');
-        if (!Number.isInteger(length) || length < 0 || length > this.view.byteLength) { const error = new RangeError('invalid BYOB response length'); error.code = 'ERR_INVALID_ARG_VALUE'; throw error; }
-        if (length === 0 && stream._state === 'readable') throw new TypeError('BYOB response must write bytes');
-        stream._byobRequest = null; this._stream = null; this._read = null; this.view = null;
-        read.filled += length;
-        if (read.filled >= read.minBytes || stream._state !== 'readable') {
-          stream._byobReads.shift(); read.resolve({ value: byobResultView(read.view, read.filled), done: read.filled === 0 });
-          stream._prepareByobRequest();
-        } else {
-          stream._prepareByobRequest();
-        }
+        bytesWritten = webEnforceRange(bytesWritten, 'bytesWritten');
+        if (this._controller === undefined) throw webInvalidState('This BYOB request has been invalidated');
+        if (webDetached(this._view.buffer)) throw webTypeError('The BYOB request view is detached');
+        this._controller._respond(bytesWritten);
       }
       respondWithNewView(view) {
-        if (!this._stream || this._stream._byobRequest !== this) throw webInvalidState('This BYOB request has been invalidated');
-        if (!ArrayBuffer.isView(view) || view.buffer !== this.view.buffer || view.byteOffset !== this.view.byteOffset || view.byteLength > this.view.byteLength) { const error = new RangeError('invalid BYOB response view'); error.code = 'ERR_INVALID_ARG_VALUE'; throw error; }
-        this.respond(view.byteLength);
+        if (!ArrayBuffer.isView(view)) throw webTypeError('view must be an ArrayBuffer view');
+        if (this._controller === undefined) throw webInvalidState('This BYOB request has been invalidated');
+        if (webDetached(view.buffer)) throw webTypeError('The view is detached');
+        this._controller._respondWithNewView(view);
       }
     }
     class ReadableByteStreamController {
-      constructor(stream) { this._stream = stream; }
-      enqueue(chunk) {
-        const stream = this._stream;
-        if (stream._state !== 'readable' || stream._closeRequested) throw webInvalidState('Controller is already closed');
-        if (!ArrayBuffer.isView(chunk) || chunk.byteLength === 0) throw new TypeError('byte stream chunks must be non-empty ArrayBuffer views');
-        stream._queue.push(new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength)); stream._queueSizes.push(chunk.byteLength); stream._queueTotalSize += chunk.byteLength; stream._drainByob();
-        if (stream._reads.length && stream._queue.length) stream._reads.shift().resolve({ value: stream._dequeue(), done: false });
-        stream._notifyCapacity(); stream._callPullIfNeeded();
+      constructor(stream) {
+        this._stream = stream; this._queue = []; this._queueTotalSize = 0; this._closeRequested = false; this._pulling = false; this._pullAgain = false;
+        this._pendingPullIntos = []; this._byobRequest = null;
       }
+      get byobRequest() { return this._getByobRequest(); }
+      get desiredSize() { return this._desiredSize(); }
       close() {
-        const stream = this._stream; if (stream._state !== 'readable' || stream._closeRequested) throw webInvalidState('Controller is already closed');
-        if (stream._byobReads.length && stream._byobReads[0].filled % stream._byobReads[0].elementSize !== 0) throw webInvalidState('Partial read');
-        stream._closeRequested = true; stream._drainByob(); stream._finishCloseIfReady();
+        if (this._closeRequested) throw webInvalidState('Controller is already closed');
+        if (this._stream._state !== 'readable') throw webInvalidState('ReadableStream is not readable');
+        this._close();
       }
-      error(error) {
-        const stream = this._stream; if (stream._state !== 'readable') return;
-        stream._state = 'errored'; stream._error = error; stream._queue.length = 0; stream._queueSizes.length = 0; stream._queueTotalSize = 0; stream._byobRequest = null; stream._rejectCapacity(error); while (stream._reads.length) stream._reads.shift().reject(error); while (stream._byobReads.length) stream._byobReads.shift().reject(error); if (stream._reader) stream._reader._closedRecord.reject(error);
+      enqueue(chunk) {
+        if (!ArrayBuffer.isView(chunk)) throw webTypeError('chunk must be an ArrayBuffer view');
+        if (chunk.byteLength === 0) throw webTypeError('chunk must not be empty');
+        if (chunk.buffer.byteLength === 0) throw webTypeError('chunk buffer must not be empty');
+        if (this._closeRequested) throw webInvalidState('Controller is already closed');
+        if (this._stream._state !== 'readable') throw webInvalidState('ReadableStream is not readable');
+        this._enqueue(chunk);
       }
-      get byobRequest() { return this._stream._byobRequest; }
-      get desiredSize() { return this._stream._state === 'readable' ? this._stream._highWaterMark - this._stream._queueTotalSize : null; }
+      error(error) { this._error(error); }
+      _desiredSize() { const state = this._stream._state; return state === 'errored' ? null : state === 'closed' ? 0 : this._stream._highWaterMark - this._queueTotalSize; }
+      _shouldCallPull() {
+        const stream = this._stream;
+        if (stream._state !== 'readable' || this._closeRequested || !stream._started) return false;
+        if (stream._reader instanceof ReadableStreamDefaultReader && stream._reads.length > 0) return true;
+        if (stream._reader instanceof ReadableStreamBYOBReader && stream._byobReads.length > 0) return true;
+        return this._desiredSize() > 0;
+      }
+      _callPullIfNeeded() {
+        if (!this._shouldCallPull()) return;
+        if (this._pulling) { this._pullAgain = true; return; }
+        const stream = this._stream;
+        if (stream._sourcePull === undefined) return;
+        this._pulling = true;
+        let result;
+        try { result = webApply(stream._sourcePull, stream._source, [this]); } catch (error) { result = Promise.reject(error); }
+        Promise.resolve(result).then(() => { this._pulling = false; if (this._pullAgain) { this._pullAgain = false; this._callPullIfNeeded(); } }, error => this._error(error));
+      }
+      _clearPendingPullIntos() { this._invalidateByobRequest(); this._pendingPullIntos = []; }
+      _invalidateByobRequest() {
+        if (this._byobRequest === null) return;
+        this._byobRequest._controller = undefined; this._byobRequest._view = null; this._byobRequest = null;
+      }
+      _resetQueue() { this._queue = []; this._queueTotalSize = 0; }
+      _clearAlgorithms() { this._stream._sourcePull = undefined; this._stream._sourceCancel = undefined; }
+      _error(error) {
+        const stream = this._stream;
+        if (stream._state !== 'readable') return;
+        this._clearPendingPullIntos(); this._resetQueue(); this._clearAlgorithms();
+        webStreamError(stream, error);
+      }
+      _close() {
+        const stream = this._stream;
+        if (this._closeRequested || stream._state !== 'readable') return;
+        if (this._queueTotalSize > 0) { this._closeRequested = true; return; }
+        if (this._pendingPullIntos.length > 0) {
+          const first = this._pendingPullIntos[0];
+          if (first.bytesFilled % first.elementSize !== 0) { const error = webInvalidState('Partial read'); this._error(error); throw error; }
+        }
+        this._clearAlgorithms(); webStreamClose(stream);
+      }
+      _enqueue(chunk) {
+        const stream = this._stream;
+        if (this._closeRequested || stream._state !== 'readable') return;
+        const { byteOffset, byteLength } = chunk;
+        if (webDetached(chunk.buffer)) throw webTypeError('The chunk buffer is detached');
+        const buffer = webTransfer(chunk.buffer);
+        if (this._pendingPullIntos.length > 0) {
+          const first = this._pendingPullIntos[0];
+          if (webDetached(first.buffer)) throw webTypeError('The pending pull-into buffer is detached');
+          this._invalidateByobRequest();
+          first.buffer = webTransfer(first.buffer);
+          if (first.readerType === 'none') this._enqueueDetachedPullIntoToQueue(first);
+        }
+        if (stream._reader instanceof ReadableStreamDefaultReader) {
+          this._processReadRequestsUsingQueue();
+          if (stream._reads.length === 0) this._enqueueChunkToQueue(buffer, byteOffset, byteLength);
+          else {
+            if (this._pendingPullIntos.length > 0) this._pendingPullIntos.shift();
+            stream._reads.shift().resolve({ value: new Uint8Array(buffer, byteOffset, byteLength), done: false });
+          }
+        } else if (stream._reader instanceof ReadableStreamBYOBReader) {
+          this._enqueueChunkToQueue(buffer, byteOffset, byteLength);
+          this._processPullIntoDescriptorsUsingQueue();
+        } else this._enqueueChunkToQueue(buffer, byteOffset, byteLength);
+        this._callPullIfNeeded();
+      }
+      _enqueueChunkToQueue(buffer, byteOffset, byteLength) { this._queue.push({ buffer, byteOffset, byteLength }); this._queueTotalSize += byteLength; }
+      _enqueueClonedChunkToQueue(buffer, byteOffset, byteLength) {
+        let clone;
+        try { clone = buffer.slice(byteOffset, byteOffset + byteLength); } catch (error) { this._error(error); throw error; }
+        this._enqueueChunkToQueue(clone, 0, byteLength);
+      }
+      _enqueueDetachedPullIntoToQueue(descriptor) {
+        if (descriptor.bytesFilled > 0) this._enqueueClonedChunkToQueue(descriptor.buffer, descriptor.byteOffset, descriptor.bytesFilled);
+        this._pendingPullIntos.shift();
+      }
+      _fillPullIntoDescriptorFromQueue(descriptor) {
+        const maxBytesToCopy = Math.min(this._queueTotalSize, descriptor.byteLength - descriptor.bytesFilled), maxBytesFilled = descriptor.bytesFilled + maxBytesToCopy;
+        let totalBytesToCopyRemaining = maxBytesToCopy, ready = false;
+        const maxAlignedBytes = maxBytesFilled - (maxBytesFilled % descriptor.elementSize);
+        if (maxAlignedBytes >= descriptor.minimumFill) { totalBytesToCopyRemaining = maxAlignedBytes - descriptor.bytesFilled; ready = true; }
+        while (totalBytesToCopyRemaining > 0) {
+          const head = this._queue[0], bytesToCopy = Math.min(totalBytesToCopyRemaining, head.byteLength);
+          new Uint8Array(descriptor.buffer, descriptor.byteOffset + descriptor.bytesFilled, bytesToCopy).set(new Uint8Array(head.buffer, head.byteOffset, bytesToCopy));
+          if (head.byteLength === bytesToCopy) this._queue.shift(); else { head.byteOffset += bytesToCopy; head.byteLength -= bytesToCopy; }
+          this._queueTotalSize -= bytesToCopy;
+          descriptor.bytesFilled += bytesToCopy;
+          totalBytesToCopyRemaining -= bytesToCopy;
+        }
+        return ready;
+      }
+      _convertPullIntoDescriptor(descriptor) {
+        const buffer = webTransfer(descriptor.buffer);
+        return new descriptor.viewConstructor(buffer, descriptor.byteOffset, descriptor.bytesFilled / descriptor.elementSize);
+      }
+      _commitPullIntoDescriptor(descriptor) {
+        const stream = this._stream, done = stream._state === 'closed', view = this._convertPullIntoDescriptor(descriptor);
+        if (descriptor.readerType === 'default') stream._reads.shift().resolve({ value: view, done });
+        else stream._byobReads.shift().resolve({ value: view, done });
+      }
+      _processPullIntoDescriptorsUsingQueue() {
+        while (this._pendingPullIntos.length > 0) {
+          if (this._queueTotalSize === 0) return;
+          const descriptor = this._pendingPullIntos[0];
+          if (this._fillPullIntoDescriptorFromQueue(descriptor)) { this._pendingPullIntos.shift(); this._commitPullIntoDescriptor(descriptor); }
+        }
+      }
+      _processReadRequestsUsingQueue() {
+        const stream = this._stream;
+        while (stream._reads.length > 0) {
+          if (this._queueTotalSize === 0) return;
+          this._fillReadRequestFromQueue(stream._reads.shift());
+        }
+      }
+      _fillReadRequestFromQueue(readRequest) {
+        const entry = this._queue.shift();
+        this._queueTotalSize -= entry.byteLength;
+        this._handleQueueDrain();
+        readRequest.resolve({ value: new Uint8Array(entry.buffer, entry.byteOffset, entry.byteLength), done: false });
+      }
+      _handleQueueDrain() {
+        if (this._queueTotalSize === 0 && this._closeRequested) { this._clearAlgorithms(); webStreamClose(this._stream); } else this._callPullIfNeeded();
+      }
+      _getByobRequest() {
+        if (this._byobRequest === null && this._pendingPullIntos.length > 0) {
+          const first = this._pendingPullIntos[0], request = new ReadableStreamBYOBRequest(webByobRequestToken);
+          request._controller = this; request._view = new Uint8Array(first.buffer, first.byteOffset + first.bytesFilled, first.byteLength - first.bytesFilled);
+          this._byobRequest = request;
+        }
+        return this._byobRequest;
+      }
+      _respond(bytesWritten) {
+        const first = this._pendingPullIntos[0];
+        if (first === undefined) throw webInvalidState('There is no pending read');
+        if (this._stream._state === 'closed') { if (bytesWritten !== 0) throw webTypeError('bytesWritten must be 0 when the stream is closed'); }
+        else {
+          if (bytesWritten === 0) throw webTypeError('bytesWritten must be greater than 0 when the stream is not closed');
+          if (first.bytesFilled + bytesWritten > first.byteLength) throw webRangeError('bytesWritten out of range');
+        }
+        first.buffer = webTransfer(first.buffer);
+        this._respondInternal(bytesWritten);
+      }
+      _respondInternal(bytesWritten) {
+        const first = this._pendingPullIntos[0];
+        if (webDetached(first.buffer)) throw webTypeError('The pending pull-into buffer is detached');
+        this._invalidateByobRequest();
+        if (this._stream._state === 'closed') this._respondInClosedState(first); else this._respondInReadableState(bytesWritten, first);
+        this._callPullIfNeeded();
+      }
+      _respondInClosedState(first) {
+        if (first.readerType === 'none') this._pendingPullIntos.shift();
+        const stream = this._stream;
+        if (stream._reader instanceof ReadableStreamBYOBReader) while (stream._byobReads.length > 0) this._commitPullIntoDescriptor(this._pendingPullIntos.shift());
+      }
+      _respondInReadableState(bytesWritten, descriptor) {
+        descriptor.bytesFilled += bytesWritten;
+        if (descriptor.readerType === 'none') { this._enqueueDetachedPullIntoToQueue(descriptor); this._processPullIntoDescriptorsUsingQueue(); return; }
+        if (descriptor.bytesFilled < descriptor.minimumFill) return;
+        this._pendingPullIntos.shift();
+        const remainderSize = descriptor.bytesFilled % descriptor.elementSize;
+        if (remainderSize > 0) {
+          const end = descriptor.byteOffset + descriptor.bytesFilled;
+          this._enqueueClonedChunkToQueue(descriptor.buffer, end - remainderSize, remainderSize);
+        }
+        descriptor.bytesFilled -= remainderSize;
+        this._commitPullIntoDescriptor(descriptor);
+        this._processPullIntoDescriptorsUsingQueue();
+      }
+      _respondWithNewView(view) {
+        const first = this._pendingPullIntos[0];
+        if (first === undefined) throw webInvalidState('There is no pending read');
+        if (this._stream._state === 'closed') { if (view.byteLength !== 0) throw webTypeError('view must be empty when the stream is closed'); }
+        else if (view.byteLength === 0) throw webTypeError('view must not be empty when the stream is not closed');
+        if (first.byteOffset + first.bytesFilled !== view.byteOffset) throw webRangeError('view byteOffset does not match the pending read');
+        if (first.bufferByteLength !== view.buffer.byteLength) throw webRangeError('view buffer length does not match the pending read');
+        if (first.bytesFilled + view.byteLength > first.byteLength) throw webRangeError('view is larger than the pending read');
+        const viewByteLength = view.byteLength;
+        first.buffer = webTransfer(view.buffer);
+        this._respondInternal(viewByteLength);
+      }
+      _pullSteps(readRequest) {
+        const stream = this._stream;
+        if (this._queueTotalSize > 0) { this._fillReadRequestFromQueue(readRequest); return; }
+        const autoAllocateChunkSize = stream._autoAllocateChunkSize;
+        if (autoAllocateChunkSize) {
+          let buffer;
+          try { buffer = new ArrayBuffer(autoAllocateChunkSize); } catch (error) { readRequest.reject(error); return; }
+          this._pendingPullIntos.push({ buffer, bufferByteLength: autoAllocateChunkSize, byteOffset: 0, byteLength: autoAllocateChunkSize, bytesFilled: 0, minimumFill: 1, elementSize: 1, viewConstructor: Uint8Array, readerType: 'default' });
+        }
+        stream._reads.push(readRequest);
+        this._callPullIfNeeded();
+      }
+      _cancelSteps(reason) {
+        this._clearPendingPullIntos(); this._resetQueue();
+        const stream = this._stream;
+        let result;
+        try { result = stream._sourceCancel === undefined ? undefined : webApply(stream._sourceCancel, stream._source, [reason]); } catch (error) { this._clearAlgorithms(); throw error; }
+        this._clearAlgorithms();
+        return result;
+      }
+      _releaseSteps() {
+        if (this._pendingPullIntos.length > 0) { const first = this._pendingPullIntos[0]; first.readerType = 'none'; this._pendingPullIntos = [first]; }
+      }
+      _pullInto(view, min, request) {
+        const stream = this._stream, { constructor, elementSize } = webViewKind(view), byteOffset = view.byteOffset, byteLength = view.byteLength;
+        let buffer;
+        try { buffer = webTransfer(view.buffer); } catch (error) { request.reject(error); return; }
+        const descriptor = { buffer, bufferByteLength: buffer.byteLength, byteOffset, byteLength, bytesFilled: 0, minimumFill: min * elementSize, elementSize, viewConstructor: constructor, readerType: 'byob' };
+        if (this._pendingPullIntos.length > 0) { this._pendingPullIntos.push(descriptor); stream._byobReads.push(request); return; }
+        if (stream._state === 'closed') { request.resolve({ value: new constructor(descriptor.buffer, descriptor.byteOffset, 0), done: true }); return; }
+        if (this._queueTotalSize > 0) {
+          if (this._fillPullIntoDescriptorFromQueue(descriptor)) {
+            const filled = this._convertPullIntoDescriptor(descriptor);
+            this._handleQueueDrain();
+            request.resolve({ value: filled, done: false });
+            return;
+          }
+          if (this._closeRequested) { const error = webInvalidState('Partial read'); this._error(error); request.reject(error); return; }
+        }
+        this._pendingPullIntos.push(descriptor); stream._byobReads.push(request);
+        this._callPullIfNeeded();
+      }
     }
     class ReadableStreamDefaultReader {
       constructor(stream) { if (stream.locked) throw webInvalidState('ReadableStream is locked'); this._stream = stream; stream._reader = this; this._closedRecord = stream._state === 'readable' ? webDeferred() : stream._state === 'closed' ? webResolved() : webRejected(stream._error); }
@@ -182,7 +435,11 @@
       read() {
         const stream = this._stream; if (!stream) return Promise.reject(webInvalidState('Reader is released'));
         stream._disturbed = true;
-        if (stream._byteStream && stream._autoAllocateChunkSize) return stream._readInto(new Uint8Array(stream._autoAllocateChunkSize), this, 1);
+        if (stream._byteStream) {
+          if (stream._state === 'closed') return Promise.resolve({ value: undefined, done: true });
+          if (stream._state === 'errored') return Promise.reject(stream._error);
+          return new Promise((resolve, reject) => stream._controller._pullSteps({ reader: this, resolve, reject }));
+        }
         if (stream._queue.length) { const value = stream._dequeue(); stream._finishCloseIfReady(); stream._callPullIfNeeded(); return Promise.resolve({ value, done: false }); }
         if (stream._state === 'closed') return Promise.resolve({ value: undefined, done: true });
         if (stream._state === 'errored') return Promise.reject(stream._error);
@@ -191,22 +448,53 @@
         return result;
       }
       cancel(reason) { if (this._stream) this._stream._disturbed = true; return this._stream ? this._stream._cancel(reason) : Promise.reject(webInvalidState('Reader is released')); }
-      releaseLock() { if (!this._stream) return; const stream = this._stream, error = webInvalidState('Reader was released'); this._closedRecord = webEnsureRejected(this._closedRecord, error); stream._reads = stream._reads.filter(read => { if (read.reader !== this) return true; read.reject(error); return false; }); stream._byobReads = stream._byobReads.filter(read => { if (read.reader !== this) return true; read.reject(error); return false; }); if (stream._byobRequest && stream._byobRequest._read.reader === this) stream._byobRequest = null; stream._reader = null; this._stream = null; }
+      releaseLock() {
+        if (!this._stream) return;
+        const stream = this._stream, error = webInvalidState('Reader was released');
+        this._closedRecord = webEnsureRejected(this._closedRecord, error);
+        stream._reads = stream._reads.filter(read => { if (read.reader !== this) return true; read.reject(error); return false; });
+        if (stream._byteStream) stream._controller._releaseSteps();
+        stream._reader = null; this._stream = null;
+      }
     }
     class ReadableStreamBYOBReader {
-      constructor(stream) { if (stream.locked) throw webInvalidState('ReadableStream is locked'); if (!stream._byteStream) { const error = new TypeError('stream must be a byte stream'); error.code = 'ERR_INVALID_ARG_VALUE'; throw error; } this._stream = stream; stream._reader = this; this._closedRecord = stream._state === 'readable' ? webDeferred() : stream._state === 'closed' ? webResolved() : webRejected(stream._error); }
+      constructor(stream) {
+        if (!stream || typeof stream !== 'object' || !('_byteStream' in stream)) throw webTypeError('stream must be a ReadableStream');
+        if (stream.locked) throw webInvalidState('ReadableStream is locked');
+        if (!stream._byteStream) throw webTypeError('stream must be a byte stream');
+        this._stream = stream; stream._reader = this; this._closedRecord = stream._state === 'readable' ? webDeferred() : stream._state === 'closed' ? webResolved() : webRejected(stream._error);
+      }
       get closed() { return this._closedRecord.promise; }
       read(view, options = {}) {
-        const stream = this._stream; if (!stream) return Promise.reject(webInvalidState('Reader is released'));
-        stream._disturbed = true;
-        if (!ArrayBuffer.isView(view) || view.byteLength === 0) return Promise.reject(new TypeError('view must be a non-empty ArrayBuffer view'));
-        const min = options.min === undefined ? 1 : Number(options.min);
-        const capacity = view instanceof DataView ? view.byteLength : view.length;
-        if (!Number.isInteger(min) || min <= 0 || min > capacity) return Promise.reject(new RangeError('invalid minimum fill count'));
-        return stream._readInto(view, this, min);
+        try {
+          if (!ArrayBuffer.isView(view)) throw webTypeError('view must be an ArrayBuffer view');
+          if (view.byteLength === 0) throw webTypeError('view must not be empty');
+          if (view.buffer.byteLength === 0) throw webTypeError('view buffer must not be empty');
+          if (webDetached(view.buffer)) throw webTypeError('view buffer is detached');
+          if (options === null || (typeof options !== 'object' && typeof options !== 'function')) { if (options !== undefined) throw webTypeError('options must be an object'); options = {}; }
+          const min = options.min === undefined ? 1 : webEnforceRange(options.min, 'min');
+          if (min === 0) throw webTypeError('min must be greater than 0');
+          if (view instanceof DataView) { if (min > view.byteLength) throw webRangeError('min is larger than the view'); }
+          else if (min > view.length) throw webRangeError('min is larger than the view');
+          const stream = this._stream;
+          if (!stream) throw webInvalidState('Reader is released');
+          stream._disturbed = true;
+          return new Promise((resolve, reject) => {
+            const request = { reader: this, resolve, reject };
+            if (stream._state === 'errored') reject(stream._error);
+            else stream._controller._pullInto(view, min, request);
+          });
+        } catch (error) { return Promise.reject(error); }
       }
       cancel(reason) { if (this._stream) this._stream._disturbed = true; return this._stream ? this._stream._cancel(reason) : Promise.reject(webInvalidState('Reader is released')); }
-      releaseLock() { if (!this._stream) return; const stream = this._stream, error = webInvalidState('Reader was released'); this._closedRecord = webEnsureRejected(this._closedRecord, error); stream._byobReads = stream._byobReads.filter(read => { if (read.reader !== this) return true; read.reject(error); return false; }); if (stream._byobRequest && stream._byobRequest._read.reader === this) stream._byobRequest = null; stream._reader = null; this._stream = null; }
+      releaseLock() {
+        if (!this._stream) return;
+        const stream = this._stream, error = webInvalidState('Reader was released');
+        this._closedRecord = webEnsureRejected(this._closedRecord, error);
+        while (stream._byobReads.length) stream._byobReads.shift().reject(error);
+        stream._controller._releaseSteps();
+        stream._reader = null; this._stream = null;
+      }
     }
     globalThis.ReadableStream = class ReadableStream {
       static from(iterable) {
@@ -248,13 +536,16 @@
         const { highWaterMark: strategyHighWaterMark, size } = webStrategy(strategy);
         // Convert the source dictionary once, in Web IDL member order, before start can mutate it.
         const autoAllocateValue = source.autoAllocateChunkSize;
-        const autoAllocateChunkSize = autoAllocateValue === undefined ? undefined : Number(autoAllocateValue);
+        let autoAllocateChunkSize;
         const cancel = webCallback(source, 'cancel');
         const pull = webCallback(source, 'pull');
         const start = webCallback(source, 'start');
         const type = source.type;
         if (type !== undefined && type !== 'bytes') { const error = new TypeError('invalid source.type'); error.code = 'ERR_INVALID_ARG_VALUE'; throw error; }
-        if (autoAllocateChunkSize !== undefined && (type !== 'bytes' || !Number.isInteger(autoAllocateChunkSize) || autoAllocateChunkSize <= 0)) throw new RangeError('invalid autoAllocateChunkSize');
+        if (type === 'bytes' && autoAllocateValue !== undefined) {
+          autoAllocateChunkSize = webEnforceRange(autoAllocateValue, 'autoAllocateChunkSize');
+          if (autoAllocateChunkSize === 0) throw webTypeError('autoAllocateChunkSize must be greater than 0');
+        }
         if (type === 'bytes' && size !== undefined) { const error = new RangeError('byte streams cannot use a size strategy'); error.code = 'ERR_INVALID_ARG_VALUE'; throw error; }
         const defaultHighWaterMark = type === 'bytes' ? 0 : 1, highWaterMark = strategyHighWaterMark === undefined ? defaultHighWaterMark : strategyHighWaterMark;
         if (Number.isNaN(highWaterMark) || highWaterMark < 0) { const error = new RangeError('invalid highWaterMark'); error.code = 'ERR_INVALID_ARG_VALUE'; throw error; }
@@ -266,51 +557,124 @@
       getReader(options = {}) { if (options.mode === undefined) return new ReadableStreamDefaultReader(this); if (options.mode === 'byob') return new ReadableStreamBYOBReader(this); const error = new TypeError('invalid reader mode'); error.code = 'ERR_INVALID_ARG_VALUE'; throw error; }
       _chunkSize(chunk) { const size = Number(this._sizeAlgorithm(chunk)); if (!Number.isFinite(size) || size < 0) { const error = new RangeError('invalid chunk size'); error.code = 'ERR_INVALID_ARG_VALUE'; throw error; } return size; }
       _dequeue() { const value = this._queue.shift(), size = this._queueSizes.shift() || 0; this._queueTotalSize = Math.max(0, this._queueTotalSize - size); this._notifyCapacity(); return value; }
-      _hasCapacity() { return this._state === 'readable' && !this._closeRequested && (this._reads.length > 0 || this._byobReads.length > 0 || this._highWaterMark - this._queueTotalSize > 0); }
+      _hasCapacity() { return this._state === 'readable' && !this._closeRequested && (this._reads.length > 0 || this._highWaterMark - this._queueTotalSize > 0); }
       _waitForCapacity() { if (this._hasCapacity()) return Promise.resolve(); if (this._state === 'errored') return Promise.reject(this._error); if (this._state !== 'readable' || this._closeRequested) return Promise.reject(webInvalidState('ReadableStream is closed')); return new Promise((resolve, reject) => this._capacityWaiters.push({ resolve, reject })); }
       _notifyCapacity() { if (!this._hasCapacity() || !this._capacityWaiters.length) return; const waiters = this._capacityWaiters.splice(0); for (const waiter of waiters) waiter.resolve(); }
       _rejectCapacity(error) { const waiters = this._capacityWaiters.splice(0); for (const waiter of waiters) waiter.reject(error); }
-      _finishCloseIfReady() { if (!this._closeRequested || this._queue.length || this._state !== 'readable') return; this._state = 'closed'; this._byobRequest = null; this._rejectCapacity(webInvalidState('ReadableStream is closed')); while (this._reads.length) this._reads.shift().resolve({ value: undefined, done: true }); while (this._byobReads.length) { const read = this._byobReads.shift(); read.resolve({ value: byobResultView(read.view, read.filled), done: read.filled === 0 }); } if (this._reader) this._reader._closedRecord.resolve(); }
+      _finishCloseIfReady() { if (!this._closeRequested || this._queue.length || this._state !== 'readable') return; this._state = 'closed'; this._rejectCapacity(webInvalidState('ReadableStream is closed')); while (this._reads.length) this._reads.shift().resolve({ value: undefined, done: true }); if (this._reader) this._reader._closedRecord.resolve(); }
       _callPullIfNeeded() {
+        if (this._byteStream) { this._controller._callPullIfNeeded(); return; }
         if (!this._started || this._state !== 'readable' || this._closeRequested || this._sourcePull === undefined) return;
         if (!this._reads.length && !this._byobReads.length && this._highWaterMark - this._queueTotalSize <= 0) return;
         if (this._pulling) { this._pullAgain = true; return; }
         this._pulling = true;
         Promise.resolve().then(() => webApply(this._sourcePull, this._source, [this._controller])).then(() => { this._pulling = false; if (this._pullAgain) { this._pullAgain = false; this._callPullIfNeeded(); } }, error => { this._pulling = false; this._controller.error(error); });
       }
-      _drainByob() {
-        while (this._byobReads.length && this._queue.length) {
-          const read = this._byobReads[0], target = new Uint8Array(read.view.buffer, read.view.byteOffset, read.view.byteLength);
-          while (read.filled < target.byteLength && this._queue.length) {
-            const chunk = this._queue[0], length = Math.min(chunk.byteLength, target.byteLength - read.filled); target.set(chunk.subarray(0, length), read.filled); read.filled += length;
-            this._queueTotalSize = Math.max(0, this._queueTotalSize - length);
-            if (length === chunk.byteLength) { this._queue.shift(); this._queueSizes.shift(); } else { this._queue[0] = chunk.subarray(length); this._queueSizes[0] -= length; }
-          }
-          if (read.filled < read.minBytes && this._state === 'readable') break;
-          this._byobReads.shift(); if (this._byobRequest && this._byobRequest._read === read) this._byobRequest = null; read.resolve({ value: byobResultView(read.view, read.filled), done: false });
+      _cancel(reason) {
+        if (this._byteStream) {
+          if (this._state === 'closed') return Promise.resolve();
+          if (this._state === 'errored') return Promise.reject(this._error);
+          webStreamClose(this);
+          if (this._reader instanceof ReadableStreamBYOBReader) while (this._byobReads.length) this._byobReads.shift().resolve({ value: undefined, done: true });
+          try { return Promise.resolve(this._controller._cancelSteps(reason)).then(() => undefined); } catch (error) { return Promise.reject(error); }
         }
-        this._finishCloseIfReady();
-        if (this._state === 'closed' && !this._queue.length) {
-          this._byobRequest = null; while (this._byobReads.length) { const read = this._byobReads.shift(); read.resolve({ value: byobResultView(read.view, 0), done: true }); }
-        }
-        this._notifyCapacity(); this._prepareByobRequest(); this._callPullIfNeeded();
+        return this._cancelDefault(reason);
       }
-      _prepareByobRequest() {
-        if (!this._byobReads.length || this._state !== 'readable' || this._byobRequest) return;
-        const read = this._byobReads[0], remaining = new Uint8Array(read.view.buffer, read.view.byteOffset + read.filled, read.view.byteLength - read.filled);
-        this._byobRequest = new ReadableStreamBYOBRequest(this, { ...read, view: remaining });
-        this._byobRequest._read = read;
-        this._callPullIfNeeded();
-      }
-      _readInto(view, reader, min) {
-        if (this._state === 'errored') return Promise.reject(this._error);
-        const elementSize = view instanceof DataView ? 1 : view.BYTES_PER_ELEMENT, result = new Promise((resolve, reject) => this._byobReads.push({ reader, view, elementSize, minBytes: min * elementSize, filled: 0, resolve, reject })); this._notifyCapacity(); this._drainByob(); this._prepareByobRequest();
-        return result;
-      }
-      _cancel(reason) { if (this._state === 'closed') return Promise.resolve(); if (this._state === 'errored') return Promise.reject(this._error); this._queue.length = 0; this._queueSizes.length = 0; this._queueTotalSize = 0; this._closeRequested = true; this._rejectCapacity(reason); this._finishCloseIfReady(); try { return Promise.resolve(this._sourceCancel === undefined ? undefined : webApply(this._sourceCancel, this._source, [reason])).then(() => undefined); } catch (error) { return Promise.reject(error); } }
+      _cancelDefault(reason) { if (this._state === 'closed') return Promise.resolve(); if (this._state === 'errored') return Promise.reject(this._error); this._queue.length = 0; this._queueSizes.length = 0; this._queueTotalSize = 0; this._closeRequested = true; this._rejectCapacity(reason); this._finishCloseIfReady(); try { return Promise.resolve(this._sourceCancel === undefined ? undefined : webApply(this._sourceCancel, this._source, [reason])).then(() => undefined); } catch (error) { return Promise.reject(error); } }
       cancel(reason) { if (this.locked) return Promise.reject(webInvalidState('ReadableStream is locked')); this._disturbed = true; return this._cancel(reason); }
+      _byteTee() {
+        const stream = this;
+        let reader = new ReadableStreamDefaultReader(stream), reading = false, readAgainForBranch1 = false, readAgainForBranch2 = false, canceled1 = false, canceled2 = false, reason1, reason2, controller1, controller2, resolveCancel;
+        const cancelPromise = new Promise(resolve => { resolveCancel = resolve; });
+        const cloneAsUint8Array = chunk => new Uint8Array(chunk.buffer.slice(chunk.byteOffset, chunk.byteOffset + chunk.byteLength));
+        const failBoth = error => { controller1.error(error); controller2.error(error); resolveCancel(stream._cancel(error)); };
+        const forwardReaderError = thisReader => { thisReader.closed.catch(error => { if (thisReader !== reader) return; controller1.error(error); controller2.error(error); if (!canceled1 || !canceled2) resolveCancel(undefined); }); };
+        const again = () => { if (readAgainForBranch1) pull1(); else if (readAgainForBranch2) pull2(); };
+        const pullWithDefaultReader = () => {
+          if (reader instanceof ReadableStreamBYOBReader) { reader.releaseLock(); reader = new ReadableStreamDefaultReader(stream); forwardReaderError(reader); }
+          reader.read().then(result => {
+            if (result.done) {
+              reading = false;
+              if (!canceled1) controller1._close();
+              if (!canceled2) controller2._close();
+              if (controller1._pendingPullIntos.length > 0) controller1._respond(0);
+              if (controller2._pendingPullIntos.length > 0) controller2._respond(0);
+              if (!canceled1 || !canceled2) resolveCancel(undefined);
+              return;
+            }
+            Promise.resolve().then(() => {
+              readAgainForBranch1 = false; readAgainForBranch2 = false;
+              const chunk1 = result.value;
+              let chunk2 = result.value;
+              if (!canceled1 && !canceled2) {
+                try { chunk2 = cloneAsUint8Array(chunk1); } catch (error) { failBoth(error); return; }
+              }
+              if (!canceled1) controller1._enqueue(chunk1);
+              if (!canceled2) controller2._enqueue(chunk2);
+              reading = false;
+              again();
+            });
+          }, () => { reading = false; });
+        };
+        const pullWithBYOBReader = (view, forBranch2) => {
+          if (reader instanceof ReadableStreamDefaultReader) { reader.releaseLock(); reader = new ReadableStreamBYOBReader(stream); forwardReaderError(reader); }
+          const byobController = forBranch2 ? controller2 : controller1, otherController = forBranch2 ? controller1 : controller2;
+          const request = {
+            reader,
+            resolve: ({ value: chunk, done }) => {
+              if (done) {
+                reading = false;
+                const byobCanceled = forBranch2 ? canceled2 : canceled1, otherCanceled = forBranch2 ? canceled1 : canceled2;
+                if (!byobCanceled) byobController._close();
+                if (!otherCanceled) otherController._close();
+                if (chunk !== undefined) {
+                  if (!byobCanceled) byobController._respondWithNewView(chunk);
+                  if (!otherCanceled && otherController._pendingPullIntos.length > 0) otherController._respond(0);
+                }
+                if (!byobCanceled || !otherCanceled) resolveCancel(undefined);
+                return;
+              }
+              Promise.resolve().then(() => {
+                readAgainForBranch1 = false; readAgainForBranch2 = false;
+                const byobCanceled = forBranch2 ? canceled2 : canceled1, otherCanceled = forBranch2 ? canceled1 : canceled2;
+                if (!otherCanceled) {
+                  let cloned;
+                  try { cloned = cloneAsUint8Array(chunk); } catch (error) { failBoth(error); return; }
+                  if (!byobCanceled) byobController._respondWithNewView(chunk);
+                  otherController._enqueue(cloned);
+                } else if (!byobCanceled) byobController._respondWithNewView(chunk);
+                reading = false;
+                again();
+              });
+            },
+            reject: () => { reading = false; }
+          };
+          stream._controller._pullInto(view, 1, request);
+        };
+        const pull1 = () => {
+          if (reading) { readAgainForBranch1 = true; return Promise.resolve(); }
+          reading = true;
+          const byobRequest = controller1._getByobRequest();
+          if (byobRequest === null) pullWithDefaultReader(); else pullWithBYOBReader(byobRequest.view, false);
+          return Promise.resolve();
+        };
+        const pull2 = () => {
+          if (reading) { readAgainForBranch2 = true; return Promise.resolve(); }
+          reading = true;
+          const byobRequest = controller2._getByobRequest();
+          if (byobRequest === null) pullWithDefaultReader(); else pullWithBYOBReader(byobRequest.view, true);
+          return Promise.resolve();
+        };
+        const cancel1 = reason => { canceled1 = true; reason1 = reason; if (canceled2) resolveCancel(stream._cancel([reason1, reason2])); return cancelPromise; };
+        const cancel2 = reason => { canceled2 = true; reason2 = reason; if (canceled1) resolveCancel(stream._cancel([reason1, reason2])); return cancelPromise; };
+        const branch1 = new ReadableStream({ type: 'bytes', start(controller) { controller1 = controller; }, pull: pull1, cancel: cancel1 });
+        const branch2 = new ReadableStream({ type: 'bytes', start(controller) { controller2 = controller; }, pull: pull2, cancel: cancel2 });
+        forwardReaderError(reader);
+        return [branch1, branch2];
+      }
       tee() {
         if (this.locked) throw webInvalidState('ReadableStream is locked');
+        if (this._byteStream) return this._byteTee();
         const byteStream = this._byteStream, reader = this.getReader(), controllers = [null, null], cancelled = [false, false], reasons = [undefined, undefined], demand = [false, false];
         let reading = false, finished = false, resolveCancellation, rejectCancellation;
         const cancellation = new Promise((resolve, reject) => { resolveCancellation = resolve; rejectCancellation = reject; });
