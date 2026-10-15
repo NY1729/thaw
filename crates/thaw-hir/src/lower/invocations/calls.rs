@@ -970,7 +970,7 @@ impl<'a> FnLowerer<'a> {
                             expected_return_hint.as_ref(),
                         );
                     }
-                    if let Some((params, _, rest, optional)) = callable {
+                    if let Some((params, method_ret, rest, optional)) = callable {
                         // Compile-time marker: keep ordinary function-valued
                         // properties distinct from receiver-aware methods.
                         let receiver_parameter = params.first().is_some_and(|parameter| {
@@ -1003,8 +1003,9 @@ impl<'a> FnLowerer<'a> {
                                 expected,
                                 rest.as_ref(),
                             )?;
-                        bindings.insert(0, (receiver_name, object_ty.clone(), object_expr));
+                        bindings.insert(0, (receiver_name.clone(), object_ty.clone(), object_expr));
                         bindings.insert(1, (callee_name.clone(), callee_type, callee));
+                        let mut copied_receiver = None;
                         if receiver_parameter {
                             let HirType::Object(receiver_fields) = &params[0] else {
                                 unreachable!()
@@ -1012,8 +1013,19 @@ impl<'a> FnLowerer<'a> {
                             let (this_arg, view_binding) = self.native_object_method_receiver(
                                 receiver.clone(), &object_ty, receiver_fields,
                             );
-                            if let Some(binding) = view_binding { bindings.insert(2, binding); }
-                            args.insert(0, this_arg);
+                            if let Some(binding) = view_binding {
+                                bindings.insert(2, binding);
+                                args.insert(0, this_arg);
+                            } else {
+                                // The method got a copy of the owner (it uses `this` as a
+                                // value): bind it so the call can copy it back afterwards.
+                                let copy_name = format!("__thaw_method_receiver_copy_{}", self.next_binding);
+                                self.next_binding += 1;
+                                self.scope.insert(copy_name.clone(), params[0].clone());
+                                bindings.insert(2, (copy_name.clone(), params[0].clone(), this_arg));
+                                args.insert(0, HirExpr::Var(copy_name.clone()));
+                                copied_receiver = Some(copy_name);
+                            }
                         }
                         if args.len() < params.len()
                             && (args.len()..params.len())
@@ -1056,10 +1068,13 @@ impl<'a> FnLowerer<'a> {
                                 .collect::<Result<Vec<_>, _>>()?;
                             args.push(native_rest_array(values, element));
                         }
-                        return self.wrap_call_argument_bindings(
-                            HirExpr::Call(Box::new(HirExpr::Var(callee_name)), args),
-                            &bindings,
-                        );
+                        let mut call_expr = HirExpr::Call(Box::new(HirExpr::Var(callee_name)), args);
+                        if let Some(copy_name) = copied_receiver {
+                            call_expr = self.copy_back_method_receiver(
+                                call_expr, &receiver_name, &object_ty, &copy_name, &params[0], &method_ret,
+                            )?;
+                        }
+                        return self.wrap_call_argument_bindings(call_expr, &bindings);
                     }
                 }
             }

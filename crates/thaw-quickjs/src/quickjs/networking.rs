@@ -486,6 +486,11 @@ fn net_take_stream(handle: u32) -> Option<TcpStream> {
 }
 
 fn net_destroy(handle: u32) {
+    net_destroy_with(handle, false);
+}
+
+/// `reset` closes with `SO_LINGER{on, 0}` and no FIN, so the peer sees an RST (`socket.resetAndDestroy()`).
+fn net_destroy_with(handle: u32, reset: bool) {
     // After `end()` the queued bytes still belong to the peer: the writer thread drains them and closes its descriptor.
     let draining = NET_WRITERS.with(|writers| {
         writers
@@ -495,7 +500,13 @@ fn net_destroy(handle: u32) {
     });
     NET_STREAMS.with(|streams| {
         if let Some(stream) = streams.borrow_mut().1.remove(&handle) {
-            if !draining {
+            if reset {
+                use std::os::fd::AsRawFd;
+                let linger = libc::linger { l_onoff: 1, l_linger: 0 };
+                unsafe {
+                    libc::setsockopt(stream.as_raw_fd(), libc::SOL_SOCKET, libc::SO_LINGER, (&linger as *const libc::linger).cast(), std::mem::size_of::<libc::linger>() as libc::socklen_t);
+                }
+            } else if !draining {
                 let _ = stream.shutdown(Shutdown::Both);
             }
         }

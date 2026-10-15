@@ -4828,6 +4828,68 @@ impl<'a> FnLowerer<'a> {
         (HirExpr::ObjectLit(copied), None)
     }
 
+    /// A method whose body uses `this` as a value runs on a copy of its owner.
+    /// After the call, store the copy's fields back into the owner (so
+    /// `this.n++` is not lost) and, when the method returned that copy
+    /// (`return this`), hand back the owner itself so identity holds.
+    fn copy_back_method_receiver(
+        &mut self,
+        call: HirExpr,
+        owner: &str,
+        owner_type: &HirType,
+        copy: &str,
+        view_type: &HirType,
+        method_ret: &HirType,
+    ) -> Result<HirExpr, String> {
+        let (HirType::Object(owner_fields), HirType::Object(view_fields)) = (owner_type, view_type) else {
+            return Ok(call);
+        };
+        let owner_var = || HirExpr::Var(owner.to_string());
+        let returns_receiver = method_ret == view_type;
+        let result_type = if returns_receiver { owner_type.clone() } else { method_ret.clone() };
+        let mut statements = Vec::new();
+        let result_name = format!("__thaw_method_result_{}", self.next_binding);
+        self.next_binding += 1;
+        if *method_ret == HirType::Void {
+            statements.push(HirStmt::Expr(call));
+        } else {
+            statements.push(HirStmt::Let(result_name.clone(), method_ret.clone(), call));
+        }
+        // ponytail: the copy overwrites fields the method changed on the owner by another route (a captured alias) while it ran.
+        // Accessor properties run setters on assignment: leave such owners alone.
+        let has_accessors = owner_fields.iter().any(|(name, _)| is_hidden_accessor_field(name));
+        for (name, ty) in view_fields.iter().filter(|_| !has_accessors) {
+            let writable = name != "__thaw_object_method_receiver"
+                && !matches!(ty, HirType::Function(..) | HirType::CallableFunction(..))
+                && owner_fields.iter().any(|(field, owner_ty)| field == name && owner_ty == ty);
+            if writable {
+                statements.push(HirStmt::Expr(HirExpr::PropAssign(
+                    Box::new(owner_var()),
+                    owner_type.clone(),
+                    name.clone(),
+                    Box::new(HirExpr::PropAccess(
+                        Box::new(HirExpr::Var(copy.to_string())), view_type.clone(), name.clone())),
+                )));
+            }
+        }
+        statements.push(HirStmt::Return(match (returns_receiver, method_ret) {
+            (true, _) => Some(owner_var()),
+            (false, HirType::Void) => None,
+            (false, _) => Some(HirExpr::Var(result_name)),
+        }));
+        let body = HirExpr::Block(statements);
+        let mut referenced = BTreeSet::new();
+        collect_referenced_bindings(&body, &mut referenced);
+        let captures = referenced
+            .into_iter()
+            .filter_map(|name| self.scope.get(&name).cloned().map(|ty| HirParam { name, ty }))
+            .collect();
+        Ok(HirExpr::Call(
+            Box::new(HirExpr::Lambda(captures, Vec::new(), result_type, Box::new(body))),
+            Vec::new(),
+        ))
+    }
+
     /// For a method field whose first parameter is the receiver-view object,
     /// returns a closure over `__thaw_this` taking only the remaining
     /// parameters, calling the method with a live receiver view of the owner.

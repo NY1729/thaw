@@ -1102,6 +1102,21 @@
       "name": "frozen and sealed arrays reject mutation",
       "expect": "matched",
       "source": "async function main(): Promise<void> {\n  const a: number[] = Object.freeze([1, 2]) as number[];\n  try { a[0] = 9; } catch (e) { console.log('write throws'); }\n  console.log(a[0], a.length);\n  for (const op of ['push', 'pop', 'shift', 'unshift', 'reverse', 'sort', 'fill', 'splice']) {\n    try {\n      if (op === 'push') a.push(3);\n      else if (op === 'pop') a.pop();\n      else if (op === 'shift') a.shift();\n      else if (op === 'unshift') a.unshift(0);\n      else if (op === 'reverse') a.reverse();\n      else if (op === 'sort') a.sort();\n      else if (op === 'fill') a.fill(0);\n      else a.splice(0, 1);\n      console.log(op, 'ok');\n    } catch (e) {\n      console.log(op, 'throws', e instanceof TypeError);\n    }\n  }\n  console.log(a.join(), Object.isFrozen(a));\n  const s: number[] = Object.seal([1, 2]) as number[];\n  s[0] = 7;\n  try { s.push(3); } catch (e) { console.log('sealed push throws'); }\n  console.log(s.join());\n  const live: number[] = [1, 2];\n  live[0] = 9;\n  live.push(3);\n  console.log(live.join());\n}\n"
+    },
+    {
+      "name": "plain object methods returning this keep identity and mutations",
+      "expect": "matched",
+      "source": "const o = {\n  n: 0,\n  inc() { this.n++; return this; },\n  dec() { this.n--; },\n  show() { return this.n; },\n};\nfunction main(): void {\n  console.log(o.inc() === o, o.n);\n  const r = o.inc();\n  r.inc();\n  console.log(o.n, r.n, o.inc().inc().n, o.n);\n  o.dec(); o.dec();\n  console.log(o.n, o.show());\n}\n"
+    },
+    {
+      "name": "awaiting a user thenable held in any",
+      "expect": "matched",
+      "source": "const thenable: any = { then(res: (v: number) => void) { res(42); } };\nconst failing: any = { then(res: any, rej: any) { rej(new Error('boom')); } };\nasync function viaAsync(): Promise<any> { return thenable; }\nasync function main(): Promise<void> {\n  console.log(await thenable);\n  console.log(await viaAsync());\n  console.log(await Promise.resolve(thenable));\n  try { await failing; } catch (e: any) { console.log('caught', e.message); }\n  const plain: any = { a: 1 };\n  const same = await plain;\n  same.a = 2;\n  console.log(plain.a);\n}\n"
+    },
+    {
+      "name": "client sockets honour allowHalfOpen and resetAndDestroy",
+      "expect": "matched",
+      "source": "import net from 'node:net';\nfunction main(): void {\n  const server = net.createServer((s: any) => { s.on('error', () => {}); s.end('hi'); });\n  server.listen(0, '127.0.0.1', () => {\n    const port = (server.address() as any).port;\n    const c: any = net.connect({ port: port, host: '127.0.0.1', allowHalfOpen: true });\n    let got = '';\n    c.on('data', (d: any) => { got += d; });\n    c.on('end', () => { console.log('end', c.writable, got); c.end(); });\n    c.on('close', () => {\n      console.log('client closed');\n      const c2: any = net.connect(port, '127.0.0.1');\n      c2.on('error', () => {});\n      c2.on('connect', () => { console.log(c2.resetAndDestroy() === c2); });\n      c2.on('close', () => { console.log('c2 closed'); server.close(); });\n    });\n  });\n}\n"
     }
   ]
 }

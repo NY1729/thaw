@@ -3610,6 +3610,10 @@ impl<'a> FnLowerer<'a> {
                 } else if let HirType::Promise(resolved) = value_type {
                     if *resolved == HirType::Void {
                         Ok(HirExpr::Await(Box::new(value)))
+                    } else if *resolved == HirType::Json {
+                        // An async function's `any` result may itself be a thenable.
+                        let awaited = HirExpr::AwaitPromise(Box::new(value), HirType::Json);
+                        self.lower_await_json_thenable(awaited)
                     } else {
                         Ok(HirExpr::AwaitPromise(Box::new(value), *resolved))
                     }
@@ -3655,6 +3659,8 @@ impl<'a> FnLowerer<'a> {
                     );
                     if resolves_at_dynamic_boundary {
                         Ok(value)
+                    } else if value_type == HirType::Json {
+                        self.lower_await_json_thenable(value)
                     } else {
                         Ok(HirExpr::Await(Box::new(value)))
                     }
