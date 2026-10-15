@@ -1,3 +1,17 @@
+/// A callback with a `Json`/`any` parameter must see live JS values, so it
+/// registers through the graph wrapper wherever it is created: as a direct
+/// argument, as a field of an object literal, as an array element or as an
+/// optional callback argument.
+// ponytail: the graph encoder copies a byte view element by element (about 6x
+// slower than the legacy replacer for a 4 MiB Buffer), so a callback that also
+// takes a byte-buffer parameter keeps the legacy wrapper; speed up the graph
+// encoder's byte path to drop this.
+pub(super) fn json_callback_wants_graph(params: &[HirType]) -> bool {
+    let takes_byte_buffer = params.iter().any(|param| *param == HirType::Bytes
+        || matches!(param, HirType::Array(element) if **element == HirType::F64));
+    !takes_byte_buffer && params.contains(&HirType::Json)
+}
+
 impl<'ctx> HirCompiler<'ctx> {
     fn compile_js_callback_from_json(
         &mut self,
@@ -1792,16 +1806,8 @@ impl<'ctx> HirCompiler<'ctx> {
             matches!(inner, HirExpr::Call(callee, _)
                 if matches!(callee.as_ref(), HirExpr::Var(name) if name == "__thaw_closure_alias"))
         };
-        // ponytail: the graph encoder copies a byte view element by element
-        // (about 6x slower than the legacy replacer for a 4 MiB Buffer), so a
-        // callback that also takes a byte-buffer parameter keeps the legacy
-        // wrapper; speed up the graph encoder's byte path to drop this.
-        let takes_byte_buffer = params.iter().any(|param| *param == HirType::Bytes
-            || matches!(param, HirType::Array(element) if **element == HirType::F64));
         let graph_mode = graph_mode
-            || (!aliased_adapter
-                && !takes_byte_buffer
-                && params.contains(&HirType::Json));
+            || (!aliased_adapter && json_callback_wants_graph(&params));
         let closure = self.compile_expr(closure_expr)?;
         if optional {
             let closure = closure.into_struct_value();
@@ -1888,7 +1894,7 @@ impl<'ctx> HirCompiler<'ctx> {
 
         self.builder.position_at_end(present_block);
         let callback = self.compile_register_native_callback_from_closure_with_rest(
-            closure, &params, ret, has_rest, false,
+            closure, &params, ret, has_rest, json_callback_wants_graph(&params),
         )?;
         self.compile_typed_dynamic_argument(array, callback, &HirType::JsValue)?;
         self.builder.build_unconditional_branch(done)
