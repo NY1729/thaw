@@ -752,6 +752,22 @@ fn lower_ts_type(
                 return Ok(HirType::Array(Box::new(HirType::Str)));
             }
 
+            // Explicit resource management: `Disposable` is `{ [Symbol.dispose](): void }`,
+            // `AsyncDisposable` the same with `[Symbol.asyncDispose](): Promise<void>`.
+            if let (Some(name @ ("Disposable" | "AsyncDisposable")), None) =
+                (ref_name, ty_ref.type_params.as_ref())
+            {
+                let (key, returned) = if name == "Disposable" {
+                    ("dispose", HirType::Void)
+                } else {
+                    ("asyncDispose", HirType::Promise(Box::new(HirType::Void)))
+                };
+                return Ok(HirType::Object(vec![(
+                    well_known_symbol_key(key),
+                    HirType::Function(Vec::new(), Box::new(returned)),
+                )]));
+            }
+
             if matches!(
                 ref_name,
                 Some("Generator" | "IterableIterator" | "AsyncGenerator" | "AsyncIterableIterator")

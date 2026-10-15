@@ -131,6 +131,11 @@ impl<'a> NativeStr<'a> {
     /// # Safety
     /// `pointer` must reference a live registered string or a NUL-terminated C string.
     pub unsafe fn from_ptr(pointer: *const c_char) -> Self {
+        // A null `string` is JavaScript `undefined` (a tagged template's
+        // invalid-escape cooked entry); it stringifies as such.
+        if pointer.is_null() {
+            return Self(b"undefined");
+        }
         let length = LENGTHS
             .with(|lengths| {
                 lengths
@@ -476,6 +481,14 @@ mod tests {
         assert_eq!(unsafe { NativeStr::from_ptr(pointer) }.to_bytes(), bytes);
         unregister_exception_bytes(pointer);
         unsafe { crate::destroy_string(pointer) };
+    }
+
+    #[test]
+    fn a_null_string_reads_as_undefined() {
+        assert_eq!(
+            unsafe { NativeStr::from_ptr(std::ptr::null()) }.to_bytes(),
+            b"undefined"
+        );
     }
 
     #[test]

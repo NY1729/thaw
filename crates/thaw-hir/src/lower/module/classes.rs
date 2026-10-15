@@ -345,7 +345,12 @@ fn collect_native_classes<'a>(
                         (!method.is_static
                             && method.kind == MethodKind::Method
                             && class_property_name(&method.key).ok().as_deref() == Some(field))
-                        .then(|| method_type(name, method, interfaces, generic_interfaces))
+                        .then(|| {
+                            (
+                                method.function.is_async,
+                                method_type(name, method, interfaces, generic_interfaces),
+                            )
+                        })
                     });
                     if implemented_method.is_some() {
                         break;
@@ -357,15 +362,28 @@ fn collect_native_classes<'a>(
                         .and_then(Expr::as_ident)
                         .and_then(|parent| declarations.get(parent.sym.as_ref()).copied());
                 }
+                // An async method's native type carries the awaited result, so
+                // its interface's `Promise<T>` return compares as `T`.
+                let mut async_method = false;
                 let actual_type = match (field_type, implemented_method) {
                     (Some(ty), _) => ty,
-                    (None, Some(ty)) => ty?,
+                    (None, Some((is_async, ty))) => {
+                        async_method = is_async;
+                        ty?
+                    }
                     (None, None) => {
                         return Err(format!(
                             "class `{name}` is missing field `{field}` required by `{}`",
                             target.sym
                         ))
                     }
+                };
+                let required_type = &match (async_method, required_type) {
+                    (true, HirType::Function(params, result)) => match result.as_ref() {
+                        HirType::Promise(inner) => HirType::Function(params.clone(), inner.clone()),
+                        _ => required_type.clone(),
+                    },
+                    _ => required_type.clone(),
                 };
                 if &actual_type != required_type {
                     return Err(format!(

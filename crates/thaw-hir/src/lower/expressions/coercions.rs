@@ -3507,6 +3507,16 @@ impl<'a> FnLowerer<'a> {
                 (HirType::Null, HirType::Null) => Some(HirExpr::Lit(HirLit::Bool(true))),
                 (HirType::Null, _) | (_, HirType::Null) => Some(HirExpr::Lit(HirLit::Bool(false))),
                 (HirType::Undefined, HirType::Undefined) => Some(HirExpr::Lit(HirLit::Bool(true))),
+                // A `string` can still hold the null pointer (a tagged template's
+                // invalid-escape cooked entry), so compare honestly.
+                (HirType::Str, HirType::Undefined) => Some(HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_string_is_null".into())),
+                    vec![lhs],
+                )),
+                (HirType::Undefined, HirType::Str) => Some(HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_string_is_null".into())),
+                    vec![rhs],
+                )),
                 (HirType::Undefined, _) | (_, HirType::Undefined) => {
                     Some(HirExpr::Lit(HirLit::Bool(false)))
                 }

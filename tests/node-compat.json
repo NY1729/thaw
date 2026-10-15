@@ -1141,6 +1141,11 @@
       "name": "inherited async rest and thenable methods through any",
       "expect": "matched",
       "source": "class Base { id = 7; who(): string { return \"base\" + this.id; } }\nclass D extends Base {\n  n = 1;\n  then(res: (v: number) => void): void { res(this.n * 10); }\n  async later(x: number): Promise<number> { return x + this.n; }\n  greet(name: string, ...rest: number[]): string { return name + this.n + rest.length; }\n}\nfunction viaParam(x: any): string { return x.greet(\"p\"); }\nasync function main(): Promise<void> {\n  const d = new D();\n  const a: any = d;\n  console.log(a.who(), a.greet(\"x\", 1, 2));\n  console.log(await a.later(5));\n  console.log(await a);\n  console.log(a.constructor.name, a instanceof Base);\n  const b: any = d;\n  console.log(a === b);\n  console.log(viaParam(d));\n  const list: any[] = [d, new D()];\n  console.log(list.map((e: any) => e.greet(\"m\")).join(\",\"));\n}\n"
+    },
+    {
+      "name": "tagged template invalid escapes cook to undefined",
+      "expect": "matched",
+      "source": "function tag(s: TemplateStringsArray, ...v: number[]): string {\n  const parts: string[] = [];\n  for (let i = 0; i < s.length; i++) parts.push(s[i] === undefined ? 'U' : s[i]);\n  return parts.join('|') + '#' + s.raw.join('|') + '#' + (s[1] ?? 'dflt');\n}\nasync function main(): Promise<void> {\n  console.log(tag`a\\unicode${1}b`);\n  console.log(tag`ok${2}\\xz`);\n}\n"
     }
   ]
 }
