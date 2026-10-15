@@ -127,8 +127,9 @@ pub fn register_napi_shutdown_bridge(
 ) {
     *NAPI_SHUTDOWN_BRIDGE.lock().unwrap() = Some((begin, poll, take_error, finish));
 }
+/// Original terminal settings of every descriptor currently in raw mode (restored at exit).
 #[cfg(unix)]
-static ORIGINAL_STDIN_TERMIOS: Mutex<Option<libc::termios>> = Mutex::new(None);
+static ORIGINAL_STDIN_TERMIOS: Mutex<Vec<(libc::c_int, libc::termios)>> = Mutex::new(Vec::new());
 #[cfg(unix)]
 static STDIN_RESTORE_REGISTERED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
@@ -527,6 +528,8 @@ struct HostWorker {
     events: Receiver<HostWorkerEvent>,
     thread: Option<JoinHandle<()>>,
     refed: bool,
+    /// Set by `terminate()`; the Worker thread's engine interrupt handler watches it so a busy script stops too.
+    terminate: Arc<std::sync::atomic::AtomicBool>,
 }
 
 struct HostWorkerStart {
@@ -536,6 +539,7 @@ struct HostWorkerStart {
     config_json: String,
     thread_id: u32,
     shared_env: Arc<Mutex<HashMap<String, String>>>,
+    terminate: Arc<std::sync::atomic::AtomicBool>,
 }
 
 struct HostWorkerTable {
@@ -575,37 +579,92 @@ fn hex_encode(value: &[u8]) -> String {
 
 #[cfg(unix)]
 extern "C" fn restore_stdin_termios() {
-    if let Some(termios) = ORIGINAL_STDIN_TERMIOS.lock().unwrap().take() {
+    let saved = std::mem::take(&mut *ORIGINAL_STDIN_TERMIOS.lock().unwrap());
+    for (fd, termios) in saved {
         unsafe {
-            libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &termios);
+            libc::tcsetattr(fd, libc::TCSANOW, &termios);
         }
     }
 }
 
+/// Switches a terminal descriptor into (or out of) raw mode; the original settings are restored at exit.
 #[cfg(unix)]
-fn set_stdin_raw_mode(enabled: bool) -> bool {
+fn set_fd_raw_mode(fd: libc::c_int, enabled: bool) -> bool {
     if !enabled {
-        restore_stdin_termios();
-        return true;
+        let saved = {
+            let mut originals = ORIGINAL_STDIN_TERMIOS.lock().unwrap();
+            originals
+                .iter()
+                .position(|(saved, _)| *saved == fd)
+                .map(|index| originals.remove(index).1)
+        };
+        return match saved {
+            Some(termios) => (unsafe { libc::tcsetattr(fd, libc::TCSANOW, &termios) }) == 0,
+            None => true,
+        };
     }
     let mut termios = unsafe { std::mem::zeroed() };
-    if unsafe { libc::tcgetattr(libc::STDIN_FILENO, &mut termios) } != 0 {
+    if unsafe { libc::tcgetattr(fd, &mut termios) } != 0 {
         return false;
     }
-    let mut original = ORIGINAL_STDIN_TERMIOS.lock().unwrap();
-    if original.is_none() {
-        *original = Some(termios);
+    {
+        let mut originals = ORIGINAL_STDIN_TERMIOS.lock().unwrap();
+        if !originals.iter().any(|(saved, _)| *saved == fd) {
+            originals.push((fd, termios));
+        }
     }
     unsafe {
         libc::cfmakeraw(&mut termios);
     }
-    let changed = unsafe { libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &termios) } == 0;
+    let changed = unsafe { libc::tcsetattr(fd, libc::TCSANOW, &termios) } == 0;
     if changed && !STDIN_RESTORE_REGISTERED.swap(true, std::sync::atomic::Ordering::AcqRel) {
         unsafe {
             libc::atexit(restore_stdin_termios);
         }
     }
     changed
+}
+
+#[cfg(unix)]
+fn set_stdin_raw_mode(enabled: bool) -> bool {
+    set_fd_raw_mode(libc::STDIN_FILENO, enabled)
+}
+
+/// `tty.ReadStream.setRawMode` for the descriptor the stream was created on.
+#[cfg(unix)]
+fn set_tty_raw_mode(fd: i32, enabled: bool) -> bool {
+    fd >= 0 && set_fd_raw_mode(fd, enabled)
+}
+
+/// Writes all `bytes` to `fd` (tty.WriteStream on a descriptor other than stdout/stderr).
+#[cfg(unix)]
+fn write_fd_bytes(fd: i32, bytes: &[u8]) -> std::io::Result<()> {
+    let mut written = 0;
+    while written < bytes.len() {
+        let count =
+            unsafe { libc::write(fd, bytes[written..].as_ptr().cast(), bytes.len() - written) };
+        if count < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(error);
+        }
+        written += count as usize;
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn set_tty_raw_mode(_fd: i32, _enabled: bool) -> bool {
+    false
+}
+
+#[cfg(not(unix))]
+fn write_fd_bytes(_fd: i32, _bytes: &[u8]) -> std::io::Result<()> {
+    Err(std::io::Error::other(
+        "raw descriptor writes are unsupported on this platform",
+    ))
 }
 
 #[cfg(not(unix))]

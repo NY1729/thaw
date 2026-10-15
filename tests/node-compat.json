@@ -939,24 +939,59 @@
       "source": "import net from 'node:net';\nfunction main(): void {\n  const server = net.createServer((socket: any) => {\n    socket.on('data', (d: any) => { console.log('data', String(d)); socket.end('bye'); });\n    socket.on('error', (e: any) => console.log('err', e && e.code));\n  });\n  server.listen(0, '127.0.0.1', () => {\n    const port = (server.address() as any).port;\n    const c = net.connect(port, '127.0.0.1', () => c.write('hello'));\n    c.on('data', (d: any) => { console.log('client got', String(d)); });\n    c.on('close', () => { console.log('closed'); server.close(); });\n  });\n}\n"
     },
     {
-      "name": "byte stream byob reads transfer the view buffer and report done at the end",
+      "name": "parentPort unref lets the worker exit",
       "expect": "matched",
-      "source": "import { ReadableStream } from 'node:stream/web'; async function main(): Promise<void> { const run: any = new Function('return (async () => { const stream = new ReadableStream({ type: \\'bytes\\', start(c) { c.enqueue(new Uint8Array([1, 2, 3])); c.close(); } });const reader = stream.getReader({ mode: \\'byob\\' }); const buffer = new ArrayBuffer(8); const view = new Uint8Array(buffer);const first = await reader.read(view); const out = [first.done, first.value.byteLength, first.value.buffer === buffer, buffer.byteLength, view.byteLength].join(\\' \\');const last = await reader.read(new Uint8Array(2)); return out + \\'\\\\n\\' + [last.done, last.value.byteLength].join(\\' \\'); })()'); console.log(await run()); }"
+      "source": "import { Worker } from 'node:worker_threads';\nasync function main(): Promise<void> {\n  const worker = new Worker(`const { parentPort } = require('node:worker_threads'); parentPort.on('message', () => {}); parentPort.unref(); parentPort.postMessage('ready');`, { eval: true });\n  const log: string[] = [];\n  worker.on('message', (v: any) => { log.push('message ' + v); });\n  const code: number = await new Promise<number>((resolve) => { worker.on('exit', (c: number) => { resolve(c); }); });\n  log.push('exit ' + code);\n  console.log(log.join('|'));\n}"
     },
     {
-      "name": "byte stream tee gives byob and default branches independent chunks",
+      "name": "worker inherits environment data",
       "expect": "matched",
-      "source": "import { ReadableStream } from 'node:stream/web'; async function main(): Promise<void> { const run: any = new Function('return (async () => { const stream = new ReadableStream({ type: \\'bytes\\', start(c) { c.enqueue(new Uint8Array([1, 2, 3, 4, 5])); c.close(); } });const branches = stream.tee(); const a = branches[0].getReader({ mode: \\'byob\\' }); const b = branches[1].getReader();const x = await a.read(new Uint8Array(8), { min: 5 }); const y = await b.read();return [x.value.byteLength, y.value.byteLength, x.value.buffer !== y.value.buffer].join(\\' \\'); })()'); console.log(await run()); }"
+      "source": "import { Worker, setEnvironmentData } from 'node:worker_threads';\nasync function main(): Promise<void> {\n  setEnvironmentData('w2.key', { a: 1 });\n  const worker = new Worker(`const { parentPort, getEnvironmentData } = require('node:worker_threads'); parentPort.postMessage(JSON.stringify(getEnvironmentData('w2.key')) + ' ' + typeof getEnvironmentData('missing'));`, { eval: true });\n  const text: string = await new Promise<string>((resolve) => { worker.once('message', (v: any) => { resolve(String(v)); }); });\n  console.log(text);\n  await worker.terminate();\n}"
     },
     {
-      "name": "stream controller methods work on any callback parameters inside option objects",
+      "name": "worker stdin end lets the worker exit",
       "expect": "matched",
-      "source": "function main(): void {\n  const log: string[] = [];\n  const rs = new ReadableStream({ start(c: any) { c.enqueue('a'); c.enqueue('b'); c.close(); } });\n  const reader = rs.getReader();\n  reader.read()\n    .then((x: any) => { log.push('r1 ' + x.value + ' ' + x.done); return reader.read(); })\n    .then((x: any) => { log.push('r2 ' + x.value + ' ' + x.done); return reader.read(); })\n    .then((x: any) => { log.push('r3 ' + x.done);\n      const ws = new WritableStream({ write(chunk: any, controller: any) { log.push('w ' + chunk + ' ' + typeof controller.error); } });\n      const w = ws.getWriter();\n      return w.write('x').then(() => w.close()); })\n    .then(() => {\n      const ts = new TransformStream({ transform(chunk: any, controller: any) { controller.enqueue(String(chunk).toUpperCase()); }, flush(controller: any) { controller.enqueue('END'); } });\n      const tw = ts.writable.getWriter(); const tr = ts.readable.getReader();\n      tw.write('q'); tw.close();\n      return tr.read().then((x: any) => { log.push('t1 ' + x.value); return tr.read(); }).then((x: any) => { log.push('t2 ' + x.value); return tr.read(); }).then((x: any) => log.push('t3 ' + x.done)); })\n    .then(() => {\n      const bs = new ReadableStream({ type: 'bytes', start(c: any) { c.enqueue(new Uint8Array([7, 8, 9])); c.close(); } });\n      return bs.getReader({ mode: 'byob' }).read(new Uint8Array(8)); })\n    .then((x: any) => { log.push('byob ' + x.done + ' ' + x.value.length + ' ' + x.value[0]); console.log(log.join('\\n')); });\n}\n"
+      "source": "import { Worker } from 'node:worker_threads';\nasync function main(): Promise<void> {\n  const worker = new Worker(`const { parentPort } = require('node:worker_threads'); let text = ''; process.stdin.setEncoding('utf8'); process.stdin.on('data', (c) => { text += c; }); process.stdin.on('end', () => { parentPort.postMessage('got ' + text); });`, { eval: true, stdin: true });\n  const log: string[] = [];\n  worker.on('message', (v: any) => { log.push(String(v)); });\n  worker.stdin!.write('abc');\n  worker.stdin!.end('def');\n  const code: number = await new Promise<number>((resolve) => { worker.on('exit', (c: number) => { resolve(c); }); });\n  log.push('exit ' + code);\n  console.log(log.join('|'));\n}"
     },
     {
-      "name": "any callback parameters in object fields and array elements receive live values",
+      "name": "worker natural exit keeps process.exitCode",
       "expect": "matched",
-      "source": "import { EventEmitter } from 'node:events';\nfunction main(): void {\n  const ee = new EventEmitter();\n  const handlers = { first: (a: any) => console.log('first', JSON.stringify(a)) };\n  ee.on('go', handlers.first);\n  ee.on('go', (a: any, b: any) => console.log('second', JSON.stringify(a), b));\n  ee.emit('go', { k: [1, 2] }, 'two');\n  const sources = [{ cb: (v: any) => console.log('src0', JSON.stringify(v)) }, { cb: (v: any) => console.log('src1', JSON.stringify(v)) }];\n  for (const s of sources) { s.cb({ n: 1 }); }\n  const p = new Promise((resolve: any) => { resolve({ ok: true }); });\n  p.then((v: any) => console.log('promise', JSON.stringify(v)));\n}\n"
+      "source": "import { Worker } from 'node:worker_threads';\nasync function main(): Promise<void> {\n  const worker = new Worker(`process.exitCode = 3;`, { eval: true });\n  const code: number = await new Promise<number>((resolve) => { worker.on('exit', (c: number) => { resolve(c); }); });\n  console.log('exit ' + code);\n}"
+    },
+    {
+      "name": "receiveMessageOnPort reads parentPort",
+      "expect": "matched",
+      "source": "import { Worker } from 'node:worker_threads';\nasync function main(): Promise<void> {\n  const worker = new Worker(`const { parentPort, receiveMessageOnPort } = require('node:worker_threads'); parentPort.postMessage('ready'); const wait = () => { const r = receiveMessageOnPort(parentPort); if (r) { parentPort.postMessage(JSON.stringify(r.message)); parentPort.close(); } else setTimeout(wait, 5); }; wait();`, { eval: true });\n  worker.on('message', (v: any) => { if (v === 'ready') worker.postMessage({ n: 7 }); else { console.log(v); } });\n  await new Promise<void>((resolve) => { worker.on('exit', () => { resolve(); }); });\n}"
+    },
+    {
+      "name": "parentPort close keeps pending work alive",
+      "expect": "matched",
+      "source": "import { Worker } from 'node:worker_threads';\nasync function main(): Promise<void> {\n  const worker = new Worker(`const { parentPort } = require('node:worker_threads'); parentPort.on('message', () => {}); parentPort.close(); setTimeout(() => { console.log('timer ran'); }, 30);`, { eval: true, stdout: false });\n  const log: string[] = [];\n  const code: number = await new Promise<number>((resolve) => { worker.on('exit', (c: number) => { resolve(c); }); });\n  console.log('exit ' + code);\n}"
+    },
+    {
+      "name": "parentPort onmessage handler runs",
+      "expect": "matched",
+      "source": "import { Worker } from 'node:worker_threads';\nasync function main(): Promise<void> {\n  const worker = new Worker(`const { parentPort } = require('node:worker_threads'); parentPort.onmessage = (event) => { parentPort.postMessage('got ' + JSON.stringify(event.data)); parentPort.close(); };`, { eval: true });\n  worker.on('message', (v: any) => { console.log(v); });\n  worker.postMessage({ k: 1 });\n  await new Promise<void>((resolve) => { worker.on('exit', () => { resolve(); }); });\n}"
+    },
+    {
+      "name": "worker stdin pause holds back data",
+      "expect": "matched",
+      "source": "import { Worker } from 'node:worker_threads';\nasync function main(): Promise<void> {\n  const worker = new Worker(`const { parentPort } = require('node:worker_threads'); const log = []; process.stdin.setEncoding('utf8'); process.stdin.on('data', (c) => { log.push('data ' + c); if (c === 'a') { process.stdin.pause(); setTimeout(() => { log.push('resume'); process.stdin.resume(); }, 40); } }); process.stdin.on('end', () => { parentPort.postMessage(log.join(',')); });`, { eval: true, stdin: true });\n  worker.on('message', (v: any) => { console.log(v); });\n  worker.stdin!.write('a');\n  setTimeout(() => { worker.stdin!.write('b'); worker.stdin!.end(); }, 10);\n  await new Promise<void>((resolve) => { worker.on('exit', () => { resolve(); }); });\n}"
+    },
+    {
+      "name": "terminate interrupts a busy worker",
+      "expect": "matched",
+      "source": "import { Worker } from 'node:worker_threads';\nasync function main(): Promise<void> {\n  const worker = new Worker(`while (true) {}`, { eval: true });\n  await new Promise<void>((resolve) => { setTimeout(() => { resolve(); }, 100); });\n  const code: number = await worker.terminate();\n  console.log('terminated ' + code);\n}"
+    },
+    {
+      "name": "resourceLimits stop a runaway allocation",
+      "expect": "matched",
+      "source": "import { Worker } from 'node:worker_threads';\nasync function main(): Promise<void> {\n  const worker = new Worker(`const keep = []; while (true) { keep.push(new Array(100000).fill(1)); }`, { eval: true, resourceLimits: { maxOldGenerationSizeMb: 16 } });\n  const result: string = await new Promise<string>((resolve) => { worker.on('error', (e: any) => { resolve('error ' + e.code); }); worker.on('exit', () => { resolve('exit'); }); });\n  console.log(result);\n}"
+    },
+    {
+      "name": "worker data shares a SharedArrayBuffer",
+      "expect": "matched",
+      "source": "import { Worker } from 'node:worker_threads';\nasync function main(): Promise<void> {\n  const shared = new SharedArrayBuffer(8);\n  const view = new Int32Array(shared);\n  const worker = new Worker(`const { parentPort, workerData } = require('node:worker_threads'); const view = new Int32Array(workerData); Atomics.store(view, 0, 42); parentPort.postMessage(workerData instanceof SharedArrayBuffer);`, { eval: true, workerData: shared });\n  const kind: boolean = await new Promise<boolean>((resolve) => { worker.once('message', (value: boolean) => { resolve(value); }); });\n  await worker.terminate();\n  console.log(kind, view[0]);\n}"
     }
   ]
 }

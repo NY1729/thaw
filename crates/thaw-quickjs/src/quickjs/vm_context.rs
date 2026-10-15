@@ -121,6 +121,8 @@ thread_local! {
     /// Deadlines of the vm runs currently on this thread's stack; the interrupt handler fires once any has passed.
     static VM_DEADLINES: RefCell<Vec<Instant>> = const { RefCell::new(Vec::new()) };
     static VM_INTERRUPTED: Cell<bool> = const { Cell::new(false) };
+    /// On a Worker thread: the flag `terminate()` raises. The interrupt handler stays installed for the Worker's whole life.
+    static WORKER_TERMINATE: RefCell<Option<Arc<std::sync::atomic::AtomicBool>>> = const { RefCell::new(None) };
 }
 
 unsafe extern "C" fn vm_interrupt_handler(_runtime: *mut rquickjs::qjs::JSRuntime, _opaque: *mut std::ffi::c_void) -> i32 {
@@ -129,7 +131,10 @@ unsafe extern "C" fn vm_interrupt_handler(_runtime: *mut rquickjs::qjs::JSRuntim
     if expired {
         let _ = VM_INTERRUPTED.try_with(|flag| flag.set(true));
     }
-    i32::from(expired)
+    let terminating = WORKER_TERMINATE
+        .try_with(|flag| flag.borrow().as_ref().is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Relaxed)))
+        .unwrap_or(false);
+    i32::from(expired || terminating)
 }
 
 fn vm_throw<'js>(ctx: &Ctx<'js>, raw: rquickjs::qjs::JSValue) -> rquickjs::Error {
@@ -269,7 +274,8 @@ fn host_vm_run<'js>(
                 deadlines.pop();
                 deadlines.len()
             });
-            if remaining == 0 {
+            // A Worker thread keeps its handler (terminate() relies on it).
+            if remaining == 0 && !WORKER_TERMINATE.with(|flag| flag.borrow().is_some()) {
                 qjs::JS_SetInterruptHandler(runtime, None, std::ptr::null_mut());
             }
             if failed && Instant::now() >= deadline && VM_INTERRUPTED.with(Cell::get) {

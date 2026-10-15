@@ -37,6 +37,7 @@
         node = { t: 'MessagePort', v: String(portId) };
       }
       else if (input instanceof ArrayBuffer) node = { t: 'ArrayBuffer', v: Array.from(new Uint8Array(input), byte => byte.toString(16).padStart(2, '0')).join('') };
+      else if (typeof SharedArrayBuffer === 'function' && input instanceof SharedArrayBuffer) node = { t: 'SharedArrayBuffer', v: globalThis.__thaw_sab_serialize(input) };
       else if (ArrayBuffer.isView(input)) node = { t: input instanceof DataView ? 'DataView' : 'TypedArray', c: input.constructor.name, b: encode(input.buffer), o: input.byteOffset, l: input instanceof DataView ? input.byteLength : input.length };
       else {
         const blobSnapshot = blobFileCloneSnapshot(input);
@@ -73,6 +74,7 @@
         values[id] = globalThis.__thaw_create_worker_port(node.v);
       }
       else if (node.t === 'ArrayBuffer') { const bytes = new Uint8Array(node.v.length / 2); for (let index = 0; index < bytes.length; index++) bytes[index] = parseInt(node.v.slice(index * 2, index * 2 + 2), 16); values[id] = bytes.buffer; }
+      else if (node.t === 'SharedArrayBuffer') values[id] = globalThis.__thaw_sab_deserialize(node.v);
       else if (node.t === 'Object') values[id] = {};
     });
     const decode = primitive;

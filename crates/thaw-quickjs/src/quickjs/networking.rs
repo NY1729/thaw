@@ -478,6 +478,13 @@ fn net_poll_read_stream(handle: u32, retain_on_eof: bool) -> String {
     })
 }
 
+/// Hands the connected stream behind `handle` to the caller (STARTTLS). The socket's writer thread
+/// drains what is already queued and exits when its channel closes.
+fn net_take_stream(handle: u32) -> Option<TcpStream> {
+    NET_WRITERS.with(|writers| writers.borrow_mut().remove(&handle));
+    NET_STREAMS.with(|streams| streams.borrow_mut().1.remove(&handle))
+}
+
 fn net_destroy(handle: u32) {
     // After `end()` the queued bytes still belong to the peer: the writer thread drains them and closes its descriptor.
     let draining = NET_WRITERS.with(|writers| {
@@ -848,6 +855,30 @@ fn decode_private_key(spec: &str) -> Result<PrivateKeyDer<'static>, String> {
     }
 }
 
+/// Protocol versions allowed by `minVersion`/`maxVersion` (rustls implements TLS 1.2 and 1.3 only).
+fn tls_protocol_versions(spec: &str) -> Result<Vec<&'static rustls::SupportedProtocolVersion>, String> {
+    let (minimum, maximum) = spec.split_once(',').unwrap_or(("", ""));
+    let rank = |name: &str, default: usize| match name {
+        "TLSv1" => 0,
+        "TLSv1.1" => 1,
+        "TLSv1.2" => 2,
+        "TLSv1.3" => 3,
+        _ => default,
+    };
+    let (minimum, maximum) = (rank(minimum, 0), rank(maximum, 3));
+    let mut versions = Vec::new();
+    if minimum <= 2 && maximum >= 2 {
+        versions.push(&rustls::version::TLS12);
+    }
+    if minimum <= 3 && maximum >= 3 {
+        versions.push(&rustls::version::TLS13);
+    }
+    if versions.is_empty() {
+        return Err("error:0A0000BF:SSL routines::no protocols available".to_string());
+    }
+    Ok(versions)
+}
+
 fn decode_alpn_protocols(spec: &str) -> Vec<Vec<u8>> {
     spec.split(',')
         .filter(|value| !value.is_empty())
@@ -863,6 +894,8 @@ pub(super) struct TlsClientOptions<'a> {
     pub(super) cert_spec: &'a str,
     pub(super) key_spec: &'a str,
     pub(super) alpn_spec: &'a str,
+    /// `minVersion,maxVersion` (TLSv1 .. TLSv1.3), either side may be empty.
+    pub(super) versions_spec: &'a str,
     pub(super) report_alpn: bool,
     pub(super) reject_unauthorized: bool,
     pub(super) defer_name_verification: bool,
@@ -944,6 +977,8 @@ struct TlsClientJob {
     report_alpn: bool,
     /// DER of the configured trust anchors, to complete the chain `getPeerCertificate(true)` reports.
     ca_certificates: Vec<Vec<u8>>,
+    /// STARTTLS: an already connected stream (taken from a `net.Socket`) to run the handshake over.
+    stream: Option<TcpStream>,
 }
 
 struct TlsClientDone {
@@ -982,13 +1017,15 @@ fn tls_client_prepare(options: &TlsClientOptions<'_>) -> Result<TlsClientJob, St
         cert_spec,
         key_spec,
         alpn_spec,
+        versions_spec,
         report_alpn,
         reject_unauthorized,
         defer_name_verification,
     } = *options;
     let roots = tls_client_roots(ca_spec).map_err(|error| format!("err:{error}"))?;
     let verifier_result = Arc::new(Mutex::new(None));
-    let builder = ClientConfig::builder().with_root_certificates(roots.clone());
+    let versions = tls_protocol_versions(versions_spec).map_err(|error| format!("err:{error}"))?;
+    let builder = ClientConfig::builder_with_protocol_versions(&versions).with_root_certificates(roots.clone());
     let mut local_certificate = None;
     let config = if cert_spec.is_empty() && key_spec.is_empty() {
         builder.with_no_client_auth()
@@ -1029,12 +1066,16 @@ fn tls_client_prepare(options: &TlsClientOptions<'_>) -> Result<TlsClientJob, St
         local_certificate,
         report_alpn,
         ca_certificates,
+        stream: None,
     })
 }
 
 impl TlsClientJob {
     fn connect(self) -> Result<TlsClientDone, String> {
-        let mut socket = tcp_connect_structured(&self.host, self.port)?;
+        let mut socket = match self.stream {
+            Some(stream) => stream,
+            None => tcp_connect_structured(&self.host, self.port)?,
+        };
         let _ = socket.set_read_timeout(Some(Duration::from_secs(5)));
         let mut connection = ClientConnection::new(self.config, self.name).map_err(|error| format!("err:{error}"))?;
         while connection.is_handshaking() {
@@ -1131,6 +1172,27 @@ pub(super) fn tls_connect_start(options: TlsClientOptions<'_>) -> u32 {
     }
 }
 
+/// STARTTLS: the TLS client handshake over the connection a `net.Socket` already owns. The stream leaves the
+/// socket tables (the `net.Socket` no longer uses its handle); queued writes are flushed by the writer thread first.
+pub(super) fn tls_wrap_start(options: TlsClientOptions<'_>, net_handle: u32) -> u32 {
+    let Some(stream) = net_take_stream(net_handle) else {
+        return async_op_ready("err:socket is closed".to_string());
+    };
+    match tls_client_prepare(&options) {
+        Err(wire) => async_op_ready(wire),
+        Ok(mut job) => {
+            job.stream = Some(stream);
+            async_op_start(move || {
+                let connected = job.connect();
+                Box::new(move || match connected {
+                    Ok(done) => done.register(),
+                    Err(wire) => wire,
+                })
+            })
+        }
+    }
+}
+
 pub(super) struct TlsServerOptions<'a> {
     pub(super) host: &'a str,
     pub(super) port: u16,
@@ -1140,6 +1202,7 @@ pub(super) struct TlsServerOptions<'a> {
     pub(super) request_cert: bool,
     pub(super) reject_unauthorized: bool,
     pub(super) alpn_spec: &'a str,
+    pub(super) versions_spec: &'a str,
 }
 
 pub(super) fn tls_server_listen(options: TlsServerOptions<'_>) -> String {
@@ -1152,6 +1215,7 @@ pub(super) fn tls_server_listen(options: TlsServerOptions<'_>) -> String {
         request_cert,
         reject_unauthorized,
         alpn_spec,
+        versions_spec,
     } = options;
     let certificates = match decode_certificates(cert_spec) {
         Ok(certificates) => certificates,
@@ -1166,7 +1230,8 @@ pub(super) fn tls_server_listen(options: TlsServerOptions<'_>) -> String {
         Err(error) => return format!("err:{error}"),
     };
     let roots = match tls_ca_roots(ca_spec) { Ok(roots) => roots, Err(error) => return format!("err:{error}") };
-    let builder = ServerConfig::builder();
+    let versions = match tls_protocol_versions(versions_spec) { Ok(versions) => versions, Err(error) => return format!("err:{error}") };
+    let builder = ServerConfig::builder_with_protocol_versions(&versions);
     let builder = if request_cert {
         let verifier = if reject_unauthorized {
             WebPkiClientVerifier::builder(Arc::new(roots)).build()
@@ -1883,6 +1948,7 @@ struct TlsClientOptions<'a> {
     cert_spec: &'a str,
     key_spec: &'a str,
     alpn_spec: &'a str,
+    versions_spec: &'a str,
     report_alpn: bool,
     reject_unauthorized: bool,
     defer_name_verification: bool,
@@ -1899,6 +1965,7 @@ struct TlsServerOptions<'a> {
     request_cert: bool,
     reject_unauthorized: bool,
     alpn_spec: &'a str,
+    versions_spec: &'a str,
 }
 
 #[cfg(not(feature = "tls"))]
@@ -1907,6 +1974,8 @@ fn tls_unavailable() -> String { "err:TLS support is not linked".to_string() }
 fn tls_connect(_: TlsClientOptions<'_>) -> String { tls_unavailable() }
 #[cfg(not(feature = "tls"))]
 fn tls_connect_start(_: TlsClientOptions<'_>) -> u32 { async_op_ready(tls_unavailable()) }
+#[cfg(not(feature = "tls"))]
+fn tls_wrap_start(_: TlsClientOptions<'_>, _: u32) -> u32 { async_op_ready(tls_unavailable()) }
 #[cfg(not(feature = "tls"))]
 fn tls_server_listen(_: TlsServerOptions<'_>) -> String { tls_unavailable() }
 #[cfg(not(feature = "tls"))]
