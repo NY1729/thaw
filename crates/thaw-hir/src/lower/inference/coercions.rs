@@ -341,6 +341,12 @@ impl<'a> FnLowerer<'a> {
         result
     }
 
+    /// An `async` method stores its awaited result type as `ret`; the interface member
+    /// declares the `Promise` of it.
+    fn async_signature_returns(is_async: bool, ret: &HirType, declared: &HirType) -> bool {
+        is_async && matches!(declared, HirType::Promise(inner) if inner.as_ref() == ret)
+    }
+
     fn coerce_to_declared(&mut self, declared: &HirType, value: HirExpr) -> Result<HirExpr, String> {
         if *declared == HirType::Dynamic {
             return Ok(value);
@@ -668,7 +674,9 @@ impl<'a> FnLowerer<'a> {
                     match expected {
                         HirType::Dynamic if !signature.generic_type_params.is_empty() => true,
                         HirType::Function(expected_params, result) => {
-                            fixed == expected_params && &signature.ret == result.as_ref()
+                            fixed == expected_params
+                                && (&signature.ret == result.as_ref()
+                                    || Self::async_signature_returns(signature.is_async, &signature.ret, result))
                         }
                         HirType::CallableFunction(expected_params, _, expected_rest, result) => {
                             fixed.len() == expected_params.len()
@@ -677,7 +685,8 @@ impl<'a> FnLowerer<'a> {
                                         || expected == actual
                                 })
                                 && signature.native_rest.as_ref() == expected_rest.as_deref()
-                                && &signature.ret == result.as_ref()
+                                && (&signature.ret == result.as_ref()
+                                    || Self::async_signature_returns(signature.is_async, &signature.ret, result))
                         }
                         _ => false,
                     }

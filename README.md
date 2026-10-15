@@ -178,6 +178,18 @@ all Node built-ins, and all npm packages are not guaranteed. Third-party
 packages and native add-ons remain subject to their own platform and license
 requirements.
 
+Known gaps against Node semantics:
+
+- A method extracted from an object (`const f = o.m; f()`) stays bound to its
+  owner, where Node would give `this` as `undefined`.
+- Values typed `any` that hold arrays, class instances or objects are live
+  views (Proxy-backed); class instances written into an `any` array through
+  such a view are not supported, and writes store copies of JavaScript-owned
+  objects.
+- `s.raw` is not available on a tagged-template parameter typed `any`.
+- Frozen native arrays always throw `TypeError` on writes (code is strict).
+- Decorated classes use snapshot semantics when passed as `any`.
+
 ## Examples
 
 - [Full-stack server](examples/fullstack-server)

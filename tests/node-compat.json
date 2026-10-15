@@ -1171,6 +1171,36 @@
       "name": "class field holding a class instance stays live through any",
       "expect": "matched",
       "source": "class Inner { v = 1; inc(): number { this.v++; return this.v; } }\nclass Outer { inner: Inner = new Inner(); name = \"o\"; }\nasync function main(): Promise<void> {\n  const o = new Outer();\n  const a: any = o;\n  console.log(a.inner.v, typeof a.inner.inc);\n  console.log(a.inner.inc(), o.inner.v);\n}\n"
+    },
+    {
+      "name": "method call on an indexed any element",
+      "expect": "matched",
+      "source": "class C { n = 1; bump(): number { this.n += 1; return this.n; } m() { return 1; } }\nasync function main(): Promise<void> {\n  const arr: number[][] = [[1], [2]];\n  const l: any = arr;\n  l[0].push(5);\n  console.log(JSON.stringify(arr));\n  const cs: C[] = [new C()];\n  const lc: any = cs;\n  console.log(lc[0].bump(), cs[0].n, lc[0].m());\n  const o: any = { list: [1, 2] };\n  o.list.push(3);\n  console.log(o.list.length, JSON.stringify(o));\n}\n"
+    },
+    {
+      "name": "spread of an any array",
+      "expect": "matched",
+      "source": "async function main(): Promise<void> {\n  const a: any = [1, 2, 3];\n  const sp = [...a];\n  console.log(sp.length, sp[2]);\n  const nums: number[] = [4, 5];\n  const an: any = nums;\n  const sp2 = [0, ...an];\n  console.log(sp2.length, sp2.join(\",\"));\n}\n"
+    },
+    {
+      "name": "async class assigned to a Promise-returning interface",
+      "expect": "matched",
+      "source": "class R { async run(): Promise<number> { return 7; } async x(a: number): Promise<string> { return \"x\" + a; } }\ninterface Runner { run(): Promise<number>; x(a: number): Promise<string>; }\nasync function main(): Promise<void> {\n  const r: Runner = new R();\n  console.log(await r.run(), await r.x(2));\n}\n"
+    },
+    {
+      "name": "hasOwnProperty of a class method through any is false",
+      "expect": "matched",
+      "source": "class C { n = 1; bump(): number { this.n += 1; return this.n; } m() { return 1; } }\nasync function main(): Promise<void> {\n  const c: any = new C();\n  console.log(c.hasOwnProperty(\"n\"), c.hasOwnProperty(\"bump\"), c.hasOwnProperty(\"m\"));\n}\n"
+    },
+    {
+      "name": "non-primitive element writes through an any array view",
+      "expect": "matched",
+      "source": "async function main(): Promise<void> {\n  const grid: number[][] = [[1], [2]];\n  const g: any = grid;\n  g[0] = [9, 9];\n  g.push([3]);\n  console.log(JSON.stringify(grid), grid.length);\n  const objs: { a: number }[] = [{ a: 1 }];\n  const go: any = objs;\n  go[0] = { a: 5 };\n  go[1] = { a: 6 };\n  console.log(objs[0].a, objs[1].a, objs.length);\n  const pairs: [string, number][] = [[\"x\", 1]];\n  const gp: any = pairs;\n  gp[0] = [\"y\", 2];\n  console.log(pairs[0][0], pairs[0][1]);\n}\n"
+    },
+    {
+      "name": "cooked undefined through an any tag parameter",
+      "expect": "matched",
+      "source": "function tag(s: any, ...v: any[]): string {\n  return typeof s[0] + \"|\" + String(s[0] === undefined) + \"|\" + String(s[1]) + \"|\" + s.length + \"|\" + Array.isArray(s) + \"|\" + JSON.stringify(s);\n}\nasync function main(): Promise<void> {\n  console.log(tag`\\unicode ${1} ok`);\n}\n"
     }
   ]
 }
