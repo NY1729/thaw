@@ -235,6 +235,15 @@
   const thawGraphObjectEntries = Object.entries;
   const thawGraphObjectValues = Object.values;
   const thawGraphObjectCreate = Object.create;
+  const thawGraphObjectSetPrototypeOf = Object.setPrototypeOf;
+  const thawStringStartsWith = String.prototype.startsWith;
+  const thawStringIndexOf = String.prototype.indexOf;
+  const thawStringSlice = String.prototype.slice;
+  const thawStringSplit = String.prototype.split;
+  // Native class instances projected into `any`: wrapper -> class name (query 23).
+  const thawClassProjectionNames = new WeakMap();
+  const thawClassProjectionSet = WeakMap.prototype.set;
+  const thawClassProjectionGet = WeakMap.prototype.get;
   const thawGraphDefineProperty = Object.defineProperty;
   const thawGraphProxy = Proxy;
   const thawNapiIntrinsicObject = Object;
@@ -522,6 +531,7 @@
       case 18: return thawGraphObjectIsFrozen(value) ? '1' : '0';
       case 19: return thawGraphObjectIsSealed(value) ? '1' : '0';
       case 20: return thawNapiReflectIsExtensible(value) ? '0' : '1';
+      case 23: return thawGraphApply(thawClassProjectionGet, thawClassProjectionNames, [value]) ?? '';
       case 22:
         return thawDateApply(thawHostIsPrototypeOf, thawHostErrorPrototype, [value]) ? '1' : '0';
       default: throw new thawGraphTypeError('Invalid native host query');
@@ -1978,12 +1988,53 @@
     return response;
   };
   thawGraphDefineProperty(globalThis, '__thaw_object_with_native_getters', {
-    value: (keys, readable, writable, accessors, methods, ...callbacks) => {
+    value: (keys, readable, writable, accessors, methods, ...rest) => {
+      // A class instance passes its class name before the callbacks: its method
+      // keys become non-enumerable members of a prototype that names the class.
+      const ancestry = typeof rest[0] === 'string' ? rest[0] : undefined;
+      const callbacks = ancestry === undefined ? rest : thawGraphApply(thawGraphArraySlice, rest, [1]);
+      const isClass = ancestry !== undefined;
       const target = {};
+      let displayName = ancestry;
+      if (isClass) {
+        const names = thawGraphApply(thawStringSplit, ancestry, ['\u001f']);
+        const display = name => {
+          // Module-scoped classes are mangled `__thawmod<N>_Name`.
+          if (thawGraphApply(thawStringStartsWith, name, ['__thawmod'])) {
+            const cut = thawGraphApply(thawStringIndexOf, name, ['_', 9]);
+            if (cut > 9) return thawGraphApply(thawStringSlice, name, [cut + 1]);
+          }
+          return name;
+        };
+        displayName = display(names[0]);
+        // A class that is also used as a value has a real JS counterpart: its
+        // prototype keeps `instanceof` and `constructor` exact. A class without
+        // one gets a named stand-in that inherits from the nearest real ancestor.
+        let inherited = Object.prototype;
+        let proto;
+        for (let i = 0; i < names.length; i++) {
+          const realClass = globalThis['__thaw_class_value_' + names[i]];
+          if (typeof realClass === 'function' && realClass.prototype) {
+            if (i === 0) proto = realClass.prototype; else inherited = realClass.prototype;
+            break;
+          }
+        }
+        if (proto === undefined) {
+          proto = thawGraphObjectCreate(inherited);
+          const constructor = thawGraphDefineProperty(function () {}, 'name', { value: displayName, configurable: true });
+          thawGraphDefineProperty(proto, 'constructor', { value: constructor, writable: true, configurable: true });
+          thawGraphDefineProperty(constructor, 'prototype', { value: proto });
+        }
+        thawGraphObjectSetPrototypeOf(target, proto);
+      }
       const positions = new thawGraphMapConstructor();
       for (let i = 0; i < keys.length; i++) {
         thawGraphApply(thawGraphMapSet, positions, [keys[i], i]);
-        if (accessors[i]) {
+        if (isClass && methods[i]) {
+          thawGraphDefineProperty(target, keys[i], {
+            value: undefined, writable: true, enumerable: false, configurable: true,
+          });
+        } else if (accessors[i]) {
           thawGraphDefineProperty(target, keys[i], {
             get: readable[i] ? callbacks[i * 2] : undefined,
             set: writable[i] ? callbacks[i * 2 + 1] : undefined,
@@ -2031,6 +2082,7 @@
         const nativeFrozen = thawGraphApply(frozen, stateReceiver, []);
         const nativeSealed = nativeFrozen || thawGraphApply(sealed, stateReceiver, []);
         for (let i = 0; i < keys.length; i++) {
+          if (isClass && methods[i]) continue;
           const key = keys[i];
           const current = thawGraphReflectGetOwnPropertyDescriptor(target, key);
           const bits = flags(key);
@@ -2143,6 +2195,7 @@
       for (let i = 0; i < keys.length; i++) if (accessors[i]) hasAccessor = true;
       if (!hasAccessor && accessors[keys.length] !== true) thawGraphApply(thawNapiWeakSetAdd, thawNativeWrapperSet, [wrapper]);
       thawGraphApply(thawProjectedReceiverAdd, thawProjectedReceivers, [wrapper]);
+      if (isClass) thawGraphApply(thawClassProjectionSet, thawClassProjectionNames, [wrapper, displayName]);
       return wrapper;
     },
     writable: false, configurable: false,

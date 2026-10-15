@@ -4680,9 +4680,13 @@ fn host_inspect_node(lease: &Rc<HostLease>, stack: &mut Vec<usize>) -> crate::in
             .into_iter()
             .map(|(key, value)| (wtf8_decode_utf16(&key), inspect_node(&value, stack)))
             .collect();
+        let ctor = match host_query(lease, 23) {
+            Some(name) if !name.is_empty() => Ctor::Named(name),
+            _ => Ctor::Plain,
+        };
         Node::Object {
             id: 0,
-            ctor: Ctor::Plain,
+            ctor,
             entries,
         }
     };

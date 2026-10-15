@@ -3705,6 +3705,45 @@ impl<'a> FnLowerer<'a> {
         ))))
     }
 
+    /// `left instanceof right` through the realm's own `instanceof` (custom
+    /// `@@hasInstance` included) for operands that are not statically native.
+    fn lower_host_instanceof(
+        &mut self,
+        left: HirExpr,
+        left_type: HirType,
+        right: HirExpr,
+        right_type: HirType,
+    ) -> Result<HirExpr, String> {
+        let left_name = format!("__thaw_dynamic_instanceof_left_{}", self.next_binding);
+        self.next_binding += 1;
+        let right_name = format!("__thaw_dynamic_instanceof_right_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(left_name.clone(), left_type.clone());
+        self.scope.insert(right_name.clone(), right_type.clone());
+        let json_arguments = self.coerce_to_declared(
+            &HirType::Json,
+            HirExpr::ArrayLit(vec![
+                HirExpr::Var(left_name.clone()),
+                HirExpr::Var(right_name.clone()),
+            ]),
+        )?;
+        let result = HirExpr::JsonAsBool(Box::new(HirExpr::Call(
+            Box::new(HirExpr::Var("callDynamicValueMixedExact".into())),
+            vec![
+                HirExpr::Call(
+                    Box::new(HirExpr::Var("getDynamicValue".into())),
+                    vec![HirExpr::Lit(HirLit::Str("__thaw_json_host_instanceof".into()))],
+                ),
+                json_arguments,
+                HirExpr::ArrayLit(Vec::new()),
+            ],
+        )));
+        self.wrap_call_argument_bindings(
+            result,
+            &[(left_name, left_type, left), (right_name, right_type, right)],
+        )
+    }
+
     /// The live "class token" `JsValue` symbol a decorated class's bare
     /// reference resolves to (see `DECORATOR_CLASS_TOKENS` /
     /// `lower_class_decorator_tokens`), if this class has one. The token is

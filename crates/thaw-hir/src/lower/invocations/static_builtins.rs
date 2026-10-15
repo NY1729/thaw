@@ -2739,7 +2739,7 @@ impl<'a> FnLowerer<'a> {
                         };
                         if let Some(fields) = live_function_fields.or(native_accessor_fields) {
                             let live = self.lower_fixed_object_as_dynamic_accessor_object(
-                                value, &fields, false, false,
+                                value, &fields, false, false, false,
                             )?;
                             let space = space
                                 .map(|(value, _)| value)

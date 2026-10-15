@@ -14,11 +14,9 @@ async function main(): Promise<void> {
     );
 }
 
-// Known limitation: `any` holds a Json snapshot of a class instance, which has
-// no methods. The call used to be dispatched as a native class method on that
-// Json pointer; it must now throw a catchable TypeError instead.
+// A class instance in `any` is a live view of the native owner, methods included.
 #[test]
-fn an_contract_class_method_through_any_throws_instead_of_misdispatching() {
+fn an_contract_class_method_through_any_mutates_the_owner() {
     let source = r##"class C { n = 1; bump(): number { this.n += 1; return this.n; } }
 async function main(): Promise<void> {
   const c = new C();
@@ -28,8 +26,8 @@ async function main(): Promise<void> {
 }
 "##;
     assert_eq!(
-        compile_and_run(source, "an_contract_class_method_through_any_throws"),
-        "threw\n1 1\n"
+        compile_and_run(source, "an_contract_class_method_through_any_mutates_the_owner"),
+        "called\n2 2\n"
     );
 }
 
