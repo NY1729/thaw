@@ -438,6 +438,8 @@
           return output;
         } else if (input instanceof ArrayBuffer) {
           output = input.slice(0);
+        } else if (typeof SharedArrayBuffer === 'function' && input instanceof SharedArrayBuffer) {
+          output = globalThis.__thaw_sab_clone(input);
         } else if (ArrayBuffer.isView(input)) {
           const buffer = clone(input.buffer);
           if (input instanceof DataView) {

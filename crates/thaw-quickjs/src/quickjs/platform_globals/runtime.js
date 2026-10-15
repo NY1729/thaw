@@ -2289,12 +2289,26 @@
       ? chain.slice(1).split('\u001f')[0] : chain.split('$')[0];
     return { name, display, original, suffix: body.slice(cursor) };
   };
+  // The native `\u0002<cause>` segment (up to the code marker `\u0003`, before the property bag)
+  // becomes `error.cause`: a tagged error text is rebuilt as an Error, anything else stays a string.
+  const restoreTaggedCause = function (error, meta) {
+    const causeIndex = meta.indexOf('\u0002');
+    if (causeIndex < 0) return;
+    let causeText = meta.slice(causeIndex + 1);
+    const codeIndex = causeText.indexOf('\u0003');
+    if (codeIndex >= 0) causeText = causeText.slice(0, codeIndex);
+    if (!causeText) return;
+    Object.defineProperty(error, 'cause', {
+      value: causeText.charCodeAt(0) === 1 ? thawErrorFromTagged(causeText) : causeText,
+      writable: true, configurable: true, enumerable: false });
+  };
   const thawErrorFromTagged = function (raw) {
     const frame = globalThis.__thaw_error_frame_parts(raw);
     if (frame) {
       const error = new Error(frame.original === null ? frame.display : frame.original);
       error.name = frame.name;
       const propertiesIndex = frame.suffix.indexOf('\u0005');
+      restoreTaggedCause(error, propertiesIndex >= 0 ? frame.suffix.slice(0, propertiesIndex) : frame.suffix);
       if (propertiesIndex >= 0) {
         try {
           const properties = JSON.parse(frame.suffix.slice(propertiesIndex + 1));
@@ -2321,9 +2335,11 @@
         message = raw.slice(separator + 1);
       }
     }
+    const metaText = message;
     message = message.split('\u0004')[0].split('\u0002')[0].split('\u0003')[0];
     const error = new Error(message);
     error.name = name;
+    restoreTaggedCause(error, metaText);
     if (propertiesJson) {
       try {
         const properties = JSON.parse(propertiesJson);
@@ -2896,10 +2912,51 @@
     const slash = String(filename).lastIndexOf('/');
     return load(slash < 0 ? '.' : slash === 0 ? '/' : String(filename).slice(0, slash), String(filename));
   };
+  // process.env is the process's real environment: compiled code reads it through libc getenv, so
+  // reads, writes and deletes made by JavaScript go through the same store (host setenv/unsetenv).
+  // Entries a bundle already put on process.env win over the inherited ones, as before.
+  const makeProcessEnv = function (initial) {
+    const hostGet = globalThis.__thaw_env_get, hostSet = globalThis.__thaw_env_set;
+    const hostUnset = globalThis.__thaw_env_unset, hostKeys = globalThis.__thaw_env_keys;
+    if (typeof hostGet !== 'function' || typeof hostSet !== 'function' || typeof hostUnset !== 'function' || typeof hostKeys !== 'function') return initial;
+    for (const key of Object.keys(initial)) if (hostGet(key) !== initial[key]) hostSet(key, String(initial[key]));
+    return new Proxy({}, {
+      get(target, key, receiver) {
+        if (typeof key === 'symbol') return Reflect.get(target, key, receiver);
+        const value = hostGet(key);
+        return value === undefined ? Reflect.get(target, key, receiver) : value;
+      },
+      set(target, key, value) {
+        if (typeof key === 'symbol') target[key] = value; else hostSet(key, String(value));
+        return true;
+      },
+      defineProperty(target, key, descriptor) {
+        if (typeof key === 'symbol') return Reflect.defineProperty(target, key, descriptor);
+        if ('value' in descriptor) hostSet(key, String(descriptor.value));
+        return true;
+      },
+      deleteProperty(target, key) {
+        if (typeof key === 'symbol') return delete target[key];
+        hostUnset(key);
+        return true;
+      },
+      has(target, key) {
+        return typeof key === 'symbol' ? key in target : hostGet(key) !== undefined || key in target;
+      },
+      ownKeys(target) {
+        return JSON.parse(hostKeys()).concat(Reflect.ownKeys(target));
+      },
+      getOwnPropertyDescriptor(target, key) {
+        if (typeof key === 'symbol') return Reflect.getOwnPropertyDescriptor(target, key);
+        const value = hostGet(key);
+        return value === undefined ? undefined : { value, writable: true, enumerable: true, configurable: true };
+      },
+    });
+  };
   Object.assign(globalThis.process, {
     argv: globalThis.process.argv || JSON.parse(globalThis.__thaw_host_argv_json || '[]'),
-    env: Object.assign({}, JSON.parse(globalThis.__thaw_host_env_json || '{}'),
-                       globalThis.process.env || {}),
+    env: makeProcessEnv(Object.assign({}, JSON.parse(globalThis.__thaw_host_env_json || '{}'),
+                       globalThis.process.env || {})),
     platform: globalThis.process.platform || hostInfo.platform || 'linux',
     arch: globalThis.process.arch || hostInfo.arch || '',
     version: globalThis.process.version || '',

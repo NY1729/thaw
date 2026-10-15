@@ -12975,6 +12975,7 @@ fn tls_client_and_accepted_server_handles_remain_independent() {
         cert_spec: "",
         key_spec: "",
         alpn_spec: "6832",
+        versions_spec: "",
         report_alpn: true,
         reject_unauthorized: true,
         defer_name_verification: false,
@@ -12991,6 +12992,7 @@ fn tls_client_and_accepted_server_handles_remain_independent() {
         request_cert: false,
         reject_unauthorized: true,
         alpn_spec: "687474702f312e31",
+        versions_spec: "",
     });
     assert!(listener_result.starts_with("ok:"), "{listener_result}");
     let listener_handle: u32 = listener_result.split(':').nth(1).unwrap().parse().unwrap();
@@ -15772,6 +15774,73 @@ fn recorded_byte_stream_contracts_match() {
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// SharedArrayBuffer structured clone and `process.env`, recorded from real Node 22 (see fixtures/w2_contracts.json).
+#[test]
+fn recorded_w2_contracts_match() {
+    let cases: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/w2_contracts.json")).unwrap();
+    let mut failures = Vec::new();
+    for (name, case) in cases.as_object().unwrap() {
+        let function = format!("__w2_{}", name);
+        let source = format!(
+            "async function {function}() {{ {}\n}}",
+            case["source"].as_str().unwrap()
+        );
+        assert_eq!(load(&source), 1, "{name} must load");
+        let actual = call(&function, "[]");
+        if actual != case["expected"].as_str().unwrap() {
+            failures.push(format!(
+                "{name}: expected {} got {actual}",
+                case["expected"]
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn process_env_reads_and_writes_the_libc_environment() {
+    // Compiled code reads process.env.NAME through libc getenv, so JavaScript must use the same store.
+    assert_eq!(
+        load(
+            r#"function w2EnvFromJavaScript() {
+              process.env.W2_LIBC_FROM_JS = 'js';
+              delete process.env.W2_LIBC_DELETED;
+              return process.env.W2_LIBC_FROM_NATIVE + '|' + (process.env.W2_LIBC_DELETED === undefined);
+            }"#
+        ),
+        1
+    );
+    std::env::set_var("W2_LIBC_FROM_NATIVE", "native");
+    std::env::set_var("W2_LIBC_DELETED", "present");
+    assert_eq!(call("w2EnvFromJavaScript", "[]"), r#""native|true""#);
+    assert_eq!(std::env::var("W2_LIBC_FROM_JS").as_deref(), Ok("js"));
+    assert!(std::env::var("W2_LIBC_DELETED").is_err());
+    std::env::remove_var("W2_LIBC_FROM_JS");
+    std::env::remove_var("W2_LIBC_FROM_NATIVE");
+}
+
+#[test]
+fn native_error_cause_becomes_error_cause() {
+    // `\u0001<name>\u0001<message>\u0002<cause>\u0003<code>`: the cause is a tagged error text or a plain string.
+    assert_eq!(
+        load(
+            r#"function w2Causes() {
+              const nested = globalThis.__thaw_error_from_tagged('\u0001Error\u0001outer\u0002\u0001TypeError\u0001root');
+              const plain = globalThis.__thaw_error_from_tagged('\u0001Error\u0001m\u0002plain text\u0003CODE');
+              const none = globalThis.__thaw_error_from_tagged('\u0001Error\u0001nothing');
+              return [nested.message, nested.name, nested.cause.message, nested.cause.name, Object.keys(nested).includes('cause'),
+                plain.message, plain.cause, 'cause' in none];
+            }"#
+        ),
+        1
+    );
+    assert_eq!(
+        call("w2Causes", "[]"),
+        r#"["outer","Error","root","TypeError",false,"m","plain text",false]"#
+    );
 }
 
 #[test]

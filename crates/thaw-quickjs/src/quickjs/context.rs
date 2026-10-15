@@ -1046,6 +1046,7 @@ fn ensure_context() {
             let context = Context::full(&runtime).expect("failed to create a QuickJS context");
             context.with(|ctx| {
                 install_shared_array_buffer_functions(&ctx);
+                install_shared_array_buffer_clone_functions(&ctx);
                 let intrinsic_then: Function = ctx.eval("Promise.prototype.then")
                     .expect("failed to capture intrinsic Promise.then");
                 let intrinsic_object_is: Function = ctx.eval("Object.is")
@@ -1084,6 +1085,7 @@ fn ensure_context() {
                         .expect("failed to serialize host environment"),
                     )
                     .expect("failed to install host environment");
+                install_process_environment_functions(&ctx);
                 let arguments = std::env::args().collect::<Vec<_>>();
                 let eval = cli_eval(&arguments);
                 let script = cli_script(&arguments);
@@ -1165,6 +1167,21 @@ fn ensure_context() {
                 ctx.globals()
                     .set("__thaw_process_write_bytes", raw_process_write)
                     .expect("failed to install raw process stream writer");
+                ctx.globals()
+                    .set("__thaw_tty_set_raw_mode", Function::new(ctx.clone(), |fd: i32, enabled: bool| set_tty_raw_mode(fd, enabled))
+                        .expect("failed to create tty raw mode switch"))
+                    .expect("failed to install tty raw mode switch");
+                ctx.globals()
+                    .set("__thaw_tty_write", Function::new(ctx.clone(), |fd: i32, encoded: String| -> rquickjs::Result<()> {
+                        if fd < 0 || !encoded.len().is_multiple_of(2) || !encoded.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                            return Err(rquickjs::Error::new_from_js_message("tty stream", "a descriptor and valid hex bytes", "invalid tty output"));
+                        }
+                        // Anything the process wrote through stdout/stderr must reach the descriptor first.
+                        let _ = io::stdout().flush();
+                        write_fd_bytes(fd, &hex_decode(&encoded))
+                            .map_err(|error| rquickjs::Error::new_from_js_message("tty stream", "a writable descriptor", error.to_string()))
+                    }).expect("failed to create tty descriptor writer"))
+                    .expect("failed to install tty descriptor writer");
                 let stdin_start = Function::new(ctx.clone(), start_host_stdin)
                     .expect("failed to create process stdin starter");
                 let stdin_poll = Function::new(ctx.clone(), poll_host_stdin)
@@ -2149,6 +2166,7 @@ fn ensure_context() {
                             cert_spec: "",
                             key_spec: "",
                             alpn_spec: "",
+                            versions_spec: "",
                             report_alpn: false,
                             reject_unauthorized: true,
                             defer_name_verification: false,
@@ -2174,6 +2192,7 @@ fn ensure_context() {
                             cert_spec: &cert,
                             key_spec: &key,
                             alpn_spec: "",
+                            versions_spec: "",
                             report_alpn: false,
                             reject_unauthorized: true,
                             defer_name_verification: false,
@@ -2191,10 +2210,11 @@ fn ensure_context() {
                      key: String,
                      options: String| {
                         let ca_spec = match tls_ca_spec(ca) { Ok(value) => value, Err(error) => return format!("err:{error}") };
-                        let mut option_parts = options.splitn(3, '|');
+                        let mut option_parts = options.splitn(4, '|');
                         let verification = option_parts.next().unwrap_or("1");
                         let alpn = option_parts.next().unwrap_or("");
                         let defer_name_verification = option_parts.next() == Some("1");
+                        let versions = option_parts.next().unwrap_or("");
                         let port = match checked_port(port) { Ok(port) => port, Err(error) => return error };
                         tls_connect(TlsClientOptions {
                             host: &host,
@@ -2204,6 +2224,7 @@ fn ensure_context() {
                             cert_spec: &cert,
                             key_spec: &key,
                             alpn_spec: alpn,
+                            versions_spec: versions,
                             report_alpn: true,
                             reject_unauthorized: verification != "0",
                             defer_name_verification,
@@ -2221,10 +2242,11 @@ fn ensure_context() {
                      key: String,
                      options: String| {
                         let ca_spec = match tls_ca_spec(ca) { Ok(value) => value, Err(error) => return async_op_ready(format!("err:{error}")) };
-                        let mut option_parts = options.splitn(3, '|');
+                        let mut option_parts = options.splitn(4, '|');
                         let verification = option_parts.next().unwrap_or("1");
                         let alpn = option_parts.next().unwrap_or("");
                         let defer_name_verification = option_parts.next() == Some("1");
+                        let versions = option_parts.next().unwrap_or("");
                         let port = match checked_port(port) { Ok(port) => port, Err(error) => return async_op_ready(error) };
                         tls_connect_start(TlsClientOptions {
                             host: &host,
@@ -2234,6 +2256,7 @@ fn ensure_context() {
                             cert_spec: &cert,
                             key_spec: &key,
                             alpn_spec: alpn,
+                            versions_spec: versions,
                             report_alpn: true,
                             reject_unauthorized: verification != "0",
                             defer_name_verification,
@@ -2241,6 +2264,36 @@ fn ensure_context() {
                     },
                 )
                 .expect("failed to create JavaScript asynchronous TLS connector");
+                let tls_wrap_start_function = Function::new(
+                    ctx.clone(),
+                    |net_handle: u32,
+                     server_name: String,
+                     ca: Value<'_>,
+                     cert: String,
+                     key: String,
+                     options: String| {
+                        let ca_spec = match tls_ca_spec(ca) { Ok(value) => value, Err(error) => return async_op_ready(format!("err:{error}")) };
+                        let mut option_parts = options.splitn(4, '|');
+                        let verification = option_parts.next().unwrap_or("1");
+                        let alpn = option_parts.next().unwrap_or("");
+                        let defer_name_verification = option_parts.next() == Some("1");
+                        let versions = option_parts.next().unwrap_or("");
+                        tls_wrap_start(TlsClientOptions {
+                            host: "",
+                            port: 0,
+                            server_name: &server_name,
+                            ca_spec: ca_spec.as_deref(),
+                            cert_spec: &cert,
+                            key_spec: &key,
+                            alpn_spec: alpn,
+                            versions_spec: versions,
+                            report_alpn: true,
+                            reject_unauthorized: verification != "0",
+                            defer_name_verification,
+                        }, net_handle)
+                    },
+                )
+                .expect("failed to create JavaScript TLS wrapper");
                 let tls_write_function =
                     Function::new(ctx.clone(), |handle: u32, value: String| {
                         tls_write(handle, &hex_decode(&value))
@@ -2302,6 +2355,7 @@ fn ensure_context() {
                             request_cert: false,
                             reject_unauthorized: true,
                             alpn_spec: "",
+                            versions_spec: "",
                         })
                     },
                 )
@@ -2325,6 +2379,7 @@ fn ensure_context() {
                             request_cert: true,
                             reject_unauthorized,
                             alpn_spec: "",
+                            versions_spec: "",
                         })
                     },
                 )
@@ -2337,7 +2392,9 @@ fn ensure_context() {
                      key: String,
                      ca: Value<'_>,
                      flags: u32,
-                     alpn: String| {
+                     alpn_and_versions: String| {
+                        // `<alpn>|<minVersion>,<maxVersion>` (the closure is at the argument-count limit).
+                        let (alpn, versions) = alpn_and_versions.split_once('|').unwrap_or((alpn_and_versions.as_str(), ""));
                         let ca_spec = match tls_ca_spec(ca) { Ok(value) => value, Err(error) => return format!("err:{error}") };
                         let port = match checked_port(port) { Ok(port) => port, Err(error) => return error };
                         tls_server_listen(TlsServerOptions {
@@ -2348,7 +2405,8 @@ fn ensure_context() {
                             ca_spec: ca_spec.as_deref(),
                             request_cert: flags & 1 != 0,
                             reject_unauthorized: flags & 2 != 0,
-                            alpn_spec: &alpn,
+                            alpn_spec: alpn,
+                            versions_spec: versions,
                         })
                     },
                 )
@@ -3040,6 +3098,9 @@ fn ensure_context() {
                     .set("__thaw_tls_connect_start", tls_connect_start_function)
                     .expect("failed to install JavaScript asynchronous TLS connector");
                 ctx.globals()
+                    .set("__thaw_tls_wrap_start", tls_wrap_start_function)
+                    .expect("failed to install JavaScript TLS wrapper");
+                ctx.globals()
                     .set("__thaw_tls_write", tls_write_function)
                     .expect("failed to install JavaScript TLS writer");
                 ctx.globals()
@@ -3304,4 +3365,85 @@ fn with_active_or_context<R>(f: impl for<'js> FnOnce(Ctx<'js>) -> R) -> R {
             f(ctx)
         }
     })
+}
+
+/// Host side of `process.env`: JavaScript reads and writes the real process environment (libc
+/// `getenv`/`setenv`), the store compiled code already uses.
+fn install_process_environment_functions(ctx: &Ctx<'_>) {
+    let globals = ctx.globals();
+    globals.set("__thaw_env_get", Function::new(ctx.clone(), |key: String| -> Option<String> {
+        if key.is_empty() || key.contains(['=', '\0']) { return None; }
+        std::env::var_os(&key).map(|value| value.to_string_lossy().into_owned())
+    }).expect("failed to create __thaw_env_get")).expect("failed to install __thaw_env_get");
+    globals.set("__thaw_env_set", Function::new(ctx.clone(), |key: String, value: String| {
+        if !key.is_empty() && !key.contains(['=', '\0']) && !value.contains('\0') {
+            std::env::set_var(key, value);
+        }
+    }).expect("failed to create __thaw_env_set")).expect("failed to install __thaw_env_set");
+    globals.set("__thaw_env_unset", Function::new(ctx.clone(), |key: String| {
+        if !key.is_empty() && !key.contains(['=', '\0']) {
+            std::env::remove_var(key);
+        }
+    }).expect("failed to create __thaw_env_unset")).expect("failed to install __thaw_env_unset");
+    globals.set("__thaw_env_keys", Function::new(ctx.clone(), || -> String {
+        let keys = std::env::vars_os()
+            .map(|(key, _)| key.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        serde_json::to_string(&keys).unwrap_or_else(|_| "[]".into())
+    }).expect("failed to create __thaw_env_keys")).expect("failed to install __thaw_env_keys");
+}
+
+/// `structuredClone` and Worker messages keep a SharedArrayBuffer's memory shared: QuickJS's own
+/// object serialization (JS_WRITE_OBJ_SAB / JS_READ_OBJ_SAB) duplicates the block reference through
+/// the allocator functions installed above, and the reader attaches to the same block.
+/// `__thaw_sab_serialize` gives the bytes as hex (it holds one block reference until read).
+fn install_shared_array_buffer_clone_functions(ctx: &Ctx<'_>) {
+    fn serialize<'js>(ctx: &Ctx<'js>, value: &Value<'js>) -> rquickjs::Result<Vec<u8>> {
+        let raw = ctx.as_raw().as_ptr();
+        let mut size = 0;
+        // SAFETY: `raw` is the live context; the returned buffer is freed with the same context.
+        let data = unsafe {
+            rquickjs::qjs::JS_WriteObject(raw, &mut size, value.as_raw(), rquickjs::qjs::JS_WRITE_OBJ_SAB as i32)
+        };
+        if data.is_null() {
+            return Err(rquickjs::Error::Exception);
+        }
+        // SAFETY: JS_WriteObject returned `size` readable bytes.
+        let bytes = unsafe { std::slice::from_raw_parts(data, size as usize) }.to_vec();
+        unsafe { rquickjs::qjs::js_free(raw, data.cast()) };
+        Ok(bytes)
+    }
+    fn deserialize<'js>(ctx: &Ctx<'js>, bytes: &[u8]) -> rquickjs::Result<Value<'js>> {
+        let raw = ctx.as_raw().as_ptr();
+        // SAFETY: `bytes` was produced by `serialize`; ownership of the block reference moves to the new object.
+        let value = unsafe {
+            rquickjs::qjs::JS_ReadObject(raw, bytes.as_ptr(), bytes.len() as _, rquickjs::qjs::JS_READ_OBJ_SAB as i32)
+        };
+        if unsafe { rquickjs::qjs::JS_IsException(value) } {
+            return Err(rquickjs::Error::Exception);
+        }
+        Ok(unsafe { Value::from_raw(ctx.clone(), value) })
+    }
+    fn sab_clone<'js>(ctx: Ctx<'js>, value: Value<'js>) -> rquickjs::Result<Value<'js>> {
+        let bytes = serialize(&ctx, &value)?;
+        deserialize(&ctx, &bytes)
+    }
+    fn sab_serialize<'js>(ctx: Ctx<'js>, value: Value<'js>) -> rquickjs::Result<String> {
+        let bytes = serialize(&ctx, &value)?;
+        Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
+    }
+    fn sab_deserialize<'js>(ctx: Ctx<'js>, hex: String) -> rquickjs::Result<Value<'js>> {
+        let bytes = (0..hex.len() / 2)
+            .map(|index| u8::from_str_radix(&hex[index * 2..index * 2 + 2], 16))
+            .collect::<Result<Vec<u8>, _>>()
+            .map_err(|_| rquickjs::Error::new_from_js_message("string", "SharedArrayBuffer", "invalid serialized SharedArrayBuffer"))?;
+        deserialize(&ctx, &bytes)
+    }
+    let globals = ctx.globals();
+    globals.set("__thaw_sab_clone", Function::new(ctx.clone(), sab_clone).expect("failed to create __thaw_sab_clone"))
+        .expect("failed to install __thaw_sab_clone");
+    globals.set("__thaw_sab_serialize", Function::new(ctx.clone(), sab_serialize).expect("failed to create __thaw_sab_serialize"))
+        .expect("failed to install __thaw_sab_serialize");
+    globals.set("__thaw_sab_deserialize", Function::new(ctx.clone(), sab_deserialize).expect("failed to create __thaw_sab_deserialize"))
+        .expect("failed to install __thaw_sab_deserialize");
 }

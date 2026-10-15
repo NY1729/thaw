@@ -92,7 +92,9 @@ fn host_worker_bootstrap(worker_data_json: &str, config_json: &str, thread_id: u
             else {{
               const moved = __thaw_apply(__thaw_transfer_port, entry.source, [entry.shell, entry.hasTransferReference]);
               if (entry.hadHostId) entry.source.__thawHostPortId = entry.id; else __thaw_define_property(entry.source, '__thawHostPortId', {{ value: entry.id, writable: true, configurable: true }}); __thaw_configure_worker_port_bridge(moved, entry.id);
-              __thaw_apply(__thaw_map_set, __thaw_host_ports, [entry.id, moved.__thawPeer]);
+              const peerPort = moved.__thawPeer, peerClose = peerPort.close; __thaw_apply(__thaw_map_set, __thaw_host_ports, [entry.id, peerPort]);
+              // Closing the worker-side end releases the bridge entry (it would otherwise keep the Worker alive forever).
+              peerPort.close = function() {{ __thaw_apply(__thaw_map_delete, __thaw_host_ports, [entry.id]); return __thaw_apply(peerClose, this, []); }};
             }}
           }}
           for (const buffer of stage.buffers) __thaw_detach_buffer(buffer);
@@ -110,9 +112,24 @@ fn host_worker_bootstrap(worker_data_json: &str, config_json: &str, thread_id: u
           const close = port.close.bind(port); port.close = function() {{ __thaw_host_ports.delete(id); close(); }};
           __thaw_apply(__thaw_map_set, __thaw_host_ports, [id, port]); return port;
         }};
+        // parentPort: messages that arrive while nothing listens are queued (receiveMessageOnPort
+        // reads them); close() only closes the port, the Worker ends when nothing else is pending;
+        // unref() stops a message listener from keeping the Worker alive.
+        let __thaw_parent_refed = true, __thaw_parent_closed = false, __thaw_parent_onmessage = null;
+        const __thaw_parent_queue = [];
+        function __thaw_parent_has_receiver() {{ return (__thaw_host_worker_listeners.get('message') || []).length > 0 || typeof __thaw_parent_onmessage === 'function'; }}
+        function __thaw_parent_dispatch(value) {{
+          for (const listener of (__thaw_host_worker_listeners.get('message') || []).slice()) listener(value);
+          if (typeof __thaw_parent_onmessage === 'function') __thaw_parent_onmessage.call(parentPort, {{ data: value, type: 'message', target: parentPort }});
+        }}
+        function __thaw_parent_flush() {{
+          while (__thaw_parent_queue.length && !__thaw_parent_closed && __thaw_parent_has_receiver()) __thaw_parent_dispatch(__thaw_parent_queue.shift().data);
+        }}
         function __thaw_host_worker_on(name, listener) {{
           const key = String(name), list = __thaw_host_worker_listeners.get(key) || [];
-          list.push(listener); __thaw_host_worker_listeners.set(key, list); return parentPort;
+          list.push(listener); __thaw_host_worker_listeners.set(key, list);
+          if (key === 'message') queueMicrotask(__thaw_parent_flush);
+          return parentPort;
         }}
         function __thaw_host_worker_off(name, listener) {{
           const key = String(name), list = __thaw_host_worker_listeners.get(key) || [];
@@ -130,11 +147,21 @@ fn host_worker_bootstrap(worker_data_json: &str, config_json: &str, thread_id: u
           once(name, listener) {{ const wrapped = (...args) => {{ __thaw_host_worker_off(name, wrapped); listener(...args); }}; wrapped.listener = listener; return __thaw_host_worker_on(name, wrapped); }},
           off: __thaw_host_worker_off,
           removeListener: __thaw_host_worker_off,
-          close() {{ globalThis.__thaw_host_worker_closed = true; }},
-          start() {{}}, ref() {{ return this; }}, unref() {{ return this; }}, hasRef() {{ return true; }}
+          close() {{
+            if (__thaw_parent_closed) return;
+            __thaw_parent_closed = true;
+            for (const listener of (__thaw_host_worker_listeners.get('close') || []).slice()) listener();
+          }},
+          start() {{ queueMicrotask(__thaw_parent_flush); }},
+          ref() {{ __thaw_parent_refed = true; return this; }},
+          unref() {{ __thaw_parent_refed = false; return this; }},
+          hasRef() {{ return __thaw_parent_refed && !__thaw_parent_closed; }},
+          get onmessage() {{ return __thaw_parent_onmessage; }},
+          set onmessage(handler) {{ __thaw_parent_onmessage = typeof handler === 'function' ? handler : null; if (__thaw_parent_onmessage) queueMicrotask(__thaw_parent_flush); }}
         }};
         const workerData = __thaw_worker_decode({worker_data});
         const __thaw_host_worker_config = JSON.parse({config});
+        globalThis.__thaw_worker_environment_data = new Map(__thaw_host_worker_config.environmentData ? __thaw_worker_decode(__thaw_host_worker_config.environmentData) : []);
         let __thaw_direct_request = 1;
         const __thaw_direct_pending = new Map();
         globalThis.module = {{ exports: {{}} }};
@@ -150,7 +177,8 @@ fn host_worker_bootstrap(worker_data_json: &str, config_json: &str, thread_id: u
         process.argv = Array.from(__thaw_host_worker_config.argv || []);
         process.execArgv = Array.from(__thaw_host_worker_config.execArgv || []);
         const __thaw_stdin_listeners = new Map();
-        let __thaw_stdin_decoder = null, __thaw_stdin_decoder_type = null, __thaw_stdin_ended = false;
+        let __thaw_stdin_decoder = null, __thaw_stdin_decoder_type = null, __thaw_stdin_ended = false, __thaw_stdin_paused = false;
+        const __thaw_stdin_pending = [];
         function __thaw_emit_stdin(name, value) {{ for (const listener of (__thaw_stdin_listeners.get(name) || []).slice()) listener(value); }}
         function __thaw_get_stdin_decoder_type() {{
           if (__thaw_stdin_decoder_type) return __thaw_stdin_decoder_type;
@@ -165,7 +193,8 @@ fn host_worker_bootstrap(worker_data_json: &str, config_json: &str, thread_id: u
           on(name, listener) {{ const key = String(name), list = __thaw_stdin_listeners.get(key) || []; list.push(listener); __thaw_stdin_listeners.set(key, list); return this; }},
           once(name, listener) {{ const wrapped = value => {{ this.off(name, wrapped); listener(value); }}; wrapped.listener = listener; return this.on(name, wrapped); }},
           off(name, listener) {{ const key = String(name), list = __thaw_stdin_listeners.get(key) || []; __thaw_stdin_listeners.set(key, list.filter(item => item !== listener && item.listener !== listener)); return this; }},
-          resume() {{ return this; }}, pause() {{ return this; }}
+          resume() {{ __thaw_stdin_paused = false; queueMicrotask(__thaw_stdin_flush); return this; }},
+          pause() {{ __thaw_stdin_paused = true; return this; }}
         }};
         function __thaw_worker_output_bytes(value, encoding) {{
           if (typeof value === 'string') return Buffer.from(value, encoding || 'utf8');
@@ -196,7 +225,7 @@ fn host_worker_bootstrap(worker_data_json: &str, config_json: &str, thread_id: u
             __thaw_commit_worker_ports(stage);
           }});
         }}
-        globalThis.__thaw_worker_module = {{ isMainThread: false, threadId: {thread_id}, threadName: String(__thaw_host_worker_config.threadName || ''), workerData, parentPort, resourceLimits: Object.assign({{}}, __thaw_host_worker_config.resourceLimits || {{}}), MessageChannel, MessagePort, BroadcastChannel, receiveMessageOnPort(port) {{ const record = port && port.__thawQueue && port.__thawQueue.shift(); return record ? {{ message: record.data }} : undefined; }}, postMessageToThread: __thaw_host_post_message_to_thread }};
+        globalThis.__thaw_worker_module = {{ isMainThread: false, threadId: {thread_id}, threadName: String(__thaw_host_worker_config.threadName || ''), workerData, parentPort, resourceLimits: Object.assign({{}}, __thaw_host_worker_config.resourceLimits || {{}}), MessageChannel, MessagePort, BroadcastChannel, receiveMessageOnPort(port) {{ if (port === parentPort) {{ const queued = __thaw_parent_queue.shift(); return queued ? {{ message: queued.data }} : undefined; }} const record = port && port.__thawQueue && port.__thawQueue.shift(); return record ? {{ message: record.data }} : undefined; }}, getEnvironmentData(key) {{ const value = globalThis.__thaw_worker_environment_data.get(key); return value === undefined ? undefined : structuredClone(value); }}, setEnvironmentData(key, value) {{ if (value === undefined) globalThis.__thaw_worker_environment_data.delete(key); else globalThis.__thaw_worker_environment_data.set(key, structuredClone(value)); }}, postMessageToThread: __thaw_host_post_message_to_thread }};
         if (typeof globalThis.__thaw_bundle_create_require === 'function') {{ try {{ const nestedWorkerThreads = globalThis.__thaw_bundle_create_require('')('node:worker_threads'); if (nestedWorkerThreads && typeof nestedWorkerThreads.Worker === 'function') globalThis.__thaw_worker_module.Worker = nestedWorkerThreads.Worker; }} catch (_) {{}} }}
         globalThis.require = function(name) {{
           if (name === 'worker_threads' || name === 'node:worker_threads') return globalThis.__thaw_worker_module;
@@ -205,9 +234,18 @@ fn host_worker_bootstrap(worker_data_json: &str, config_json: &str, thread_id: u
         }};
         globalThis.__thaw_host_worker_deliver = function(payload) {{
           const value = __thaw_worker_decode(payload);
-          for (const listener of (__thaw_host_worker_listeners.get('message') || []).slice()) listener(value);
+          if (__thaw_parent_closed) return;
+          if (__thaw_parent_has_receiver()) __thaw_parent_dispatch(value);
+          else __thaw_parent_queue.push({{ data: value }});
         }};
+        function __thaw_stdin_flush() {{
+          while (!__thaw_stdin_paused && __thaw_stdin_pending.length) {{ const item = __thaw_stdin_pending.shift(); __thaw_stdin_apply(item.payload, item.ended); }}
+        }}
         globalThis.__thaw_host_worker_stdin = function(payload, ended) {{
+          if (__thaw_stdin_paused || __thaw_stdin_pending.length) {{ __thaw_stdin_pending.push({{ payload, ended }}); return; }}
+          __thaw_stdin_apply(payload, ended);
+        }};
+        function __thaw_stdin_apply(payload, ended) {{
           if (__thaw_stdin_ended) return;
           if (ended) {{
             __thaw_stdin_ended = true;
@@ -218,7 +256,7 @@ fn host_worker_bootstrap(worker_data_json: &str, config_json: &str, thread_id: u
           const bytes = Buffer.from(payload, 'hex');
           const value = __thaw_stdin_decoder ? __thaw_stdin_decoder.write(bytes) : bytes;
           if (!__thaw_stdin_decoder || value.length) __thaw_emit_stdin('data', value);
-        }};
+        }}
         globalThis.__thaw_host_worker_port = function(id, payload) {{
           const port = __thaw_host_ports.get(String(id)); if (!port) return;
           port.__thawQueue.push({{ data: __thaw_worker_decode(payload), ports: [] }}); port.__thawSchedule();
@@ -233,9 +271,18 @@ fn host_worker_bootstrap(worker_data_json: &str, config_json: &str, thread_id: u
           __thaw_apply(__thaw_map_delete, __thaw_direct_pending, [Number(request)]); if (pending.timer) __thaw_clear_timeout(pending.timer);
           if (!errorText) pending.resolve(); else {{ const separator = errorText.indexOf(':'), code = separator < 0 ? errorText : errorText.slice(0, separator), message = separator < 0 ? errorText : errorText.slice(separator + 1), error = new Error(message); error.code = code; if (code === 'ERR_WORKER_MESSAGING_ERRORED') error.cause = new Error(message); pending.reject(error); }}
         }};
+        // Natural end of the event loop: the exit code is process.exitCode and 'exit' listeners run once.
+        globalThis.__thaw_host_worker_finalize = function() {{
+          if (globalThis.__thaw_host_worker_exit_code === undefined) {{
+            const status = Number(process.exitCode || 0);
+            globalThis.__thaw_host_worker_exit_code = status;
+            if (typeof process.emit === 'function') process.emit('exit', status);
+          }}
+          return Number(globalThis.__thaw_host_worker_exit_code);
+        }};
         globalThis.__thaw_host_worker_drain = function() {{ return JSON.stringify(__thaw_host_worker_events.splice(0)); }};
         globalThis.__thaw_host_worker_should_exit = function() {{
-          return globalThis.__thaw_host_worker_closed || (((__thaw_host_worker_listeners.get('message') || []).length === 0) && ((!process.listenerCount || process.listenerCount('workerMessage') === 0)) && __thaw_direct_pending.size === 0 && __thaw_host_ports.size === 0 && ((__thaw_stdin_listeners.get('data') || []).length === 0) && ((__thaw_stdin_listeners.get('end') || []).length === 0) && ((process[Symbol.for('thaw.worker.liveChildren')] || 0) === 0) && __thaw_next_timer_delay() < 0);
+          return globalThis.__thaw_host_worker_closed || ((__thaw_parent_closed || !__thaw_parent_refed || !__thaw_parent_has_receiver()) && (__thaw_parent_closed || !process.listenerCount || process.listenerCount('workerMessage') === 0) && __thaw_direct_pending.size === 0 && __thaw_host_ports.size === 0 && __thaw_stdin_pending.length === 0 && (__thaw_stdin_ended || (((__thaw_stdin_listeners.get('data') || []).length === 0) && ((__thaw_stdin_listeners.get('end') || []).length === 0))) && ((process[Symbol.for('thaw.worker.liveChildren')] || 0) === 0) && __thaw_next_timer_delay() < 0);
         }};
         "#
     )
@@ -375,8 +422,23 @@ fn run_host_worker(
     commands: Receiver<HostWorkerCommand>,
     events: Sender<HostWorkerEvent>,
 ) {
+    // resourceLimits.maxOldGenerationSizeMb bounds the heap this Worker may add on top of its baseline.
+    let memory_limit_mb = serde_json::from_str::<serde_json::Value>(&start.config_json)
+        .ok()
+        .and_then(|config| config.pointer("/resourceLimits/maxOldGenerationSizeMb").and_then(serde_json::Value::as_f64))
+        .filter(|limit| *limit > 0.0);
+    let terminate = start.terminate.clone();
     let initialized = with_context(|ctx| -> Result<(), String> {
         install_shared_environment_functions(&ctx, start.shared_env.clone())?;
+        WORKER_TERMINATE.with(|flag| *flag.borrow_mut() = Some(start.terminate.clone()));
+        // SAFETY: the runtime belongs to this thread; the handler only reads thread-local state and an atomic.
+        unsafe {
+            rquickjs::qjs::JS_SetInterruptHandler(
+                rquickjs::qjs::JS_GetRuntime(ctx.as_raw().as_ptr()),
+                Some(vm_interrupt_handler),
+                std::ptr::null_mut(),
+            );
+        }
         if !start.bundle_source.is_empty() {
             load_impl(ctx.clone(), &start.bundle_source)?;
         }
@@ -384,6 +446,16 @@ fn run_host_worker(
             ctx.clone(),
             &host_worker_bootstrap(&start.worker_data_json, &start.config_json, start.thread_id),
         )?;
+        if let Some(limit_mb) = memory_limit_mb {
+            // SAFETY: as above; usage is read into a zeroed out-parameter.
+            unsafe {
+                let runtime = rquickjs::qjs::JS_GetRuntime(ctx.as_raw().as_ptr());
+                let mut usage: rquickjs::qjs::JSMemoryUsage = std::mem::zeroed();
+                rquickjs::qjs::JS_ComputeMemoryUsage(runtime, &mut usage);
+                let baseline = usage.malloc_size.max(0) as u64;
+                rquickjs::qjs::JS_SetMemoryLimit(runtime, baseline.saturating_add((limit_mb * 1024.0 * 1024.0) as u64) as _);
+            }
+        }
         let _ = events.send(HostWorkerEvent::Online);
         load_worker_script(
             &ctx,
@@ -391,8 +463,17 @@ fn run_host_worker(
         )?;
         Ok(())
     });
+    let worker_error = |error: String| -> Result<i32, String> {
+        if terminate.load(std::sync::atomic::Ordering::Relaxed) {
+            return Ok(1);
+        }
+        if memory_limit_mb.is_some() && error.contains("out of memory") {
+            return Err("ERR_WORKER_OUT_OF_MEMORY:Worker terminated due to reaching memory limit: JS heap out of memory".into());
+        }
+        Err(error)
+    };
     let work = match initialized {
-        Err(error) => Err(error),
+        Err(error) => worker_error(error),
         Ok(()) => loop {
             let should_exit = with_context(|ctx| -> Result<bool, String> {
                 loop {
@@ -436,9 +517,15 @@ fn run_host_worker(
             });
             let should_exit = match should_exit {
                 Ok(should_exit) => should_exit,
-                Err(error) => break Err(error),
+                Err(error) => break worker_error(error),
             };
             if should_exit && !napi_bridge_pending() && !host_workers_active() {
+                // The loop ended naturally: process.exitCode becomes the exit code and 'exit' listeners run.
+                with_context(|ctx| {
+                    if let Ok(finalize) = ctx.globals().get::<_, Function>("__thaw_host_worker_finalize") {
+                        let _ = finalize.call::<_, f64>(());
+                    }
+                });
                 break Ok(0);
             }
 
@@ -501,7 +588,7 @@ fn run_host_worker(
                         }
                         Ok(())
                     });
-                    if let Err(error) = delivered { break Err(error); }
+                    if let Err(error) = delivered { break worker_error(error); }
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
                 Err(mpsc::RecvTimeoutError::Disconnected) => break Ok(1),
@@ -622,6 +709,8 @@ fn spawn_host_worker(
     let (command_sender, command_receiver) = mpsc::channel();
     let (event_sender, event_receiver) = mpsc::channel();
     let shared_env = HOST_WORKERS.with(|table| table.borrow().shared_env.clone());
+    let terminate = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let worker_terminate = terminate.clone();
     let thread = std::thread::spawn(move || {
         run_host_worker(
             HostWorkerStart {
@@ -631,6 +720,7 @@ fn spawn_host_worker(
                 config_json,
                 thread_id,
                 shared_env,
+                terminate: worker_terminate,
             },
             command_receiver,
             event_sender,
@@ -647,6 +737,7 @@ fn spawn_host_worker(
                 events: event_receiver,
                 thread: Some(thread),
                 refed: true,
+                terminate,
             },
         );
         handle
@@ -754,7 +845,11 @@ fn terminate_host_worker(handle: u32) -> bool {
             .borrow()
             .workers
             .get(&handle)
-            .is_some_and(|worker| worker.commands.send(HostWorkerCommand::Terminate).is_ok())
+            .is_some_and(|worker| {
+                // The flag stops a script that never returns to the command loop.
+                worker.terminate.store(true, std::sync::atomic::Ordering::Relaxed);
+                worker.commands.send(HostWorkerCommand::Terminate).is_ok()
+            })
     })
 }
 
@@ -1738,7 +1833,7 @@ fn host_worker_late_ref_keeps_queued_terminal_events_alive_until_poll() {
     HOST_WORKERS.with(|table| {
         table.borrow_mut().workers.insert(
             handle,
-            HostWorker { commands, events, thread: Some(thread), refed: false },
+            HostWorker { commands, events, thread: Some(thread), refed: false, terminate: Arc::default() },
         );
     });
 
