@@ -1419,9 +1419,15 @@ impl<'a> FnLowerer<'a> {
                             // from a sparse for-of element yet.
                             // `return promise` from an `async` function settles with the
                             // promise's value (as `return await promise`).
+                            // A promise of a sparse-array element (`Promise<number | undefined>`,
+                            // e.g. `return Promise.resolve(x)` for a `for...of` element) settles
+                            // the same way; the Optional is then coerced like any other return.
                             let value = match self.infer_expr_type(&value)? {
                                 HirType::Promise(inner)
-                                    if *inner == self.ret_type && *inner != HirType::Void =>
+                                    if *inner != HirType::Void
+                                        && (*inner == self.ret_type
+                                            || matches!(inner.as_ref(), HirType::Optional(t)
+                                                if **t == self.ret_type)) =>
                                 {
                                     HirExpr::AwaitPromise(Box::new(value), *inner)
                                 }
