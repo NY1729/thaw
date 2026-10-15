@@ -664,6 +664,13 @@ impl<'ctx> HirCompiler<'ctx> {
                     return Err("array resize requires a homogeneous array".into());
                 };
                 let handle = self.compile_expr(array)?.into_pointer_value();
+                if self.tracks_object_integrity {
+                    self.compile_guard_array_handle(
+                        handle,
+                        2,
+                        "Cannot assign to read only property 'length' of object '[object Array]'",
+                    )?;
+                }
                 let length = self.compile_expr(length)?.into_float_value();
                 self.builder.build_call(
                     self.module.get_function("thaw_array_resize").unwrap(),

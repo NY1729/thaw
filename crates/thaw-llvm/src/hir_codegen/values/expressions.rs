@@ -392,6 +392,13 @@ impl<'ctx> HirCompiler<'ctx> {
             }
             HirExpr::IndexAssign(arr, idx, value) => {
                 let handle = self.compile_expr(arr)?.into_pointer_value();
+                if self.tracks_object_integrity {
+                    self.compile_guard_array_handle(
+                        handle,
+                        2,
+                        "Cannot assign to read only property of object '[object Array]'",
+                    )?;
+                }
                 let index = self.compile_expr(idx)?.into_float_value();
                 let val = self.compile_expr(value)?;
                 let width = match self.expr_hir_type(arr) {

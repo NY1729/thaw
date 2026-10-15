@@ -26,6 +26,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     | "__thaw_unescape"
                     | "__thaw_template_strings_register"
                     | "__thaw_template_strings_raw"
+                    | "__thaw_template_site"
             );
         if !text_call {
             return None;
@@ -381,6 +382,25 @@ impl<'ctx> HirCompiler<'ctx> {
                     )
                     .map_err(|error| error.to_string())?;
                 return Ok(self.context.f64_type().const_zero().into());
+            }
+            "__thaw_template_site" => {
+                let [site, cooked, raw] = args else {
+                    return Err("template site expects three operands".into());
+                };
+                let site = self.compile_expr(site)?;
+                let cooked = self.compile_expr(cooked)?;
+                let raw = self.compile_expr(raw)?;
+                return self
+                    .builder
+                    .build_call(
+                        self.module.get_function("thaw_template_site").unwrap(),
+                        &[site.into(), cooked.into(), raw.into()],
+                        "template_site",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("template site returned no value".into());
             }
             "__thaw_template_strings_raw" => {
                 let [cooked] = args else {

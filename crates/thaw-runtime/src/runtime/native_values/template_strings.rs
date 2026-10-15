@@ -37,6 +37,40 @@ pub unsafe extern "C" fn thaw_template_strings_register(cooked: *const u8, raw: 
     thaw_arena::replace_reference(cooked as usize, previous as usize, raw as usize);
 }
 
+thread_local! {
+    /// One frozen template object per tagged-template site, rooted for the process.
+    static TEMPLATE_SITES: RefCell<std::collections::HashMap<u64, (usize, thaw_arena::ArenaRoot)>> =
+        RefCell::new(std::collections::HashMap::new());
+}
+
+fn reset_template_sites(tracing: bool) {
+    if !tracing {
+        TEMPLATE_SITES.with(|sites| sites.borrow_mut().clear());
+    }
+}
+
+#[no_mangle]
+/// Returns the site's template object, creating it from `cooked`/`raw` on the
+/// first evaluation: registers `.raw`, freezes both arrays, and keeps the
+/// object alive so every later evaluation of the same site is identical.
+///
+/// # Safety
+/// `cooked` and `raw` must be live Thaw `Array<Str>` handles.
+pub unsafe extern "C" fn thaw_template_site(site: f64, cooked: *mut u8, raw: *mut u8) -> *mut u8 {
+    let site = site as u64;
+    if let Some(existing) = TEMPLATE_SITES.with(|sites| sites.borrow().get(&site).map(|entry| entry.0)) {
+        return existing as *mut u8;
+    }
+    unsafe { thaw_template_strings_register(cooked, raw) };
+    thaw_object_set_state(cooked, 3);
+    thaw_object_set_state(raw, 3);
+    thaw_arena::register_metadata_reset_hook(reset_template_sites);
+    TEMPLATE_SITES.with(|sites| {
+        sites.borrow_mut().insert(site, (cooked as usize, thaw_arena::ArenaRoot::new(cooked as usize)));
+    });
+    cooked
+}
+
 #[no_mangle]
 /// Returns the registered raw array handle. Unrelated/null arrays retain the
 /// existing empty-array fallback. No handle or string is copied for a template.
@@ -89,5 +123,28 @@ mod template_strings_reset_tests {
         drop(root);
         thaw_arena::thaw_arena_reset();
         TEMPLATE_RAW_STRINGS.with(|stored| assert!(!stored.borrow().contains_key(&(cooked as usize))));
+    }
+
+    #[test]
+    fn a_site_returns_one_frozen_template_object_every_time() {
+        let text = thaw_arena::arena_string(b"a\0");
+        let make = || {
+            (
+                wrap_array_handle(arena_pointer_array(vec![text.cast()])),
+                wrap_array_handle(arena_pointer_array(vec![text.cast()])),
+            )
+        };
+        let (cooked, raw) = make();
+        let (other_cooked, other_raw) = make();
+        unsafe {
+            let first = thaw_template_site(7.0, cooked, raw);
+            assert_eq!(first, cooked);
+            assert_eq!(thaw_template_site(7.0, other_cooked, other_raw), cooked);
+            assert_eq!(thaw_template_site(8.0, other_cooked, other_raw), other_cooked);
+            assert_eq!(thaw_template_strings_raw(cooked), raw);
+        }
+        assert!(thaw_object_state(cooked, 2) && thaw_object_state(raw, 2));
+        thaw_arena::thaw_arena_reset();
+        TEMPLATE_SITES.with(|sites| assert!(sites.borrow().is_empty()));
     }
 }

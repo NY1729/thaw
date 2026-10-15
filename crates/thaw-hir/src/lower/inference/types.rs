@@ -2066,6 +2066,16 @@ impl<'a> FnLowerer<'a> {
                         self.expect_type(&array_type, raw, "tagged template raw strings")?;
                         return Ok(HirType::Void);
                     }
+                    "__thaw_template_site" => {
+                        let [site, cooked, raw] = args.as_slice() else {
+                            return Err("template site expects three operands".into());
+                        };
+                        let array_type = HirType::Array(Box::new(HirType::Str));
+                        self.expect_type(&HirType::F64, site, "tagged template site")?;
+                        self.expect_type(&array_type, cooked, "tagged template cooked strings")?;
+                        self.expect_type(&array_type, raw, "tagged template raw strings")?;
+                        return Ok(array_type);
+                    }
                     "__thaw_template_strings_raw" => {
                         let [cooked] = args.as_slice() else {
                             return Err("template strings .raw expects one operand".into());

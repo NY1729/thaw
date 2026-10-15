@@ -1082,6 +1082,26 @@
       "name": "chained receivers keep identity in closures and containers",
       "expect": "matched",
       "source": "import { EventEmitter } from 'node:events';\nimport { Readable, PassThrough } from 'node:stream';\nfunction main(): void {\n  const e: any = new EventEmitter();\n  const f = () => {};\n  const g = () => { const k: any = e.on('x', f).on('y', f); return k.listenerCount('x'); };\n  console.log(g());\n  const r: any = new Readable({ read() {} });\n  const r2: any = r.setEncoding('utf8').pause().resume();\n  console.log(r2 === r, r2.readableFlowing);\n  const p: any = new PassThrough();\n  const p2: any = p.setEncoding('utf8').setMaxListeners(20);\n  console.log(p2 === p, p2.getMaxListeners());\n  const arr: any[] = [e.on('p', f).on('q', f)];\n  const o: any = { held: e.on('m', f).on('n', f) };\n  console.log(arr[0] === e, arr[0].listenerCount('q'), o.held === e, o.held.listenerCount('n'));\n}\n"
+    },
+    {
+      "name": "default-parameter closures see the callee's parameter cell",
+      "expect": "matched",
+      "source": "function f(a: number = 1, g: () => number = () => a): number { a = 2; return g(); }\nfunction mk(x: number = 0, inc: () => number = () => ++x): () => number { return inc; }\nasync function main(): Promise<void> {\n  console.log(f());\n  console.log(f(5));\n  const i1 = mk();\n  const i2 = mk();\n  console.log(i1(), i1(), i2());\n  console.log(mk(10)());\n}\n"
+    },
+    {
+      "name": "a static written through a subclass shadows the base",
+      "expect": "matched",
+      "source": "class A { static s: number = 1; static t: string = 'a'; }\nclass B extends A {}\nclass C extends B {}\nasync function main(): Promise<void> {\n  B.s = 10;\n  console.log(A.s, B.s, C.s);\n  C.s = 20;\n  console.log(A.s, B.s, C.s);\n  A.s = 5;\n  console.log(A.s, B.s, C.s);\n  B.t += 'x';\n  console.log(A.t, B.t, C.t);\n}\n"
+    },
+    {
+      "name": "tagged template objects are per-site, frozen and carry raw",
+      "expect": "matched",
+      "source": "function tag(s: TemplateStringsArray, ...v: number[]): TemplateStringsArray { return s; }\nconst f = (): TemplateStringsArray => tag`a${1}b\\n`;\nasync function main(): Promise<void> {\n  console.log(f() === f(), tag`a${1}b` === tag`a${1}b`);\n  console.log(Object.isFrozen(f()), f().raw[1], f()[1].length, f().raw[1].length, f().length);\n  console.log(Array.isArray(f().raw), Object.isFrozen(f().raw));\n}\n"
+    },
+    {
+      "name": "frozen and sealed arrays reject mutation",
+      "expect": "matched",
+      "source": "async function main(): Promise<void> {\n  const a: number[] = Object.freeze([1, 2]) as number[];\n  try { a[0] = 9; } catch (e) { console.log('write throws'); }\n  console.log(a[0], a.length);\n  for (const op of ['push', 'pop', 'shift', 'unshift', 'reverse', 'sort', 'fill', 'splice']) {\n    try {\n      if (op === 'push') a.push(3);\n      else if (op === 'pop') a.pop();\n      else if (op === 'shift') a.shift();\n      else if (op === 'unshift') a.unshift(0);\n      else if (op === 'reverse') a.reverse();\n      else if (op === 'sort') a.sort();\n      else if (op === 'fill') a.fill(0);\n      else a.splice(0, 1);\n      console.log(op, 'ok');\n    } catch (e) {\n      console.log(op, 'throws', e instanceof TypeError);\n    }\n  }\n  console.log(a.join(), Object.isFrozen(a));\n  const s: number[] = Object.seal([1, 2]) as number[];\n  s[0] = 7;\n  try { s.push(3); } catch (e) { console.log('sealed push throws'); }\n  console.log(s.join());\n  const live: number[] = [1, 2];\n  live[0] = 9;\n  live.push(3);\n  console.log(live.join());\n}\n"
     }
   ]
 }

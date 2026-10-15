@@ -1430,6 +1430,11 @@ impl<'ctx> HirCompiler<'ctx> {
             Some(Linkage::External),
         );
         self.module.add_function(
+            "thaw_template_site",
+            i8_ptr.fn_type(&[f64_type.into(), i8_ptr.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
             "thaw_template_strings_raw",
             i8_ptr.fn_type(&[i8_ptr.into()], false),
             Some(Linkage::External),

@@ -1421,6 +1421,13 @@ impl<'a> FnLowerer<'a> {
                     }
                 }
                 let template = &tagged.tpl;
+                // The source position identifies the site; synthesized code has none.
+                let site = if tagged.span.lo.0 == 0 {
+                    self.next_binding += 1;
+                    f64::from(0x8000_0000u32) + self.next_binding as f64
+                } else {
+                    f64::from(tagged.span.lo.0)
+                };
                 let mut cooked_strings = Vec::with_capacity(template.quasis.len());
                 let mut raw_strings = Vec::with_capacity(template.quasis.len());
                 for quasi in &template.quasis {
@@ -1569,11 +1576,7 @@ impl<'a> FnLowerer<'a> {
                 // to arity-check a rest-parameter tag function and
                 // rejected a valid call outright.
                 let call_type = self.infer_expr_type(&call)?;
-                let register = HirStmt::Expr(HirExpr::Call(
-                    Box::new(HirExpr::Var("__thaw_template_strings_register".to_string())),
-                    vec![HirExpr::Var(cooked_name.clone()), HirExpr::ArrayLit(raw_strings)],
-                ));
-                let mut body_statements = vec![register];
+                let mut body_statements = Vec::new();
                 body_statements.extend(extra_statements);
                 if call_type == HirType::Void {
                     body_statements.push(HirStmt::Expr(call));
@@ -1601,7 +1604,15 @@ impl<'a> FnLowerer<'a> {
                         call_type,
                         Box::new(body),
                     )),
-                    vec![HirExpr::ArrayLit(cooked_strings)],
+                    // One frozen template object per site, created on first use.
+                    vec![HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_template_site".to_string())),
+                        vec![
+                            HirExpr::Lit(HirLit::F64(site)),
+                            HirExpr::ArrayLit(cooked_strings),
+                            HirExpr::ArrayLit(raw_strings),
+                        ],
+                    )],
                 ))
             }
 

@@ -466,6 +466,9 @@ pub struct HirCompiler<'ctx> {
     /// Nonprefix structural aliases need tracked owner identities even in
     /// modules that never start QuickJS.
     tracks_physical_object_layouts: bool,
+    /// The program calls `Object.freeze`/`seal`/`preventExtensions`, so native-array
+    /// mutations consult the object-state table (otherwise no array can be locked).
+    tracks_object_integrity: bool,
     /// Non-arrow Json receivers and live Json literals create owned boxes
     /// that may escape through generated globals or captured arena cells.
     tracks_owned_json_roots: bool,
@@ -773,6 +776,7 @@ impl<'ctx> HirCompiler<'ctx> {
             uses_quickjs_handles: false,
             projects_native_objects: false,
             tracks_physical_object_layouts: false,
+            tracks_object_integrity: false,
             tracks_owned_json_roots: false,
             compiling_quickjs_dynamic_arguments: false,
             fresh_event_key_argument_scopes: Vec::new(),
@@ -790,6 +794,8 @@ impl<'ctx> HirCompiler<'ctx> {
             hir_contains_named_call(program, "__thaw_build_native_object_wrapper");
         self.tracks_physical_object_layouts =
             hir_contains_named_call(program, "__thaw_register_native_object_layout");
+        self.tracks_object_integrity =
+            hir_contains_named_call(program, "__thaw_object_set_state_and_return");
         self.declare_runtime_builtins();
         self.declare_exception_state();
         self.declare_globals(program)?;

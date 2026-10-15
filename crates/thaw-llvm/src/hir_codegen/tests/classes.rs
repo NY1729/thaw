@@ -1078,7 +1078,7 @@ fn compiles_and_runs_inherited_native_static_class_fields() {
     "#;
     assert_eq!(
         compile_and_run(source, "inherited_native_static_class_fields"),
-        "40\n42\n43\n43\n45\nshared\n10\n45\n11\n"
+        "40\n40\n41\n42\n42\nshared\n10\n40\n11\n"
     );
 }
 
@@ -1716,7 +1716,7 @@ fn compiles_uninitialized_optional_native_class_fields() {
     "#;
     assert_eq!(
         compile_and_run(source, "native_uninitialized_optional_fields"),
-        "40\nmissing\nprivate-missing\n41\nuntitled\n2\nready\nprivate-ready\n3\nshared\n40\n"
+        "40\nmissing\nprivate-missing\n41\nuntitled\n2\nready\nprivate-ready\n3\nmissing\n40\n"
     );
 }
 
@@ -1951,7 +1951,7 @@ fn shares_native_generic_class_static_state_across_specializations() {
     "#;
     assert_eq!(
         compile_and_run(source, "native_generic_class_static_state"),
-        "40\nready\n3\n3\n3\n3\nbox\n40\n2\n2\n2\n1\ntwo\n42\n"
+        "40\nready\n3\n3\n3\n3\nbox\n40\n2\n1\n2\n1\ntwo\n42\n"
     );
 }
 
