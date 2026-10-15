@@ -1,3 +1,132 @@
+  const cloneUnsupportedBootstrap = globalThis.__thaw_clone_unsupported_bootstrap;
+  const cloneErrorBootstrap = globalThis.__thaw_clone_error_bootstrap;
+  const cloneReflectApply = Reflect.apply;
+  const cloneObject = Object;
+  const cloneString = String;
+  const cloneDefineProperty = Object.defineProperty;
+  const utilTypesTag = value => Object.prototype.toString.call(value);
+  const utilTypes = {
+    isDate: value => value instanceof Date,
+    isRegExp: value => value instanceof RegExp,
+    isMap: value => value instanceof Map,
+    isSet: value => value instanceof Set,
+    isWeakMap: value => value instanceof WeakMap,
+    isWeakSet: value => value instanceof WeakSet,
+    isPromise: value => value instanceof Promise,
+    isArrayBuffer: value => value instanceof ArrayBuffer,
+    isAnyArrayBuffer: value => value instanceof ArrayBuffer
+      || (typeof SharedArrayBuffer === 'function' && value instanceof SharedArrayBuffer),
+    isArrayBufferView: value => ArrayBuffer.isView(value),
+    isDataView: value => value instanceof DataView,
+    isTypedArray: value => ArrayBuffer.isView(value) && !(value instanceof DataView),
+    isUint8Array: value => value instanceof Uint8Array,
+    isUint8ClampedArray: value => value instanceof Uint8ClampedArray,
+    isUint16Array: value => value instanceof Uint16Array,
+    isUint32Array: value => value instanceof Uint32Array,
+    isInt8Array: value => value instanceof Int8Array,
+    isInt16Array: value => value instanceof Int16Array,
+    isInt32Array: value => value instanceof Int32Array,
+    isFloat32Array: value => value instanceof Float32Array,
+    isFloat64Array: value => value instanceof Float64Array,
+    isBigInt64Array: value => typeof BigInt64Array === 'function' && value instanceof BigInt64Array,
+    isBigUint64Array: value => typeof BigUint64Array === 'function' && value instanceof BigUint64Array,
+    isNativeError: value => cloneErrorBootstrap(value),
+    isArgumentsObject: value => utilTypesTag(value) === '[object Arguments]',
+    isNumberObject: value => utilTypesTag(value) === '[object Number]',
+    isStringObject: value => utilTypesTag(value) === '[object String]',
+    isBooleanObject: value => utilTypesTag(value) === '[object Boolean]',
+    isBigIntObject: value => utilTypesTag(value) === '[object BigInt]',
+    isSymbolObject: value => utilTypesTag(value) === '[object Symbol]',
+    isBoxedPrimitive: value => /\[object (Number|String|Boolean|BigInt|Symbol)\]/.test(utilTypesTag(value)),
+    isAsyncFunction: value => utilTypesTag(value) === '[object AsyncFunction]',
+    isGeneratorFunction: value => utilTypesTag(value) === '[object GeneratorFunction]',
+    isGeneratorObject: value => utilTypesTag(value) === '[object Generator]',
+    isExternal: () => false,
+    isProxy: () => false,
+    isModuleNamespaceObject: () => false,
+    isKeyObject: () => false,
+    isCryptoKey: () => false,
+  };
+  utilTypes.default = utilTypes;
+  utilTypes.__esModule = true;
+  cloneDefineProperty(globalThis, '__thaw_util_types', { value: utilTypes });
+  const cloneGetOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
+  const cloneHasOwnProperty = Object.prototype.hasOwnProperty;
+  const cloneWeakMapHas = WeakMap.prototype.has;
+  const cloneWeakSetHas = WeakSet.prototype.has;
+  const cloneMapGet = Map.prototype.get;
+  const cloneTypeErrorPrototype = TypeError.prototype;
+  const cloneObjectIsPrototypeOf = Object.prototype.isPrototypeOf;
+  const cloneNumberConstructor = Number;
+  const cloneStringConstructor = String;
+  const cloneBooleanConstructor = Boolean;
+  const cloneErrorConstructors = new Map([
+    ['Error', Error], ['EvalError', EvalError], ['RangeError', RangeError],
+    ['ReferenceError', ReferenceError], ['SyntaxError', SyntaxError],
+    ['TypeError', TypeError], ['URIError', URIError],
+  ]);
+  const cloneNumberValueOf = Number.prototype.valueOf;
+  const cloneStringValueOf = String.prototype.valueOf;
+  const cloneBooleanValueOf = Boolean.prototype.valueOf;
+  const cloneBigIntValueOf = BigInt.prototype.valueOf;
+  const cloneSymbolValueOf = Symbol.prototype.valueOf;
+  const cloneProbeTypeErrorPrototype = TypeError.prototype;
+  const cloneBoxProbes = [
+    ['Number', cloneNumberValueOf], ['String', cloneStringValueOf],
+    ['Boolean', cloneBooleanValueOf], ['BigInt', cloneBigIntValueOf],
+    ['Symbol', cloneSymbolValueOf],
+  ];
+  const isCloneProbeTypeError = error =>
+    error !== null && (typeof error === 'object' || typeof error === 'function')
+    && cloneReflectApply(cloneObjectIsPrototypeOf, cloneProbeTypeErrorPrototype, [error]);
+  const inspectCloneBox = input => {
+    for (const [kind, valueOf] of cloneBoxProbes) {
+      try {
+        return { kind, value: cloneReflectApply(valueOf, input, []) };
+      } catch (error) {
+        if (!isCloneProbeTypeError(error)) throw error;
+      }
+    }
+    return null;
+  };
+  const makeCloneError = input => {
+    const name = input.name;
+    const Constructor = cloneReflectApply(cloneMapGet, cloneErrorConstructors, [name])
+      || cloneReflectApply(cloneMapGet, cloneErrorConstructors, ['Error']);
+    const messageDescriptor = cloneGetOwnPropertyDescriptor(input, 'message');
+    const hasMessage = messageDescriptor
+      && cloneReflectApply(cloneHasOwnProperty, messageDescriptor, ['value']);
+    if (hasMessage && typeof messageDescriptor.value === 'symbol') {
+      const TypeErrorConstructor = cloneReflectApply(cloneMapGet, cloneErrorConstructors, ['TypeError']);
+      throw new TypeErrorConstructor('Cannot convert a Symbol value to a string');
+    }
+    const output = hasMessage
+      ? new Constructor(cloneString(messageDescriptor.value))
+      : new Constructor();
+    const stackDescriptor = cloneGetOwnPropertyDescriptor(input, 'stack');
+    if (stackDescriptor && cloneReflectApply(cloneHasOwnProperty, stackDescriptor, ['value'])
+        && typeof stackDescriptor.value === 'string') {
+      cloneDefineProperty(output, 'stack', {
+        value: stackDescriptor.value, writable: true, configurable: true,
+      });
+    }
+    return output;
+  };
+  const cloneWeakProbeKey = {};
+  const cloneHasWeakBrand = (has, value) => {
+    try { cloneReflectApply(has, value, [cloneWeakProbeKey]); return true; }
+    catch (error) {
+      if (error !== null && (typeof error === 'object' || typeof error === 'function')
+          && cloneReflectApply(cloneObjectIsPrototypeOf, cloneTypeErrorPrototype, [error])) return false;
+      throw error;
+    }
+  };
+  const isUnsupportedCloneObject = value =>
+    cloneUnsupportedBootstrap(value)
+    || cloneHasWeakBrand(cloneWeakMapHas, value)
+    || cloneHasWeakBrand(cloneWeakSetHas, value);
+  const isCloneUncloneable = (set, value) =>
+    cloneReflectApply(cloneWeakSetHas, set, [value]);
   const base64Alphabet =
     'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
   globalThis.btoa = input => {
@@ -69,10 +198,17 @@
     toJSON() { return { name: this.name, entryType: this.entryType, startTime: this.startTime, duration: this.duration, detail: this.detail }; }
   }
   class PerformanceMark extends PerformanceEntry {
-    constructor(name, options = {}) { super(name, 'mark', options.startTime === undefined ? performanceNow() : options.startTime, 0, options.detail); }
+    constructor(name, options = {}) {
+      super(name, 'mark', options.startTime === undefined ? performanceNow() : options.startTime, 0, options.detail);
+      if (this.startTime < 0) throw new TypeError('Performance timestamp must be non-negative');
+      this.detail = cloneMetadata(this.detail);
+    }
   }
   class PerformanceMeasure extends PerformanceEntry {
-    constructor(name, startTime, duration, detail) { super(name, 'measure', startTime, duration, detail); }
+    constructor(name, startTime, duration, detail) {
+      super(name, 'measure', startTime, duration, detail);
+      this.detail = cloneMetadata(this.detail);
+    }
   }
   class PerformanceObserverEntryList {
     constructor(entries) { this._entries = entries; }
@@ -87,7 +223,7 @@
       observer._records.push(entry);
       if (!observer._queued) {
         observer._queued = true;
-        queueMicrotask(() => {
+        setImmediate(() => {
           observer._queued = false;
           const records = observer.takeRecords();
           if (records.length) observer._callback(new PerformanceObserverEntryList(records), observer);
@@ -97,15 +233,46 @@
     return entry;
   };
   class PerformanceObserver {
-    constructor(callback) { if (typeof callback !== 'function') throw new TypeError('callback must be a function'); this._callback = callback; this._types = new Set(); this._records = []; this._queued = false; }
+    constructor(callback) { if (typeof callback !== 'function') throw new TypeError('callback must be a function'); this._callback = callback; this._types = new Set(); this._records = []; this._queued = false; this._mode = undefined; }
     observe(options = {}) {
-      if (options.type) this._types.add(String(options.type));
-      if (options.entryTypes) for (const type of options.entryTypes) this._types.add(String(type));
+      const type = options.type;
+      const entryTypes = options.entryTypes;
+      const hasType = type !== undefined;
+      const hasEntryTypes = entryTypes !== undefined;
+      if (hasType === hasEntryTypes) throw new TypeError('observe requires exactly one of type or entryTypes');
+      const buffered = options.buffered;
+      if (hasEntryTypes && buffered !== undefined) throw new TypeError('buffered is only valid with type');
+      const mode = hasType ? 'type' : 'entryTypes';
+      if (this._mode !== undefined && this._mode !== mode) {
+        throw new DOMException('Observer registration mode cannot change', 'InvalidModificationError');
+      }
+      let selected;
+      if (hasType) {
+        selected = String(type);
+      } else {
+        selected = [];
+        for (const candidate of entryTypes) selected.push(String(candidate));
+      }
+      this._mode = mode;
+      const supported = PerformanceObserver.supportedEntryTypes;
+      let types;
+      if (hasType) {
+        if (!supported.includes(selected)) return;
+        types = new Set(this._types);
+        types.add(selected);
+      } else {
+        types = new Set(selected.filter(candidate => supported.includes(candidate)));
+        if (types.size === 0) return;
+      }
+      const bufferedRecords = hasType && buffered
+        ? performanceEntries.filter(entry => entry.entryType === selected)
+        : [];
+      this._types = types;
       performanceObservers.add(this);
-      if (options.buffered && options.type) this._records.push(...performanceEntries.filter(entry => entry.entryType === String(options.type)));
+      this._records.push(...bufferedRecords);
       if (this._records.length && !this._queued) {
         this._queued = true;
-        queueMicrotask(() => { this._queued = false; const records = this.takeRecords(); if (records.length) this._callback(new PerformanceObserverEntryList(records), this); });
+        setImmediate(() => { this._queued = false; const records = this.takeRecords(); if (records.length) this._callback(new PerformanceObserverEntryList(records), this); });
       }
     }
     disconnect() { performanceObservers.delete(this); this._records = []; this._types.clear(); }
@@ -114,8 +281,11 @@
   PerformanceObserver.supportedEntryTypes = ['function', 'mark', 'measure'];
   const entryTime = (value, fallback) => {
     if (value === undefined) return fallback;
-    if (typeof value === 'number') return value;
-    const entry = performanceEntries.slice().reverse().find(candidate => candidate.name === String(value));
+    if (typeof value === 'number') {
+      if (value < 0) throw new TypeError('Performance timestamp must be non-negative');
+      return value;
+    }
+    const entry = performanceEntries.slice().reverse().find(candidate => candidate.entryType === 'mark' && candidate.name === String(value));
     if (!entry) throw new SyntaxError(`Unknown performance mark: ${value}`);
     return entry.startTime;
   };
@@ -198,10 +368,13 @@
       }
       const clone = input => {
         if (((typeof input === 'object' && input !== null) || typeof input === 'function')
-            && workerUncloneableObjects.has(input)) {
+            && isCloneUncloneable(workerUncloneableObjects, input)) {
           const error = new DOMException('Object is marked as uncloneable', 'DataCloneError');
           workerUncloneableErrors.add(error);
           throw error;
+        }
+        if (input !== null && typeof input === 'object' && isUnsupportedCloneObject(input)) {
+          throw new DOMException('value cannot be cloned', 'DataCloneError');
         }
         if (input === null || typeof input !== 'object') {
           if (typeof input === 'function' || typeof input === 'symbol') {
@@ -211,6 +384,33 @@
           return input;
         }
         if (seen.has(input)) return seen.get(input);
+        if (cloneErrorBootstrap(input)) {
+          const output = makeCloneError(input);
+          seen.set(input, output);
+          const causeDescriptor = cloneGetOwnPropertyDescriptor(input, 'cause');
+          if (causeDescriptor
+              && cloneReflectApply(cloneHasOwnProperty, causeDescriptor, ['value'])) {
+            cloneDefineProperty(output, 'cause', {
+              value: clone(causeDescriptor.value), writable: true, configurable: true,
+            });
+          }
+          return output;
+        }
+        const boxed = inspectCloneBox(input);
+        if (boxed) {
+          if (boxed.kind === 'Symbol') {
+            throw new DOMException('value cannot be structured-cloned', 'DataCloneError');
+          }
+          const output = boxed.kind === 'Number'
+            ? new cloneNumberConstructor(boxed.value)
+            : boxed.kind === 'String'
+              ? new cloneStringConstructor(boxed.value)
+              : boxed.kind === 'Boolean'
+                ? new cloneBooleanConstructor(boxed.value)
+                : cloneObject(boxed.value);
+          seen.set(input, output);
+          return output;
+        }
         if (typeof globalThis.MessagePort === 'function'
             && input instanceof globalThis.MessagePort) {
           if (!transfer.has(input)) {
@@ -226,7 +426,6 @@
           output = new Date(input.getTime());
         } else if (input instanceof RegExp) {
           output = new RegExp(input.source, input.flags);
-          output.lastIndex = input.lastIndex;
         } else if (input instanceof Map) {
           output = new Map();
           seen.set(input, output);
@@ -240,18 +439,22 @@
         } else if (input instanceof ArrayBuffer) {
           output = input.slice(0);
         } else if (ArrayBuffer.isView(input)) {
+          const buffer = clone(input.buffer);
           if (input instanceof DataView) {
-            output = new DataView(input.buffer.slice(input.byteOffset,
-              input.byteOffset + input.byteLength));
+            output = new DataView(buffer, input.byteOffset, input.byteLength);
           } else {
-            output = new input.constructor(input);
+            output = new input.constructor(buffer, input.byteOffset, input.length);
           }
         } else {
-          output = Array.isArray(input) ? [] : {};
+          output = Array.isArray(input) ? new Array(input.length) : {};
         }
         seen.set(input, output);
         if (!(input instanceof Date) && !(input instanceof RegExp)
             && !(input instanceof ArrayBuffer) && !ArrayBuffer.isView(input)) {
+          const blobSnapshot = blobFileCloneSnapshot(input);
+          if (blobSnapshot) {
+            for (const key of Object.keys(blobSnapshot)) output[key] = clone(blobSnapshot[key]);
+          }
           for (const key of Object.keys(input)) output[key] = clone(input[key]);
         }
         return output;
@@ -267,3 +470,4 @@
     };
     globalThis.__thaw_structured_clone_with_uncloneable_checks = globalThis.structuredClone;
   }
+  const cloneMetadata = globalThis.structuredClone;

@@ -14,9 +14,15 @@ thread_local! {
     // first reference projection.
     static OBJECT_PROJECTORS: RefCell<HashMap<usize, (String, usize)>> =
         RefCell::new(HashMap::new());
+    // A thrown Error record's `() -> Json` describer, so a catch can read the
+    // record without any QuickJS projection. Arena child of its owner like a
+    // projector.
+    static OBJECT_DESCRIBERS: RefCell<HashMap<usize, usize>> =
+        RefCell::new(HashMap::new());
     // A structural alias can enumerate fields in a different order from the
     // physical allocation. Record its original byte offsets at the first
     // type-erasure boundary, without copying or changing the object ABI.
+    #[allow(clippy::type_complexity)]
     static OBJECT_FIELD_OFFSETS: RefCell<HashMap<usize, (String, HashMap<String, u64>)>> =
         RefCell::new(HashMap::new());
     // The source HIR type carries class ancestry in the marker field name;
@@ -90,6 +96,7 @@ pub unsafe extern "C" fn thaw_object_set_property_flags(
     if property.is_null() { return false; }
     let Ok(property) = thaw_arena::NativeStr::from_ptr(property).to_str() else { return false; };
     if !object_can_set_property_flags(object, property, requested) { return false; }
+    thaw_arena::register_metadata_reset_hook(prune_object_states);
     OBJECT_PROPERTY_FLAGS.with(|stored| {
         stored.borrow_mut().entry(object as usize).or_default()
             .insert(property.to_owned(), requested);
@@ -136,6 +143,7 @@ pub unsafe extern "C" fn thaw_object_set_class_identity(
     let Some(identities) = marker.strip_prefix("__thaw_class_identity_\u{1e}") else {
         return false;
     };
+    thaw_arena::register_metadata_reset_hook(prune_object_states);
     OBJECT_CLASS_IDENTITIES.with(|stored| {
         let mut stored = stored.borrow_mut();
         let metadata = stored.entry(object as usize).or_default();
@@ -190,6 +198,7 @@ pub unsafe extern "C" fn thaw_object_hide_marker(
     if !marker.starts_with("__thaw_class_identity_\u{1e}") {
         return false;
     }
+    thaw_arena::register_metadata_reset_hook(prune_object_states);
     OBJECT_CLASS_IDENTITIES.with(|stored| {
         let mut stored = stored.borrow_mut();
         let metadata = stored.entry(object as usize).or_default();
@@ -239,6 +248,7 @@ pub extern "C" fn thaw_object_order_begin(object: *const u8) -> bool {
     if object.is_null() {
         return false;
     }
+    thaw_arena::register_metadata_reset_hook(prune_object_states);
     OBJECT_CLASS_IDENTITIES.with(|stored| {
         stored.borrow_mut().entry(object as usize).or_default().own_key_order = Some(Vec::new());
     });
@@ -330,6 +340,7 @@ pub extern "C" fn thaw_object_set_state(object: *const u8, operation: u8) -> boo
         3 => NON_EXTENSIBLE | SEALED | FROZEN,
         _ => return false,
     };
+    thaw_arena::register_metadata_reset_hook(prune_object_states);
     OBJECT_STATES.with(|states| {
         *states.borrow_mut().entry(object as usize).or_default() |= flags;
     });
@@ -356,6 +367,7 @@ pub extern "C" fn thaw_object_copy_state(source: *const u8, target: *const u8) -
     else {
         return false;
     };
+    thaw_arena::register_metadata_reset_hook(prune_object_states);
     OBJECT_STATES.with(|states| {
         *states.borrow_mut().entry(target as usize).or_default() |= flags;
     });
@@ -396,6 +408,7 @@ pub unsafe extern "C" fn thaw_object_set_accessor(
     let Ok(property) = thaw_arena::NativeStr::from_ptr(property).to_str() else {
         return false;
     };
+    thaw_arena::register_metadata_reset_hook(prune_object_states);
     OBJECT_ACCESSORS.with(|accessors| {
         let mut accessors = accessors.borrow_mut();
         let slot = &mut accessors
@@ -461,7 +474,7 @@ fn full_object_field_names(owner: *const u8) -> Option<Vec<String>> {
         let length = segment[..colon].parse::<usize>().ok()?;
         let end = colon.checked_add(1)?.checked_add(length.checked_mul(2)?)?;
         let hex = segment.get(colon + 1..end)?;
-        let bytes = hex.as_bytes().chunks_exact(2).map(|pair| {
+        let bytes = hex.as_bytes().as_chunks::<2>().0.iter().map(|pair| {
             u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok()
         }).collect::<Option<Vec<_>>>()?;
         String::from_utf8(bytes).ok()
@@ -560,6 +573,7 @@ pub unsafe extern "C" fn thaw_object_register_field_offsets(
             return object_layout_contains(physical, descriptor)
                 && fields.keys().all(|name| offsets.contains_key(name));
         }
+        thaw_arena::register_metadata_reset_hook(prune_object_states);
         all.insert(owner as usize, (descriptor.to_owned(), fields));
         true
     })
@@ -631,6 +645,7 @@ pub unsafe extern "C" fn thaw_object_register_projector(
             if object_layout_contains(existing, layout) { return true; }
             if !object_layout_contains(layout, existing) { return false; }
         }
+        thaw_arena::register_metadata_reset_hook(prune_object_states);
         let old = projectors.insert(owner as usize, (layout.to_owned(), closure as usize))
             .map(|(_, pointer)| pointer).unwrap_or_default();
         thaw_arena::replace_reference(owner as usize, old, closure as usize);
@@ -654,21 +669,47 @@ pub unsafe extern "C" fn thaw_object_projector(
         .unwrap_or(std::ptr::null_mut()))
 }
 
+#[no_mangle]
+/// # Safety
+/// `owner` and `closure` are arena objects.
+pub unsafe extern "C" fn thaw_object_register_describer(owner: *mut u8, closure: *mut u8) -> bool {
+    if owner.is_null() || closure.is_null() || !thaw_arena::contains_allocation(owner as usize) {
+        return false;
+    }
+    OBJECT_DESCRIBERS.with(|describers| {
+        thaw_arena::register_metadata_reset_hook(prune_object_states);
+        let old = describers.borrow_mut().insert(owner as usize, closure as usize).unwrap_or_default();
+        thaw_arena::replace_reference(owner as usize, old, closure as usize);
+        true
+    })
+}
+
+#[no_mangle]
+/// # Safety
+/// `owner` is an arena object.
+pub unsafe extern "C" fn thaw_object_describer(owner: *const u8) -> *mut u8 {
+    if owner.is_null() { return std::ptr::null_mut(); }
+    OBJECT_DESCRIBERS.with(|describers| describers.borrow().get(&(owner as usize))
+        .map(|closure| *closure as *mut u8).unwrap_or(std::ptr::null_mut()))
+}
+
 fn clear_object_states() {
     OBJECT_STATES.with(|states| states.borrow_mut().clear());
     OBJECT_ACCESSORS.with(|accessors| accessors.borrow_mut().clear());
     OBJECT_PROPERTY_FLAGS.with(|flags| flags.borrow_mut().clear());
     OBJECT_PROJECTORS.with(|projectors| projectors.borrow_mut().clear());
+    OBJECT_DESCRIBERS.with(|describers| describers.borrow_mut().clear());
     OBJECT_FIELD_OFFSETS.with(|offsets| offsets.borrow_mut().clear());
     OBJECT_CLASS_IDENTITIES.with(|identities| identities.borrow_mut().clear());
 }
 
-fn prune_object_states() {
-    if !thaw_arena::is_tracing() { clear_object_states(); return; }
+fn prune_object_states(tracing: bool) {
+    if !tracing { clear_object_states(); return; }
     OBJECT_STATES.with(|states| states.borrow_mut().retain(|pointer, _| !thaw_arena::was_reclaimed(*pointer)));
     OBJECT_ACCESSORS.with(|accessors| accessors.borrow_mut().retain(|pointer, _| !thaw_arena::was_reclaimed(*pointer)));
     OBJECT_PROPERTY_FLAGS.with(|flags| flags.borrow_mut().retain(|pointer, _| !thaw_arena::was_reclaimed(*pointer)));
     OBJECT_PROJECTORS.with(|projectors| projectors.borrow_mut().retain(|pointer, _| !thaw_arena::was_reclaimed(*pointer)));
+    OBJECT_DESCRIBERS.with(|describers| describers.borrow_mut().retain(|pointer, _| !thaw_arena::was_reclaimed(*pointer)));
     OBJECT_FIELD_OFFSETS.with(|offsets| offsets.borrow_mut().retain(|pointer, _| !thaw_arena::was_reclaimed(*pointer)));
     OBJECT_CLASS_IDENTITIES.with(|identities| identities.borrow_mut().retain(|pointer, _| !thaw_arena::was_reclaimed(*pointer)));
 }
@@ -676,6 +717,64 @@ fn prune_object_states() {
 #[cfg(test)]
 mod object_state_tests {
     use super::*;
+
+    thread_local! {
+        static RESET_RELEASE_ADD_FRESH_STATE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+
+    static RESET_OLD_OBJECT: u8 = 0;
+    static RESET_FRESH_OBJECT: u8 = 0;
+
+    fn add_fresh_state_during_release(_: bool) {
+        if RESET_RELEASE_ADD_FRESH_STATE.with(|armed| armed.replace(false)) {
+            // Reset callbacks must not inherit a metadata-table borrow from an earlier phase.
+            OBJECT_STATES.with(|table| assert!(table.try_borrow_mut().is_ok()));
+            OBJECT_ACCESSORS.with(|table| assert!(table.try_borrow_mut().is_ok()));
+            OBJECT_PROPERTY_FLAGS.with(|table| assert!(table.try_borrow_mut().is_ok()));
+            OBJECT_PROJECTORS.with(|table| assert!(table.try_borrow_mut().is_ok()));
+            OBJECT_DESCRIBERS.with(|table| assert!(table.try_borrow_mut().is_ok()));
+            OBJECT_FIELD_OFFSETS.with(|table| assert!(table.try_borrow_mut().is_ok()));
+            OBJECT_CLASS_IDENTITIES.with(|table| assert!(table.try_borrow_mut().is_ok()));
+            assert!(thaw_object_set_state(&RESET_FRESH_OBJECT, 3));
+        }
+    }
+
+    #[test]
+    fn reset_clears_old_state_before_release_callback_adds_fresh_state() {
+        std::thread::spawn(|| {
+            assert!(!thaw_arena::is_tracing());
+            assert_ne!(
+                &RESET_OLD_OBJECT as *const u8,
+                &RESET_FRESH_OBJECT as *const u8
+            );
+            thaw_arena::register_reset_hook(add_fresh_state_during_release);
+            assert!(thaw_object_set_state(&RESET_OLD_OBJECT, 3));
+            RESET_RELEASE_ADD_FRESH_STATE.with(|armed| armed.set(true));
+
+            thaw_arena::thaw_arena_reset();
+
+            assert!(!thaw_object_state(&RESET_OLD_OBJECT, 2));
+            assert!(thaw_object_state(&RESET_FRESH_OBJECT, 2));
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    fn first_metadata_hook_registered_during_release_cleans_on_next_reset() {
+        std::thread::spawn(|| {
+            assert!(!thaw_arena::is_tracing());
+            thaw_arena::register_reset_hook(add_fresh_state_during_release);
+            RESET_RELEASE_ADD_FRESH_STATE.with(|armed| armed.set(true));
+            thaw_arena::thaw_arena_reset();
+            assert!(thaw_object_state(&RESET_FRESH_OBJECT, 2));
+
+            thaw_arena::thaw_arena_reset();
+            assert!(!thaw_object_state(&RESET_FRESH_OBJECT, 2));
+        })
+        .join()
+        .unwrap();
+    }
 
     #[test]
     fn own_key_order_tracks_creation_hide_reveal_and_full_native_names() {
@@ -779,7 +878,6 @@ mod object_state_tests {
             assert!(unsafe { thaw_object_set_class_identity(reclaimed, marker.as_ptr()) });
             let root = thaw_arena::ArenaRoot::new(retained as usize);
             thaw_arena::thaw_arena_reset();
-            prune_object_states();
             assert!(unsafe { thaw_object_marker_hidden(retained, marker.as_ptr()) });
             assert!(unsafe { thaw_object_has_class_identity(retained, leaf.as_ptr()) });
             assert!(!unsafe { thaw_object_marker_hidden(reclaimed, marker.as_ptr()) });
@@ -789,8 +887,93 @@ mod object_state_tests {
             assert!(!unsafe { thaw_object_marker_hidden(reused, marker.as_ptr()) });
             drop(root);
             thaw_arena::thaw_arena_reset();
-            prune_object_states();
             assert!(!unsafe { thaw_object_marker_hidden(retained, marker.as_ptr()) });
+        }).join().unwrap();
+    }
+
+    #[test]
+    fn traced_reset_keeps_all_metadata_and_children_for_live_owner_only() {
+        std::thread::spawn(|| {
+            clear_object_states();
+            thaw_arena::thaw_arena_enable_tracing();
+            let live = thaw_arena::thaw_arena_alloc(8, 8);
+            let dead = thaw_arena::thaw_arena_alloc(8, 8);
+            let live_accessor = thaw_arena::thaw_arena_alloc(8, 8);
+            let dead_accessor = thaw_arena::thaw_arena_alloc(8, 8);
+            let live_projector = thaw_arena::thaw_arena_alloc(8, 8);
+            let dead_projector = thaw_arena::thaw_arena_alloc(8, 8);
+            let live_describer = thaw_arena::thaw_arena_alloc(8, 8);
+            let dead_describer = thaw_arena::thaw_arena_alloc(8, 8);
+            assert!([
+                live, dead, live_accessor, dead_accessor, live_projector, dead_projector,
+                live_describer, dead_describer,
+            ].iter().all(|pointer| !pointer.is_null()));
+
+            let live_marker = std::ffi::CString::new("__thaw_class_identity_\u{1e}Live").unwrap();
+            let dead_marker = std::ffi::CString::new("__thaw_class_identity_\u{1e}Dead").unwrap();
+            let property = thaw_arena::arena_string(b"field");
+            let live_name = thaw_arena::arena_string(b"live-key");
+            let dead_name = thaw_arena::arena_string(b"dead-key");
+            let offsets = std::ffi::CString::new("0:61;").unwrap();
+            let descriptor = std::ffi::CString::new("1:611:78").unwrap();
+            assert!(!property.is_null() && !live_name.is_null() && !dead_name.is_null());
+
+            unsafe {
+                assert!(thaw_object_set_class_identity(live, live_marker.as_ptr()));
+                assert!(thaw_object_set_class_identity(dead, dead_marker.as_ptr()));
+                assert!(thaw_object_order_begin(live));
+                assert!(thaw_object_order_begin(dead));
+                assert!(thaw_object_order_seed(live, live_name));
+                assert!(thaw_object_order_seed(dead, dead_name));
+                assert!(thaw_object_set_property_flags(live, property, PROPERTY_ENUMERABLE));
+                assert!(thaw_object_set_property_flags(dead, property, PROPERTY_ENUMERABLE));
+                assert!(thaw_object_set_accessor(live, c"accessor".as_ptr(), live_accessor, false));
+                assert!(thaw_object_set_accessor(dead, c"accessor".as_ptr(), dead_accessor, false));
+                assert!(thaw_object_register_field_offsets(live, offsets.as_ptr(), descriptor.as_ptr()));
+                assert!(thaw_object_register_field_offsets(dead, offsets.as_ptr(), descriptor.as_ptr()));
+                assert!(thaw_object_register_projector(live, descriptor.as_ptr(), live_projector));
+                assert!(thaw_object_register_projector(dead, descriptor.as_ptr(), dead_projector));
+                assert!(thaw_object_register_describer(live, live_describer));
+                assert!(thaw_object_register_describer(dead, dead_describer));
+            }
+            assert!(thaw_object_set_state(live, 3));
+            assert!(thaw_object_set_state(dead, 3));
+            let root = thaw_arena::ArenaRoot::new(live as usize);
+
+            thaw_arena::thaw_arena_reset();
+
+            assert!(thaw_object_state(live, 2));
+            assert!(!thaw_object_state(dead, 2));
+            assert!(OBJECT_ACCESSORS.with(|table| table.borrow().contains_key(&(live as usize))));
+            assert!(!OBJECT_ACCESSORS.with(|table| table.borrow().contains_key(&(dead as usize))));
+            assert!(OBJECT_PROPERTY_FLAGS.with(|table| table.borrow().contains_key(&(live as usize))));
+            assert!(!OBJECT_PROPERTY_FLAGS.with(|table| table.borrow().contains_key(&(dead as usize))));
+            assert!(OBJECT_CLASS_IDENTITIES.with(|table| table.borrow().get(&(live as usize))
+                .is_some_and(|metadata| metadata.ancestry.as_deref() == Some("Live")
+                    && metadata.hidden_markers.contains("__thaw_class_identity_\u{1e}Live")
+                    && metadata.own_key_order.as_deref().is_some_and(|order|
+                        order.len() == 1 && order[0] == "live-key"))));
+            assert!(!OBJECT_CLASS_IDENTITIES.with(|table| table.borrow().contains_key(&(dead as usize))));
+            assert!(OBJECT_FIELD_OFFSETS.with(|table| table.borrow().contains_key(&(live as usize))));
+            assert!(!OBJECT_FIELD_OFFSETS.with(|table| table.borrow().contains_key(&(dead as usize))));
+            assert!(OBJECT_PROJECTORS.with(|table| table.borrow().contains_key(&(live as usize))));
+            assert!(!OBJECT_PROJECTORS.with(|table| table.borrow().contains_key(&(dead as usize))));
+            assert!(OBJECT_DESCRIBERS.with(|table| table.borrow().contains_key(&(live as usize))));
+            assert!(!OBJECT_DESCRIBERS.with(|table| table.borrow().contains_key(&(dead as usize))));
+            assert!(!thaw_arena::was_reclaimed(live_accessor as usize));
+            assert!(!thaw_arena::was_reclaimed(live_projector as usize));
+            assert!(!thaw_arena::was_reclaimed(live_describer as usize));
+            assert!(thaw_arena::was_reclaimed(dead_accessor as usize));
+            assert!(thaw_arena::was_reclaimed(dead_projector as usize));
+            assert!(thaw_arena::was_reclaimed(dead_describer as usize));
+
+            drop(root);
+            thaw_arena::thaw_arena_reset();
+            assert!(!thaw_object_state(live, 2));
+            assert!(!OBJECT_ACCESSORS.with(|table| table.borrow().contains_key(&(live as usize))));
+            assert!(thaw_arena::was_reclaimed(live_accessor as usize));
+            assert!(thaw_arena::was_reclaimed(live_projector as usize));
+            assert!(thaw_arena::was_reclaimed(live_describer as usize));
         }).join().unwrap();
     }
 

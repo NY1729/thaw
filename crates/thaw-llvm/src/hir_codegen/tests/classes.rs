@@ -358,6 +358,130 @@ fn native_instanceof_checks_allocated_identity_not_marker_layout() {
 }
 
 #[test]
+fn dynamic_instanceof_uses_the_resolved_property_constructor() {
+    let source = r#"
+        function computedKey(): string {
+            loadScript("dynamicInstanceofKeyCalls++");
+            return "C";
+        }
+        function main(): void {
+            loadScript("globalThis.dynamicInstanceofKeyCalls = 0; globalThis.dynamicInstanceofHolder = { C: class DynamicInstanceofClass {} }; globalThis.dynamicInstanceofMember = new dynamicInstanceofHolder.C(); globalThis.dynamicInstanceofOther = {};");
+            const holder: JsValue = getDynamicValue("dynamicInstanceofHolder");
+            const member: JsValue = getDynamicValue("dynamicInstanceofMember");
+            const other: JsValue = getDynamicValue("dynamicInstanceofOther");
+            console.log(member instanceof holder.C, other instanceof holder.C, 1 instanceof holder.C);
+            console.log(member instanceof holder[computedKey()], Number(getDynamicValue("dynamicInstanceofKeyCalls")));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "dynamic_instanceof_property_constructor"),
+        "true false false\ntrue 1\n"
+    );
+}
+
+#[test]
+fn dynamic_instanceof_evaluates_operands_left_to_right_once() {
+    let source = r#"
+        function left(): JsValue {
+            loadScript("dynamicInstanceofOrder += 'L';");
+            return getDynamicValue("dynamicInstanceofMarker");
+        }
+        function throwingLeft(): JsValue {
+            loadScript("dynamicInstanceofOrder += 'L';");
+            throw getDynamicValue("dynamicInstanceofMarker");
+        }
+        function main(): void {
+            loadScript("globalThis.dynamicInstanceofOrder = ''; globalThis.dynamicInstanceofMarker = {}; globalThis.dynamicInstanceofHolder = { get C() { dynamicInstanceofOrder += 'R'; return { [Symbol.hasInstance](value) { dynamicInstanceofOrder += 'H'; return value === dynamicInstanceofMarker; } }; } }; globalThis.dynamicInstanceofThrowingHolder = { get C() { dynamicInstanceofOrder += 'R'; throw dynamicInstanceofMarker; } };");
+            const holder: JsValue = getDynamicValue("dynamicInstanceofHolder");
+            console.log(left() instanceof holder.C, String(getDynamicValue("dynamicInstanceofOrder")));
+            loadScript("dynamicInstanceofOrder = '';");
+            const throwingHolder: JsValue = getDynamicValue("dynamicInstanceofThrowingHolder");
+            try { throwingLeft() instanceof throwingHolder.C; console.log("missed left throw"); }
+            catch (error) { console.log(error === getDynamicValue("dynamicInstanceofMarker"), String(getDynamicValue("dynamicInstanceofOrder"))); }
+            loadScript("dynamicInstanceofOrder = '';");
+            try { left() instanceof throwingHolder.C; console.log("missed RHS throw"); }
+            catch (error) { console.log(error === getDynamicValue("dynamicInstanceofMarker"), String(getDynamicValue("dynamicInstanceofOrder"))); }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "dynamic_instanceof_operand_order_and_throws"),
+        "true LRH\ntrue L\ntrue LR\n"
+    );
+}
+
+#[test]
+fn dynamic_instanceof_invalid_rhs_uses_native_type_errors() {
+    let source = r#"
+        function isTypeError(holder: JsValue, key: string, value: any): boolean {
+            try { const ignored = value instanceof holder[key]; return false; }
+            catch (error) { return error instanceof TypeError; }
+        }
+        function main(): void {
+            loadScript("globalThis.dynamicInstanceofTargets = { nullValue: null, undefinedValue: undefined, numberValue: 3, plainValue: {}, arrowValue: () => {}, badHasInstance: { [Symbol.hasInstance]: 1 } }; globalThis.dynamicInstanceofObject = {};");
+            const targets: JsValue = getDynamicValue("dynamicInstanceofTargets");
+            const object: JsValue = getDynamicValue("dynamicInstanceofObject");
+            console.log(isTypeError(targets, "nullValue", 1), isTypeError(targets, "undefinedValue", 1), isTypeError(targets, "numberValue", 1), isTypeError(targets, "plainValue", 1), isTypeError(targets, "arrowValue", object), isTypeError(targets, "badHasInstance", 1));
+            console.log((1 as any) instanceof targets.arrowValue);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "dynamic_instanceof_invalid_rhs_types"),
+        "true true true true true true\nfalse\n"
+    );
+}
+
+#[test]
+fn dynamic_instanceof_custom_has_instance_keeps_receiver_and_primitive_lhs() {
+    let source = r#"
+        function main(): void {
+            loadScript("globalThis.dynamicInstanceofReads = 0; globalThis.dynamicInstanceofCalls = 0; globalThis.dynamicInstanceofObject = {}; globalThis.dynamicInstanceofOther = {}; globalThis.dynamicInstanceofSawObject = false; globalThis.dynamicInstanceofSawPrimitive = false; globalThis.dynamicInstanceofSawOther = false; globalThis.dynamicInstanceofCustom = {}; Object.defineProperty(dynamicInstanceofCustom, Symbol.hasInstance, { get() { dynamicInstanceofReads++; return function(value) { dynamicInstanceofCalls++; if (this !== dynamicInstanceofCustom) throw new Error('wrong hasInstance receiver'); if (value === dynamicInstanceofObject) { dynamicInstanceofSawObject = true; return { matched: true }; } if (value === 7) { dynamicInstanceofSawPrimitive = true; return 1; } if (value === dynamicInstanceofOther) dynamicInstanceofSawOther = true; return false; }; } }); globalThis.dynamicInstanceofHolder = { C: dynamicInstanceofCustom };");
+            const holder: JsValue = getDynamicValue("dynamicInstanceofHolder");
+            const object: JsValue = getDynamicValue("dynamicInstanceofObject");
+            const other: JsValue = getDynamicValue("dynamicInstanceofOther");
+            console.log(object instanceof holder.C, other instanceof holder.C, 7 instanceof holder.C);
+            console.log(Number(getDynamicValue("dynamicInstanceofReads")), Number(getDynamicValue("dynamicInstanceofCalls")), Number(getDynamicValue("dynamicInstanceofSawObject")), Number(getDynamicValue("dynamicInstanceofSawOther")), Number(getDynamicValue("dynamicInstanceofSawPrimitive")));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "dynamic_instanceof_custom_has_instance"),
+        "true false true\n3 3 1 1 1\n"
+    );
+}
+
+#[test]
+fn dynamic_instanceof_preserves_getter_and_hook_throws_exactly() {
+    let source = r#"
+        function main(): void {
+            loadScript("globalThis.dynamicInstanceofMarker = {}; globalThis.dynamicInstanceofGetterFailure = {}; Object.defineProperty(dynamicInstanceofGetterFailure, Symbol.hasInstance, { get() { throw dynamicInstanceofMarker; } }); globalThis.dynamicInstanceofGetterUndefined = {}; Object.defineProperty(dynamicInstanceofGetterUndefined, Symbol.hasInstance, { get() { throw undefined; } }); globalThis.dynamicInstanceofHookFailure = { [Symbol.hasInstance]() { throw dynamicInstanceofMarker; } }; globalThis.dynamicInstanceofHookUndefined = { [Symbol.hasInstance]() { throw undefined; } }; globalThis.dynamicInstanceofHolder = { get propertyFailure() { throw dynamicInstanceofMarker; }, getterFailure: dynamicInstanceofGetterFailure, getterUndefined: dynamicInstanceofGetterUndefined, hookFailure: dynamicInstanceofHookFailure, hookUndefined: dynamicInstanceofHookUndefined }; globalThis.dynamicInstanceofValue = {};");
+            const holder: JsValue = getDynamicValue("dynamicInstanceofHolder");
+            const value: JsValue = getDynamicValue("dynamicInstanceofValue");
+            let propertyCaught = false;
+            try { value instanceof holder.propertyFailure; }
+            catch (error) { propertyCaught = error === getDynamicValue("dynamicInstanceofMarker"); }
+            let getterCaught = false;
+            try { value instanceof holder.getterFailure; }
+            catch (error) { getterCaught = error === getDynamicValue("dynamicInstanceofMarker"); }
+            let getterUndefinedCaught = false;
+            let getterUndefinedDidThrow = false;
+            try { value instanceof holder.getterUndefined; }
+            catch (error) { getterUndefinedDidThrow = true; getterUndefinedCaught = error === undefined; }
+            let hookCaught = false;
+            try { value instanceof holder.hookFailure; }
+            catch (error) { hookCaught = error === getDynamicValue("dynamicInstanceofMarker"); }
+            let hookUndefinedCaught = false;
+            let hookUndefinedDidThrow = false;
+            try { value instanceof holder.hookUndefined; }
+            catch (error) { hookUndefinedDidThrow = true; hookUndefinedCaught = error === undefined; }
+            console.log(propertyCaught, getterCaught, getterUndefinedDidThrow, getterUndefinedCaught, hookCaught, hookUndefinedDidThrow, hookUndefinedCaught);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "dynamic_instanceof_exact_throws"),
+        "true true true true true true true\n"
+    );
+}
+
+#[test]
 fn fixed_object_values_entries_skip_only_runtime_hidden_markers() {
     let source = r#"
         class Leaf { value: number; label: string; constructor() { this.value = 3; this.label = "s"; } }
@@ -775,7 +899,7 @@ fn compiles_utf16_string_search_methods() {
     "#;
     assert_eq!(
         compile_and_run(source, "string_search"),
-        "2\n3\ntrue\ntrue\ntrue\ntrue\n5\ntrue\ntrue\ntrue\nreceiver\nneedle\nposition\n4\n3\n0\n0\n5\n0\nreceiver\nawaited-needle\n4\nawaited-text\ntrue\n"
+        "2\n3\ntrue\ntrue\ntrue\ntrue\n5\ntrue\ntrue\ntrue\nreceiver\nneedle\nposition\n4\n3\n0\n0\n5\n5\nreceiver\nawaited-needle\n4\nawaited-text\ntrue\n"
     );
 }
 
@@ -3689,7 +3813,9 @@ fn non_arrow_json_receiver_enables_arena_tracing_before_module_init() {
     let source = r#"
         function __thaw_module_init(): void {}
         function main(): void {
-            const read = function(this: Json): number { return 1; };
+            // The receiver must be read: a `this: Json` parameter the body
+            // never touches is dropped and no owned Json receiver exists.
+            const read = function(this: Json): number { return typeof this === "number" ? 1 : 0; };
             console.log(read.call(3));
         }
     "#;
@@ -3699,6 +3825,30 @@ fn non_arrow_json_receiver_enables_arena_tracing_before_module_init() {
     let mut compiler = HirCompiler::new(&context, "json_receiver_arena_tracing");
     compiler.compile_program(&program).unwrap();
     let ir = compiler.print_to_string();
+    let main = ir.find("define i32 @main(").expect(&ir);
+    let body = &ir[main..main + ir[main..].find("\n}").unwrap()];
+    let enable = body.find("call void @thaw_arena_enable_tracing(").expect(body);
+    let init = body.find("call void @__thaw_module_init(").expect(body);
+    assert!(enable < init, "{body}");
+}
+
+#[test]
+fn native_callback_registration_enables_exception_arena_tracing_before_module_init() {
+    let source = r#"
+        function __thaw_module_init(): void {}
+        function main(): void {
+            const callback: () => number = (): number => 73;
+            const handle: JsValue = registerNativeCallback(callback);
+        }
+    "#;
+    let module = thaw_parser::parse_typescript(source).unwrap();
+    let program = thaw_hir::lower_module(&module).unwrap();
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "native_callback_exception_tracing");
+    compiler.compile_program(&program).unwrap();
+    let ir = compiler.print_to_string();
+    assert!(ir.lines().any(|line| line.contains("call ")
+        && line.contains("@thaw_js_register_native_callback(")), "{ir}");
     let main = ir.find("define i32 @main(").expect(&ir);
     let body = &ir[main..main + ir[main..].find("\n}").unwrap()];
     let enable = body.find("call void @thaw_arena_enable_tracing(").expect(body);

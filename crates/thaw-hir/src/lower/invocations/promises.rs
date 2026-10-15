@@ -165,7 +165,7 @@ impl<'a> FnLowerer<'a> {
         let reject_name = format!("__thaw_with_resolvers_reject_{}", self.next_binding);
         self.next_binding += 1;
         self.scope.insert(result_name.clone(), result_type.clone());
-        self.scope.insert(promise_name.clone(), promise_type.clone());
+        let _ = &promise_name;
 
         let assign = |field: &str, value: &str| {
             HirStmt::Expr(HirExpr::PropAssign(
@@ -203,12 +203,14 @@ impl<'a> FnLowerer<'a> {
                 result_type.clone(),
                 HirExpr::ObjectAlloc(result_type.clone()),
             ),
-            HirStmt::Let(
-                promise_name.clone(),
-                promise_type,
-                HirExpr::PromiseNew(Box::new(executor), resolved, false, false),
-            ),
-            assign("promise", &promise_name),
+            // The object's `promise` field takes ownership of the new Promise
+            // directly: a local would release it again when this block exits.
+            HirStmt::Expr(HirExpr::PropAssign(
+                Box::new(HirExpr::Var(result_name.clone())),
+                result_type.clone(),
+                "promise".into(),
+                Box::new(HirExpr::PromiseNew(Box::new(executor), resolved, false, false)),
+            )),
             HirStmt::Return(Some(HirExpr::Var(result_name))),
         ]);
         Ok(HirExpr::Call(
@@ -294,13 +296,32 @@ impl<'a> FnLowerer<'a> {
                         call.args[0].expr.as_ref(),
                         Expr::Ident(ident) if ident.sym == *"undefined"
                     ) || matches!(call.args[0].expr.as_ref(), Expr::Lit(Lit::Null(_)));
+                    // A callback that always throws has no result of its own;
+                    // it takes the other handler's result type.
+                    let fulfilled_throws = !omitted_fulfilled
+                        && ast_callback_always_throws(&call.args[0].expr);
+                    let rejected_throws =
+                        ast_callback_always_throws(&call.args[1].expr);
+                    let mut early_rejected = None;
+                    let mut fulfilled_expected = None;
+                    if fulfilled_throws && !rejected_throws {
+                        let on_rejected =
+                            self.lower_promise_rejection_callback(&call.args[1].expr, None)?;
+                        if let HirType::Function(_, rejected_output) = self.infer_expr_type(&on_rejected)? {
+                            fulfilled_expected = Some(match rejected_output.as_ref() {
+                                HirType::Promise(inner) => inner.as_ref().clone(),
+                                other => other.clone(),
+                            });
+                        }
+                        early_rejected = Some(on_rejected);
+                    }
                     let fulfilled = if omitted_fulfilled {
                         None
                     } else {
                         let callback = self.lower_promise_callback(
                             &call.args[0].expr,
                             &fulfilled_params,
-                            None,
+                            fulfilled_expected.as_ref(),
                         )?;
                         let HirType::Function(_, callback_output) =
                             self.infer_expr_type(&callback)?
@@ -316,8 +337,14 @@ impl<'a> FnLowerer<'a> {
                     let output = fulfilled
                         .as_ref()
                         .map_or_else(|| input.clone(), |(_, output, _)| output.clone());
-                    let on_rejected =
-                        self.lower_promise_rejection_callback(&call.args[1].expr, None)?;
+                    let rejected_expected = (rejected_throws && fulfilled.is_some()).then(|| output.clone());
+                    let on_rejected = match early_rejected {
+                        Some(done) => done,
+                        None => self.lower_promise_rejection_callback(
+                            &call.args[1].expr,
+                            rejected_expected.as_ref(),
+                        )?,
+                    };
                     let HirType::Function(_, rejected_output) =
                         self.infer_expr_type(&on_rejected)?
                     else {
@@ -384,7 +411,9 @@ impl<'a> FnLowerer<'a> {
                         (
                             source,
                             if on_rejected {
-                                self.lower_promise_rejection_callback(&callback.expr, None)?
+                                let expected = ast_callback_always_throws(&callback.expr)
+                                    .then(|| input.as_ref().clone());
+                                self.lower_promise_rejection_callback(&callback.expr, expected.as_ref())?
                             } else {
                                 self.lower_promise_callback(
                                     &callback.expr,

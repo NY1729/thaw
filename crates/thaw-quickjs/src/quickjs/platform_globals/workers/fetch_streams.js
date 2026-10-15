@@ -10,7 +10,7 @@
     };
     const headerValue = value => {
       const text = String(value);
-      if (/[\0\r\n]/.test(text)) throw new TypeError(`invalid header value: ${text}`);
+      if (/[\0\r\n]/.test(text) || /[^\u0000-\u00ff]/.test(text)) throw new TypeError(`invalid header value: ${text}`);
       return text.replace(/^[\t ]+|[\t ]+$/g, '');
     };
     const headersList = value => { const list = headerLists.get(value); if (!list) throw new TypeError('invalid Headers receiver'); return list; };
@@ -257,7 +257,7 @@
         if (autoAllocateChunkSize !== undefined && (type !== 'bytes' || !Number.isInteger(autoAllocateChunkSize) || autoAllocateChunkSize <= 0)) throw new RangeError('invalid autoAllocateChunkSize');
         if (type === 'bytes' && size !== undefined) { const error = new RangeError('byte streams cannot use a size strategy'); error.code = 'ERR_INVALID_ARG_VALUE'; throw error; }
         const defaultHighWaterMark = type === 'bytes' ? 0 : 1, highWaterMark = strategyHighWaterMark === undefined ? defaultHighWaterMark : strategyHighWaterMark;
-        if (!Number.isFinite(highWaterMark) || highWaterMark < 0) { const error = new RangeError('invalid highWaterMark'); error.code = 'ERR_INVALID_ARG_VALUE'; throw error; }
+        if (Number.isNaN(highWaterMark) || highWaterMark < 0) { const error = new RangeError('invalid highWaterMark'); error.code = 'ERR_INVALID_ARG_VALUE'; throw error; }
         this._source = source; this._sourcePull = pull; this._sourceCancel = cancel; this._byteStream = type === 'bytes'; this._highWaterMark = highWaterMark; this._sizeAlgorithm = webSizeAlgorithm(size); this._autoAllocateChunkSize = this._byteStream && autoAllocateChunkSize !== undefined ? autoAllocateChunkSize : 0; this._queue = []; this._queueSizes = []; this._queueTotalSize = 0; this._reads = []; this._byobReads = []; this._byobRequest = null; this._capacityWaiters = []; this._state = 'readable'; this._closeRequested = false; this._disturbed = false; this._error = undefined; this._reader = null; this._started = false; this._pulling = false; this._pullAgain = false;
         this._controller = this._byteStream ? new ReadableByteStreamController(this) : new ReadableStreamDefaultController(this);
         Promise.resolve(start === undefined ? undefined : webApply(start, source, [this._controller])).then(() => { this._started = true; this._callPullIfNeeded(); }, error => this._controller.error(error));
@@ -479,10 +479,11 @@
         if (sink.type !== undefined) throw new RangeError('invalid sink.type');
         const write = webCallback(sink, 'write');
         const highWaterMark = strategyHighWaterMark === undefined ? 1 : strategyHighWaterMark;
-        if (!Number.isFinite(highWaterMark) || highWaterMark < 0) { const error = new RangeError('invalid highWaterMark'); error.code = 'ERR_INVALID_ARG_VALUE'; throw error; }
+        if (Number.isNaN(highWaterMark) || highWaterMark < 0) { const error = new RangeError('invalid highWaterMark'); error.code = 'ERR_INVALID_ARG_VALUE'; throw error; }
         this._sink = sink; this._sinkWrite = write; this._sinkClose = close; this._sinkAbort = abort; this._highWaterMark = highWaterMark; this._sizeAlgorithm = webSizeAlgorithm(size); this._queueTotalSize = 0; this._backpressured = false; this._state = 'writable'; this._closeQueued = false; this._closeInFlight = false; this._closeResult = null; this._abortPromise = null; this._error = undefined; this._writer = null; this._closedStatus = 'pending'; this._closedReason = undefined; this._chain = Promise.resolve();
         this._controller = new WritableStreamDefaultController(this); this._setBackpressure(this._desiredSize() <= 0);
         if (start !== undefined) this._chain = Promise.resolve(webApply(start, sink, [this._controller])).catch(error => { this._errorStream(error); throw error; });
+        this._started = false; Promise.resolve(this._chain).then(() => { this._started = true; }, () => { this._started = true; });
       }
       get locked() { return this._writer !== null; }
       getWriter() { return new WritableStreamDefaultWriter(this); }
@@ -500,16 +501,23 @@
         catch (error) { this._errorStream(error); return Promise.reject(error); }
         this._queueTotalSize += size;
         this._setBackpressure(this._desiredSize() <= 0);
+        // A write submitted while the sink is idle is already in flight (the spec calls the sink
+        // synchronously); a later abort() must wait for it instead of rejecting it.
+        const startsNow = this._started && !this._pendingWrites; this._pendingWrites = (this._pendingWrites || 0) + 1;
         const operation = this._chain.then(() => {
-          if (this._state === 'errored') throw this._error;
+          if (this._state === 'errored' && !startsNow) throw this._error;
           return this._sinkWrite === undefined ? undefined : webApply(this._sinkWrite, this._sink, [chunk, this._controller]);
         });
         const result = operation.then(() => {
+          this._pendingWrites--;
           this._queueTotalSize = Math.max(0, this._queueTotalSize - size);
           if (this._state === 'writable' && !this._closeQueued) this._setBackpressure(this._desiredSize() <= 0);
+          this._runDeferredAbort();
         }, error => {
+          this._pendingWrites--;
           this._queueTotalSize = Math.max(0, this._queueTotalSize - size);
           this._errorStream(error);
+          this._runDeferredAbort();
           throw error;
         });
         this._chain = result.catch(() => {});
@@ -541,6 +549,7 @@
         return result;
       }
       close() { if (this.locked) { const error = new TypeError('WritableStream is locked'); error.code = 'ERR_INVALID_STATE'; return Promise.reject(error); } return this._close(); }
+      _runDeferredAbort() { if (this._pendingWrites || !this._deferredAbort) return; const run = this._deferredAbort; this._deferredAbort = null; run(); }
       _abort(reason) {
         if (this._abortPromise) return this._abortPromise;
         if (this._state !== 'writable') return Promise.resolve();
@@ -551,6 +560,16 @@
         this._controller._abortController.abort(reason);
         if (this._closeInFlight) {
           this._closeResult.then(() => resolveAbort(), error => rejectAbort(error));
+        } else if (this._pendingWrites) {
+          // Spec: the sink abort runs synchronously when the in-flight write finishes, before the
+          // write's own promise reactions.
+          this._deferredAbort = () => {
+            let operation;
+            try { operation = Promise.resolve(this._sinkAbort === undefined ? undefined : webApply(this._sinkAbort, this._sink, [reason])); }
+            catch (error) { operation = Promise.reject(error); }
+            operation.then(() => { this._rejectWriterClosed(reason); resolveAbort(); }, error => { this._rejectWriterClosed(reason); rejectAbort(error); });
+          };
+          this._chain = result.catch(() => {});
         } else {
           const operation = this._chain.then(() => this._sinkAbort === undefined ? undefined : webApply(this._sinkAbort, this._sink, [reason]));
           operation.then(() => { this._rejectWriterClosed(reason); resolveAbort(); }, error => { this._rejectWriterClosed(reason); rejectAbort(error); });
@@ -584,10 +603,10 @@
         let readableController, writable;
         if (readableQueueStrategy.highWaterMark === undefined) readableQueueStrategy.highWaterMark = 0;
         const callCancel = reason => cancel === undefined ? undefined : webApply(cancel, transformer, [reason]);
-        this.readable = new ReadableStream({ start(value) { readableController = value; }, cancel(error) { if (writable) writable._errorStream(error); return callCancel(error); } }, readableQueueStrategy);
+        this.readable = new ReadableStream({ start(value) { readableController = value; }, cancel(reason) { let outcome; try { outcome = callCancel(reason); } catch (error) { outcome = Promise.reject(error); } return Promise.resolve(outcome).then(() => { if (writable) writable._errorStream(reason); }, error => { if (writable) writable._errorStream(error); throw error; }); } }, readableQueueStrategy);
         const controller = new TransformStreamDefaultController(readableController), fail = error => { controller.error(error); throw error; };
         writable = this.writable = new WritableStream({
-          start(writableController) { controller._writable = writable = writableController._stream; return start === undefined ? undefined : webApply(start, transformer, [controller]); },
+          start(writableController) { controller._writable = writable = writableController._stream; const result = start === undefined ? undefined : webApply(start, transformer, [controller]); return result !== null && (typeof result === 'object' || typeof result === 'function') && typeof result.then === 'function' ? Promise.resolve(result).catch(error => { controller.error(error); throw error; }) : result; },
           write(chunk) { return readableController._stream._waitForCapacity().then(() => transform === undefined ? controller.enqueue(chunk) : webApply(transform, transformer, [chunk, controller])).catch(fail); },
           close() { return Promise.resolve().then(() => flush === undefined ? undefined : webApply(flush, transformer, [controller])).then(() => readableController.close()).catch(fail); },
           abort(error) { return Promise.resolve(callCancel(error)).then(() => readableController.error(error)); }
@@ -748,24 +767,37 @@
       if (ArrayBuffer.isView(value)) return { stream: bytesBodyStream(new Uint8Array(value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength))), type: null };
       return { stream: bytesBodyStream(Uint8Array.from(encodeUtf8(String(value)))), type: 'text/plain;charset=UTF-8' };
     };
+    // A body chunk must be a Uint8Array; its bytes are copied on receipt because
+    // the producer may reuse the buffer for its next chunk.
+    const bodyChunkBytes = value => {
+      if (!(value instanceof Uint8Array)) throw new TypeError('Received non-Uint8Array chunk');
+      return value.slice();
+    };
     const consumeResponseBody = async response => {
       const record = responseData.get(response); if (!record) throw new TypeError('invalid Response receiver');
       if (!record.body) return new Uint8Array();
       if (record.body._disturbed || record.body.locked) throw new TypeError('Body is unusable');
       const reader = record.body.getReader(), chunks = []; let length = 0;
-      while (true) { const result = await reader.read(); if (result.done) break; const chunk = result.value instanceof ArrayBuffer ? new Uint8Array(result.value) : ArrayBuffer.isView(result.value) ? new Uint8Array(result.value.buffer, result.value.byteOffset, result.value.byteLength) : Uint8Array.from(encodeUtf8(String(result.value))); chunks.push(chunk); length += chunk.byteLength; }
+      while (true) { const result = await reader.read(); if (result.done) break; const chunk = bodyChunkBytes(result.value); chunks.push(chunk); length += chunk.byteLength; }
       const output = new Uint8Array(length); let offset = 0; for (const chunk of chunks) { output.set(chunk, offset); offset += chunk.byteLength; } return output;
     };
     const parseFormDataBody = (type, bytes) => {
-      const data = new FormData(), lower = type.toLowerCase();
-      if (lower.startsWith('application/x-www-form-urlencoded')) { const params = new URLSearchParams(new TextDecoder().decode(bytes)); for (const [name, value] of params) data.append(name, value); return data; }
-      if (!lower.startsWith('multipart/form-data')) throw new TypeError('unsupported form data content type');
+      const data = new FormData(), lower = type.split(';')[0].trim().toLowerCase();
+      if (lower === 'application/x-www-form-urlencoded') { const params = new URLSearchParams(new TextDecoder().decode(bytes)); for (const [name, value] of params) data.append(name, value); return data; }
+      if (lower !== 'multipart/form-data') throw new TypeError('unsupported form data content type');
       const boundaryMatch = /(?:^|;)\s*boundary=(?:"([^"]+)"|([^;\s]+))/i.exec(type);
       if (!boundaryMatch) throw new TypeError('multipart boundary is missing');
       const boundary = boundaryMatch[1] || boundaryMatch[2]; let binary = '';
       for (let offset = 0; offset < bytes.length; offset += 8192) binary += String.fromCharCode(...bytes.subarray(offset, offset + 8192));
-      const delimiter = `--${boundary}`, sections = binary.split(delimiter);
-      for (let section of sections.slice(1)) {
+      // A delimiter is `--boundary` at the start of a line (and followed by `--` or the line end),
+      // so the boundary text inside a value or file does not split it.
+      const delimiter = `--${boundary}`, positions = [];
+      for (let at = binary.indexOf(delimiter); at >= 0; at = binary.indexOf(delimiter, at + delimiter.length)) {
+        const after = binary.slice(at + delimiter.length, at + delimiter.length + 2);
+        if ((at === 0 || binary.slice(at - 2, at) === '\r\n') && (after === '--' || after === '\r\n' || after === '' || /^[ \t]/.test(after))) positions.push(at);
+      }
+      const sections = positions.map((at, index) => binary.slice(at + delimiter.length, index + 1 < positions.length ? positions[index + 1] : binary.length));
+      for (let section of sections) {
         if (section.startsWith('--')) break;
         if (section.startsWith('\r\n')) section = section.slice(2);
         if (section.endsWith('\r\n')) section = section.slice(0, -2);
@@ -806,7 +838,7 @@
       async json() { return JSON.parse(await this.text()); }
       async text() { return new TextDecoder().decode(await consumeResponseBody(this)); }
       async formData() { const type = this.headers.get('content-type') || ''; return parseFormDataBody(type, await consumeResponseBody(this)); }
-      clone() { const record = responseData.get(this); if (record.body && (record.body._disturbed || record.body.locked)) throw new TypeError('Body has already been consumed'); let body = null; if (record.body) { const branches = record.body.tee(); record.body = branches[0]; body = branches[1]; } const clone = new Response(body, { status: record.status, statusText: record.statusText, headers: record.headers }); const cloneRecord = responseData.get(clone); cloneRecord.type = record.type; cloneRecord.url = record.url; cloneRecord.redirected = record.redirected; if (thawImmutableResponseHeaders.has(record.headers)) thawImmutableResponseHeaders.add(cloneRecord.headers); return clone; }
+      clone() { const record = responseData.get(this); if (record.body && (record.body._disturbed || record.body.locked)) throw new TypeError('Body has already been consumed'); let body = null; if (record.body) { const branches = record.body.tee(); record.body = branches[0]; body = branches[1]; } const clone = new Response(body, { status: 200, statusText: record.statusText, headers: record.headers }); const cloneRecord = responseData.get(clone); cloneRecord.status = record.status; cloneRecord.type = record.type; cloneRecord.url = record.url; cloneRecord.redirected = record.redirected; if (thawImmutableResponseHeaders.has(record.headers)) thawImmutableResponseHeaders.add(cloneRecord.headers); return clone; }
       static error() { const response = new Response(); const record = responseData.get(response); record.status = 0; record.type = 'error'; thawImmutableResponseHeaders.add(record.headers); return response; }
       static json(value, init = {}) { const body = JSON.stringify(value); if (body === undefined) throw new TypeError('value is not JSON serializable'); const headers = new Headers(init.headers); if (!headers.has('content-type')) headers.set('content-type', 'application/json'); return new Response(body, { ...init, headers }); }
       static redirect(url, status = 302) { const code = Number(status); if (![301, 302, 303, 307, 308].includes(code)) throw new RangeError('invalid redirect status'); const response = new Response(null, { status: code, headers: { location: new URL(String(url)).href } }); thawImmutableResponseHeaders.add(responseData.get(response).headers); return response; }
@@ -834,7 +866,7 @@
         signal.addEventListener('abort', onAbort, { once: true });
       }) : null;
       const reading = (async () => {
-      while (true) { const result = await reader.read(); if (result.done) break; const chunk = result.value instanceof ArrayBuffer ? new Uint8Array(result.value) : ArrayBuffer.isView(result.value) ? new Uint8Array(result.value.buffer, result.value.byteOffset, result.value.byteLength) : Uint8Array.from(encodeUtf8(String(result.value))); chunks.push(chunk); length += chunk.byteLength; }
+      while (true) { const result = await reader.read(); if (result.done) break; const chunk = bodyChunkBytes(result.value); chunks.push(chunk); length += chunk.byteLength; }
       const output = new Uint8Array(length); let offset = 0; for (const chunk of chunks) { output.set(chunk, offset); offset += chunk.byteLength; } return output;
       })();
       try {
@@ -860,16 +892,12 @@
         if (!/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/.test(method)) throw new TypeError('invalid HTTP method');
         const upperMethod = method.toUpperCase(); if (['DELETE', 'GET', 'HEAD', 'OPTIONS', 'POST', 'PUT'].includes(upperMethod)) method = upperMethod;
         if (upperMethod === 'CONNECT' || upperMethod === 'TRACE' || upperMethod === 'TRACK') throw new TypeError(`unsupported HTTP method ${upperMethod}`);
-        const headers = new Headers(init.headers === undefined ? inherited ? inherited.headers : undefined : init.headers), hasBody = Object.prototype.hasOwnProperty.call(init, 'body');
+        const headers = new Headers(init.headers === undefined ? inherited ? inherited.headers : undefined : init.headers), hasBody = init.body !== undefined && init.body !== null;
         let normalized = { stream: null, type: null };
+        const inheriting = !hasBody && Boolean(inherited && inherited.body);
         const bodyHasSource = hasBody ? !(init.body instanceof ReadableStream) : inherited ? inherited.bodyHasSource : true;
         if (hasBody) normalized = responseBody(init.body);
-        else if (inherited && inherited.body) {
-          if (inherited.body._disturbed || inherited.body.locked) throw new TypeError('Body is unusable');
-          const reader = inherited.body.getReader(); inherited.body._disturbed = true;
-          normalized.stream = new ReadableStream({ async pull(controller) { const result = await reader.read(); if (result.done) controller.close(); else controller.enqueue(result.value); }, cancel(reason) { return reader.cancel(reason); } });
-        }
-        if ((method === 'GET' || method === 'HEAD') && normalized.stream) throw new TypeError('Request with GET/HEAD method cannot have body');
+        if ((method === 'GET' || method === 'HEAD') && (normalized.stream || inheriting)) throw new TypeError('Request with GET/HEAD method cannot have body');
         if (hasBody && init.body instanceof ReadableStream && init.duplex !== 'half') throw new TypeError('duplex option is required for a streaming body');
         if (normalized.type && !headers.has('content-type')) headers.set('content-type', normalized.type);
         const sourceSignal = init.signal === undefined ? inherited ? inherited.signal : null : init.signal, signalController = new AbortController();
@@ -878,17 +906,28 @@
         const mode = select(init.mode, inherited ? inherited.mode : 'cors', ['same-origin', 'no-cors', 'cors'], 'mode');
         const cache = select(init.cache, inherited ? inherited.cache : 'default', ['default', 'no-store', 'reload', 'no-cache', 'force-cache', 'only-if-cached'], 'cache');
         if (cache === 'only-if-cached' && mode !== 'same-origin') throw new TypeError('only-if-cached requires same-origin mode');
+        const keepalive = init.keepalive === undefined ? inherited ? inherited.keepalive : false : Boolean(init.keepalive);
+        if ((normalized.stream || inheriting) && !bodyHasSource) {
+          if (keepalive) throw new TypeError('keepalive cannot be used with a streaming body');
+          if (mode === 'no-cors') throw new TypeError('a streaming body requires same-origin or cors mode');
+        }
         const credentials = select(init.credentials, inherited ? inherited.credentials : 'same-origin', ['omit', 'same-origin', 'include'], 'credentials');
         const redirect = select(init.redirect, inherited ? inherited.redirect : 'follow', ['follow', 'manual', 'error'], 'redirect');
         const referrerPolicy = select(init.referrerPolicy, inherited ? inherited.referrerPolicy : '', ['', 'no-referrer', 'no-referrer-when-downgrade', 'same-origin', 'origin', 'strict-origin', 'origin-when-cross-origin', 'strict-origin-when-cross-origin', 'unsafe-url'], 'referrerPolicy');
         let referrer = init.referrer === undefined ? inherited ? inherited.referrer : 'about:client' : String(init.referrer);
         if (referrer && referrer !== 'about:client') referrer = new URL(referrer).href;
+        // The original request's body is taken over only after every check above has passed.
+        if (inheriting) {
+          if (inherited.body._disturbed || inherited.body.locked) throw new TypeError('Body is unusable');
+          const reader = inherited.body.getReader(); inherited.body._disturbed = true;
+          normalized.stream = new ReadableStream({ async pull(controller) { const result = await reader.read(); if (result.done) controller.close(); else controller.enqueue(result.value); }, cancel(reason) { return reader.cancel(reason); } });
+        }
         requestData.set(this, {
           body: normalized.stream, bodyHasSource, headers, method, url: url.href, signal: signalController.signal,
           cache, credentials,
           destination: inherited ? inherited.destination : '',
           integrity: init.integrity === undefined ? inherited ? inherited.integrity : '' : String(init.integrity),
-          keepalive: init.keepalive === undefined ? inherited ? inherited.keepalive : false : Boolean(init.keepalive),
+          keepalive,
           mode, redirect, referrer, referrerPolicy,
           duplex: 'half'
         });

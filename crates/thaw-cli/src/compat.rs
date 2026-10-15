@@ -118,5 +118,5 @@ fn compatibility_report(path: &Path) -> Result<serde_json::Value, String> {
 }
 
 fn compat_case_source_name(name: &str) -> thaw_parser::common::FileName {
-    thaw_parser::common::FileName::Custom(format!("compat case {name}").into())
+    thaw_parser::common::FileName::Custom(format!("compat case {name}"))
 }

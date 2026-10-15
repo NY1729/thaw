@@ -1,4 +1,208 @@
 impl<'ctx> HirCompiler<'ctx> {
+    pub(super) fn register_stack_promise_slot(
+        &mut self,
+        slot: PointerValue<'ctx>,
+        name: &str,
+    ) -> Result<(), String> {
+        if self.stack_promise_slots.contains_key(&slot) { return Ok(()); }
+        let flag = self.allocate_variable_cell(self.context.bool_type().into(),
+            &format!("{name}_promise_owned"))?;
+        let entry = self.current_function().get_first_basic_block()
+            .ok_or("Promise ownership flag requires a function entry")?;
+        let initializer = self.context.create_builder();
+        if let Some(terminator) = entry.get_terminator() {
+            initializer.position_before(&terminator);
+        } else {
+            initializer.position_at_end(entry);
+        }
+        initializer.build_store(flag, self.context.bool_type().const_zero())
+            .map_err(|error| error.to_string())?;
+        self.stack_promise_slots.insert(slot, flag);
+        Ok(())
+    }
+
+    pub(super) fn emit_stack_promise_cleanup(&mut self) -> Result<(), String> {
+        self.emit_stack_promise_cleanup_except(&HashSet::new())
+    }
+
+    pub(super) fn emit_stack_promise_cleanup_except(
+        &mut self,
+        preserved: &HashSet<PointerValue<'ctx>>,
+    ) -> Result<(), String> {
+        let owners = self.stack_promise_slots.iter()
+            .filter(|(slot, _)| !preserved.contains(slot))
+            .map(|(slot, flag)| (*slot, *flag))
+            .collect::<Vec<_>>();
+        let ptr_ty = self.context.ptr_type(AddressSpace::default());
+        for (slot, flag) in owners {
+            let owned = self.builder.build_load(self.context.bool_type(), flag, "promise_slot_owned")
+                .map_err(|error| error.to_string())?
+                .into_int_value();
+            let function = self.current_function();
+            let release = self.context.append_basic_block(function, "release_stack_promise");
+            let next = self.context.append_basic_block(function, "stack_promise_cleanup_next");
+            self.builder.build_conditional_branch(owned, release, next)
+                .map_err(|error| error.to_string())?;
+            self.builder.position_at_end(release);
+            let promise = self.builder.build_load(ptr_ty, slot, "owned_stack_promise")
+                .map_err(|error| error.to_string())?
+                .into_pointer_value();
+            self.builder.build_store(flag, self.context.bool_type().const_zero())
+                .map_err(|error| error.to_string())?;
+            self.builder.build_call(
+                self.module.get_function("thaw_promise_destroy").unwrap(),
+                &[promise.into()], "release_stack_promise_owner",
+            ).map_err(|error| error.to_string())?;
+            self.builder.build_unconditional_branch(next)
+                .map_err(|error| error.to_string())?;
+            self.builder.position_at_end(next);
+        }
+        Ok(())
+    }
+
+    pub(super) fn push_catch_target(&mut self, target: inkwell::basic_block::BasicBlock<'ctx>) {
+        self.catch_stack.push(CatchScope {
+            target,
+            promise_boundary: self.stack_promise_slots.keys().copied().collect(),
+        });
+    }
+
+    pub(super) fn pop_catch_target(&mut self) {
+        self.catch_stack.pop();
+    }
+
+    fn take_catch_context(&mut self) -> CatchContext<'ctx> {
+        CatchContext {
+            scopes: std::mem::take(&mut self.catch_stack),
+        }
+    }
+
+    fn replace_catch_context(&mut self, next: CatchContext<'ctx>) -> CatchContext<'ctx> {
+        CatchContext {
+            scopes: std::mem::replace(&mut self.catch_stack, next.scopes),
+        }
+    }
+
+    fn clear_catch_context(&mut self) {
+        self.catch_stack.clear();
+    }
+
+    fn take_codegen_scope_context(&mut self) -> CodegenScopeContext<'ctx> {
+        CodegenScopeContext {
+            catches: self.take_catch_context(),
+            stack_promise_slots: std::mem::take(&mut self.stack_promise_slots),
+            loops: std::mem::take(&mut self.loop_scopes),
+            loop_promotions: std::mem::take(&mut self.loop_promotion_scopes),
+            active_async_completion: self.active_async_completion.take(),
+        }
+    }
+
+    fn replace_codegen_scope_context(
+        &mut self,
+        next: CodegenScopeContext<'ctx>,
+    ) -> CodegenScopeContext<'ctx> {
+        CodegenScopeContext {
+            catches: self.replace_catch_context(next.catches),
+            stack_promise_slots: std::mem::replace(
+                &mut self.stack_promise_slots,
+                next.stack_promise_slots,
+            ),
+            loops: std::mem::replace(&mut self.loop_scopes, next.loops),
+            loop_promotions: std::mem::replace(
+                &mut self.loop_promotion_scopes,
+                next.loop_promotions,
+            ),
+            active_async_completion: std::mem::replace(
+                &mut self.active_async_completion,
+                next.active_async_completion,
+            ),
+        }
+    }
+
+    pub(super) fn release_stack_promise_after_promotion(
+        &mut self,
+        slot: PointerValue<'ctx>,
+        flag: PointerValue<'ctx>,
+    ) -> Result<(), String> {
+        let owned = self.builder.build_load(self.context.bool_type(), flag, "promoted_stack_promise_owned")
+            .map_err(|error| error.to_string())?.into_int_value();
+        let function = self.current_function();
+        let release = self.context.append_basic_block(function, "release_promoted_stack_promise");
+        let ready = self.context.append_basic_block(function, "promoted_stack_promise_ready");
+        self.builder.build_conditional_branch(owned, release, ready)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(release);
+        let promise = self.builder.build_load(self.context.ptr_type(AddressSpace::default()),
+            slot, "promoted_stack_promise").map_err(|error| error.to_string())?.into_pointer_value();
+        self.builder.build_store(flag, self.context.bool_type().const_zero())
+            .map_err(|error| error.to_string())?;
+        self.builder.build_call(self.module.get_function("thaw_promise_destroy").unwrap(),
+            &[promise.into()], "release_promoted_stack_promise_owner")
+            .map_err(|error| error.to_string())?;
+        self.builder.build_unconditional_branch(ready)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(ready);
+        self.stack_promise_slots.remove(&slot);
+        Ok(())
+    }
+
+    pub(super) fn store_arena_promise_slot(
+        &mut self,
+        owner: PointerValue<'ctx>,
+        slot: PointerValue<'ctx>,
+        ty: &HirType,
+        value: BasicValueEnum<'ctx>,
+    ) -> Result<(), String> {
+        self.store_arena_promise_slot_with_token(owner, slot, ty, value, false)
+    }
+
+    pub(super) fn store_arena_promise_slot_with_token(
+        &mut self,
+        owner: PointerValue<'ctx>,
+        slot: PointerValue<'ctx>,
+        ty: &HirType,
+        value: BasicValueEnum<'ctx>,
+        consume_external_token: bool,
+    ) -> Result<(), String> {
+        if !matches!(ty, HirType::Promise(_)) {
+            self.builder.build_store(slot, value).map_err(|error| error.to_string())?;
+            return Ok(());
+        }
+        let stored = self.builder.build_call(
+            self.module.get_function("thaw_promise_arena_slot_replace").unwrap(),
+            &[owner.into(), slot.into(), value.into_pointer_value().into()],
+            "replace_arena_promise_slot",
+        ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+            .ok_or("native Promise arena slot replacement returned no value")?.into_int_value();
+        let failed = self.builder.build_int_compare(
+            IntPredicate::EQ, stored, self.context.i8_type().const_zero(),
+            "arena_promise_slot_replace_failed",
+        ).map_err(|error| error.to_string())?;
+        let function = self.current_function();
+        let failed_block = self.context.append_basic_block(function, "arena_promise_slot_error");
+        let ready_block = self.context.append_basic_block(function, "arena_promise_slot_ready");
+        self.builder.build_conditional_branch(failed, failed_block, ready_block)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(failed_block);
+        if consume_external_token {
+            self.builder.build_call(
+                self.module.get_function("thaw_promise_destroy").unwrap(),
+                &[value.into_pointer_value().into()],
+                "release_failed_promise_slot_adoption",
+            ).map_err(|error| error.to_string())?;
+        }
+        self.compile_throw_type_error("Unable to store native Promise in arena slot")?;
+        self.builder.position_at_end(ready_block);
+        if consume_external_token {
+            self.builder.build_call(
+                self.module.get_function("thaw_promise_destroy").unwrap(),
+                &[value.into_pointer_value().into()],
+                "release_adopted_promise_token",
+            ).map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    }
+
     fn prepromote_branch_captures(
         &mut self,
         condition: &HirExpr,
@@ -64,31 +268,79 @@ impl<'ctx> HirCompiler<'ctx> {
     /// branches all do). Returns `true` when that happened, so callers know
     /// not to fall through past this block.
     fn compile_block(&mut self, stmts: &[HirStmt]) -> Result<bool, String> {
-        for stmt in stmts {
-            if self.compile_stmt(stmt)? {
-                return Ok(true);
+        let entry_map = self.stack_promise_slots.clone();
+        let entry_slots = self.stack_promise_slots.keys().copied().collect::<HashSet<_>>();
+        for (index, stmt) in stmts.iter().enumerate() {
+            match self.compile_stmt(stmt) {
+                Ok(true) => return Ok(true),
+                Ok(false) => {}
+                Err(error) => {
+                    self.stack_promise_slots = entry_map;
+                    return Err(error);
+                }
+            }
+            // A local declared inside a loop body and captured by a closure later in the body gets
+            // a fresh arena cell per iteration, allocated where it is promoted. Promoting lazily at
+            // the first capture would put that allocation on one path only, so a use reached through
+            // another path (an injected `continue`/`break`/`return` cleanup, a `catch`) would read a
+            // cell that was never allocated on that path. Promote at the declaration instead, which
+            // dominates every later use. Outside loops the cell goes to the function entry block,
+            // which dominates everything already, and variables declared before the loop are
+            // promoted by `compile_while`'s pre-pass.
+            if let HirStmt::Let(name, _, _) = stmt {
+                let declared_in_loop = !self.loop_promotion_scopes.is_empty()
+                    && !self.loop_promotion_scopes.iter().any(|scope| scope.variables.contains(name));
+                let hir_ty = self.variable_hir_types.get(name).cloned();
+                if let (true, Some(hir_ty)) = (declared_in_loop, hir_ty) {
+                    let captured = thaw_hir::closure_captured_names_in_while(
+                        &HirExpr::Lit(HirLit::Bool(false)),
+                        &stmts[index + 1..],
+                    );
+                    if captured.contains(name) {
+                        let promotion = if hir_ty == HirType::JsValue {
+                            // Allocate per iteration before cleanup branches; retain only on capture.
+                            self.prepromote_variable_to_arena_cell(name, &hir_ty)
+                        } else {
+                            self.promote_variable_to_arena_cell(name, &hir_ty)
+                        };
+                        if let Err(error) = promotion {
+                            self.stack_promise_slots = entry_map;
+                            return Err(error);
+                        }
+                    }
+                }
             }
         }
+        if let Err(error) = self.emit_stack_promise_cleanup_except(&entry_slots) {
+            self.stack_promise_slots = entry_map;
+            return Err(error);
+        }
+        self.stack_promise_slots.retain(|slot, _| entry_slots.contains(slot));
         Ok(false)
     }
 
     fn compile_throw_text(&mut self, expr: &HirExpr) -> Result<PointerValue<'ctx>, String> {
-        // This marker is created by source lowering only after conversion to
-        // native text. Its name cannot occur in a TypeScript identifier.
-        let trusted_text = if let HirExpr::Call(callee, args) = expr {
-            if matches!(callee.as_ref(), HirExpr::Var(name) if name == "@@thaw_trusted_exception_text")
-                && args.len() == 1
-            {
-                Some(&args[0])
-            } else {
-                None
+        // Both compiler-private markers carry already converted text. Only
+        // the published form follows a fresh clear-and-setter tuple and may
+        // preserve the native descriptor channel across this final throw.
+        let (trusted_text, published_exception_tuple) = if let HirExpr::Call(callee, args) = expr {
+            match callee.as_ref() {
+                HirExpr::Var(name) if args.len() == 1 && name == "@@thaw_trusted_exception_text" => {
+                    (Some(&args[0]), false)
+                }
+                HirExpr::Var(name) if args.len() == 1 && name == "@@thaw_published_exception_text" => {
+                    (Some(&args[0]), true)
+                }
+                _ => (None, false),
             }
         } else {
-            None
+            (None, false)
         };
+        let text_only_packet = trusted_text.is_some()
+            || matches!(expr, HirExpr::Lit(HirLit::Str(_) | HirLit::Wtf8(_)));
         let pending_rethrow = if let HirExpr::Call(callee, args) = expr {
             if matches!(callee.as_ref(), HirExpr::Var(name) if name == "@@thaw_rethrow_pending_exception")
-                && args.len() == 9 { Some(args.as_slice()) } else { None }
+                && args.len() == 10 { Some(args.as_slice()) } else { None }
         } else { None };
         // The exit injector has already evaluated the visible catch binding.
         // Keep its original binding only as provenance for the caught tuple;
@@ -115,17 +367,21 @@ impl<'ctx> HirCompiler<'ctx> {
             let same = self.builder.build_int_compare(inkwell::IntPredicate::EQ,
                 value_word, original_word, "same_rejection_binding")
                 .map_err(|error| error.to_string())?;
-            let native = self.compile_expr(&args[2])?.into_pointer_value();
+            // These same-identity snapshots carry two distinct pointer
+            // channels: args[2] is display-text provenance; args[9] is the
+            // native exception descriptor used for checked projection.
+            let native_text = self.compile_expr(&args[2])?.into_pointer_value();
             let aggregate = self.compile_expr(&args[3])?.into_pointer_value();
             let tag = self.compile_expr(&args[4])?.into_int_value();
             let f64_value = self.compile_expr(&args[5])?.into_float_value();
             let i64_value = self.compile_expr(&args[6])?.into_int_value();
             let bool_value = self.compile_expr(&args[7])?.into_int_value();
             let object = self.compile_expr(&args[8])?.into_pointer_value();
+            let native_descriptor = self.compile_expr(&args[9])?.into_pointer_value();
             self.clear_pending_native_text()?;
             for (slot, value) in [
                 (self.pending_exception_native_text().as_pointer_value(),
-                    self.builder.build_select(same, native, ptr.const_null(), "rethrow_native_text")
+                    self.builder.build_select(same, native_text, ptr.const_null(), "rethrow_native_text")
                         .map_err(|error| error.to_string())?),
                 (self.pending_exception_aggregate_errors().as_pointer_value(),
                     self.builder.build_select(same, aggregate, ptr.const_null(), "rethrow_aggregate")
@@ -146,6 +402,10 @@ impl<'ctx> HirCompiler<'ctx> {
                 .map_err(|error| error.to_string())?;
             self.builder.build_store(self.pending_exception_value(PENDING_EXCEPTION_BOOL_SYMBOL).as_pointer_value(), bool_value)
                 .map_err(|error| error.to_string())?;
+            let native_descriptor = self.builder.build_select(same, native_descriptor, ptr.const_null(), "rethrow_native_exception")
+                .map_err(|error| error.to_string())?;
+            self.builder.build_store(self.pending_exception_native().as_pointer_value(), native_descriptor)
+                .map_err(|error| error.to_string())?;
             return Ok(val);
         }
         let snapshot_origin = snapshot_caught.and_then(|args| {
@@ -157,11 +417,37 @@ impl<'ctx> HirCompiler<'ctx> {
         if self.restore_caught_exception_tuple(val, provenance_expr)? {
             return Ok(val);
         }
-        self.clear_pending_native_text()?;
-        if trusted_text.is_some() || matches!(expr, HirExpr::Lit(HirLit::Str(_) | HirLit::Wtf8(_))) {
+        // A text-only trusted marker may follow a finalizer which changed the
+        // pending exception globals. Discard that stale tuple; the distinct
+        // published marker is emitted only after the source throw's setters.
+        if !published_exception_tuple {
+            self.clear_pending_native_text()?;
+            if text_only_packet {
+                let ptr = self.context.ptr_type(AddressSpace::default());
+                self.builder.build_store(self.pending_exception_object().as_pointer_value(), ptr.const_null())
+                    .map_err(|error| error.to_string())?;
+                self.builder.build_store(
+                    self.pending_exception_value(PENDING_EXCEPTION_VALUE_TAG_SYMBOL).as_pointer_value(),
+                    self.context.i64_type().const_int(4, false),
+                ).map_err(|error| error.to_string())?;
+                self.builder.build_store(
+                    self.pending_exception_value(PENDING_EXCEPTION_F64_SYMBOL).as_pointer_value(),
+                    self.context.f64_type().const_zero(),
+                ).map_err(|error| error.to_string())?;
+                self.builder.build_store(
+                    self.pending_exception_value(PENDING_EXCEPTION_I64_SYMBOL).as_pointer_value(),
+                    self.context.i64_type().const_zero(),
+                ).map_err(|error| error.to_string())?;
+                self.builder.build_store(
+                    self.pending_exception_value(PENDING_EXCEPTION_BOOL_SYMBOL).as_pointer_value(),
+                    self.context.bool_type().const_zero(),
+                ).map_err(|error| error.to_string())?;
+            }
+        }
+        if text_only_packet {
             self.mark_pending_native_text(val)?;
         } else if let HirExpr::Var(name) = provenance_expr {
-            if let Some((catch_slot, native_slot, _, _)) = self.catch_native_text.get(name) {
+            if let Some((catch_slot, native_slot, _, _, _)) = self.catch_native_text.get(name) {
                 if self.variables.get(name).map(|(slot, _)| slot) == Some(catch_slot) {
                     let provenance = self.builder.build_load(
                         self.context.ptr_type(AddressSpace::default()), *native_slot,
@@ -191,9 +477,23 @@ impl<'ctx> HirCompiler<'ctx> {
                         return Ok(false);
                     }
                 }
-                let value = self.compile_expr(expr)?;
+                if self.promise_expression_needs_discard(expr) {
+                    self.compile_and_discard_promise_expression(expr)?;
+                    return Ok(false);
+                }
+                let discard_frame_depth = self.owned_json_discard_frames.len();
+                self.begin_owned_json_discard_frame();
+                let value = match self.compile_expr(expr) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        self.owned_json_discard_frames.truncate(discard_frame_depth);
+                        return Err(error);
+                    }
+                };
+                let result_type = self.expr_hir_type(expr);
+                self.discard_owned_json_statement_result(expr, value, result_type.clone())?;
                 if matches!(expr, HirExpr::Call(..) | HirExpr::DynamicCall(..))
-                    && self.expr_hir_type(expr) == Some(HirType::JsValue)
+                    && result_type == Some(HirType::JsValue)
                 {
                     self.builder
                         .build_call(
@@ -209,12 +509,28 @@ impl<'ctx> HirCompiler<'ctx> {
             HirStmt::Return(value) => {
                 match value {
                     Some(expr) => {
-                        let val = self.compile_expr(expr)?;
+                        let expr_ty = self.expr_hir_type(expr);
+                        let val = match expr_ty {
+                            Some(result_type @ HirType::Promise(_)) => {
+                                self.compile_native_promise_result_for_return(expr, &result_type)?
+                            }
+                            Some(HirType::Union(members))
+                                if members.iter().any(|member| matches!(member, HirType::Promise(_))) =>
+                            {
+                                self.compile_native_promise_result_for_return(
+                                    expr,
+                                    &HirType::Union(members),
+                                )?
+                            }
+                            _ => self.compile_expr(expr)?,
+                        };
+                        self.emit_stack_promise_cleanup()?;
                         self.builder
                             .build_return(Some(&val))
                             .map_err(|e| e.to_string())?;
                     }
                     None => {
+                        self.emit_stack_promise_cleanup()?;
                         self.builder.build_return(None).map_err(|e| e.to_string())?;
                     }
                 }
@@ -222,9 +538,8 @@ impl<'ctx> HirCompiler<'ctx> {
             }
 
             HirStmt::Let(name, ty, expr) => {
-                let val = self.compile_expr(expr)?;
                 if self.for_iteration_frame_slots.contains_key(name) {
-                    self.store_for_iteration_cell(name, ty, val)?;
+                    self.store_for_iteration_cell(name, ty, expr)?;
                     return Ok(false);
                 }
                 let llvm_ty = self.basic_type(ty)?;
@@ -255,16 +570,25 @@ impl<'ctx> HirCompiler<'ctx> {
                     .get(name)
                     .filter(|(cell, _)| self.async_frame_cells.contains(cell))
                     .map(|(cell, _)| *cell);
-                let slot = match existing_frame_cell {
+                let existing_arena_cell = self.arena_variables.contains(name)
+                    .then(|| self.variables.get(name).map(|(cell, _)| *cell)).flatten();
+                let slot = match existing_frame_cell.or(existing_arena_cell) {
                     Some(cell) => cell,
                     None => self.allocate_variable_cell(llvm_ty, name)?,
                 };
                 if existing_frame_cell.is_some() {
-                    self.retain_native_promise_cell_value(slot, ty, val)?;
+                    let owner = *self.async_frame_slot_owners.get(&slot)
+                        .ok_or_else(|| format!("missing async frame owner for `{name}`"))?;
+                    self.compile_and_store_arena_promise_expression(owner, slot, ty, expr)?;
+                } else if existing_arena_cell.is_some() {
+                    self.compile_and_store_arena_promise_expression(slot, slot, ty, expr)?;
+                } else if matches!(ty, HirType::Promise(_)) {
+                    self.register_stack_promise_slot(slot, name)?;
+                    self.compile_and_store_stack_promise_expression(slot, expr)?;
+                } else {
+                    let val = self.compile_expr(expr)?;
+                    self.builder.build_store(slot, val).map_err(|e| e.to_string())?;
                 }
-                self.builder
-                    .build_store(slot, val)
-                    .map_err(|e| e.to_string())?;
                 self.variables.insert(name.clone(), (slot, llvm_ty));
                 self.variable_hir_types.insert(name.clone(), ty.clone());
                 Ok(false)
@@ -277,11 +601,9 @@ impl<'ctx> HirCompiler<'ctx> {
             HirStmt::While(cond, body) => self.compile_while(cond, body),
 
             HirStmt::Break => {
-                let (_, break_target) = self
-                    .loop_stack
-                    .last()
-                    .copied()
-                    .ok_or("`break` used outside a loop")?;
+                let scope = self.loop_scopes.last().ok_or("`break` used outside a loop")?;
+                let break_target = scope.break_target;
+                self.emit_stack_promise_cleanup_except(&scope.promise_boundary.clone())?;
                 self.builder
                     .build_unconditional_branch(break_target)
                     .map_err(|e| e.to_string())?;
@@ -289,12 +611,11 @@ impl<'ctx> HirCompiler<'ctx> {
             }
 
             HirStmt::BreakDepth(depth) => {
-                let index = self
-                    .loop_stack
-                    .len()
-                    .checked_sub(depth + 1)
+                let index = self.loop_scopes.len().checked_sub(depth + 1)
                     .ok_or("labeled `break` target is outside the active loop stack")?;
-                let (_, break_target) = self.loop_stack[index];
+                let scope = &self.loop_scopes[index];
+                let break_target = scope.break_target;
+                self.emit_stack_promise_cleanup_except(&scope.promise_boundary.clone())?;
                 self.builder
                     .build_unconditional_branch(break_target)
                     .map_err(|e| e.to_string())?;
@@ -302,11 +623,9 @@ impl<'ctx> HirCompiler<'ctx> {
             }
 
             HirStmt::Continue => {
-                let (continue_target, _) = self
-                    .loop_stack
-                    .last()
-                    .copied()
-                    .ok_or("`continue` used outside a loop")?;
+                let scope = self.loop_scopes.last().ok_or("`continue` used outside a loop")?;
+                let continue_target = scope.continue_target;
+                self.emit_stack_promise_cleanup_except(&scope.promise_boundary.clone())?;
                 self.builder
                     .build_unconditional_branch(continue_target)
                     .map_err(|e| e.to_string())?;
@@ -314,12 +633,11 @@ impl<'ctx> HirCompiler<'ctx> {
             }
 
             HirStmt::ContinueDepth(depth) => {
-                let index = self
-                    .loop_stack
-                    .len()
-                    .checked_sub(depth + 1)
+                let index = self.loop_scopes.len().checked_sub(depth + 1)
                     .ok_or("labeled `continue` target is outside the active loop stack")?;
-                let (continue_target, _) = self.loop_stack[index];
+                let scope = &self.loop_scopes[index];
+                let continue_target = scope.continue_target;
+                self.emit_stack_promise_cleanup_except(&scope.promise_boundary.clone())?;
                 self.builder
                     .build_unconditional_branch(continue_target)
                     .map_err(|e| e.to_string())?;
@@ -331,11 +649,14 @@ impl<'ctx> HirCompiler<'ctx> {
                 self.builder
                     .build_store(self.pending_exception().as_pointer_value(), val)
                     .map_err(|e| e.to_string())?;
-                if let Some(catch_bb) = self.catch_stack.last().copied() {
+                if let Some(catch) = self.catch_stack.last().cloned() {
+                    self.emit_fresh_event_key_cleanup_before_catch(Some(self.catch_stack.len() - 1))?;
+                    self.emit_stack_promise_cleanup_except(&catch.promise_boundary)?;
                     self.builder
-                        .build_unconditional_branch(catch_bb)
+                        .build_unconditional_branch(catch.target)
                         .map_err(|e| e.to_string())?;
                 } else {
+                    self.emit_fresh_event_key_cleanup_before_catch(None)?;
                     self.build_default_return()?;
                 }
                 Ok(true)
@@ -383,11 +704,20 @@ impl<'ctx> HirCompiler<'ctx> {
         let variables_before_branches = self.variables.clone();
         let native_text_before_branches = self.catch_native_text.clone();
         let arena_variables_before_branches = self.arena_variables.clone();
+        let promise_slots_before_branches = self.stack_promise_slots.clone();
         self.builder.position_at_end(then_bb);
-        let then_terminated = self.compile_block(then_branch)?;
+        let then_result = self.compile_block(then_branch);
+        let then_terminated = match then_result {
+            Ok(terminated) => terminated,
+            Err(error) => {
+                self.stack_promise_slots = promise_slots_before_branches;
+                return Err(error);
+            }
+        };
         let then_variables = self.variables.clone();
         let then_native_text = self.catch_native_text.clone();
         let then_arena_variables = self.arena_variables.clone();
+        let then_promise_slots = self.stack_promise_slots.clone();
         if !then_terminated {
             self.builder
                 .build_unconditional_branch(merge_bb)
@@ -398,8 +728,20 @@ impl<'ctx> HirCompiler<'ctx> {
             self.arena_variables = arena_variables_before_branches.clone();
         }
 
+        // Code generation for sibling arms must begin from the same physical
+        // owner table. A promotion or abrupt exit in the first arm must not
+        // erase cleanup records from the second arm.
+        self.stack_promise_slots = promise_slots_before_branches.clone();
         self.builder.position_at_end(else_bb);
-        let else_terminated = self.compile_block(else_branch)?;
+        let else_result = self.compile_block(else_branch);
+        let else_terminated = match else_result {
+            Ok(terminated) => terminated,
+            Err(error) => {
+                self.stack_promise_slots = promise_slots_before_branches;
+                return Err(error);
+            }
+        };
+        let else_promise_slots = self.stack_promise_slots.clone();
         if !else_terminated {
             self.builder
                 .build_unconditional_branch(merge_bb)
@@ -412,6 +754,7 @@ impl<'ctx> HirCompiler<'ctx> {
 
         self.builder.position_at_end(merge_bb);
         if then_terminated && else_terminated {
+            self.stack_promise_slots = promise_slots_before_branches;
             // merge_bb has no predecessors; give it a terminator so the
             // module stays valid IR, then report that this whole
             // if-statement terminates its enclosing block.
@@ -420,8 +763,30 @@ impl<'ctx> HirCompiler<'ctx> {
                 .map_err(|e| e.to_string())?;
             Ok(true)
         } else {
+            self.stack_promise_slots = Self::merge_live_stack_promise_slots(
+                !then_terminated,
+                &then_promise_slots,
+                !else_terminated,
+                &else_promise_slots,
+            );
             Ok(false)
         }
+    }
+
+    fn merge_live_stack_promise_slots(
+        then_live: bool,
+        then_slots: &HashMap<PointerValue<'ctx>, PointerValue<'ctx>>,
+        else_live: bool,
+        else_slots: &HashMap<PointerValue<'ctx>, PointerValue<'ctx>>,
+    ) -> HashMap<PointerValue<'ctx>, PointerValue<'ctx>> {
+        let mut merged = HashMap::new();
+        if then_live {
+            merged.extend(then_slots.iter().map(|(slot, flag)| (*slot, *flag)));
+        }
+        if else_live {
+            merged.extend(else_slots.iter().map(|(slot, flag)| (*slot, *flag)));
+        }
+        merged
     }
 
     fn compile_while(&mut self, cond: &HirExpr, body: &[HirStmt]) -> Result<bool, String> {
@@ -470,17 +835,42 @@ impl<'ctx> HirCompiler<'ctx> {
             .map_err(|e| e.to_string())?;
 
         let variables_before_body = self.variables.clone();
+        let promise_slots_before_body = self.stack_promise_slots.clone();
         let native_text_before_body = self.catch_native_text.clone();
         let variable_types_before_body = self.variable_hir_types.clone();
         let arena_variables_before_body = self.arena_variables.clone();
+        let loop_scope_depth = self.loop_scopes.len();
+        let promotion_scope_index = self.loop_promotion_scopes.len();
         self.builder.position_at_end(body_bb);
-        self.loop_stack.push((header_bb, after_bb));
-        self.loop_promotion_scopes.push((
-            preheader_bb,
-            variables_before_body.keys().cloned().collect(),
-        ));
-        let body_terminated = self.compile_block(body)?;
-        self.loop_stack.pop();
+        self.loop_scopes.push(LoopScope {
+            continue_target: header_bb,
+            break_target: after_bb,
+            promise_boundary: promise_slots_before_body.keys().copied().collect(),
+        });
+        self.loop_promotion_scopes.push(LoopPromotionScope {
+            preheader: preheader_bb,
+            variables: variables_before_body.keys().cloned().collect(),
+            catches: CatchContext {
+                scopes: self.catch_stack.clone(),
+            },
+            stack_promise_slots: promise_slots_before_body.clone(),
+            outer_loops: self.loop_scopes[..loop_scope_depth].to_vec(),
+        });
+        let body_result = self.compile_block(body);
+        let body_terminated = match body_result {
+            Ok(terminated) => terminated,
+            Err(error) => {
+                let restored_slots = self.loop_promotion_scopes[promotion_scope_index]
+                    .stack_promise_slots.clone();
+                self.loop_scopes.truncate(loop_scope_depth);
+                self.loop_promotion_scopes.truncate(promotion_scope_index);
+                self.stack_promise_slots = restored_slots;
+                return Err(error);
+            }
+        };
+        self.loop_scopes.truncate(loop_scope_depth);
+        self.stack_promise_slots = self.loop_promotion_scopes[promotion_scope_index]
+            .stack_promise_slots.clone();
         if !body_terminated {
             self.builder
                 .build_unconditional_branch(header_bb)
@@ -512,8 +902,9 @@ impl<'ctx> HirCompiler<'ctx> {
         // still-stale original variable at the top of every iteration,
         // discarding the previous iteration's write before it's ever
         // read back.
-        let cond_val = self.compile_expr(cond)?.into_int_value();
-        self.loop_promotion_scopes.pop();
+        let cond_result = self.compile_expr(cond);
+        self.loop_promotion_scopes.truncate(promotion_scope_index);
+        let cond_val = cond_result?.into_int_value();
         self.builder
             .build_conditional_branch(cond_val, body_bb, after_bb)
             .map_err(|e| e.to_string())?;
@@ -526,10 +917,12 @@ impl<'ctx> HirCompiler<'ctx> {
 
     /// Pack the original exception tuple into the ordinary catch value.
     /// Used both by lexical try/catch and by split async catch frames.
+    #[allow(clippy::too_many_arguments)]
     fn build_caught_exception_carrier(
         &mut self,
         text: PointerValue<'ctx>,
         owner: PointerValue<'ctx>,
+        native: PointerValue<'ctx>,
         exception_tag: IntValue<'ctx>,
         number: FloatValue<'ctx>,
         bigint: IntValue<'ctx>,
@@ -537,18 +930,7 @@ impl<'ctx> HirCompiler<'ctx> {
         share_json: bool,
     ) -> Result<StructValue<'ctx>, String> {
         let i64_ty = self.context.i64_type();
-        let i8_ty = self.context.i8_type();
-        let number_bits = self.builder.build_bit_cast(number, i64_ty, "caught_number_bits")
-            .map_err(|e| e.to_string())?.into_int_value();
-        let bool_bits = self.builder.build_int_z_extend(boolean, i64_ty, "caught_bool_bits")
-            .map_err(|e| e.to_string())?;
-        let text_bits = self.builder.build_ptr_to_int(text, i64_ty, "caught_text_bits")
-            .map_err(|e| e.to_string())?;
-        let owner_bits = self.builder.build_ptr_to_int(owner, i64_ty, "caught_owner_bits")
-            .map_err(|e| e.to_string())?;
-        // Lexical catches may receive a borrowed JSON Box and must share it.
-        // A split async catch uses the runtime pending-transfer API before its
-        // source Promise dies; that Box is already independently arena-rooted.
+        if share_json { self.tracks_owned_json_roots = true; }
         let selected_owner = if share_json {
             let is_json = self.builder.build_int_compare(inkwell::IntPredicate::EQ,
                 exception_tag, i64_ty.const_int(7, false), "caught_is_json")
@@ -584,9 +966,42 @@ impl<'ctx> HirCompiler<'ctx> {
         } else {
             owner
         };
+        self.pack_caught_exception_carrier(
+            text, owner, native, exception_tag, number, bigint, boolean, selected_owner,
+        )
+    }
+
+    /// The part of `build_caught_exception_carrier` that needs no JSON sharing, so
+    /// split async catch frames (which already own their JSON) can call it through `&self`.
+    #[allow(clippy::too_many_arguments)]
+    fn pack_caught_exception_carrier(
+        &self,
+        text: PointerValue<'ctx>,
+        owner: PointerValue<'ctx>,
+        native: PointerValue<'ctx>,
+        exception_tag: IntValue<'ctx>,
+        number: FloatValue<'ctx>,
+        bigint: IntValue<'ctx>,
+        boolean: IntValue<'ctx>,
+        selected_owner: PointerValue<'ctx>,
+    ) -> Result<StructValue<'ctx>, String> {
+        let i64_ty = self.context.i64_type();
+        let i8_ty = self.context.i8_type();
+        let number_bits = self.builder.build_bit_cast(number, i64_ty, "caught_number_bits")
+            .map_err(|e| e.to_string())?.into_int_value();
+        let bool_bits = self.builder.build_int_z_extend(boolean, i64_ty, "caught_bool_bits")
+            .map_err(|e| e.to_string())?;
+        let text_bits = self.builder.build_ptr_to_int(text, i64_ty, "caught_text_bits")
+            .map_err(|e| e.to_string())?;
+        let owner_bits = self.builder.build_ptr_to_int(owner, i64_ty, "caught_owner_bits")
+            .map_err(|e| e.to_string())?;
+        // Lexical catches may receive a borrowed JSON Box and must share it.
+        // A split async catch uses the runtime pending-transfer API before its
+        // source Promise dies; that Box is already independently arena-rooted.
         let json_bits = self.builder.build_ptr_to_int(selected_owner,
             i64_ty, "caught_json_bits").map_err(|e| e.to_string())?;
-        // Exception tags 1..8 map to union members 0..5,7,8.
+        // Exception tags 1..8 map to union members 0..5,7,8; native tags
+        // 20..29 map to the private checked-projection member 9.
         // Tag 0 with an owner pointer is the native Object member (6);
         // legacy text-only tag 0 remains a String member (3).
         let owner_present = self.builder.build_is_not_null(owner, "caught_owner_present")
@@ -615,6 +1030,22 @@ impl<'ctx> HirCompiler<'ctx> {
             payload = self.builder.build_select(active, bits, payload, "select_caught_payload")
                 .map_err(|e| e.to_string())?.into_int_value();
         }
+        let native_low = self.builder.build_int_compare(
+            inkwell::IntPredicate::UGE, exception_tag, i64_ty.const_int(20, false),
+            "caught_native_tag_low",
+        ).map_err(|e| e.to_string())?;
+        let native_high = self.builder.build_int_compare(
+            inkwell::IntPredicate::ULE, exception_tag, i64_ty.const_int(29, false),
+            "caught_native_tag_high",
+        ).map_err(|e| e.to_string())?;
+        let native_active = self.builder.build_and(native_low, native_high, "caught_native_tag")
+            .map_err(|e| e.to_string())?;
+        let native_bits = self.builder.build_ptr_to_int(native, i64_ty, "caught_native_bits")
+            .map_err(|e| e.to_string())?;
+        union_tag = self.builder.build_select(native_active, i8_ty.const_int(9, false), union_tag,
+            "select_native_caught_tag").map_err(|e| e.to_string())?.into_int_value();
+        payload = self.builder.build_select(native_active, native_bits, payload,
+            "select_native_caught_payload").map_err(|e| e.to_string())?.into_int_value();
         let union_ty = self.basic_type(&thaw_hir::caught_exception_carrier_type())?.into_struct_type();
         let tagged = self.builder.build_insert_value(union_ty.get_undef(), union_tag,
             0, "caught_union_tag").map_err(|e| e.to_string())?.into_struct_value();
@@ -647,10 +1078,13 @@ impl<'ctx> HirCompiler<'ctx> {
             .build_unconditional_branch(try_bb)
             .map_err(|e| e.to_string())?;
 
+        let promise_slots_before_try = self.stack_promise_slots.clone();
         self.builder.position_at_end(try_bb);
-        self.catch_stack.push(catch_bb);
-        let try_terminated = self.compile_block(body)?;
-        self.catch_stack.pop();
+        self.push_catch_target(catch_bb);
+        let try_result = self.compile_block(body);
+        self.pop_catch_target();
+        self.stack_promise_slots = promise_slots_before_try.clone();
+        let try_terminated = try_result?;
         if !try_terminated {
             self.builder
                 .build_unconditional_branch(merge_bb)
@@ -666,8 +1100,12 @@ impl<'ctx> HirCompiler<'ctx> {
                 "caught_exception",
             )
             .map_err(|e| e.to_string())?;
+        self.compile_restore_parked_native_throw(thrown.into_pointer_value())?;
+        let restored_thrown = self.builder.build_load(
+            ptr_ty, self.pending_exception().as_pointer_value(), "restored_caught_exception",
+        ).map_err(|e| e.to_string())?;
         self.builder
-            .build_store(catch_slot, thrown)
+            .build_store(catch_slot, restored_thrown)
             .map_err(|e| e.to_string())?;
         let valid_slot = self.builder.build_alloca(self.context.bool_type(), "catch_original_valid_slot")
             .map_err(|e| e.to_string())?;
@@ -675,7 +1113,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .map_err(|e| e.to_string())?;
         let original_slot = self.builder.build_alloca(str_ty, "catch_original_value_slot")
             .map_err(|e| e.to_string())?;
-        self.builder.build_store(original_slot, thrown).map_err(|e| e.to_string())?;
+        self.builder.build_store(original_slot, restored_thrown).map_err(|e| e.to_string())?;
         let native_text_slot = self.builder.build_alloca(str_ty, "catch_native_text_slot")
             .map_err(|e| e.to_string())?;
         let native_text = self.builder.build_load(
@@ -688,8 +1126,15 @@ impl<'ctx> HirCompiler<'ctx> {
             ptr_ty, self.pending_exception_aggregate_errors().as_pointer_value(),
             "caught_aggregate_errors",
         ).map_err(|e| e.to_string())?;
+        let native_descriptor = self.builder.build_load(
+            ptr_ty, self.pending_exception_native().as_pointer_value(),
+            "caught_native_exception_descriptor",
+        ).map_err(|e| e.to_string())?.into_pointer_value();
+        let native_slot = self.builder.build_alloca(str_ty, "catch_native_exception_slot")
+            .map_err(|e| e.to_string())?;
+        self.builder.build_store(native_slot, native_descriptor).map_err(|e| e.to_string())?;
         let previous_native_text = self.catch_native_text.insert(
-            catch_name.to_string(), (catch_slot, native_text_slot, original_slot, valid_slot),
+            catch_name.to_string(), (catch_slot, native_text_slot, original_slot, valid_slot, native_slot),
         );
         self.builder
             .build_store(
@@ -744,6 +1189,8 @@ impl<'ctx> HirCompiler<'ctx> {
             .map_err(|e| e.to_string())?;
         self.builder.build_store(aggregate_slot, aggregate).map_err(|e| e.to_string())?;
         self.variables.insert(format!("{catch_name}__thaw_exception_aggregate"), (aggregate_slot, str_ty));
+        self.variables.insert(format!("{catch_name}__thaw_exception_native"), (native_slot, str_ty));
+        self.variable_hir_types.insert(format!("{catch_name}__thaw_exception_native"), HirType::NativeException);
         for (suffix, symbol, ty) in [
             (
                 "tag",
@@ -801,7 +1248,7 @@ impl<'ctx> HirCompiler<'ctx> {
             let boolean = self.builder.build_load(self.context.bool_type(), stored_bool, "caught_value_bool")
                 .map_err(|e| e.to_string())?.into_int_value();
             let tagged = self.build_caught_exception_carrier(
-                thrown, thrown_object, exception_tag, number, bigint, boolean, true,
+                thrown.into_pointer_value(), thrown_object.into_pointer_value(), native_descriptor, exception_tag, number, bigint, boolean, true,
             )?;
             self.builder.build_store(carrier_slot, tagged).map_err(|e| e.to_string())?;
         }
@@ -820,12 +1267,14 @@ impl<'ctx> HirCompiler<'ctx> {
             self.variables
                 .insert(hidden_tag.to_string(), (catch_slot, str_ty));
         }
-        let catch_terminated = self.compile_block(catch_body)?;
+        let catch_result = self.compile_block(catch_body);
+        self.stack_promise_slots = promise_slots_before_try;
         if let Some(previous) = previous_native_text {
             self.catch_native_text.insert(catch_name.to_string(), previous);
         } else {
             self.catch_native_text.remove(catch_name);
         }
+        let catch_terminated = catch_result?;
         if !catch_terminated {
             self.builder
                 .build_unconditional_branch(merge_bb)
@@ -841,5 +1290,115 @@ impl<'ctx> HirCompiler<'ctx> {
         } else {
             Ok(false)
         }
+    }
+}
+
+impl<'ctx> HirCompiler<'ctx> {
+    /// A native throw that crossed JavaScript arrives as an authenticated private Error carrier.
+    /// Restore its complete packet before the native catch binding snapshots the thrown value.
+    fn compile_restore_parked_native_throw(&mut self, thrown: PointerValue<'ctx>) -> Result<(), String> {
+        let token = self.builder.build_call(
+            self.module.get_function("thaw_exception_native_token").unwrap(),
+            &[thrown.into()], "parked_native_throw_token",
+        ).map_err(|e| e.to_string())?.try_as_basic_value().basic()
+            .ok_or("parked throw token returned no value")?.into_int_value();
+        self.compile_apply_parked_native_throw(token)
+    }
+
+    /// Dead or absent tokens leave the pending tuple untouched; only a live private carrier
+    /// may replace all pending channels.
+    fn compile_apply_parked_native_throw(&mut self, token: IntValue<'ctx>) -> Result<(), String> {
+        let i64_ty = self.context.i64_type();
+        let ptr_ty = self.context.ptr_type(AddressSpace::default());
+        let function = self.current_function();
+        let present = self.builder.build_int_compare(
+            inkwell::IntPredicate::NE, token, i64_ty.const_zero(), "parked_native_throw_present",
+        ).map_err(|e| e.to_string())?;
+        let restore = self.context.append_basic_block(function, "restore_parked_native_throw");
+        let materialize = self.context.append_basic_block(function, "materialize_parked_native_throw");
+        let done = self.context.append_basic_block(function, "parked_native_throw_checked");
+        let check_live = self.context.append_basic_block(function, "check_parked_native_throw_live");
+        self.builder.build_conditional_branch(present, check_live, done).map_err(|e| e.to_string())?;
+        self.builder.position_at_end(check_live);
+        let live = self.builder.build_call(
+            self.module.get_function("thaw_exception_token_is_live").unwrap(),
+            &[token.into()], "parked_native_throw_live",
+        ).map_err(|e| e.to_string())?.try_as_basic_value().basic()
+            .ok_or("parked throw liveness returned no value")?.into_int_value();
+        let valid = self.builder.build_int_compare(
+            inkwell::IntPredicate::NE, live, self.context.i8_type().const_zero(),
+            "parked_native_throw_is_live",
+        ).map_err(|e| e.to_string())?;
+        self.builder.build_conditional_branch(valid, materialize, done).map_err(|e| e.to_string())?;
+        self.builder.position_at_end(materialize);
+        let snapshot_type = i64_ty.array_type(9);
+        let snapshot = self.allocate_variable_cell(snapshot_type.into(), "parked_native_throw_snapshot")?;
+        let snapshot_out = self.builder.build_pointer_cast(snapshot, ptr_ty, "parked_native_throw_snapshot_out")
+            .map_err(|e| e.to_string())?;
+        let copied = self.builder.build_call(
+            self.module.get_function("thaw_exception_native_snapshot").unwrap(),
+            &[token.into(), snapshot_out.into()], "parked_native_throw_materialized",
+        ).map_err(|e| e.to_string())?.try_as_basic_value().basic()
+            .ok_or("parked throw snapshot returned no value")?.into_int_value();
+        let copied = self.builder.build_int_compare(
+            inkwell::IntPredicate::NE, copied, self.context.i8_type().const_zero(),
+            "parked_native_throw_snapshot_ok",
+        ).map_err(|e| e.to_string())?;
+        self.builder.build_conditional_branch(copied, restore, done).map_err(|e| e.to_string())?;
+        self.builder.position_at_end(restore);
+        let field = |this: &Self, index: u64| -> Result<IntValue<'ctx>, String> {
+            // SAFETY: `snapshot` points to the `[9 x i64]` alloca above, and
+            // each call below supplies a compile-time field index in 0..9.
+            let element = unsafe { this.builder.build_gep(snapshot_type, snapshot, &[
+                this.context.i32_type().const_zero(), this.context.i32_type().const_int(index, false),
+            ], "parked_native_throw_snapshot_field") }.map_err(|e| e.to_string())?;
+            Ok(this.builder.build_load(i64_ty, element, "parked_native_throw_field")
+                .map_err(|e| e.to_string())?.into_int_value())
+        };
+        let tag = field(self, 0)?;
+        let number_bits = field(self, 1)?;
+        let bigint = field(self, 2)?;
+        let boolean_bits = field(self, 3)?;
+        let object_bits = field(self, 4)?;
+        let native_bits = field(self, 5)?;
+        let pending_bits = field(self, 6)?;
+        let native_text_bits = field(self, 7)?;
+        let aggregate_bits = field(self, 8)?;
+        let number = self.builder.build_bit_cast(number_bits, self.context.f64_type(), "parked_native_throw_number")
+            .map_err(|e| e.to_string())?;
+        let boolean = self.builder.build_int_truncate(boolean_bits, self.context.bool_type(), "parked_native_throw_bool")
+            .map_err(|e| e.to_string())?;
+        let object = self.builder.build_int_to_ptr(object_bits, ptr_ty, "parked_native_throw_object")
+            .map_err(|e| e.to_string())?;
+        let native = self.builder.build_int_to_ptr(native_bits, ptr_ty, "parked_native_throw_native")
+            .map_err(|e| e.to_string())?;
+        let pending = self.builder.build_int_to_ptr(pending_bits, ptr_ty, "parked_native_throw_pending")
+            .map_err(|e| e.to_string())?;
+        let native_text = self.builder.build_int_to_ptr(native_text_bits, ptr_ty, "parked_native_throw_native_text")
+            .map_err(|e| e.to_string())?;
+        let aggregate = self.builder.build_int_to_ptr(aggregate_bits, ptr_ty, "parked_native_throw_aggregate")
+            .map_err(|e| e.to_string())?;
+        for (symbol, value) in [
+            (PENDING_EXCEPTION_VALUE_TAG_SYMBOL, BasicValueEnum::from(tag)),
+            (PENDING_EXCEPTION_F64_SYMBOL, number),
+            (PENDING_EXCEPTION_I64_SYMBOL, BasicValueEnum::from(bigint)),
+            (PENDING_EXCEPTION_BOOL_SYMBOL, BasicValueEnum::from(boolean)),
+        ] {
+            self.builder.build_store(self.pending_exception_value(symbol).as_pointer_value(), value)
+                .map_err(|e| e.to_string())?;
+        }
+        self.builder.build_store(self.pending_exception_object().as_pointer_value(), object)
+            .map_err(|e| e.to_string())?;
+        self.builder.build_store(self.pending_exception_native().as_pointer_value(), native)
+            .map_err(|e| e.to_string())?;
+        self.builder.build_store(self.pending_exception().as_pointer_value(), pending)
+            .map_err(|e| e.to_string())?;
+        self.builder.build_store(self.pending_exception_native_text().as_pointer_value(), native_text)
+            .map_err(|e| e.to_string())?;
+        self.builder.build_store(self.pending_exception_aggregate_errors().as_pointer_value(), aggregate)
+            .map_err(|e| e.to_string())?;
+        self.builder.build_unconditional_branch(done).map_err(|e| e.to_string())?;
+        self.builder.position_at_end(done);
+        Ok(())
     }
 }

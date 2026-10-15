@@ -386,7 +386,7 @@ fn native_callback_arguments_restore_only_origin_marked_instances() {
     let wrapped = wrap_as_commonjs_module("module.exports = {};", &[], &[], &[], "")
         .replacen("return __thaw_addon;", "globalThis.__thaw_napi_test = { handles: __thaw_napi_handles, argument: __thaw_napi_argument }; return __thaw_addon;", 1);
     let script = format!(
-        "globalThis.__thaw_napi_bridge_exports = function() {{ return '{{\"names\":[],\"qualifiedPackages\":[]}}'; }}; \
+        "globalThis.__thaw_napi_bridge_available = () => true; globalThis.__thaw_napi_bridge_exports = function() {{ return '{{\"names\":[],\"qualifiedPackages\":[]}}'; }}; \
          globalThis.__thaw_napi_bridge_handle = function() {{ return JSON.stringify({{value: null}}); }}; \
          {wrapped} \
          globalThis.inspectNativeCallbackArgs = function() {{ \
@@ -433,7 +433,8 @@ fn native_class_proxies_use_native_properties_and_release_native_handles() {
     assert!(wrapped.contains("new ctor(value.__thaw_napi_error__)"));
     assert!(wrapped.contains("result.value['$__thaw_napi_undefined$'] === true"));
     assert!(wrapped.contains("globalThis.process.dlopen = (function(previous)"));
-    assert!(wrapped.contains("__thaw_addon.QueryEngine"));
+    assert!(wrapped.contains("__thaw_is_self_path"));
+    assert!(!wrapped.contains("PRISMA_QUERY_ENGINE_LIBRARY"));
 }
 
 #[test]
@@ -862,7 +863,7 @@ fn private_napi_value_envelopes_preserve_origins_across_result_paths() {
     let wrapped = wrap_as_commonjs_module("module.exports = {};", &[], &[], &[], "")
         .replacen("return __thaw_addon;", "globalThis.__thaw_napi_test = { argument: __thaw_napi_argument, sync: __thaw_napi_sync_arguments, handle: __thaw_napi_handle }; return __thaw_addon;", 1);
     let script = [r#"
-        globalThis.__thaw_napi_bridge_exports = () => JSON.stringify({names:['direct'],qualifiedPackages:[]});
+        globalThis.__thaw_napi_bridge_available = () => true; globalThis.__thaw_napi_bridge_exports = () => JSON.stringify({names:['direct'],qualifiedPackages:[]});
         globalThis.__thaw_napi_bridge_call = () => JSON.stringify({
           kind: 'value',
           value: JSON.parse('{"timestamp":0,"__thaw_napi_error__":"data","__thaw_napi_promise__":"ordinary","$__thaw_napi_undefined$":true,"nested":{"__proto__":null,"invalid":null,"numbers":[null,null,null]}}'),
@@ -935,7 +936,7 @@ fn stale_native_proxy_finalizer_cannot_release_replacement() {
           constructor(value) { this.value = value; }
           deref() { return this.value; }
         };
-        globalThis.__thaw_napi_bridge_exports = () => JSON.stringify({names:['direct'],qualifiedPackages:[]});
+        globalThis.__thaw_napi_bridge_available = () => true; globalThis.__thaw_napi_bridge_exports = () => JSON.stringify({names:['direct'],qualifiedPackages:[]});
         globalThis.__thaw_napi_bridge_call = () => JSON.stringify({kind:'value', value:{__thaw_napi_handle__:'91'}});
         globalThis.releasedNativeHandles = [];
         globalThis.__thaw_napi_bridge_handle = (operation, target) => {
@@ -952,11 +953,12 @@ fn stale_native_proxy_finalizer_cannot_release_replacement() {
           const second = require.addon().direct();
           registry.callback(oldRecord.held);
           const retained = require.addon().direct() === second;
-          const noEarlyRelease = releasedNativeHandles.length === 0;
+          // Each wrapper owns one renew/release pair: the stale finalizer releases only its own claim.
+          const noEarlyRelease = releasedNativeHandles.length === 1;
           const newRecord = registry.records.find(record => record.object === second);
           registry.callback(newRecord.held);
           return [first !== second, retained, noEarlyRelease,
-            releasedNativeHandles.length === 1 && releasedNativeHandles[0] === '91'];
+            releasedNativeHandles.length === 2 && releasedNativeHandles.every(handle => handle === '91')];
         };
     "#].join("\n");
     assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
@@ -979,7 +981,7 @@ fn stale_native_binary_finalizer_cannot_release_replacement() {
           constructor(value) { this.value = value; }
           deref() { return this.value; }
         };
-        globalThis.__thaw_napi_bridge_exports = () => JSON.stringify({names:['direct'],qualifiedPackages:[]});
+        globalThis.__thaw_napi_bridge_available = () => true; globalThis.__thaw_napi_bridge_exports = () => JSON.stringify({names:['direct'],qualifiedPackages:[]});
         globalThis.__thaw_napi_bridge_call = () => JSON.stringify({kind:'value', value:{
           __thaw_napi_binary__:'92', kind:'ArrayBuffer', data:[1, 2]
         }});
@@ -998,11 +1000,12 @@ fn stale_native_binary_finalizer_cannot_release_replacement() {
           const second = require.addon().direct();
           registry.callback(oldRecord.held);
           const retained = require.addon().direct() === second;
-          const noEarlyRelease = releasedNativeHandles.length === 0;
+          // Each wrapper owns one renew/release pair: the stale finalizer releases only its own claim.
+          const noEarlyRelease = releasedNativeHandles.length === 1;
           const newRecord = registry.records.find(record => record.object === second);
           registry.callback(newRecord.held);
           return [first !== second, retained, noEarlyRelease,
-            releasedNativeHandles.length === 1 && releasedNativeHandles[0] === '92'];
+            releasedNativeHandles.length === 2 && releasedNativeHandles.every(handle => handle === '92')];
         };
     "#].join("\n");
     assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
@@ -1029,7 +1032,7 @@ fn native_addon_codecs_and_delayed_commonjs_bindings_survive_another_package() {
           constructor(callback) { this.callback = callback; this.records = []; fakeRegistries.push(this); }
           register(object, held) { this.records.push({object, held}); }
         };
-        globalThis.__thaw_napi_bridge_exports = () => JSON.stringify({
+        globalThis.__thaw_napi_bridge_available = () => true; globalThis.__thaw_napi_bridge_exports = () => JSON.stringify({
           names:['first-pkg::make','first-pkg::accept','second-pkg::accept'],
           qualifiedPackages:['first-pkg','second-pkg']
         });
@@ -1088,11 +1091,11 @@ fn commonjs_native_addon_view_uses_its_packages_qualified_exports() {
     use std::ffi::CString;
 
     let bridge = CString::new(
-        "globalThis.__thaw_napi_bridge_exports = function() { return JSON.stringify({ names: ['first-pkg::same', 'second-pkg::same', '@scope/third::same', 'legacy'], qualifiedPackages: ['first-pkg', 'second-pkg', '@scope/third', 'zero-pkg'] }); };\n\
+        "globalThis.__thaw_napi_bridge_available = () => true; globalThis.__thaw_napi_bridge_exports = function() { return JSON.stringify({ names: ['first-pkg::same', 'second-pkg::same', '@scope/third::same', 'legacy'], qualifiedPackages: ['first-pkg', 'second-pkg', '@scope/third', 'zero-pkg'] }); };\n\
          globalThis.__thaw_napi_bridge_call = function(name) { return JSON.stringify({kind:'value',value:name,origins:[]}); };"
     ).unwrap();
     assert_eq!(thaw_quickjs::thaw_js_load(bridge.as_ptr()), 1);
-    assert_eq!(thaw_quickjs::thaw_js_load(CString::new("globalThis.__thaw_saved_process = globalThis.process; globalThis.process = {env:{}};").unwrap().as_ptr()), 1);
+    assert_eq!(thaw_quickjs::thaw_js_load(CString::new("globalThis.__thaw_saved_process = globalThis.process; globalThis.process = {env:{}, execPath:'/opt/app/main', pid:4242};").unwrap().as_ptr()), 1);
     for (package, slot) in [("first-pkg", "firstAddon"), ("second-pkg", "secondAddon"), ("@scope/third", "scopedAddon"), ("zero-pkg", "zeroAddon"), ("legacy-pkg", "legacyAddon"), ("", "emptyAddon")] {
         let source = format!("globalThis.{slot} = require('binding.node'); globalThis.{slot}Require = require; globalThis.{slot}Dlopen = process.dlopen;");
         let wrapped = wrap_as_commonjs_module(&source, &[], &[], &[], package);
@@ -1115,6 +1118,12 @@ fn commonjs_native_addon_view_uses_its_packages_qualified_exports() {
     assert_eq!(thaw_quickjs::eval_json("legacyAddon.legacy()"), Ok(Some("\"legacy\"".into())));
     assert_eq!(thaw_quickjs::eval_json("legacyAddonDlopen({exports:{},filename:'/thaw_modules/legacy-pkg/index.js'}, 'binding.node').legacy()"), Ok(Some("\"legacy\"".into())));
     assert_eq!(thaw_quickjs::eval_json("emptyAddonDlopen({exports:{},filename:'/thaw_modules//index.js'}, 'binding.node').legacy()"), Ok(Some("\"legacy\"".into())));
+    // Any alias of the executable itself names every embedded addon at once; the earlier-registered
+    // package wins a name clash (`same`), and each package-only export stays reachable.
+    for alias in ["/proc/self/exe", "/opt/app/main", "/proc/4242/exe"] {
+        assert_eq!(thaw_quickjs::eval_json(&format!("firstAddonDlopen({{exports:{{}}}}, '{alias}').same()")), Ok(Some("\"first-pkg::same\"".into())));
+        assert_eq!(thaw_quickjs::eval_json(&format!("firstAddonDlopen({{exports:{{}}}}, '{alias}').legacy()")), Ok(Some("\"legacy\"".into())));
+    }
     assert_eq!(thaw_quickjs::eval_json("Object.getOwnPropertyDescriptor(process, 'dlopen').configurable"), Ok(Some("false".into())));
     assert_eq!(thaw_quickjs::thaw_js_load(CString::new("globalThis.process = globalThis.__thaw_saved_process; delete globalThis.__thaw_saved_process;").unwrap().as_ptr()), 1);
 }

@@ -195,6 +195,10 @@ pub enum HirType {
     WeakSet(Box<HirType>),
     Tuple(Vec<HirType>),
     Object(Vec<(Symbol, HirType)>),
+    /// Compiler-private pointer to an immutable native exception descriptor.
+    /// It is never interpreted as an Object; checked projections recover the
+    /// original owner only after category and static-layout validation.
+    NativeException,
     Function(Vec<HirType>, Box<HirType>),
     /// Native callable with a separate physical `this` parameter. Its value
     /// is still one closure pointer; `signature` describes visible values
@@ -239,7 +243,32 @@ pub fn caught_exception_carrier_type() -> HirType {
         HirType::Object(Vec::new()),
         HirType::Json,
         HirType::JsValue,
+        HirType::NativeException,
     ])
+}
+
+/// Native exception category codes are shared by HIR publication and the
+/// runtime's non-assimilating exception descriptor.
+pub fn native_exception_tag(ty: &HirType) -> Option<u64> {
+    Some(match ty {
+        HirType::Symbol => 20,
+        HirType::Array(_) => 21,
+        HirType::Bytes => 22,
+        HirType::Map(_, _) => 23,
+        HirType::WeakMap(_, _) => 24,
+        HirType::Set(_) => 25,
+        HirType::WeakSet(_) => 26,
+        HirType::Tuple(_) => 27,
+        HirType::Function(_, _)
+        | HirType::FunctionWithThis(_, _)
+        | HirType::CallableFunction(..) => 28,
+        HirType::Promise(_) => 29,
+        _ => return None,
+    })
+}
+
+pub fn native_exception_layout_token(ty: &HirType) -> Option<String> {
+    native_exception_tag(ty).map(|_| format!("{ty:?}"))
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -307,4 +336,22 @@ pub fn native_object_layout_token(fields: &[(Symbol, HirType)]) -> String {
         }
     }
     token
+}
+
+/// Whether `name` is one of the built-in error constructors (`Error` and its standard subclasses).
+/// The single source of truth for "is this class chain rooted in a built-in error": a user class
+/// merely *named* `...Error` is not one.
+pub fn is_error_family_name(name: &str) -> bool {
+    matches!(
+        name,
+        "Error"
+            | "TypeError"
+            | "RangeError"
+            | "SyntaxError"
+            | "ReferenceError"
+            | "EvalError"
+            | "URIError"
+            | "AggregateError"
+            | "SuppressedError"
+    )
 }

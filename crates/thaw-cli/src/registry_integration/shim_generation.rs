@@ -99,7 +99,7 @@ fn push_error_family_ambient_declarations(classes: &[thaw_bridge::DtsClass], shi
         let Some(base) = &class.extends else {
             continue;
         };
-        shim.push_str(&format!(
+        let declaration = format!(
             "class {} extends {} {{}}\n",
             class_identifier(&class.name),
             if classes.iter().any(|candidate| &candidate.name == base) {
@@ -107,7 +107,12 @@ fn push_error_family_ambient_declarations(classes: &[thaw_bridge::DtsClass], shi
             } else {
                 base.clone()
             },
-        ));
+        );
+        // Two entry points of one package (`csv-parse` and `csv-parse/sync`) share the class.
+        if shim.starts_with(&declaration) || shim.contains(&format!("\n{declaration}")) {
+            continue;
+        }
+        shim.push_str(&declaration);
     }
 }
 
@@ -138,6 +143,7 @@ fn native_addon_path_component(name: &str) -> String {
 /// call). Returns the generated shim text, the native lib paths to
 /// link, and any cross-package name-collision rewrites the caller must
 /// also apply to the user's own source (`rewrite_qualified_calls`).
+#[allow(clippy::too_many_arguments)]
 fn generate_registry_shims(
     registry_dir: &Path,
     use_packages: &[String],
@@ -167,16 +173,21 @@ fn generate_registry_shims(
         // (see `thaw_bridge::allow_native_bytes_type`'s doc comment) to
         // this one package's `.d.ts` processing below -- only ever `true`
         // for a hand-authored ambient builtin, never a real npm package.
+        let path_builtin = path_builtin_name(name);
         let _native_bytes_type_guard =
-            thaw_bridge::allow_native_bytes_type(name.starts_with("node:"));
-        let package = if name.starts_with("node:") {
+            thaw_bridge::allow_native_bytes_type(name.starts_with("node:") || path_builtin.is_some());
+        let mut package = if let Some(builtin) = path_builtin {
+            let mut package = thaw_registry::resolve_builtin(builtin)?;
+            package.name = name.clone();
+            package
+        } else if name.starts_with("node:") {
             thaw_registry::resolve_builtin(name)?
         } else {
             thaw_registry::resolve(registry_dir, name)?
         };
         let dts_filename = package.dts_path.as_ref().map_or_else(
             || thaw_parser::common::FileName::Custom(
-                format!("{} generated declarations", package.name).into(),
+                format!("{} generated declarations", package.name),
             ),
             |path| thaw_parser::common::FileName::Real(path.clone()),
         );
@@ -193,6 +204,29 @@ fn generate_registry_shims(
             .map_err(|e| format!("failed to parse `{name}`'s package.d.ts classes: {e}"))?;
         let mut values = thaw_bridge::parse_dts_values_named(&package.dts_source, &dts_filename)
             .map_err(|e| format!("failed to parse `{name}`'s package.d.ts values: {e}"))?;
+        if path_builtin.is_some() && !values.iter().any(|value| value.name == "default") {
+            values.push(thaw_bridge::DtsValue {
+                name: "default".into(),
+                ty: thaw_bridge::DtsType::Native(thaw_hir::HirType::JsValue),
+            });
+        }
+        if let Some(builtin) = path_builtin {
+            let root_bundle = if builtin == "node:path" {
+                package.bundle_js.clone()
+            } else {
+                thaw_registry::resolve_builtin("node:path")?.bundle_js
+            }
+            .ok_or_else(|| "built-in `node:path` has no runtime bundle".to_string())?;
+            let selected = match builtin {
+                "node:path" => "root",
+                "node:path/posix" => "root.posix",
+                _ => "root.win32",
+            };
+            package.bundle_js = Some(format!(
+                "(function(){{var cache=globalThis.__thaw_bundle_exports||(globalThis.__thaw_bundle_exports={{}}),root;if(Object.prototype.hasOwnProperty.call(cache,\"node:path\"))root=cache[\"node:path\"];else{{{root_bundle}\nroot=module.exports;cache[\"node:path\"]=root;}}var selected={selected};module.exports=selected;if(selected&&(typeof selected===\"object\"||typeof selected===\"function\")){{selected.default=selected;selected.__esModule=true;}}cache[{canonical}]=selected;}})();",
+                canonical = serde_json::to_string(builtin).unwrap(),
+            ));
+        }
         let explicit_type_exports = thaw_bridge::exported_type_names_named(&package.dts_source, &dts_filename);
         let value_exports = thaw_bridge::exported_value_names_named(&package.dts_source, &dts_filename);
         let type_only_namespaces = thaw_bridge::type_only_namespace_names_named(&package.dts_source, &dts_filename);
@@ -291,6 +325,7 @@ fn generate_registry_shims(
             thaw_bridge::self_referential_namespace_aliases_named(&package.dts_source, &dts_filename);
         let mut type_only_exports = explicit_type_exports;
         type_only_exports.extend(classes.iter().filter(|class| !internal_support_classes.contains(&class.name)).map(|class| class.name.clone()));
+        type_only_exports.extend(thaw_bridge::exported_declared_type_names_named(&package.dts_source, &dts_filename));
         nested_namespaces.retain(|namespace, _| !type_only_namespaces.contains(namespace));
         for (namespace, members) in &mut nested_namespaces {
             for (member, target) in members {
@@ -1160,6 +1195,25 @@ fn generate_registry_shims(
                         (pkg.name.clone(), function.name.clone()),
                         symbol.clone(),
                     );
+                    // A callable object (`debug`, `ky`) is exported as a live `JsValue` for member
+                    // access (`debug.enable(..)`), but a direct call (`debug("ns")`) must still use
+                    // the typed function, whose declared result (a callable `Debugger`) is a handle.
+                    if pkg.values.iter().any(|value| value.name == function.name) {
+                        // A default import (`import createDebug from "debug"`) is keyed `default`.
+                        let default_alias = (pkg.commonjs_export_name.as_deref() == Some(function.name.as_str()))
+                            .then(|| qualified_export_alias(&pkg.name, "default"));
+                        for alias in std::iter::once(function.name.clone()).chain(default_alias) {
+                            fallback_function_overload_rewrites.push((
+                                alias,
+                                symbol.clone(),
+                                function.required_params,
+                                function.params.len(),
+                                scoring_param_hir_types(function, napi),
+                                dts_function_param_field_constraints(function),
+                                None,
+                            ));
+                        }
+                    }
                     if pkg
                         .called_commonjs_namespace_properties
                         .contains(&function.name)
@@ -1340,9 +1394,20 @@ fn generate_registry_shims(
         let package_overloads = fallback_function_overload_rewrites
             .drain(overload_rewrite_start..)
             .collect::<Vec<_>>();
+        // A default import (`import ms from "ms"`) is keyed `default` at the call
+        // site, so the package's default-export function is also a candidate
+        // under that alias -- for every overload set, not only callable values.
+        let default_aliased = |candidate: &FallbackFunctionOverloadRewrite| {
+            (pkg.commonjs_export_name.as_deref() == Some(candidate.0.as_str())).then(|| {
+                let mut aliased = candidate.clone();
+                aliased.0 = qualified_export_alias(&pkg.name, "default");
+                aliased
+            })
+        };
         for candidate in package_overloads {
             if !union_dispatched_names.contains(&(pkg.name.clone(), candidate.0.clone())) {
                 fallback_function_overload_rewrites.push(candidate.clone());
+                fallback_function_overload_rewrites.extend(default_aliased(&candidate));
             }
             if let Some(qualified) = qualified
                 .iter()
@@ -1360,6 +1425,7 @@ fn generate_registry_shims(
         // there's no duplicate-declaration risk here to guard against.
         for candidate in union_dispatch_overload_rewrites.drain(..) {
             fallback_function_overload_rewrites.push(candidate.clone());
+            fallback_function_overload_rewrites.extend(default_aliased(&candidate));
             if let Some(qualified) = qualified
                 .iter()
                 .find(|qualified| qualified.name == candidate.0)
@@ -1551,7 +1617,7 @@ fn generate_registry_shims(
                     members.iter().filter_map(move |(member, target)| {
                         let path = format!("{namespace}.{member}");
                         if pkg.type_only_value_names.contains(&path) { return None; }
-                        let declared = pkg.values.iter().any(|value| &value.name == target)
+                        let declared = pkg.values.iter().any(|value| &value.name == target || value.name == path)
                             || pkg.functions.iter().any(|function| &function.name == target)
                             || (!target.contains('.') && pkg.classes.iter().any(|class| &class.name == target));
                         if declared {

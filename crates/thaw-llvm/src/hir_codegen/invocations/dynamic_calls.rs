@@ -7,6 +7,9 @@ impl<'ctx> HirCompiler<'ctx> {
         };
         self.uses_quickjs = true;
         self.uses_quickjs_handles = true;
+        // The iterator result is captured as a live graph; reading its `done`/`value`
+        // later needs the host operations, like the other dynamic call paths.
+        self.compile_register_js_callback_host_operations()?;
         let iterator = self.compile_expr(iterator)?.into_int_value();
         let mode = self.compile_expr(mode)?.into_int_value();
         let mode = self.builder.build_int_truncate(mode, self.context.i8_type(),
@@ -21,6 +24,27 @@ impl<'ctx> HirCompiler<'ctx> {
         self.compile_original_quickjs_exception_handle(value, true)
     }
 
+    fn compile_dynamic_property_exact(
+        &mut self, args: &[HirExpr],
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let [receiver, key] = args else {
+            return Err("getDynamicProperty expects a receiver and property key".into());
+        };
+        self.uses_quickjs = true;
+        self.uses_quickjs_handles = true;
+        // A getter may enter native callbacks and graph capture on this first
+        // property read, so publish the host operations before evaluating it.
+        self.compile_register_js_callback_host_operations()?;
+        let receiver = self.compile_expr(receiver)?.into_int_value();
+        let key = self.compile_expr(key)?.into_pointer_value();
+        let result = self.builder.build_call(
+            self.module.get_function("thaw_js_get_property_exact_result").unwrap(),
+            &[receiver.into(), key.into()], "dynamic_property_exact",
+        ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+            .ok_or("exact property read returned no result")?.into_struct_value();
+        self.compile_exact_iterator_handle_result(result, "property_read")
+    }
+
     fn compile_to_iterator_exact(
         &mut self, args: &[HirExpr],
     ) -> Result<BasicValueEnum<'ctx>, String> {
@@ -29,6 +53,7 @@ impl<'ctx> HirCompiler<'ctx> {
         };
         self.uses_quickjs = true;
         self.uses_quickjs_handles = true;
+        self.compile_register_js_callback_host_operations()?;
         let source = self.compile_expr(source)?.into_int_value();
         let result = self.builder.build_call(
             self.module.get_function("thaw_js_to_iterator_exact_result").unwrap(),
@@ -38,7 +63,7 @@ impl<'ctx> HirCompiler<'ctx> {
         self.compile_exact_iterator_handle_result(result, "iterator_acquire")
     }
 
-    fn compile_exact_iterator_handle_result(
+    pub(super) fn compile_exact_iterator_handle_result(
         &mut self, result: inkwell::values::StructValue<'ctx>, _label: &str,
     ) -> Result<BasicValueEnum<'ctx>, String> {
         let value = self.builder.build_extract_value(result, 0, "iterator_step_record")
@@ -84,9 +109,7 @@ impl<'ctx> HirCompiler<'ctx> {
             "callDynamicValueHandle" => self.compile_call_dynamic_value_handle(args),
             "callDynamicValueWithValue" => self.compile_call_dynamic_value_with_value(args),
             "releaseDynamicValue" => self.compile_release_dynamic_value(args),
-            "getDynamicProperty" => {
-                self.compile_dynamic_handle_operation("thaw_js_get_property_result", args)
-            }
+            "getDynamicProperty" => self.compile_dynamic_property_exact(args),
             "deleteDynamicProperty" => self.compile_dynamic_property_predicate(
                 "thaw_js_delete_property_result",
                 args,
@@ -104,13 +127,41 @@ impl<'ctx> HirCompiler<'ctx> {
             "callDynamicMethodHandleRaw" => self.compile_call_dynamic_method_handle(args, true),
             "readDynamicValue" => self.compile_read_dynamic_value(args),
             "retainDynamicJson" => self.compile_retain_dynamic_json(args),
+            "retainDynamicNative" => self.compile_retain_dynamic_native(args),
+            "retainEventKey" => self.compile_retain_event_key(args),
+            "__thaw_mark_typed_wrapper_json_argument" => {
+                let [kind, key, argument] = args else {
+                    return Some(Err("typed-wrapper JSON ownership marker expects owner kind, key, and value".into()));
+                };
+                let owner = match (kind, key) {
+                    (HirExpr::Lit(HirLit::Str(kind)), HirExpr::Lit(HirLit::Str(key))) => {
+                        match kind.as_str() {
+                            "wrapper" => TypedJsonArgumentOwner::ProvenWrapper(key.clone()),
+                            "direct-quickjs" => TypedJsonArgumentOwner::DirectQuickJs(key.clone()),
+                            "napi-constructor" => TypedJsonArgumentOwner::NapiConstructor(key.clone()),
+                            _ => return Some(Err("typed-wrapper JSON ownership marker has unknown owner kind".into())),
+                        }
+                    }
+                    _ => return Some(Err("typed-wrapper JSON ownership marker owner must be literal".into())),
+                };
+                (|| {
+                    let value = self.compile_expr(argument)?.into_pointer_value();
+                    self.track_typed_wrapper_json_argument(value, &owner)?;
+                    Ok(value.into())
+                })()
+            }
             "@@thaw_retain_borrowed_dynamic_handle" =>
                 self.compile_retain_borrowed_dynamic_handle(args),
             "__thaw_json_host_from_dynamic" => self.compile_host_json_from_dynamic(args),
+            "__thaw_json_from_consumed_dynamic" => self.compile_consumed_json_from_dynamic(args),
             "__thaw_json_host_from_borrowed_dynamic" =>
                 self.compile_host_json_from_borrowed_dynamic(args),
             "__thaw_lookup_native_object" => self.compile_lookup_native_object(args),
             "__thaw_lookup_native_projector" => self.compile_lookup_native_projector(args),
+            "__thaw_register_native_exception_describer" =>
+                self.compile_register_native_exception_describer(args),
+            "__thaw_lookup_native_exception_describer" =>
+                self.compile_lookup_native_exception_describer(args),
             "__thaw_register_native_object_projector" =>
                 self.compile_register_native_object_projector(args),
             "__thaw_register_native_object_layout" =>
@@ -209,7 +260,41 @@ impl<'ctx> HirCompiler<'ctx> {
         self.builder.build_call(self.module.get_function("thaw_js_release_handle").unwrap(),
             &[handle.into()], "release_live_json_builder_handle")
             .map_err(|error| error.to_string())?;
-        self.compile_check_json_host_error(json, Some("thaw_json_destroy"))
+        let json = self.compile_check_json_host_error(json, Some("thaw_json_destroy"))?;
+        self.mark_fresh_owned_json_result(json)?;
+        Ok(json)
+    }
+
+    /// Consumes the freshly projected handle after the generic Json
+    /// conversion has retained/materialized its own value. Unlike the
+    /// host-only helper above, this preserves the runtime's copy-vs-live
+    /// policy for native object projections.
+    fn compile_consumed_json_from_dynamic(
+        &mut self,
+        args: &[HirExpr],
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let [source] = args else {
+            return Err("consuming JSON conversion expects one handle".into());
+        };
+        self.uses_quickjs = true;
+        self.uses_quickjs_handles = true;
+        self.tracks_owned_json_roots = true;
+        let handle = self.compile_expr(source)?.into_int_value();
+        let json = self.builder.build_call(
+            self.module.get_function("thaw_json_from_borrowed_handle").unwrap(),
+            &[handle.into()], "consumed_dynamic_json",
+        ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+            .ok_or("consuming JSON conversion returned no value")?;
+        // This projection call produced a fresh retained handle. The Json
+        // conversion owns an independent copy/lease, so release the temporary
+        // on both success and HostError paths.
+        self.builder.build_call(
+            self.module.get_function("thaw_js_release_handle").unwrap(),
+            &[handle.into()], "release_consumed_dynamic_projection",
+        ).map_err(|error| error.to_string())?;
+        let json = self.compile_check_json_host_error(json, Some("thaw_json_destroy"))?;
+        self.mark_fresh_owned_json_result(json)?;
+        Ok(json)
     }
 
     fn compile_host_json_from_borrowed_dynamic(
@@ -230,7 +315,9 @@ impl<'ctx> HirCompiler<'ctx> {
             .ok_or("borrowed live JSON host conversion returned no value")?;
         // The source JsValue is borrowed. The std helper retained an
         // independent host lease; the lexical catch carrier keeps its own.
-        self.compile_check_json_host_error(json, Some("thaw_json_destroy"))
+        let json = self.compile_check_json_host_error(json, Some("thaw_json_destroy"))?;
+        self.mark_fresh_owned_json_result(json)?;
+        Ok(json)
     }
 
     /// The exact mixed call consumes each direct handle. A source JsValue is
@@ -291,7 +378,7 @@ impl<'ctx> HirCompiler<'ctx> {
         let json = self
             .builder
             .build_call(
-                self.module.get_function("thaw_json_stringify").unwrap(),
+                self.module.get_function("thaw_json_graph_encode").unwrap(),
                 &[value.into()],
                 "retained_dynamic_json",
             )
@@ -303,7 +390,7 @@ impl<'ctx> HirCompiler<'ctx> {
         let result = self
             .builder
             .build_call(
-                self.module.get_function("thaw_js_retain_json_result").unwrap(),
+                self.module.get_function("thaw_js_retain_graph_result").unwrap(),
                 &[json.into()],
                 "retain_dynamic_json_result",
             )
@@ -334,6 +421,156 @@ impl<'ctx> HirCompiler<'ctx> {
         self.mark_pending_native_text(error)?;
         self.branch_on_pending_exception()?;
         Ok(retained)
+    }
+
+    fn compile_retain_dynamic_native(
+        &mut self,
+        args: &[HirExpr],
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let [source] = args else {
+            return Err("retainDynamicNative expects exactly one argument".into());
+        };
+        let source_type = self.expr_hir_type(source)
+            .ok_or("retainDynamicNative source has no inferred native type")?;
+        if !matches!(&source_type, HirType::Array(_) | HirType::Tuple(_) | HirType::Object(_)) {
+            return Err(format!("retainDynamicNative does not support {source_type:?}"));
+        }
+        self.uses_quickjs = true;
+        self.uses_quickjs_handles = true;
+        self.tracks_owned_json_roots = true;
+        let native = self.compile_expr(source)?;
+        let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+        let entry = self.current_function().get_first_basic_block().unwrap();
+        let entry_builder = self.context.create_builder();
+        if let Some(first) = entry.get_first_instruction() {
+            entry_builder.position_before(&first);
+        } else {
+            entry_builder.position_at_end(entry);
+        }
+        let ledger = entry_builder.build_alloca(ptr_ty, "native_symbol_handle_ledger")
+            .map_err(|error| error.to_string())?;
+        let capacity = entry_builder.build_alloca(self.context.i64_type(), "native_symbol_handle_capacity")
+            .map_err(|error| error.to_string())?;
+        entry_builder.build_store(ledger, ptr_ty.const_null())
+            .map_err(|error| error.to_string())?;
+        entry_builder.build_store(capacity, self.context.i64_type().const_zero())
+            .map_err(|error| error.to_string())?;
+        let ledger = NativeHandleLedger { buffer: ledger, capacity };
+        self.begin_live_native_projection_scope(ledger);
+
+        let projection_function = self.current_function().get_name().to_string_lossy().into_owned();
+        let previous_projection = self.live_native_projection.replace((projection_function, ledger));
+        let previous_dynamic_arguments = self.compiling_quickjs_dynamic_arguments;
+        self.compiling_quickjs_dynamic_arguments = true;
+        let projection = match &source_type {
+            HirType::Array(element) => self.compile_native_array_to_json_with_undefined(
+                native.into_pointer_value(), element, true,
+            ),
+            HirType::Tuple(elements) => self.compile_native_tuple_to_json_with_undefined(
+                native.into_pointer_value(), elements, true,
+            ),
+            HirType::Object(_) => self.compile_native_object_to_json_with_undefined(
+                native.into_pointer_value(), &source_type, true,
+            ),
+            _ => unreachable!(),
+        };
+        self.compiling_quickjs_dynamic_arguments = previous_dynamic_arguments;
+        self.live_native_projection = previous_projection;
+        let projected = projection?;
+        let wire = self.builder.build_call(
+            self.module.get_function("thaw_json_graph_encode").unwrap(),
+            &[projected.into()], "native_projection_graph_wire",
+        ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+            .ok_or("native projection graph encoder returned no wire")?;
+        let wire = self.compile_check_json_graph_result_error(wire, &[projected], &[], &[])?;
+        self.builder.build_call(
+            self.module.get_function("thaw_json_destroy").unwrap(), &[projected.into()],
+            "destroy_native_projection_tree",
+        ).map_err(|error| error.to_string())?;
+        let result = self.builder.build_call(
+            self.module.get_function("thaw_js_retain_graph_result").unwrap(),
+            &[wire.into()], "native_projection_graph_result",
+        ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+            .ok_or("native projection graph decoder returned no result")?.into_struct_value();
+        let retained = self.builder.build_extract_value(result, 0, "native_projection_handle")
+            .map_err(|error| error.to_string())?;
+        let error = self.builder.build_extract_value(result, 1, "native_projection_error")
+            .map_err(|error| error.to_string())?;
+        self.builder.build_call(
+            self.module.get_function("thaw_cstring_destroy").unwrap(), &[wire.into()],
+            "destroy_native_projection_wire",
+        ).map_err(|error| error.to_string())?;
+        self.builder.build_store(self.pending_exception().as_pointer_value(), error)
+            .map_err(|error| error.to_string())?;
+        self.clear_pending_native_text()?;
+        self.mark_pending_native_text(error)?;
+        self.branch_on_pending_exception()?;
+        // Success transfers all nested values into the retained JS graph.
+        self.release_native_handle_ledger(ledger)?;
+        self.finish_live_native_projection_scope()?;
+        // If this projection occurs while evaluating a typed QuickJS call
+        // argument, the returned object handle belongs to that outer call's
+        // lease scope. This makes a later argument exception release it.
+        self.track_fresh_event_key_handle(retained.into_int_value())?;
+        Ok(retained)
+    }
+
+    fn compile_retain_event_key(
+        &mut self,
+        args: &[HirExpr],
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let [value, is_symbol] = args else {
+            return Err("retainEventKey expects a native scalar and kind flag".into());
+        };
+        let value_type = self.expr_hir_type(value).ok_or("native scalar has no inferred type")?;
+        if !matches!(value_type, HirType::Str | HirType::Symbol) {
+            return Err("retainEventKey only accepts native strings and Symbols".into());
+        }
+        self.uses_quickjs = true;
+        self.uses_quickjs_handles = true;
+        let value = self.compile_expr(value)?.into_pointer_value();
+        let is_symbol = self.compile_expr(is_symbol)?.into_int_value();
+        let is_symbol = self.builder.build_int_z_extend(
+            is_symbol, self.context.i8_type(), "native_scalar_is_symbol_i8",
+        ).map_err(|error| error.to_string())?;
+        let array = self.builder.build_call(
+            self.module.get_function("thaw_json_array_new").unwrap(), &[], "native_scalar_wire",
+        ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+            .ok_or("thaw_json_array_new returned no native scalar wire")?;
+        self.builder.build_call(
+            self.module.get_function("thaw_json_array_push_native_wtf8_string").unwrap(),
+            &[array.into(), value.into()], "native_scalar_wire_push",
+        ).map_err(|error| error.to_string())?;
+        let json = self.builder.build_call(
+            self.module.get_function("thaw_json_stringify").unwrap(),
+            &[array.into()], "native_scalar_wire_json",
+        ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+            .ok_or("thaw_json_stringify returned no native scalar JSON")?;
+        let json = self.compile_check_json_stringify_error_with_cleanup(json, &[array])?;
+        let result = self.builder.build_call(
+            self.module.get_function("thaw_js_event_key_handle_result").unwrap(),
+            &[json.into(), is_symbol.into()], "native_scalar_handle_result",
+        ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+            .ok_or("native scalar bridge returned no result")?.into_struct_value();
+        let handle = self.builder.build_extract_value(result, 0, "native_scalar_handle")
+            .map_err(|error| error.to_string())?;
+        let error = self.builder.build_extract_value(result, 1, "native_scalar_error")
+            .map_err(|error| error.to_string())?;
+        self.builder.build_call(
+            self.module.get_function("thaw_cstring_destroy").unwrap(), &[json.into()],
+            "destroy_native_scalar_wire_json",
+        ).map_err(|error| error.to_string())?;
+        self.builder.build_call(
+            self.module.get_function("thaw_json_destroy").unwrap(), &[array.into()],
+            "destroy_native_scalar_wire_array",
+        ).map_err(|error| error.to_string())?;
+        self.builder.build_store(self.pending_exception().as_pointer_value(), error)
+            .map_err(|error| error.to_string())?;
+        self.clear_pending_native_text()?;
+        self.mark_pending_native_text(error)?;
+        self.branch_on_pending_exception()?;
+        self.track_fresh_event_key_handle(handle.into_int_value())?;
+        Ok(handle)
     }
 
     fn compile_set_dynamic_property_json(
@@ -380,7 +617,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .try_as_basic_value()
             .basic()
             .unwrap();
-        let args_json = self.compile_check_json_stringify_error_with_cleanup(args_json, &[array])?;
+        let args_json = self.compile_check_json_stringify_error_with_cleanup(args_json, &[array.into()])?;
         let result = self
             .builder
             .build_call(
@@ -462,7 +699,7 @@ impl<'ctx> HirCompiler<'ctx> {
             "cached_native_object_tag")
             .map_err(|error| error.to_string())?.into_struct_value();
         self.builder.build_insert_value(tagged, handle, 1, "cached_native_object_value")
-            .map(Into::into).map_err(|error| error.to_string())
+            .map(|value| value.into_struct_value().into()).map_err(|error| error.to_string())
     }
 
     fn compile_require_native_owner(
@@ -492,7 +729,7 @@ impl<'ctx> HirCompiler<'ctx> {
         Ok(self.context.i8_type().const_zero().into())
     }
 
-    fn compile_register_native_object_layout(
+    pub(super) fn compile_register_native_object_layout(
         &mut self, args: &[HirExpr],
     ) -> Result<BasicValueEnum<'ctx>, String> {
         let [owner, HirExpr::Lit(HirLit::Bool(required))] = args else {
@@ -585,6 +822,43 @@ impl<'ctx> HirCompiler<'ctx> {
         Ok(self.context.i8_type().const_zero().into())
     }
 
+    fn compile_register_native_exception_describer(
+        &mut self, args: &[HirExpr],
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let [owner, factory] = args else {
+            return Err("exception describer registration expects owner and factory".into());
+        };
+        let owner = self.compile_expr(owner)?.into_pointer_value();
+        let factory = self.compile_expr(factory)?.into_pointer_value();
+        Ok(self.builder.build_call(
+            self.module.get_function("thaw_object_register_describer").unwrap(),
+            &[owner.into(), factory.into()], "register_exception_describer",
+        ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+            .ok_or("exception describer registration returned no value")?)
+    }
+
+    fn compile_lookup_native_exception_describer(
+        &mut self, args: &[HirExpr],
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let [owner] = args else {
+            return Err("exception describer lookup expects an owner".into());
+        };
+        let owner = self.compile_expr(owner)?.into_pointer_value();
+        let describer = self.builder.build_call(
+            self.module.get_function("thaw_object_describer").unwrap(),
+            &[owner.into()], "lookup_exception_describer",
+        ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+            .ok_or("exception describer lookup returned no value")?.into_pointer_value();
+        let present = self.builder.build_is_not_null(describer, "exception_describer_present")
+            .map_err(|error| error.to_string())?;
+        let ty = self.basic_type(&HirType::Optional(Box::new(HirType::Function(
+            Vec::new(), Box::new(HirType::Json)))))?.into_struct_type();
+        let tagged = self.builder.build_insert_value(ty.get_undef(), present, 0,
+            "exception_describer_tag").map_err(|error| error.to_string())?.into_struct_value();
+        self.builder.build_insert_value(tagged, describer, 1, "exception_describer_value")
+            .map(|value| value.into_struct_value().into()).map_err(|error| error.to_string())
+    }
+
     fn compile_lookup_native_projector(
         &mut self, args: &[HirExpr],
     ) -> Result<BasicValueEnum<'ctx>, String> {
@@ -606,7 +880,7 @@ impl<'ctx> HirCompiler<'ctx> {
         let tagged = self.builder.build_insert_value(ty.get_undef(), present, 0,
             "native_projector_tag").map_err(|error| error.to_string())?.into_struct_value();
         self.builder.build_insert_value(tagged, projector, 1, "native_projector_value")
-            .map(Into::into).map_err(|error| error.to_string())
+            .map(|value| value.into_struct_value().into()).map_err(|error| error.to_string())
     }
 
     fn compile_intern_native_object(

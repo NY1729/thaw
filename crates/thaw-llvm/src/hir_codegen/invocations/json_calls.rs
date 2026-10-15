@@ -51,6 +51,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 ).map_err(|error| error.to_string())?;
                 self.compile_throw_builtin_error("SyntaxError", "Unexpected token in JSON")?;
                 self.builder.position_at_end(valid);
+                self.mark_fresh_owned_json_result(result)?;
                 return Ok(result);
             }
             "JSON.stringify" => {
@@ -92,6 +93,14 @@ impl<'ctx> HirCompiler<'ctx> {
                 return self.compile_single_arg_call(
                     "thaw_json_receiver_number", args, "JSON number");
             }
+            "__thaw_json_error_to_string" => {
+                return self.compile_single_arg_call(
+                    "thaw_json_error_to_string", args, "caught JSON toString");
+            }
+            "__thaw_json_error_stack" => {
+                return self.compile_single_arg_call(
+                    "thaw_json_error_stack", args, "caught JSON stack");
+            }
             "__thaw_json_receiver_string" => {
                 return self.compile_single_arg_call(
                     "thaw_json_receiver_string", args, "JSON string");
@@ -109,7 +118,9 @@ impl<'ctx> HirCompiler<'ctx> {
                     &[value.into()], "json_receiver_bool",
                 ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
                     .ok_or("JSON bool constructor returned no value")?;
-                return self.compile_check_json_host_error(result, Some("thaw_json_destroy"));
+                let result = self.compile_check_json_host_error(result, Some("thaw_json_destroy"))?;
+                self.mark_fresh_owned_json_result(result)?;
+                return Ok(result);
             }
             "__thaw_json_undefined" | "__thaw_json_null" => {
                 if !args.is_empty() {
@@ -124,13 +135,20 @@ impl<'ctx> HirCompiler<'ctx> {
                     self.module.get_function(symbol).unwrap(), &[], "json_receiver_constant",
                 ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
                     .ok_or("JSON constant constructor returned no value")?;
-                return self.compile_check_json_host_error(result, Some("thaw_json_destroy"));
+                let result = self.compile_check_json_host_error(result, Some("thaw_json_destroy"))?;
+                self.mark_fresh_owned_json_result(result)?;
+                return Ok(result);
             }
             "__thaw_json_track_owned" => {
                 let result = self.compile_single_arg_call(
                     "thaw_json_track_arena_owned_root", args, "owned catch JSON root",
                 )?;
                 return self.compile_check_json_host_error(result, None);
+            }
+            "__thaw_json_argument_array" => {
+                let result = self.compile_owned_json_argument_array(args)?;
+                self.mark_fresh_owned_json_result(result)?;
+                return Ok(result);
             }
             "__thaw_json_is_date_shape" => {
                 let [value] = args else {
@@ -179,6 +197,50 @@ impl<'ctx> HirCompiler<'ctx> {
                         zero,
                         "json_is_buffer_shape",
                     )
+                    .map(Into::into)
+                    .map_err(|error| error.to_string());
+            }
+            "__thaw_json_is_not_iterable" => {
+                let [value] = args else {
+                    return Err("__thaw_json_is_not_iterable expects one argument".into());
+                };
+                let value = self.compile_expr(value)?;
+                let function = self.module.get_function("thaw_json_is_not_iterable").unwrap();
+                let call = self
+                    .builder
+                    .build_call(function, &[value.into()], "json_is_not_iterable_u8")
+                    .map_err(|error| error.to_string())?;
+                let u8_val = call
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("thaw_json_is_not_iterable did not return a value")?
+                    .into_int_value();
+                let zero = self.context.i8_type().const_int(0, false);
+                return self
+                    .builder
+                    .build_int_compare(inkwell::IntPredicate::NE, u8_val, zero, "json_is_not_iterable")
+                    .map(Into::into)
+                    .map_err(|error| error.to_string());
+            }
+            "__thaw_json_is_live_iterable" => {
+                let [value] = args else {
+                    return Err("__thaw_json_is_live_iterable expects one argument".into());
+                };
+                let value = self.compile_expr(value)?;
+                let function = self.module.get_function("thaw_json_is_live_iterable").unwrap();
+                let call = self
+                    .builder
+                    .build_call(function, &[value.into()], "json_is_live_iterable_u8")
+                    .map_err(|error| error.to_string())?;
+                let u8_val = call
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("thaw_json_is_live_iterable did not return a value")?
+                    .into_int_value();
+                let zero = self.context.i8_type().const_int(0, false);
+                return self
+                    .builder
+                    .build_int_compare(inkwell::IntPredicate::NE, u8_val, zero, "json_is_live_iterable")
                     .map(Into::into)
                     .map_err(|error| error.to_string());
             }
@@ -372,7 +434,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     .map_err(|error| error.to_string())?
                     .try_as_basic_value()
                     .basic()
-                    .ok_or("JSON.stringify returned no value".into())?;
+                    .ok_or_else(|| String::from("JSON.stringify returned no value"))?;
                 return self.compile_check_json_stringify_error(result);
             }
             "__thaw_json_stringify_string_space" => {
@@ -393,7 +455,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     .map_err(|error| error.to_string())?
                     .try_as_basic_value()
                     .basic()
-                    .ok_or("JSON.stringify returned no value".into())?;
+                    .ok_or_else(|| String::from("JSON.stringify returned no value"))?;
                 return self.compile_check_json_stringify_error(result);
             }
             "__thaw_json_stringify_keys" => {
@@ -414,7 +476,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     .map_err(|error| error.to_string())?
                     .try_as_basic_value()
                     .basic()
-                    .ok_or("JSON.stringify returned no value".into())?;
+                    .ok_or_else(|| String::from("JSON.stringify returned no value"))?;
                 return self.compile_check_json_stringify_error(result);
             }
             "__thaw_json_stringify_keys_number_space"
@@ -439,7 +501,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     .map_err(|error| error.to_string())?
                     .try_as_basic_value()
                     .basic()
-                    .ok_or("JSON.stringify returned no value".into())?;
+                    .ok_or_else(|| String::from("JSON.stringify returned no value"))?;
                 return self.compile_check_json_stringify_error(result);
             }
             "__thaw_json_array_join" => {
@@ -523,7 +585,7 @@ impl<'ctx> HirCompiler<'ctx> {
             }
             "__thaw_json_clone" => {
                 return self.compile_single_arg_call(
-                    name.trim_start_matches("__"),
+                    "thaw_json_structured_clone",
                     args,
                     "structuredClone",
                 );
@@ -606,7 +668,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     .basic()
                     .ok_or_else(|| "thaw_json_index_get_mut returned no value".to_string());
             }
-            "__thaw_json_keys" | "__thaw_json_own_keys" => {
+            "__thaw_json_keys" | "__thaw_json_for_in_keys" | "__thaw_json_own_keys" => {
                 return self.compile_json_enumeration(name.trim_start_matches("__"), args);
             }
             "__thaw_array_keys" => {
@@ -887,13 +949,39 @@ impl<'ctx> HirCompiler<'ctx> {
         )
     }
 
-    fn compile_check_json_stringify_error_with_inputs_and_handles(
+    pub(super) fn compile_check_json_stringify_error_with_inputs_and_handles(
         &mut self,
         result: BasicValueEnum<'ctx>,
         cleanup: &[BasicValueEnum<'ctx>],
         graph_strings: &[BasicValueEnum<'ctx>],
         handles: &[PointerValue<'ctx>],
         direct_handles: &[IntValue<'ctx>],
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        self.compile_check_json_stringify_error_inner(
+            result, cleanup, graph_strings, handles, direct_handles, false,
+        )
+    }
+
+    pub(super) fn compile_check_json_graph_result_error(
+        &mut self,
+        result: BasicValueEnum<'ctx>,
+        cleanup: &[BasicValueEnum<'ctx>],
+        handles: &[PointerValue<'ctx>],
+        direct_handles: &[IntValue<'ctx>],
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        self.compile_check_json_stringify_error_inner(
+            result, cleanup, &[], handles, direct_handles, true,
+        )
+    }
+
+    fn compile_check_json_stringify_error_inner(
+        &mut self,
+        result: BasicValueEnum<'ctx>,
+        cleanup: &[BasicValueEnum<'ctx>],
+        graph_strings: &[BasicValueEnum<'ctx>],
+        handles: &[PointerValue<'ctx>],
+        direct_handles: &[IntValue<'ctx>],
+        graph_result: bool,
     ) -> Result<BasicValueEnum<'ctx>, String> {
         let error = self.builder.build_call(
             self.module.get_function("thaw_json_take_stringify_error").unwrap(),
@@ -909,6 +997,12 @@ impl<'ctx> HirCompiler<'ctx> {
         self.builder.build_conditional_branch(failed, invalid, valid)
             .map_err(|error| error.to_string())?;
         self.builder.position_at_end(invalid);
+        if graph_result {
+            self.builder.build_call(
+                self.module.get_function("thaw_json_discard_graph_wire").unwrap(),
+                &[result.into()], "release_failed_graph_result_grant",
+            ).map_err(|error| error.to_string())?;
+        }
         self.builder.build_call(
             self.module.get_function("thaw_cstring_destroy").unwrap(),
             &[result.into()], "discard_cyclic_json",
@@ -939,6 +1033,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 &[(*handle).into()], "release_failed_projection_builder")
                 .map_err(|error| error.to_string())?;
         }
+        self.release_live_native_projection_ledgers_before_throw()?;
         self.compile_throw_builtin_error("TypeError", "Converting circular structure to JSON")?;
         self.builder.position_at_end(valid);
         let host_error = self.builder.build_call(
@@ -953,6 +1048,12 @@ impl<'ctx> HirCompiler<'ctx> {
         self.builder.build_conditional_branch(has_host_error, host_failed, host_valid)
             .map_err(|error| error.to_string())?;
         self.builder.position_at_end(host_failed);
+        if graph_result {
+            self.builder.build_call(
+                self.module.get_function("thaw_json_discard_graph_wire").unwrap(),
+                &[result.into()], "release_failed_graph_result_grant",
+            ).map_err(|error| error.to_string())?;
+        }
         self.builder.build_call(self.module.get_function("thaw_cstring_destroy").unwrap(),
             &[result.into()], "discard_failed_host_stringify")
             .map_err(|error| error.to_string())?;
@@ -984,6 +1085,7 @@ impl<'ctx> HirCompiler<'ctx> {
         self.clear_pending_native_text()?;
         self.mark_pending_native_text(host_error)?;
         self.branch_on_pending_exception()?;
+        self.builder.build_unconditional_branch(host_valid).map_err(|error| error.to_string())?;
         self.builder.position_at_end(host_valid);
         Ok(result)
     }

@@ -183,7 +183,7 @@
     {
       "name": "v8 serialization round trip",
       "expect": "matched",
-      "source": "import { deserialize, serialize } from 'node:v8'; function main(): void { const value = deserialize(serialize({ name: 'thaw', values: [1, 2] })); console.log(JSON.stringify(value)); }"
+      "source": "import { deserialize, serialize } from 'node:v8'; function main(): void { const invalid = new Date(NaN); const value = deserialize(serialize({ valid: new Date(1234), invalid, again: invalid })); console.log(value.valid.getTime(), Number.isNaN(value.invalid.getTime()), value.invalid === value.again); }"
     },
     {
       "name": "crypto random bytes and timing safe equality",
@@ -839,6 +839,21 @@
       "source": "import { runInNewContext } from 'node:vm'; function main(): void { runInNewContext(`Object.prototype.thawVmLeak = 1`); console.log(runInNewContext(`typeof Object.prototype.thawVmLeak`)); }"
     },
     {
+      "name": "vm context declarations persist across runs",
+      "expect": "matched",
+      "source": "import { createContext, runInContext } from 'node:vm'; function main(): void { const context: any = createContext({ a: 1 }); runInContext('var x = 10; let y = 20; const z = 30; function g() { return x + y + z; }', context); console.log(runInContext('g() + a + typeof y', context), context.x, typeof context.y, typeof context.g); }"
+    },
+    {
+      "name": "vm context timeout interrupts a runaway script",
+      "expect": "matched",
+      "source": "import { runInNewContext, runInContext, createContext } from 'node:vm'; function main(): void { const context = createContext({}); try { runInContext('while (true) {}', context, { timeout: 30 }); } catch (error: any) { console.log(error.code, error.message); } console.log(runInContext('1 + 1', context)); try { runInNewContext('for (;;) {}', {}, { timeout: 20 }); } catch (error: any) { console.log(error.code, error instanceof Error); } }"
+    },
+    {
+      "name": "vm many contexts are created and released",
+      "expect": "matched",
+      "source": "import { createContext, runInContext } from 'node:vm'; function main(): void { let total = 0; for (let index = 0; index < 300; index++) { const context: any = createContext({ index }); total += runInContext('var square = index * index; square', context); } console.log(total); }"
+    },
+    {
       "name": "performance event loop delay histogram",
       "expect": "matched",
       "source": "import { monitorEventLoopDelay } from 'node:perf_hooks'; async function main(): Promise<void> { const histogram = monitorEventLoopDelay({ resolution: 1 }); histogram.enable(); await new Promise<void>((resolve) => setTimeout(resolve, 20)); histogram.disable(); console.log(histogram.count > 0, histogram.min > 0, histogram.max >= histogram.min, histogram.mean >= histogram.min, histogram.percentile(50) > 0); }"
@@ -862,6 +877,66 @@
       "name": "cluster executes worker process",
       "expect": "matched",
       "source": "import cluster, { isPrimary } from 'node:cluster'; import process from 'node:process'; function main(): void { if (isPrimary) cluster.fork(); else { console.log('worker'); process.disconnect(); } }"
+    },
+    {
+      "name": "zlib callbacks round trip off the event loop",
+      "expect": "matched",
+      "source": "import zlib from 'node:zlib';\nconst input = Buffer.from('hello hello hello hello');\nfunction roundTrip(next: () => void): void { zlib.gzip(input, (error: any, packed: Buffer) => { const first = error === null; zlib.gunzip(packed, (error2: any, plain: Buffer) => { console.log(first, error2 === null, plain.toString()); next(); }); }); }\nfunction invalid(next: () => void): void { zlib.gunzip(Buffer.from('not gzip data'), (error3: any, none: any) => { console.log(error3.code, none === undefined); next(); }); }\nfunction withOptions(next: () => void): void { zlib.deflate(input, { level: 9 }, (error4: any, deflated: Buffer) => { const ok = error4 === null; zlib.inflate(deflated, (error5: any, inflated: Buffer) => { console.log(ok, error5 === null, inflated.toString() === 'hello hello hello hello'); next(); }); }); }\nfunction main(): void { roundTrip(() => { invalid(() => { withOptions(() => { console.log('done'); }); }); }); }"
+    },
+    {
+      "name": "event loop utilization reports idle time",
+      "expect": "matched",
+      "source": "import { performance } from 'node:perf_hooks'; function main(): void { const before = performance.eventLoopUtilization(); console.log(before.idle === 0, before.active === 0, before.utilization === 0); setTimeout(() => { const first = performance.eventLoopUtilization(); setTimeout(() => { const delta = performance.eventLoopUtilization(first); console.log(delta.idle > 0, delta.active >= 0, delta.utilization >= 0 && delta.utilization < 1); const whole = performance.eventLoopUtilization(); console.log(whole.idle > 0, whole.active > 0, whole.idle + whole.active > 40); }, 60); }, 10); }"
+    },
+    {
+      "name": "unref keeps a spawned child from holding the process open",
+      "expect": "matched",
+      "source": "import { spawn } from 'node:child_process'; function main(): void { const child = spawn('sleep', ['1.5'], { stdio: 'ignore' }); child.unref(); child.on('exit', () => { console.log('child exited'); }); console.log('started'); }"
+    },
+    {
+      "name": "child stdio inherit writes straight to the parent output",
+      "expect": "matched",
+      "source": "import { spawn } from 'node:child_process'; function main(): void { console.log('before'); const child = spawn('echo', ['inherited'], { stdio: 'inherit' }); child.on('close', (code: any) => { console.log('closed', code, child.stdout === null, child.stderr === null, child.stdin === null); }); }"
+    },
+    {
+      "name": "async_hooks createHook reports resources timers and promises",
+      "expect": "matched",
+      "source": "import { createHook, AsyncResource, executionAsyncId, triggerAsyncId } from 'node:async_hooks'; function main(): void { const types = new Map<number, string>(); const log: string[] = []; const hook = createHook({ init(id: number, type: string, trigger: number) { if (type === 'MyRes' || type === 'Timeout' || type === 'PROMISE') { types.set(id, type); if (type !== 'PROMISE') log.push('init:' + type); } }, before(id: number) { const t = types.get(id); if (t && t !== 'PROMISE') log.push('before:' + t); }, after(id: number) { const t = types.get(id); if (t && t !== 'PROMISE') log.push('after:' + t); }, destroy(id: number) { const t = types.get(id); if (t && t !== 'PROMISE') log.push('destroy:' + t); }, promiseResolve(id: number) { if (types.get(id) === 'PROMISE') log.push('resolve:PROMISE'); } }).enable(); const resource = new AsyncResource('MyRes'); resource.runInAsyncScope(() => { log.push('scope ' + (executionAsyncId() === resource.asyncId()) + ' ' + (triggerAsyncId() === resource.triggerAsyncId())); }); setTimeout(() => { log.push('timeout'); resource.emitDestroy(); }, 10); setTimeout(() => { hook.disable(); console.log(log.filter((entry) => !entry.endsWith('PROMISE')).join(',')); }, 40); }"
+    },
+    {
+      "name": "async_hooks createHook validates callbacks and can be disabled",
+      "expect": "matched",
+      "source": "import { createHook, AsyncResource } from 'node:async_hooks'; function main(): void { try { createHook({ init: 1 } as any); } catch (error: any) { console.log(error.code, error.message); } let count = 0; const hook = createHook({ init(id: number, type: string) { if (type !== 'PROMISE') count++; } }); new AsyncResource('Before'); hook.enable(); new AsyncResource('During'); hook.disable(); new AsyncResource('After'); console.log(count, hook.enable() === hook, hook.disable() === hook); }"
+    },
+    {
+      "name": "cluster workers are real processes with an IPC channel",
+      "expect": "matched",
+      "source": "import cluster from 'node:cluster'; import process from 'node:process'; function main(): void { if (cluster.isPrimary) { const worker = cluster.fork(); const log: string[] = []; worker.on('online', () => { log.push('online'); worker.send({ hello: 1 }); }); worker.on('message', (message: any) => { log.push('message ' + JSON.stringify(message)); log.push('connected ' + worker.isConnected()); worker.kill(); }); worker.on('disconnect', () => { log.push('disconnect'); }); worker.on('exit', (code: any, signal: any) => { log.push('exit ' + signal + ' dead ' + worker.isDead() + ' after ' + worker.exitedAfterDisconnect); console.log(log.join('|')); }); } else { process.on('message', (message: any) => { process.send!({ echo: message, worker: cluster.worker!.id }); }); } }"
+    },
+    {
+      "name": "vm timeout while a tls handshake is pending",
+      "expect": "matched",
+      "source": "import net from 'node:net'; import tls from 'node:tls'; import { runInNewContext } from 'node:vm'; function main(): void { const server = net.createServer((_socket: any) => {}); server.listen(0, '127.0.0.1', () => { const port = (server.address() as any).port; const client = tls.connect({ host: '127.0.0.1', port, rejectUnauthorized: false }); client.on('error', () => {}); let ticks = 0; const timer = setInterval(() => { ticks++; }, 5); try { runInNewContext('while (true) {}', {}, { timeout: 30 }); } catch (error: any) { console.log(error.code); } setTimeout(() => { console.log('timer ran during pending handshake', ticks > 0); console.log('handshake still pending', client.authorized === false); clearInterval(timer); client.destroy(); server.close(); }, 60); }); }"
+    },
+    {
+      "name": "zlib completes off the loop while a net connect and writes are pending",
+      "expect": "matched",
+      "source": "import net from 'node:net'; import zlib from 'node:zlib';\nfunction main(): void {\n  const server = net.createServer((_socket: any) => {});\n  server.listen(0, '127.0.0.1', () => {\n    const port = (server.address() as any).port;\n    const client = net.connect({ host: '127.0.0.1', port });\n    client.on('error', () => {});\n    let ticks = 0;\n    const timer = setInterval(() => { ticks++; }, 2);\n    const input = Buffer.alloc(4 * 1024 * 1024); input.fill(97);\n    zlib.gzip(input, (e: any, packed: Buffer) => {\n      const gzipOk = e === null;\n      zlib.gunzip(packed, (e2: any, plain: Buffer) => {\n        const gunzipOk = e2 === null;\n        client.write('x', () => {\n          console.log('zlib', gzipOk, gunzipOk, plain.length === input.length);\n          console.log('timer ran during zlib', ticks > 0);\n          console.log('connected', client.remotePort === port);\n          clearInterval(timer); client.destroy(); server.close();\n        });\n      });\n    });\n  });\n}"
+    },
+    {
+      "name": "buffer alloc fills with a repeated pattern",
+      "expect": "matched",
+      "source": "function main(): void {\n  const a = Buffer.alloc(5, 'ab');\n  const b = Buffer.alloc(4, 7);\n  const c = Buffer.alloc(6, Buffer.from('xyz'));\n  const d = Buffer.alloc(4, 'aGk=', 'base64');\n  const e = Buffer.alloc(3, 'ff', 'hex');\n  const f = Buffer.alloc(3);\n  console.log(a.toString(), b.join(','), c.toString(), d.toString('hex'), e.toString('hex'), f.join(','));\n}\n"
+    },
+    {
+      "name": "captured any compares equal to null inside nested closures",
+      "expect": "matched",
+      "source": "import zlib from 'node:zlib';\nfunction main(): void {\n  const input = Buffer.from('hello world hello world');\n  zlib.gzip(input, (e: any, packed: Buffer) => {\n    zlib.gunzip(packed, (e2: any, plain: Buffer) => {\n      setTimeout(() => {\n        console.log('deep', e === null, e2 === null, plain.length === input.length);\n      }, 1);\n    });\n    const direct = e === null;\n    setTimeout(() => { console.log('mid', e === null, direct); }, 1);\n  });\n}\n"
+    },
+    {
+      "name": "connection handler can call methods on its any socket",
+      "expect": "matched",
+      "source": "import net from 'node:net';\nfunction main(): void {\n  const server = net.createServer((socket: any) => {\n    socket.on('data', (d: any) => { console.log('data', String(d)); socket.end('bye'); });\n    socket.on('error', (e: any) => console.log('err', e && e.code));\n  });\n  server.listen(0, '127.0.0.1', () => {\n    const port = (server.address() as any).port;\n    const c = net.connect(port, '127.0.0.1', () => c.write('hello'));\n    c.on('data', (d: any) => { console.log('client got', String(d)); });\n    c.on('close', () => { console.log('closed'); server.close(); });\n  });\n}\n"
     }
   ]
 }

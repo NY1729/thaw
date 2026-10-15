@@ -126,7 +126,8 @@ function main(): void {
     );
     assert_eq!(
         String::from_utf8_lossy(&result.stdout),
-        "wrapped(thing:gadget)\n{}\n"
+        // Real Node prints the function member by name; the old `{}` oracle was stale.
+        "wrapped(thing:gadget)\n{ describe: [Function: describe] }\n"
     );
     let _ = std::fs::remove_dir_all(dir);
 }

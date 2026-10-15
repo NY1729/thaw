@@ -195,9 +195,10 @@ include!("jit/callables.rs");
 
 fn registry_bundle_js_source_name(package: &str, has_bundle: bool) -> thaw_parser::common::FileName {
     let kind = if has_bundle { "bundle" } else { "missing bundle" };
-    thaw_parser::common::FileName::Custom(format!("{package} {kind} JavaScript").into())
+    thaw_parser::common::FileName::Custom(format!("{package} {kind} JavaScript"))
 }
 
+#[allow(dead_code)]
 fn jit_export(
     source: &str,
     export_name: &str,

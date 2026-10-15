@@ -2,7 +2,7 @@
 fn vm_builtin_runs_scripts_in_contexts_and_compiles_functions() {
     use std::ffi::{CStr, CString};
     let dir = temp_registry("builtin_vm");
-    fs::write(dir.join("index.js"), "var vm = require('node:vm'); module.exports = async function () { var sandbox = { value: 3 }; var context = vm.createContext(sandbox); var script = new vm.Script('value *= 4; created = value + 1; value', { filename: 'sample.js' }); var contextual = script.runInContext(context); var fresh = vm.runInNewContext('input + 2', { input: 5 }); var current = vm.runInThisContext('6 * 7'); var add = vm.compileFunction('return left + right;', ['left', 'right'], { filename: 'add.js' }); var memory = await vm.measureMemory(); var cached = script.createCachedData(); return [contextual, sandbox.value, sandbox.created, fresh, current, add(8, 9), vm.isContext(context), vm.isContext({}), cached.toString().includes('value *= 4'), script.cachedDataRejected, memory.total.jsMemoryEstimate, vm.getDefaultContext() === globalThis, typeof vm.constants.DONT_CONTEXTIFY]; };").unwrap();
+    fs::write(dir.join("index.js"), "var vm = require('node:vm'); module.exports = async function () { var receiverSandbox = { marker: 17 }, receiverContext = vm.createContext(receiverSandbox); if (vm.runInContext('this === globalThis', receiverContext) !== true) throw new Error('vm context receiver'); if (vm.runInContext(\"'use strict'; this === globalThis\", receiverContext) !== true) throw new Error('vm strict context receiver'); if (vm.runInContext('(() => this === globalThis)()', receiverContext) !== true) throw new Error('vm lexical context receiver'); if (vm.runInContext('this.marker += 1; this.marker', receiverContext) !== 18 || receiverSandbox.marker !== 18) throw new Error('vm receiver property'); if (new vm.Script('this === globalThis').runInContext(receiverContext) !== true) throw new Error('vm Script receiver'); if (vm.runInNewContext('this === globalThis', {}) !== true || new vm.Script('this === globalThis').runInNewContext({}) !== true) throw new Error('vm fresh receiver'); if (vm.runInThisContext('this === globalThis') !== true) throw new Error('vm host receiver unchanged'); var invalidContext; try { vm.runInContext('1', {}); } catch (error) { invalidContext = error; } if (!(invalidContext instanceof TypeError)) throw new Error('vm context validation unchanged'); var sandbox = { value: 3 }; var context = vm.createContext(sandbox); var script = new vm.Script('value *= 4; created = value + 1; value', { filename: 'sample.js' }); var contextual = script.runInContext(context); var fresh = vm.runInNewContext('input + 2', { input: 5 }); var current = vm.runInThisContext('6 * 7'); var add = vm.compileFunction('return left + right;', ['left', 'right'], { filename: 'add.js' }); var memory = await vm.measureMemory(); var cached = script.createCachedData(); return [contextual, sandbox.value, sandbox.created, fresh, current, add(8, 9), vm.isContext(context), vm.isContext({}), cached.toString().includes('value *= 4'), script.cachedDataRejected, memory.total.jsMemoryEstimate > 0, vm.getDefaultContext() === globalThis, typeof vm.constants.DONT_CONTEXTIFY]; };").unwrap();
     let empty_node_modules = temp_registry("builtin_vm_node_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
@@ -16,7 +16,7 @@ fn vm_builtin_runs_scripts_in_contexts_and_compiles_functions() {
     let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
     assert_eq!(
         result,
-        r#"[12,12,13,7,42,17,true,false,true,false,0,true,"symbol"]"#
+        r#"[12,12,13,7,42,17,true,false,true,null,true,true,"symbol"]"#
     );
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
@@ -644,7 +644,7 @@ fn tls_client_verifies_custom_ca_and_exchanges_encrypted_bytes() {
             });
 
     let dir = temp_registry("builtin_tls");
-    fs::write(dir.join("index.js"), "var tls = require('node:tls'); module.exports = async function (port, caHex, certHex, keyHex) { var events = []; var socket = new tls.TLSSocket(); socket.on('connect', function() { events.push('connect'); }); socket.on('secureConnect', function() { events.push('secureConnect'); }); socket.on('data', function(chunk) { events.push('data:' + chunk.toString()); }); socket.on('end', function() { events.push('end'); }); var closed = new Promise(function(resolve, reject) { socket.on('error', reject); socket.on('close', function(hadError) { events.push('close:' + hadError); resolve(); }); }); socket.connect({ host: '127.0.0.1', port: port, servername: 'localhost', ca: Buffer.from(caHex, 'hex'), cert: Buffer.from(certHex, 'hex'), key: Buffer.from(keyHex, 'hex'), ALPNProtocols: ['h2', 'http/1.1'] }); socket.end('ping'); await closed; var peer = socket.getPeerCertificate(), local = socket.getCertificate(); var bypassData = '', bypass = new tls.TLSSocket(); var bypassClosed = new Promise(function(resolve, reject) { bypass.on('error', reject); bypass.on('data', function(chunk) { bypassData += chunk.toString(); }); bypass.on('close', resolve); }); bypass.connect({ host: '127.0.0.1', port: port, servername: 'not-localhost', cert: Buffer.from(certHex, 'hex'), key: Buffer.from(keyHex, 'hex'), rejectUnauthorized: false }); bypass.end('insecure'); await bypassClosed; return [events, socket.authorized, socket.authorizationError, socket.encrypted, socket.alpnProtocol, socket.getProtocol(), socket.getCipher().version, socket.bytesWritten, socket.bytesRead, tls.getCiphers().length, tls.DEFAULT_MIN_VERSION, peer.raw.length > 0, local.raw.length > 0, /^(?:[0-9A-F]{2}:){31}[0-9A-F]{2}$/.test(peer.fingerprint256), peer.subject.CN, peer.issuer.CN, local.subject.CN, peer.valid_from.length > 0, peer.valid_to.length > 0, peer.serialNumber.length > 0, bypassData, bypass.authorized, bypass.authorizationError]; };").unwrap();
+    fs::write(dir.join("index.js"), "var tls = require('node:tls'); module.exports = async function (port, caHex, certHex, keyHex) { var events = []; var socket = new tls.TLSSocket(); socket.on('connect', function() { events.push('connect'); }); var snapshot; socket.on('secureConnect', function() { events.push('secureConnect'); snapshot = { protocol: socket.getProtocol(), cipher: socket.getCipher().version, peer: socket.getPeerCertificate(), local: socket.getCertificate() }; }); socket.on('data', function(chunk) { events.push('data:' + chunk.toString()); }); socket.on('end', function() { events.push('end'); }); var closed = new Promise(function(resolve, reject) { socket.on('error', reject); socket.on('close', function(hadError) { events.push('close:' + hadError); resolve(); }); }); socket.connect({ host: '127.0.0.1', port: port, servername: 'localhost', ca: Buffer.from(caHex, 'hex'), cert: Buffer.from(certHex, 'hex'), key: Buffer.from(keyHex, 'hex'), ALPNProtocols: ['h2', 'http/1.1'] }); socket.end('ping'); await closed; var peer = snapshot.peer, local = snapshot.local; var bypassData = '', bypass = new tls.TLSSocket(); var bypassClosed = new Promise(function(resolve, reject) { bypass.on('error', reject); bypass.on('data', function(chunk) { bypassData += chunk.toString(); }); bypass.on('close', resolve); }); bypass.connect({ host: '127.0.0.1', port: port, servername: 'not-localhost', cert: Buffer.from(certHex, 'hex'), key: Buffer.from(keyHex, 'hex'), rejectUnauthorized: false }); bypass.end('insecure'); await bypassClosed; return [events, socket.authorized, socket.authorizationError, socket.encrypted, socket.alpnProtocol, snapshot.protocol, snapshot.cipher, socket.bytesWritten, socket.bytesRead, tls.getCiphers().length, tls.DEFAULT_MIN_VERSION, peer.raw.length > 0, local.raw.length > 0, /^(?:[0-9A-F]{2}:){31}[0-9A-F]{2}$/.test(peer.fingerprint256), peer.subject.CN, peer.issuer.CN, local.subject.CN, peer.valid_from.length > 0, peer.valid_to.length > 0, peer.serialNumber.length > 0, bypassData, bypass.authorized, bypass.authorizationError]; };").unwrap();
     let empty_node_modules = temp_registry("builtin_tls_node_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
@@ -895,4 +895,51 @@ fn form_data_preserves_file_metadata_and_utf8_multipart_parameters() {
     assert_eq!(result, r#"[[true,"日本語.bin","blob","変更.bin",1,true,42,"日本語.bin"],"日本語.bin","application/custom",[0,255,13],"text/plain","hello"]"#);
     let _ = fs::remove_dir_all(dir);
     let _ = fs::remove_dir_all(modules);
+}
+
+#[test]
+fn node_util_text_encoding_exports_and_web_callers_share_fixed_utf8_paths() {
+    use std::ffi::{CStr, CString};
+    let dir = temp_registry("util_text_encoding_contracts");
+    fs::write(
+        dir.join("index.js"),
+        r#"var util = require('node:util'), web = require('node:stream/web'), consumers = require('node:stream/consumers');
+module.exports = async function () {
+  var encoder = new util.TextEncoder(), output = new Uint8Array(5); output.set = function() {};
+  var into = encoder.encodeInto('A😀B', output), encoded = Array.from(new Uint8Array(output.buffer));
+  var invalid; try { new util.TextDecoder().decode({ buffer: new ArrayBuffer(1), byteOffset: 0, byteLength: 1 }); } catch (error) { invalid = error.name; }
+  var fatal = new util.TextDecoder('utf-8', { fatal: true }); fatal.decode(new Uint8Array([65]), { stream: true }); var failed = false;
+  try { fatal.decode(new Uint8Array([255])); } catch (error) { failed = error instanceof TypeError; }
+  var afterFatal = fatal.decode(new Uint8Array([239, 187, 191, 66]));
+  var blobText = await new Blob(['Blob']).text(), responseText = await new Response('Response').text();
+  var requestText = await new Request('https://example.test/', { method: 'POST', body: 'Request' }).text();
+  var formBom = new URLSearchParams('x=%EF%BB%BFy').get('x').codePointAt(0);
+  var source = new web.ReadableStream({ start: function(controller) { controller.enqueue(new Uint8Array([239, 187])); controller.enqueue(new Uint8Array([191, 226, 130])); controller.enqueue(new Uint8Array([172])); controller.close(); } });
+  var decoderStream = await consumers.text(source.pipeThrough(new web.TextDecoderStream()));
+  var strings = new web.ReadableStream({ start: function(controller) { controller.enqueue('\ud83d'); controller.enqueue('\ude00A'); controller.close(); } });
+  var encoderStream = await consumers.text(strings.pipeThrough(new web.TextEncoderStream()).pipeThrough(new web.TextDecoderStream()));
+  return [util.TextEncoder === globalThis.TextEncoder, util.TextDecoder === globalThis.TextDecoder,
+    into, encoded, invalid, failed, afterFatal, blobText, responseText, requestText, formBom, decoderStream, encoderStream];
+};"#,
+    )
+    .unwrap();
+    let empty_node_modules = temp_registry("util_text_encoding_contracts_modules");
+    let (bundle, _, _, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    let script = format!(
+        "globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseUtilText = module.exports;"
+    );
+    let source = CString::new(script).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let result_ptr = thaw_quickjs::thaw_js_call(
+        CString::new("exerciseUtilText").unwrap().as_ptr(),
+        CString::new("[]").unwrap().as_ptr(),
+    );
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(
+        result,
+        r#"[true,true,{"read":3,"written":5},[65,240,159,152,128],"TypeError",true,"B","Blob","Response","Request",65279,"€","😀A"]"#
+    );
+    let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(empty_node_modules);
 }

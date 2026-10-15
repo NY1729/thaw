@@ -359,6 +359,12 @@ impl<'a> FnLowerer<'a> {
         // receiver is itself the *method call* `z.string().min(2)`, which
         // needs this same hint recursively for its own receiver in turn.
         let receiver = self.lower_expr_with_expected_type(receiver_expr, Some(&HirType::JsValue))?;
+        // A `Json` receiver (a live native-owner wrapper) yields its host handle.
+        let receiver = if self.infer_expr_type(&receiver)? == HirType::Json {
+            self.coerce_to_declared(&HirType::JsValue, receiver)?
+        } else {
+            receiver
+        };
         // Each argument gets the same one-shot `JsValue` hint the receiver
         // just did, for the identical reason: an argument that's itself a
         // method call chained off a `JsValue` receiver (`z.string().pipe(
@@ -376,6 +382,11 @@ impl<'a> FnLowerer<'a> {
             .iter()
             .map(|argument| {
                 let value = match argument.expr.as_ref() {
+                    // Preserve a fixed native object until the Json coercion
+                    // can mark its acquired live projection as owned. Forcing
+                    // JsValue here first would route through the generic
+                    // borrowed-handle wrapper and erase that provenance.
+                    Expr::Object(_) => self.lower_expr(&argument.expr)?,
                     Expr::Arrow(arrow) => {
                         let expected_return = if arrow.is_async {
                             HirType::Promise(Box::new(HirType::JsValue))
@@ -396,7 +407,17 @@ impl<'a> FnLowerer<'a> {
                 self.coerce_to_declared(&HirType::Json, value)
             })
             .collect::<Result<Vec<_>, String>>()?;
-        let array = self.coerce_to_declared(&HirType::Json, HirExpr::ArrayLit(json_args))?;
+        // Preserve the exact owned producer at this ABI boundary. The
+        // generated Array<Json> wrapper otherwise hides which temporary Box
+        // must be dropped after cloning into the call graph.
+        let array = if json_args.iter().any(Self::is_owned_consumed_dynamic_json) {
+            HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_json_argument_array".into())),
+                json_args,
+            )
+        } else {
+            self.coerce_to_declared(&HirType::Json, HirExpr::ArrayLit(json_args))?
+        };
         let call = HirExpr::Call(
             Box::new(HirExpr::Var(intrinsic.to_string())),
             vec![receiver, HirExpr::Lit(HirLit::Str(property.to_string())), array],
@@ -406,6 +427,15 @@ impl<'a> FnLowerer<'a> {
         } else {
             Ok(call)
         }
+    }
+
+    fn is_owned_consumed_dynamic_json(expr: &HirExpr) -> bool {
+        matches!(expr,
+            HirExpr::Call(callee, args)
+                if matches!(callee.as_ref(), HirExpr::Var(name)
+                    if name == "__thaw_json_from_consumed_dynamic")
+                    && args.len() == 1
+        )
     }
 
     /// Lowers `receiver.property` (a plain property *read*, no call at
@@ -537,10 +567,7 @@ impl<'a> FnLowerer<'a> {
                 ));
             }
             if callee_name == "Number" && ty == HirType::JsValue {
-                return Ok(HirExpr::JsonAsNumber(Box::new(HirExpr::Call(
-                    Box::new(HirExpr::Var("readDynamicValue".to_string())),
-                    vec![value],
-                ))));
+                return self.dynamic_value_to_number(value, "__thaw_number_constructor");
             }
             if callee_name == "Number"
                 && matches!(ty, HirType::Optional(_) | HirType::Nullable(_) | HirType::Nullish(_)
@@ -631,11 +658,11 @@ impl<'a> FnLowerer<'a> {
                     "`{callee_name}(...)` is only supported on a JSON value for now (got {ty:?})"
                 ));
             }
-            return Ok(match callee_name {
+            Ok(match callee_name {
                 "Number" => HirExpr::JsonAsNumber(Box::new(value)),
                 "String" => HirExpr::JsonAsString(Box::new(value)),
                 _ => HirExpr::JsonAsBool(Box::new(value)),
-            });
+            })
     }
 
 }

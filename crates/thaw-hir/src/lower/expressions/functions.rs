@@ -1,4 +1,22 @@
 impl<'a> FnLowerer<'a> {
+    fn with_function_control_flow<T>(
+        &mut self,
+        lower: impl FnOnce(&mut Self) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let loop_depth = std::mem::take(&mut self.loop_depth);
+        let source_break_depths = std::mem::take(&mut self.source_break_depths);
+        let source_continue_depths = std::mem::take(&mut self.source_continue_depths);
+        let labels = std::mem::take(&mut self.labels);
+        let function_var_names = std::mem::take(&mut self.function_var_names);
+        let result = lower(self);
+        self.function_var_names = function_var_names;
+        self.loop_depth = loop_depth;
+        self.source_break_depths = source_break_depths;
+        self.source_continue_depths = source_continue_depths;
+        self.labels = labels;
+        result
+    }
+
     fn lower_function_expression(
         &mut self,
         expression: &swc_ecma_ast::FnExpr,
@@ -245,15 +263,15 @@ impl<'a> FnLowerer<'a> {
         let saved_conservative_sparse_arrays = self.conservative_sparse_arrays.clone();
         let saved_sparse_array_functions = self.sparse_array_functions.clone();
         let saved_return = self.ret_type.clone();
-        let result = (|| {
+        let result = self.with_function_control_flow(|lowerer| {
             let mut params = Vec::with_capacity(source_params.len() + usize::from(receiver.is_some()));
             if let Some(receiver) = &receiver {
-                self.class_static_context = false;
-                self.class_context = None;
-                self.unbound_this_context = false;
+                lowerer.class_static_context = false;
+                lowerer.class_context = None;
+                lowerer.unbound_this_context = false;
                 let name = "__thaw_this".to_string();
-                self.scope.insert(name.clone(), receiver.clone());
-                self.bindings.entry("this".into()).or_default().push(name.clone());
+                lowerer.scope.insert(name.clone(), receiver.clone());
+                lowerer.bindings.entry("this".into()).or_default().push(name.clone());
                 params.push(HirParam { name, ty: receiver.clone() });
             }
             let mut destructuring = Vec::new();
@@ -276,10 +294,10 @@ impl<'a> FnLowerer<'a> {
                 } else {
                     param.ty.clone()
                 };
-                let name = self.bind_local(&param.name, ty.clone());
-                self.mark_array_parameter(&name, &ty);
-                if self.promise_catch_parameter.as_ref() == Some(&param.name) {
-                    self.promise_catch_bindings.insert(name.clone());
+                let name = lowerer.bind_local(&param.name, ty.clone());
+                lowerer.mark_array_parameter(&name, &ty);
+                if lowerer.promise_catch_parameter.as_ref() == Some(&param.name) {
+                    lowerer.promise_catch_bindings.insert(name.clone());
                 }
                 if !matches!(pattern, Pat::Ident(_) | Pat::Rest(_)) {
                     destructuring.push((pattern, name.clone(), ty.clone()));
@@ -288,13 +306,13 @@ impl<'a> FnLowerer<'a> {
             }
             let mut prefix = Vec::new();
             if let Some(binding) = params.iter()
-                .find(|param| self.promise_catch_bindings.contains(&param.name))
+                .find(|param| lowerer.promise_catch_bindings.contains(&param.name))
                 .map(|param| param.name.clone())
             {
-                prefix.extend(self.snapshot_promise_rejection(&binding));
+                prefix.extend(lowerer.snapshot_promise_rejection(&binding));
             }
             for (pattern, name, ty) in destructuring {
-                self.lower_binding_pattern(pattern, HirExpr::Var(name), &ty, &mut prefix)?;
+                lowerer.lower_binding_pattern(pattern, HirExpr::Var(name), &ty, &mut prefix)?;
             }
             let declared_async_result = if arrow.is_async {
                 match &declared_return {
@@ -313,8 +331,8 @@ impl<'a> FnLowerer<'a> {
             // into a nested arrow's own lowering -- only actually used
             // below when this arrow is a plain (non-async) callback with
             // no declared return annotation.
-            let arrow_return_hint = self.expected_arrow_return_hint.take();
-            self.ret_type = declared_async_result
+            let arrow_return_hint = lowerer.expected_arrow_return_hint.take();
+            lowerer.ret_type = declared_async_result
                 .clone()
                 .or_else(|| declared_return.clone())
                 .or(arrow_return_hint)
@@ -328,15 +346,15 @@ impl<'a> FnLowerer<'a> {
                     // dynamic method call in tail position here defaults
                     // to the untyped JSON-snapshot path the exact same
                     // way.
-                    let ret_type = self.ret_type.clone();
-                    let mut expression = self.lower_expr_with_expected_type(expr, Some(&ret_type))?;
+                    let ret_type = lowerer.ret_type.clone();
+                    let mut expression = lowerer.lower_expr_with_expected_type(expr, Some(&ret_type))?;
                     if declared_return.is_none() && !arrow.is_async {
-                        expression = self.lower_inferred_array_literal(expression)?;
+                        expression = lowerer.lower_inferred_array_literal(expression)?;
                     }
                     if sparse_mapping_result && declared_return.is_none() && !arrow.is_async {
-                        expression = self.lower_array_index_operand(expression)?;
+                        expression = lowerer.lower_array_index_operand(expression)?;
                     }
-                    let mut inferred = self.infer_expr_type(&expression)?;
+                    let mut inferred = lowerer.infer_expr_type(&expression)?;
                     if arrow.is_async {
                         if let HirExpr::AwaitPromise(promise, resolved) = expression {
                             expression = *promise;
@@ -353,7 +371,7 @@ impl<'a> FnLowerer<'a> {
                             }
                         });
                         if contains_await(&expression) {
-                            expression = self.coerce_to_declared(&resolved, expression)?;
+                            expression = lowerer.coerce_to_declared(&resolved, expression)?;
                             inferred = HirType::Promise(Box::new(resolved));
                         } else {
                             let assimilates = matches!(
@@ -361,7 +379,7 @@ impl<'a> FnLowerer<'a> {
                                 HirType::Promise(inner) if inner.as_ref() == &resolved
                             );
                             if !assimilates {
-                                expression = self.coerce_to_declared(&resolved, expression)?;
+                                expression = lowerer.coerce_to_declared(&resolved, expression)?;
                             }
                             let resolve_type = HirType::Function(
                                 vec![if assimilates {
@@ -372,14 +390,14 @@ impl<'a> FnLowerer<'a> {
                                 Box::new(HirType::Void),
                             );
                             let resolve_name =
-                                format!("__thaw_async_arrow_resolve_{}", self.next_binding);
-                            self.next_binding += 1;
+                                format!("__thaw_async_arrow_resolve_{}", lowerer.next_binding);
+                            lowerer.next_binding += 1;
                             let mut referenced = BTreeSet::new();
                             collect_referenced_bindings(&expression, &mut referenced);
                             let executor_captures = referenced
                                 .into_iter()
                                 .filter_map(|name| {
-                                    self.scope
+                                    lowerer.scope
                                         .get(&name)
                                         .cloned()
                                         .map(|ty| HirParam { name, ty })
@@ -406,8 +424,8 @@ impl<'a> FnLowerer<'a> {
                             inferred = HirType::Promise(Box::new(resolved));
                         }
                     } else if let Some(expected) = &declared_return {
-                        expression = self.coerce_to_declared(expected, expression)?;
-                        inferred = self.infer_expr_type(&expression)?;
+                        expression = lowerer.coerce_to_declared(expected, expression)?;
+                        inferred = lowerer.infer_expr_type(&expression)?;
                     }
                     let body = if prefix.is_empty() {
                         expression
@@ -419,11 +437,11 @@ impl<'a> FnLowerer<'a> {
                 }
                 ArrowFunctionBody::FunctionBody(block) => {
                     let mut stmts = prefix;
-                    stmts.extend(self.lower_stmts(&block.stmts)?);
+                    stmts.extend(lowerer.lower_stmts(&block.stmts)?);
                     if sparse_mapping_result && declared_return.is_none() {
-                        self.lower_sparse_mapping_returns(&mut stmts)?;
+                        lowerer.lower_sparse_mapping_returns(&mut stmts)?;
                     }
-                    let inferred = self.infer_return_type(&stmts)?;
+                    let inferred = lowerer.infer_return_type(&stmts)?;
                     if arrow.is_async {
                         let has_await = stmts.iter().any(stmt_contains_await);
                         let only_tail_awaits =
@@ -449,8 +467,8 @@ impl<'a> FnLowerer<'a> {
                                 Box::new(HirType::Void),
                             );
                             let resolve_name =
-                                format!("__thaw_async_arrow_resolve_{}", self.next_binding);
-                            self.next_binding += 1;
+                                format!("__thaw_async_arrow_resolve_{}", lowerer.next_binding);
+                            lowerer.next_binding += 1;
                             let mut executor_body =
                                 rewrite_async_arrow_returns(stmts, &resolve_name, &resolved)?;
                             if resolved == HirType::Void && !assimilates {
@@ -466,7 +484,7 @@ impl<'a> FnLowerer<'a> {
                                 .into_iter()
                                 .filter(|name| name != &resolve_name)
                                 .filter_map(|name| {
-                                    self.scope
+                                    lowerer.scope
                                         .get(&name)
                                         .cloned()
                                         .map(|ty| HirParam { name, ty })
@@ -520,7 +538,7 @@ impl<'a> FnLowerer<'a> {
                 arrow,
                 HirExpr::Lambda(captures, params, return_type, Box::new(body)),
             ))
-        })();
+        });
         self.scope = saved_scope;
         self.bindings = saved_bindings;
         self.sparse_arrays = saved_sparse_arrays;
@@ -565,23 +583,23 @@ impl<'a> FnLowerer<'a> {
         let saved_class_static_context = self.class_static_context;
         let saved_class_context = self.class_context.clone();
         let saved_unbound_this_context = self.unbound_this_context;
-        let result = (|| {
+        let result = self.with_function_control_flow(|lowerer| {
             let mut params = Vec::with_capacity(source_params.len() + usize::from(receiver.is_some()));
             let mut body = Vec::new();
             if let Some(receiver) = &receiver {
-                self.class_static_context = false;
-                self.class_context = None;
-                self.unbound_this_context = false;
+                lowerer.class_static_context = false;
+                lowerer.class_context = None;
+                lowerer.unbound_this_context = false;
                 let name = "__thaw_this".to_string();
-                self.scope.insert(name.clone(), receiver.clone());
-                self.bindings.entry("this".into()).or_default().push(name.clone());
+                lowerer.scope.insert(name.clone(), receiver.clone());
+                lowerer.bindings.entry("this".into()).or_default().push(name.clone());
                 params.push(HirParam { name, ty: receiver.clone() });
             }
             for (pattern, param) in arrow.params.iter().zip(source_params.clone()) {
-                let name = self.bind_local(&param.name, param.ty.clone());
-                self.mark_array_parameter(&name, &param.ty);
+                let name = lowerer.bind_local(&param.name, param.ty.clone());
+                lowerer.mark_array_parameter(&name, &param.ty);
                 if !matches!(pattern, Pat::Ident(_) | Pat::Rest(_)) {
-                    self.lower_binding_pattern(
+                    lowerer.lower_binding_pattern(
                         pattern,
                         HirExpr::Var(name.clone()),
                         &param.ty,
@@ -590,9 +608,9 @@ impl<'a> FnLowerer<'a> {
                 }
                 params.push(HirParam { name, ty: param.ty });
             }
-            self.ret_type = declared_return.clone();
+            lowerer.ret_type = declared_return.clone();
             lower_function_statements(
-                self,
+                lowerer,
                 &block.stmts,
                 &declared_return,
                 true,
@@ -624,7 +642,7 @@ impl<'a> FnLowerer<'a> {
                 declared_return.clone(),
                 Box::new(expression),
             ))
-        })();
+        });
         let inferred_return = self.ret_type.clone();
         self.scope = saved_scope;
         self.bindings = saved_bindings;
@@ -668,7 +686,7 @@ impl<'a> FnLowerer<'a> {
         let types = resolve_explicit_generic_type_tuple(
             signature,
             &instantiation.type_args.params,
-            &[],
+            GenericMatchActuals::TypeOnly,
             self.interfaces,
             self.generic_interfaces,
         )?;
@@ -815,7 +833,10 @@ impl<'a> FnLowerer<'a> {
                     Pat::Array(array) => &mut array.type_ann,
                     _ => return Err("unsupported contextual generator parameter pattern".into()),
                 };
-                if annotation.is_none() {
+                if annotation.as_ref().is_none_or(|annotation| {
+                    lower_ts_type(&annotation.type_ann, self.interfaces, self.generic_interfaces)
+                        .is_ok_and(|annotated| object_width_subset(&annotated, ty))
+                }) {
                     *annotation = Some(Box::new(swc_ecma_ast::TsTypeAnn {
                         span: swc_common::DUMMY_SP,
                         type_ann: Box::new(hir_type_as_ts_type(ty)?),
@@ -840,7 +861,8 @@ impl<'a> FnLowerer<'a> {
                         annotation.type_ann.as_ref(),
                         TsType::TsKeywordType(keyword)
                             if keyword.kind == TsKeywordTypeKind::TsAnyKeyword
-                    )
+                    ) || lower_ts_type(&annotation.type_ann, self.interfaces, self.generic_interfaces)
+                        .is_ok_and(|annotated| object_width_subset(&annotated, ty))
                 }) {
                     *annotation = Some(Box::new(swc_ecma_ast::TsTypeAnn {
                         span: swc_common::DUMMY_SP,
@@ -918,6 +940,7 @@ impl<'a> FnLowerer<'a> {
                 is_async: false,
                 returns_sparse_array: false,
                 uses_this: false,
+                generic_this_pattern: None,
                 is_extern: false,
                 source_range: (arrow.span.lo.0, arrow.span.hi.0),
                 accessor_owner: None,
@@ -1046,15 +1069,15 @@ impl<'a> FnLowerer<'a> {
         let saved_conservative_sparse_arrays = self.conservative_sparse_arrays.clone();
         let saved_sparse_array_functions = self.sparse_array_functions.clone();
         let saved_return = self.ret_type.clone();
-        let result = (|| {
+        let result = self.with_function_control_flow(|lowerer| {
             let mut params = Vec::with_capacity(parameter_types.len() + usize::from(receiver.is_some()));
             if let Some(receiver) = &receiver {
-                self.class_static_context = false;
-                self.class_context = None;
-                self.unbound_this_context = false;
+                lowerer.class_static_context = false;
+                lowerer.class_context = None;
+                lowerer.unbound_this_context = false;
                 let name = "__thaw_this".to_string();
-                self.scope.insert(name.clone(), receiver.clone());
-                self.bindings.entry("this".into()).or_default().push(name.clone());
+                lowerer.scope.insert(name.clone(), receiver.clone());
+                lowerer.bindings.entry("this".into()).or_default().push(name.clone());
                 params.push(HirParam { name, ty: receiver.clone() });
             }
             let mut destructuring = Vec::new();
@@ -1137,11 +1160,22 @@ impl<'a> FnLowerer<'a> {
                     && arrow_body_mutates(&source_name, arrow)
                 {
                     HirType::JsValue
+                } else if let Some(supplied) = expected_index
+                    .filter(|supplied| object_width_subset(ty, supplied))
+                {
+                    // The annotation names only some of the fields the caller supplies
+                    // (width subtyping by name): lower the parameter at the supplied type.
+                    // The value keeps its one physical layout, so reads and writes through
+                    // the narrower annotation reach the original object.
+                    supplied.clone()
                 } else {
                     ty.clone()
                 };
-                let name = self.bind_local(&source_name, ty.clone());
-                self.mark_array_parameter(&name, &ty);
+                let name = lowerer.bind_local(&source_name, ty.clone());
+                lowerer.mark_array_parameter(&name, &ty);
+                if lowerer.promise_catch_parameter.as_deref() == Some(source_name.as_str()) {
+                    lowerer.promise_catch_bindings.insert(name.clone());
+                }
                 if !matches!(pat, Pat::Ident(_) | Pat::Rest(_)) {
                     destructuring.push((pat, name.clone(), ty.clone()));
                 }
@@ -1151,42 +1185,60 @@ impl<'a> FnLowerer<'a> {
                 });
             }
             for ty in parameter_types.iter().skip(arrow.params.len()) {
-                let name = format!("__thaw_unused_{}", self.next_binding);
-                self.next_binding += 1;
+                let name = format!("__thaw_unused_{}", lowerer.next_binding);
+                lowerer.next_binding += 1;
                 params.push(HirParam {
                     name,
                     ty: ty.clone(),
                 });
             }
             let mut prefix = Vec::new();
-            for (pattern, name, ty) in destructuring {
-                self.lower_binding_pattern(pattern, HirExpr::Var(name), &ty, &mut prefix)?;
+            if let Some(binding) = params.iter()
+                .find(|param| lowerer.promise_catch_bindings.contains(&param.name))
+                .map(|param| param.name.clone())
+            {
+                prefix.extend(lowerer.snapshot_promise_rejection(&binding));
             }
-            self.ret_type = expected_return.cloned().unwrap_or(HirType::Dynamic);
+            for (pattern, name, ty) in destructuring {
+                lowerer.lower_binding_pattern(pattern, HirExpr::Var(name), &ty, &mut prefix)?;
+            }
+            lowerer.ret_type = expected_return.cloned().unwrap_or(HirType::Dynamic);
             let (body, inferred) = match arrow.body.as_ref() {
                 ArrowFunctionBody::Expr(expr) => {
                     let expression = if let Some(expected) = expected_return {
-                        let expression = self.lower_expr_with_expected_type(expr, Some(expected))?;
+                        let expression = lowerer.lower_expr_with_expected_type(expr, Some(expected))?;
                         if matches!(expected, HirType::Void | HirType::JsValue) {
                             expression
                         } else {
-                            self.coerce_to_declared(expected, expression)?
+                            lowerer.coerce_to_declared(expected, expression)?
                         }
                     } else {
-                        self.lower_expr(expr)?
+                        lowerer.lower_expr(expr)?
                     };
                     let expression = if sparse_mapping_result && expected_return.is_none() {
-                        self.lower_array_index_operand(expression)?
+                        lowerer.lower_array_index_operand(expression)?
                     } else {
                         expression
                     };
                     let expression = if expected_return.is_none() {
-                        self.lower_inferred_array_literal(expression)?
+                        lowerer.lower_inferred_array_literal(expression)?
                     } else {
                         expression
                     };
-                    let inferred = self.infer_expr_type(&expression)?;
-                    if expected_return == Some(&HirType::Void) {
+                    let inferred = lowerer.infer_expr_type(&expression)?;
+                    // A tuple literal infers as an array; `expect_type` knows it satisfies the tuple.
+                    let inferred = match expected_return {
+                        Some(expected)
+                            if inferred != *expected
+                                && lowerer.expect_type(expected, &expression, "arrow return").is_ok() =>
+                        {
+                            expected.clone()
+                        }
+                        _ => inferred,
+                    };
+                    if expected_return == Some(&HirType::Void)
+                        || (inferred == HirType::Void && !prefix.is_empty())
+                    {
                         prefix.push(HirStmt::Expr(expression));
                         (HirExpr::Block(prefix), HirType::Void)
                     } else {
@@ -1201,11 +1253,30 @@ impl<'a> FnLowerer<'a> {
                 }
                 ArrowFunctionBody::FunctionBody(block) => {
                     let mut stmts = prefix;
-                    stmts.extend(self.lower_stmts(&block.stmts)?);
+                    stmts.extend(lowerer.lower_stmts(&block.stmts)?);
                     if sparse_mapping_result && expected_return.is_none() {
-                        self.lower_sparse_mapping_returns(&mut stmts)?;
+                        lowerer.lower_sparse_mapping_returns(&mut stmts)?;
                     }
-                    let inferred = self.infer_return_type(&stmts)?;
+                    let mut inferred = lowerer.infer_return_type(&stmts)?;
+                    // A body that always throws has no `return`, so it infers
+                    // `Void`, but it satisfies any declared return type.
+                    if inferred == HirType::Void
+                        && expected_return.is_some_and(|expected| *expected != HirType::Void)
+                        && ast_block_terminates(&block.stmts)
+                    {
+                        inferred = expected_return.cloned().unwrap_or(inferred);
+                    }
+                    // As for an expression body: tuple literals infer as arrays but satisfy
+                    // the declared tuple return.
+                    if let Some(expected) = expected_return.filter(|expected| inferred != **expected) {
+                        let mut values = Vec::new();
+                        collect_return_values(&stmts, &mut values, &mut false);
+                        if !values.is_empty()
+                            && values.iter().all(|value| lowerer.expect_type(expected, value, "arrow return").is_ok())
+                        {
+                            inferred = expected.clone();
+                        }
+                    }
                     (HirExpr::Block(stmts), inferred)
                 }
             };
@@ -1244,7 +1315,7 @@ impl<'a> FnLowerer<'a> {
                 })
                 .collect();
             Ok(HirExpr::Lambda(captures, params, ret, Box::new(body)))
-        })();
+        });
         self.scope = saved_scope;
         self.bindings = saved_bindings;
         self.sparse_arrays = saved_sparse_arrays;

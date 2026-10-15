@@ -462,11 +462,19 @@ fn lowers_typeof_to_an_evaluating_typed_closure() {
                         && matches!(body.as_ref(), HirExpr::Lit(HirLit::Str(value)) if value == "number"))
                     && matches!(values.as_slice(), [HirExpr::Call(_, _)]))
     ));
+    // A function value can carry `undefined` in the raw Function pointer ABI, so `typeof` of a
+    // function reference keeps a runtime check: `undefined` when the value is the absent
+    // sentinel, `"function"` otherwise (previously a bare string literal).
     assert!(matches!(
         &main.body[1],
         HirStmt::Expr(HirExpr::Call(_, args))
-            if matches!(&args[0], HirExpr::Lit(HirLit::Str(value)) if value == "function")
-    ));
+            if matches!(&args[0], HirExpr::Call(lambda, values)
+                if matches!(lambda.as_ref(), HirExpr::Lambda(_, params, HirType::Str, body)
+                    if params.len() == 1
+                        && format!("{body:?}").contains("Lit(Str(\"function\"))")
+                        && format!("{body:?}").contains("Lit(Str(\"undefined\"))"))
+                    && matches!(values.as_slice(), [HirExpr::FunctionRef(name, _, _)] if name == "callback"))
+    ), "{:?}", main.body[1]);
 }
 
 #[test]
@@ -509,10 +517,15 @@ fn lowers_number_field_update_expressions() {
         &program.functions[0].body[1],
         HirStmt::Let(_, HirType::F64, HirExpr::Call(_, _))
     ));
+    // The prefix update binds the object once, reads the old value, and assigns the new value
+    // inside a closure (same staging as the postfix form) instead of a bare property assignment.
     assert!(matches!(
         &program.functions[0].body[2],
-        HirStmt::Let(_, HirType::F64, HirExpr::PropAssign(_, _, field, _)) if field == "value"
+        HirStmt::Let(_, HirType::F64, HirExpr::Call(_, _))
     ));
+    let lowered = format!("{:?}", program.functions[0].body[2]);
+    assert!(lowered.contains("PropAssign(Var(\"__thaw_update_object_"), "{lowered}");
+    assert!(lowered.contains("\"value\""), "{lowered}");
 }
 
 #[test]
@@ -954,6 +967,373 @@ fn generic_key_literal_strict_equality_lowers_as_string_content_comparison() {
 }
 
 #[test]
+fn strict_optional_json_comparison_branches_on_presence_and_projects_live_owner() {
+    fn walk_expr(expression: &HirExpr, visit: &mut impl FnMut(&HirExpr)) {
+        visit(expression);
+        match expression {
+            HirExpr::Call(callee, args) => {
+                walk_expr(callee, visit);
+                for arg in args { walk_expr(arg, visit); }
+            }
+            HirExpr::Conditional(test, yes, no, _) => {
+                walk_expr(test, visit);
+                walk_expr(yes, visit);
+                walk_expr(no, visit);
+            }
+            HirExpr::Lambda(_, _, _, body) | HirExpr::TypedClosure(_, body)
+            | HirExpr::NonArrowFunction(body) => walk_expr(body, visit),
+            HirExpr::Block(statements) => for statement in statements {
+                match statement {
+                    HirStmt::Expr(value) | HirStmt::Throw(value)
+                    | HirStmt::Return(Some(value)) | HirStmt::Let(_, _, value) => walk_expr(value, visit),
+                    HirStmt::If(test, yes, no) => {
+                        walk_expr(test, visit);
+                        for nested in yes.iter().chain(no) {
+                            match nested {
+                                HirStmt::Expr(value) | HirStmt::Throw(value)
+                                | HirStmt::Return(Some(value)) | HirStmt::Let(_, _, value) => walk_expr(value, visit),
+                                _ => {}
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            },
+            HirExpr::BinOp(_, left, right) | HirExpr::EvalThen(left, right)
+            | HirExpr::Index(left, right) | HirExpr::TypedIndex(left, right, _)
+            | HirExpr::JsonKey(left, right) | HirExpr::JsonIndex(left, right)
+            | HirExpr::ArraySetLen(left, right, _) => {
+                walk_expr(left, visit);
+                walk_expr(right, visit);
+            }
+            HirExpr::OptionalIsNone(value, _) | HirExpr::OptionalValue(value, _)
+            | HirExpr::NullableIsNone(value, _) | HirExpr::NullableValue(value, _)
+            | HirExpr::NullishIsNone(value, _) | HirExpr::NullishValue(value, _)
+            | HirExpr::ArrayLen(value) | HirExpr::Await(value) | HirExpr::ArrayAlloc(value, _)
+            | HirExpr::JsonAsBool(value) | HirExpr::JsonAsNumber(value) | HirExpr::JsonAsString(value)
+            | HirExpr::JsValueAsJson(value) => walk_expr(value, visit),
+            HirExpr::ArrayLit(values) | HirExpr::DynamicCall(_, values) => {
+                for value in values { walk_expr(value, visit); }
+            }
+            HirExpr::ObjectLit(fields) | HirExpr::JsonObjectLit(fields, _) => {
+                for (_, value) in fields { walk_expr(value, visit); }
+            }
+            HirExpr::PropAccess(value, _, _) | HirExpr::JsonGet(value, _)
+            | HirExpr::JsonAsNative(value, _) => walk_expr(value, visit),
+            HirExpr::IndexAssign(array, index, value) | HirExpr::JsonSet(array, index, value, _, _) => {
+                walk_expr(array, visit);
+                walk_expr(index, visit);
+                walk_expr(value, visit);
+            }
+            HirExpr::PropAssign(object, _, _, value) => {
+                walk_expr(object, visit);
+                walk_expr(value, visit);
+            }
+            _ => {}
+        }
+    }
+
+    fn has_variable(expression: &HirExpr, name: &str) -> bool {
+        let mut found = false;
+        walk_expr(expression, &mut |node| found |= matches!(node, HirExpr::Var(value) if value == name));
+        found
+    }
+
+    fn variable_count(expression: &HirExpr, name: &str) -> usize {
+        let mut count = 0;
+        walk_expr(expression, &mut |node| if matches!(node, HirExpr::Var(value) if value == name) {
+            count += 1;
+        });
+        count
+    }
+
+    fn named_call(expression: &HirExpr, name: &str) -> bool {
+        let mut found = false;
+        walk_expr(expression, &mut |node| found |= matches!(node,
+            HirExpr::Call(callee, _) if matches!(callee.as_ref(), HirExpr::Var(value) if value == name)));
+        found
+    }
+
+    fn named_call_with_argument(expression: &HirExpr, name: &str, predicate: impl Fn(&HirExpr) -> bool) -> bool {
+        let mut found = false;
+        walk_expr(expression, &mut |node| {
+            if let HirExpr::Call(callee, args) = node {
+                if matches!(callee.as_ref(), HirExpr::Var(value) if value == name)
+                    && args.iter().any(&predicate) { found = true; }
+            }
+        });
+        found
+    }
+
+    fn one_operand_binding<'a>(expression: &'a HirExpr, prefix: &str)
+        -> Option<(&'a HirParam, &'a HirExpr, &'a HirExpr)> {
+        let HirExpr::Call(callee, args) = expression else { return None };
+        let HirExpr::Lambda(_, parameters, _, body) = callee.as_ref() else { return None };
+        if parameters.len() != 1 || args.len() != 1 || !parameters[0].name.starts_with(prefix) {
+            return None;
+        }
+        Some((&parameters[0], &args[0], body))
+    }
+
+    fn map_get_optional_binding(expression: &HirExpr, receiver_name: &str) -> bool {
+        let Some((receiver, receiver_source, after_receiver)) =
+            one_operand_binding(expression, "__thaw_map_get_receiver_") else { return false };
+        if receiver.ty != HirType::Map(Box::new(HirType::Str), Box::new(HirType::Json))
+            || !matches!(receiver_source, HirExpr::Var(name) if name == receiver_name) {
+            return false;
+        }
+        let Some((key, key_source, result)) =
+            one_operand_binding(after_receiver, "__thaw_map_get_key_") else { return false };
+        if key.ty != HirType::Str
+            || !matches!(key_source,
+                HirExpr::Lit(HirLit::Str(value)) if value == "owner")
+                && !matches!(key_source,
+                    HirExpr::TypedClosure(HirType::Str, value)
+                        if matches!(value.as_ref(), HirExpr::Lit(HirLit::Str(value)) if value == "owner")) {
+            return false;
+        }
+        let HirExpr::Call(callee, args) = result else { return false };
+        let HirExpr::Lambda(_, parameters, return_type, body) = callee.as_ref() else { return false };
+        if !parameters.is_empty() || !args.is_empty()
+            || *return_type != HirType::Optional(Box::new(HirType::Json)) {
+            return false;
+        }
+        let HirExpr::Block(statements) = body.as_ref() else { return false };
+        let has_pair_condition = |condition: &HirExpr, intrinsic: &str| -> bool {
+            matches!(condition,
+                HirExpr::Call(callee, arguments)
+                    if matches!(callee.as_ref(), HirExpr::Var(name) if name == intrinsic)
+                        && matches!(arguments.as_slice(), [HirExpr::Var(receiver_alias), HirExpr::Var(key_alias)]
+                            if receiver_alias == &receiver.name && key_alias == &key.name))
+        };
+        let has_presence_test = statements.iter().any(|statement| matches!(statement,
+            HirStmt::If(condition, _, otherwise)
+                if has_pair_condition(condition, "__thaw_map_str_has")
+                    && otherwise.iter().any(|statement| matches!(statement,
+                        HirStmt::Return(Some(HirExpr::OptionalNone(HirType::Json)))))));
+        let returns_optional_value = statements.iter().any(|statement| matches!(statement,
+            HirStmt::Return(Some(HirExpr::OptionalSome(value, HirType::Json)))
+                if matches!(value.as_ref(), HirExpr::TypedClosure(HirType::Json, raw)
+                    if matches!(raw.as_ref(), HirExpr::Call(callee, arguments)
+                    if matches!(callee.as_ref(), HirExpr::Var(name) if name == "__thaw_map_str_get_ptr")
+                        && matches!(arguments.as_slice(), [HirExpr::Var(receiver_alias), HirExpr::Var(key_alias)]
+                            if receiver_alias == &receiver.name && key_alias == &key.name)))));
+        has_presence_test && returns_optional_value
+    }
+
+    fn selected_presence<'a>(expression: &'a HirExpr, optional_name: &str)
+        -> Option<(&'a HirExpr, &'a HirExpr)> {
+        let HirExpr::Conditional(test, absent, present, _) = expression else { return None };
+        matches!(test.as_ref(), HirExpr::OptionalIsNone(value, HirType::Json)
+            if matches!(value.as_ref(), HirExpr::Var(name) if name == optional_name))
+            .then_some((present.as_ref(), absent.as_ref()))
+    }
+
+    fn has_exact_optional_value(expression: &HirExpr, name: &str) -> bool {
+        let mut found = false;
+        walk_expr(expression, &mut |node| found |= matches!(node,
+            HirExpr::OptionalValue(value, HirType::Json)
+                if matches!(value.as_ref(), HirExpr::Var(alias) if alias == name)));
+        found
+    }
+
+    fn has_projection_of(expression: &HirExpr, owner_name: &str) -> bool {
+        named_call_with_argument(expression, "__thaw_json_from_consumed_dynamic",
+            |argument| has_variable(argument, owner_name))
+    }
+
+    fn has_undefined_literal(expression: &HirExpr) -> bool {
+        let mut found = false;
+        walk_expr(expression, &mut |node| found |= matches!(node,
+            HirExpr::Lit(HirLit::Undefined)));
+        found
+    }
+
+    fn has_bool_literal(expression: &HirExpr, expected: bool) -> bool {
+        let mut found = false;
+        walk_expr(expression, &mut |node| found |= matches!(node,
+            HirExpr::Lit(HirLit::Bool(value)) if *value == expected));
+        found
+    }
+
+    fn connected_trusted_json_pair(expression: &HirExpr, optional_name: &str, owner_name: &str) -> bool {
+        let mut connected = false;
+        walk_expr(expression, &mut |node| {
+            let HirExpr::Call(callee, _) = node else { return };
+            if !matches!(callee.as_ref(), HirExpr::Var(name) if name == "callDynamicValueMixed") {
+                return;
+            }
+            let strict = named_call_with_argument(node, "getDynamicValue", |argument|
+                matches!(argument, HirExpr::Lit(HirLit::Str(name)) if name == "__thaw_strict_equal_dynamic"));
+            let json_payload = named_call_with_argument(node, "__thaw_json_borrowed_handle_id",
+                |argument| matches!(argument, HirExpr::Var(alias) if alias == optional_name));
+            let owner_payload = named_call_with_argument(node, "__thaw_json_borrowed_handle_id",
+                |argument| has_projection_of(argument, owner_name));
+            connected |= strict && json_payload && owner_payload;
+        });
+        connected
+    }
+
+    let program = lower(
+        r#"
+            interface Owner { value: number; }
+            function left(values: Map<string, any>, owner: Owner): boolean { return values.get("owner") === owner; }
+            function right(values: Map<string, any>, owner: Owner): boolean { return owner === values.get("owner"); }
+            function nullLeft(values: Map<string, any>): boolean { return values.get("owner") === null; }
+            function nullRight(values: Map<string, any>): boolean { return null === values.get("owner"); }
+            class NominalOwner { value: number; constructor(value: number) { this.value = value; } }
+            function nominal(values: Map<string, any>, owner: NominalOwner): boolean { return values.get("owner") === owner; }
+            function methodOwner(values: Map<string, any>): boolean {
+                const owner = { value: 7, run(): number { return this["value"]; } };
+                return values.get("owner") === owner;
+            }
+        "#,
+    );
+    for (name, left_source, right_source, expects_owner) in [
+        ("left", "map", "owner", true),
+        ("right", "owner", "map", true),
+        ("nullLeft", "map", "null", false),
+        ("nullRight", "null", "map", false),
+    ] {
+        let function = program.functions.iter().find(|function| function.name == name).unwrap();
+        let expression = function.body.iter().find_map(|statement| match statement {
+            HirStmt::Return(Some(value)) => Some(value),
+            _ => None,
+        }).unwrap();
+        let (left, left_actual, after_left) = one_operand_binding(expression, "__thaw_strict_left_")
+            .expect("original left operand is bound first");
+        let (right, right_actual, comparison) = one_operand_binding(after_left, "__thaw_strict_right_")
+            .expect("original right operand is bound second");
+        let optional = if left.ty == HirType::Optional(Box::new(HirType::Json)) { left }
+            else { right };
+        assert_eq!(optional.ty, HirType::Optional(Box::new(HirType::Json)),
+            "{name} keeps the exact Optional<Json> input ABI");
+        let source_kind = |actual: &HirExpr, expected: &str| match expected {
+            "map" => assert!(map_get_optional_binding(actual, "values"),
+                "{name} binds Map.get's exact Optional<Json> receiver, key, and result route: {actual:?}"),
+            "owner" => assert!(matches!(actual, HirExpr::Var(source) if source == "owner"), "{name} binds the original owner: {actual:?}"),
+            "null" => assert!(matches!(actual, HirExpr::Lit(HirLit::Null)), "{name} binds the original null literal: {actual:?}"),
+            _ => unreachable!(),
+        };
+        source_kind(left_actual, left_source);
+        source_kind(right_actual, right_source);
+        for (parameter, label) in [(left, left_source), (right, right_source)] {
+            match label {
+                "map" => assert_eq!(parameter.ty, HirType::Optional(Box::new(HirType::Json)),
+                    "{name} Map.get source is bound with its exact Optional<Json> result ABI"),
+                "owner" => assert_eq!(parameter.ty,
+                    function.params.iter().find(|param| param.name == "owner").unwrap().ty,
+                    "{name} owner binding retains the original function parameter type"),
+                "null" => assert_eq!(parameter.ty, HirType::Null,
+                    "{name} null operand retains its original literal type"),
+                _ => unreachable!(),
+            }
+        }
+        for label in [left_source, right_source] {
+            match label {
+                "map" => assert_eq!(variable_count(expression, "values"), 1,
+                    "{name} evaluates its Map receiver once in the original operand slot"),
+                "owner" => assert_eq!(variable_count(expression, "owner"), 1,
+                    "{name} evaluates the native owner once in the original operand slot"),
+                _ => {}
+            }
+        }
+        let (present, absent) = selected_presence(comparison, &optional.name)
+            .expect("selected Optional<Json> operand has its exact presence Conditional");
+        assert!(has_exact_optional_value(present, &optional.name),
+            "{name} extracts the present Json from the same selected operand alias");
+        assert!(!has_exact_optional_value(absent, &optional.name),
+            "{name} does not extract an absent Json payload");
+        assert!(!named_call(absent, "__thaw_json_from_consumed_dynamic"),
+            "{name} does not project an owner on the absent branch");
+        let (present_left, present_left_actual, after_present_left) =
+            one_operand_binding(present, "__thaw_strict_left_")
+                .expect("present comparison binds its first operand");
+        let (present_right, present_right_actual, present_comparison) =
+            one_operand_binding(after_present_left, "__thaw_strict_right_")
+                .expect("present comparison binds its second operand");
+        let optional_is_left = left.ty == HirType::Optional(Box::new(HirType::Json));
+        let (present_json, present_json_actual, present_other, present_other_actual) =
+            if optional_is_left {
+                (present_left, present_left_actual, present_right, present_right_actual)
+            } else {
+                (present_right, present_right_actual, present_left, present_left_actual)
+            };
+        assert_eq!(present_json.ty, HirType::Json,
+            "{name} inner Json alias has the present payload ABI");
+        assert!(matches!(present_json_actual,
+            HirExpr::OptionalValue(value, HirType::Json)
+                if matches!(value.as_ref(), HirExpr::Var(alias) if alias == &optional.name)),
+            "{name} inner Json alias comes from the selected outer Optional<Json>");
+        if expects_owner {
+            assert!(has_undefined_literal(absent),
+                "{name} compares absent Optional<Json> as semantic undefined");
+            let owner = if left.ty == HirType::Optional(Box::new(HirType::Json)) { right } else { left };
+            assert!(matches!(&owner.ty, HirType::Object(_)), "{name} keeps the fixed owner type");
+            assert_eq!(present_other.ty, owner.ty,
+                "{name} inner owner alias retains the outer owner type");
+            assert!(matches!(present_other_actual, HirExpr::Var(alias) if alias == &owner.name),
+                "{name} inner owner alias reads the selected outer owner");
+            assert!(has_projection_of(present_comparison, &present_other.name),
+                "{name} projects the exact inner owner alias in the selected present branch");
+            assert!(connected_trusted_json_pair(
+                present_comparison, &present_json.name, &present_other.name),
+                "{name} connects both inner aliases to the trusted strict comparator");
+        } else {
+            assert!(has_bool_literal(absent, false),
+                "{name} keeps absent-versus-null false");
+            assert_eq!(present_other.ty, HirType::Null,
+                "{name} inner null alias retains its source literal type");
+            let outer_null = if optional_is_left { right } else { left };
+            assert!(matches!(present_other_actual, HirExpr::Var(alias) if alias == &outer_null.name),
+                "{name} inner null alias reads the exact outer null binding sourced from the original literal");
+            assert!(named_call_with_argument(present_comparison, "__thaw_json_is_null", |argument|
+                matches!(argument, HirExpr::Var(alias) if alias == &present_json.name)),
+                "{name} compares null against the exact present Json payload");
+        }
+    }
+
+    for name in ["nominal", "methodOwner"] {
+        let function = program.functions.iter().find(|function| function.name == name).unwrap();
+        let expression = function.body.iter().find_map(|statement| match statement {
+            HirStmt::Return(Some(value)) => Some(value), _ => None,
+        }).unwrap();
+        let (map_operand, map_actual, after_left) =
+            one_operand_binding(expression, "__thaw_strict_left_").unwrap();
+        assert_eq!(map_operand.ty, HirType::Optional(Box::new(HirType::Json)));
+        assert!(map_get_optional_binding(map_actual, "values"),
+            "{name} uses the same genuine Map.get Optional<Json> source route");
+        let (_, _, comparison) = one_operand_binding(after_left, "__thaw_strict_right_").unwrap();
+        assert!(!named_call(comparison, "__thaw_json_from_consumed_dynamic"),
+            "{name} remains outside the plain fixed-object projection boundary");
+        if name == "methodOwner" {
+            let (owner_binding, owner_actual, _) =
+                one_operand_binding(after_left, "__thaw_strict_right_").unwrap();
+            let HirExpr::Var(owner_name) = owner_actual else {
+                panic!("methodOwner binds its local owner as the original right operand: {owner_actual:?}");
+            };
+            let HirType::Object(fields) = &owner_binding.ty else {
+                panic!("methodOwner remains a fixed object: {:?}", owner_binding.ty);
+            };
+            let (_, method_type) = fields.iter().find(|(field, _)| field == "run")
+                .expect("methodOwner retains its source method field");
+            let HirType::Function(parameters, _) = method_type else {
+                panic!("methodOwner run retains its function type: {method_type:?}");
+            };
+            let Some(HirType::Object(receiver)) = parameters.first() else {
+                panic!("methodOwner run retains an object receiver parameter: {parameters:?}");
+            };
+            assert_eq!(receiver, &vec![
+                ("value".into(), HirType::F64),
+                ("__thaw_object_method_receiver".into(), HirType::Undefined),
+            ], "computed this access retains the actual non-Bool receiver marker");
+            assert!(!has_projection_of(comparison, owner_name),
+                "methodOwner's marked receiver type remains nonprojectable");
+        }
+    }
+}
+
+#[test]
 fn explicit_this_default_wrappers_keep_receiver_and_default_binding() {
     let program = lower(
         r#"
@@ -993,4 +1373,351 @@ fn switch_cases_do_not_inherit_presence_guards_from_other_entries() {
     }
     lower("function read(x: number | undefined, key: number): number { if (x === undefined) return 0; switch (key) { case 0: return x; default: return x; } }");
     lower("function read(x: number | undefined, key: number): number { switch (key) { case 0: if (x === undefined) return 0; return x; default: if (x === undefined) return 0; return x; } }");
+}
+
+fn find_test_normalized_adapter(expr: &HirExpr) -> Option<(&[HirParam], &HirExpr)> {
+    match expr {
+        HirExpr::Lambda(_, params, _, body)
+            if params.iter().any(|param| param.name.starts_with("__thaw_promise_argument_")) =>
+        {
+            Some((params, body))
+        }
+        HirExpr::Lambda(_, _, _, body) | HirExpr::TypedClosure(_, body)
+        | HirExpr::EvalThen(_, body) => find_test_normalized_adapter(body),
+        HirExpr::Call(callee, args) => find_test_normalized_adapter(callee)
+            .or_else(|| args.iter().find_map(find_test_normalized_adapter)),
+        HirExpr::FfiCall(_, args) | HirExpr::DynamicCall(_, args) => {
+            args.iter().find_map(find_test_normalized_adapter)
+        }
+        HirExpr::Block(statements) => statements.iter().find_map(find_test_normalized_adapter_in_stmt),
+        _ => None,
+    }
+}
+
+fn find_test_callback_alias_in_expr(expr: &HirExpr) -> Option<(&[HirParam], &HirExpr, &HirExpr)> {
+    if let HirExpr::Call(callee, args) = expr {
+        if matches!(callee.as_ref(), HirExpr::Var(name) if name == "__thaw_closure_alias") {
+            if let [adapted, original] = args.as_slice() {
+                if let Some((params, body)) = find_test_normalized_adapter(adapted) {
+                    return Some((params, body, original));
+                }
+            }
+        }
+    }
+    match expr {
+        HirExpr::Call(callee, args) => find_test_callback_alias_in_expr(callee)
+            .or_else(|| args.iter().find_map(find_test_callback_alias_in_expr)),
+        HirExpr::FfiCall(_, args) | HirExpr::DynamicCall(_, args) => {
+            args.iter().find_map(find_test_callback_alias_in_expr)
+        }
+        HirExpr::PromiseThen(source, callback, ..) => find_test_callback_alias_in_expr(source)
+            .or_else(|| find_test_callback_alias_in_expr(callback)),
+        HirExpr::PromiseThenBoth(source, fulfilled, rejected, ..) => {
+            find_test_callback_alias_in_expr(source)
+                .or_else(|| fulfilled.as_deref().and_then(find_test_callback_alias_in_expr))
+                .or_else(|| find_test_callback_alias_in_expr(rejected))
+        }
+        HirExpr::Lambda(_, _, _, body) | HirExpr::TypedClosure(_, body)
+        | HirExpr::EvalThen(_, body) => find_test_callback_alias_in_expr(body),
+        HirExpr::Block(statements) => statements.iter().find_map(find_test_callback_alias_in_stmt),
+        _ => None,
+    }
+}
+
+fn find_test_normalized_adapter_in_stmt(statement: &HirStmt) -> Option<(&[HirParam], &HirExpr)> {
+    match statement {
+        HirStmt::Expr(expr) | HirStmt::Return(Some(expr)) | HirStmt::Throw(expr)
+        | HirStmt::Let(_, _, expr) => find_test_normalized_adapter(expr),
+        HirStmt::If(condition, yes, no) => find_test_normalized_adapter(condition)
+            .or_else(|| yes.iter().find_map(find_test_normalized_adapter_in_stmt))
+            .or_else(|| no.iter().find_map(find_test_normalized_adapter_in_stmt)),
+        HirStmt::While(condition, body) => find_test_normalized_adapter(condition)
+            .or_else(|| body.iter().find_map(find_test_normalized_adapter_in_stmt)),
+        HirStmt::Try(body, _, catch, _) => body.iter().find_map(find_test_normalized_adapter_in_stmt)
+            .or_else(|| catch.iter().find_map(find_test_normalized_adapter_in_stmt)),
+        HirStmt::Finally(body, _) => body.iter().find_map(find_test_normalized_adapter_in_stmt),
+        _ => None,
+    }
+}
+
+fn find_test_callback_alias_in_stmt(statement: &HirStmt) -> Option<(&[HirParam], &HirExpr, &HirExpr)> {
+    match statement {
+        HirStmt::Expr(expr) | HirStmt::Return(Some(expr)) | HirStmt::Throw(expr) => {
+            find_test_callback_alias_in_expr(expr)
+        }
+        HirStmt::Let(_, _, expr) => find_test_callback_alias_in_expr(expr),
+        HirStmt::If(condition, yes, no) => find_test_callback_alias_in_expr(condition)
+            .or_else(|| yes.iter().find_map(find_test_callback_alias_in_stmt))
+            .or_else(|| no.iter().find_map(find_test_callback_alias_in_stmt)),
+        HirStmt::While(condition, body) => find_test_callback_alias_in_expr(condition)
+            .or_else(|| body.iter().find_map(find_test_callback_alias_in_stmt)),
+        HirStmt::Try(body, _, catch, _) => body.iter().find_map(find_test_callback_alias_in_stmt)
+            .or_else(|| catch.iter().find_map(find_test_callback_alias_in_stmt)),
+        HirStmt::Finally(body, _) => body.iter().find_map(find_test_callback_alias_in_stmt),
+        _ => None,
+    }
+}
+
+fn has_test_json_coercion(expr: &HirExpr, expected: &HirType) -> bool {
+    match expr {
+        HirExpr::JsonAsString(_) => expected == &HirType::Str,
+        HirExpr::JsonAsNumber(_) => expected == &HirType::F64,
+        HirExpr::Call(callee, args) => has_test_json_coercion(callee, expected)
+            || args.iter().any(|arg| has_test_json_coercion(arg, expected)),
+        HirExpr::Block(statements) => statements.iter().any(|statement| match statement {
+            HirStmt::Expr(expr) | HirStmt::Return(Some(expr)) | HirStmt::Throw(expr)
+            | HirStmt::Let(_, _, expr) => has_test_json_coercion(expr, expected),
+            _ => false,
+        }),
+        HirExpr::TypedClosure(_, body) | HirExpr::Lambda(_, _, _, body)
+        | HirExpr::EvalThen(_, body) => has_test_json_coercion(body, expected),
+        HirExpr::FfiCall(_, args) | HirExpr::DynamicCall(_, args) => {
+            args.iter().any(|arg| has_test_json_coercion(arg, expected))
+        }
+        _ => false,
+    }
+}
+
+fn find_test_lambda_params_in_expr(expr: &HirExpr) -> Option<&[HirParam]> {
+    match expr {
+        HirExpr::Lambda(_, params, _, _) => Some(params),
+        HirExpr::Call(callee, args) => find_test_lambda_params_in_expr(callee)
+            .or_else(|| args.iter().find_map(find_test_lambda_params_in_expr)),
+        HirExpr::FfiCall(_, args) | HirExpr::DynamicCall(_, args) => {
+            args.iter().find_map(find_test_lambda_params_in_expr)
+        }
+        HirExpr::PromiseThen(source, callback, ..) => find_test_lambda_params_in_expr(source)
+            .or_else(|| find_test_lambda_params_in_expr(callback)),
+        HirExpr::PromiseThenBoth(source, fulfilled, rejected, ..) => {
+            find_test_lambda_params_in_expr(source)
+                .or_else(|| fulfilled.as_deref().and_then(find_test_lambda_params_in_expr))
+                .or_else(|| find_test_lambda_params_in_expr(rejected))
+        }
+        HirExpr::TypedClosure(_, value) | HirExpr::EvalThen(_, value) => {
+            find_test_lambda_params_in_expr(value)
+        }
+        HirExpr::Block(statements) => statements.iter().find_map(|statement| match statement {
+            HirStmt::Expr(expr) | HirStmt::Return(Some(expr)) | HirStmt::Throw(expr)
+            | HirStmt::Let(_, _, expr) => find_test_lambda_params_in_expr(expr),
+            _ => None,
+        }),
+        _ => None,
+    }
+}
+
+#[test]
+fn contextual_rest_callback_adapts_named_fixed_arity_functions() {
+    let program = lower(
+        r#"
+        declare function accept(callback: (...values: any[]) => void): void;
+        function main(): void {
+            const fixed: (value: string, count: number) => void = (value, count) => {};
+            accept(fixed);
+        }
+        "#,
+    );
+    let main = program.functions.iter().find(|function| function.name == "main").unwrap();
+    let (params, adapter_body, original) = main.body.iter()
+        .find_map(find_test_callback_alias_in_stmt)
+        .expect("fixed callback is captured by a typed adapter");
+    assert_eq!(params.iter().map(|param| param.ty.clone()).collect::<Vec<_>>(),
+        vec![HirType::Json, HirType::Json]);
+    assert!(matches!(original, HirExpr::Var(name) if name == "fixed"));
+    assert!(has_test_json_coercion(adapter_body, &HirType::Str));
+    assert!(has_test_json_coercion(adapter_body, &HirType::F64));
+}
+
+#[test]
+fn contextual_rest_callback_preserves_zero_and_fixed_prefix_rest_shapes() {
+    let zero = lower(
+        r#"
+        declare function accept(callback: (...values: any[]) => void): void;
+        function zero(): void {}
+        function main(): void { accept(zero); }
+        "#,
+    );
+    let main = zero.functions.iter().find(|function| function.name == "main").unwrap();
+    assert!(format!("{:?}", main.body).contains("FunctionRef(\"zero\""));
+
+    let rest = lower(
+        r#"
+        declare function accept(callback: (...values: any[]) => void): void;
+        function rest(prefix: any, ...values: any[]): void {}
+        function main(): void { accept(rest); }
+        "#,
+    );
+    let main = rest.functions.iter().find(|function| function.name == "main").unwrap();
+    let (params, _) = main.body.iter()
+        .find_map(find_test_normalized_adapter_in_stmt)
+        .expect("rest callback adapter");
+    assert_eq!(params.len(), 2);
+    assert_eq!(params[0].ty, HirType::Json);
+    assert_eq!(params[1].ty, HirType::Array(Box::new(HirType::Json)));
+    assert!(format!("{:?}", main.body).contains("FunctionRef(\"rest\""));
+}
+
+#[test]
+fn contextual_rest_callbacks_keep_inline_and_named_fixed_prefixes() {
+    let program = lower(
+        r#"
+        declare function accept(callback: (prefix: string, ...values: any[]) => void): void;
+        function named(prefix: string, count: number, ...values: any[]): void {}
+        function main(): void {
+            accept(named);
+            const namedLocal: (prefix: string, count: number, ...values: any[]) => void = named;
+            accept(namedLocal);
+            accept((prefix: string, ...values: any[]) => {});
+        }
+        "#,
+    );
+    let main = program.functions.iter().find(|function| function.name == "main").unwrap();
+    let (named_params, _) = main.body.iter()
+        .find_map(find_test_normalized_adapter_in_stmt)
+        .expect("named fixed-prefix rest adapter");
+    assert_eq!(named_params.iter().map(|param| param.ty.clone()).collect::<Vec<_>>(),
+        vec![HirType::Str, HirType::Json, HirType::Array(Box::new(HirType::Json))]);
+    assert!(format!("{:?}", main.body).contains("FunctionRef(\"named\""));
+    let accept_arguments = main.body.iter().filter_map(|statement| match statement {
+        HirStmt::Expr(HirExpr::FfiCall(signature, args))
+            if signature.symbol == "accept" =>
+        {
+            args.first()
+        }
+        _ => None,
+    }).collect::<Vec<_>>();
+    assert_eq!(accept_arguments.len(), 3, "named, named-local, and inline accept calls stay top-level FFI calls");
+    let (final_named_type, final_named_value) = match accept_arguments[0] {
+        HirExpr::TypedClosure(ty, value) => (ty.clone(), value.as_ref()),
+        _ => panic!("final named callback argument retains its contextual rest ABI"),
+    };
+    assert_eq!(final_named_type, HirType::CallableFunction(
+        vec![HirType::Str, HirType::Json],
+        HirOptionalMask::default(),
+        Some(Box::new(HirType::Json)),
+        Box::new(HirType::Void),
+    ));
+    let direct_named_params = match final_named_value {
+        HirExpr::Call(callee, args)
+            if matches!(callee.as_ref(), HirExpr::Lambda(_, _, _, _))
+                && matches!(args.as_slice(), [HirExpr::FunctionRef(name, _, _)] if name == "named") =>
+        {
+            find_test_normalized_adapter(callee)
+                .expect("direct named binder contains its normalized adapter")
+                .0
+        }
+        _ => panic!("direct named function reference is passed through its callback binder"),
+    };
+    assert_eq!(direct_named_params.iter().map(|param| param.ty.clone()).collect::<Vec<_>>(),
+        vec![HirType::Str, HirType::Json, HirType::Array(Box::new(HirType::Json))]);
+    let (local_type, local_value) = match accept_arguments[1] {
+        HirExpr::TypedClosure(ty, value) => (ty, value.as_ref()),
+        _ => panic!("named-local callback argument retains its contextual rest ABI"),
+    };
+    assert_eq!(local_type, &HirType::CallableFunction(
+        vec![HirType::Str, HirType::Json],
+        HirOptionalMask::default(),
+        Some(Box::new(HirType::Json)),
+        Box::new(HirType::Void),
+    ));
+    assert!(matches!(local_value,
+        HirExpr::Call(callee, args)
+            if matches!(callee.as_ref(), HirExpr::Var(name) if name == "__thaw_closure_alias")
+                && args.len() == 2
+                && find_test_normalized_adapter(&args[0]).is_some()
+                && matches!(&args[1], HirExpr::Var(name) if name == "namedLocal")
+    ), "named-local rest adapter is aliased exactly once to the selected local binding");
+    let inline_params = main.body.iter().find_map(|statement| match statement {
+        HirStmt::Expr(expr) => find_test_lambda_params_in_expr(expr)
+            .filter(|params| params.len() == 2 && params[0].name == "prefix"),
+        _ => None,
+    }).expect("inline fixed-prefix rest lambda");
+    assert_eq!(inline_params[0].ty, HirType::Str);
+    assert_eq!(inline_params[1].ty, HirType::Array(Box::new(HirType::Json)));
+}
+
+#[test]
+fn contextual_rest_callback_preserves_optional_metadata_and_shadowed_bindings() {
+    let optional = lower(
+        r#"
+        declare function accept(callback: (...values: any[]) => void): void;
+        function main(): void {
+            const optional: (value?: string) => void = (value) => {};
+            accept(optional);
+        }
+        "#,
+    );
+    let main = optional.functions.iter().find(|function| function.name == "main").unwrap();
+    assert!(main.body.iter().any(|statement| matches!(statement,
+        HirStmt::Let(name, HirType::CallableFunction(_, mask, _, _), _)
+            if name == "optional" && mask.contains(0))));
+    let (params, _, original) = main.body.iter()
+        .find_map(find_test_callback_alias_in_stmt)
+        .expect("optional callback adapter");
+    assert_eq!(params.len(), 1);
+    assert_eq!(params[0].ty, HirType::Json);
+    assert!(matches!(original, HirExpr::Var(name) if name == "optional"));
+
+    let shadowed = lower(
+        r#"
+        declare function accept(callback: (...values: any[]) => void): void;
+        function callback(value: string): void {}
+        function main(): void {
+            const callback: (value: string, count: number) => void = (value, count) => {};
+            accept(callback);
+        }
+        "#,
+    );
+    assert!(shadowed.functions.iter().any(|function| function.name == "callback"));
+    let main = shadowed.functions.iter().find(|function| function.name == "main").unwrap();
+    let local_callback = main.body.iter().find_map(|statement| match statement {
+        HirStmt::Let(name, HirType::Function(params, _), _) if params.len() == 2 => Some(name.as_str()),
+        HirStmt::Let(name, HirType::CallableFunction(params, _, _, _), _) if params.len() == 2 => Some(name.as_str()),
+        _ => None,
+    }).unwrap_or_else(|| panic!("two-parameter shadowing local binding not found in HIR: {:#?}", main.body));
+    let (params, _, original) = main.body.iter()
+        .find_map(find_test_callback_alias_in_stmt)
+        .expect("shadowed callback adapter");
+    assert_eq!(params.len(), 2);
+    assert_eq!(params[0].ty, HirType::Json);
+    assert_eq!(params[1].ty, HirType::Json);
+    assert!(matches!(original, HirExpr::Var(name) if name == local_callback));
+}
+
+#[test]
+fn promise_then_keeps_single_value_callback_validation() {
+    lower(
+        r#"
+        function single(value: number): void {}
+        function optional(value?: number): void {}
+        function main(): void {
+            new Promise<number>((resolve) => resolve(1)).then(single);
+            new Promise<number>((resolve) => resolve(1)).then(optional);
+        }
+        "#,
+    );
+    let invalid = thaw_parser::parse_typescript(
+        r#"
+        function required(value: number, count: number): void {}
+        function main(): void {
+            new Promise<number>((resolve) => resolve(1)).then(required);
+        }
+        "#,
+    ).unwrap();
+    assert!(lower_module(&invalid).is_err(), "Promise.then supplies one value");
+
+    for source in [
+        r#"
+        declare function accept(callback: (prefix: string, ...values: any[]) => number): void;
+        function badPrefix(prefix: number, count: number, ...values: any[]): number { return count; }
+        function main(): void { accept(badPrefix); }
+        "#,
+        r#"
+        declare function accept(callback: (prefix: string, ...values: any[]) => number): void;
+        function badReturn(prefix: string, count: number, ...values: any[]): string { return "bad"; }
+        function main(): void { accept(badReturn); }
+        "#,
+    ] {
+        let module = thaw_parser::parse_typescript(source).unwrap();
+        assert!(lower_module(&module).is_err(), "accepted incompatible fixed prefix/return: {source}");
+    }
 }

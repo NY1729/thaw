@@ -60,7 +60,9 @@ impl<'a> FnLowerer<'a> {
             HirType::Json => {
                 let key = self.lower_expr(&computed.expr)?;
                 match self.infer_expr_type(&key)? {
-                    HirType::Str => {
+                    // A symbol is stored under its private string token, like a
+                    // dictionary key.
+                    HirType::Str | HirType::Symbol => {
                         Ok(Target::Dictionary(object, Box::new(key), HirType::Json))
                     }
                     HirType::F64 => Ok(Target::JsonIndex(object, Box::new(key))),

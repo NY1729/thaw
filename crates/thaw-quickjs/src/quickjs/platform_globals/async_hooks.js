@@ -114,14 +114,144 @@
       return thawWithFrame(frame, callback, null, Array.prototype.slice.call(arguments, 1));
     };
   };
+  // ---- async_hooks.createHook ----
+  // Enabled hooks and the dispatcher the runtime's timers / nextTick queue / promise hook feed. Events are
+  // emitted synchronously; an event raised while a hook callback runs is not re-emitted (as in Node, a hook
+  // must not depend on its own resources).
+  const thawEnabledHooks = new thawSet();
+  const thawLiveResources = new Map();
+  const thawScopeStack = [];
+  const thawPromiseIds = new thawWeakMap();
+  let thawEmitting = false;
+  const thawHookNames = ['init', 'before', 'after', 'destroy', 'promiseResolve'];
+  const thawEmit = (name, a, b, c, d) => {
+    if (thawEmitting || thawEnabledHooks.size === 0) return;
+    thawEmitting = true;
+    try {
+      for (const hook of Array.from(thawEnabledHooks)) {
+        const callback = hook[name];
+        if (typeof callback === 'function') thawApply(callback, hook.callbacks, [a, b, c, d]);
+      }
+    } catch (error) {
+      globalThis.__thaw_report_uncaught(error);
+    } finally {
+      thawEmitting = false;
+    }
+  };
+  const thawEnterScope = (id, trigger, resource) => {
+    thawScopeStack.push([thawCurrentAsyncId, thawCurrentTriggerId, thawCurrentResource]);
+    thawCurrentAsyncId = id;
+    thawCurrentTriggerId = trigger;
+    thawCurrentResource = resource;
+  };
+  const thawLeaveScope = () => {
+    const previous = thawScopeStack.pop();
+    thawCurrentAsyncId = previous[0];
+    thawCurrentTriggerId = previous[1];
+    thawCurrentResource = previous[2];
+  };
+  // Like Node, `destroy` is delivered after the current callback finished (never from inside it): ids are
+  // queued and flushed by one unreferenced zero-delay timer.
+  let thawDestroyQueue = [];
+  const thawQueueDestroy = id => {
+    if (thawEnabledHooks.size === 0) return;
+    if (thawDestroyQueue.length === 0) {
+      globalThis.__thaw_set_timeout_ref(() => {
+        const ids = thawDestroyQueue;
+        thawDestroyQueue = [];
+        for (const queued of ids) thawEmit('destroy', queued);
+      }, 0, false);
+    }
+    thawDestroyQueue.push(id);
+  };
+  const thawBus = {
+    enabled: false,
+    init(type, resource, triggerAsyncId) {
+      const id = thawNextAsyncId++;
+      const trigger = triggerAsyncId === undefined ? thawCurrentAsyncId : triggerAsyncId;
+      thawLiveResources.set(id, { trigger, resource });
+      thawEmit('init', id, type, trigger, resource);
+      return id;
+    },
+    before(id) {
+      const live = thawLiveResources.get(id);
+      thawEnterScope(id, live ? live.trigger : 0, live ? live.resource : {});
+      thawEmit('before', id);
+    },
+    after(id) {
+      thawEmit('after', id);
+      thawLeaveScope();
+    },
+    destroy(id) {
+      if (!thawLiveResources.delete(id)) return;
+      thawQueueDestroy(id);
+    },
+  };
+  Object.defineProperty(globalThis, '__thaw_async_hook_bus', {
+    value: thawBus, configurable: false, enumerable: false, writable: false,
+  });
+  // QuickJS reports promise creation (with the parent of a `then` result) and resolution.
+  Object.defineProperty(globalThis, '__thaw_async_hooks_promise', {
+    value: function(kind, promise, parent) {
+      if (kind === 0) {
+        const id = thawNextAsyncId++;
+        const known = parent === undefined ? undefined : thawApply(thawWeakGet, thawPromiseIds, [parent]);
+        thawApply(thawWeakSet, thawPromiseIds, [promise, { id }]);
+        thawEmit('init', id, 'PROMISE', known ? known.id : thawCurrentAsyncId, promise);
+      } else if (kind === 3) {
+        const known = thawApply(thawWeakGet, thawPromiseIds, [promise]);
+        if (known) thawEmit('promiseResolve', known.id);
+      }
+    },
+    configurable: false, enumerable: false, writable: false,
+  });
+  const thawRefreshBus = () => {
+    const enabled = thawEnabledHooks.size > 0;
+    if (enabled === thawBus.enabled) return;
+    thawBus.enabled = enabled;
+    globalThis.__thaw_async_hooks_promise_hook(enabled);
+  };
+  function AsyncHook(callbacks) {
+    if (callbacks === null || typeof callbacks !== 'object') {
+      const error = new TypeError('The "hook" argument must be of type object.');
+      error.code = 'ERR_INVALID_ARG_TYPE';
+      throw error;
+    }
+    const state = { callbacks };
+    for (const name of thawHookNames) {
+      if (callbacks[name] !== undefined && typeof callbacks[name] !== 'function') {
+        const error = new TypeError(`hook.${name} must be a function`);
+        error.code = 'ERR_ASYNC_CALLBACK';
+        throw error;
+      }
+      state[name] = callbacks[name];
+    }
+    this._state = state;
+  }
+  AsyncHook.prototype.enable = function() {
+    thawApply(thawSetAdd, thawEnabledHooks, [this._state]);
+    thawRefreshBus();
+    return this;
+  };
+  AsyncHook.prototype.disable = function() {
+    thawApply(thawSetDelete, thawEnabledHooks, [this._state]);
+    thawRefreshBus();
+    return this;
+  };
   function AsyncResource(type, options) {
     if (!(this instanceof AsyncResource)) return new AsyncResource(type, options);
+    if (typeof type !== 'string') {
+      const error = new TypeError('The "type" argument must be of type string.');
+      error.code = 'ERR_INVALID_ARG_TYPE';
+      throw error;
+    }
     this.type = String(type);
     this._asyncId = thawNextAsyncId++;
     this._triggerAsyncId = options && options.triggerAsyncId !== undefined
       ? Number(options.triggerAsyncId) : thawCurrentAsyncId;
     thawApply(thawWeakSet, thawResourceFrames, [this, thawFrameGet()]);
     this._destroyed = false;
+    thawEmit('init', this._asyncId, this.type, this._triggerAsyncId, this);
   }
   AsyncResource.prototype.asyncId = function() { return this._asyncId; };
   AsyncResource.prototype.triggerAsyncId = function() { return this._triggerAsyncId; };
@@ -133,14 +263,22 @@
     thawCurrentAsyncId = this._asyncId;
     thawCurrentTriggerId = this._triggerAsyncId;
     thawCurrentResource = this;
+    thawEmit('before', this._asyncId);
     try { return thawWithFrame(thawApply(thawWeakGet, thawResourceFrames, [this]), callback, thisArg, args); }
     finally {
+      thawEmit('after', this._asyncId);
       thawCurrentAsyncId = previousId;
       thawCurrentTriggerId = previousTrigger;
       thawCurrentResource = previousResource;
     }
   };
-  AsyncResource.prototype.emitDestroy = function() { this._destroyed = true; return this; };
+  AsyncResource.prototype.emitDestroy = function() {
+    if (!this._destroyed) {
+      this._destroyed = true;
+      thawQueueDestroy(this._asyncId);
+    }
+    return this;
+  };
   AsyncResource.prototype.bind = function(callback, thisArg) {
     const resource = this;
     return function() {
@@ -154,9 +292,7 @@
   const thawAsyncHooksExports = {
     AsyncLocalStorage: AsyncLocalStorage,
     AsyncResource: AsyncResource,
-    createHook(callbacks) {
-      return { enable() { return this; }, disable() { return this; }, callbacks: callbacks || {} };
-    },
+    createHook(callbacks) { return new AsyncHook(callbacks); },
     executionAsyncId() { return thawCurrentAsyncId; },
     triggerAsyncId() { return thawCurrentTriggerId; },
     executionAsyncResource() { return thawCurrentResource; },

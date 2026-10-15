@@ -475,7 +475,6 @@ fn generates_typed_napi_tuple_class_shims() {
             false,
             vec![tuple],
         )],
-        &std::collections::HashMap::new(),
     )
     .unwrap();
     assert!(!rewritten.contains("new PairBox"));
@@ -634,7 +633,6 @@ fn generates_typed_napi_nullable_shims() {
             false,
             methods[0].4.clone(),
         )],
-        &std::collections::HashMap::new(),
     )
     .unwrap();
     assert!(!rewritten.contains("new NullableBox"));
@@ -798,7 +796,6 @@ fn rewrites_inherited_external_class_methods() {
             inherited.3,
             inherited.4.clone(),
         )],
-        &std::collections::HashMap::new(),
     )
     .unwrap();
     assert!(rewritten.contains(&format!("{}(value, 4)", inherited.1)));
@@ -822,7 +819,6 @@ fn rewrites_methods_on_values_created_from_external_classes() {
             false,
             vec![thaw_hir::HirType::Str, thaw_hir::HirType::F64],
         )],
-        &std::collections::HashMap::new(),
     )
     .unwrap();
     assert_eq!(
@@ -1079,7 +1075,6 @@ fn rewrites_zero_argument_external_class_methods() {
             false,
             vec![],
         )],
-        &std::collections::HashMap::new(),
     )
     .unwrap();
     assert_eq!(
@@ -1106,7 +1101,6 @@ fn tracks_external_class_instance_aliases_and_invalidates_reassignments() {
             false,
             vec![],
         )],
-        &std::collections::HashMap::new(),
     )
     .unwrap();
     assert_eq!(
@@ -1133,7 +1127,6 @@ fn tracks_external_class_instances_through_object_properties() {
             false,
             vec![],
         )],
-        &std::collections::HashMap::new(),
     )
     .unwrap();
     assert_eq!(
@@ -1160,7 +1153,6 @@ fn joins_object_property_instance_facts_across_branches() {
             false,
             vec![],
         )],
-        &std::collections::HashMap::new(),
     )
     .unwrap();
     assert_eq!(

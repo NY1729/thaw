@@ -1,0 +1,2682 @@
+// Return-boundary controls for synchronous native Promise and direct
+// Promise-bearing Union values. These use opaque native producers so their
+// return/discard assertions contain no constructor-failure cleanup sites.
+
+#[derive(Clone, Copy)]
+enum NerRoute {
+    Named,
+    ExpressionLambda,
+    BlockLambda,
+}
+
+#[derive(Clone, Copy)]
+enum NerOwnership {
+    Owned,
+    Borrowed,
+}
+
+struct NerFixture {
+    route: NerRoute,
+    ownership: NerOwnership,
+    shape: &'static str,
+    output_type: HirType,
+    function_name: String,
+    first_name: String,
+    second_name: Option<String>,
+    consumer_name: Option<String>,
+}
+
+fn ner_shape_types() -> [(&'static str, HirType); 3] {
+    [
+        ("exact", udjit_promise_f64()),
+        ("flat", udjit_flat_union_type()),
+        ("three", udjit_three_union_type()),
+    ]
+}
+
+fn ner_eval_then(first: &str, ownership: NerOwnership, second: Option<&str>) -> HirExpr {
+    let second = match ownership {
+        NerOwnership::Owned => udjit_call(second.expect("owned output producer"), Vec::new()),
+        NerOwnership::Borrowed => udjit_var("borrowed"),
+    };
+    udeval_eval_then(udjit_call(first, Vec::new()), second)
+}
+
+fn ner_function_name(route: NerRoute, ownership: NerOwnership, shape: &str) -> String {
+    let route = match route {
+        NerRoute::Named => "named",
+        NerRoute::ExpressionLambda => "expression_lambda",
+        NerRoute::BlockLambda => "block_lambda",
+    };
+    let ownership = match ownership {
+        NerOwnership::Owned => "owned",
+        NerOwnership::Borrowed => "borrowed",
+    };
+    format!("nret_{ownership}_{route}_{shape}")
+}
+
+fn ner_add_fixture(
+    functions: &mut Vec<HirFunction>,
+    externals: &mut Vec<(String, HirType)>,
+    route: NerRoute,
+    ownership: NerOwnership,
+    shape: &'static str,
+    output_type: HirType,
+) -> NerFixture {
+    let function_name = ner_function_name(route, ownership, shape);
+    let first_name = format!("{function_name}_first_owned");
+    let second_name = matches!(ownership, NerOwnership::Owned)
+        .then(|| format!("{function_name}_second_owned"));
+    let consumer_name = matches!(route, NerRoute::Named)
+        .then(|| format!("{function_name}_consumer"));
+
+    externals.push((first_name.clone(), output_type.clone()));
+    if let Some(second) = &second_name {
+        externals.push((second.clone(), output_type.clone()));
+    }
+
+    let returned = ner_eval_then(&first_name, ownership, second_name.as_deref());
+    match route {
+        NerRoute::Named => {
+            let params = if matches!(ownership, NerOwnership::Borrowed) {
+                vec![udjit_param("borrowed", output_type.clone())]
+            } else {
+                Vec::new()
+            };
+            functions.push(udjit_function(
+                &function_name,
+                params,
+                output_type.clone(),
+                vec![HirStmt::Return(Some(returned))],
+            ));
+            if let Some(consumer) = &consumer_name {
+                let (consumer_params, arguments) = if matches!(ownership, NerOwnership::Borrowed) {
+                    (
+                        vec![udjit_param("borrowed", output_type.clone())],
+                        vec![udjit_var("borrowed")],
+                    )
+                } else {
+                    (Vec::new(), Vec::new())
+                };
+                functions.push(udjit_function(
+                    consumer,
+                    consumer_params,
+                    HirType::Void,
+                    vec![
+                        HirStmt::Expr(udjit_call(&function_name, arguments)),
+                        HirStmt::Return(None),
+                    ],
+                ));
+            }
+        }
+        NerRoute::ExpressionLambda | NerRoute::BlockLambda => {
+            let params = if matches!(ownership, NerOwnership::Borrowed) {
+                vec![udjit_param("borrowed", output_type.clone())]
+            } else {
+                Vec::new()
+            };
+            let body = match route {
+                NerRoute::ExpressionLambda => returned,
+                NerRoute::BlockLambda => HirExpr::Block(vec![HirStmt::Return(Some(returned))]),
+                NerRoute::Named => unreachable!(),
+            };
+            let closure_type = HirType::Function(
+                params.iter().map(|param| param.ty.clone()).collect(),
+                Box::new(output_type.clone()),
+            );
+            let lambda = HirExpr::Lambda(
+                Vec::new(),
+                params,
+                output_type.clone(),
+                Box::new(body),
+            );
+            functions.push(udjit_function(
+                &function_name,
+                Vec::new(),
+                HirType::Void,
+                vec![
+                    HirStmt::Let("closure".into(), closure_type, lambda),
+                    HirStmt::Return(None),
+                ],
+            ));
+        }
+    }
+
+    NerFixture {
+        route,
+        ownership,
+        shape,
+        output_type,
+        function_name,
+        first_name,
+        second_name,
+        consumer_name,
+    }
+}
+
+fn ner_compile(functions: &[HirFunction], externals: &[(String, HirType)]) -> String {
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "native_eval_then_return_controls");
+    let external_refs = externals.iter()
+        .map(|(name, ty)| (name.as_str(), ty.clone()))
+        .collect::<Vec<_>>();
+    udjit_compile_minimal(&mut compiler, functions, &external_refs).unwrap();
+    compiler.module.verify().unwrap();
+    compiler.print_to_string()
+}
+
+fn ner_function_body_for_call(ir: &str, callee: &str) -> String {
+    let matches = union_discard_all_function_bodies(ir).into_iter()
+        .filter(|body| body.lines().any(|line|
+            line.contains("= call ") && line.contains(&format!("@{callee}("))
+        ))
+        .collect::<Vec<_>>();
+    assert_eq!(matches.len(), 1,
+        "expected one emitted function to call {callee}; matches: {matches:?}\n{ir}");
+    matches.into_iter().next().unwrap()
+}
+
+fn ner_llvm_return_type(ty: &HirType) -> &'static str {
+    match ty {
+        HirType::Promise(_) => "ptr",
+        HirType::Union(_) => "{ i8, i64 }",
+        _ => panic!("unsupported return control type: {ty:?}"),
+    }
+}
+
+fn ner_assert_exact_return_identity(body: &str, callee: &str, result_type: &HirType) -> String {
+    let result = udeval_call_result(body, callee);
+    let expected = format!("ret {} {result}", ner_llvm_return_type(result_type));
+    let returns = body.lines().map(str::trim).filter(|line| *line == expected)
+        .collect::<Vec<_>>();
+    assert_eq!(returns.len(), 1,
+        "normal native output must return the exact SSA result from {callee}: {expected}\n{body}");
+    result
+}
+
+fn ner_assert_owned_first_release(body: &str, first: &str, result_type: &HirType) {
+    let first_value = udeval_call_result(body, first);
+    let blocks = udeval_blocks(body);
+    match result_type {
+        HirType::Promise(_) => {
+            let releases = body.lines().filter(|line|
+                line.contains("@thaw_promise_destroy(")
+                    && line.contains(&format!("ptr {first_value})"))
+            ).collect::<Vec<_>>();
+            assert_eq!(releases.len(), 1,
+                "owned exact first result A must be released exactly once:\n{body}");
+            assert_eq!(body.lines().filter(|line| line.contains("@thaw_promise_destroy(")).count(), 1,
+                "isolated exact case has no unrelated owner/factory cleanup:\n{body}");
+            let call = udeval_call_block(&blocks, first);
+            let (normal, exceptional) = udeval_call_edges(&blocks, call);
+            let destroy_block = blocks.iter().find(|block|
+                block.text.lines().any(|line| line == releases[0])
+            ).expect("exact first release is in a real block");
+            assert!(udeval_reaches(&blocks, &normal, &destroy_block.label));
+            assert!(!udeval_reaches(&blocks, &exceptional, &destroy_block.label),
+                "first-call exceptional edge cannot release an unpublished result");
+        }
+        HirType::Union(_) => {
+            let selected_tags = if result_type == &udjit_three_union_type() { &[0, 2][..] } else { &[0][..] };
+            let trace = udeval_assert_union_destroy_identity(body, &blocks, &first_value, selected_tags);
+            assert_eq!(body.lines().filter(|line| line.contains("@thaw_promise_destroy(")).count(),
+                trace.destroy_blocks.len(),
+                "only first-result Promise tag blocks may destroy in this isolated producer:\n{body}");
+            udeval_assert_result_destroy_only_on_normal_edge(&blocks, first, &trace);
+        }
+        _ => unreachable!(),
+    }
+    assert!(!body.contains("@thaw_promise_retain("),
+        "already-owned EvalThen output must not be retained:\n{body}");
+}
+
+fn ner_assert_exact_borrowed_retain(body: &str) {
+    let return_line = body.lines().map(str::trim).find(|line|
+        line.starts_with("ret ptr ") && !line.ends_with("null")
+    ).expect("borrowed exact output has a normal pointer return");
+    let pointer = return_line.strip_prefix("ret ptr ").unwrap();
+    assert!(body.lines().any(|line|
+        line.contains("= load ptr, ptr %borrowed_cell")
+            && line.split_once('=').is_some_and(|(lhs, _)| lhs.trim() == pointer)
+    ), "returned exact Promise must preserve the borrowed parameter identity:\n{body}");
+    let retains = body.lines().filter(|line|
+        line.contains("call i8 @thaw_promise_retain(")
+    ).collect::<Vec<_>>();
+    assert_eq!(retains.len(), 1,
+        "borrowed exact second output needs one retain before lexical cleanup:\n{body}");
+    assert!(retains[0].contains(&format!("ptr {pointer})")),
+        "output retain must target the exact borrowed return identity {pointer}: {}", retains[0]);
+}
+
+fn ner_assert_wrapped_pointer_identity(
+    body: &str,
+    source: &str,
+    borrowed: bool,
+    roundtrip: bool,
+) {
+    let return_line = body.lines().map(str::trim).find(|line|
+        line.starts_with("ret ptr ") && !line.ends_with("null") && !line.ends_with("undef")
+    ).expect("wrapped Some-to-Value output has a normal native pointer return");
+    let output = return_line.strip_prefix("ret ptr ").unwrap();
+
+    // Some construction must insert the exact source pointer into field 1.
+    // Unwrapping, and optional union pack/unpack for the round-trip cases,
+    // intentionally create new SSA values, so identity is followed by def-use.
+    let some_payload_line = body.lines().find(|line|
+        line.contains("= insertvalue ") && line.contains(&format!("ptr {source}, 1"))
+    ).unwrap_or_else(|| panic!("Some construction must carry source pointer {source}:\n{body}"));
+    let some_aggregate = udeval_ssa_result(some_payload_line);
+
+    let projected = if roundtrip {
+        let store_line = body.lines().find(|line|
+            line.trim_start().starts_with("store {")
+                && line.contains(&format!(" {some_aggregate}, ptr "))
+        ).unwrap_or_else(|| panic!("matching UnionInject must store the Some aggregate for its struct payload:\n{body}"));
+        let slot = store_line.rsplit_once(", ptr ").unwrap().1
+            .split([',', ' '])
+            .next().unwrap().to_string();
+        let packed_line = body.lines().find(|line|
+            line.contains("= ptrtoint ptr ")
+                && line.contains(&format!("ptr {slot} to i64"))
+        ).unwrap_or_else(|| panic!("UnionInject must pack the Some-cell pointer {slot}:\n{body}"));
+        let packed = udeval_ssa_result(packed_line);
+        let union_insert = body.lines().find(|line|
+            line.contains("= insertvalue { i8, i64 }")
+                && line.contains(&format!("i64 {packed}, 1"))
+        ).unwrap_or_else(|| panic!("matching UnionInject must put the exact Some-cell word in its payload:\n{body}"));
+        let union = udeval_ssa_result(union_insert);
+        let union_payload = body.lines().find(|line|
+            line.contains(&format!("= extractvalue {{ i8, i64 }} {union}, 1"))
+        ).unwrap_or_else(|| panic!("matching UnionValue must extract that packed union payload:\n{body}"));
+        let word = udeval_ssa_result(union_payload);
+        let decoded_line = body.lines().find(|line|
+            line.contains(&format!("= inttoptr i64 {word} to ptr"))
+        ).unwrap_or_else(|| panic!("UnionValue must decode the extracted Some-cell word:\n{body}"));
+        let decoded = udeval_ssa_result(decoded_line);
+        let load_line = body.lines().find(|line|
+            line.contains("= load {") && line.contains(&format!(", ptr {decoded}"))
+        ).unwrap_or_else(|| panic!("UnionValue must reload the packed Some aggregate:\n{body}"));
+        let loaded_some = udeval_ssa_result(load_line);
+        let payload = body.lines().find(|line|
+            line.contains("= extractvalue {") && line.contains(&format!(" {loaded_some}, 1"))
+        ).unwrap_or_else(|| panic!("Some-to-Value must project the payload after UnionValue:\n{body}"));
+        udeval_ssa_result(payload)
+    } else {
+        let payload = body.lines().find(|line|
+            line.contains("= extractvalue {") && line.contains(&format!(" {some_aggregate}, 1"))
+        ).unwrap_or_else(|| panic!("Some-to-Value must extract field 1 from its exact Some aggregate:\n{body}"));
+        udeval_ssa_result(payload)
+    };
+
+    assert_eq!(output, projected,
+        "native result must preserve the selected Some pointer through typed projection/packing; raw SSA equality is not required:\n{body}");
+    let retain_lines = body.lines().filter(|line|
+        line.contains("call i8 @thaw_promise_retain(")
+    ).collect::<Vec<_>>();
+    assert_eq!(retain_lines.len(), usize::from(borrowed),
+        "only borrowed Some output is retained once:\n{body}");
+    if borrowed {
+        assert!(retain_lines[0].contains(&format!("ptr {projected})")),
+            "retain must acquire the exact projected pointer identity {projected}: {}", retain_lines[0]);
+    }
+}
+
+fn ner_assert_union_borrowed_retain(body: &str, selected_tags: &[u8]) {
+    let returned = body.lines().map(str::trim).filter_map(|line|
+        line.strip_prefix("ret { i8, i64 } ").map(str::to_string)
+    ).find(|value| value != "undef" && value != "zeroinitializer")
+        .expect("borrowed union output has a normal aggregate return");
+    ner_assert_phi_predecessors_are_entry_reachable(body);
+    // IR instruction lines are indented; the propagate path's `zeroinitializer` return is not a result.
+    assert!(body.lines().map(str::trim).any(|line|
+        line.starts_with("ret { i8, i64 } ") && !line.ends_with("undef") && !line.ends_with("zeroinitializer")
+    ), "borrowed union normalizer must publish a typed native result:\n{body}");
+    let input_line = body.lines().find(|line|
+        line.contains("= load { i8, i64 }, ptr %borrowed_cell")
+    ).expect("borrowed union parameter is loaded before output normalization");
+    let input = udeval_ssa_result(input_line);
+    let aggregate = format!(" {input},");
+    let tag_lines = body.lines().filter(|line|
+        line.contains("= extractvalue") && line.contains(&aggregate) && line.ends_with(", 0")
+    ).collect::<Vec<_>>();
+    assert_eq!(tag_lines.len(), 1, "borrowed output selects by its exact input tag:\n{body}");
+    let tag = udeval_ssa_result(tag_lines[0]);
+    let blocks = udeval_blocks(body);
+    let mut previous_false = None;
+    for selected_tag in selected_tags {
+        let comparisons = body.lines().filter(|line|
+            line.contains("= icmp eq i8")
+                && line.contains(&format!(" {tag}, {selected_tag}"))
+                && line.trim_end().ends_with(&format!(", {selected_tag}"))
+        ).collect::<Vec<_>>();
+        assert_eq!(comparisons.len(), 1,
+            "borrowed union output must guard Promise tag {selected_tag} exactly once:\n{body}");
+        let condition = udeval_ssa_result(comparisons[0]);
+        let branches = blocks.iter().filter(|block| block.text.lines().any(|line|
+            udeval_branch_condition(line).as_deref() == Some(condition.as_str())
+        )).collect::<Vec<_>>();
+        assert_eq!(branches.len(), 1, "selected Promise tag controls one branch:\n{body}");
+        let branch = branches[0];
+        if let Some(expected) = &previous_false {
+            assert_eq!(&branch.label, expected,
+                "prior nonmatching tag edge must reach the next tag test");
+        }
+        let successors = udeval_successors(branch);
+        assert_eq!(successors.len(), 2);
+        let selected = udeval_block(&blocks, &successors[0]);
+        let rejected = udeval_block(&blocks, &successors[1]);
+        assert!(selected.text.contains("@thaw_promise_retain("),
+            "matching tag enters a block that retains the selected borrowed Promise: {}", selected.label);
+        let payload_lines = selected.text.lines().filter(|line|
+            line.contains("= extractvalue") && line.contains(&aggregate) && line.ends_with(", 1")
+        ).collect::<Vec<_>>();
+        assert_eq!(payload_lines.len(), 1,
+            "selected output tag extracts only its own payload:\n{}", selected.text);
+        let payload = udeval_ssa_result(payload_lines[0]);
+        let decode_lines = selected.text.lines().filter(|line|
+            line.contains("= inttoptr i64") && line.contains(&format!(" {payload} to ptr"))
+        ).collect::<Vec<_>>();
+        assert_eq!(decode_lines.len(), 1,
+            "selected borrowed output decodes its exact Promise payload:\n{}", selected.text);
+        let decoded = udeval_ssa_result(decode_lines[0]);
+        let retains = body.lines().filter(|line|
+            line.contains("call i8 @thaw_promise_retain(")
+                && line.contains(&format!("ptr {decoded})"))
+        ).collect::<Vec<_>>();
+        assert_eq!(retains.len(), 1,
+            "selected tag must retain this borrowed token exactly once: {decoded}\n{body}");
+        let packed_lines = body.lines().filter(|line|
+            line.contains("= ptrtoint ptr") && line.contains(&format!(" {decoded} to i64"))
+        ).collect::<Vec<_>>();
+        assert_eq!(packed_lines.len(), 1,
+            "the retained Promise identity must be packed once into the output union:\n{body}");
+        let packed = udeval_ssa_result(packed_lines[0]);
+        let inserted_lines = body.lines().filter(|line|
+            line.contains("= insertvalue { i8, i64 }")
+                && line.contains(&format!("i64 {packed}, 1"))
+        ).collect::<Vec<_>>();
+        assert_eq!(inserted_lines.len(), 1,
+            "the exact retained token payload must reach one native output aggregate:\n{body}");
+        let inserted = udeval_ssa_result(inserted_lines[0]);
+        if returned != input {
+            let return_definitions = body.lines().filter(|line|
+                line.split_once(" = ").is_some_and(|(lhs, rhs)|
+                    lhs.trim() == returned && rhs.trim_start().starts_with("phi { i8, i64 }")
+                )
+            ).collect::<Vec<_>>();
+            assert_eq!(return_definitions.len(), 1,
+                "rebuilt borrowed output must be a typed PHI at the live return merge:\n{body}");
+            assert!(return_definitions[0].contains(&format!("[ {inserted}, %")),
+                "returned PHI must carry the selected retained pointer's output payload:\n{}",
+                return_definitions[0]);
+        }
+        assert!(!rejected.text.contains("= extractvalue")
+                && !rejected.text.contains("= inttoptr i64")
+                && !rejected.text.contains("@thaw_promise_retain("),
+            "false Promise tag cannot decode or retain the inactive payload:\n{}", rejected.text);
+        previous_false = Some(successors[1].clone());
+    }
+    let total_retains = body.lines().filter(|line|
+        line.contains("call i8 @thaw_promise_retain(")
+    ).count();
+    assert_eq!(total_retains, selected_tags.len(),
+        "a borrowed union output has one selected retain site per Promise tag:\n{body}");
+    ner_assert_phi_predecessors_are_entry_reachable(body);
+}
+
+fn ner_assert_borrowed_output(body: &str, result_type: &HirType, route: NerRoute) {
+    match result_type {
+        HirType::Promise(_) => {
+            ner_assert_exact_borrowed_retain(body);
+            // Exact Promise parameters own a false-initialized stack flag.
+            // Its guarded destructor is lexical cleanup, not an output discard.
+            if matches!(route, NerRoute::Named) {
+                assert_borrowed_promise_cleanup_flag_is_false_initialized(body, "borrowed");
+            } else {
+                ner_assert_lambda_borrowed_promise_cleanup_flag_is_false(body);
+            }
+        }
+        HirType::Union(members) => {
+            let tags = members.iter().enumerate().filter_map(|(index, member)|
+                matches!(member, HirType::Promise(_)).then_some(index as u8)
+            ).collect::<Vec<_>>();
+            ner_assert_union_borrowed_retain(body, &tags);
+        }
+        _ => unreachable!(),
+    }
+}
+
+fn ner_assert_lambda_borrowed_promise_cleanup_flag_is_false(body: &str) {
+    let blocks = union_discard_ir_blocks(body);
+    let slot = "%borrowed_cell";
+    let pointer_parameters = union_discard_ir_pointer_parameters(body);
+    assert_eq!(pointer_parameters.len(), 2,
+        "closure signature has one hidden environment and one Promise parameter:\n{body}");
+    let borrowed_parameter = pointer_parameters.last().unwrap();
+    assert!(blocks.iter().any(|block| block.label == "entry"
+        && block.instructions.iter().any(|line|
+            union_discard_ir_store_pointer_operands(line).is_some_and(|(value, destination)|
+                value == borrowed_parameter.as_str() && destination.as_str() == slot
+            )
+        )), "lambda stores the borrowed parameter without adopting it:\n{body}");
+    let (entry, flag) = blocks.iter().find_map(|block| block.instructions.iter().find_map(|line|
+        union_discard_ir_rhs(line).strip_prefix("store i1 false, ptr ")
+            .map(|rest| (block.label.clone(), rest.split(',').next().unwrap_or(rest).trim().to_string()))
+    )).unwrap_or_else(|| panic!("lambda's borrowed owner flag starts false:\n{body}"));
+    assert_eq!(entry, "entry");
+    let owned = blocks.iter().flat_map(|block| block.instructions.iter()).find_map(|line|
+        (union_discard_ir_load_pointer_operand(line, "i1").as_deref() == Some(flag.as_str()))
+            .then(|| union_discard_ir_lhs(line)).flatten().map(str::to_string)
+    ).unwrap_or_else(|| panic!("lambda cleanup reads the false-initialized borrowed owner flag:\n{body}"));
+    let release = blocks.iter().find_map(|block| block.instructions.iter().find_map(|line|
+        union_discard_ir_conditional_branch(line).filter(|(condition, yes, no)|
+            condition == &owned
+                && yes.starts_with("release_stack_promise")
+                && no.starts_with("stack_promise_cleanup_next")
+        ).map(|(_, yes, _)| yes.clone())
+    )).unwrap_or_else(|| panic!("only true borrowed owner flags enter lambda cleanup:\n{body}"));
+    let release_block = blocks.iter().find(|block| block.label == release)
+        .expect("flag-guarded lambda cleanup block exists");
+    let loaded = release_block.instructions.iter().find_map(|line|
+        (union_discard_ir_load_pointer_operand(line, "ptr").as_deref() == Some(slot))
+            .then(|| union_discard_ir_lhs(line)).flatten().map(str::to_string)
+    ).expect("lambda cleanup reloads the borrowed parameter slot");
+    assert_eq!(release_block.instructions.iter().filter_map(|line|
+        union_discard_ir_destroy_operand(line)
+    ).collect::<Vec<_>>(), vec![loaded],
+        "guarded lambda cleanup may release only the parameter slot's own token:\n{body}");
+}
+
+#[test]
+fn native_eval_then_return_owned_union_and_exact_tokens() {
+    let mut functions = Vec::new();
+    let mut externals = Vec::new();
+    let mut fixtures = Vec::new();
+    for (shape, output_type) in ner_shape_types() {
+        for route in [NerRoute::Named, NerRoute::ExpressionLambda, NerRoute::BlockLambda] {
+            for ownership in [NerOwnership::Owned, NerOwnership::Borrowed] {
+                fixtures.push(ner_add_fixture(
+                    &mut functions,
+                    &mut externals,
+                    route,
+                    ownership,
+                    shape,
+                    output_type.clone(),
+                ));
+            }
+        }
+    }
+    let ir = ner_compile(&functions, &externals);
+
+    for fixture in &fixtures {
+        let body = if matches!(fixture.route, NerRoute::Named) {
+            udeval_function_body(&ir, &fixture.function_name)
+        } else {
+            ner_function_body_for_call(&ir, &fixture.first_name)
+        };
+        let first_value = udeval_call_result(&body, &fixture.first_name);
+        if matches!(fixture.ownership, NerOwnership::Owned) {
+            ner_assert_owned_first_release(&body, &fixture.first_name, &fixture.output_type);
+            udeval_assert_pending_edges_skip_later(
+                &udeval_blocks(&body),
+                &fixture.first_name,
+                fixture.second_name.as_deref().expect("owned second"),
+            );
+            let second_name = fixture.second_name.as_deref().unwrap();
+            let second_value = ner_assert_exact_return_identity(&body, second_name, &fixture.output_type);
+            assert_ne!(first_value, second_value,
+                "first owner A and returned second owner B need distinct SSA identities");
+            assert!(!body.lines().any(|line|
+                line.contains("@thaw_promise_destroy(")
+                    && line.contains(&format!("ptr {second_value})"))
+            ), "producer cannot consume its returned second token B:\n{body}");
+
+            if let Some(consumer_name) = fixture.consumer_name.as_deref() {
+                let consumer = udeval_function_body(&ir, consumer_name);
+                let returned = udeval_call_result(&consumer, &fixture.function_name);
+                let consumer_blocks = udeval_blocks(&consumer);
+                match &fixture.output_type {
+                    HirType::Promise(_) => {
+                        let destroy = consumer.lines().filter(|line|
+                            line.contains("@thaw_promise_destroy(")
+                                && line.contains(&format!("ptr {returned})"))
+                        ).collect::<Vec<_>>();
+                        assert_eq!(destroy.len(), 1,
+                            "exact output consumer discards precisely the returned identity:\n{consumer}");
+                        assert_eq!(consumer.lines().filter(|line|
+                            line.contains("@thaw_promise_destroy(")
+                        ).count(), 1);
+                    }
+                    HirType::Union(_) => {
+                        let tags = if fixture.output_type == udjit_three_union_type() {
+                            &[0, 2][..]
+                        } else { &[0][..] };
+                        let trace = udeval_assert_union_destroy_identity(
+                            &consumer, &consumer_blocks, &returned, tags,
+                        );
+                        assert_eq!(consumer.lines().filter(|line|
+                            line.contains("@thaw_promise_destroy(")
+                        ).count(), trace.destroy_blocks.len(),
+                            "consumer has only its one selected-tag discard:");
+                        udeval_assert_result_destroy_only_on_normal_edge(
+                            &consumer_blocks, &fixture.function_name, &trace,
+                        );
+                    }
+                    _ => unreachable!(),
+                }
+                assert!(!consumer.contains("@thaw_promise_retain("),
+                    "consumer of an already-owned native output adds no retain:\n{consumer}");
+            }
+        } else {
+            ner_assert_borrowed_output(&body, &fixture.output_type, fixture.route);
+            assert!(body.contains("@thaw_promise_retain("),
+                "borrowed second output must acquire ownership before return:\n{body}");
+            if matches!(fixture.route, NerRoute::Named) {
+                let consumer_name = fixture.consumer_name.as_deref().unwrap();
+                let consumer = udeval_function_body(&ir, consumer_name);
+                let returned = udeval_call_result(&consumer, &fixture.function_name);
+                match &fixture.output_type {
+                    HirType::Promise(_) => {
+                        let destroy = consumer.lines().filter(|line|
+                            line.contains("@thaw_promise_destroy(")
+                                && line.contains(&format!("ptr {returned})"))
+                        ).collect::<Vec<_>>();
+                        assert_eq!(destroy.len(), 1,
+                            "borrowed output consumer releases its single returned reference:\n{consumer}");
+                        assert_borrowed_promise_cleanup_flag_is_false_initialized(&consumer, "borrowed");
+                    }
+                    HirType::Union(members) => {
+                        let tags = members.iter().enumerate().filter_map(|(index, member)|
+                            matches!(member, HirType::Promise(_)).then_some(index as u8)
+                        ).collect::<Vec<_>>();
+                        let trace = udeval_assert_union_destroy_identity(
+                            &consumer, &udeval_blocks(&consumer), &returned, &tags,
+                        );
+                        assert_eq!(consumer.lines().filter(|line|
+                            line.contains("@thaw_promise_destroy(")
+                        ).count(), trace.destroy_blocks.len(),
+                            "borrowed union consumer destroys only the output selection:\n{consumer}");
+                    }
+                    _ => unreachable!(),
+                }
+            }
+        }
+        assert!(matches!(fixture.shape, "exact" | "flat" | "three"));
+    }
+}
+
+fn ner_named_return(
+    name: &str,
+    params: Vec<HirParam>,
+    result: HirType,
+    expression: HirExpr,
+) -> HirFunction {
+    udjit_function(name, params, result, vec![HirStmt::Return(Some(expression))])
+}
+
+fn ner_external(externals: &mut Vec<(String, HirType)>, name: &str, ty: HirType) {
+    externals.push((name.to_string(), ty));
+}
+
+fn ner_count_calls(body: &str, callee: &str) -> usize {
+    body.lines().filter(|line| line.contains("= call ") && line.contains(&format!("@{callee}("))
+        ).count()
+}
+
+fn ner_assert_return_pointer_phi(body: &str, incoming_values: &[String]) -> String {
+    let returned = body.lines().map(str::trim).filter_map(|line|
+        line.strip_prefix("ret ptr ").map(str::to_string)
+    ).find(|value| value != "null" && value != "undef")
+        .expect("selected exact Promise producer has a normal pointer return");
+    let phi = body.lines().find(|line| line.split_once(" = ").is_some_and(|(lhs, rhs)|
+        lhs.trim() == returned && rhs.trim_start().starts_with("phi ptr ")
+    ));
+    if let Some(phi) = phi {
+        for incoming in incoming_values {
+            assert!(phi.contains(&format!("[ {incoming}, %")),
+                "the live return PHI must forward selected identity {incoming}:\n{phi}");
+        }
+    } else {
+        assert!(incoming_values.iter().any(|incoming| incoming == &returned),
+            "normal exact Promise return is a selected incoming value or its typed PHI:\n{body}");
+    }
+    ner_assert_phi_predecessors_are_entry_reachable(body);
+    returned
+}
+
+fn ner_assert_return_contains_source(body: &str, llvm_type: &str, source_value: &str) {
+    let returned = body.lines().map(str::trim).filter_map(|line|
+        line.strip_prefix(&format!("ret {llvm_type} ")).map(str::to_string)
+    ).find(|value| value != "null" && value != "undef" && value != "zeroinitializer");
+    let returned = returned.expect("normal result return exists");
+    if returned == source_value { return; }
+    let phi = body.lines().find(|line| line.split_once(" = ").is_some_and(|(lhs, rhs)|
+        lhs.trim() == returned && rhs.trim_start().starts_with(&format!("phi {llvm_type} "))
+    )).expect("conditional return value is a typed result PHI");
+    assert!(phi.contains(&format!("[ {source_value}, %")),
+        "normal return PHI must carry the live source result {source_value}:\n{phi}");
+}
+
+fn ner_assert_owned_first_promise(body: &str, first: &str) -> String {
+    let first_value = udeval_call_result(body, first);
+    let releases = body.lines().filter(|line|
+        line.contains("@thaw_promise_destroy(")
+            && line.contains(&format!("ptr {first_value})"))
+    ).collect::<Vec<_>>();
+    assert_eq!(releases.len(), 1,
+        "owned EvalThen prefix token A is released exactly once:\n{body}");
+    first_value
+}
+
+fn ner_assert_first_union_release_without_constraining_selected_output(
+    body: &str,
+    first: &str,
+    selected_tags: &[u8],
+) {
+    let first_value = udeval_call_result(body, first);
+    let blocks = udeval_blocks(body);
+    let trace = udeval_assert_union_destroy_identity(body, &blocks, &first_value, selected_tags);
+    assert_eq!(body.lines().filter(|line| line.contains("@thaw_promise_destroy(")).count(),
+        trace.destroy_blocks.len(),
+        "only the EvalThen first union owner is destroyed in its producer:\n{body}");
+    udeval_assert_result_destroy_only_on_normal_edge(&blocks, first, &trace);
+}
+
+#[test]
+fn native_eval_then_return_selected_wrappers() {
+    let promise = udjit_promise_f64();
+    let flat = udjit_flat_union_type();
+    let mut functions = Vec::new();
+    let mut externals = Vec::new();
+
+    // Prefix followed by an exact-Promise selection. Both branches are
+    // source-visible once, but only the borrowed branch gets an output retain.
+    for (name, owned_first, condition, owned_second, reverse) in [
+        ("nret_select_owned_then_borrowed", "nret_select_first_a", "nret_select_condition_a", "nret_select_owned_a", false),
+        ("nret_select_borrowed_then_owned", "nret_select_first_b", "nret_select_condition_b", "nret_select_owned_b", true),
+    ] {
+        ner_external(&mut externals, owned_first, promise.clone());
+        ner_external(&mut externals, condition, HirType::Bool);
+        ner_external(&mut externals, owned_second, promise.clone());
+        let owned = udjit_call(owned_second, Vec::new());
+        let borrowed = udjit_var("borrowed");
+        let (then_value, else_value) = if reverse { (borrowed, owned) } else { (owned, borrowed) };
+        let selection = HirExpr::Conditional(
+            Box::new(udjit_call(condition, Vec::new())),
+            Box::new(then_value),
+            Box::new(else_value),
+            promise.clone(),
+        );
+        let selected = if reverse {
+            HirExpr::TypedClosure(promise.clone(), Box::new(selection))
+        } else {
+            selection
+        };
+        let expression = udeval_eval_then(udjit_call(owned_first, Vec::new()), selected);
+        functions.push(ner_named_return(
+            name,
+            vec![udjit_param("borrowed", promise.clone())],
+            promise.clone(),
+            expression,
+        ));
+    }
+
+    // A conditional leaf can itself carry an EvalThen prefix. The nested
+    // version includes two distinct owned prefixes before the selected leaf.
+    ner_external(&mut externals, "nret_nested_prefix_first_a", promise.clone());
+    ner_external(&mut externals, "nret_nested_prefix_first_b", promise.clone());
+    ner_external(&mut externals, "nret_nested_prefix_condition", HirType::Bool);
+    ner_external(&mut externals, "nret_nested_prefix_owned", promise.clone());
+    ner_external(&mut externals, "nret_nested_prefix_outer_condition", HirType::Bool);
+    ner_external(&mut externals, "nret_nested_prefix_plain", promise.clone());
+    let inner = HirExpr::Conditional(
+        Box::new(udjit_call("nret_nested_prefix_condition", Vec::new())),
+        Box::new(udeval_eval_then(
+            udjit_call("nret_nested_prefix_first_b", Vec::new()),
+            udjit_call("nret_nested_prefix_owned", Vec::new()),
+        )),
+        Box::new(udjit_var("borrowed")),
+        promise.clone(),
+    );
+    let outer = HirExpr::Conditional(
+        Box::new(udjit_call("nret_nested_prefix_outer_condition", Vec::new())),
+        Box::new(inner),
+        Box::new(udjit_call("nret_nested_prefix_plain", Vec::new())),
+        promise.clone(),
+    );
+    functions.push(ner_named_return(
+        "nret_nested_prefixes_and_selections",
+        vec![udjit_param("borrowed", promise.clone())],
+        promise.clone(),
+        udeval_eval_then(udjit_call("nret_nested_prefix_first_a", Vec::new()), outer),
+    ));
+
+    // Reversed direct-union branches pin owned/plain forwarding against a
+    // borrowed Promise-bearing alternative without decoding the owned arm.
+    for (name, first, condition, owned, reverse) in [
+        ("nret_union_owned_then_borrowed", "nret_union_first_a", "nret_union_condition_a", "nret_union_owned_a", false),
+        ("nret_union_borrowed_then_owned", "nret_union_first_b", "nret_union_condition_b", "nret_union_owned_b", true),
+    ] {
+        ner_external(&mut externals, first, flat.clone());
+        ner_external(&mut externals, condition, HirType::Bool);
+        ner_external(&mut externals, owned, flat.clone());
+        let owned_value = udjit_call(owned, Vec::new());
+        let borrowed_value = udjit_var("borrowed_union");
+        let (then_value, else_value) = if reverse {
+            (borrowed_value, owned_value)
+        } else {
+            (owned_value, borrowed_value)
+        };
+        let selection = HirExpr::Conditional(
+            Box::new(udjit_call(condition, Vec::new())),
+            Box::new(then_value),
+            Box::new(else_value),
+            flat.clone(),
+        );
+        functions.push(ner_named_return(
+            name,
+            vec![udjit_param("borrowed_union", flat.clone())],
+            flat.clone(),
+            udeval_eval_then(udjit_call(first, Vec::new()), selection),
+        ));
+    }
+
+    // Explicit direct union injections prove owned Promise versus pointer-
+    // looking plain F64 in both selected branch orders.
+    for (name, first, condition, owned, plain, reverse) in [
+        ("nret_union_owned_then_plain", "nret_union_plain_first_a", "nret_union_plain_condition_a", "nret_union_plain_owned_a", "nret_union_plain_f64_a", false),
+        ("nret_union_plain_then_owned", "nret_union_plain_first_b", "nret_union_plain_condition_b", "nret_union_plain_owned_b", "nret_union_plain_f64_b", true),
+    ] {
+        ner_external(&mut externals, first, flat.clone());
+        ner_external(&mut externals, condition, HirType::Bool);
+        ner_external(&mut externals, owned, promise.clone());
+        ner_external(&mut externals, plain, HirType::F64);
+        let owned_leaf = udjit_inject(udjit_call(owned, Vec::new()), 0, &flat);
+        let plain_leaf = udjit_inject(udjit_call(plain, Vec::new()), 1, &flat);
+        let (then_value, else_value) = if reverse {
+            (plain_leaf, owned_leaf)
+        } else {
+            (owned_leaf, plain_leaf)
+        };
+        let selection = HirExpr::Conditional(
+            Box::new(udjit_call(condition, Vec::new())),
+            Box::new(then_value),
+            Box::new(else_value),
+            flat.clone(),
+        );
+        functions.push(ner_named_return(
+            name,
+            Vec::new(),
+            flat.clone(),
+            udeval_eval_then(udjit_call(first, Vec::new()), selection),
+        ));
+    }
+
+    // Every Some-to-Value family is an independent output body. The roundtrip
+    // variant crosses a matching UnionInject/UnionValue and one additional
+    // same-typed TypedClosure before the native Promise Return.
+    let families = [
+        ("optional", UnionDiscardValueFamily::Optional),
+        ("nullable", UnionDiscardValueFamily::Nullable),
+        ("nullish", UnionDiscardValueFamily::Nullish),
+    ];
+    for (family_name, family) in families {
+        for (roundtrip, path_name) in [(false, "some_value"), (true, "roundtrip_some_value")] {
+            for borrowed in [false, true] {
+                let name = format!("nret_{family_name}_{path_name}_{}", if borrowed { "borrowed" } else { "owned" });
+                let first = format!("{name}_first");
+                let source = format!("{name}_source");
+                ner_external(&mut externals, &first, promise.clone());
+                if !borrowed {
+                    ner_external(&mut externals, &source, promise.clone());
+                }
+                let leaf = if borrowed { udjit_var("borrowed") } else { udjit_call(&source, Vec::new()) };
+                let wrapped = if roundtrip {
+                    union_discard_roundtrip_some_value(family, leaf, &promise)
+                } else {
+                    union_discard_some_value(family, leaf, &promise)
+                };
+                let wrapped = HirExpr::TypedClosure(
+                    promise.clone(),
+                    Box::new(HirExpr::TypedClosure(promise.clone(), Box::new(wrapped))),
+                );
+                let params = if borrowed { vec![udjit_param("borrowed", promise.clone())] } else { Vec::new() };
+                functions.push(ner_named_return(
+                    &name,
+                    params,
+                    promise.clone(),
+                    udeval_eval_then(udjit_call(&first, Vec::new()), wrapped),
+                ));
+            }
+        }
+    }
+
+    let ir = ner_compile(&functions, &externals);
+    for (name, first, condition, owned, reverse) in [
+        ("nret_select_owned_then_borrowed", "nret_select_first_a", "nret_select_condition_a", "nret_select_owned_a", false),
+        ("nret_select_borrowed_then_owned", "nret_select_first_b", "nret_select_condition_b", "nret_select_owned_b", true),
+    ] {
+        let body = udeval_function_body(&ir, name);
+        ner_assert_owned_first_promise(&body, first);
+        assert_eq!(ner_count_calls(&body, condition), 1, "condition is evaluated exactly once:\n{body}");
+        assert_eq!(ner_count_calls(&body, owned), 1, "owned factory is evaluated exactly once:\n{body}");
+        assert_eq!(body.lines().filter(|line| line.contains("call i8 @thaw_promise_retain(")).count(), 1,
+            "only the borrowed selected leaf is retained:\n{body}");
+        ner_assert_phi_predecessors_are_entry_reachable(&body);
+        // The exception paths also load `%borrowed_cell` (to release an owned stack Promise), so the
+        // selected leaf is identified by what the single retain actually receives.
+        let retained = body.lines().find(|line| line.contains("call i8 @thaw_promise_retain("))
+            .expect("borrowed selected pointer is output-retained");
+        let borrowed = retained.split("@thaw_promise_retain(ptr ").nth(1)
+            .and_then(|rest| rest.split(')').next())
+            .expect("retain has a pointer argument").to_string();
+        assert_eq!(body.lines().filter(|line|
+            line.trim_start().starts_with(&format!("{borrowed} = load ptr, ptr %borrowed_cell"))
+        ).count(), 1, "borrowed selected input is loaded once and then output-retained:\n{body}");
+        let owned_value = udeval_call_result(&body, owned);
+        ner_assert_return_pointer_phi(&body, &[borrowed, owned_value]);
+        assert_eq!(reverse, name.ends_with("borrowed_then_owned"));
+    }
+
+    let nested = udeval_function_body(&ir, "nret_nested_prefixes_and_selections");
+    for name in ["nret_nested_prefix_first_a", "nret_nested_prefix_first_b"] {
+        ner_assert_owned_first_promise(&nested, name);
+    }
+    for name in [
+        "nret_nested_prefix_condition",
+        "nret_nested_prefix_owned",
+        "nret_nested_prefix_outer_condition",
+        "nret_nested_prefix_plain",
+    ] {
+        assert_eq!(ner_count_calls(&nested, name), 1,
+            "each nested conditional/test/source is emitted once:\n{nested}");
+    }
+    assert_eq!(nested.lines().filter(|line| line.contains("call i8 @thaw_promise_retain(")).count(), 1,
+        "only the nested borrowed leaf is retained:\n{nested}");
+    ner_assert_phi_predecessors_are_entry_reachable(&nested);
+
+    for (name, first, condition, owned) in [
+        ("nret_union_owned_then_borrowed", "nret_union_first_a", "nret_union_condition_a", "nret_union_owned_a"),
+        ("nret_union_borrowed_then_owned", "nret_union_first_b", "nret_union_condition_b", "nret_union_owned_b"),
+    ] {
+        let body = udeval_function_body(&ir, name);
+        ner_assert_first_union_release_without_constraining_selected_output(&body, first, &[0]);
+        assert_eq!(ner_count_calls(&body, condition), 1);
+        assert_eq!(ner_count_calls(&body, owned), 1);
+        assert_eq!(body.lines().filter(|line| line.contains("call i8 @thaw_promise_retain(")).count(), 1,
+            "the borrowed union branch receives one selected output retain:\n{body}");
+        assert!(body.contains("= extractvalue { i8, i64 }"),
+            "borrowed union selection checks a direct Promise tag:\n{body}");
+        ner_assert_phi_predecessors_are_entry_reachable(&body);
+    }
+
+    for (name, first, condition, owned, plain) in [
+        ("nret_union_owned_then_plain", "nret_union_plain_first_a", "nret_union_plain_condition_a", "nret_union_plain_owned_a", "nret_union_plain_f64_a"),
+        ("nret_union_plain_then_owned", "nret_union_plain_first_b", "nret_union_plain_condition_b", "nret_union_plain_owned_b", "nret_union_plain_f64_b"),
+    ] {
+        let body = udeval_function_body(&ir, name);
+        ner_assert_owned_first_release(&body, first, &flat);
+        for callee in [condition, owned, plain] {
+            assert_eq!(ner_count_calls(&body, callee), 1,
+                "each selected owned/plain factory and condition appears once:\n{body}");
+        }
+        assert!(!body.contains("@thaw_promise_retain("),
+            "direct owned Promise and plain F64 injections need no output retain:\n{body}");
+        assert!(body.lines().any(|line| line.trim().starts_with("ret { i8, i64 } ")),
+            "selected direct Union Return remains a typed native aggregate:\n{body}");
+        ner_assert_phi_predecessors_are_entry_reachable(&body);
+    }
+
+    for (family_name, _) in families {
+        for (path_name, _) in [("some_value", false), ("roundtrip_some_value", true)] {
+            for borrowed in [false, true] {
+                let name = format!("nret_{family_name}_{path_name}_{}", if borrowed { "borrowed" } else { "owned" });
+                let body = udeval_function_body(&ir, &name);
+                ner_assert_owned_first_promise(&body, &format!("{name}_first"));
+                let source = if borrowed {
+                    body.lines().find(|line|
+                        line.contains("= load ptr, ptr %borrowed_cell")
+                    ).map(udeval_ssa_result)
+                        .expect("borrowed Some source comes from the exact parameter slot")
+                } else {
+                    udeval_call_result(&body, &format!("{name}_source"))
+                };
+                ner_assert_wrapped_pointer_identity(&body, &source, borrowed, path_name == "roundtrip_some_value");
+                if borrowed {
+                    assert_borrowed_promise_cleanup_flag_is_false_initialized(&body, "borrowed");
+                } else {
+                    assert!(!body.lines().any(|line|
+                        line.contains("@thaw_promise_destroy(")
+                            && line.contains(&format!("ptr {source})"))
+                    ), "owned Some output B is not consumed in its producer:\n{body}");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn native_eval_then_return_local_owner_is_retained_before_cleanup() {
+    let promise = udjit_promise_f64();
+    let first = "nret_local_owner_first";
+    let owner_factory = "nret_local_owner_source";
+    let name = "nret_local_owner_return";
+    let function = udjit_function(
+        name,
+        Vec::new(),
+        promise.clone(),
+        vec![
+            HirStmt::Let(
+                "local_owner".into(),
+                promise.clone(),
+                udjit_call(owner_factory, Vec::new()),
+            ),
+            HirStmt::Return(Some(udeval_eval_then(
+                udjit_call(first, Vec::new()),
+                udjit_var("local_owner"),
+            ))),
+        ],
+    );
+    let ir = ner_compile(&[function], &[
+        (first.to_string(), promise.clone()),
+        (owner_factory.to_string(), promise),
+    ]);
+    let body = udeval_function_body(&ir, name);
+    let first_value = ner_assert_owned_first_promise(&body, first);
+    let owner_value = udeval_call_result(&body, owner_factory);
+    let owner_slot = "%local_owner_cell";
+    let stores = body.lines().filter(|line|
+        line.contains(&format!("store ptr {owner_value}, ptr {owner_slot}"))
+    ).collect::<Vec<_>>();
+    assert_eq!(stores.len(), 2,
+        "the existing-owner and empty-slot assignment arms each install the factory-owned B token:\n{body}");
+    let true_flag_stores = body.lines().filter_map(|line|
+        line.split_once("store i1 true, ptr ").map(|(_, rest)|
+            rest.split([',', ' '])
+                .next().unwrap_or(rest).to_string()
+        )
+    ).collect::<HashSet<_>>();
+    assert_eq!(true_flag_stores.len(), 1,
+        "both assignment arms set one shared true ownership flag for the local owner:\n{body}");
+    let owner_flag = true_flag_stores.iter().next().unwrap();
+    let blocks = udeval_blocks(&body);
+    let entry = udeval_block(&blocks, "entry");
+    assert!(entry.text.lines().any(|line|
+        line.contains(&format!("store i1 false, ptr {owner_flag}"))
+    ), "the exact local-owner true flag begins false in entry:\n{body}");
+    let slot_store_blocks = blocks.iter().filter(|block| block.text.lines().any(|line|
+        line.contains(&format!("store ptr {owner_value}, ptr {owner_slot}"))
+    )).collect::<Vec<_>>();
+    assert_eq!(slot_store_blocks.len(), 2,
+        "the two static owner stores remain in their distinct assignment arms:\n{body}");
+    assert!(slot_store_blocks.iter().any(|block| block.label.starts_with("release_replaced_stack_promise")));
+    assert!(slot_store_blocks.iter().any(|block| block.label.starts_with("replace_unowned_stack_promise")));
+    for block in &slot_store_blocks {
+        assert!(block.text.lines().any(|line|
+            line.contains(&format!("store i1 true, ptr {owner_flag}"))
+        ), "each exact slot store installs the same true owner flag in {}:\n{}", block.label, block.text);
+        assert!(udeval_successors(block).iter().any(|label|
+            label.starts_with("stack_promise_replace_done")
+        ), "both owner assignment arms join only after storing B and its true flag: {}", block.label);
+    }
+    let dispatch_blocks = blocks.iter().filter(|block| {
+        let successors = udeval_successors(block);
+        successors.len() == 2
+            && successors[0].starts_with("release_replaced_stack_promise")
+            && successors[1].starts_with("replace_unowned_stack_promise")
+    }).collect::<Vec<_>>();
+    assert_eq!(dispatch_blocks.len(), 1,
+        "first-owner installation branches on the exact previously-owned flag:\n{body}");
+    let dispatch = dispatch_blocks[0];
+    let dispatch_flag_load = dispatch.text.lines().find(|line|
+        line.contains(&format!("= load i1, ptr {owner_flag}"))
+    ).expect("assignment dispatch reloads the local owner's exact flag");
+    let dispatch_branch = dispatch.text.lines().find(|line|
+        line.trim_start().starts_with("br i1 ")
+    ).expect("owner assignment must branch on prior ownership");
+    let dispatch_flag_value = udeval_ssa_result(dispatch_flag_load);
+    assert_eq!(udeval_branch_condition(dispatch_branch).as_deref(),
+        Some(dispatch_flag_value.as_str()),
+        "true goes to replacement cleanup; false goes to first installation");
+    let factory_blocks = udeval_blocks(&body);
+    let factory_call = udeval_call_block(&factory_blocks, owner_factory);
+    let (factory_normal, factory_exception) = udeval_call_edges(&factory_blocks, factory_call);
+    assert!(udeval_reaches(&factory_blocks, &factory_normal, &dispatch.label));
+    assert!(!udeval_reaches(&factory_blocks, &factory_exception, &dispatch.label),
+        "factory-error cleanup remains outside the owner-installation normal edge");
+    let replace_done = blocks.iter().find(|block|
+        block.label.starts_with("stack_promise_replace_done")
+    ).expect("both owner-store arms have one continuation block");
+    let replace_predecessors = blocks.iter().filter(|block|
+        udeval_successors(block).contains(&replace_done.label)
+    ).collect::<Vec<_>>();
+    assert_eq!(replace_predecessors.len(), 2,
+        "both mutually exclusive owner-store arms feed the same initialized continuation");
+    for block in &slot_store_blocks {
+        assert!(udeval_successors(block).contains(&replace_done.label));
+    }
+    let slot_loads = body.lines().filter(|line|
+        line.contains(&format!("= load ptr, ptr {owner_slot}"))
+    ).map(udeval_ssa_result).collect::<Vec<_>>();
+    assert!(slot_loads.len() >= 2,
+        "the return borrow and lexical cleanup load the exact same owner slot:\n{body}");
+    let retains = body.lines().filter(|line|
+        line.contains("call i8 @thaw_promise_retain(")
+            && slot_loads.iter().any(|value| line.contains(&format!("ptr {value})")))
+    ).collect::<Vec<_>>();
+    assert_eq!(retains.len(), 1,
+        "return acquires one output ref to a value loaded from the exact local owner slot before cleanup:\n{body}");
+    let mut cleanup_sites = Vec::<(String, String, String)>::new();
+    for release in blocks.iter().filter(|block|
+        block.label.starts_with("release_stack_promise")
+    ) {
+        let slot_load = release.text.lines().find(|line|
+            line.contains(&format!("= load ptr, ptr {owner_slot}"))
+        );
+        let Some(slot_load) = slot_load else { continue; };
+        let loaded_owner = udeval_ssa_result(slot_load);
+        let owner_destroys = release.text.lines().filter(|line|
+            line.contains("@thaw_promise_destroy(")
+                && line.contains(&format!("ptr {loaded_owner})"))
+        ).collect::<Vec<_>>();
+        if owner_destroys.is_empty() { continue; }
+        assert_eq!(owner_destroys.len(), 1,
+            "a local-owner cleanup arm destroys its exact reloaded slot value once:\n{}", release.text);
+        assert!(release.text.lines().any(|line|
+            line.contains(&format!("store i1 false, ptr {owner_flag}"))
+        ), "the local-owner release clears its exact true flag:\n{}", release.text);
+        let guards = blocks.iter().filter(|block|
+            udeval_successors(block).contains(&release.label)
+        ).collect::<Vec<_>>();
+        assert_eq!(guards.len(), 1,
+            "each static local-owner destroy block has one exact guard predecessor:\n{}", release.text);
+        let guard = guards[0];
+        let owner_flag_load = guard.text.lines().find(|line|
+            line.contains(&format!("= load i1, ptr {owner_flag}"))
+        ).expect("cleanup guard reads the local owner's exact flag");
+        let branch = guard.text.lines().find(|line|
+            line.trim_start().starts_with("br i1 ")
+        ).expect("local-owner cleanup guard has a conditional branch");
+        let guard_flag_value = udeval_ssa_result(owner_flag_load);
+        assert_eq!(udeval_branch_condition(branch).as_deref(),
+            Some(guard_flag_value.as_str()),
+            "cleanup destruction is controlled by the exact true owner flag");
+        let successors = udeval_successors(guard);
+        assert_eq!(successors.len(), 2);
+        assert_eq!(successors[0], release.label,
+            "true local-owner flag enters this exact destroy block");
+        assert!(successors[1].starts_with("stack_promise_cleanup_next"),
+            "false local-owner flag skips only this cleanup block");
+        cleanup_sites.push((release.label.clone(), guard.label.clone(), owner_destroys[0].trim().to_string()));
+    }
+    assert!(!cleanup_sites.is_empty(),
+        "all static local-owner cleanup sites remain represented behind the shared owner flag:\n{body}");
+    let destroys_of_first = body.lines().filter(|line|
+        line.contains("@thaw_promise_destroy(")
+            && line.contains(&format!("ptr {first_value})"))
+    ).collect::<Vec<_>>();
+    assert_eq!(destroys_of_first.len(), 1,
+        "EvalThen retires its exact first token before returning the local owner's second token:\n{body}");
+    ner_assert_operation_dominates(
+        &body,
+        destroys_of_first[0],
+        retains[0],
+        "EvalThen first-result release precedes return acquisition",
+    );
+    let retain_result = udeval_ssa_result(retains[0]);
+    let retain_block = blocks.iter().find(|block| block.text.lines().any(|line|
+        line.trim() == retains[0].trim()
+    )).expect("output acquisition has one concrete call block");
+    assert!(udeval_dominates(&blocks, &replace_done.label, &retain_block.label),
+        "both assignment arms set the exact owner flag before borrowed output acquisition:\n{body}");
+    let retain_failed_compare = body.lines().filter(|line|
+        line.contains("= icmp eq i8 ") && line.contains(&format!(" {retain_result}, 0"))
+    ).collect::<Vec<_>>();
+    assert_eq!(retain_failed_compare.len(), 1,
+        "retain-ready selection is based on the exact output-acquisition result:\n{body}");
+    let failed_condition = udeval_ssa_result(retain_failed_compare[0]);
+    let retain_branches = blocks.iter().filter(|block| block.text.lines().any(|line|
+        udeval_branch_condition(line).as_deref() == Some(failed_condition.as_str())
+    )).collect::<Vec<_>>();
+    assert_eq!(retain_branches.len(), 1,
+        "retain result has one failure/ready control branch:\n{body}");
+    let retain_branch = retain_branches[0];
+    let retain_successors = udeval_successors(retain_branch);
+    assert_eq!(retain_successors.len(), 2);
+    assert!(retain_successors[0].starts_with("borrowed_await_retain_error"));
+    assert!(retain_successors[1].starts_with("borrowed_await_retain_ready"));
+    let retain_error = &retain_successors[0];
+    let retain_ready = &retain_successors[1];
+    let normal_cleanup_sites = cleanup_sites.iter().filter(|(_, guard, _)|
+        udeval_reaches(&blocks, retain_ready, guard)
+            && !udeval_reaches(&blocks, retain_error, guard)
+    ).collect::<Vec<_>>();
+    assert_eq!(normal_cleanup_sites.len(), 1,
+        "only the successful retain-ready path reaches the normal Return cleanup for this local owner:\n{body}");
+    let (_, normal_cleanup_guard, normal_cleanup_destroy) = normal_cleanup_sites[0];
+    let factory_cleanup_sites = cleanup_sites.iter().filter(|(_, guard, _)|
+        udeval_reaches(&blocks, &factory_exception, guard)
+    ).collect::<Vec<_>>();
+    assert!(!factory_cleanup_sites.is_empty(),
+        "factory exception still retains its own guarded lexical-cleanup copy:\n{body}");
+    let first_call = udeval_call_block(&blocks, first);
+    let (_, first_exception) = udeval_call_edges(&blocks, first_call);
+    assert!(cleanup_sites.iter().any(|(_, guard, _)|
+        udeval_reaches(&blocks, &first_exception, guard)
+    ), "EvalThen-first exception still reaches its own guarded cleanup copy:\n{body}");
+    assert!(cleanup_sites.iter().any(|(_, guard, _)|
+        udeval_reaches(&blocks, retain_error, guard)
+    ), "failed output retain still reaches its own guarded cleanup copy:\n{body}");
+    for error_edge in [&factory_exception, &first_exception, retain_error] {
+        assert!(!udeval_reaches(&blocks, error_edge, normal_cleanup_guard),
+            "factory/first-call/retain-failure cleanup must not be confused with successful Return cleanup");
+    }
+    let return_line = body.lines().map(str::trim).find(|line|
+        line.starts_with("ret ptr ") && !line.ends_with("null") && !line.ends_with("undef")
+    ).expect("successful local-owner return has a native output");
+    let return_block = blocks.iter().find(|block| block.text.lines().any(|line|
+        line.trim() == return_line
+    )).expect("normal native output has one final Return block");
+    assert!(udeval_reaches(&blocks, normal_cleanup_guard, &return_block.label),
+        "the selected successful local-owner cleanup lies on the path to native Return:\n{body}");
+    ner_assert_operation_dominates(
+        &body,
+        retains[0],
+        normal_cleanup_destroy,
+        "successful borrowed-return acquisition dominates only the normal lexical owner cleanup",
+    );
+}
+
+#[test]
+fn native_eval_then_return_source_liveness_preservation() {
+    let source = r#"
+        function named(value: Promise<number>): Promise<number> {
+            return value;
+        }
+        function expression(value: Promise<number>): Promise<number> {
+            const forward = (input: Promise<number>): Promise<number> => input;
+            return forward(value);
+        }
+        function block(value: Promise<number>): Promise<number> {
+            const forward = (input: Promise<number>): Promise<number> => {
+                return input;
+            };
+            return forward(value);
+        }
+        async function main(): Promise<void> {
+            const owner: Promise<number> = Promise.resolve(42);
+            named(owner);
+            expression(owner);
+            block(owner);
+            console.log(await owner);
+        }
+    "#;
+    let module = thaw_parser::parse_typescript(source).unwrap();
+    let program = thaw_hir::lower_module(&module).unwrap();
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "native_eval_then_return_source_liveness");
+    compiler.compile_program(&program).unwrap();
+    compiler.module.verify().unwrap();
+    assert_eq!(compile_and_run(source, "native_eval_then_return_source_liveness"), "42\n");
+}
+
+fn ner_assert_operation_dominates(body: &str, earlier: &str, later: &str, reason: &str) {
+    let blocks = udeval_blocks(body);
+    let owner = blocks.iter().find(|block|
+        block.text.lines().any(|line| line.trim() == earlier.trim())
+    ).unwrap_or_else(|| panic!("missing earlier operation {earlier}:\n{body}"));
+    let target = blocks.iter().find(|block|
+        block.text.lines().any(|line| line.trim() == later.trim())
+    ).unwrap_or_else(|| panic!("missing later operation {later}:\n{body}"));
+    if owner.label == target.label {
+        let position = |block: &UdevalBlock, needle: &str| block.text.lines().position(|line|
+            line.trim() == needle.trim()
+        ).unwrap();
+        assert!(position(owner, earlier) < position(target, later),
+            "{reason}: same-block instruction order must be forward:\n{body}");
+    } else {
+        assert!(udeval_dominates(&blocks, &owner.label, &target.label),
+            "{reason}: earlier operation's block must dominate later operation's block:\n{body}");
+    }
+}
+
+fn ner_phi_incoming_labels(line: &str) -> Vec<String> {
+    line.split('[').skip(1).filter_map(|incoming| {
+        incoming.split(']').next()
+            .and_then(|contents| contents.rsplit_once(", %"))
+            .map(|(_, label)| label.trim().trim_matches('"').to_string())
+    }).collect()
+}
+
+fn ner_assert_phi_predecessors_are_entry_reachable(body: &str) {
+    let blocks = udeval_blocks(body);
+    for block in &blocks {
+        for line in block.text.lines().map(str::trim).filter(|line| line.contains(" = phi ")) {
+            let incoming = ner_phi_incoming_labels(line);
+            assert!(!incoming.is_empty(), "normal-output PHI must have live incoming values:\n{body}");
+            for predecessor in incoming {
+                assert!(!predecessor.starts_with("after_throw_value")
+                        && !predecessor.starts_with("after_async_throw_value"),
+                    "unattached ThrowValue continuation cannot be a PHI predecessor: {line}");
+                assert!(udeval_reaches(&blocks, "entry", &predecessor),
+                    "PHI predecessor {predecessor} must be reachable from actual function entry:\n{body}");
+                assert!(udeval_successors(udeval_block(&blocks, &predecessor)).contains(&block.label),
+                    "PHI predecessor {predecessor} must branch to the actual merge {}:\n{body}", block.label);
+            }
+        }
+    }
+}
+
+fn ner_throw_value(error: &str, fallback: HirExpr) -> HirExpr {
+    HirExpr::ThrowValue(
+        Box::new(HirExpr::Lit(HirLit::Str(error.into()))),
+        Box::new(fallback),
+    )
+}
+
+fn ner_assert_consumer_discard_skips_pending_call(body: &str, callee: &str) {
+    let blocks = udeval_blocks(body);
+    let call = udeval_call_block(&blocks, callee);
+    let (normal, exceptional) = udeval_call_edges(&blocks, call);
+    let destroys = blocks.iter().filter(|block| block.text.lines().any(|line|
+        line.contains("@thaw_promise_destroy(")
+    )).collect::<Vec<_>>();
+    assert!(!destroys.is_empty(), "a valid successful return still has its normal consumer discard:\n{body}");
+    for destroy in destroys {
+        assert!(udeval_reaches(&blocks, &normal, &destroy.label));
+        assert!(!udeval_reaches(&blocks, &exceptional, &destroy.label),
+            "pending exception from the returner bypasses every consumer discard:\n{body}");
+    }
+}
+
+#[test]
+fn native_eval_then_return_throw_selected_arm_has_no_orphan_output() {
+    let promise = udjit_promise_f64();
+    let first = "nret_throw_selected_first";
+    let condition = "nret_throw_selected_condition";
+    let fallback = "nret_throw_selected_fallback";
+    let normal = "nret_throw_selected_normal";
+    let producer = "nret_throw_selected_return";
+    let consumer = "nret_throw_selected_consumer";
+    let expression = udeval_eval_then(
+        udjit_call(first, Vec::new()),
+        HirExpr::Conditional(
+            Box::new(udjit_call(condition, Vec::new())),
+            Box::new(ner_throw_value("selected arm throws", udjit_call(fallback, Vec::new()))),
+            Box::new(udjit_call(normal, Vec::new())),
+            promise.clone(),
+        ),
+    );
+    let functions = vec![
+        ner_named_return(producer, Vec::new(), promise.clone(), expression),
+        udjit_void_probe(consumer, udjit_call(producer, Vec::new())),
+    ];
+    let ir = ner_compile(&functions, &[
+        (first.to_string(), promise.clone()),
+        (condition.to_string(), HirType::Bool),
+        (fallback.to_string(), promise.clone()),
+        (normal.to_string(), promise),
+    ]);
+    let body = udeval_function_body(&ir, producer);
+    let blocks = udeval_blocks(&body);
+    let fallback_call = udeval_call_block(&blocks, fallback);
+    assert!(!udeval_reaches(&blocks, "entry", &fallback_call.label),
+        "the typed fallback after selected ThrowValue remains unattached to function entry:\n{body}");
+    let normal_call = udeval_call_block(&blocks, normal);
+    assert!(udeval_reaches(&blocks, "entry", &normal_call.label),
+        "the nonthrowing alternate remains an actual native return path:\n{body}");
+    ner_assert_phi_predecessors_are_entry_reachable(&body);
+    let fallback_result = udeval_call_result(&body, fallback);
+    assert!(!body.lines().any(|line|
+        line.trim().starts_with("ret ptr ") && line.contains(&fallback_result)
+    ), "the throw-arm fallback token is not published from the Return:\n{body}");
+    let normal_result = udeval_call_result(&body, normal);
+    ner_assert_return_contains_source(&body, "ptr", &normal_result);
+    let output_return = body.lines().map(str::trim).filter_map(|line|
+        line.strip_prefix("ret ptr ").map(str::to_string)
+    ).find(|value| value != "null" && value != "undef").unwrap();
+    let normal_return_blocks = blocks.iter().filter(|block| block.text.lines().any(|line|
+        line.trim() == format!("ret ptr {output_return}")
+    )).collect::<Vec<_>>();
+    assert_eq!(normal_return_blocks.len(), 1);
+    for throw_block in blocks.iter().filter(|block|
+        block.text.contains("@__thaw_pending_exception")
+            && block.text.lines().any(|line| line.trim().starts_with("ret "))
+    ) {
+        assert!(!udeval_reaches(&blocks, &throw_block.label, &normal_return_blocks[0].label),
+            "the selected throw's real pending-exception return cannot reach output publication:\n{body}");
+    }
+    let consumer_body = udeval_function_body(&ir, consumer);
+    ner_assert_consumer_discard_skips_pending_call(&consumer_body, producer);
+}
+
+#[test]
+fn native_eval_then_return_throwing_test_never_enters_selection() {
+    let promise = udjit_promise_f64();
+    let first = "nret_throw_test_first";
+    let test_fallback = "nret_throw_test_fallback_bool";
+    let then_source = "nret_throw_test_then_source";
+    let else_source = "nret_throw_test_else_source";
+    let producer = "nret_throw_test_return";
+    let consumer = "nret_throw_test_consumer";
+    let expression = udeval_eval_then(
+        udjit_call(first, Vec::new()),
+        HirExpr::Conditional(
+            Box::new(ner_throw_value(
+                "condition throws",
+                udjit_call(test_fallback, Vec::new()),
+            )),
+            Box::new(udjit_call(then_source, Vec::new())),
+            Box::new(udjit_call(else_source, Vec::new())),
+            promise.clone(),
+        ),
+    );
+    let functions = vec![
+        ner_named_return(producer, Vec::new(), promise.clone(), expression),
+        udjit_void_probe(consumer, udjit_call(producer, Vec::new())),
+    ];
+    let ir = ner_compile(&functions, &[
+        (first.to_string(), promise.clone()),
+        (test_fallback.to_string(), HirType::Bool),
+        (then_source.to_string(), promise.clone()),
+        (else_source.to_string(), promise),
+    ]);
+    let body = udeval_function_body(&ir, producer);
+    let blocks = udeval_blocks(&body);
+    let fallback_call = udeval_call_block(&blocks, test_fallback);
+    assert!(!udeval_reaches(&blocks, "entry", &fallback_call.label),
+        "the typed Bool fallback after ThrowValue is not executable from function entry:\n{body}");
+    let fallback_value = udeval_call_result(&body, test_fallback);
+    let fallback_branches = blocks.iter().filter(|block| block.text.lines().any(|line|
+        line.trim_start().starts_with(&format!("br i1 {fallback_value},"))
+    )).collect::<Vec<_>>();
+    assert!(fallback_branches.iter().all(|block| !udeval_reaches(&blocks, "entry", &block.label)),
+        "no fabricated normal branch from the throwing test's orphan value is entry-reachable:\n{body}");
+    for branch in [then_source, else_source] {
+        assert!(!body.lines().any(|line|
+            line.contains("= call ") && line.contains(&format!("@{branch}("))
+        ), "throwing test emits no selection call or normal output branch for {branch}:\n{body}");
+    }
+    ner_assert_phi_predecessors_are_entry_reachable(&body);
+    let consumer_body = udeval_function_body(&ir, consumer);
+    ner_assert_consumer_discard_skips_pending_call(&consumer_body, producer);
+}
+
+#[test]
+fn native_eval_then_return_both_throwing_arms_remain_valid_without_live_result() {
+    let promise = udjit_promise_f64();
+    let condition = "nret_throw_both_condition";
+    let then_fallback = "nret_throw_both_then_fallback";
+    let else_fallback = "nret_throw_both_else_fallback";
+    let producer = "nret_throw_both_return";
+    let consumer = "nret_throw_both_consumer";
+    let expression = udeval_eval_then(
+        udjit_call("nret_throw_both_first", Vec::new()),
+        HirExpr::Conditional(
+            Box::new(udjit_call(condition, Vec::new())),
+            Box::new(ner_throw_value("then throws", udjit_call(then_fallback, Vec::new()))),
+            Box::new(ner_throw_value("else throws", udjit_call(else_fallback, Vec::new()))),
+            promise.clone(),
+        ),
+    );
+    let functions = vec![
+        ner_named_return(producer, Vec::new(), promise.clone(), expression),
+        udjit_void_probe(consumer, udjit_call(producer, Vec::new())),
+    ];
+    let ir = ner_compile(&functions, &[
+        ("nret_throw_both_first".to_string(), promise.clone()),
+        (condition.to_string(), HirType::Bool),
+        (then_fallback.to_string(), promise.clone()),
+        (else_fallback.to_string(), promise),
+    ]);
+    // ner_compile verifies the complete valid-HIR module before returning the
+    // IR; the unreachable typed fallbacks are never passed to a JIT.
+    let body = udeval_function_body(&ir, producer);
+    let blocks = udeval_blocks(&body);
+    ner_assert_phi_predecessors_are_entry_reachable(&body);
+    for fallback in [then_fallback, else_fallback] {
+        let call = udeval_call_block(&blocks, fallback);
+        assert!(!udeval_reaches(&blocks, "entry", &call.label),
+            "all-throwing arm fallback {fallback} is not entry-reachable:\n{body}");
+    }
+    let real_returns = blocks.iter().filter(|block| block.label == "entry" || udeval_reaches(&blocks, "entry", &block.label))
+        .flat_map(|block| block.text.lines().map(str::trim))
+        .filter(|line| line.starts_with("ret ptr ") && !line.ends_with("null"))
+        .collect::<Vec<_>>();
+    assert!(real_returns.is_empty(),
+        "both throwing arms cannot publish a non-null normal result from reachable blocks:\n{body}");
+    let no_value_sink = udeval_block(&blocks, "return_promise_no_normal_value");
+    assert!(!udeval_reaches(&blocks, "entry", &no_value_sink.label),
+        "unchanged caller cleanup/Return is placed only in the detached no-normal-value sink:\n{body}");
+    assert!(no_value_sink.text.lines().any(|line| line.trim() == "ret ptr null"),
+        "the detached sink carries only the zero fallback value, not a Promise token:\n{body}");
+    let merge = blocks.iter().find(|block| block.label == "return_promise_normalize_end")
+        .expect("all-throw selection closes its output merge");
+    assert!(merge.text.lines().any(|line| line.trim() == "unreachable"),
+        "all-throw merge is closed without constructing a PHI:\n{body}");
+    let consumer_body = udeval_function_body(&ir, consumer);
+    ner_assert_consumer_discard_skips_pending_call(&consumer_body, producer);
+}
+
+#[test]
+fn native_eval_then_return_nested_throw_argument_is_not_a_live_call_result() {
+    let promise = udjit_promise_f64();
+    let factory = "nret_nested_throw_target_owner";
+    let registered_target = "nret_registered_f64_argument_producer";
+    let condition = "nret_nested_throw_condition";
+    let first = "nret_nested_throw_first";
+    let live = "nret_nested_throw_live_alternate";
+    let producer = "nret_nested_throw_return";
+    let consumer = "nret_nested_throw_consumer";
+    let target_function = udjit_function(
+        registered_target,
+        vec![udjit_param("value", HirType::F64)],
+        promise.clone(),
+        vec![HirStmt::Return(Some(udjit_call(factory, Vec::new())))],
+    );
+    let throwing_argument = ner_throw_value(
+        "argument evaluation throws",
+        HirExpr::Lit(HirLit::F64(8.5)),
+    );
+    let selected_call = HirExpr::Call(
+        Box::new(udjit_var(registered_target)),
+        vec![throwing_argument],
+    );
+    let expression = udeval_eval_then(
+        udjit_call(first, Vec::new()),
+        HirExpr::Conditional(
+            Box::new(udjit_call(condition, Vec::new())),
+            Box::new(selected_call),
+            Box::new(udjit_call(live, Vec::new())),
+            promise.clone(),
+        ),
+    );
+    let functions = vec![
+        target_function,
+        ner_named_return(producer, Vec::new(), promise.clone(), expression),
+        udjit_void_probe(consumer, udjit_call(producer, Vec::new())),
+    ];
+    let ir = ner_compile(&functions, &[
+        (factory.to_string(), promise.clone()),
+        (first.to_string(), promise.clone()),
+        (condition.to_string(), HirType::Bool),
+        (live.to_string(), promise),
+    ]);
+    let body = udeval_function_body(&ir, producer);
+    let blocks = udeval_blocks(&body);
+    let dead_call = udeval_call_block(&blocks, registered_target);
+    assert!(!udeval_reaches(&blocks, "entry", &dead_call.label),
+        "the selected Promise call's F64 argument throws before its call block is entry-reachable:\n{body}");
+    ner_assert_phi_predecessors_are_entry_reachable(&body);
+    let live_result = udeval_call_result(&body, live);
+    ner_assert_return_contains_source(&body, "ptr", &live_result);
+    let dead_result = udeval_call_result(&body, registered_target);
+    assert!(!body.lines().any(|line|
+        line.trim() == format!("ret ptr {dead_result}")
+    ), "the post-throw argument call result is not a published Return operand:\n{body}");
+    let dead_result_ret_blocks = blocks.iter().filter(|block| block.text.lines().any(|line|
+        line.trim() == format!("ret ptr {dead_result}")
+    )).collect::<Vec<_>>();
+    assert!(dead_result_ret_blocks.iter().all(|block|
+        !udeval_reaches(&blocks, "entry", &block.label)
+    ), "no dead argument continuation can publish its Promise result:\n{body}");
+    let consumer_body = udeval_function_body(&ir, consumer);
+    ner_assert_consumer_discard_skips_pending_call(&consumer_body, producer);
+}
+
+#[test]
+fn native_eval_then_return_union_assignment_after_throw_has_no_live_escape() {
+    let flat = udjit_flat_union_type();
+    let first = "nret_throw_assign_first";
+    let producer = "nret_throw_assign_return";
+    let consumer = "nret_throw_assign_consumer";
+    let expression = udeval_eval_then(
+        udjit_call(first, Vec::new()),
+        HirExpr::Assign(
+            "u".into(),
+            Box::new(ner_throw_value("assignment value throws", udjit_var("u"))),
+        ),
+    );
+    let producer_function = ner_named_return(
+        producer,
+        vec![udjit_param("u", flat.clone())],
+        flat.clone(),
+        expression,
+    );
+    let consumer_function = udjit_function(
+        consumer,
+        vec![udjit_param("u", flat.clone())],
+        HirType::Void,
+        vec![
+            HirStmt::Expr(udjit_call(producer, vec![udjit_var("u")])),
+            HirStmt::Return(None),
+        ],
+    );
+    let ir = ner_compile(&[producer_function, consumer_function], &[
+        (first.to_string(), udjit_promise_f64()),
+    ]);
+    let body = udeval_function_body(&ir, producer);
+    let blocks = udeval_blocks(&body);
+    ner_assert_owned_first_promise(&body, first);
+    ner_assert_phi_predecessors_are_entry_reachable(&body);
+    let orphan = blocks.iter().find(|block| block.label.starts_with("after_throw_value"))
+        .expect("ThrowValue assignment fallback remains separately identified");
+    assert!(!udeval_reaches(&blocks, "entry", &orphan.label),
+        "the assignment's typed union fallback remains detached from actual function entry:\n{body}");
+    let retain_blocks = blocks.iter().filter(|block| block.text.contains("@thaw_promise_retain("))
+        .collect::<Vec<_>>();
+    assert!(retain_blocks.iter().all(|block| !udeval_reaches(&blocks, "entry", &block.label)),
+        "the thrown assignment cannot reach any borrowed-union output normalization retain:\n{body}");
+    assert!(!body.lines().any(|line| line.contains("= phi { i8, i64 }")),
+        "the orphaned assignment cannot feed a direct-union Return/escape PHI:\n{body}");
+    let consumer_body = udeval_function_body(&ir, consumer);
+    ner_assert_consumer_discard_skips_pending_call(&consumer_body, producer);
+}
+
+#[test]
+fn native_eval_then_return_exception_and_context_paths() {
+    let promise = udjit_promise_f64();
+    let first = udjit_function(
+        "nret_pending_first_thrower",
+        Vec::new(),
+        promise.clone(),
+        vec![HirStmt::Throw(HirExpr::Lit(HirLit::Str("first native call throws".into())))],
+    );
+    let producer = ner_named_return(
+        "nret_pending_first_throw_return",
+        Vec::new(),
+        promise.clone(),
+        udeval_eval_then(
+            udjit_call("nret_pending_first_thrower", Vec::new()),
+            udjit_call("nret_pending_first_throw_second_effect", Vec::new()),
+        ),
+    );
+    let consumer = udjit_void_probe(
+        "nret_pending_first_throw_consumer",
+        udjit_call("nret_pending_first_throw_return", Vec::new()),
+    );
+    let ir = ner_compile(&[first, producer, consumer], &[
+        ("nret_pending_first_throw_second_effect".to_string(), promise),
+    ]);
+    let body = udeval_function_body(&ir, "nret_pending_first_throw_return");
+    udeval_assert_pending_edges_skip_later(
+        &udeval_blocks(&body),
+        "nret_pending_first_thrower",
+        "nret_pending_first_throw_second_effect",
+    );
+    let consumer_body = udeval_function_body(&ir, "nret_pending_first_throw_consumer");
+    ner_assert_consumer_discard_skips_pending_call(
+        &consumer_body,
+        "nret_pending_first_throw_return",
+    );
+}
+
+#[test]
+fn native_eval_then_return_pending_second_throw_skips_output_and_discard() {
+    let promise = udjit_promise_f64();
+    let second = udjit_function(
+        "nret_pending_second_thrower",
+        Vec::new(),
+        promise.clone(),
+        vec![HirStmt::Throw(HirExpr::Lit(HirLit::Str("second native call throws".into())))],
+    );
+    let producer = ner_named_return(
+        "nret_pending_second_throw_return",
+        Vec::new(),
+        promise.clone(),
+        udeval_eval_then(
+            udjit_call("nret_pending_second_first_value", Vec::new()),
+            udjit_call("nret_pending_second_thrower", Vec::new()),
+        ),
+    );
+    let consumer = udjit_void_probe(
+        "nret_pending_second_throw_consumer",
+        udjit_call("nret_pending_second_throw_return", Vec::new()),
+    );
+    let ir = ner_compile(&[second, producer, consumer], &[
+        ("nret_pending_second_first_value".to_string(), promise.clone()),
+    ]);
+    let body = udeval_function_body(&ir, "nret_pending_second_throw_return");
+    let blocks = udeval_blocks(&body);
+    let first_value = ner_assert_owned_first_promise(&body, "nret_pending_second_first_value");
+    let second_call = udeval_call_block(&blocks, "nret_pending_second_thrower");
+    assert!(body.lines().filter(|line|
+        line.contains("@thaw_promise_destroy(")
+            && line.contains(&format!("ptr {first_value})"))
+    ).count() == 1, "the first owner is retired before entering the throwing second producer:\n{body}");
+    let second_value = udeval_call_result(&body, "nret_pending_second_thrower");
+    ner_assert_return_contains_source(&body, "ptr", &second_value);
+    let (normal, exceptional) = udeval_call_edges(&blocks, second_call);
+    let return_value = body.lines().map(str::trim).filter_map(|line|
+        line.strip_prefix("ret ptr ").map(str::to_string)
+    ).find(|value| value != "null" && value != "undef").unwrap();
+    let return_blocks = blocks.iter().filter(|block| block.text.lines().any(|line|
+        line.trim() == format!("ret ptr {return_value}")
+    )).collect::<Vec<_>>();
+    assert_eq!(return_blocks.len(), 1);
+    assert!(udeval_reaches(&blocks, &normal, &return_blocks[0].label));
+    assert!(!udeval_reaches(&blocks, &exceptional, &return_blocks[0].label),
+        "pending exception from second native producer bypasses output publication:\n{body}");
+    assert!(!body.contains("@thaw_promise_retain("),
+        "an already-owned second result receives no output normalization retain:\n{body}");
+    let consumer_body = udeval_function_body(&ir, "nret_pending_second_throw_consumer");
+    ner_assert_consumer_discard_skips_pending_call(
+        &consumer_body,
+        "nret_pending_second_throw_return",
+    );
+}
+
+#[test]
+fn native_eval_then_return_named_closure_this_forwarding() {
+    let flat = udjit_flat_union_type();
+    let promise = udjit_promise_f64();
+    let mut functions = Vec::new();
+    let mut externals = Vec::new();
+    let mut make_returner = |name: &str, first: &str, second: &str| {
+        ner_external(&mut externals, first, flat.clone());
+        ner_external(&mut externals, second, flat.clone());
+        ner_named_return(
+            name,
+            Vec::new(),
+            flat.clone(),
+            udeval_eval_then(
+                udjit_call(first, Vec::new()),
+                udjit_call(second, Vec::new()),
+            ),
+        )
+    };
+    let named = "nret_forward_named_target";
+    functions.push(make_returner(named, "nret_forward_named_first", "nret_forward_named_second"));
+    functions.push(make_returner(
+        "nret_forward_method_ordinary_target",
+        "nret_forward_method_ordinary_first",
+        "nret_forward_method_ordinary_second",
+    ));
+    functions.push(make_returner(
+        "nret_forward_method_explicit_target",
+        "nret_forward_method_explicit_first",
+        "nret_forward_method_explicit_second",
+    ));
+    ner_external(&mut externals, "nret_forward_bound_first", flat.clone());
+    ner_external(&mut externals, "nret_forward_bound_second", flat.clone());
+    functions.push(udjit_function(
+        "nret_forward_bound_target",
+        vec![udjit_param("bound_input", promise.clone())],
+        flat.clone(),
+        vec![HirStmt::Return(Some(udeval_eval_then(
+            udjit_call("nret_forward_bound_first", Vec::new()),
+            udjit_call("nret_forward_bound_second", Vec::new()),
+        )))],
+    ));
+
+    let expression_lambda_name = "nret_forward_expression_lambda_holder";
+    let expression_first = "nret_forward_expression_first";
+    let expression_second = "nret_forward_expression_second";
+    ner_external(&mut externals, expression_first, flat.clone());
+    ner_external(&mut externals, expression_second, flat.clone());
+    let expression_lambda = HirExpr::Lambda(
+        Vec::new(), Vec::new(), flat.clone(),
+        Box::new(udeval_eval_then(
+            udjit_call(expression_first, Vec::new()),
+            udjit_call(expression_second, Vec::new()),
+        )),
+    );
+    functions.push(udjit_function(
+        expression_lambda_name,
+        Vec::new(),
+        HirType::Void,
+        vec![
+            HirStmt::Let(
+                "expression_returner".into(),
+                HirType::Function(Vec::new(), Box::new(flat.clone())),
+                expression_lambda,
+            ),
+            HirStmt::Return(None),
+        ],
+    ));
+
+    let block_lambda_name = "nret_forward_block_lambda_holder";
+    let block_first = "nret_forward_block_first";
+    let block_second = "nret_forward_block_second";
+    ner_external(&mut externals, block_first, flat.clone());
+    ner_external(&mut externals, block_second, flat.clone());
+    let block_lambda = HirExpr::Lambda(
+        Vec::new(), Vec::new(), flat.clone(),
+        Box::new(HirExpr::Block(vec![HirStmt::Return(Some(udeval_eval_then(
+            udjit_call(block_first, Vec::new()),
+            udjit_call(block_second, Vec::new()),
+        )))])),
+    );
+    functions.push(udjit_function(
+        block_lambda_name,
+        Vec::new(),
+        HirType::Void,
+        vec![
+            HirStmt::Let(
+                "block_returner".into(),
+                HirType::Function(Vec::new(), Box::new(flat.clone())),
+                block_lambda,
+            ),
+            HirStmt::Return(None),
+        ],
+    ));
+
+    let function_ref = || HirExpr::FunctionRef(named.into(), Vec::new(), flat.clone());
+    let function_ref_call = HirExpr::Call(Box::new(function_ref()), Vec::new());
+    let ignored_this_call = HirExpr::FunctionCallWithThis(
+        Box::new(function_ref()),
+        Box::new(HirExpr::Lit(HirLit::Undefined)),
+        Vec::new(),
+        Vec::new(),
+        flat.clone(),
+    );
+    let expression_lambda_call = HirExpr::Call(
+        Box::new(HirExpr::Lambda(
+            Vec::new(), Vec::new(), flat.clone(),
+            Box::new(udeval_eval_then(
+                udjit_call("nret_forward_closure_first", Vec::new()),
+                udjit_call("nret_forward_closure_second", Vec::new()),
+            )),
+        )),
+        Vec::new(),
+    );
+    ner_external(&mut externals, "nret_forward_closure_first", flat.clone());
+    ner_external(&mut externals, "nret_forward_closure_second", flat.clone());
+    let block_lambda_call = HirExpr::Call(
+        Box::new(HirExpr::Lambda(
+            Vec::new(), Vec::new(), flat.clone(),
+            Box::new(HirExpr::Block(vec![HirStmt::Return(Some(udeval_eval_then(
+                udjit_call("nret_forward_block_call_first", Vec::new()),
+                udjit_call("nret_forward_block_call_second", Vec::new()),
+            )))])),
+        )),
+        Vec::new(),
+    );
+    ner_external(&mut externals, "nret_forward_block_call_first", flat.clone());
+    ner_external(&mut externals, "nret_forward_block_call_second", flat.clone());
+
+    let method_ref_call = HirExpr::FunctionCallWithThis(
+        Box::new(HirExpr::MethodRef(
+            "nret_forward_method_ordinary_target".into(),
+            "nret_forward_method_explicit_target".into(),
+            Vec::new(),
+            flat.clone(),
+            true,
+            None,
+        )),
+        Box::new(HirExpr::Lit(HirLit::Undefined)),
+        Vec::new(),
+        Vec::new(),
+        flat.clone(),
+    );
+    let bound_this_call = HirExpr::Call(
+        Box::new(HirExpr::FunctionBindThis(
+            Box::new(HirExpr::FunctionRef(
+                "nret_forward_bound_target".into(),
+                vec![promise.clone()],
+                flat.clone(),
+            )),
+            Box::new(HirExpr::Lit(HirLit::Undefined)),
+            Vec::new(),
+            vec![promise.clone()],
+            flat.clone(),
+        )),
+        vec![udjit_var("bound_input")],
+    );
+
+    for (consumer, expression) in [
+        ("nret_drop_function_ref", function_ref_call),
+        ("nret_drop_ignored_this_ref", ignored_this_call),
+        ("nret_drop_expression_lambda", expression_lambda_call),
+        ("nret_drop_block_lambda", block_lambda_call),
+        ("nret_drop_method_ref", method_ref_call),
+    ] {
+        functions.push(udjit_void_probe(consumer, expression));
+    }
+    functions.push(udjit_function(
+        "nret_drop_bound_forwarder",
+        vec![udjit_param("bound_input", promise.clone())],
+        HirType::Void,
+        vec![HirStmt::Expr(bound_this_call), HirStmt::Return(None)],
+    ));
+
+    let ir = ner_compile(&functions, &externals);
+    for (name, first, second) in [
+        (named, "nret_forward_named_first", "nret_forward_named_second"),
+        ("nret_forward_method_ordinary_target", "nret_forward_method_ordinary_first", "nret_forward_method_ordinary_second"),
+        ("nret_forward_method_explicit_target", "nret_forward_method_explicit_first", "nret_forward_method_explicit_second"),
+    ] {
+        let body = udeval_function_body(&ir, name);
+        ner_assert_owned_first_release(&body, first, &flat);
+        let result = ner_assert_exact_return_identity(&body, second, &flat);
+        assert!(!body.lines().any(|line|
+            line.contains("@thaw_promise_destroy(") && line.contains(&format!("ptr {result})"))
+        ), "returner publishes the second token without consuming it:\n{body}");
+    }
+
+    // This target has one ordinary Promise parameter, while FunctionBindThis
+    // binds zero leading arguments. Its only extra destroy call is the
+    // false-initialized lexical parameter cleanup, independently guarded.
+    let bound_target = udeval_function_body(&ir, "nret_forward_bound_target");
+    let bound_first = udeval_call_result(&bound_target, "nret_forward_bound_first");
+    let bound_blocks = udeval_blocks(&bound_target);
+    let bound_trace = udeval_assert_union_destroy_identity(
+        &bound_target,
+        &bound_blocks,
+        &bound_first,
+        &[0],
+    );
+    udeval_assert_result_destroy_only_on_normal_edge(
+        &bound_blocks,
+        "nret_forward_bound_first",
+        &bound_trace,
+    );
+    assert!(bound_target.lines().any(|line|
+        line.contains("@thaw_promise_destroy(")
+            && line.contains("release_stack_promise")
+    ) || bound_target.contains("release_stack_promise"),
+        "the unused borrowed Promise parameter has only its lexical cleanup site:\n{bound_target}");
+    assert_borrowed_promise_cleanup_flag_is_false_initialized(&bound_target, "bound_input");
+    let bound_second = ner_assert_exact_return_identity(
+        &bound_target,
+        "nret_forward_bound_second",
+        &flat,
+    );
+    assert!(!bound_target.lines().any(|line|
+        line.contains("@thaw_promise_destroy(")
+            && line.contains(&format!("ptr {bound_second})"))
+    ), "bound target cannot destroy its returned second result:\n{bound_target}");
+
+    for (callee, output) in [
+        (expression_first, expression_second),
+        (block_first, block_second),
+        ("nret_forward_closure_first", "nret_forward_closure_second"),
+        ("nret_forward_block_call_first", "nret_forward_block_call_second"),
+    ] {
+        let body = ner_function_body_for_call(&ir, callee);
+        ner_assert_owned_first_release(&body, callee, &flat);
+        ner_assert_exact_return_identity(&body, output, &flat);
+    }
+
+    let bodies = union_discard_all_function_bodies(&ir);
+    let function_ref_adapter = bodies.iter().find(|body|
+        body.lines().next().is_some_and(|line|
+            line.contains("@__thaw_function_ref_") && body.contains(&format!("@{named}("))
+        )
+    ).expect("actual FunctionRef forwarding adapter exists");
+    let function_ref_target = function_ref_adapter.lines().next().unwrap()
+        .split('@').nth(1).unwrap().split('(').next().unwrap();
+    assert_adapter_returns_call_result(function_ref_adapter, named);
+    let ignored_this = bodies.iter().find(|body|
+        body.lines().next().is_some_and(|line|
+            line.contains(&format!("@{function_ref_target}__thaw_this_adapter("))
+        )
+    ).expect("actual ignored-this FunctionRef entry exists");
+    assert_adapter_returns_call_result(ignored_this, function_ref_target);
+
+    let method_adapters = bodies.iter().filter(|body|
+        body.lines().next().is_some_and(|line| line.contains("@__thaw_method_ref_"))
+    ).collect::<Vec<_>>();
+    assert_eq!(method_adapters.len(), 2,
+        "both actual ordinary and explicit-this method adapters are generated");
+    assert_adapter_returns_call_result(
+        method_adapters.iter().find(|body| body.contains("@nret_forward_method_ordinary_target("))
+            .expect("ordinary method entry forwards its actual HIR producer"),
+        "nret_forward_method_ordinary_target",
+    );
+    assert_adapter_returns_call_result(
+        method_adapters.iter().find(|body| body.contains("@nret_forward_method_explicit_target("))
+            .expect("explicit-this method entry forwards its actual HIR producer"),
+        "nret_forward_method_explicit_target",
+    );
+
+    let bound_adapters = bodies.iter().filter(|body|
+        body.lines().next().is_some_and(|line| line.contains("@__thaw_bound_function_"))
+    ).collect::<Vec<_>>();
+    let bound_target = bound_adapters.iter().find(|body| body.contains("call { i8, i64 } %bound_source_this_entry("))
+        .expect("zero-bound-argument function has a physical forwarding entry");
+    let indirect_return = bound_target.lines().find(|line|
+        line.contains("call { i8, i64 } %bound_source_this_entry(")
+    ).expect("bound entry's actual target call is returning");
+    let indirect_value = union_discard_ir_lhs(indirect_return).expect("indirect call result SSA");
+    assert!(bound_target.lines().any(|line|
+        union_discard_ir_rhs(line) == format!("ret {{ i8, i64 }} {indirect_value}")
+    ), "bound forwarder returns its exact indirect target result:\n{bound_target}");
+    assert!(!bound_target.contains("@thaw_promise_retain(")
+            && !bound_target.contains("@thaw_promise_destroy("),
+        "bound forwarding performs no additional Promise token operation:\n{bound_target}");
+    let bound_wrapper_name = bound_target.lines().next().unwrap()
+        .split('@').nth(1).unwrap().split('(').next().unwrap();
+    let bound_ignored_this = bodies.iter().find(|body|
+        body.lines().next().is_some_and(|line|
+            line.contains(&format!("@{bound_wrapper_name}__thaw_this_adapter("))
+        )
+    ).expect("bound forwarding also gets the ignored-this entry");
+    assert_adapter_returns_call_result(bound_ignored_this, bound_wrapper_name);
+
+    for consumer in [
+        "nret_drop_function_ref",
+        "nret_drop_ignored_this_ref",
+        "nret_drop_expression_lambda",
+        "nret_drop_block_lambda",
+        "nret_drop_method_ref",
+    ] {
+        let body = udeval_function_body(&ir, consumer);
+        assert_union_result_payload_reaches_destroy(&body, None, &[0]);
+        assert_pending_exception_continuation_precedes_union_discard(&body);
+    }
+    let bound_consumer = udeval_function_body(&ir, "nret_drop_bound_forwarder");
+    assert_union_result_payload_reaches_destroy(&bound_consumer, None, &[0]);
+    assert_pending_exception_continuation_precedes_union_discard(&bound_consumer);
+    assert_borrowed_promise_cleanup_flag_is_false_initialized(&bound_consumer, "bound_input");
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NerJitEvent {
+    Retain { token: usize, succeeded: bool },
+    Destroy(usize),
+}
+
+static NER_JIT_EVENTS: std::sync::Mutex<Vec<NerJitEvent>> = std::sync::Mutex::new(Vec::new());
+static NER_JIT_REFS: std::sync::Mutex<Vec<(usize, usize)>> = std::sync::Mutex::new(Vec::new());
+static NER_JIT_FAIL_NEXT_RETAIN: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+static NER_JIT_PROBE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+static NER_JIT_THROW_EFFECTS: std::sync::Mutex<Vec<&'static str>> = std::sync::Mutex::new(Vec::new());
+// JIT address of the module's `udjit_raise_pending`. `__thaw_pending_exception` has Internal linkage,
+// so mapping it from the engine never reaches the generated loads; the mocks raise it through the module.
+static NER_JIT_RAISE_PENDING: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+fn ner_jit_raise_pending() {
+    let address = NER_JIT_RAISE_PENDING.load(std::sync::atomic::Ordering::SeqCst);
+    assert_ne!(address, 0, "udjit_raise_pending was not installed");
+    unsafe { std::mem::transmute::<usize, unsafe extern "C" fn()>(address)() };
+}
+
+unsafe extern "C" fn ner_jit_retain_stub(token: *mut std::ffi::c_void) -> u8 {
+    // Only the numeric identity is used. These inert test addresses are never
+    // dereferenced or passed to the real Promise runtime.
+    let address = token as usize;
+    let succeeded = !NER_JIT_FAIL_NEXT_RETAIN.swap(false, std::sync::atomic::Ordering::SeqCst);
+    NER_JIT_EVENTS.lock().unwrap().push(NerJitEvent::Retain { token: address, succeeded });
+    if succeeded {
+        let mut refs = NER_JIT_REFS.lock().unwrap();
+        if let Some((_, count)) = refs.iter_mut().find(|(known, _)| *known == address) {
+            *count += 1;
+        } else {
+            refs.push((address, 1));
+        }
+        1
+    } else {
+        0
+    }
+}
+
+unsafe extern "C" fn ner_jit_destroy_stub(token: *mut std::ffi::c_void) {
+    // Simulate reference counts from numeric identities only; do not free or
+    // inspect the backing test records.
+    let address = token as usize;
+    NER_JIT_EVENTS.lock().unwrap().push(NerJitEvent::Destroy(address));
+    let mut refs = NER_JIT_REFS.lock().unwrap();
+    if let Some((_, count)) = refs.iter_mut().find(|(known, _)| *known == address) {
+        *count = (*count).saturating_sub(1);
+    } else {
+        refs.push((address, 0));
+    }
+}
+
+unsafe extern "C" fn ner_jit_throw_first_effect() -> *mut std::ffi::c_void {
+    NER_JIT_THROW_EFFECTS.lock().unwrap().push("first");
+    udjit_token_address(&UD_JIT_TOKEN_FLAT_OWNED) as *mut std::ffi::c_void
+}
+
+unsafe extern "C" fn ner_jit_throw_second_effect() -> *mut std::ffi::c_void {
+    NER_JIT_THROW_EFFECTS.lock().unwrap().push("second");
+    udjit_token_address(&UD_JIT_TOKEN_THREE_TAG0_OWNED) as *mut std::ffi::c_void
+}
+
+unsafe extern "C" fn ner_jit_throw_first_mapped() -> *mut std::ffi::c_void {
+    NER_JIT_THROW_EFFECTS.lock().unwrap().push("first_throw");
+    ner_jit_raise_pending();
+    std::ptr::null_mut()
+}
+
+unsafe extern "C" fn ner_jit_throw_second_mapped() -> *mut std::ffi::c_void {
+    NER_JIT_THROW_EFFECTS.lock().unwrap().push("second_throw");
+    ner_jit_raise_pending();
+    std::ptr::null_mut()
+}
+
+fn ner_jit_reset_state(refs: &[(usize, usize)], fail_retain: bool) {
+    NER_JIT_EVENTS.lock().unwrap().clear();
+    *NER_JIT_REFS.lock().unwrap() = refs.to_vec();
+    NER_JIT_FAIL_NEXT_RETAIN.store(fail_retain, std::sync::atomic::Ordering::SeqCst);
+}
+
+fn ner_jit_events() -> Vec<NerJitEvent> {
+    NER_JIT_EVENTS.lock().unwrap().clone()
+}
+
+fn ner_jit_ref_count(token: usize) -> usize {
+    NER_JIT_REFS.lock().unwrap().iter()
+        .find(|(known, _)| *known == token)
+        .map(|(_, count)| *count)
+        .unwrap_or(0)
+}
+
+fn ner_jit_add_internal_provider<'ctx>(
+    compiler: &mut HirCompiler<'ctx>,
+    name: &str,
+    result_type: HirType,
+    token: usize,
+    union_tag: Option<u8>,
+) {
+    let llvm_type = compiler.basic_type(&result_type).unwrap();
+    compiler.module.add_function(
+        name,
+        llvm_type.fn_type(&[], false),
+        Some(Linkage::Internal),
+    );
+    compiler.function_return_types.insert(name.to_string(), result_type.clone());
+    let function = compiler.module.get_function(name).unwrap();
+    let entry = compiler.context.append_basic_block(function, "entry");
+    compiler.builder.position_at_end(entry);
+    let pointer_type = compiler.context.ptr_type(AddressSpace::default());
+    let token_word = compiler.context.i64_type().const_int(token as u64, false);
+    match result_type {
+        HirType::Promise(_) => {
+            let token_pointer = compiler.builder.build_int_to_ptr(
+                token_word,
+                pointer_type,
+                "inert_promise_token",
+            ).unwrap();
+            compiler.builder.build_return(Some(&token_pointer)).unwrap();
+        }
+        HirType::Union(_) => {
+            let tag = union_tag.expect("union producer has a physical selected tag");
+            let union_type = llvm_type.into_struct_type();
+            let tagged = compiler.builder.build_insert_value(
+                union_type.get_undef(),
+                compiler.context.i8_type().const_int(tag as u64, false),
+                0,
+                "inert_union_tag",
+            ).unwrap().into_struct_value();
+            let payload = compiler.builder.build_insert_value(
+                tagged,
+                token_word,
+                1,
+                "inert_union_payload",
+            ).unwrap().into_struct_value();
+            compiler.builder.build_return(Some(&payload)).unwrap();
+        }
+        _ => panic!("native test provider is limited to exact Promise or direct Union outputs"),
+    }
+}
+
+fn ner_jit_compile_functions<'ctx>(
+    compiler: &mut HirCompiler<'ctx>,
+    functions: &[HirFunction],
+) {
+    for function in functions {
+        compiler.function_return_types.insert(function.name.clone(), function.ret.clone());
+    }
+    for function in functions {
+        compiler.declare_function(function).unwrap();
+    }
+    for function in functions {
+        compiler.compile_function_body(function).unwrap();
+    }
+}
+
+fn ner_jit_map_lifecycle_stubs<'ctx>(
+    compiler: &HirCompiler<'ctx>,
+    engine: &inkwell::execution_engine::ExecutionEngine<'ctx>,
+) {
+    let retain = compiler.module.get_function("thaw_promise_retain").unwrap();
+    assert_eq!(retain.get_type().get_param_types().len(), 1);
+    assert!(retain.get_type().get_param_types()[0].is_pointer_type());
+    assert_eq!(retain.get_type().get_return_type().unwrap().into_int_type().get_bit_width(), 8);
+    engine.add_global_mapping(&retain, ner_jit_retain_stub as *const () as usize);
+    let destroy = compiler.module.get_function("thaw_promise_destroy").unwrap();
+    assert_eq!(destroy.get_type().get_param_types().len(), 1);
+    assert!(destroy.get_type().get_param_types()[0].is_pointer_type());
+    assert!(destroy.get_type().get_return_type().is_none());
+    engine.add_global_mapping(&destroy, ner_jit_destroy_stub as *const () as usize);
+}
+
+fn ner_jit_run_owned_case(result_type: HirType, second_token: usize, tag: Option<u8>) -> Vec<NerJitEvent> {
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "native_eval_then_return_owned_probe");
+    compiler.declare_runtime_builtins();
+    compiler.declare_exception_state();
+    let first_token = udjit_token_address(&UD_JIT_TOKEN_NESTED_OWNED);
+    ner_jit_add_internal_provider(
+        &mut compiler,
+        "nret_jit_owned_first",
+        udjit_promise_f64(),
+        first_token,
+        None,
+    );
+    ner_jit_add_internal_provider(
+        &mut compiler,
+        "nret_jit_owned_second",
+        result_type.clone(),
+        second_token,
+        tag,
+    );
+    let producer = ner_named_return(
+        "nret_jit_owned_return",
+        Vec::new(),
+        result_type.clone(),
+        udeval_eval_then(
+            udjit_call("nret_jit_owned_first", Vec::new()),
+            udjit_call("nret_jit_owned_second", Vec::new()),
+        ),
+    );
+    let consumer = udjit_void_probe(
+        "nret_jit_owned_discard",
+        udjit_call("nret_jit_owned_return", Vec::new()),
+    );
+    let functions = vec![producer, consumer];
+    ner_jit_compile_functions(&mut compiler, &functions);
+    compiler.module.verify().unwrap();
+    let ir = compiler.print_to_string().to_string();
+    let internal = [
+        "nret_jit_owned_first".to_string(),
+        "nret_jit_owned_second".to_string(),
+        "nret_jit_owned_return".to_string(),
+        "nret_jit_owned_discard".to_string(),
+    ].into_iter().collect::<HashSet<_>>();
+    let external = udjit_external_call_symbols(&ir, &internal);
+    assert_eq!(external, BTreeSet::from(["thaw_promise_destroy".to_string()]),
+        "map only the inventoried non-dereferencing destroy dependency before invoking:\n{ir}");
+    let engine = compiler.module.create_jit_execution_engine(OptimizationLevel::None).unwrap();
+    ner_jit_map_lifecycle_stubs(&compiler, &engine);
+    type Probe = unsafe extern "C" fn();
+    let probe = unsafe { engine.get_function::<Probe>("nret_jit_owned_discard").unwrap() };
+    let mut initial_refs = vec![(first_token, 1)];
+    if tag.is_none() || result_type_direct_tag_is_promise(&result_type, tag.unwrap_or(0)) {
+        initial_refs.push((second_token, 1));
+    }
+    ner_jit_reset_state(&initial_refs, false);
+    unsafe { probe.call(); }
+    ner_jit_events()
+}
+
+fn result_type_direct_tag_is_promise(result_type: &HirType, tag: u8) -> bool {
+    matches!(result_type, HirType::Union(members)
+        if matches!(members.get(tag as usize), Some(HirType::Promise(_))))
+}
+
+fn ner_jit_run_borrowed_case(fail_retain: bool) -> (Vec<NerJitEvent>, usize, usize) {
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "native_eval_then_return_borrowed_probe");
+    compiler.declare_runtime_builtins();
+    compiler.declare_exception_state();
+    let first_token = udjit_token_address(&UD_JIT_TOKEN_NESTED_OWNED);
+    let borrowed_token = udjit_token_address(&UD_JIT_TOKEN_BORROWED);
+    ner_jit_add_internal_provider(
+        &mut compiler,
+        "nret_jit_borrowed_first",
+        udjit_promise_f64(),
+        first_token,
+        None,
+    );
+    let promise = udjit_promise_f64();
+    let producer = ner_named_return(
+        "nret_jit_borrowed_return",
+        vec![udjit_param("borrowed", promise.clone())],
+        promise.clone(),
+        udeval_eval_then(
+            udjit_call("nret_jit_borrowed_first", Vec::new()),
+            udjit_var("borrowed"),
+        ),
+    );
+    let consumer = udjit_function(
+        "nret_jit_borrowed_discard",
+        vec![udjit_param("borrowed", promise.clone())],
+        HirType::Void,
+        vec![
+            HirStmt::Expr(udjit_call("nret_jit_borrowed_return", vec![udjit_var("borrowed")])),
+            HirStmt::Return(None),
+        ],
+    );
+    let functions = vec![producer, consumer];
+    ner_jit_compile_functions(&mut compiler, &functions);
+    compiler.module.verify().unwrap();
+    let ir = compiler.print_to_string().to_string();
+    let internal = [
+        "nret_jit_borrowed_first".to_string(),
+        "nret_jit_borrowed_return".to_string(),
+        "nret_jit_borrowed_discard".to_string(),
+    ].into_iter().collect::<HashSet<_>>();
+    let external = udjit_external_call_symbols(&ir, &internal);
+    assert_eq!(external, BTreeSet::from([
+        "thaw_promise_destroy".to_string(),
+        "thaw_promise_retain".to_string(),
+    ]), "all return/error calls are inventoried before invocation:\n{ir}");
+    let engine = compiler.module.create_jit_execution_engine(OptimizationLevel::None).unwrap();
+    ner_jit_map_lifecycle_stubs(&compiler, &engine);
+    type Probe = unsafe extern "C" fn(*mut std::ffi::c_void);
+    let probe = unsafe { engine.get_function::<Probe>("nret_jit_borrowed_discard").unwrap() };
+    ner_jit_reset_state(&[(first_token, 1), (borrowed_token, 1)], fail_retain);
+    unsafe { probe.call(borrowed_token as *mut std::ffi::c_void); }
+    (ner_jit_events(), ner_jit_ref_count(first_token), ner_jit_ref_count(borrowed_token))
+}
+
+fn ner_jit_add_borrowed_union_probe<'ctx>(
+    compiler: &mut HirCompiler<'ctx>,
+    union_type: &HirType,
+    consumer_name: &str,
+    probe_name: &str,
+) {
+    let i64_type = compiler.context.i64_type();
+    let function = compiler.module.add_function(
+        probe_name,
+        compiler.context.void_type().fn_type(&[i64_type.into(), i64_type.into()], false),
+        Some(Linkage::Internal),
+    );
+    let entry = compiler.context.append_basic_block(function, "entry");
+    compiler.builder.position_at_end(entry);
+    let tag = compiler.builder.build_int_truncate(
+        function.get_nth_param(0).unwrap().into_int_value(),
+        compiler.context.i8_type(),
+        "probe_union_tag",
+    ).unwrap();
+    let payload = function.get_nth_param(1).unwrap().into_int_value();
+    let llvm_union = compiler.basic_type(union_type).unwrap().into_struct_type();
+    let tagged = compiler.builder.build_insert_value(
+        llvm_union.get_undef(), tag, 0, "probe_tagged_union",
+    ).unwrap().into_struct_value();
+    let union = compiler.builder.build_insert_value(
+        tagged, payload, 1, "probe_union_payload",
+    ).unwrap().into_struct_value();
+    let consumer = compiler.module.get_function(consumer_name).unwrap();
+    compiler.builder.build_call(consumer, &[union.into()], "probe_consumer_call").unwrap();
+    compiler.builder.build_return(None).unwrap();
+}
+
+fn ner_jit_run_borrowed_union_case(
+    result_type: HirType,
+    tag: u8,
+    borrowed_token: usize,
+    fail_retain: bool,
+) -> (Vec<NerJitEvent>, usize, usize) {
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "native_eval_then_return_borrowed_union_probe");
+    compiler.declare_runtime_builtins();
+    compiler.declare_exception_state();
+    let first_token = udjit_token_address(&UD_JIT_TOKEN_NESTED_OWNED);
+    ner_jit_add_internal_provider(
+        &mut compiler,
+        "nret_jit_borrowed_union_first",
+        udjit_promise_f64(),
+        first_token,
+        None,
+    );
+    let returner = ner_named_return(
+        "nret_jit_borrowed_union_return",
+        vec![udjit_param("borrowed_union", result_type.clone())],
+        result_type.clone(),
+        udeval_eval_then(
+            udjit_call("nret_jit_borrowed_union_first", Vec::new()),
+            udjit_var("borrowed_union"),
+        ),
+    );
+    let consumer = udjit_function(
+        "nret_jit_borrowed_union_consumer",
+        vec![udjit_param("borrowed_union", result_type.clone())],
+        HirType::Void,
+        vec![
+            HirStmt::Expr(udjit_call(
+                "nret_jit_borrowed_union_return",
+                vec![udjit_var("borrowed_union")],
+            )),
+            HirStmt::Return(None),
+        ],
+    );
+    let functions = vec![returner, consumer];
+    ner_jit_compile_functions(&mut compiler, &functions);
+    ner_jit_add_borrowed_union_probe(
+        &mut compiler,
+        &result_type,
+        "nret_jit_borrowed_union_consumer",
+        "nret_jit_borrowed_union_probe",
+    );
+    udjit_add_exception_reset(&compiler);
+    compiler.module.verify().unwrap();
+    let ir = compiler.print_to_string().to_string();
+    let internal = [
+        "nret_jit_borrowed_union_first".to_string(),
+        "nret_jit_borrowed_union_return".to_string(),
+        "nret_jit_borrowed_union_consumer".to_string(),
+        "nret_jit_borrowed_union_probe".to_string(),
+        "udjit_reset_pending_exception_tuple".to_string(),
+    ].into_iter().collect::<HashSet<_>>();
+    let external = udjit_external_call_symbols(&ir, &internal);
+    assert_eq!(external, BTreeSet::from([
+        "thaw_promise_destroy".to_string(),
+        "thaw_promise_retain".to_string(),
+    ]), "borrowed Union paths inventory all lifecycle calls before invocation:\n{ir}");
+    let engine = compiler.module.create_jit_execution_engine(OptimizationLevel::None).unwrap();
+    ner_jit_map_lifecycle_stubs(&compiler, &engine);
+    type Probe = unsafe extern "C" fn(u64, u64);
+    let probe = unsafe { engine.get_function::<Probe>("nret_jit_borrowed_union_probe").unwrap() };
+    let reset = unsafe {
+        engine.get_function::<unsafe extern "C" fn()>("udjit_reset_pending_exception_tuple").unwrap()
+    };
+    ner_jit_reset_state(&[(first_token, 1), (borrowed_token, 1)], fail_retain);
+    unsafe {
+        reset.call();
+        probe.call(u64::from(tag), borrowed_token as u64);
+        reset.call();
+    }
+    (ner_jit_events(), ner_jit_ref_count(first_token), ner_jit_ref_count(borrowed_token))
+}
+
+#[test]
+fn native_eval_then_return_borrowed_union_mapped_tag_events() {
+    let _guard = NER_JIT_PROBE_LOCK.lock().unwrap();
+    let first = udjit_token_address(&UD_JIT_TOKEN_NESTED_OWNED);
+    for (result_type, tag, token) in [
+        (udjit_flat_union_type(), 0, udjit_token_address(&UD_JIT_TOKEN_FLAT_OWNED)),
+        (udjit_three_union_type(), 0, udjit_token_address(&UD_JIT_TOKEN_THREE_TAG0_OWNED)),
+        (udjit_three_union_type(), 2, udjit_token_address(&UD_JIT_TOKEN_THREE_TAG2_OWNED)),
+    ] {
+        let (events, first_refs, owner_refs) = ner_jit_run_borrowed_union_case(
+            result_type.clone(), tag, token, false,
+        );
+        assert_eq!(events, vec![
+            NerJitEvent::Destroy(first),
+            NerJitEvent::Retain { token, succeeded: true },
+            NerJitEvent::Destroy(token),
+        ], "borrowed Union selected tag {tag} acquires and consumer-discards only its retained output");
+        assert_eq!(first_refs, 0);
+        assert_eq!(owner_refs, 1,
+            "the borrowed Union's original Promise owner remains live after output discard");
+
+        let (failed_events, first_refs, owner_refs) = ner_jit_run_borrowed_union_case(
+            result_type, tag, token, true,
+        );
+        assert_eq!(failed_events, vec![
+            NerJitEvent::Destroy(first),
+            NerJitEvent::Retain { token, succeeded: false },
+        ], "failed borrowed Union acquisition does not publish a result for consumer discard");
+        assert_eq!(first_refs, 0);
+        assert_eq!(owner_refs, 1,
+            "failed retain preserves the borrowed Union's original Promise owner");
+    }
+
+    for (result_type, tag, token) in [
+        (udjit_flat_union_type(), 1, udjit_token_address(&UD_JIT_TOKEN_PLAIN_F64_BITS)),
+        (udjit_three_union_type(), 1, udjit_token_address(&UD_JIT_TOKEN_PLAIN_STR_BITS)),
+    ] {
+        let (events, first_refs, payload_refs) = ner_jit_run_borrowed_union_case(
+            result_type, tag, token, false,
+        );
+        assert_eq!(events, vec![NerJitEvent::Destroy(first)],
+            "borrowed plain Union tag {tag} forwards pointer-looking bits without Promise retain/discard");
+        assert_eq!(first_refs, 0);
+        assert_eq!(payload_refs, 1,
+            "pointer-looking non-Promise payload bits are untouched by lifecycle events");
+    }
+}
+
+fn ner_jit_run_throw_bypass_case(first_throws: bool) -> (Vec<NerJitEvent>, Vec<&'static str>, usize) {
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "native_eval_then_return_throw_bypass_probe");
+    compiler.declare_runtime_builtins();
+    compiler.declare_exception_state();
+    let promise = udjit_promise_f64();
+    let first_name = "nret_jit_throw_first_producer";
+    let second_name = "nret_jit_throw_second_producer";
+    let mapped_type = compiler.basic_type(&promise).unwrap().fn_type(&[], false);
+    for name in [first_name, second_name] {
+        compiler.module.add_function(name, mapped_type, None);
+        compiler.function_return_types.insert(name.to_string(), promise.clone());
+    }
+    let producer = ner_named_return(
+        "nret_jit_throw_returner",
+        Vec::new(),
+        promise.clone(),
+        udeval_eval_then(udjit_call(first_name, Vec::new()), udjit_call(second_name, Vec::new())),
+    );
+    let consumer = udjit_void_probe(
+        "nret_jit_throw_consumer",
+        udjit_call("nret_jit_throw_returner", Vec::new()),
+    );
+    let functions = vec![producer, consumer];
+    ner_jit_compile_functions(&mut compiler, &functions);
+    udjit_add_exception_reset(&compiler);
+    {
+        let raise = compiler.module.add_function(
+            "udjit_raise_pending",
+            context.void_type().fn_type(&[], false),
+            Some(Linkage::Internal),
+        );
+        let builder = context.create_builder();
+        builder.position_at_end(context.append_basic_block(raise, "entry"));
+        let pointer_type = context.ptr_type(AddressSpace::default());
+        let inert = builder.build_int_to_ptr(context.i64_type().const_int(1, false), pointer_type, "inert_exception").unwrap();
+        let slot = compiler.module.get_global("__thaw_pending_exception").unwrap();
+        builder.build_store(slot.as_pointer_value(), inert).unwrap();
+        builder.build_return(None).unwrap();
+    }
+    compiler.module.verify().unwrap();
+    let ir = compiler.print_to_string().to_string();
+    let internal = [
+        "nret_jit_throw_returner".to_string(),
+        "nret_jit_throw_consumer".to_string(),
+        "udjit_reset_pending_exception_tuple".to_string(),
+        "udjit_raise_pending".to_string(),
+    ].into_iter().collect::<HashSet<_>>();
+    let external = udjit_external_call_symbols(&ir, &internal);
+    assert_eq!(external, BTreeSet::from([
+        "thaw_promise_destroy".to_string(),
+        first_name.to_string(),
+        second_name.to_string(),
+    ]), "throw-bypass module maps every lifecycle and producer call before JIT:\n{ir}");
+
+    let engine = compiler.module.create_jit_execution_engine(OptimizationLevel::None).unwrap();
+    ner_jit_map_lifecycle_stubs(&compiler, &engine);
+    let first = compiler.module.get_function(first_name).unwrap();
+    let second = compiler.module.get_function(second_name).unwrap();
+    engine.add_global_mapping(&first, if first_throws {
+        ner_jit_throw_first_mapped as *const () as usize
+    } else {
+        ner_jit_throw_first_effect as *const () as usize
+    });
+    engine.add_global_mapping(&second, if first_throws {
+        ner_jit_throw_second_effect as *const () as usize
+    } else {
+        ner_jit_throw_second_mapped as *const () as usize
+    });
+    NER_JIT_RAISE_PENDING.store(
+        engine.get_function_address("udjit_raise_pending").unwrap(),
+        std::sync::atomic::Ordering::SeqCst,
+    );
+    type Probe = unsafe extern "C" fn();
+    let probe = unsafe { engine.get_function::<Probe>("nret_jit_throw_consumer").unwrap() };
+    let reset = unsafe {
+        engine.get_function::<unsafe extern "C" fn()>("udjit_reset_pending_exception_tuple").unwrap()
+    };
+    let observed = if first_throws {
+        udjit_token_address(&UD_JIT_TOKEN_THREE_TAG0_OWNED)
+    } else {
+        udjit_token_address(&UD_JIT_TOKEN_FLAT_OWNED)
+    };
+    let refs = [(observed, 1)];
+    ner_jit_reset_state(&refs, false);
+    NER_JIT_THROW_EFFECTS.lock().unwrap().clear();
+    unsafe {
+        reset.call();
+        probe.call();
+        reset.call();
+    }
+    let events = ner_jit_events();
+    let effects = NER_JIT_THROW_EFFECTS.lock().unwrap().clone();
+    (events, effects, ner_jit_ref_count(observed))
+}
+
+#[test]
+fn native_eval_then_return_mapped_throw_producers_bypass_effect_and_discard() {
+    let _guard = NER_JIT_PROBE_LOCK.lock().unwrap();
+    let (first_events, first_effects, second_owner_refs) = ner_jit_run_throw_bypass_case(true);
+    assert!(first_events.is_empty(),
+        "a throwing first producer has no normal output token to publish or consumer-discard");
+    assert_eq!(first_effects, vec!["first_throw"],
+        "the mapped first throw executes, but the mapped normal second effect is bypassed");
+    assert_eq!(second_owner_refs, 1,
+        "skipped second producer leaves its inert external token untouched");
+
+    let first_token = udjit_token_address(&UD_JIT_TOKEN_FLAT_OWNED);
+    let (second_events, second_effects, first_owner_refs) = ner_jit_run_throw_bypass_case(false);
+    assert_eq!(second_effects, vec!["first", "second_throw"],
+        "second-throw case runs the mapped first producer and mapped throwing second producer");
+    assert_eq!(second_events, vec![NerJitEvent::Destroy(first_token)],
+        "EvalThen consumes only first result A; no missing/exceptional output reaches consumer discard");
+    assert_eq!(first_owner_refs, 0);
+}
+
+#[test]
+fn native_eval_then_return_owned_identity_mapped_event_probe() {
+    let _guard = NER_JIT_PROBE_LOCK.lock().unwrap();
+    let first = udjit_token_address(&UD_JIT_TOKEN_NESTED_OWNED);
+    for (result_type, tag, token, expected) in [
+        (udjit_promise_f64(), None, udjit_token_address(&UD_JIT_TOKEN_FLAT_OWNED), Some(udjit_token_address(&UD_JIT_TOKEN_FLAT_OWNED))),
+        (udjit_flat_union_type(), Some(0), udjit_token_address(&UD_JIT_TOKEN_FLAT_OWNED), Some(udjit_token_address(&UD_JIT_TOKEN_FLAT_OWNED))),
+        (udjit_three_union_type(), Some(0), udjit_token_address(&UD_JIT_TOKEN_THREE_TAG0_OWNED), Some(udjit_token_address(&UD_JIT_TOKEN_THREE_TAG0_OWNED))),
+        (udjit_three_union_type(), Some(2), udjit_token_address(&UD_JIT_TOKEN_THREE_TAG2_OWNED), Some(udjit_token_address(&UD_JIT_TOKEN_THREE_TAG2_OWNED))),
+    ] {
+        let events = ner_jit_run_owned_case(result_type, token, tag);
+        let mut expected_events = vec![NerJitEvent::Destroy(first)];
+        if let Some(token) = expected { expected_events.push(NerJitEvent::Destroy(token)); }
+        assert_eq!(events, expected_events,
+            "one fresh verified module must preserve the exact selected native output token");
+    }
+}
+
+#[test]
+fn native_eval_then_return_borrowed_and_plain_tokens() {
+    let _guard = NER_JIT_PROBE_LOCK.lock().unwrap();
+    let first = udjit_token_address(&UD_JIT_TOKEN_NESTED_OWNED);
+    for (result_type, tag, token) in [
+        (udjit_flat_union_type(), 1, udjit_token_address(&UD_JIT_TOKEN_PLAIN_F64_BITS)),
+        (udjit_three_union_type(), 1, udjit_token_address(&UD_JIT_TOKEN_PLAIN_STR_BITS)),
+    ] {
+        assert_eq!(
+            ner_jit_run_owned_case(result_type, token, Some(tag)),
+            vec![NerJitEvent::Destroy(first)],
+            "plain pointer-looking union payload is never decoded, retained, or destroyed",
+        );
+    }
+    let borrowed = udjit_token_address(&UD_JIT_TOKEN_BORROWED);
+    let (events, first_refs, borrowed_refs) = ner_jit_run_borrowed_case(false);
+    assert_eq!(events, vec![
+        NerJitEvent::Destroy(first),
+        NerJitEvent::Retain { token: borrowed, succeeded: true },
+        NerJitEvent::Destroy(borrowed),
+    ], "borrowed output is retained once, then its discarded result is destroyed once");
+    assert_eq!(first_refs, 0);
+    assert_eq!(borrowed_refs, 1,
+        "consumer discard releases only the output reference; original borrowed owner remains live");
+
+    let (failed_events, first_refs, borrowed_refs) = ner_jit_run_borrowed_case(true);
+    assert_eq!(failed_events, vec![
+        NerJitEvent::Destroy(first),
+        NerJitEvent::Retain { token: borrowed, succeeded: false },
+    ], "failed output retain publishes nothing for the consumer to destroy");
+    assert_eq!(first_refs, 0);
+    assert_eq!(borrowed_refs, 1,
+        "failed retain neither consumes nor replaces the original borrowed owner");
+}
+
+fn ner_capturing_owned_promise_new() -> HirExpr {
+    let capture = udjit_param("udeval_transient_capture", HirType::F64);
+    let resolve = udjit_param(
+        "nret_restore_resolve",
+        HirType::Function(vec![HirType::F64], Box::new(HirType::Void)),
+    );
+    let reject = udjit_param(
+        "nret_restore_reject",
+        HirType::Function(vec![HirType::Str], Box::new(HirType::Void)),
+    );
+    let executor = HirExpr::Lambda(
+        vec![capture.clone()],
+        vec![resolve.clone(), reject],
+        HirType::Void,
+        Box::new(udjit_call(
+            "nret_restore_resolve",
+            vec![udjit_var(&capture.name)],
+        )),
+    );
+    HirExpr::PromiseNew(Box::new(executor), HirType::F64, false, false)
+}
+
+#[test]
+fn native_eval_then_return_normalizer_restores_seeded_context_after_capture_error() {
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "nret_normalizer_context_restore");
+    let entry = udeval_seed_error_compiler(&mut compiler, "nret_normalizer_context_restore_fn");
+    let before = udeval_snapshot_scope(&compiler);
+    assert!(!compiler.arena_variables.contains("udeval_transient_capture"),
+        "fixture capture starts outside the arena-variable set");
+
+    // The return normalizer first prepromotes the capture used by the selected
+    // PromiseNew lambda, then hits a deterministic missing-binding error in
+    // the alternate expression, outside either discard helper. This is
+    // codegen-only: partially emitted failed IR is not verified or executed.
+    let expression = HirExpr::Conditional(
+        Box::new(HirExpr::Lit(HirLit::Bool(true))),
+        Box::new(ner_capturing_owned_promise_new()),
+        Box::new(udjit_var("nret_missing_after_capture_prepromotion")),
+        udjit_promise_f64(),
+    );
+    let error = compiler.compile_native_promise_result_for_return(
+        &expression,
+        &udjit_promise_f64(),
+    ).unwrap_err();
+    assert!(error.contains("nret_missing_after_capture_prepromotion"),
+        "the control fails only at its intended outer-continuation binding:\n{error}");
+    let partial_ir = compiler.print_to_string().to_string();
+    assert!(partial_ir.contains("udeval_transient_capture_cell = call ptr @thaw_arena_alloc("),
+        "the normalizer actually prepromoted its captured outer cell before reaching the later error:\n{partial_ir}");
+    assert_eq!(before.insertion_block, Some(entry));
+    udeval_assert_scope_restored(&compiler, &before);
+}
+
+#[test]
+fn native_eval_then_return_invalid_union_injection_stops_at_codegen_boundary() {
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "nret_invalid_union_injection");
+    let entry = udeval_seed_error_compiler(&mut compiler, "nret_invalid_union_injection_fn");
+    let before = udeval_snapshot_scope(&compiler);
+    let flat = udjit_flat_union_type();
+    for (name, ty) in [
+        ("nret_invalid_union_first", udjit_promise_f64()),
+        ("nret_invalid_union_second", udjit_promise_f64()),
+    ] {
+        let native_type = compiler.basic_type(&ty).unwrap();
+        compiler.function_return_types.insert(name.into(), ty);
+        compiler.module.add_function(name, native_type.fn_type(&[], false), None);
+    }
+    let members = match &flat { HirType::Union(members) => members.clone(), _ => unreachable!() };
+    let invalid_leaf = HirExpr::UnionInject(
+        Box::new(udjit_call("nret_invalid_union_second", Vec::new())),
+        9,
+        members,
+    );
+    let expression = udeval_eval_then(
+        udjit_call("nret_invalid_union_first", Vec::new()),
+        invalid_leaf,
+    );
+    // This intentionally malformed HIR is only sent to the code generator.
+    // No module verification, JIT construction, or invocation follows.
+    let error = compiler.compile_native_promise_result_for_return(&expression, &flat)
+        .unwrap_err();
+    assert!(error.contains("union member index 9"),
+        "selected return leaf mismatch is rejected at its exact codegen boundary: {error}");
+    assert_eq!(before.insertion_block, Some(entry));
+    udeval_assert_scope_restored(&compiler, &before);
+}

@@ -61,6 +61,19 @@
         return error;
       }
     }
+    // shortcut: the reserved legacy tag shape can collide with user JSON; origins would be needed to disambiguate it.
+    if (
+      value &&
+      typeof value === 'object' &&
+      !Array.isArray(value) &&
+      Object.keys(value).length === 1 &&
+      Object.prototype.hasOwnProperty.call(value, '$__thaw_non_finite$')
+    ) {
+      const tag = value.$__thaw_non_finite$;
+      if (tag === 'NaN') return NaN;
+      if (tag === 'Infinity') return Infinity;
+      if (tag === '-Infinity') return -Infinity;
+    }
     if (
       value &&
       typeof value === 'object' &&
@@ -158,9 +171,9 @@
     // parent is processed.
     if (value && typeof value === 'object') {
       for (const key of Object.keys(value)) {
-        if (key.charCodeAt(0) === 0x1f && key.startsWith('\u001f@@')) {
-          const symbol = Symbol[key.slice(3)];
-          if (symbol) {
+        if (key.startsWith('\u001f@@') || key.startsWith('__thaw_symbol_')) {
+          const symbol = thawPropertyKey(key);
+          if (typeof symbol === 'symbol') {
             Object.defineProperty(value, symbol, {
               value: value[key],
               writable: true,
@@ -193,34 +206,87 @@
     }
     return value;
   };
-  globalThis.__thaw_json_safe_stringify = function (value) {
-    const ancestors = [];
-    const text = JSON.stringify(value, function (key, nested) {
-      nested = globalThis.__thaw_json_binary_replacer.call(this, key, nested);
-      // `NaN`/`Infinity`/`-Infinity` have no JSON representation --
-      // real `JSON.stringify` collapses them to `null`, indistinguishable
-      // from an explicit `null`. Tag them the same way the sibling
-      // `undefined` sentinel above is tagged, so a `Json`-typed value on
-      // the native side (`thaw_json_as_number`/`thaw_json_typeof`,
-      // thaw-std) can recover the real value instead of losing it.
-      const source = this[key];
-      if (typeof source === 'number' && !Number.isFinite(source)) {
-        return {
-          $__thaw_non_finite$: Number.isNaN(source)
-            ? 'NaN'
-            : source > 0
-              ? 'Infinity'
-              : '-Infinity',
-        };
-      }
-      if (nested && typeof nested === 'object') {
-        while (ancestors.length && ancestors[ancestors.length - 1] !== this) ancestors.pop();
-        if (ancestors.includes(nested)) return undefined;
-        ancestors.push(nested);
-      }
-      return nested;
+  // Legacy-wire parse: plain `JSON.parse` followed by a post-order restoration
+  // pass that applies `__thaw_json_date_reviver`'s conversions. A reviver
+  // cannot be used directly because returning `undefined` from it deletes the
+  // property (`{x: undefined}` would lose `x`, `[undefined]` would become a
+  // hole); here the restored value is always defined as an own data property.
+  globalThis.__thaw_json_parse_legacy = function (text) {
+    const revive = globalThis.__thaw_json_date_reviver;
+    const define = (holder, key, value) => Object.defineProperty(holder, key, {
+      value, writable: true, enumerable: true, configurable: true,
     });
-    if (text === undefined) return undefined;
+    const walk = (holder, key) => {
+      const value = holder[key];
+      if (value !== null && typeof value === 'object') {
+        for (const child of Object.keys(value)) walk(value, child);
+      }
+      const revived = revive.call(holder, key, value);
+      if (revived !== value) define(holder, key, revived);
+    };
+    const root = {};
+    define(root, '', JSON.parse(text));
+    walk(root, '');
+    return root[''];
+  };
+  // Legacy-wire stringify: an acquired-value snapshot. Every own property is
+  // read exactly once (a getter runs once, and a getter that throws on a
+  // second call still works); the Date / byte-view / non-finite / undefined
+  // decisions are made from that acquired value, never from a re-read of
+  // `holder[key]`. Nested `undefined` uses the same sentinel as the top-level
+  // result (`null` and a missing property stay distinguishable).
+  const OMIT = Symbol('omit');
+  const snapshot = (holder, key, value, ancestors, mark) => {
+    if (value instanceof Date) return { timestamp: value.getTime() };
+    if (value instanceof ArrayBuffer) {
+      return { type: 'Buffer', data: Array.from(new Uint8Array(value)) };
+    }
+    if (ArrayBuffer.isView(value)) {
+      return {
+        type: 'Buffer',
+        data: Array.from(new Uint8Array(value.buffer, value.byteOffset, value.byteLength)),
+      };
+    }
+    if (value !== null && (typeof value === 'object' || typeof value === 'bigint')) {
+      const toJSON = value.toJSON;
+      if (typeof toJSON === 'function') value = toJSON.call(value, key);
+    }
+    if (value === undefined) return mark ? { $__thaw_napi_undefined$: true } : OMIT;
+    if (typeof value === 'function' || typeof value === 'symbol') return OMIT;
+    if (typeof value === 'bigint') throw new TypeError('Do not know how to serialize a BigInt');
+    if (typeof value === 'number') {
+      if (Number.isFinite(value)) return value;
+      return { $__thaw_non_finite$: Number.isNaN(value) ? 'NaN' : value > 0 ? 'Infinity' : '-Infinity' };
+    }
+    if (value === null || typeof value !== 'object') return value;
+    if (value instanceof Number || value instanceof String || value instanceof Boolean) {
+      return snapshot(holder, key, value.valueOf(), ancestors, mark);
+    }
+    if (ancestors.includes(value)) return OMIT;
+    ancestors.push(value);
+    let out;
+    if (Array.isArray(value)) {
+      out = [];
+      for (let index = 0; index < value.length; index++) {
+        const item = Object.prototype.hasOwnProperty.call(value, index)
+          ? snapshot(value, String(index), value[index], ancestors, mark)
+          : null;
+        out.push(item === OMIT ? null : item);
+      }
+    } else {
+      out = Object.create(null);
+      for (const name of Object.keys(value)) {
+        const item = snapshot(value, name, value[name], ancestors, mark);
+        if (item !== OMIT) out[name] = item;
+      }
+    }
+    ancestors.pop();
+    return out;
+  };
+  globalThis.__thaw_json_safe_stringify = function (value, mark) {
+    const encoded = snapshot({ '': value }, '', value, [], !!mark);
+    if (value === undefined || encoded === OMIT) return undefined;
+    const text = JSON.stringify(encoded);
     // Well-formed `JSON.stringify` escapes a lone surrogate as `\uXXXX`,
     // but if the engine left one raw it would break the native Rust
     // `String` conversion -- escape any that remain.

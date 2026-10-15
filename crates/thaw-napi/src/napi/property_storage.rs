@@ -887,10 +887,28 @@ enum ScopedValueRoot {
 // new handle in the recipient's scope, even when its Value allocation came
 // from a scope that has already closed. This is the same ownership record
 // Env::alloc gives freshly allocated values.
+// The registered environment, other than `env`, that currently owns `value`.
+unsafe fn live_foreign_value_owner(env: NapiEnv, value: NapiValue) -> Option<NapiEnv> {
+    HOST.try_with(|host| {
+        let host = host.borrow();
+        host.module_envs.iter().chain(host.pending_call_envs.iter())
+            .map(|owner| &**owner as *const Env as NapiEnv)
+            .find(|owner| *owner != env && owner.as_ref().is_some_and(|owner|
+                !owner.finalized && owner.values.contains(&value)
+                    && !owner.finalized_handles.contains(&(value as usize))))
+    }).ok().flatten()
+}
+
 unsafe fn root_existing_value(env: NapiEnv, value: NapiValue) -> Result<ScopedValueRoot, NapiStatus> {
     if value.is_null() { return Ok(ScopedValueRoot::None); }
     let owner = env_mut(env).map_err(|_| NAPI_INVALID_ARG)?;
-    if !owner.values.contains(&value) || owner.finalized_handles.contains(&(value as usize)) {
+    if !owner.values.contains(&value) {
+        // A value owned by another loaded environment stays rooted by that
+        // owner; this environment has nothing of its own to root.
+        return if live_foreign_value_owner(env, value).is_some() { Ok(ScopedValueRoot::None) }
+            else { Err(NAPI_INVALID_ARG) };
+    }
+    if owner.finalized_handles.contains(&(value as usize)) {
         return Err(NAPI_INVALID_ARG);
     }
     let generation = *owner.value_generations.get(&(value as usize))

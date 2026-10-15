@@ -1266,9 +1266,20 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
             stack.push(JitKind::Dictionary);
         } else if let Some(value) = token
             .strip_prefix("dnput")
+            .or_else(|| token.strip_prefix("dninit"))
             .map(|_| JitKind::Number)
-            .or_else(|| token.strip_prefix("dbput").map(|_| JitKind::Boolean))
-            .or_else(|| token.strip_prefix("dsput").map(|_| JitKind::String))
+            .or_else(|| {
+                token
+                    .strip_prefix("dbput")
+                    .or_else(|| token.strip_prefix("dbinit"))
+                    .map(|_| JitKind::Boolean)
+            })
+            .or_else(|| {
+                token
+                    .strip_prefix("dsput")
+                    .or_else(|| token.strip_prefix("dsinit"))
+                    .map(|_| JitKind::String)
+            })
         {
             if stack.pop()? != value || stack.last().copied()? != JitKind::Dictionary {
                 return None;
@@ -1840,10 +1851,38 @@ fn jit_expression_kind(expression: &[String]) -> Option<(JitKind, usize)> {
 }
 
 fn validated_jit_expression(mut expression: Vec<String>, expected: JitKind) -> Option<String> {
-    let (mut kind, maximum_depth) = jit_expression_kind(&expression)?;
+    let (mut kind, mut maximum_depth) = jit_expression_kind(&expression)?;
     if expected == JitKind::Dynamic && kind != JitKind::Dynamic {
         tag_jit_value(&mut expression, kind)?;
         kind = JitKind::Dynamic;
+    }
+    // A tagged value built only from numbers and booleans (for example the merged result of a
+    // callable table whose entries return either) converts to the declared number with ToNumber.
+    if expected == JitKind::Number
+        && kind == JitKind::Dynamic
+        && expression
+            .iter()
+            .any(|token| matches!(token.as_str(), "tagnum" | "tagbool"))
+        && !expression.iter().any(|token| {
+            token.starts_with('h')
+                || token.starts_with("lh")
+                || jit_dynamic_argument(token).is_some()
+                || matches!(
+                    token.as_str(),
+                    "tagstr"
+                        | "tagrn"
+                        | "tagrb"
+                        | "tagrs"
+                        | "tagdn"
+                        | "tagdb"
+                        | "tagds"
+                        | "tagobject"
+                        | "tagtuple"
+                )
+        })
+    {
+        expression.push("dynnum".into());
+        (kind, maximum_depth) = jit_expression_kind(&expression)?;
     }
     let compatible = kind == expected
         || (matches!(kind, JitKind::Number | JitKind::Boolean)

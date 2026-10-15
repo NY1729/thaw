@@ -294,13 +294,15 @@ macro_rules! jit_loop_control {
         match statement {
             Stmt::Throw(thrown) => {
                 let mut encoded = Vec::new();
-                encode_expression(
+                let enc_ok = encode_expression(
                     thrown.arg.as_ref(),
                     parameters,
                     locals,
                     context,
                     &mut encoded,
-                )?;
+                );
+                
+                enc_ok?;
                 let error = CaughtThrowKind {
                     kind: JitKind::String,
                     prefix: "ls",

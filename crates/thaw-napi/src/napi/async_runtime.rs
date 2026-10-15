@@ -479,7 +479,7 @@ pub unsafe extern "C" fn napi_create_async_work(
     if env_ref.finalizing || env_ref.finalized {
         return record_status(env, NAPI_CLOSING);
     }
-    let mut work = Box::new(AsyncWork {
+    let work = Arc::new(AsyncWork {
         env: env as usize,
         owner: std::thread::current().id(),
         execute: execute.unwrap(),
@@ -488,7 +488,7 @@ pub unsafe extern "C" fn napi_create_async_work(
         state: AtomicU8::new(ASYNC_CREATED),
         completion_status: AtomicI32::new(NAPI_OK),
     });
-    let work_ptr = (&mut *work) as *mut AsyncWork;
+    let work_ptr = Arc::as_ptr(&work).cast_mut();
     env_ref.async_works.push(work);
     *result = work_ptr;
     NAPI_OK
@@ -523,10 +523,18 @@ pub unsafe extern "C" fn napi_queue_async_work(env: NapiEnv, work: *mut AsyncWor
         return record_status(env, NAPI_GENERIC_FAILURE);
     };
     ACTIVE_ASYNC_WORK.fetch_add(1, Ordering::AcqRel);
+    // The queue entry owns a strong reference so the worker never touches a
+    // work item that its Env already released.
+    let queued = (*env)
+        .async_works
+        .iter()
+        .find(|candidate| std::ptr::eq(Arc::as_ptr(candidate), work))
+        .map(Arc::clone)
+        .expect("async_work_ref validated this work");
     pool.queue
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .push_back(work as usize);
+        .push_back(Arc::into_raw(queued) as usize);
     pool.ready.notify_one();
     NAPI_OK
 }
@@ -549,7 +557,10 @@ pub unsafe extern "C" fn napi_cancel_async_work(env: NapiEnv, work: *mut AsyncWo
     let Some(position) = queue.iter().position(|queued| *queued == work as usize) else {
         return record_status(env, NAPI_GENERIC_FAILURE);
     };
-    queue.remove(position);
+    if let Some(address) = queue.remove(position) {
+        // Release the strong reference the queue entry was holding.
+        drop(Arc::from_raw(address as *const AsyncWork));
+    }
     work_ref
         .completion_status
         .store(NAPI_CANCELLED, Ordering::Release);

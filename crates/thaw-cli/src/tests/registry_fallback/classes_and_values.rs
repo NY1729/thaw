@@ -1542,3 +1542,137 @@ console.log(value === "hello", value !== "bye");
     assert_eq!(String::from_utf8_lossy(&result.stdout), "true true\n");
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// Ordinary data that merely *looks like* an internal wire tag (a
+/// `"__thaw_symbol_*"` string, a `{timestamp: n}` object) must keep its type
+/// across a dynamic call, while a real `Date` keeps its identity and a real
+/// `undefined` stays a present, undefined own property/element. Expected
+/// output recorded by running the same program under node 22 (see
+/// `triage/g-probe`): compiled producers send these through the typed graph
+/// wire, so there is no untyped legacy byte shape to collide with.
+#[test]
+fn ordinary_wire_lookalikes_keep_their_type_across_dynamic_calls() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-wire-lookalikes-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("wire-lookalike-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function makeThing(): JsValue;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        r#"module.exports.makeThing = function() {
+  return {
+    describe: function(value) {
+      if (typeof value === 'symbol') return 'symbol';
+      if (value instanceof Date) return 'date:' + value.getTime();
+      if (value === undefined) return 'undefined';
+      if (typeof value === 'object' && value !== null) {
+        const keys = Object.keys(value);
+        return 'object:' + keys.join(',') + ':' + JSON.stringify(value, (k, v) => v === undefined ? '<undef>' : v);
+      }
+      return typeof value + ':' + String(value);
+    },
+    hasOwn: function(value, key) { return Object.prototype.hasOwnProperty.call(value, key); },
+    makeUndefinedHolder: function() { return { value: undefined, list: [undefined] }; },
+  };
+};
+"#,
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { makeThing } from "wire-lookalike-kit";
+function main(): void {
+    const thing = makeThing();
+    console.log(thing.describe("__thaw_symbol_iterator"));
+    console.log(thing.describe({ timestamp: 123 }));
+    console.log(thing.describe(new Date(123)));
+    console.log(thing.describe({ value: undefined }));
+    console.log(thing.describe([undefined]));
+    console.log(thing.hasOwn({ value: undefined }, "value"));
+    const holder = thing.makeUndefinedHolder();
+    console.log(thing.hasOwn(holder, "value"));
+    console.log(thing.hasOwn(holder.list, 0));
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "string:__thaw_symbol_iterator\n\
+         object:timestamp:{\"timestamp\":123}\n\
+         date:123\n\
+         object:value:{\"value\":\"<undef>\"}\n\
+         object:0:[\"<undef>\"]\n\
+         true\ntrue\ntrue\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A decoded result that the declaration types as `JsValue`
+/// (`post(): Promise<JsValue>`) is re-materialised as a live handle through
+/// the typed graph pair, so a result field that merely looks like a wire tag
+/// (`timestamp`, a `"__thaw_symbol_*"` string) keeps its type, a real `Date`
+/// stays a `Date`, and an `undefined` field stays an own property. Expected
+/// output recorded by running the same program under node 22.
+#[test]
+fn a_typed_js_value_result_keeps_ordinary_wire_lookalikes_ordinary() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-registry-typed-jsvalue-lookalikes-{}",
+        std::process::id()
+    ));
+    let registry = dir.join("modules");
+    let package = registry.join("typed-lookalike-kit");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
+        package.join("package.d.ts"),
+        "export declare function post(): Promise<JsValue>;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        package.join("bundle.js"),
+        "module.exports.post = async function() {\n\
+             return { timestamp: 5, label: '__thaw_symbol_iterator', when: new Date(7), gone: undefined };\n\
+         };\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import { post } from "typed-lookalike-kit";
+async function main(): Promise<void> {
+    const r = await post();
+    console.log(typeof r.timestamp, r.timestamp, typeof r.label, r.label, r.when instanceof Date, Object.prototype.hasOwnProperty.call(r, "gone"));
+}
+"#,
+    )
+    .unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &registry, &[]).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&result.stdout),
+        "number 5 string __thaw_symbol_iterator true true\n"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}

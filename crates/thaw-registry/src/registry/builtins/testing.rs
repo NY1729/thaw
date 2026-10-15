@@ -10,7 +10,7 @@ pub(super) fn source(name: &str) -> Option<&'static str> {
              var mock = new MockTracker();
              function countedAssertions(context) {
                var cache = new WeakMap();
-               function wrap(fn) { if (cache.has(fn)) return cache.get(fn); var counted = function() { context._assertions++; return Reflect.apply(fn, this, arguments); }; cache.set(fn, counted); if (fn === assertion) Object.keys(fn).forEach(function(key) { var value = fn[key]; counted[key] = key !== 'AssertionError' && typeof value === 'function' ? wrap(value) : value; }); return counted; }
+               function wrap(fn) { if (cache.has(fn)) return cache.get(fn); var counted = function() { context._assertions++; return Reflect.apply(fn, this, arguments); }; cache.set(fn, counted); if (fn === assertion || fn === assertion.strict) Object.keys(fn).forEach(function(key) { var value = fn[key]; counted[key] = key !== 'AssertionError' && typeof value === 'function' ? wrap(value) : value; }); return counted; }
                return wrap(assertion);
              }
              function TestContext(record, timeout) { this.name = record.name; this.fullName = record.fullName; this._controller = new AbortController(); this.signal = this._controller.signal; var self = this; this._closed = false; this.mock = new MockTracker(function() { return !self._closed; }); this.assert = countedAssertions(this); this._diagnostics = []; this._plan = null; this._assertions = 0; this._children = []; this._record = record; this._timeout = timeout; this.signal.addEventListener('abort', function() { self._closed = true; }, { once: true }); }

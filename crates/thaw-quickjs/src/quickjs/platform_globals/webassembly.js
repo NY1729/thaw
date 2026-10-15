@@ -111,7 +111,17 @@
     const key = instance + ':' + value.v;
     let cached = wasmCachedFuncref(key);
     if (!cached) {
-      const owner = wasmInstance(instance);
+      // A retained table function (instance 0) has no single owner instance;
+      // sync every live instance's memories/globals around the call.
+      // ponytail: O(live instances) per call, track owners from Rust if this gets hot.
+      const owner = instance === 0 ? { get __thawResources() {
+        const all = [];
+        for (const entry of wasmInstances.values()) {
+          const live = entry && typeof entry.deref === 'function' ? entry.deref() : entry;
+          if (live && live.__thawResources) all.push(...live.__thawResources);
+        }
+        return all;
+      } } : wasmInstance(instance);
       const callable = (...args) => {
         const encoded = JSON.stringify(wasmEncodeArguments(args, value.parameters || []));
         const called = wasmWithResources(owner, () => wasmResult(__thaw_wasm_call_funcref(instance, value.v, encoded), WebAssembly.RuntimeError));
@@ -207,6 +217,9 @@
         // Function-reference carrier lifetime still uses the existing instance path.
         if (global.type === 'funcref') {
           this.__thawInstance = descriptor.instance; this.__thawName = descriptor.name;
+          // The global reads through the instance's store: keep that Instance (and
+          // so its finalizer's resources) alive for as long as this export lives.
+          Object.defineProperty(this, '__thawOwner', { value: descriptor.owner });
           return;
         }
         const retained = wasmResult(__thaw_wasm_global_retain(descriptor.instance, descriptor.name));
@@ -344,16 +357,24 @@
           else throw new WebAssembly.LinkError(`WebAssembly import '${item.module}.${item.name}' has an unsupported kind`);
         }
       } catch (error) { __thaw_wasm_release_pending(JSON.stringify(linkage.functions.map(value => value.handle))); throw error; }
-      let rawResult;
-      try { rawResult = JSON.parse(__thaw_wasm_instantiate(module.__thawHandle, JSON.stringify(linkage))); }
-      catch (error) { __thaw_wasm_release_pending(JSON.stringify(linkage.functions.map(value => value.handle))); throw error; }
-      if (!rawResult.ok) { __thaw_wasm_release_pending(JSON.stringify(linkage.functions.map(value => value.handle))); wasmResult(JSON.stringify(rawResult), rawResult.runtime ? WebAssembly.RuntimeError : WebAssembly.LinkError); }
+      const pendingHandles = JSON.stringify(linkage.functions.map(value => value.handle));
+      let rawResult, failed = false, primary;
+      try {
+        rawResult = JSON.parse(__thaw_wasm_instantiate(module.__thawHandle, JSON.stringify(linkage)));
+        if (!rawResult.ok) wasmResult(JSON.stringify(rawResult), rawResult.runtime ? WebAssembly.RuntimeError : WebAssembly.LinkError);
+      } catch (error) { failed = true; primary = error; }
+      for (const memory of linkedMemories.keys()) {
+        try { memory.__thawRefresh(); }
+        catch (error) { if (!failed) { failed = true; primary = error; } }
+      }
+      if (failed) {
+        if (rawResult && rawResult.ok) __thaw_wasm_release('instance', rawResult.handle);
+        __thaw_wasm_release_pending(pendingHandles);
+        throw primary;
+      }
       const result = rawResult;
       Object.defineProperty(this, '__thawHandle', { value: result.handle });
       const exports = Object.create(null), resources = pendingResources.map(resource => ({ value: resource.value, binding: resource.value.__thawBind(this.__thawHandle, resource.item.module, resource.item.name) }));
-      // Instantiation runs data segments and the start function before returning.
-      // Adopt their imported-memory writes before any later call can sync an old buffer.
-      for (const resource of resources) if (resource.value instanceof WasmMemory) resource.value.__thawRefresh(resource.binding);
       const memories = new Map();
       for (const item of result.exports) {
         if (item.kind === 'function') {
@@ -396,7 +417,7 @@
             if (!imported) resources.push({ value: memory });
           }
           exports[item.name] = memory;
-        } else if (item.kind === 'global') exports[item.name] = new WasmGlobal({ instance: this.__thawHandle, name: item.name }, undefined, true);
+        } else if (item.kind === 'global') exports[item.name] = new WasmGlobal({ instance: this.__thawHandle, name: item.name, owner: this }, undefined, true);
         else if (item.kind === 'table') { const table = new WasmTable({ instance: this.__thawHandle, name: item.name }, null, true); resources.push({ value: table }); exports[item.name] = table; }
       }
       Object.defineProperty(this, 'exports', { value: Object.freeze(exports), enumerable: true });

@@ -688,7 +688,7 @@ impl<'ctx> HirCompiler<'ctx> {
         for (handle, array, length) in arrays {
             let bytes = self
                 .builder
-                .build_int_mul(length, element_bytes, "spread_copy_size")
+                .build_int_mul(length, i64_type.const_int(element_width, false), "spread_copy_size")
                 .map_err(|error| error.to_string())?;
             let source = unsafe {
                 self.builder

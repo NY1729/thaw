@@ -264,14 +264,22 @@ impl<'a> FnLowerer<'a> {
                     } else {
                         raw_get
                     };
-                    let mut body = vec![HirStmt::If(
+                    let mut body = if key_suffix == "any" && matches!(receiver_type, HirType::WeakMap(_, _)) {
+                        self.weak_key_runtime_guard(
+                            var(&key_name),
+                            "Invalid value used as weak map key",
+                        )?
+                    } else {
+                        Vec::new()
+                    };
+                    body.push(HirStmt::If(
                         HirExpr::Call(
                             Box::new(HirExpr::Var(has_intrinsic)),
                             vec![var(&receiver_name), var(&key_name)],
                         ),
                         vec![HirStmt::Return(Some(decoded))],
                         Vec::new(),
-                    )];
+                    ));
                     let mut bindings = vec![(receiver_name.clone(), receiver_type, receiver)];
                     bindings.extend(spread_bindings);
                     bindings.push((key_name.clone(), key_type, key.clone()));
@@ -938,6 +946,7 @@ impl<'a> FnLowerer<'a> {
         key: HirExpr,
         message: &str,
     ) -> Result<Vec<HirStmt>, String> {
+        let key_copy = key.clone();
         let typeof_name = format!("__thaw_weak_key_typeof_{}", self.next_binding);
         self.next_binding += 1;
         self.scope.insert(typeof_name.clone(), HirType::Str);
@@ -957,14 +966,24 @@ impl<'a> FnLowerer<'a> {
             Box::new(HirExpr::Lit(HirLit::Str("function".to_string()))),
         );
         let is_valid = self.lower_logical_expr(is_object, is_function, false)?;
+        // `typeof null` is "object", but null is never a valid weak key.
+        let is_null = HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_json_is_null".to_string())),
+            vec![key_copy],
+        );
+        let invalid = self.lower_logical_expr(
+            HirExpr::BinOp(
+                BinOp::EqEqEq,
+                Box::new(is_valid),
+                Box::new(HirExpr::Lit(HirLit::Bool(false))),
+            ),
+            is_null,
+            false,
+        )?;
         Ok(vec![
             HirStmt::Let(typeof_name, HirType::Str, typeof_call),
             HirStmt::If(
-                HirExpr::BinOp(
-                    BinOp::EqEqEq,
-                    Box::new(is_valid),
-                    Box::new(HirExpr::Lit(HirLit::Bool(false))),
-                ),
+                invalid,
                 vec![HirStmt::Throw(HirExpr::Lit(HirLit::Str(format!(
                     "\u{1}TypeError\u{1}{message}"
                 ))))],

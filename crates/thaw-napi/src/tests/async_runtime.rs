@@ -345,7 +345,7 @@ unsafe extern "C" fn cleanup_finalizer_rejects_new_async_roots(
     let mut work = ptr::null_mut();
     assert_eq!(napi_create_async_work(env, ptr::null_mut(), ptr::null_mut(),
         Some(noop_execute), None, ptr::null_mut(), &mut work), NAPI_CLOSING);
-    let existing = (&mut *(*env).async_works[0]) as *mut AsyncWork;
+    let existing = Arc::as_ptr(&(&*env).async_works[0]).cast_mut();
     assert_eq!(napi_queue_async_work(env, existing), NAPI_CLOSING);
     assert_eq!(napi_add_env_cleanup_hook(env, Some(cleanup_probe), ptr::null_mut()), NAPI_CLOSING);
 }
@@ -864,7 +864,7 @@ fn method_with_callback_can_stop_its_own_pending_async_work() {
         callback: stop_work,
         data: gate_data.cast(),
         properties: HashMap::new(),
-        _thaw_bridge: None,
+        _thaw_bridge: None, _accessor_owner: None,
     }));
     let receiver = env.alloc(Value::Object(HashMap::from([(
         PropertyKey::String("stop".into()), method,
@@ -915,7 +915,7 @@ fn threadsafe_function_queues_worker_calls_and_finalizes_on_main_thread() {
         callback: threadsafe_js_callback,
         data: probe.cast(),
         properties: HashMap::new(),
-        _thaw_bridge: None,
+        _thaw_bridge: None, _accessor_owner: None,
     }));
     let mut threadsafe = ptr::null_mut();
     unsafe {
@@ -1297,7 +1297,7 @@ fn later_finalizer_cannot_dispatch_prior_env_callback_data() {
     let callback_data = Box::into_raw(Box::new(7_u8)).cast::<c_void>();
     let function = first.alloc(Value::Function(Function {
         callback: counted_native_callback, data: callback_data,
-        properties: HashMap::new(), _thaw_bridge: None,
+        properties: HashMap::new(), _thaw_bridge: None, _accessor_owner: None,
     }));
     first.finalizers.push(FinalizeRecord {
         data: callback_data, finalize: Some(release_callback_data), hint: ptr::null_mut(),
@@ -1318,14 +1318,14 @@ fn later_finalizer_cannot_dispatch_prior_env_callback_data() {
         let mut host = host.borrow_mut();
         host.functions.insert("cleanup_prior_export".into(), Function {
             callback: counted_native_callback, data: callback_data,
-            properties: HashMap::new(), _thaw_bridge: None,
+            properties: HashMap::new(), _thaw_bridge: None, _accessor_owner: None,
         });
         host.exports.insert("cleanup_prior_export".into(), (first_env as usize, function));
         host.module_envs.extend([first, second]);
     });
     retire_owned_envs();
     assert_eq!(CALLED_AFTER_FINALIZATION.load(Ordering::Acquire), 0);
-    let retained = HOST.with(|host| host.borrow_mut().module_envs.drain(..).collect::<Vec<_>>());
+    let retained = HOST.with(|host| std::mem::take(&mut host.borrow_mut().module_envs));
     drop(retained);
 }
 
@@ -1395,7 +1395,7 @@ fn later_finalizer_cannot_read_prior_env_external_backing_store() {
     second.shutdown_requested = true;
     HOST.with(|host| host.borrow_mut().module_envs.extend([first, second]));
     retire_owned_envs();
-    let retained = HOST.with(|host| host.borrow_mut().module_envs.drain(..).collect::<Vec<_>>());
+    let retained = HOST.with(|host| std::mem::take(&mut host.borrow_mut().module_envs));
     drop(retained);
 }
 
@@ -1419,7 +1419,7 @@ fn finalizer_queued_work_keeps_other_env_owned_until_completion() {
     assert_eq!(thaw_napi_run_async_work(), 1);
     assert!(HOST.with(|host| host.borrow().module_envs.iter()
         .any(|env| (&**env as *const Env).cast_mut() == second_env && env.finalized)));
-    let retained = HOST.with(|host| host.borrow_mut().module_envs.drain(..).collect::<Vec<_>>());
+    let retained = HOST.with(|host| std::mem::take(&mut host.borrow_mut().module_envs));
     drop(retained);
 }
 
@@ -1502,7 +1502,7 @@ fn threadsafe_function_reports_full_deadlock_and_abort_cleanup() {
         callback: threadsafe_js_callback,
         data: probe.cast(),
         properties: HashMap::new(),
-        _thaw_bridge: None,
+        _thaw_bridge: None, _accessor_owner: None,
     }));
     let mut threadsafe = ptr::null_mut();
     unsafe {
@@ -1579,7 +1579,7 @@ fn threadsafe_function_serializes_multiple_producers() {
         callback: threadsafe_js_callback,
         data: probe.cast(),
         properties: HashMap::new(),
-        _thaw_bridge: None,
+        _thaw_bridge: None, _accessor_owner: None,
     }));
     let mut threadsafe = ptr::null_mut();
     unsafe {
@@ -1630,6 +1630,24 @@ fn threadsafe_function_serializes_multiple_producers() {
     assert!(probe.finalized.load(Ordering::Acquire));
 }
 
+// These tests drive an Env that is not registered with the Host, so the drain
+// loop cannot see its queued work and would return before a slow worker pushes
+// the completion. Wait for that completion event first.
+fn wait_for_ready_completion() {
+    wait_for_ready_completions(1);
+}
+
+fn wait_for_ready_completions(count: usize) {
+    let owner = std::thread::current().id();
+    for _ in 0..5_000 {
+        let ready = ready_events().lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+            .iter().filter(|event| unsafe { event.owner() == owner }).count();
+        if ready >= count { return; }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    panic!("async completions were never queued");
+}
+
 #[test]
 fn async_work_executes_on_a_worker_and_completes_on_the_draining_thread() {
     let _guard = lock_async_test();
@@ -1658,6 +1676,7 @@ fn async_work_executes_on_a_worker_and_completes_on_the_draining_thread() {
         assert_eq!(napi_queue_async_work(&mut env, work), NAPI_OK);
         assert_eq!(napi_queue_async_work(&mut env, work), NAPI_GENERIC_FAILURE);
     }
+    wait_for_ready_completion();
     assert_eq!(thaw_napi_run_async_work(), 1);
 
     let probe = unsafe { Box::from_raw(probe_ptr) };
@@ -1738,6 +1757,9 @@ fn async_work_executes_on_a_worker_and_completes_on_the_draining_thread() {
     gate_state.1 = true;
     gate.changed.notify_all();
     drop(gate_state);
+    // The unregistered Env is invisible to the drain loop: wait until every
+    // released worker has queued its completion (plus the cancelled one).
+    wait_for_ready_completions(worker_count + 1);
     assert_eq!(thaw_napi_run_async_work(), worker_count + 1);
     let cancel_probe = unsafe { Box::from_raw(cancel_probe) };
     assert!(!cancel_probe.executed.load(Ordering::Acquire));
@@ -1774,6 +1796,7 @@ fn native_promise_can_settle_on_the_final_async_completion() {
         );
         assert_eq!(napi_queue_async_work(&mut env, work), NAPI_OK);
     }
+    wait_for_ready_completion();
     assert!(matches!(wait_for_promise(promise), Ok(value) if unsafe {
         matches!(value_ref(value), Ok(Value::Undefined))
     }));
@@ -1784,6 +1807,9 @@ fn native_promise_can_settle_on_the_final_async_completion() {
 
 #[test]
 fn async_creation_validates_resources_names_and_callback_environment() {
+    // It creates and finalizes threadsafe functions, which move the
+    // process-wide counters the other async tests observe.
+    let _guard = lock_async_test();
     unsafe {
         let mut env = Env::new();
         let env_ptr: NapiEnv = &mut env;
@@ -1951,6 +1977,71 @@ fn phased_shutdown_retains_env_and_reports_errors_before_release() {
 #[cfg(target_os = "linux")]
 unsafe extern "C" fn close_and_free_uv_handle(handle: *mut c_void) {
     libc::free(handle);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn polling_keeps_call_envs_while_a_registered_libuv_loop_is_referenced() {
+    let _guard = lock_async_test();
+    unsafe {
+        type UvLoopSize = unsafe extern "C" fn() -> usize;
+        type UvLoopInit = unsafe extern "C" fn(*mut c_void) -> i32;
+        type UvLoopClose = unsafe extern "C" fn(*mut c_void) -> i32;
+        type UvHandleSize = unsafe extern "C" fn(i32) -> usize;
+        type UvTimerInit = unsafe extern "C" fn(*mut c_void, *mut c_void) -> i32;
+        type UvTimerStart = unsafe extern "C" fn(
+            *mut c_void, Option<unsafe extern "C" fn(*mut c_void)>, u64, u64,
+        ) -> i32;
+        type UvClose = unsafe extern "C" fn(
+            *mut c_void, Option<unsafe extern "C" fn(*mut c_void)>,
+        );
+        let library = libc::dlopen(c"libuv.so.1".as_ptr(), libc::RTLD_NOW | libc::RTLD_GLOBAL);
+        assert!(!library.is_null());
+        macro_rules! uv_symbol {
+            ($name:literal, $ty:ty) => {{
+                let symbol = libc::dlsym(libc::RTLD_DEFAULT, $name.as_ptr());
+                assert!(!symbol.is_null());
+                std::mem::transmute::<*mut c_void, $ty>(symbol)
+            }};
+        }
+        let loop_size = uv_symbol!(c"uv_loop_size", UvLoopSize);
+        let loop_init = uv_symbol!(c"uv_loop_init", UvLoopInit);
+        let loop_close = uv_symbol!(c"uv_loop_close", UvLoopClose);
+        let handle_size = uv_symbol!(c"uv_handle_size", UvHandleSize);
+        let timer_init = uv_symbol!(c"uv_timer_init", UvTimerInit);
+        let timer_start = uv_symbol!(c"uv_timer_start", UvTimerStart);
+        let close = uv_symbol!(c"uv_close", UvClose);
+        let event_loop = libc::calloc(1, loop_size());
+        assert_eq!(loop_init(event_loop), 0);
+        assert_eq!(thaw_napi_register_uv_loop(event_loop), NAPI_OK);
+        const UV_TIMER: i32 = 13;
+        let timer = libc::calloc(1, handle_size(UV_TIMER));
+        assert_eq!(timer_init(event_loop, timer), 0);
+        // A referenced timer which the addon scheduled from a call: nothing is
+        // counted as async work or a threadsafe function, only libuv knows.
+        assert_eq!(timer_start(timer, Some(test_uv_timer_callback), 10_000, 0), 0);
+        HOST.with(|host| host.borrow_mut().pending_call_envs.push(Box::new(Env::new())));
+        thaw_napi_poll_async_work();
+        assert!(
+            HOST.with(|host| {
+                let host = host.borrow();
+                host.pending_call_envs.len() == 1 && !host.pending_call_envs[0].finalized
+            }),
+            "the call Env must outlive the libuv timer that may still call back into it"
+        );
+        close(timer, Some(close_and_free_uv_handle));
+        for _ in 0..100 {
+            poll_uv_loop();
+            if !uv_handles_open() { break; }
+        }
+        assert_eq!(thaw_napi_unregister_uv_loop(event_loop), NAPI_OK);
+        thaw_napi_poll_async_work();
+        assert!(HOST.with(|host| host.borrow().pending_call_envs[0].finalized));
+        HOST.with(|host| host.borrow_mut().pending_call_envs.clear());
+        assert_eq!(loop_close(event_loop), 0);
+        libc::free(event_loop);
+        libc::dlclose(library);
+    }
 }
 
 #[cfg(target_os = "linux")]

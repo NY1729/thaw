@@ -72,8 +72,18 @@ impl<'ctx> HirCompiler<'ctx> {
             HirExpr::Lit(HirLit::Bool(_)) => Some(HirType::Bool),
             HirExpr::Lit(HirLit::Undefined | HirLit::ArrayHole) => Some(HirType::Undefined),
             HirExpr::Lit(HirLit::Null) => Some(HirType::Null),
-            HirExpr::Var(name) => self.variable_hir_types.get(name).cloned(),
-            HirExpr::Assign(_, value) => self.expr_hir_type(value),
+            HirExpr::Var(name) => self
+                .variable_hir_types
+                .get(name)
+                .cloned()
+                .or_else(|| self.planning_var_types.borrow().get(name).cloned()),
+            HirExpr::Assign(_, value)
+            | HirExpr::IndexAssign(_, _, value)
+            | HirExpr::PropAssign(_, _, _, value) => self.expr_hir_type(value),
+            HirExpr::Block(statements) => match statements.last() {
+                Some(HirStmt::Return(Some(value))) => self.expr_hir_type(value),
+                _ => None,
+            },
             HirExpr::EvalThen(_, second) => self.expr_hir_type(second),
             HirExpr::PostfixUpdate(_, _) => Some(HirType::F64),
             HirExpr::OptionalSome(_, payload) | HirExpr::OptionalNone(payload) => {
@@ -166,6 +176,13 @@ impl<'ctx> HirCompiler<'ctx> {
                 Some(HirType::Function(params.clone(), Box::new(ret.clone())))
             }
             HirExpr::Call(callee, arguments) => {
+                // HIR preserves the adapted closure's callable type through this
+                // identity alias; keep the LLVM type mirror in sync with HIR inference.
+                if matches!(callee.as_ref(), HirExpr::Var(name) if name == "__thaw_closure_alias") {
+                    if let [adapted, _original] = arguments.as_slice() {
+                        return self.expr_hir_type(adapted);
+                    }
+                }
                 if let HirExpr::Var(name) = callee.as_ref() {
                     match name.as_str() {
                         "JSON.parse"
@@ -185,7 +202,16 @@ impl<'ctx> HirCompiler<'ctx> {
                         | "__thaw_json_map_or_set_set"
                         | "__thaw_json_map_or_set_add"
                         | "__thaw_json_map_or_set_delete"
-                        | "__thaw_json_map_or_set_clear" => return Some(HirType::Json),
+                        | "__thaw_json_map_or_set_clear"
+                        // Boxing a native scalar yields a Json value; `===` against
+                        // it must go through the Json comparison, not pointer equality.
+                        | "__thaw_json_receiver_number"
+                        | "__thaw_json_receiver_bool"
+                        | "__thaw_json_receiver_string"
+                        | "__thaw_json_receiver_bigint"
+                        | "__thaw_json_from_consumed_dynamic"
+                        | "__thaw_json_host_from_dynamic"
+                        | "__thaw_json_host_from_borrowed_dynamic" => return Some(HirType::Json),
                         // `Object.keys`/`Object.getOwnPropertyNames`/
                         // `Reflect.ownKeys` on a `Json`/`Dictionary`/
                         // array receiver, and the array-receiver variant
@@ -201,7 +227,7 @@ impl<'ctx> HirCompiler<'ctx> {
                         // `thaw_error_message`, not a value to format --
                         // observed printing garbage/replacement-character
                         // bytes instead of the array's own text.
-                        "__thaw_json_keys" | "__thaw_array_keys"
+                        "__thaw_json_keys" | "__thaw_json_for_in_keys" | "__thaw_array_keys"
                         | "__thaw_template_strings_raw" => {
                             return Some(HirType::Array(Box::new(HirType::Str)))
                         }
@@ -332,6 +358,7 @@ impl<'ctx> HirCompiler<'ctx> {
                         | "deleteDynamicProperty"
                         | "hasDynamicProperty"
                         | "__thaw_error_is_error"
+                        | "__thaw_native_wrapper_is_live"
                         | "__thaw_error_is_instance" => {
                             return Some(HirType::Bool)
                         }

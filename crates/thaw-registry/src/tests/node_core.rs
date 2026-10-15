@@ -139,7 +139,7 @@ fn url_builtin_supports_legacy_parse_and_format() {
     let empty_node_modules = temp_registry("builtin_url_legacy_node_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    assert_eq!(file_count, 2);
+    assert_eq!(file_count, 3);
     let script = format!(
         "globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseUrl = module.exports;"
     );
@@ -166,6 +166,25 @@ fn querystring_builtin_runs_through_bundled_commonjs_require() {
             dir.join("index.js"),
             "var querystring = require('querystring');\n\
              module.exports = function () {\n\
+             \x20 var values = { n: NaN, p: Infinity, m: -Infinity, finite: 1.5, zero: -0, repeat: [NaN, 2, Infinity, -Infinity], truth: true, text: 'Infinity', big: 3n };\n\
+             \x20 var expected = 'n=&p=&m=&finite=1.5&zero=0&repeat=&repeat=2&repeat=&repeat=&truth=true&text=Infinity&big=3';\n\
+             \x20 if (querystring.stringify(values) !== expected) throw new Error('querystring numeric primitives');\n\
+             \x20 if (querystring.encode(values) !== expected) throw new Error('querystring encode alias');\n\
+             \x20 var encoded = querystring.stringify({ n: NaN, p: Infinity, m: -Infinity, finite: 2 }, ';', ':', { encodeURIComponent: function(value) { return '[' + value + ']'; } });\n\
+             \x20 if (encoded !== '[n]:[];[p]:[];[m]:[];[finite]:[2]') throw new Error('querystring custom encoder');\n\
+             \x20 var tolerant = [['%41%ZZ', 'A%ZZ'], ['%41%', 'A%'], ['%41%2', 'A%2'], ['%C3%A9%ZZ', '\\u00e9%ZZ'], ['%E2%82%ZZ', '\\ufffd%ZZ'], ['%FF%41', '\\ufffdA'], ['%EF%BB%BF%ZZ', '\\ufeff%ZZ']];\n\
+             \x20 tolerant.forEach(function(test) { if (querystring.unescape(test[0]) !== test[1]) throw new Error('querystring tolerant UTF8'); });\n\
+             \x20 if (querystring.unescape('a+b', true) !== 'a+b' || querystring.unescape('%41+%ZZ') !== 'A+%ZZ' || querystring.unescape('%41+%ZZ', true) !== 'A %ZZ') throw new Error('querystring direct unescape spaces');\n\
+             \x20 var malformed = querystring.parse('%41%ZZ=%C3%A9%ZZ&x=%FF%41'); if (malformed['A%ZZ'] !== '\\u00e9%ZZ' || malformed.x !== '\\ufffdA') throw new Error('querystring malformed parse');\n\
+             \x20 if (querystring.parse('q=two+words&literal=%2B', '&', '=', { decodeURIComponent: decodeURIComponent }).q !== 'two words' || querystring.parse('literal=%2B').literal !== '+') throw new Error('querystring custom plus');\n\
+             \x20 var decoderInputs = []; var encodedSpaces = querystring.parse('a+b=c+d', '&', '=', { decodeURIComponent: function(text) { decoderInputs.push(text); return text; } }); if (decoderInputs[0] !== 'a%20b' || decoderInputs[1] !== 'c%20d' || encodedSpaces['a%20b'] !== 'c%20d') throw new Error('querystring custom decoder input');\n\
+             \x20 var customFallback = querystring.parse('q=%41%ZZ+end', '&', '=', { decodeURIComponent: function() { throw new URIError('decode'); } }); if (customFallback.q !== 'A%ZZ end') throw new Error('querystring custom fallback');\n\
+             \x20 var empties = querystring.parse('&a=1&&a=2&'); if (Object.getPrototypeOf(empties) !== null || Object.prototype.hasOwnProperty.call(empties, '') || empties.a.length !== 2 || empties.a[0] !== '1' || empties.a[1] !== '2') throw new Error('querystring empty fields');\n\
+             \x20 var explicitEmpty = querystring.parse('=value&='); if (!Array.isArray(explicitEmpty['']) || explicitEmpty[''][0] !== 'value' || explicitEmpty[''][1] !== '') throw new Error('querystring explicit empty key');\n\
+             \x20 if (Object.keys(querystring.parse('&&a=1', '&', '=', { maxKeys: 2 })).length !== 0 || querystring.parse('&&a=1', '&', '=', { maxKeys: 3 }).a !== '1') throw new Error('querystring empty pair quota');\n\
+             \x20 var unlimited = querystring.decode('&&a=1&', '&', '=', { maxKeys: 0 }); if (unlimited.a !== '1' || Object.prototype.hasOwnProperty.call(unlimited, '')) throw new Error('querystring decode alias');\n\
+             \x20 var customSeparator = querystring.parse(';;a:1;;', ';', ':'); if (customSeparator.a !== '1' || Object.prototype.hasOwnProperty.call(customSeparator, '')) throw new Error('querystring custom separator empties');\n\
+             \x20 if (querystring.unescape('%41\\u00e9%ZZ') !== 'A\\ufffd%ZZ' || querystring.unescape('%00').charCodeAt(0) !== 0) throw new Error('querystring low-byte fallback');\n\
              \x20 return querystring.stringify({ a: [1, 2], space: 'two words' }) + ':' + JSON.stringify(querystring.parse('x=1&x=2'));\n\
              };",
         )
@@ -454,13 +473,93 @@ fn util_helpers_run_through_bundled_commonjs_require() {
     let dir = temp_registry("builtin_util_helpers");
     fs::write(
             dir.join("index.js"),
-            "var util = require('node:util');\n\
+            "var directTypes = require('node:util/types'); var util = require('node:util');\n\
              function Base() {} function Child() {} util.inherits(Child, Base);\n\
              module.exports = async function () {\n\
+             \x20 if (directTypes !== util.types || directTypes.default !== directTypes || util.default.types !== directTypes) throw new Error('util types identity');\n\
+             \x20 if (!directTypes.isDataView(new DataView(new ArrayBuffer(8))) || !util.types.isUint8Array(new Uint8Array(1)) || !util.types.isArrayBufferView(new DataView(new ArrayBuffer(1)))) throw new Error('util types complete table');\n\
+             \x20 if (!directTypes.isWeakMap(new WeakMap()) || !directTypes.isNumberObject(Object(1)) || typeof directTypes.isCryptoKey !== 'function' || typeof directTypes.isGeneratorObject !== 'function') throw new Error('util types retained fields');\n\
+             \x20 var marker = {}; directTypes.__testAlias = marker; if (util.types.__testAlias !== marker) throw new Error('util types export mutation'); delete directTypes.__testAlias;\n\
+             \x20 var realError = new Error('brand'), derivedError = new TypeError('derived'), fakeError = Object.create(Error.prototype);\n\
+             \x20 class CustomError extends Error {} var subclassError = new CustomError('subclass');\n\
+             \x20 if (!directTypes.isNativeError(realError) || !util.types.isNativeError(derivedError) || !directTypes.isNativeError(subclassError) || directTypes.isNativeError(fakeError) || directTypes.isNativeError(new Proxy(realError, {}))) throw new Error('util native Error brand');\n\
+             \x20 Object.setPrototypeOf(realError, null); if (!directTypes.isNativeError(realError)) throw new Error('util detached Error prototype');\n\
+             \x20 var touched = 0, spoof = {}; Object.defineProperty(spoof, Symbol.toStringTag, { get: function() { touched++; return 'Error'; } }); Object.defineProperty(spoof, 'stack', { get: function() { touched++; throw new Error('stack getter'); } });\n\
+             \x20 if (directTypes.isNativeError(spoof) || touched !== 0 || directTypes.isNativeError(null) || directTypes.isNativeError('Error') || directTypes.isNativeError()) throw new Error('util spoof brand');\n\
+             \x20 var originalError = globalThis.Error; try { globalThis.Error = function() { throw new originalError('replacement constructor'); }; if (!directTypes.isNativeError(derivedError) || directTypes.isNativeError(fakeError)) throw new originalError('util captured brand'); } finally { globalThis.Error = originalError; }\n\
              \x20 var custom = {}; custom[util.inspect.custom] = function() { return 'custom'; };\n\
              \x20 var add = util.promisify(function(a, b, callback) { queueMicrotask(function() { callback(null, a + b); }); });\n\
              \x20 var sum = await add(2, 3);\n\
+             \x20 var multi = util.promisify(function(callback) { callback(null, 'first', 'extra'); });\n\
+             \x20 if (await multi() !== 'first') throw new Error('promisify first value');\n\
+             \x20 if (util.promisify(multi) !== multi || multi[util.promisify.custom] !== multi) throw new Error('promisify identity');\n\
+             \x20 var descriptor = Object.getOwnPropertyDescriptor(multi, util.promisify.custom);\n\
+             \x20 if (!descriptor || descriptor.enumerable || descriptor.writable || !descriptor.configurable) throw new Error('promisify descriptor');\n\
+             \x20 if (await util.promisify(function(callback) { callback(null); })() !== undefined) throw new Error('promisify no success value');\n\
+             \x20 var receiver = { value: 7, method: util.promisify(function(callback) { callback(null, this.value, 'extra'); }) };\n\
+             \x20 if (await receiver.method() !== 7) throw new Error('promisify receiver');\n\
+             \x20 var reason = new Error('callback failure'), rejected;\n\
+             \x20 try { await util.promisify(function(callback) { callback(reason); })(); } catch (error) { rejected = error; }\n\
+             \x20 if (rejected !== reason) throw new Error('promisify rejection');\n\
+             \x20 var thrown = new Error('sync failure'), caught;\n\
+             \x20 try { await util.promisify(function() { throw thrown; })(); } catch (error) { caught = error; }\n\
+             \x20 if (caught !== thrown) throw new Error('promisify synchronous throw');\n\
+             \x20 var original = function() { throw new Error('original must not be called'); };\n\
+             \x20 var override = function() { return Promise.resolve('custom'); };\n\
+             \x20 original[util.promisify.custom] = override;\n\
+             \x20 if (util.promisify(original) !== override || util.promisify(override) !== override || await override() !== 'custom') throw new Error('promisify custom');\n\
+             \x20 [123, 'custom', {}].forEach(function(value) { var fn = function() {}; fn[util.promisify.custom] = value; var error; try { util.promisify(fn); } catch (caught) { error = caught; } if (!(error instanceof TypeError) || error.code !== 'ERR_INVALID_ARG_TYPE') throw new Error('promisify custom validation'); });\n\
+             \x20 [undefined, null, false, 0, '', NaN].forEach(function(value) { var fn = function(callback) { callback(null, 'normal'); }; fn[util.promisify.custom] = value; var wrapped = util.promisify(fn); if (typeof wrapped !== 'function' || wrapped === fn || util.promisify(wrapped) !== wrapped) throw new Error('promisify falsy custom'); });\n\
              \x20 var callbackValue = await new Promise(function(resolve, reject) { util.callbackify(async function(value) { return value * 2; })(4, function(error, value) { if (error) reject(error); else resolve(value); }); });\n\
+             \x20 function callbackResult(fn, receiver) { return new Promise(function(resolve) { fn.call(receiver, function(error, value) { resolve({ error: error, value: value, receiver: this }); }); }); }\n\
+             \x20 var callbackReceiver = { value: 11 };\n\
+             \x20 var success = await callbackResult(util.callbackify(function() { return Promise.resolve(this.value); }), callbackReceiver);\n\
+             \x20 if (success.error !== null || success.value !== 11 || success.receiver !== callbackReceiver) throw new Error('callbackify success receiver');\n\
+             \x20 var errorMessages = ['', '0', 'false', 'null', 'undefined', 'NaN', 'normal'];\n\
+             \x20 for (var errorIndex = 0; errorIndex < errorMessages.length; errorIndex++) { var callbackReason = new Error(errorMessages[errorIndex]); callbackReason.extra = { keep: true }; var originalStack = callbackReason.stack; callbackReceiver.reason = callbackReason; var failure = await callbackResult(util.callbackify(function() { return Promise.reject(this.reason); }), callbackReceiver); if (failure.error !== callbackReason || failure.error.stack !== originalStack || failure.error.extra !== callbackReason.extra || failure.receiver !== callbackReceiver || failure.value !== undefined) throw new Error('callbackify Error identity'); }\n\
+             \x20 var falsyReasons = [undefined, null, false, 0, -0, '', NaN];\n\
+             \x20 for (var reasonIndex = 0; reasonIndex < falsyReasons.length; reasonIndex++) { callbackReceiver.reason = falsyReasons[reasonIndex]; var falsyFailure = await callbackResult(util.callbackify(function() { return Promise.reject(this.reason); }), callbackReceiver); if (!(falsyFailure.error instanceof Error) || falsyFailure.error.code !== 'ERR_FALSY_VALUE_REJECTION' || !Object.is(falsyFailure.error.reason, falsyReasons[reasonIndex]) || falsyFailure.receiver !== callbackReceiver) throw new Error('callbackify falsy reason'); }\n\
+             \x20 var objectReason = { detail: 'identity' }; callbackReceiver.reason = objectReason; var objectFailure = await callbackResult(util.callbackify(function() { return Promise.reject(this.reason); }), callbackReceiver); if (objectFailure.error !== objectReason) throw new Error('callbackify object rejection');\n\
+             \x20 var usvCases = [['\\udc00\\udc01', '\\ufffd\\ufffd'], ['a\\udc00\\udc01z', 'a\\ufffd\\ufffdz'], ['\\ud800\\ud801', '\\ufffd\\ufffd'], ['\\ud800x\\udc00', '\\ufffdx\\ufffd'], ['\\ud83d\\ude00', '\\ud83d\\ude00'], ['\\ud83d\\ude00\\udc00', '\\ud83d\\ude00\\ufffd'], ['\\ud800\\ud83d\\ude00', '\\ufffd\\ud83d\\ude00'], ['\\udc00\\ud83d\\ude00', '\\ufffd\\ud83d\\ude00'], ['\\ud83d\\ude00\\ud83d\\ude01', '\\ud83d\\ude00\\ud83d\\ude01'], ['', ''], ['plain', 'plain']];\n\
+             \x20 usvCases.forEach(function(test) { if (util.toUSVString(test[0]) !== test[1]) throw new Error('toUSVString surrogate repair'); });\n\
+             \x20 var conversions = 0;\n\
+             \x20 if (util.toUSVString({ toString: function() { conversions++; return '\\udc00\\udc01'; } }) !== '\\ufffd\\ufffd' || conversions !== 1) throw new Error('toUSVString conversion');\n\
+             \x20 if (util.toUSVString(123) !== '123') throw new Error('toUSVString numeric conversion');\n\
+             \x20 var getterCalls = 0, accessed = {};\n\
+             \x20 Object.defineProperty(accessed, 'value', { enumerable: true, get: function() { getterCalls++; throw new Error('getter ran'); } });\n\
+             \x20 if (util.inspect(accessed).indexOf('[Getter]') < 0 || getterCalls !== 0) throw new Error('inspect default getter');\n\
+             \x20 if (util.format('%o', accessed).indexOf('[Getter]') < 0 || getterCalls !== 0) throw new Error('format default getter');\n\
+             \x20 var getterArray = []; Object.defineProperty(getterArray, '0', { enumerable: true, configurable: true, get: function() { getterCalls++; return 5; } });\n\
+             \x20 if (util.inspect(getterArray).indexOf('[Getter]') < 0 || getterCalls !== 0) throw new Error('inspect array getter');\n\
+             \x20 var selected = {}, onlyCalls = 0, bothCalls = 0;\n\
+             \x20 Object.defineProperty(selected, 'only', { enumerable: true, get: function() { onlyCalls++; return 7; } });\n\
+             \x20 Object.defineProperty(selected, 'both', { enumerable: true, get: function() { bothCalls++; return 8; }, set: function() {} });\n\
+             \x20 util.inspect(selected, { getters: 'get' }); if (onlyCalls !== 1 || bothCalls !== 0) throw new Error('inspect getter-only selection');\n\
+             \x20 util.inspect(selected, { getters: 'set' }); if (onlyCalls !== 1 || bothCalls !== 1) throw new Error('inspect getter-setter selection');\n\
+             \x20 util.inspect(selected, { getters: true }); if (onlyCalls !== 2 || bothCalls !== 2) throw new Error('inspect all getters');\n\
+             \x20 if (util.inspect(accessed, { getters: true }).indexOf('Inspection threw') < 0 || getterCalls !== 1) throw new Error('inspect throwing explicit getter');\n\
+             \x20 var hookCalls = 0, hookObject = { value: 3 };\n\
+             \x20 hookObject[util.inspect.custom] = function(depth, options, inspect) { hookCalls++; if (depth !== 0 || options.customInspect !== undefined || inspect !== util.inspect || this !== hookObject) throw new Error('inspect hook arguments'); return 'hook'; };\n\
+             \x20 if (util.inspect(hookObject, { depth: 0 }) !== 'hook' || hookCalls !== 1) throw new Error('inspect enabled custom');\n\
+             \x20 if (util.inspect(hookObject, { customInspect: false }).indexOf('value: 3') < 0 || hookCalls !== 1) throw new Error('inspect disabled custom');\n\
+             \x20 var symbolAccessorCalls = 0, symbolAccessor = { value: 4 }; Object.defineProperty(symbolAccessor, util.inspect.custom, { get: function() { symbolAccessorCalls++; throw new Error('hook lookup'); } });\n\
+             \x20 util.inspect(symbolAccessor, { customInspect: false }); if (symbolAccessorCalls !== 0) throw new Error('inspect disabled hook lookup');\n\
+             \x20 var deep = { a: { b: { c: { d: 1 } } } };\n\
+             \x20 if (util.inspect(deep) !== '{ a: { b: { c: [Object] } } }' || util.inspect(deep, { depth: 0 }) !== '{ a: [Object] }') throw new Error('inspect depth');\n\
+             \x20 if (util.inspect(deep, { depth: null }).indexOf('d: 1') < 0 || util.inspect(deep, { depth: Infinity }).indexOf('d: 1') < 0) throw new Error('inspect unlimited depth');\n\
+             \x20 if (util.inspect([[1]], { depth: 0 }).indexOf('[Array]') < 0 || util.inspect(new Map([['x', { deep: 1 }]]), { depth: 0 }).indexOf('[Object]') < 0 || util.inspect(new Set([{ deep: 1 }]), { depth: 0 }).indexOf('[Object]') < 0) throw new Error('inspect container depth');\n\
+             \x20 var depthGetterCalls = 0, depthGuard = { child: {} }; Object.defineProperty(depthGuard.child, 'hidden', { enumerable: true, get: function() { depthGetterCalls++; return 1; } });\n\
+             \x20 if (util.inspect(depthGuard, { depth: 0 }).indexOf('[Object]') < 0 || depthGetterCalls !== 0) throw new Error('inspect depth getter guard');\n\
+             \x20 var cycle = {}; cycle.self = cycle; if (util.inspect(cycle, { depth: null }).indexOf('[Circular]') < 0) throw new Error('inspect circular');\n\
+             \x20 var numericSymbol = Symbol('numeric');\n\
+             \x20 if (util.format('%d:%i:%f', numericSymbol, numericSymbol, numericSymbol) !== 'NaN:NaN:NaN') throw new Error('format numeric Symbol');\n\
+             \x20 if (util.format('%d %s', numericSymbol, 'next', 7) !== 'NaN next 7') throw new Error('format Symbol argument consumption');\n\
+             \x20 if (util.format('%% %d') !== '% %d') throw new Error('format missing numeric argument');\n\
+             \x20 if (util.format('%s', numericSymbol) !== 'Symbol(numeric)' || util.format('%o', numericSymbol) !== 'Symbol(numeric)') throw new Error('format nonnumeric Symbol');\n\
+             \x20 if (util.format('%d:%i:%f', '12.5', '12.5', '12.5') !== '12.5:12:12.5') throw new Error('format numeric coercion');\n\
+             \x20 var numericHookCalls = 0, numericHook = {}; numericHook[util.inspect.custom] = function() { numericHookCalls++; return 'kept'; };\n\
+             \x20 if (util.format('%o', numericHook) !== 'kept' || numericHookCalls !== 1) throw new Error('format inspect hook');\n\
+             \x20 ['%d', '%i', '%f'].forEach(function(token) { var reason = new Error('conversion'), received; var value = {}; value[Symbol.toPrimitive] = function() { throw reason; }; try { util.format(token, value); } catch (error) { received = error; } if (received !== reason) throw new Error('format preserves conversion failure'); var boxedError; try { util.format(token, Object(numericSymbol)); } catch (error) { boxedError = error; } if (!(boxedError instanceof TypeError)) throw new Error('format boxed Symbol remains object coercion'); });\n\
              \x20 var debug = util.debuglog('sharp');\n\
              \x20 return [util.format('%s:%d:%j:%%', 'value', 4, { ok: true }), util.inspect(custom), Child.super_ === Base, new Child() instanceof Base, util.types.isDate(new Date()), util.types.isRegExp(/x/), util.types.isMap(new Map()), util.types.isTypedArray(new Uint8Array(1)), sum, callbackValue, util.stripVTControlCharacters('\\u001b[31mred\\u001b[0m'), util.toUSVString('x\\ud800y'), typeof debug, debug.enabled];\n\
              };",
@@ -469,7 +568,7 @@ fn util_helpers_run_through_bundled_commonjs_require() {
     let empty_node_modules = temp_registry("builtin_util_helpers_node_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    assert_eq!(file_count, 2);
+    assert_eq!(file_count, 3);
     let script = format!(
             "globalThis.module = {{ exports: {{}} }};\n\
              globalThis.exports = globalThis.module.exports;\n\
@@ -497,7 +596,35 @@ fn util_parse_args_handles_long_short_multiple_negative_and_tokens() {
     let dir = temp_registry("builtin_util_parse_args");
     fs::write(
             dir.join("index.js"),
-            "var util = require('node:util'); module.exports = function () { var result = util.parseArgs({ args: ['-v', '--name=thaw', '--tag', 'one', '--tag=two', '--no-color', 'input.ts', '--', '-literal'], options: { verbose: { type: 'boolean', short: 'v' }, name: { type: 'string' }, tag: { type: 'string', multiple: true }, color: { type: 'boolean', default: true } }, allowNegative: true, allowPositionals: true, tokens: true }); var unknown; try { util.parseArgs({ args: ['--missing'], options: {} }); } catch (error) { unknown = error.code; } return [result.values.verbose, result.values.name, result.values.tag, result.values.color, result.positionals, result.tokens.map(function(token) { return token.kind; }), unknown, new util.TextEncoder().encode('ok').length, new util.TextDecoder().decode(Uint8Array.of(111, 107))]; };",
+            "var util = require('node:util'); module.exports = function () {\n\
+             var defs = { verbose: { type: 'boolean', short: 'v' }, output: { type: 'string', short: 'o' } };\n\
+             [['--verbose=false'], ['--verbose='], ['--output', '--verbose'], ['-o', '-v'], ['--output'], ['-o']].forEach(function(args) { var error; try { util.parseArgs({ args: args, options: defs }); } catch (caught) { error = caught; } if (!error || error.code !== 'ERR_PARSE_ARGS_INVALID_OPTION_VALUE') throw new Error('parseArgs strict value'); });\n\
+             var attached = util.parseArgs({ args: ['--output=-v'], options: defs }); if (attached.values.output !== '-v') throw new Error('parseArgs attached dash');\n\
+             var shortDash = util.parseArgs({ args: ['-o-v'], options: defs }); if (shortDash.values.output !== '-v') throw new Error('parseArgs short attached dash');\n\
+             var loose = util.parseArgs({ args: ['--verbose=false', '--output', '--other'], options: defs, strict: false }); if (loose.values.verbose !== 'false' || loose.values.output !== '--other') throw new Error('parseArgs loose values');\n\
+             var looseMissing = util.parseArgs({ args: ['--verbose'], options: defs, strict: false }); if (looseMissing.values.verbose !== true) throw new Error('parseArgs loose missing boolean');\n\
+             var looseMissingLong = util.parseArgs({ args: ['--output'], options: defs, strict: false, tokens: true }); if (looseMissingLong.values.output !== true || looseMissingLong.tokens[0].value !== undefined || looseMissingLong.tokens[0].inlineValue !== undefined) throw new Error('parseArgs loose missing long string');\n\
+             var looseMissingShort = util.parseArgs({ args: ['-o'], options: defs, strict: false, tokens: true }); if (looseMissingShort.values.output !== true || looseMissingShort.tokens[0].value !== undefined || looseMissingShort.tokens[0].inlineValue !== undefined) throw new Error('parseArgs loose missing short string');\n\
+             var shortMissingAfterAttached = util.parseArgs({ args: ['-ofile', '-o'], options: defs, strict: false, tokens: true }); if (shortMissingAfterAttached.tokens[1].value !== undefined || shortMissingAfterAttached.tokens[1].inlineValue !== undefined) throw new Error('parseArgs short inline metadata reset');\n\
+             var looseNegative = util.parseArgs({ args: ['--no-verbose=false'], options: defs, allowNegative: true, strict: false }); if (looseNegative.values['no-verbose'] !== 'false' || looseNegative.values.verbose !== undefined) throw new Error('parseArgs loose negation');\n\
+             var negative = util.parseArgs({ args: ['--no-verbose'], options: defs, allowNegative: true }); if (negative.values.verbose !== false) throw new Error('parseArgs negative false');\n\
+             var badNegative; try { util.parseArgs({ args: ['--no-verbose=false'], options: defs, allowNegative: true }); } catch (error) { badNegative = error; } if (!badNegative || badNegative.code !== 'ERR_PARSE_ARGS_INVALID_OPTION_VALUE') throw new Error('parseArgs negative explicit value');\n\
+             var defaults = { tag: { type: 'string', multiple: true, default: ['default'] }, flag: { type: 'boolean', default: true }, empty: { type: 'string', default: 'default' } };\n\
+             var explicit = util.parseArgs({ args: ['--tag', 'one', '--tag=two', '--no-flag', '--empty='], options: defaults, allowNegative: true }); if (explicit.values.tag.length !== 2 || explicit.values.tag[0] !== 'one' || explicit.values.tag[1] !== 'two' || explicit.values.flag !== false || explicit.values.empty !== '') throw new Error('parseArgs explicit replaces defaults');\n\
+             var absent = util.parseArgs({ args: [], options: defaults }); if (absent.values.tag.length !== 1 || absent.values.tag[0] !== 'default' || absent.values.flag !== true || absent.values.empty !== 'default') throw new Error('parseArgs absent defaults');\n\
+             var noDefault = util.parseArgs({ args: [], options: { tag: { type: 'string', multiple: true } } }); if (Object.prototype.hasOwnProperty.call(noDefault.values, 'tag')) throw new Error('parseArgs absent multiple');\n\
+             var multiDefault = util.parseArgs({ args: ['--no-flag'], options: { flag: { type: 'boolean', multiple: true, default: [true] } }, allowNegative: true }); if (multiDefault.values.flag.length !== 1 || multiDefault.values.flag[0] !== false) throw new Error('parseArgs multiple default replacement');\n\
+             var expectedTokens = [[0, 'verbose', '-v', undefined, undefined], [0, 'output', '-o', 'file', true], [1, 'output', '-o', 'next', false], [3, 'output', '--output', 'last', true]];\n\
+             var tokenized = util.parseArgs({ args: ['-vofile', '-o', 'next', '--output=last'], options: defs, tokens: true }); if (tokenized.tokens.length !== expectedTokens.length) throw new Error('parseArgs token count'); tokenized.tokens.forEach(function(token, index) { var expected = expectedTokens[index]; if (token.kind !== 'option' || token.index !== expected[0] || token.name !== expected[1] || token.rawName !== expected[2] || token.value !== expected[3] || token.inlineValue !== expected[4]) throw new Error('parseArgs token metadata'); });\n\
+             var separateCluster = util.parseArgs({ args: ['-vo', 'file'], options: defs, tokens: true }); if (separateCluster.tokens[1].index !== 0 || separateCluster.tokens[1].rawName !== '-o' || separateCluster.tokens[1].inlineValue !== false || separateCluster.tokens[1].value !== 'file') throw new Error('parseArgs separate cluster');\n\
+             [{ args: ['plain'] }, { args: ['--', 'plain'] }, { args: ['plain'], strict: false, allowPositionals: false }, { args: ['--', '-literal'], strict: false, allowPositionals: false }, { args: ['-'], strict: false, allowPositionals: false }].forEach(function(config) { var error; try { util.parseArgs(config); } catch (caught) { error = caught; } if (!error || error.code !== 'ERR_PARSE_ARGS_UNEXPECTED_POSITIONAL') throw new Error('parseArgs rejects positional'); });\n\
+             var loosePositionals = util.parseArgs({ args: ['plain', '--', '-literal'], strict: false, tokens: true }); if (loosePositionals.positionals.length !== 2 || loosePositionals.positionals[0] !== 'plain' || loosePositionals.positionals[1] !== '-literal') throw new Error('parseArgs loose positional default');\n\
+             var positionalTokens = loosePositionals.tokens; if (positionalTokens.length !== 3 || positionalTokens[0].kind !== 'positional' || positionalTokens[0].index !== 0 || positionalTokens[1].kind !== 'option-terminator' || positionalTokens[1].index !== 1 || positionalTokens[2].kind !== 'positional' || positionalTokens[2].index !== 2 || positionalTokens[2].value !== '-literal') throw new Error('parseArgs positional tokens');\n\
+             [true, false].forEach(function(strict) { var accepted = util.parseArgs({ args: ['plain', '--', '-literal'], strict: strict, allowPositionals: true }); if (accepted.positionals.length !== 2 || accepted.positionals[0] !== 'plain' || accepted.positionals[1] !== '-literal') throw new Error('parseArgs explicit positional allowance'); });\n\
+             var bareTerminator = util.parseArgs({ args: ['--'], allowPositionals: false, tokens: true }); if (bareTerminator.positionals.length !== 0 || bareTerminator.tokens.length !== 1 || bareTerminator.tokens[0].kind !== 'option-terminator') throw new Error('parseArgs empty terminator');\n\
+             var consumedValue = util.parseArgs({ args: ['--output', 'file'], options: { output: { type: 'string' } }, allowPositionals: false }); if (consumedValue.values.output !== 'file' || consumedValue.positionals.length !== 0) throw new Error('parseArgs consumed string is not positional');\n\
+             var unknownStill; try { util.parseArgs({ args: ['--missing'], allowPositionals: true }); } catch (error) { unknownStill = error; } if (!unknownStill || unknownStill.code !== 'ERR_PARSE_ARGS_UNKNOWN_OPTION') throw new Error('parseArgs unknown option unchanged');\n\
+             var result = util.parseArgs({ args: ['-v', '--name=thaw', '--tag', 'one', '--tag=two', '--no-color', 'input.ts', '--', '-literal'], options: { verbose: { type: 'boolean', short: 'v' }, name: { type: 'string' }, tag: { type: 'string', multiple: true }, color: { type: 'boolean', default: true } }, allowNegative: true, allowPositionals: true, tokens: true }); var unknown; try { util.parseArgs({ args: ['--missing'], options: {} }); } catch (error) { unknown = error.code; } return [result.values.verbose, result.values.name, result.values.tag, result.values.color, result.positionals, result.tokens.map(function(token) { return token.kind; }), unknown, new util.TextEncoder().encode('ok').length, new util.TextDecoder().decode(Uint8Array.of(111, 107))]; };",
         )
         .unwrap();
     let empty_node_modules = temp_registry("builtin_util_parse_args_node_modules");
@@ -596,6 +723,137 @@ fn path_builtin_exposes_posix_and_win32_operations() {
     );
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
+}
+
+#[test]
+fn path_full_posix_and_windows_lexical_contracts() {
+    use std::ffi::{CStr, CString};
+
+    let dir = temp_registry("builtin_path_full_contracts");
+    fs::write(dir.join("index.js"), r#"
+var path = require('node:path'), posixSubpath = require('path/posix'), winSubpath = require('node:path/win32');
+function same(actual, expected, label) { if (JSON.stringify(actual) !== JSON.stringify(expected)) throw new Error(label + ': ' + JSON.stringify(actual)); }
+function lex(api, rows, label) {
+  rows.forEach(function(row) {
+    same([api.dirname(row[0]), api.basename(row[0]), api.extname(row[0]), api.parse(row[0])],
+      [row[1], row[2], row[3], row[4]], label + ' ' + row[0]);
+  });
+}
+module.exports = function() {
+  var p = path.posix, w = path.win32;
+  lex(p, [
+    ['/a/b/..', '/a/b', '..', '', {root:'/',dir:'/a/b',base:'..',ext:'',name:'..'}],
+    ['a/../b', 'a/..', 'b', '', {root:'',dir:'a/..',base:'b',ext:'',name:'b'}],
+    ['/a/b/', '/a', 'b', '', {root:'/',dir:'/a',base:'b',ext:'',name:'b'}],
+    ['a///', '.', 'a', '', {root:'',dir:'',base:'a',ext:'',name:'a'}],
+    ['.', '.', '.', '', {root:'',dir:'',base:'.',ext:'',name:'.'}],
+    ['..', '.', '..', '', {root:'',dir:'',base:'..',ext:'',name:'..'}],
+    ['', '.', '', '', {root:'',dir:'',base:'',ext:'',name:''}],
+    ['/', '/', '', '', {root:'/',dir:'/',base:'',ext:'',name:''}],
+    ['//foo', '//', 'foo', '', {root:'/',dir:'/',base:'foo',ext:'',name:'foo'}],
+    ['///foo', '//', 'foo', '', {root:'/',dir:'//',base:'foo',ext:'',name:'foo'}],
+  ], 'posix lexical');
+  same([p.basename('file.txt', '.txt'), p.basename('file.txt', '.TXT'), p.basename('file.txt', '.md'), p.basename('a/../b', 'b'), p.basename('/a/b', '/a/b')], ['file','file.txt','file.txt','b',''], 'posix suffix exact/nonmatching/case-sensitive');
+  same(['..','.hidden','...','file.','.a.b','dir/.hidden/'].map(function(x) { return [p.extname(x), p.parse(x).ext, p.parse(x).name]; }),
+    [['','','..'],['','','.hidden'],['.','.','..'],['.','.','file'],['.b','.b','.a'],['','','.hidden']], 'posix extension boundaries');
+  same([p.extname('/..'), p.parse('/..'), p.parse('/a/b/..')], ['', {root:'/',dir:'/',base:'..',ext:'.',name:'.'}, {root:'/',dir:'/a/b',base:'..',ext:'',name:'..'}], 'posix root-adjacent versus nested dot-dot parse');
+  same([p.format({name:'report',ext:'txt'}), p.format({name:'report',ext:'.txt'}), p.format({name:'report',ext:''}),
+    p.format({base:'kept',name:'ignored',ext:'txt'}), p.format({root:'/',base:'file'}), p.format({dir:'/override',root:'/root',base:'file'}), p.format(p.parse('report.txt'))],
+    ['report.txt','report.txt','report','kept','/file','/override/file','report.txt'], 'posix format');
+  same([p.parse('report.txt'), w.parse('report.txt')],
+    [{root:'',dir:'',base:'report.txt',ext:'.txt',name:'report'},{root:'',dir:'',base:'report.txt',ext:'.txt',name:'report'}], 'report.txt parse fields');
+
+  lex(w, [
+    ['C:\\a\\b\\..', 'C:\\a\\b', '..', '', {root:'C:\\',dir:'C:\\a\\b',base:'..',ext:'',name:'..'}],
+    ['a\\..\\b', 'a\\..', 'b', '', {root:'',dir:'a\\..',base:'b',ext:'',name:'b'}],
+    ['C:\\a\\b\\', 'C:\\a', 'b', '', {root:'C:\\',dir:'C:\\a',base:'b',ext:'',name:'b'}],
+    ['a\\\\\\', '.', 'a', '', {root:'',dir:'',base:'a',ext:'',name:'a'}],
+    ['C:/a\\b/', 'C:/a', 'b', '', {root:'C:/',dir:'C:/a',base:'b',ext:'',name:'b'}],
+    ['.', '.', '.', '', {root:'',dir:'',base:'.',ext:'',name:'.'}],
+    ['..', '.', '..', '', {root:'',dir:'',base:'..',ext:'',name:'..'}],
+    ['', '.', '', '', {root:'',dir:'',base:'',ext:'',name:''}],
+    ['C:\\', 'C:\\', '', '', {root:'C:\\',dir:'C:\\',base:'',ext:'',name:''}],
+    ['C:foo', 'C:', 'foo', '', {root:'C:',dir:'C:',base:'foo',ext:'',name:'foo'}],
+    ['\\\\server\\share', '\\\\server\\share', 'share', '', {root:'\\\\server\\share',dir:'\\\\server\\share',base:'',ext:'',name:''}],
+    ['\\\\srv\\share.txt', '\\\\srv\\share.txt', 'share.txt', '.txt', {root:'\\\\srv\\share.txt',dir:'\\\\srv\\share.txt',base:'',ext:'',name:''}],
+    ['\\\\\\server', '\\\\', 'server', '', {root:'\\',dir:'\\\\',base:'server',ext:'',name:'server'}],
+    ['\\\\server\\share\\folder\\', '\\\\server\\share\\', 'folder', '', {root:'\\\\server\\share\\',dir:'\\\\server\\share\\',base:'folder',ext:'',name:'folder'}]
+  ], 'win32 lexical');
+  same([w.basename('folder\\file.txt','.txt'), w.basename('folder\\file.txt','.TXT'), w.basename('folder\\file.txt','.md'), w.basename('C:\\dir\\file','file'), w.basename('C:\\dir\\file','C:\\dir\\file')], ['file','file.txt','file.txt','file',''], 'win32 suffix exact/nonmatching/case-sensitive');
+  same(['..','.hidden','...','file.','.a.b','folder\\.hidden\\'].map(function(x) { return [w.extname(x), w.parse(x).ext, w.parse(x).name]; }),
+    [['','','..'],['','','.hidden'],['.','.','..'],['.','.','file'],['.b','.b','.a'],['','','.hidden']], 'win32 extension boundaries');
+  same([w.format({name:'report',ext:'txt'}), w.format({name:'report',ext:'.txt'}), w.format({name:'report',ext:''}), w.format({base:'kept',name:'ignored',ext:'txt'}),
+    w.format({root:'C:',base:'file.txt'}), w.format({root:'C:\\',base:'file.txt'}), w.format({root:'\\\\server\\share\\',base:'file'}),
+    w.format({dir:'C:/mixed',root:'C:\\',base:'file'})],
+    ['report.txt','report.txt','report','kept','C:file.txt','C:\\file.txt','\\\\server\\share\\file','C:/mixed\\file'], 'win32 format');
+  same([w.normalize('\\\\server\\share\\a\\..\\..\\x\\'), w.normalize('C:foo\\..'), w.normalize('C:\\a\\..'), w.normalize('a\\..\\'),
+    w.normalize('C:'), w.normalize('C:foo'),
+    w.normalize('\\foo\\..\\bar'), w.normalize('\\\\server'), w.normalize('\\\\\\server')],
+    ['\\\\server\\share\\x\\','C:.','C:\\','.\\','C:.','C:foo','\\bar','\\server','\\server'], 'win32 normalization roots');
+  same([w.join('\\\\server\\share','a','..','..','x'), w.join('\\\\server\\share','dir'), w.join('\\','\\','server','share'), w.join('/\\server','share'), w.join('a\\..\\'), w.join(null), w.join(undefined,'file')],
+    ['\\\\server\\share\\x','\\\\server\\share\\dir','\\server\\share','\\\\server\\share\\','.\\','null','undefined\\file'], 'win32 join explicit versus synthesized UNC');
+  same(['/logs','\\logs','\\\\server\\share','C:\\logs','C:logs','C:','ordinary',''].map(function(x) { return w.isAbsolute(x); }),
+    [true,true,true,true,false,false,false,false], 'win32 isAbsolute');
+  same([w.relative('C:\\a','D:\\b'), w.relative('C:\\A','c:\\a'), w.relative('C:\\A','C:\\B\\Foo'),
+    w.relative('\\\\srv\\share\\A','\\\\SRV\\SHARE\\a\\B'), w.relative('\\\\srv\\one\\a','\\\\srv\\two\\b'), w.relative('\\\\other\\two\\b','\\\\srv\\one\\a'), p.relative('/A','/a')],
+    ['D:\\b','','..\\B\\Foo','B','..\\..\\two\\b','\\\\srv\\one\\a','../a'], 'relative device/case behavior');
+  var originalProcess = globalThis.process;
+  try {
+    globalThis.process = { env: {'=C:':'C:\\drive\\home'}, cwd: function() { return 'D:\\base\\cwd'; } };
+    same([w.resolve('C:foo'), w.resolve('\\logs'), w.resolve('\\\\server\\share\\a\\..\\..\\x'), w.resolve('C:\\a','D:\\b','x'), w.resolve('C:\\a','..','b'), w.resolve('\\\\server\\share\\a','..','b'), w.resolve(), w.resolve('plain')],
+      ['C:\\drive\\home\\foo','D:\\logs','\\\\server\\share\\x','D:\\b\\x','C:\\b','\\\\server\\share\\b','D:\\base\\cwd','D:\\base\\cwd\\plain'], 'isolated per-drive cwd and conflicting devices');
+    globalThis.process.cwd = function() { return 'C:\\current\\dir'; }; delete globalThis.process.env['=C:'];
+    same(w.resolve('C:foo'), 'C:\\current\\dir\\foo', 'matching current-drive cwd');
+    globalThis.process.env['=C:'] = 'D:\\wrong\\drive'; globalThis.process.cwd = function() { return 'C:\\current\\dir'; };
+    same(w.resolve('C:foo'), 'C:\\foo', 'mismatched drive cwd falls back to drive root');
+    delete globalThis.process.env['=C:']; globalThis.process.cwd = function() { return '/work/x'; };
+    same(w.resolve('C:foo'), 'C:\\work\\x\\foo', 'explicit drive resolves from POSIX cwd tail');
+    globalThis.process.cwd = function() { return 'C:\\current\\dir'; }; globalThis.process.env['=C:'] = 'C:\\environment\\cwd';
+    same([w.resolve(), w.resolve('plain')], ['C:\\current\\dir','C:\\current\\dir\\plain'], 'plain resolve uses current cwd despite same-drive environment');
+    globalThis.process.env['=C:'] = 'C:base';
+    same(w.resolve('C:..\\..\\x'), 'C:..\\x', 'drive-relative parents retain relative root');
+    same(w.resolve('C:..'), 'C:', 'empty drive-relative tail stays bare');
+    globalThis.process.env['=C:'] = 'D:/wrong/drive';
+    same(w.resolve('C:foo'), 'C:foo', 'conflicting selected cwd device is skipped');
+    same(w.resolve('C:'), 'C:', 'bare drive skips conflicting selected cwd');
+    same([w.relative('C:foo','C:bar'), w.relative('C:foo','C:FOO'), w.relative('C:foo','C:foo\\Child')],
+      ['C:bar','','Child'], 'relative compares complete drive-relative paths');
+    globalThis.process.env['=C:'] = 'C:base';
+    same(w.relative('C:foo','C:bar'), '..\\bar', 'relative retains shared drive-relative components');
+    globalThis.process.env = {};
+    globalThis.process.cwd = function() { return '/work/x'; };
+    same([w.relative('/a','/b'), w.relative('/a','/a/B')], ['\\b','B'], 'relative compares complete device-free paths');
+    same([w.relative('\\','\\'), w.relative('\\','\\a'), w.relative('\\a','\\')],
+      ['','a','..'], 'relative compares equal and ancestor roots');
+    same([w.relative('\\\u0130','\\b'), w.relative('\\\u0130','\\i\u0307'),
+      w.relative('\\\\other\\one\\\u0130','\\\\srv\\two\\b')],
+      ['..\\b','','..\\..\\..\\srv\\two\\b'], 'relative preserves Node Unicode casefold branches');
+  } finally { globalThis.process = originalProcess; }
+  same(globalThis.process === originalProcess, true, 'resolve fixture restores process identity');
+  var extRead = false, winningBase = { base: 'kept' }; Object.defineProperty(winningBase, 'ext', { get: function() { extRead = true; throw new Error('ignored extension'); } });
+  var formatErrors = [false, false, false, false]; try { p.format(null); } catch (error) { formatErrors[0] = true; } try { p.format(undefined); } catch (error) { formatErrors[1] = true; } try { w.format(null); } catch (error) { formatErrors[2] = true; } try { w.format(undefined); } catch (error) { formatErrors[3] = true; }
+  same([formatErrors, p.format(winningBase), w.format(winningBase), extRead], [[true,true,true,true], 'kept', 'kept', false], 'format preserves errors and lazy base precedence');
+  var formatMarker = new Error('format base coercion'), formatBase = { toString: function() { throw formatMarker; } }, formatThrown = false; try { w.format({base: formatBase}); } catch (error) { formatThrown = error === formatMarker; }
+  same([w.format({base:1}), formatThrown], ['1', true], 'win32 format preserves string conversion and errors');
+  var coercionError = new Error('path coercion'), coercionOrder = false, throwingPath = {}; throwingPath.toString = function() { throw coercionError; };
+  try { p.resolve(throwingPath, '/absolute'); } catch (error) { coercionOrder = error === coercionError; }
+  same(coercionOrder, true, 'posix resolve coerces all arguments left-to-right');
+  same([p.posix === p, p.win32 === w, w.posix === p, w.win32 === w, posixSubpath === p, winSubpath === w,
+    path.default === path, posixSubpath.default === p, winSubpath.default === w], [true,true,true,true,true,true,true,true,true], 'reciprocal aliases and subpath defaults');
+  return true;
+};
+"#).unwrap();
+    let empty_node_modules = temp_registry("builtin_path_full_contracts_node_modules");
+    let (bundle, _, file_count, _) = bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(file_count, 4);
+    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exercisePathContracts = module.exports;");
+    let source = CString::new(script).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let func = CString::new("exercisePathContracts").unwrap(); let args = CString::new("[]").unwrap();
+    let result_ptr = thaw_quickjs::thaw_js_call(func.as_ptr(), args.as_ptr());
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(result, "true");
+    let _ = fs::remove_dir_all(&dir); let _ = fs::remove_dir_all(&empty_node_modules);
 }
 
 #[test]
@@ -698,7 +956,7 @@ fn repl_server_evaluates_input_and_drives_commands() {
     let empty_node_modules = temp_registry("builtin_repl_server_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    assert_eq!(file_count, 4);
+    assert_eq!(file_count, 5);
     let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseRepl = module.exports;");
     let source = CString::new(script).unwrap();
     assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
@@ -715,19 +973,22 @@ fn repl_server_evaluates_input_and_drives_commands() {
 }
 
 #[test]
-fn cluster_primary_tracks_worker_lifecycle_and_messages() {
+fn cluster_primary_applies_settings_and_reports_setup_without_forking() {
     use std::ffi::{CStr, CString};
 
+    // Forking real workers needs a compiled executable (it re-runs itself); the lifecycle with a real child,
+    // its IPC channel, `online`, `message`, `disconnect` and `exit` is covered by the node-compat cases
+    // "cluster workers are real processes with an IPC channel" (output compared with Node 22).
     let dir = temp_registry("builtin_cluster_primary");
     fs::write(
             dir.join("index.js"),
-            "var cluster = require('node:cluster'); module.exports = async function () { var events = []; cluster.on('setup', function(settings) { events.push('setup:' + settings.exec); }); cluster.on('fork', function(worker) { events.push('fork:' + worker.id); }); cluster.on('online', function(worker) { events.push('online:' + worker.id); }); cluster.on('message', function(worker, message) { events.push('cluster-message:' + message.value); }); cluster.on('disconnect', function(worker) { events.push('cluster-disconnect:' + worker.id); }); cluster.on('exit', function(worker, code, signal) { events.push('cluster-exit:' + signal); }); cluster.setupPrimary({ exec: 'service.js', args: ['--serve'] }); cluster.schedulingPolicy = cluster.SCHED_NONE; var worker = cluster.fork({ PORT: '8080' }); worker.on('online', function() { events.push('worker-online'); }); worker.on('message', function(message) { events.push('worker-message:' + message.value); }); worker.on('disconnect', function() { events.push('worker-disconnect'); }); worker.on('exit', function(code, signal) { events.push('worker-exit:' + signal); }); worker.send({ value: 42 }, function(error) { events.push(error ? error.code : 'sent'); }); await new Promise(function(resolve) { cluster.disconnect(function() { events.push('all-disconnected'); resolve(); }); }); var connected = worker.isConnected(), exitedAfterDisconnect = worker.exitedAfterDisconnect; worker.kill('SIGKILL'); await Promise.resolve(); return [cluster.isPrimary, cluster.isMaster, cluster.isWorker, cluster.settings.exec, cluster.schedulingPolicy, worker.environment.PORT, connected, exitedAfterDisconnect, worker.isDead(), Object.keys(cluster.workers).length, events]; };",
+            "var cluster = require('node:cluster'); module.exports = async function () { var events = []; cluster.on('setup', function(settings) { events.push('setup:' + settings.exec + ':' + settings.args.join(',')); }); cluster.setupPrimary({ exec: 'service.js', args: ['--serve'] }); cluster.schedulingPolicy = cluster.SCHED_NONE; await new Promise(function(resolve) { cluster.disconnect(function() { events.push('all-disconnected'); resolve(); }); }); return [cluster.isPrimary, cluster.isMaster, cluster.isWorker, cluster.settings.exec, cluster.schedulingPolicy, Object.keys(cluster.workers).length, cluster.worker === undefined, events]; };",
         )
         .unwrap();
     let empty_node_modules = temp_registry("builtin_cluster_primary_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    assert_eq!(file_count, 6);
+    assert_eq!(file_count, 8);
     let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseCluster = module.exports;");
     let source = CString::new(script).unwrap();
     assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
@@ -737,7 +998,7 @@ fn cluster_primary_tracks_worker_lifecycle_and_messages() {
     let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
     assert_eq!(
         result,
-        r#"[true,true,false,"service.js",1,"8080",false,true,true,0,["setup:service.js","fork:1","worker-online","online:1","worker-message:42","cluster-message:42","sent","worker-disconnect","cluster-disconnect:1","all-disconnected","worker-exit:SIGKILL","cluster-exit:SIGKILL"]]"#
+        r#"[true,true,false,"service.js",1,0,true,["setup:service.js:--serve","all-disconnected"]]"#
     );
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
@@ -756,7 +1017,7 @@ fn internal_http_and_tls_modules_share_public_implementations() {
     let empty_node_modules = temp_registry("builtin_internal_http_tls_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    assert_eq!(file_count, 14);
+    assert_eq!(file_count, 15);
     let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseInternalHttpTls = module.exports;");
     let source = CString::new(script).unwrap();
     assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
@@ -785,7 +1046,7 @@ fn http2_h2c_sessions_exchange_real_frames_over_tcp() {
     let empty_node_modules = temp_registry("builtin_http2_h2c_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    assert_eq!(file_count, 3);
+    assert_eq!(file_count, 5);
     let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseHttp2 = module.exports;");
     let source = CString::new(script).unwrap();
     assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
@@ -795,7 +1056,7 @@ fn http2_h2c_sessions_exchange_real_frames_over_tcp() {
     let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
     assert_eq!(
         result,
-        r#"[true,true,"200","text/plain","/demo",20000,"hello thaw","12345678",true,0,12,0,"symbol"]"#
+        r#"[true,true,"200","text/plain","/demo",20000,"hello thaw","12345678",true,false,12,0,"symbol"]"#
     );
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
@@ -869,6 +1130,8 @@ fn http2_stream_terminal_paths_drain_queue_and_suppress_late_frames() {
 
 #[test]
 fn http2_zero_initial_window_blocks_data_until_window_update() {
+    // Real Node (verified with a raw SETTINGS peer): the SETTINGS ACK is written first and the
+    // newly unblocked DATA frame follows it, so the data frame is the LAST frame after the update.
     use std::ffi::{CStr, CString};
 
     let dir = temp_registry("builtin_http2_zero_window");
@@ -890,7 +1153,7 @@ module.exports = function () {
   var secondWindow = second._sendWindow, secondWrite = second.write('b');
   var beforeSettings = [secondWindow, secondWrite, second._writeQueue.length, dataCount()];
   session._frame(4, 0, 0, Buffer.from([0, 4, 0, 0, 0, 1]));
-  var afterSettings = [second._sendWindow, second._writeQueue.length, dataCount(), frames[frames.length - 2][9]];
+  var afterSettings = [second._sendWindow, second._writeQueue.length, dataCount(), frames[frames.length - 1][9]];
   session.localSettings.initialWindowSize = 0;
   var receiveWindow = new http2.Http2Stream(session, 99)._receiveWindow;
   return blocked.concat(resumed, beforeSettings, afterSettings, [receiveWindow]);
@@ -900,7 +1163,7 @@ module.exports = function () {
     let empty_node_modules = temp_registry("builtin_http2_zero_window_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    assert_eq!(file_count, 3);
+    assert_eq!(file_count, 5);
     let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseHttp2ZeroWindow = module.exports;");
     let source = CString::new(script).unwrap();
     assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
@@ -945,7 +1208,7 @@ module.exports = function () {
     let empty_node_modules = temp_registry("builtin_http2_local_window_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    assert_eq!(file_count, 3);
+    assert_eq!(file_count, 5);
     let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseHttp2LocalWindow = module.exports;");
     let source = CString::new(script).unwrap();
     assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
@@ -971,7 +1234,7 @@ fn http2_flow_control_resumes_large_bidirectional_bodies() {
     let empty_node_modules = temp_registry("builtin_http2_flow_control_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    assert_eq!(file_count, 3);
+    assert_eq!(file_count, 5);
     let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseHttp2Flow = module.exports;");
     let source = CString::new(script).unwrap();
     assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
@@ -997,7 +1260,7 @@ fn http2_hpack_reuses_dynamic_entries_across_streams() {
     let empty_node_modules = temp_registry("builtin_http2_hpack_dynamic_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    assert_eq!(file_count, 3);
+    assert_eq!(file_count, 5);
     let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseHttp2Hpack = module.exports;");
     let source = CString::new(script).unwrap();
     assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
@@ -1048,7 +1311,7 @@ module.exports = function() {
     let empty_node_modules = temp_registry("builtin_http2_hpack_zero_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    assert_eq!(file_count, 3);
+    assert_eq!(file_count, 5);
     let script = [
         "globalThis.module = { exports: {} }; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) { throw new Error(name); };",
         &bundle,
@@ -1061,7 +1324,7 @@ module.exports = function() {
     let arguments = CString::new("[]").unwrap();
     let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
     let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
-    assert_eq!(result, r#"[[true,0,0,false],[false,1,1,true],[false,1,1,true],"HPACK table size exceeds SETTINGS limit",["200",0],["200",1],["200",1]]"#);
+    assert_eq!(result, r#"[[true,0,0,true],[false,1,1,true],[false,1,1,true],"HPACK table size exceeds SETTINGS limit",["200",0],["200",1],["200",1]]"#);
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
 }
@@ -1118,7 +1381,7 @@ module.exports = function() {
     let empty_node_modules = temp_registry("builtin_http2_hpack_wire_size_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    assert_eq!(file_count, 3);
+    assert_eq!(file_count, 5);
     let script = [
         "globalThis.module = { exports: {} }; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) { throw new Error(name); };",
         &bundle,
@@ -1219,7 +1482,7 @@ module.exports = function() {
     let empty_node_modules = temp_registry("builtin_http2_hpack_wire_reentry_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    assert_eq!(file_count, 3);
+    assert_eq!(file_count, 5);
     let script = [
         "globalThis.module = { exports: {} }; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) { throw new Error(name); };",
         &bundle,
@@ -1235,6 +1498,90 @@ module.exports = function() {
     assert_eq!(result, r#"[[true,0,0,1],["2082",null],[true,"ERR_HTTP2_ERROR",[4]],[true,"ERR_HTTP2_ERROR",[1]],[false,1,3,[1,3],true,1],[false,[3,1],true,"88be",null,1],["Response has already been initiated",1,204,0],[1,3,[[1,4],[3,5]],1,true],["Response has already been initiated",[[1,4]],1,204,false],[false,false,null,1,[[4,1],[1,4]]],[false,true,null,0,[[4,1],[1,0]]]]"#);
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
+}
+
+#[test]
+fn http2_tls_ca_presence_and_collections_are_validated_before_native_calls() {
+    use std::ffi::{CStr, CString};
+
+    let dir = temp_registry("builtin_http2_tls_ca_capture");
+    fs::write(dir.join("index.js"), r#"
+var http2 = require('node:http2');
+function check(value, message) { if (!value) throw new Error(message); }
+module.exports = function() {
+  var originalConnect = globalThis.__thaw_tls_connect_with_options;
+  var originalServer = globalThis.__thaw_tls_server_listen_with_options;
+  var connectCalls = [], serverCalls = [];
+  function connect(hasCa, ca, expected, identity, rejectUnauthorized) {
+    var options = { rejectUnauthorized: rejectUnauthorized !== false };
+    if (hasCa) options.ca = ca;
+    if (identity) { options.cert = 'cert'; options.key = 'key'; }
+    var caught;
+    try { http2.connect('https://example.invalid', options); } catch (error) { caught = error; }
+    check(caught && caught.message === 'finite client failure', 'client reached finite native result');
+    var args = connectCalls[connectCalls.length - 1];
+    check(args[3] === expected && args[6] === (rejectUnauthorized === false ? '0|6832|1' : '1|6832|1'), 'client CA and ALPN serialization');
+    check(args[4] === (identity ? '63657274' : '') && args[5] === (identity ? '6b6579' : ''), 'client identity forwarding');
+  }
+  function secureServer(hasCa, ca, expected, requestCert, rejectUnauthorized) {
+    var options = { cert: 'cert', key: 'key', requestCert: requestCert, rejectUnauthorized: rejectUnauthorized };
+    if (hasCa) options.ca = ca;
+    var server = http2.createSecureServer(options), caught;
+    try { server.listen(0, '127.0.0.1', function() {}); } catch (error) { caught = error; }
+    check(caught && caught.message === 'finite server failure', 'server reached finite native result');
+    var args = serverCalls[serverCalls.length - 1];
+    check(args[4] === expected && args[5] === ((requestCert ? 1 : 0) | (rejectUnauthorized !== false ? 2 : 0)) && args[6] === '6832', 'server CA, flags, and ALPN serialization');
+    check(args[2] === '63657274' && args[3] === '6b6579' && !server.listening && server._handle === 0, 'server identity/state preserved');
+  }
+  function invalidClient(ca) {
+    var before = connectCalls.length, caught;
+    try { http2.connect('https://example.invalid', { ca: ca }); } catch (error) { caught = error; }
+    check(caught instanceof TypeError && connectCalls.length === before, 'invalid HTTP2 client CA rejected before native call');
+  }
+  function invalidServer(ca, requestCert) {
+    var before = serverCalls.length, server = http2.createSecureServer({ cert: 'cert', key: 'key', ca: ca, requestCert: requestCert }), caught;
+    try { server.listen(0, '127.0.0.1', function() {}); } catch (error) { caught = error; }
+    check(caught instanceof TypeError && serverCalls.length === before && !server.listening && server._handle === 0
+      && server.listenerCount('listening') === 0, 'invalid HTTP2 server CA rejected before listener state/native call');
+  }
+  try {
+    globalThis.__thaw_tls_connect_with_options = function() { connectCalls.push(Array.prototype.slice.call(arguments)); return 'err:finite client failure'; };
+    globalThis.__thaw_tls_server_listen_with_options = function() { serverCalls.push(Array.prototype.slice.call(arguments)); return 'err:finite server failure'; };
+    connect(false, undefined, undefined, true, false);
+    connect(true, undefined, undefined, false, true);
+    connect(true, [], '', false, true); connect(true, '', '', false, true); connect(true, Buffer.alloc(0), '', false, true);
+    connect(true, 'ca', '6361', false, true); connect(true, ['a', 'bc'], '61,6263', false, true);
+    connect(true, [Buffer.from('a'), Buffer.from('xBC').subarray(1)], '61,4243', false, true);
+    secureServer(false, undefined, undefined, false, true);
+    secureServer(true, undefined, undefined, true, true);
+    secureServer(true, [], '', true, true); secureServer(true, '', '', false, true);
+    secureServer(true, [Buffer.from('a'), Buffer.from('xBC').subarray(1)], '61,4243', true, false);
+    [null, 7, {}, [undefined], [[Buffer.from('a')]], new Array(1), ['']].forEach(function(value) {
+      invalidClient(value); invalidServer(value, true); invalidServer(value, false);
+    });
+    return true;
+  } finally {
+    globalThis.__thaw_tls_connect_with_options = originalConnect;
+    globalThis.__thaw_tls_server_listen_with_options = originalServer;
+  }
+};
+"#).unwrap();
+    let empty_node_modules = temp_registry("builtin_http2_tls_ca_capture_modules");
+    let (bundle, _, _, _) = bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    let source = CString::new(format!(
+        "globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseHttp2TlsCaCapture = module.exports;"
+    )).unwrap();
+    let loaded = thaw_quickjs::thaw_js_load(source.as_ptr());
+    if loaded != 1 {
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&empty_node_modules);
+        assert_eq!(loaded, 1);
+    }
+    let result = thaw_quickjs::thaw_js_call(c"exerciseHttp2TlsCaCapture".as_ptr(), c"[]".as_ptr());
+    let result = unsafe { CStr::from_ptr(result) }.to_string_lossy().into_owned();
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+    assert_eq!(result, "true");
 }
 
 #[test]
@@ -1353,7 +1700,7 @@ fn http2_tls_sessions_negotiate_h2_with_alpn() {
     let empty_node_modules = temp_registry("builtin_http2_tls_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    assert_eq!(file_count, 3);
+    assert_eq!(file_count, 5);
     let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseHttp2Tls = module.exports;");
     let source = CString::new(script).unwrap();
     assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
@@ -1486,7 +1833,7 @@ fn http2_secure_server_accepts_an_alpn_h2_peer() {
     fs::write(
             dir.join("index.js"),
             format!(
-                "var http2 = require('node:http2'), certificate = {}, key = {}; module.exports = function () {{ return new Promise(function(resolve, reject) {{ var sessionState, server = http2.createSecureServer({{ cert: certificate, key: key }}); server.on('error', reject); server.on('sessionError', reject); server.on('session', function(session) {{ sessionState = [session.encrypted, session.alpnProtocol, session.socket.alpnProtocol]; }}); server.on('stream', function(stream, headers) {{ stream.on('close', function() {{ server.close(function() {{ resolve([server instanceof http2.Http2SecureServer, sessionState, headers[':scheme']]); }}); }}); stream.respond({{ ':status': 202 }}); stream.end('served'); }}); server.listen({}, '127.0.0.1'); }}); }};",
+                "var http2 = require('node:http2'), certificate = {}, key = {}; module.exports = function () {{ return new Promise(function(resolve, reject) {{ var sessionState, server = http2.createSecureServer({{ cert: certificate, key: key }}); server.on('error', reject); server.on('sessionError', reject); server.on('session', function(session) {{ sessionState = [session.encrypted, session.alpnProtocol, session.socket.alpnProtocol, session.socket.authorized, session.socket.authorizationError]; }}); server.on('stream', function(stream, headers) {{ stream.on('close', function() {{ server.close(function() {{ resolve([server instanceof http2.Http2SecureServer, sessionState, headers[':scheme']]); }}); }}); stream.respond({{ ':status': 202 }}); stream.end('served'); }}); server.listen({}, '127.0.0.1'); }}); }};",
                 serde_json::to_string(&certificate).unwrap(),
                 serde_json::to_string(&key).unwrap(),
                 port
@@ -1496,7 +1843,7 @@ fn http2_secure_server_accepts_an_alpn_h2_peer() {
     let empty_node_modules = temp_registry("builtin_http2_secure_server_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    assert_eq!(file_count, 3);
+    assert_eq!(file_count, 5);
     let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseHttp2SecureServer = module.exports;");
     let source = CString::new(script).unwrap();
     assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
@@ -1504,7 +1851,7 @@ fn http2_secure_server_accepts_an_alpn_h2_peer() {
     let arguments = CString::new("[]").unwrap();
     let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
     let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
-    assert_eq!(result, r#"[true,[true,"h2","h2"],"https"]"#);
+    assert_eq!(result, r#"[true,[true,"h2","h2",false,"TLS client authentication was not requested"],"https"]"#);
     let (alpn, body) = peer.join().unwrap();
     assert_eq!(alpn, b"h2");
     assert_eq!(body, b"served");
@@ -1614,6 +1961,26 @@ fn string_decoder_preserves_multibyte_boundaries() {
              \x20 var utf16 = new StringDecoder('utf16le'); var wide = Buffer.from('A雪', 'utf16le'); var utf16Parts = [utf16.write(wide.subarray(0, 3)), utf16.end(wide.subarray(3))];\n\
              \x20 var base64 = new StringDecoder('base64'); var hello = Buffer.from('hello'); var encoded = base64.write(hello.subarray(0, 2)) + base64.write(hello.subarray(2)) + base64.end();\n\
              \x20 var incomplete = new StringDecoder(); var replacement = incomplete.end(Buffer.from([0xe9]));\n\
+             \x20 function check(value, message) { if (!value) throw new Error(message); }\n\
+             \x20 var reset8 = new StringDecoder('utf8'); reset8.write(Buffer.from([0xe2])); check(reset8.text(Buffer.from([0xff, 0x41]), 1) === 'A' && reset8.end() === '', 'utf8 text reset and offset');\n\
+             \x20 check(reset8.text(Buffer.from([0x42]), 0) === 'B' && reset8.end() === '', 'repeated text reset');\n\
+             \x20 var empty8 = new StringDecoder('utf8'); empty8.write(Buffer.from([0xe2])); check(empty8.text(Buffer.from([9]), 1) === '' && empty8.lastNeed === 0 && empty8.lastTotal === 0 && empty8._pending.length === 0, 'text at input end clears old state');\n\
+             \x20 var fresh8 = new StringDecoder('utf8'); fresh8.write(Buffer.from([0xe2])); check(fresh8.text(Buffer.from([0, 0xe2]), 1) === '' && fresh8.write(Buffer.from([0x82, 0xac])) === '€' && fresh8.end() === '', 'text keeps new pending bytes');\n\
+             \x20 var split8 = new StringDecoder('utf8'); check(split8.write(Buffer.from([0xe2])) === '' && split8.write(Buffer.from([0x82, 0xac])) === '€', 'consecutive writes still combine');\n\
+             \x20 var reset16 = new StringDecoder('utf16le'); reset16.write(Buffer.from([0xff])); check(reset16.text(Buffer.from([0xee, 0x41, 0]), 1) === 'A' && reset16.end() === '', 'utf16 text reset and offset');\n\
+             \x20 var fresh16 = new StringDecoder('utf16le'); check(fresh16.text(Buffer.from([0xee, 0x41]), 1) === '' && fresh16.end(Buffer.from([0])) === 'A', 'utf16 keeps new odd byte');\n\
+             \x20 var grin = String.fromCharCode(0xd83d, 0xde00), high = Buffer.from([0x3d, 0xd8]), low = Buffer.from([0x00, 0xde]);\n\
+             \x20 ['utf16le', 'ucs2'].forEach(function(encoding) { var pair = new StringDecoder(encoding); check(pair.write(high) === '' && pair._pending.length === 2 && pair.write(low) === grin && pair.end() === '' && pair._pending.length === 0, encoding + ' split surrogate pair'); });\n\
+             \x20 var split16 = new StringDecoder('utf16le'); check(split16.write(Buffer.from([0x41, 0x00, 0x3d, 0xd8])) === 'A' && split16._pending.length === 2 && split16.write(Buffer.from([0])) === '' && split16._pending.length === 3 && split16.write(Buffer.alloc(0)) === '' && split16._pending.length === 3 && split16.write(Buffer.from([0xde])) === grin && split16.end() === '', 'utf16 high surrogate plus odd byte');\n\
+             \x20 var eofHigh = new StringDecoder('utf16le'); eofHigh.write(high); var eofHighText = eofHigh.end(); check(eofHighText.length === 1 && eofHighText.charCodeAt(0) === 0xd83d && eofHigh._pending.length === 0, 'utf16 high surrogate EOF');\n\
+             \x20 var eofOdd = new StringDecoder('utf16le'); eofOdd.write(Buffer.from([0x3d, 0xd8, 0x00])); var eofOddText = eofOdd.end(); check(eofOddText.length === 1 && eofOddText.charCodeAt(0) === 0xd83d, 'utf16 high surrogate plus odd EOF');\n\
+             \x20 var endPair = new StringDecoder('utf16le'); endPair.write(high); check(endPair.end(low) === grin, 'utf16 pair completed at end');\n\
+             \x20 [0xd800, 0xdbff].forEach(function(unit) { var boundary = new StringDecoder('utf16le'); check(boundary.write(Buffer.from([unit & 255, unit >> 8])) === '' && boundary._pending.length === 2 && boundary.end().charCodeAt(0) === unit, 'utf16 high boundary'); });\n\
+             \x20 [0xd7ff, 0xdc00].forEach(function(unit) { var boundary = new StringDecoder('utf16le'); check(boundary.write(Buffer.from([unit & 255, unit >> 8])) === String.fromCharCode(unit) && boundary._pending.length === 0, 'utf16 nonhigh boundary'); });\n\
+             \x20 var afterPair = new StringDecoder('utf16le'); check(afterPair.write(Buffer.from([0x3d, 0xd8, 0, 0xde, 0x00, 0xdb])) === grin && afterPair._pending.length === 2 && afterPair.end().charCodeAt(0) === 0xdb00, 'utf16 pair followed by new high tail');\n\
+             \x20 var resetHigh = new StringDecoder('utf16le'); resetHigh.write(high); check(resetHigh.text(Buffer.from([0x41, 0]), 0) === 'A' && resetHigh._pending.length === 0 && resetHigh.text(high, 0) === '' && resetHigh._pending.length === 2 && resetHigh.write(low) === grin, 'utf16 text reset with fresh surrogate tail');\n\
+             \x20 var reset64 = new StringDecoder('base64'); reset64.write(Buffer.from([0xff, 0xfe])); var text64 = reset64.text(Buffer.from([0, 1, 2, 3, 4]), 1) + reset64.end(); check(text64 === Buffer.from([1, 2, 3, 4]).toString('base64'), 'base64 text reset and offset');\n\
+             \x20 var reset64url = new StringDecoder('base64url'); reset64url.write(Buffer.from([0xff])); var text64url = reset64url.text(Buffer.from([0, 5, 6, 7]), 1) + reset64url.end(); check(text64url === Buffer.from([5, 6, 7]).toString('base64url'), 'base64url text reset and offset');\n\
              \x20 return [utf8Parts, utf16Parts, encoded, replacement, utf8.lastNeed, utf8.encoding];\n\
              };",
         )
@@ -1654,7 +2021,7 @@ fn timer_modules_share_the_runtime_queue_and_support_abort() {
              module.exports = async function () {\n\
              \x20 var immediate = await new Promise(function(resolve) { timers.setImmediate(resolve, 'immediate'); });\n\
              \x20 var delayed = await promises.setTimeout(0, 'delayed'); await promises.scheduler.yield();\n\
-             \x20 var controller = new AbortController(); controller.abort('cancelled'); var reason; try { await promises.setTimeout(1, 'wrong', { signal: controller.signal }); } catch (error) { reason = error; }\n\
+             \x20 var controller = new AbortController(); controller.abort('cancelled'); var reason; try { await promises.setTimeout(1, 'wrong', { signal: controller.signal }); } catch (error) { reason = [error.name, error.code, error.cause]; }\n\
              \x20 var interval = promises.setInterval(0, 'tick'); var first = await interval.next(); var second = await interval.next(); var ended = await interval.return();\n\
              \x20 return [immediate, delayed, reason, first.value, first.done, second.value, ended.done];\n\
              };",
@@ -1679,10 +2046,347 @@ fn timer_modules_share_the_runtime_queue_and_support_abort() {
     let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
     assert_eq!(
         result,
-        r#"["immediate","delayed","cancelled","tick",false,"tick",true]"#
+        r#"["immediate","delayed",["AbortError","ABORT_ERR","cancelled"],"tick",false,"tick",true]"#
     );
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
+}
+
+#[test]
+fn timer_promises_ref_false_unrefs_live_handles() {
+    use std::ffi::{CStr, CString};
+
+    let dir = temp_registry("builtin_timer_promises_ref");
+    fs::write(
+        dir.join("index.js"),
+        r#"
+var promises = require('node:timers/promises');
+module.exports = async function() {
+  var original = {
+    setTimeout: globalThis.setTimeout, clearTimeout: globalThis.clearTimeout,
+    setImmediate: globalThis.setImmediate, clearImmediate: globalThis.clearImmediate,
+    setInterval: globalThis.setInterval, clearInterval: globalThis.clearInterval
+  };
+  var records = [], cleared = [], failNextInterval = false, nextIntervalFailure, iterators = [], signals = [];
+  function wrapSchedule(name) {
+    globalThis[name] = function(callback) {
+      if (name === 'setInterval' && failNextInterval) { failNextInterval = false; throw nextIntervalFailure; }
+      var args = Array.prototype.slice.call(arguments);
+      var handle = original[name].apply(globalThis, args);
+      records.push({ name: name, callback: callback, handle: handle });
+      return handle;
+    };
+  }
+  function wrapClear(name) {
+    globalThis[name] = function(handle) {
+      cleared.push(handle);
+      return original[name].call(globalThis, handle);
+    };
+  }
+  function record(name) {
+    for (var i = records.length - 1; i >= 0; i--) if (records[i].name === name) return records[i];
+    throw new Error('missing timer ' + name);
+  }
+  function count(name) { return records.filter(function(item) { return item.name === name; }).length; }
+  function clearCount(handle) { return cleared.filter(function(item) { return item === handle; }).length; }
+  function trackedSignal(aborted, reason) {
+    var controller = new AbortController(), signal = controller.signal;
+    var nativeAdd = signal.addEventListener, nativeRemove = signal.removeEventListener;
+    var addDescriptor = Object.getOwnPropertyDescriptor(signal, 'addEventListener');
+    var removeDescriptor = Object.getOwnPropertyDescriptor(signal, 'removeEventListener');
+    var listeners = [], adds = 0, removes = 0, sameListener = true;
+    signal.addEventListener = function(type, listener, options) {
+      if (type === 'abort') { adds++; listeners.push(listener); }
+      return nativeAdd.call(signal, type, listener, options);
+    };
+    signal.removeEventListener = function(type, listener, options) {
+      if (type === 'abort') { removes++; if (listeners.indexOf(listener) < 0) sameListener = false; }
+      return nativeRemove.call(signal, type, listener, options);
+    };
+    var tracked = {
+      signal: signal,
+      abort: function(value) { controller.abort(value); },
+      adds: function() { return adds; }, removes: function() { return removes; },
+      sameListener: function() { return sameListener; },
+      restore: function() {
+        if (addDescriptor) Object.defineProperty(signal, 'addEventListener', addDescriptor);
+        else delete signal.addEventListener;
+        if (removeDescriptor) Object.defineProperty(signal, 'removeEventListener', removeDescriptor);
+        else delete signal.removeEventListener;
+      }
+    };
+    signals.push(tracked);
+    if (aborted) controller.abort(reason);
+    return tracked;
+  }
+  function trackIterator(iterator) { iterators.push(iterator); return iterator; }
+  function check(value, message) { if (!value) throw new Error(message); }
+  function abortInfo(error, cause) { return error instanceof Error && error.name === 'AbortError' && error.code === 'ABORT_ERR' && error.cause === cause; }
+  try {
+    wrapSchedule('setTimeout'); wrapClear('clearTimeout');
+    wrapSchedule('setImmediate'); wrapClear('clearImmediate');
+    wrapSchedule('setInterval'); wrapClear('clearInterval');
+
+    var timeoutPromise = promises.setTimeout(60000, 'timeout', { ref: false });
+    var timeoutRecord = record('setTimeout'), timeoutUnrefed = timeoutRecord.handle.hasRef() === false;
+    globalThis.clearTimeout(timeoutRecord.handle); timeoutRecord.callback();
+    var timeoutValue = await timeoutPromise;
+
+    var immediatePromise = promises.setImmediate('immediate', { ref: false });
+    var immediateRecord = record('setImmediate'), immediateUnrefed = immediateRecord.handle.hasRef() === false;
+    globalThis.clearImmediate(immediateRecord.handle); immediateRecord.callback();
+    var immediateValue = await immediatePromise;
+
+    var intervalCountBefore = count('setInterval'), interval = trackIterator(promises.setInterval(60000, 'tick', { ref: false }));
+    var lazyInterval = count('setInterval') === intervalCountBefore;
+    var firstPromise = interval.next(), secondPromise = interval.next();
+    var deliveryOrder = [];
+    firstPromise.then(function() { deliveryOrder.push(1); });
+    secondPromise.then(function() { deliveryOrder.push(2); });
+    var intervalRecord = record('setInterval'), intervalUnrefed = intervalRecord.handle.hasRef() === false;
+    check(lazyInterval && count('setInterval') === intervalCountBefore + 1, 'lazy single interval allocation');
+    intervalRecord.callback(); var first = await firstPromise;
+    intervalRecord.callback(); var second = await secondPromise;
+    var stillUnrefed = intervalRecord.handle.hasRef() === false;
+    check(deliveryOrder.join(',') === '1,2', 'concurrent interval waiters resolve in order');
+    intervalRecord.callback();
+    var ended = await interval.return();
+    var endedAgain = await interval.return();
+    var pendingResult = await interval.next(), pendingAlsoResult = await interval.next();
+    var intervalCleared = cleared.indexOf(intervalRecord.handle) >= 0;
+    intervalRecord.callback();
+    var afterReturn = await interval.next(), afterStaleTick = await interval.next();
+    check(endedAgain.done && pendingResult.done && pendingAlsoResult.done && afterReturn.done && afterStaleTick.done &&
+      clearCount(intervalRecord.handle) === 1 && count('setInterval') === intervalCountBefore + 1,
+      'return clears queue, settles waiters once, and blocks stale ticks');
+
+    var unstartedCount = count('setInterval'), unstartedSignal = trackedSignal(false);
+    var unstarted = trackIterator(promises.setInterval(60000, 'unused', { signal: unstartedSignal.signal }));
+    var unstartedEnd = await unstarted.return(), unstartedNext = await unstarted.next();
+    check(unstartedEnd.done && unstartedNext.done && count('setInterval') === unstartedCount &&
+      unstartedSignal.adds() === 0 && unstartedSignal.removes() === 0,
+      'return before next does not allocate or attach listener');
+    var waitingInterval = trackIterator(promises.setInterval(60000, 'waiting'));
+    var waitingFirst = waitingInterval.next(), waitingSecond = waitingInterval.next();
+    var waitingRecord = record('setInterval'), waitingEnd = await waitingInterval.return();
+    check((await waitingFirst).done && (await waitingSecond).done && waitingEnd.done &&
+      clearCount(waitingRecord.handle) === 1, 'return settles all concurrent pending next calls');
+
+    var defaultPromise = promises.setTimeout(60000, 'default');
+    var defaultRecord = record('setTimeout'), defaultRefed = defaultRecord.handle.hasRef() === true;
+    globalThis.clearTimeout(defaultRecord.handle); defaultRecord.callback();
+    var defaultValue = await defaultPromise;
+    var truePromise = promises.setImmediate('true', { ref: true });
+    var trueRecord = record('setImmediate'), trueRefed = trueRecord.handle.hasRef() === true;
+    globalThis.clearImmediate(trueRecord.handle); trueRecord.callback();
+    var trueValue = await truePromise;
+    var defaultIntervalCount = count('setInterval'), defaultInterval = trackIterator(promises.setInterval(60000, 'default interval'));
+    var defaultStillLazy = count('setInterval') === defaultIntervalCount, defaultPending = defaultInterval.next();
+    var defaultIntervalRecord = record('setInterval'), defaultIntervalRefed = defaultIntervalRecord.handle.hasRef() === true;
+    var defaultIntervalEnd = await defaultInterval.return(), defaultPendingResult = await defaultPending;
+    check(defaultStillLazy && defaultPendingResult.done && clearCount(defaultIntervalRecord.handle) === 1,
+      'default interval starts on first next and return settles waiter');
+    var trueIntervalCount = count('setInterval'), trueInterval = trackIterator(promises.setInterval(60000, 'true interval', { ref: true }));
+    var trueStillLazy = count('setInterval') === trueIntervalCount, truePending = trueInterval.next();
+    var trueIntervalRecord = record('setInterval'), trueIntervalRefed = trueIntervalRecord.handle.hasRef() === true;
+    var trueIntervalEnd = await trueInterval.return(), truePendingResult = await truePending;
+    check(trueStillLazy && truePendingResult.done && clearCount(trueIntervalRecord.handle) === 1,
+      'true interval starts on first next and return settles waiter');
+
+    var preAborted = trackedSignal(true, 'pre'), preCount = count('setInterval');
+    var preIterator = trackIterator(promises.setInterval(60000, 'unused', { signal: preAborted.signal }));
+    var preError = await preIterator.next().then(function() { return null; }, function(error) { return error; });
+    check(abortInfo(preError, 'pre') && preAborted.adds() === 0 && count('setInterval') === preCount,
+      'pre-aborted first next allocates no timer or listener');
+    var betweenSignal = trackedSignal(false), betweenIterator = trackIterator(promises.setInterval(60000, 'unused', { signal: betweenSignal.signal }));
+    betweenSignal.abort('between');
+    var betweenCount = count('setInterval');
+    var betweenError = await betweenIterator.next().then(function() { return null; }, function(error) { return error; });
+    check(abortInfo(betweenError, 'between') && betweenSignal.adds() === 0 && count('setInterval') === betweenCount,
+      'abort between construction and first next allocates nothing');
+
+    var returnSignal = trackedSignal(false), returnIterator = trackIterator(promises.setInterval(60000, 'return', { signal: returnSignal.signal }));
+    var returnPending = returnIterator.next(), returnSignalRecord = record('setInterval');
+    var returnDone = await returnIterator.return(), returnPendingValue = await returnPending;
+    check(returnDone.done && returnPendingValue.done && returnSignal.adds() === 1 &&
+      returnSignal.removes() === 1 && returnSignal.sameListener() && clearCount(returnSignalRecord.handle) === 1,
+      'normal return removes the named abort listener');
+
+    var liveCount = count('setInterval'), liveSignal = trackedSignal(false);
+    var liveIterator = trackIterator(promises.setInterval(60000, 'abort', { signal: liveSignal.signal }));
+    var livePending = liveIterator.next(), liveRecord = record('setInterval');
+    liveSignal.abort('aborted');
+    var liveError = await livePending.then(function() { return null; }, function(error) { return error; });
+    var afterAbortError = await liveIterator.next().then(function() { return null; }, function(error) { return error; });
+    check(abortInfo(liveError, 'aborted') && abortInfo(afterAbortError, 'aborted') && liveSignal.adds() === 1 &&
+      liveSignal.removes() === 1 && liveSignal.sameListener() && clearCount(liveRecord.handle) === 1 &&
+      count('setInterval') === liveCount + 1,
+      'abort rejects waiters, clears timer and removes listener');
+
+    var bufferedSignal = trackedSignal(false), bufferedIterator = trackIterator(promises.setInterval(60000, 'buffered', { signal: bufferedSignal.signal }));
+    var bufferedPending = bufferedIterator.next(), bufferedRecord = record('setInterval');
+    bufferedRecord.callback(); await bufferedPending;
+    bufferedRecord.callback();
+    bufferedSignal.abort('buffered abort');
+    var discardedBufferError = await bufferedIterator.next().then(function() { return null; }, function(error) { return error; });
+    check(abortInfo(discardedBufferError, 'buffered abort') && bufferedSignal.removes() === 1 &&
+      bufferedSignal.sameListener() && clearCount(bufferedRecord.handle) === 1, 'abort discards buffered values');
+
+    var failureSignal = trackedSignal(false), failureIterator = trackIterator(promises.setInterval(60000, 'failure', { signal: failureSignal.signal }));
+    var failureCount = count('setInterval'); failNextInterval = true; nextIntervalFailure = new Error('start failed');
+    var startupError = await failureIterator.next().then(function() { return null; }, function(error) { return error.message; });
+    var failureRetry = await failureIterator.next().then(function() { return null; }, function(error) { return error.message; });
+    check(startupError === 'start failed' && count('setInterval') === failureCount &&
+      failureRetry === 'start failed' && failureSignal.adds() === 1 && failureSignal.removes() === 1 &&
+      failureSignal.sameListener(),
+      'startup failure removes registered listener without leaking timer');
+
+    var coercionAbortSignal = trackedSignal(false), coercionAbortIterator, abortCoercionRan = false;
+    var abortDelay = { valueOf: function() { if (!abortCoercionRan) { abortCoercionRan = true; coercionAbortSignal.abort('during delay'); } return 60000; } };
+    coercionAbortIterator = trackIterator(promises.setInterval(abortDelay, 'unused', { signal: coercionAbortSignal.signal }));
+    var abortCoercionCount = count('setInterval');
+    var coercionAbortPending = coercionAbortIterator.next();
+    var coercionAbortRecord = record('setInterval');
+    var coercionAbortResult = await coercionAbortPending.then(function() { return null; }, function(error) { return error; });
+    var coercionAbortRetry = await coercionAbortIterator.next().then(function() { return null; }, function(error) { return error; });
+    check(abortCoercionRan && abortInfo(coercionAbortResult, 'during delay') && abortInfo(coercionAbortRetry, 'during delay') &&
+      count('setInterval') === abortCoercionCount + 1 && clearCount(coercionAbortRecord.handle) === 1 &&
+      coercionAbortSignal.adds() === 1 && coercionAbortSignal.removes() === 1,
+      'abort during delay coercion clears the subsequently created handle');
+
+    var coercionReturnSignal = trackedSignal(false), coercionReturnIterator, returnCoercionRan = false;
+    var reentrantReturn;
+    var returnDelay = { valueOf: function() {
+      if (!returnCoercionRan) { returnCoercionRan = true; reentrantReturn = coercionReturnIterator.return(); }
+      return 60000;
+    } };
+    coercionReturnIterator = trackIterator(promises.setInterval(returnDelay, 'unused', { signal: coercionReturnSignal.signal }));
+    var returnCoercionCount = count('setInterval'), coercionReturnPending = coercionReturnIterator.next();
+    var coercionReturnRecord = record('setInterval'), coercionReturnResult = await coercionReturnPending;
+    var reentrantReturnResult = await reentrantReturn;
+    var coercionReturnRetry = await coercionReturnIterator.next();
+    check(returnCoercionRan && coercionReturnResult.done && reentrantReturnResult.done &&
+      coercionReturnRetry.done && count('setInterval') === returnCoercionCount + 1 &&
+      clearCount(coercionReturnRecord.handle) === 1 &&
+      coercionReturnSignal.adds() === 1 && coercionReturnSignal.removes() === 1,
+      'return during delay coercion clears the subsequently created handle');
+
+    var falseyResults = [];
+    [null, false, 0, ''].forEach(function(reason) {
+      var aborted = trackedSignal(true, reason);
+      falseyResults.push([promises.setTimeout(60000, 'unused', { signal: aborted.signal }).then(function(error) { return [false, error]; }, function(error) { return [true, error]; }),
+        promises.setImmediate('unused', { signal: aborted.signal }).then(function(error) { return [false, error]; }, function(error) { return [true, error]; }),
+        promises.scheduler.wait(60000, { signal: aborted.signal }).then(function(error) { return [false, error]; }, function(error) { return [true, error]; }), reason]);
+    });
+    var falseyIntervalResults = [];
+    [null, false, 0, ''].forEach(function(reason) {
+      var falseySignal = trackedSignal(false), falseyIterator = trackIterator(promises.setInterval(60000, 'unused', { signal: falseySignal.signal }));
+      var waiter = falseyIterator.next().then(function() { return null; }, function(error) { return error; });
+      var falseyRecord = record('setInterval'); falseySignal.abort(reason);
+      falseyIntervalResults.push([waiter, falseyIterator.next().then(function(value) { return value; }, function(error) { return error; }), falseyRecord, falseySignal, reason]);
+    });
+    for (var falseyIndex = 0; falseyIndex < falseyIntervalResults.length; falseyIndex++) {
+      var falsey = falseyIntervalResults[falseyIndex], waiterError = await falsey[0], nextError = await falsey[1];
+      check(abortInfo(waiterError, falsey[4]) && abortInfo(nextError, falsey[4]) && clearCount(falsey[2].handle) === 1 &&
+        falsey[3].adds() === 1 && falsey[3].removes() === 1, 'falsey interval abort remains a failure');
+    }
+    for (var falseyIndex = 0; falseyIndex < falseyResults.length; falseyIndex++) {
+      var falsey = falseyResults[falseyIndex];
+      for (var errorIndex = 0; errorIndex < 3; errorIndex++) {
+        var timerResult = await falsey[errorIndex];
+        check(timerResult[0] && abortInfo(timerResult[1], falsey[3]), 'falsey promise timer abort is AbortError');
+      }
+    }
+    var undefinedFailureSignal = trackedSignal(false), undefinedFailureIterator = trackIterator(promises.setInterval(60000, 'undefined failure', { signal: undefinedFailureSignal.signal }));
+    var undefinedFailureCount = count('setInterval'); failNextInterval = true; nextIntervalFailure = undefined;
+    var undefinedFailure = await undefinedFailureIterator.next().then(function(value) { return [false, value]; }, function(error) { return [true, error]; });
+    var undefinedRetry = await undefinedFailureIterator.next().then(function(value) { return [false, value]; }, function(error) { return [true, error]; });
+    check(undefinedFailure[0] && undefinedFailure[1] === undefined && undefinedRetry[0] && undefinedRetry[1] === undefined &&
+      count('setInterval') === undefinedFailureCount && undefinedFailureSignal.adds() === 1 && undefinedFailureSignal.removes() === 1 &&
+      undefinedFailureSignal.sameListener(), 'undefined startup failure remains rejected on later next');
+
+    var objectReason = {}, objectController = new AbortController(); objectController.abort(objectReason);
+    var objectErrorResult = await promises.setTimeout(60000, 'unused', { signal: objectController.signal }).then(
+      function(error) { return [false, error]; }, function(error) { return [true, error]; });
+    check(objectErrorResult[0] && abortInfo(objectErrorResult[1], objectReason), 'AbortError preserves object cause identity');
+    var defaultController = new AbortController(); defaultController.abort();
+    var defaultErrorResult = await promises.setImmediate('unused', { signal: defaultController.signal }).then(
+      function(error) { return [false, error]; }, function(error) { return [true, error]; });
+    check(defaultErrorResult[0] && abortInfo(defaultErrorResult[1], defaultController.signal.reason), 'AbortError wraps default abort reason');
+    var liveController = new AbortController(), livePromise = promises.setTimeout(60000, 'unused', { signal: liveController.signal });
+    var liveOneShotRecord = record('setTimeout');
+    var liveOneShotResult = livePromise.then(function(error) { return [false, error]; }, function(error) { return [true, error]; });
+    liveController.abort(objectReason);
+    liveOneShotResult = await liveOneShotResult;
+    check(liveOneShotResult[0] && abortInfo(liveOneShotResult[1], objectReason) && clearCount(liveOneShotRecord.handle) === 1,
+      'live one-shot abort wraps its reason and clears timer');
+
+    var beforeThrow = records.length, getterReads = 0, getterOrder = [], getterError;
+    try {
+      promises.setTimeout(1, 'unused', {
+        get signal() { getterOrder.push('signal'); return undefined; },
+        get ref() { getterReads++; getterOrder.push('ref'); throw new Error('ref getter'); }
+      });
+    }
+    catch (error) { getterError = error.message; }
+    var noAllocationOnThrow = records.length === beforeThrow;
+
+    var controller = new AbortController(); controller.abort('stopped');
+    var beforeAbort = records.length, abortReason;
+    try { await promises.setTimeout(1, 'unused', { signal: controller.signal, ref: false }); }
+    catch (error) { abortReason = [error.name, error.code, error.cause]; }
+    var noAllocationWhenAborted = records.length === beforeAbort;
+    return [
+      [timeoutUnrefed, timeoutValue],
+      [immediateUnrefed, immediateValue],
+      [intervalUnrefed, first.value, first.done, stillUnrefed, second.value, second.done,
+        ended.done, pendingResult.done, intervalCleared],
+      [defaultRefed, defaultValue, trueRefed, trueValue, defaultIntervalRefed, defaultIntervalEnd.done,
+        trueIntervalRefed, trueIntervalEnd.done],
+      [getterReads, getterOrder.join(','), getterError, noAllocationOnThrow, noAllocationWhenAborted, abortReason]
+    ];
+  } finally {
+    signals.forEach(function(signal) { try { signal.abort('fixture cleanup'); } catch (_) {} });
+    iterators.forEach(function(iterator) { try { iterator.return(); } catch (_) {} });
+    globalThis.setTimeout = original.setTimeout; globalThis.clearTimeout = original.clearTimeout;
+    globalThis.setImmediate = original.setImmediate; globalThis.clearImmediate = original.clearImmediate;
+    globalThis.setInterval = original.setInterval; globalThis.clearInterval = original.clearInterval;
+    records.forEach(function(record) {
+      if (record.name === 'setTimeout') original.clearTimeout.call(globalThis, record.handle);
+      else if (record.name === 'setImmediate') original.clearImmediate.call(globalThis, record.handle);
+      else original.clearInterval.call(globalThis, record.handle);
+    });
+    signals.forEach(function(signal) { signal.restore(); });
+  }
+};
+"#,
+    )
+    .unwrap();
+    let empty_node_modules = temp_registry("builtin_timer_promises_ref_node_modules");
+    let (bundle, _, file_count, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    let script = format!(
+        "globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseTimerPromisesRef = module.exports;"
+    );
+    let source = CString::new(script).unwrap();
+    let loaded = thaw_quickjs::thaw_js_load(source.as_ptr()) == 1;
+    let result = if loaded {
+        let result_ptr = thaw_quickjs::thaw_js_call(
+            CString::new("exerciseTimerPromisesRef").unwrap().as_ptr(),
+            CString::new("[]").unwrap().as_ptr(),
+        );
+        Some(unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy().into_owned())
+    } else {
+        None
+    };
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+    assert_eq!(file_count, 2);
+    assert!(loaded);
+    assert_eq!(
+        result.as_deref(),
+        Some(r#"[[true,"timeout"],[true,"immediate"],[true,"tick",false,true,"tick",false,true,true,true],[true,"default",true,"true",true,true,true,true],[1,"signal,ref","ref getter",true,true,["AbortError","ABORT_ERR","stopped"]]]"#)
+    );
 }
 
 #[test]
@@ -1730,7 +2434,7 @@ fn http2_failed_host_write_does_not_complete_queued_data() {
     let empty_node_modules = temp_registry("builtin_http2_failed_write_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    assert_eq!(file_count, 3);
+    assert_eq!(file_count, 5);
     let script = [
         "globalThis.module = { exports: {} }; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) { throw new Error(name); };",
         &bundle,
@@ -1789,7 +2493,7 @@ module.exports = function () {
     let empty_node_modules = temp_registry("builtin_http2_failed_write_reentry_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    assert_eq!(file_count, 3);
+    assert_eq!(file_count, 5);
     let script = [
         "globalThis.module = { exports: {} }; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) { throw new Error(name); };",
         &bundle,
@@ -1850,7 +2554,7 @@ module.exports = function () {
     let empty_node_modules = temp_registry("builtin_http2_failed_controls_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    assert_eq!(file_count, 3);
+    assert_eq!(file_count, 5);
     let script = [
         "globalThis.module = { exports: {} }; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) { throw new Error(name); };",
         &bundle,
@@ -1921,7 +2625,7 @@ module.exports = function() {
     let empty_node_modules = temp_registry("builtin_http2_failed_ack_parse_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    assert_eq!(file_count, 3);
+    assert_eq!(file_count, 5);
     let script = [
         "globalThis.module = { exports: {} }; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) { throw new Error(name); };",
         &bundle,
@@ -1967,7 +2671,7 @@ module.exports = function() {
     let empty_node_modules = temp_registry("builtin_http2_ping_remove_throw_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    assert_eq!(file_count, 3);
+    assert_eq!(file_count, 5);
     let script = [
         "globalThis.module = { exports: {} }; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) { throw new Error(name); };",
         &bundle,
@@ -2022,7 +2726,7 @@ module.exports = function() {
     let empty_node_modules = temp_registry("builtin_http2_pending_ack_destroy_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    assert_eq!(file_count, 3);
+    assert_eq!(file_count, 5);
     let script = [
         "globalThis.module = { exports: {} }; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) { throw new Error(name); };",
         &bundle,
@@ -2094,7 +2798,7 @@ module.exports = function() {
     let empty_node_modules = temp_registry("builtin_http2_ack_fifo_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    assert_eq!(file_count, 3);
+    assert_eq!(file_count, 5);
     let script = [
         "globalThis.module = { exports: {} }; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) { throw new Error(name); };",
         &bundle,
@@ -2165,7 +2869,7 @@ module.exports = function() {
     let empty_node_modules = temp_registry("builtin_http2_finish_throw_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    assert_eq!(file_count, 3);
+    assert_eq!(file_count, 5);
     let script = [
         "globalThis.module = { exports: {} }; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) { throw new Error(name); };",
         &bundle,
@@ -2214,7 +2918,7 @@ module.exports = function() {
     let empty_node_modules = temp_registry("builtin_http2_rst_error_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    assert_eq!(file_count, 3);
+    assert_eq!(file_count, 5);
     let script = [
         "globalThis.module = { exports: {} }; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) { throw new Error(name); };",
         &bundle,
@@ -2231,6 +2935,240 @@ module.exports = function() {
         result,
         r#"[[0,true,false,false,["aborted:0","close:0"],null],[8,true,false,false,["aborted:0","close:0"],null],[7,true,false,false,["aborted:0","error:1:ERR_HTTP2_STREAM_ERROR:Stream closed with error code NGHTTP2_REFUSED_STREAM","close:0"],null],[99,true,false,false,["aborted:0","error:1:ERR_HTTP2_STREAM_ERROR:Stream closed with error code 99","close:0"],null],[2,true,false,false,["aborted:0","error:1:ERR_HTTP2_STREAM_ERROR:Stream closed with error code NGHTTP2_INTERNAL_ERROR","close:0"],"aborted-marker"],[true,["ERR_HTTP2_STREAM_ERROR","Stream closed with error code NGHTTP2_REFUSED_STREAM"]]]"#
     );
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+}
+
+
+#[test]
+fn http2_goaway_cutoff_graceful_drain_and_server_settings_are_wire_safe() {
+    use std::ffi::{CStr, CString};
+
+    let dir = temp_registry("builtin_http2_protocol_boundaries");
+    fs::write(
+        dir.join("index.js"),
+        r#"var http2 = require('node:http2');
+module.exports = function() {
+  var server = new http2.ServerHttp2Session(999960, 'tcp'), sent = [], admitted = [];
+  server._send = function(frame) { sent.push(Buffer.from(frame)); return true; };
+  server.on('stream', function(stream) { admitted.push(stream.id); });
+  server._deliverHeaders(1, 4, Buffer.from([0x83]));
+  var first = server._streams.get(1);
+  first._markClosed();
+  server._deliverHeaders(3, 4, Buffer.from([0x83]));
+  server.goaway(0, undefined, Buffer.from('opaque'));
+  var goaway = sent[sent.length - 1];
+  server.goaway(0, 99);
+  var cutoff = [goaway[9] * 0x1000000 + (goaway[10] << 16) + (goaway[11] << 8) + goaway[12], goaway.subarray(17).toString(), sent[sent.length - 1][12]];
+  server._deliverHeaders(5, 4, Buffer.from([0x83]));
+  var closeSession = new http2.ServerHttp2Session(0, 'tcp'), closeSent = [];
+  closeSession._send = function(frame) { closeSent.push(Buffer.from(frame)); return true; };
+  var active = new http2.ServerHttp2Stream(closeSession, 1), closed = 0;
+  closeSession._streams.set(1, active);
+  closeSession.close(function(error) { if (!error) closed++; });
+  var held = [closeSession.destroyed, active.closed, closeSent[0][3]];
+  active._markClosed();
+  var settings = new http2.ServerHttp2Session(0, 'tcp'), settingsWire = [];
+  settings._send = function(frame) { settingsWire.push(Buffer.from(frame)); return true; };
+  settings._buffer = Buffer.from('PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n');
+  settings._parse();
+  settings.settings({ enablePush: true, initialWindowSize: 0 });
+  var emitted = settingsWire.map(function(frame) { return http2.getUnpackedSettings(frame.subarray(9)); });
+  return Promise.resolve().then(function() { return Promise.resolve().then(function() { return [admitted, cutoff, [held, closeSession.destroyed, closed], emitted.map(function(value) { return [value.enablePush === undefined, value.initialWindowSize]; }), settings.localSettings.enablePush]; }); });
+};"#,
+    )
+    .unwrap();
+    let empty_node_modules = temp_registry("builtin_http2_protocol_boundaries_modules");
+    let (bundle, _, file_count, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(file_count, 5);
+    let script = [
+        "globalThis.module = { exports: {} }; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) { throw new Error(name); };",
+        &bundle,
+        "globalThis.exerciseHttp2ProtocolBoundaries = module.exports;",
+    ]
+    .join("\n");
+    let source = CString::new(script).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let function = CString::new("exerciseHttp2ProtocolBoundaries").unwrap();
+    let arguments = CString::new("[]").unwrap();
+    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(result, "[[1,3],[3,\"opaque\",3],[[false,false,7],true,1],[[true,65535],[true,0]],false]");
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+}
+
+
+#[test]
+fn http2_goaway_admission_drain_reentry_and_hpack_boundaries() {
+    use std::ffi::{CStr, CString};
+
+    let dir = temp_registry("builtin_http2_goaway_boundaries");
+    fs::write(
+        dir.join("index.js"),
+        r#"var http2 = require('node:http2');
+module.exports = function() {
+  function check(value, message) { if (!value) throw new Error(message); }
+  function payloadCutoff(value) { return value[9] * 0x1000000 + (value[10] << 16) + (value[11] << 8) + value[12]; }
+  function safeDestroy(session) { var destroy = session.destroy; session.destroy = function(error) { this._handle = 0; return destroy.call(this, error); }; }
+  function twoTurns(fn) { return Promise.resolve().then(function() { return Promise.resolve().then(fn); }); }
+  function gotGoaway(session) { session._frame(7, 0, 0, Buffer.alloc(8)); }
+
+  var received = new http2.ClientHttp2Session(99101, 'tcp'), receivedFrames = [];
+  received._send = function(value) { receivedFrames.push(Buffer.from(value)); return true; };
+  gotGoaway(received);
+  var receivedId = received._nextStream, receivedSize = received._streams.size, receivedError;
+  try { received.request({ ':path': '/after-goaway' }); } catch (error) { receivedError = error.code; }
+  check(receivedError === 'ERR_HTTP2_GOAWAY_SESSION' && receivedFrames.length === 0 && received._nextStream === receivedId && received._streams.size === receivedSize, 'received GOAWAY admitted a request');
+
+  var fromHeader = new http2.ClientHttp2Session(99102, 'tcp'), headerFrames = [];
+  fromHeader._send = function(value) { headerFrames.push(Buffer.from(value)); return true; };
+  var headerGetter = {};
+  Object.defineProperty(headerGetter, 'x-trigger', { enumerable: true, get: function() { gotGoaway(fromHeader); return 'v'; } });
+  var headerId = fromHeader._nextStream, headerSize = fromHeader._streams.size, headerError;
+  try { fromHeader.request(headerGetter); } catch (error) { headerError = error.code; }
+  check(headerError === 'ERR_HTTP2_GOAWAY_SESSION' && headerFrames.length === 0 && fromHeader._nextStream === headerId && fromHeader._streams.size === headerSize, 'header getter admitted a request after GOAWAY');
+
+  var fromOptions = new http2.ClientHttp2Session(99103, 'tcp'), optionFrames = [];
+  fromOptions._send = function(value) { optionFrames.push(Buffer.from(value)); return true; };
+  var options = {};
+  Object.defineProperty(options, 'endStream', { get: function() { gotGoaway(fromOptions); return true; } });
+  var optionsId = fromOptions._nextStream, optionsSize = fromOptions._streams.size, optionsError;
+  try { fromOptions.request({ ':path': '/' }, options); } catch (error) { optionsError = error.code; }
+  check(optionsError === 'ERR_HTTP2_GOAWAY_SESSION' && optionFrames.length === 0 && fromOptions._nextStream === optionsId && fromOptions._streams.size === optionsSize, 'options getter admitted a request after GOAWAY');
+
+  var direct = new http2.ClientHttp2Session(99104, 'tcp'), directFrames = [];
+  direct._send = function(value) { directFrames.push(Buffer.from(value)); return true; };
+  direct.goaway();
+  var stillUsable = direct.request({ ':path': '/allowed-after-local-goaway' });
+  check(stillUsable.id === 1 && directFrames.filter(function(value) { return value[3] === 1; }).length === 1, 'direct GOAWAY closed local request admission');
+
+  var invalid = new http2.ServerHttp2Session(0, 'tcp'), invalidFrames = [];
+  invalid._send = function(value) { invalidFrames.push(Buffer.from(value)); return true; };
+  [NaN, Infinity, -1, 1.5, 2147483648].forEach(function(id) { var rejected = false; try { invalid.goaway(0, id); } catch (error) { rejected = error instanceof RangeError; } check(rejected && invalid._sentGoawayLastStreamId === undefined && invalidFrames.length === 0, 'invalid GOAWAY cutoff changed session state'); });
+  invalid.goaway(0, 0);
+  check(payloadCutoff(invalidFrames[0]) === 0 && invalid._sentGoawayLastStreamId === 0, 'explicit zero cutoff was not preserved');
+
+  var nested = new http2.ServerHttp2Session(0, 'tcp'), nestedWire = [], nestedEmitted = [];
+  nested._lastRemoteStreamId = 3;
+  nested.on('stream', function(stream) { nestedEmitted.push(stream.id); });
+  nested._send = function(value) { nestedWire.push(payloadCutoff(value)); if (nestedWire.length === 1) { nested.goaway(0, 1); nested._deliverHeaders(3, 4, Buffer.from([0x83])); } return true; };
+  nested.goaway();
+  check(nestedWire.join(',') === '3,1' && nested._sentGoawayLastStreamId === 1 && nestedEmitted.length === 0, 'nested GOAWAY increased or bypassed the cutoff');
+  var converting = new http2.ServerHttp2Session(0, 'tcp'), convertingWire = [];
+  converting._lastRemoteStreamId = 3;
+  converting._send = function(value) { convertingWire.push(payloadCutoff(value)); return true; };
+  var opaque = {};
+  Object.defineProperty(opaque, 'length', { get: function() { converting.goaway(0, 1); return 0; } });
+  converting.goaway(0, undefined, opaque);
+  check(convertingWire.join(',') === '1,1' && converting._sentGoawayLastStreamId === 1, 'opaque conversion reentry raised the sent cutoff');
+  var snapshot = new http2.ServerHttp2Session(0, 'tcp'), snapshotWire = [], snapshotEmitted = [];
+  snapshot._lastRemoteStreamId = 1;
+  snapshot._send = function(value) { snapshotWire.push(payloadCutoff(value)); return true; };
+  snapshot.on('stream', function(stream) { snapshotEmitted.push(stream.id); });
+  var snapshotOpaque = {};
+  Object.defineProperty(snapshotOpaque, 'length', { get: function() { snapshot._deliverHeaders(3, 4, Buffer.from([0x83])); return 0; } });
+  snapshot.goaway(0, undefined, snapshotOpaque);
+  check(snapshotWire[0] === 3 && snapshot._sentGoawayLastStreamId === 3 && snapshotEmitted.join(',') === '3', 'default GOAWAY cutoff missed a peer stream admitted during opaque conversion');
+
+  var reentrant = new http2.ServerHttp2Session(0, 'tcp'), reentrantEmitted = [];
+  reentrant._lastRemoteStreamId = 1;
+  reentrant.on('stream', function(stream) { reentrantEmitted.push(stream.id); });
+  reentrant._send = function(value) { if (value[3] === 7) reentrant._deliverHeaders(3, 4, Buffer.from([0x83])); return true; };
+  reentrant.goaway();
+  check(reentrantEmitted.length === 0 && reentrant._streams.size === 0, 'peer HEADERS reentry bypassed published GOAWAY cutoff');
+
+  var hpack = new http2.ServerHttp2Session(0, 'tcp'), hpackEmitted = [], existing = new http2.ServerHttp2Stream(hpack, 1);
+  hpack._send = function() { return true; };
+  hpack._sentGoawayLastStreamId = 1;
+  hpack._streams.set(1, existing);
+  existing.on('response', function(headers) { hpackEmitted.push(headers['x-test']); });
+  var inserted = Buffer.from([0x40, 0x06].concat(Array.from(Buffer.from('x-test')), [0x01, 0x76]));
+  hpack._deliverHeaders(3, 4, inserted);
+  hpack._deliverHeaders(1, 4, Buffer.from([0xbe]));
+  check(!hpack._streams.has(3) && hpackEmitted[0] === 'v', 'refused HEADERS did not preserve HPACK state for an existing stream');
+
+  var natural = new http2.ServerHttp2Session(99105, 'tcp'), naturalWire = [], naturalDone = 0;
+  natural._send = function(value) { naturalWire.push(Buffer.from(value)); return true; };
+  safeDestroy(natural);
+  var upload = new http2.ServerHttp2Stream(natural, 1);
+  natural._streams.set(1, upload);
+  natural.close(function(error) { if (!error) naturalDone++; });
+  natural.close(function(error) { if (!error) naturalDone++; });
+  check(!natural.destroyed && naturalWire.filter(function(value) { return value[3] === 7; }).length === 1, 'close did not wait for the active stream or repeated close sent another GOAWAY');
+  upload.write('upload');
+  upload.end();
+  natural._frame(0, 1, 1, Buffer.from('response'));
+
+  var afterReceived = new http2.ServerHttp2Session(99106, 'tcp'), afterWire = [], afterDone = 0;
+  afterReceived._send = function(value) { afterWire.push(Buffer.from(value)); return true; };
+  safeDestroy(afterReceived);
+  var remoteReset = new http2.ServerHttp2Stream(afterReceived, 1);
+  afterReceived._streams.set(1, remoteReset);
+  gotGoaway(afterReceived);
+  afterReceived.close(function(error) { if (!error) afterDone++; });
+  afterReceived._frame(3, 0, 1, Buffer.alloc(4));
+
+  var localResetSession = new http2.ServerHttp2Session(99107, 'tcp');
+  localResetSession._send = function() { return true; };
+  safeDestroy(localResetSession);
+  var localReset = new http2.ServerHttp2Stream(localResetSession, 1);
+  localResetSession._streams.set(1, localReset);
+  localResetSession.close();
+  localReset.close();
+
+  var throwing = new http2.ServerHttp2Session(99108, 'tcp'), throwingClosed = 0, marker = new Error('finish marker');
+  throwing._send = function() { return true; };
+  safeDestroy(throwing);
+  var finalStream = new http2.ServerHttp2Stream(throwing, 1);
+  throwing._streams.set(1, finalStream);
+  finalStream.readableEnded = true;
+  finalStream.on('finish', function() { throw marker; });
+  throwing.close(function(error) { if (!error) throwingClosed++; });
+  var caughtFinish = false;
+  try { finalStream.end(); } catch (error) { caughtFinish = error === marker; }
+
+  var failed = new http2.ServerHttp2Session(99109, 'tcp'), failedWrites = 0, failedAcks = 0, failedCloses = 0, sendError = new Error('goaway write failed');
+  failed._send = function(value) { if (value[3] === 7) { failed._sendError = sendError; return false; } return true; };
+  safeDestroy(failed);
+  failed.settings({}, function(error) { if (error) failedAcks++; });
+  failed._sendWindow = 0;
+  var queued = new http2.ServerHttp2Stream(failed, 1);
+  failed._streams.set(1, queued);
+  queued.write('queued', function(error) { if (error) failedWrites++; });
+  failed.on('error', function() { throw new Error('session error listener threw'); });
+  var caughtDestroy = false;
+  try { failed.close(function(error) { if (error) failedCloses++; }); } catch (error) { caughtDestroy = error.message === 'session error listener threw'; }
+
+  return twoTurns(function() {
+    check(natural.destroyed && naturalDone === 2 && upload.writableEnded && upload.readableEnded && naturalWire.filter(function(value) { return value[3] === 0; }).length >= 2, 'natural close did not drain writable and readable stream sides');
+    check(afterReceived.destroyed && afterDone === 1 && afterWire.filter(function(value) { return value[3] === 7; }).length === 1, 'close after received GOAWAY did not drain after remote reset');
+    check(localResetSession.destroyed && localReset.closed, 'local reset did not trigger graceful drain');
+    check(caughtFinish && throwing.destroyed && throwingClosed === 1, 'throwing finish listener skipped graceful cleanup');
+    check(caughtDestroy && failed.destroyed && failedWrites === 1 && failedAcks === 1 && failedCloses === 1, 'failed GOAWAY did not settle queued callbacks through throwing listener');
+    return true;
+  });
+};"#,
+    )
+    .unwrap();
+    let empty_node_modules = temp_registry("builtin_http2_goaway_boundaries_modules");
+    let (bundle, _, file_count, _) =
+        bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    assert_eq!(file_count, 5);
+    let script = [
+        "globalThis.module = { exports: {} }; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) { throw new Error(name); };",
+        &bundle,
+        "globalThis.exerciseHttp2GoawayBoundaries = module.exports;",
+    ]
+    .join("\n");
+    let source = CString::new(script).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let function = CString::new("exerciseHttp2GoawayBoundaries").unwrap();
+    let arguments = CString::new("[]").unwrap();
+    let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
+    let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    assert_eq!(result, "true");
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
 }
@@ -2885,4 +3823,161 @@ module.exports = async function () {
     );
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
+}
+
+#[test]
+fn child_process_credentials_forward_and_validate_in_embedded_runtime() {
+    use std::ffi::{CStr, CString};
+
+    let dir = temp_registry("builtin_child_process_credentials_capture");
+    fs::write(
+        dir.join("index.js"),
+        r#"var childProcess = require('node:child_process');
+module.exports = function () {
+  var host = globalThis, calls = [];
+  var previous = {
+    sync: host.__thaw_child_process_sync,
+    spawn: host.__thaw_child_process_spawn,
+    stdin: host.__thaw_child_process_stdin,
+    poll: host.__thaw_child_process_poll
+  };
+  try {
+    host.__thaw_child_process_sync = function(command, args, options) {
+      calls.push({ kind: 'sync', command: command, args: JSON.parse(args), options: JSON.parse(options) });
+      return JSON.stringify({ pid: 0, stdout: '', stderr: '', status: 0 });
+    };
+    host.__thaw_child_process_spawn = function(command, args, options) {
+      calls.push({ kind: 'spawn', command: command, args: JSON.parse(args), options: JSON.parse(options) });
+      return calls.length;
+    };
+    host.__thaw_child_process_stdin = function() {};
+    host.__thaw_child_process_poll = function() { return '[]'; };
+    var accepted = [0, 123, -1, -2147483648, 2147483647];
+    var firstSync = childProcess.spawnSync('cmd', { uid: accepted[0] });
+    if (!firstSync || firstSync.status !== 0 || !firstSync.stdout || firstSync.stdout.length !== 0) throw new Error('spawnSync return shape');
+    accepted.slice(1).forEach(function(uid) { childProcess.spawnSync('cmd', { uid: uid }); });
+    accepted.forEach(function(gid) { childProcess.spawn('cmd', { gid: gid }); });
+    childProcess.spawnSync('cmd', ['arg'], { uid: 0, shell: true });
+    childProcess.spawn('cmd', { gid: 0 });
+    var fileSyncOutput = childProcess.execFileSync('cmd', { uid: 0 });
+    var execSyncOutput = childProcess.execSync('cmd', { gid: 0 });
+    if (!fileSyncOutput || fileSyncOutput.length !== 0 || !execSyncOutput || execSyncOutput.length !== 0) throw new Error('synchronous wrapper return shape');
+    childProcess.execFile('cmd', { uid: 0 });
+    childProcess.exec('cmd', { gid: 0 });
+    childProcess.fork('/tmp/entry.js', { uid: 123, gid: -1, execPath: '/bin/echo' });
+    var syncCalls = calls.filter(function(call) { return call.kind === 'sync'; });
+    var spawnCalls = calls.filter(function(call) { return call.kind === 'spawn'; });
+    if (syncCalls.length !== 8 || spawnCalls.length !== 9) throw new Error('wrapper call coverage');
+    calls.forEach(function(call) {
+      if (call.options.uid !== undefined && accepted.indexOf(call.options.uid) < 0) throw new Error('uid int32 forwarding');
+      if (call.options.gid !== undefined && accepted.indexOf(call.options.gid) < 0) throw new Error('gid int32 forwarding');
+    });
+    if (calls[0].options.uid !== 0 || calls[0].options.gid !== undefined || calls[5].options.uid !== undefined || calls[5].options.gid !== 0) throw new Error('uid-only/gid-only forwarding');
+    if (calls[10].options.uid !== 0 || calls[10].args[0] !== '-c') throw new Error('shell option forwarding');
+    var forkCall = calls[calls.length - 1];
+    if (forkCall.options.uid !== 123 || forkCall.options.gid !== -1 || forkCall.options.detached !== false || !forkCall.args.length) throw new Error('fork option forwarding');
+    var beforeInvalid = calls.length;
+    var invalid = ['123', true, new Number(1), 1.5, NaN, Infinity, -2147483649, 2147483648];
+    ['uid', 'gid'].forEach(function(field) {
+      invalid.forEach(function(value) {
+        var caught;
+        try { childProcess.spawnSync('must-not-reach-native', (function() { var options = {}; options[field] = value; return options; })()); }
+        catch (error) { caught = error; }
+        if (!(caught instanceof TypeError) || caught.code !== 'ERR_INVALID_ARG_TYPE' || caught.message.indexOf('options.' + field) < 0) throw new Error('public int32 validation for ' + field);
+      });
+    });
+    if (calls.length !== beforeInvalid) throw new Error('invalid values reached the native hook');
+    var beforeNullish = calls.length;
+    ['uid', 'gid'].forEach(function(field) {
+      var nullOptions = {}, undefinedOptions = {};
+      nullOptions[field] = null;
+      undefinedOptions[field] = undefined;
+      childProcess.spawnSync('nullish', nullOptions);
+      childProcess.spawnSync('nullish', undefinedOptions);
+    });
+    if (calls.length !== beforeNullish + 4) throw new Error('nullish wrapper calls missing');
+    calls.slice(beforeNullish).forEach(function(call) {
+      if (call.options.uid !== undefined || call.options.gid !== undefined) throw new Error('nullish credential was serialized');
+    });
+    return true;
+  } finally {
+    host.__thaw_child_process_sync = previous.sync;
+    host.__thaw_child_process_spawn = previous.spawn;
+    host.__thaw_child_process_stdin = previous.stdin;
+    host.__thaw_child_process_poll = previous.poll;
+  }
+};"#,
+    ).unwrap();
+    let empty_node_modules = temp_registry("builtin_child_process_credentials_capture_modules");
+    let (bundle, _, _, _) = bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseChildProcessCredentialCapture = module.exports;");
+    let source = CString::new(script).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let result = thaw_quickjs::thaw_js_call(c"exerciseChildProcessCredentialCapture".as_ptr(), c"[]".as_ptr());
+    let result = unsafe { CStr::from_ptr(result) }.to_string_lossy().into_owned();
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+    assert_eq!(result, "true");
+}
+
+#[test]
+fn child_process_credentials_async_startup_failure_completes_callback_and_promise_once() {
+    use std::ffi::{CStr, CString};
+
+    let dir = temp_registry("builtin_child_process_credentials_async_error");
+    fs::write(
+        dir.join("index.js"),
+        r#"var childProcess = require('node:child_process'), util = require('node:util');
+module.exports = async function () {
+  var host = globalThis, nextHandle = 50, pending = [];
+  var previous = {
+    spawn: host.__thaw_child_process_spawn,
+    stdin: host.__thaw_child_process_stdin,
+    poll: host.__thaw_child_process_poll,
+    active: host.__thaw_child_process_active
+  };
+  try {
+    host.__thaw_child_process_spawn = function() { var handle = nextHandle++; pending.push(handle); return handle; };
+    host.__thaw_child_process_stdin = function() {};
+    host.__thaw_child_process_active = function() { return pending.length !== 0; };
+    host.__thaw_child_process_poll = function() {
+      var handle = pending.shift();
+      return handle === undefined ? '[]' : JSON.stringify([
+        { handle: handle, type: 'error', message: 'credential denied', code: 'EPERM' },
+        { handle: handle, type: 'exit', code: null, signal: null }
+      ]);
+    };
+    var callbackCount = 0;
+    await new Promise(function(resolve, reject) {
+      childProcess.execFile('cmd', { uid: 0 }, function(error, stdout, stderr) {
+        callbackCount++;
+        if (!error || error.code !== 'EPERM' || stdout !== '' || stderr !== '') { reject(new Error('execFile startup error')); return; }
+        resolve();
+      });
+    });
+    if (callbackCount !== 1) throw new Error('callback completion count');
+    var promiseError;
+    try { await util.promisify(childProcess.execFile)('cmd', { gid: 0 }); }
+    catch (error) { promiseError = error; }
+    if (!promiseError || promiseError.code !== 'EPERM' || promiseError.stdout !== '' || promiseError.stderr !== '') throw new Error('promisified startup error');
+    if (pending.length !== 0) throw new Error('startup event handles were not consumed');
+    return true;
+  } finally {
+    host.__thaw_child_process_spawn = previous.spawn;
+    host.__thaw_child_process_stdin = previous.stdin;
+    host.__thaw_child_process_poll = previous.poll;
+    host.__thaw_child_process_active = previous.active;
+  }
+};"#,
+    ).unwrap();
+    let empty_node_modules = temp_registry("builtin_child_process_credentials_async_error_modules");
+    let (bundle, _, _, _) = bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
+    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseChildProcessCredentialStartupFailure = module.exports;");
+    let source = CString::new(script).unwrap();
+    assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
+    let result = thaw_quickjs::thaw_js_call(c"exerciseChildProcessCredentialStartupFailure".as_ptr(), c"[]".as_ptr());
+    let result = unsafe { CStr::from_ptr(result) }.to_string_lossy().into_owned();
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&empty_node_modules);
+    assert_eq!(result, "true");
 }

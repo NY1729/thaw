@@ -172,9 +172,17 @@ impl<'a> FnLowerer<'a> {
                 Box::new(false_lit()),
             )),
             HirType::Json => Ok(HirExpr::JsonAsBool(Box::new(value))),
+            // Truthiness is asked of the live engine value: a function (or any object
+            // whose JSON projection is empty) is truthy, which a JSON round trip loses.
             HirType::JsValue => Ok(HirExpr::JsonAsBool(Box::new(HirExpr::Call(
-                Box::new(HirExpr::Var("readDynamicValue".into())),
-                vec![value],
+                Box::new(HirExpr::Var("callDynamicValueWithValue".into())),
+                vec![
+                    HirExpr::Call(
+                        Box::new(HirExpr::Var("getDynamicValue".into())),
+                        vec![HirExpr::Lit(HirLit::Str("__thaw_is_truthy_dynamic_value".into()))],
+                    ),
+                    value,
+                ],
             )))),
             HirType::Null | HirType::Undefined => Ok(false_lit()),
             // Only ever seen here for a still-unresolved generic type
@@ -301,7 +309,19 @@ impl<'a> FnLowerer<'a> {
     ) -> Result<HirExpr, String> {
         let mut lhs = lhs;
         let mut lhs_type = self.infer_expr_type(&lhs)?;
-        let rhs_type = self.infer_expr_type(&rhs)?;
+        let mut rhs = rhs;
+        let mut rhs_type = self.infer_expr_type(&rhs)?;
+        // A caught value has no member-wise `Json` form; read it through the carrier adapter
+        // first (`catch (e) { e && e.message }`).
+        let carrier = crate::caught_exception_carrier_type();
+        if lhs_type == carrier {
+            lhs = self.caught_carrier_as_json(lhs)?;
+            lhs_type = HirType::Json;
+        }
+        if rhs_type == carrier {
+            rhs = self.caught_carrier_as_json(rhs)?;
+            rhs_type = HirType::Json;
+        }
         if lhs_type == HirType::JsValue && rhs_type != HirType::JsValue {
             lhs = HirExpr::Call(
                 Box::new(HirExpr::Var("readDynamicValue".to_string())),
@@ -331,8 +351,39 @@ impl<'a> FnLowerer<'a> {
             lhs_type = HirType::Json;
         }
         if lhs_type != rhs_type && lhs_type != HirType::Json {
-            return Err(format!(
-                "logical operands have incompatible types {lhs_type:?} and {rhs_type:?}"
+            return self.lower_mixed_logical_expr(lhs, lhs_type, rhs, rhs_type, is_and);
+        }
+        // Boolean logical expressions always return a boolean, so they can
+        // be lowered directly to a lazy conditional. Binding the left value
+        // in a temporary lambda here captures every free value in the right
+        // branch, including JsValue handles that are not evaluated on the
+        // short-circuit path.
+        if lhs_type == HirType::Bool && rhs_type == HirType::Bool {
+            let condition = self.truthiness_expr(lhs, &lhs_type)?;
+            let (then_value, else_value) = if is_and {
+                (rhs, HirExpr::Lit(HirLit::Bool(false)))
+            } else {
+                (HirExpr::Lit(HirLit::Bool(true)), rhs)
+            };
+            return Ok(HirExpr::Conditional(
+                Box::new(condition),
+                Box::new(then_value),
+                Box::new(else_value),
+                HirType::Bool,
+            ));
+        }
+        // A plain variable needs no bound temporary: evaluating it twice is
+        // unobservable (the branch not taken never runs the right operand),
+        // and the binding lambda would capture -- and claim -- every dynamic
+        // handle the right operand uses even when it is short-circuited.
+        if matches!(&lhs, HirExpr::Var(_)) && lhs_type == rhs_type {
+            let condition = self.truthiness_expr(lhs.clone(), &lhs_type)?;
+            let (then_value, else_value) = if is_and { (rhs, lhs) } else { (lhs, rhs) };
+            return Ok(HirExpr::Conditional(
+                Box::new(condition),
+                Box::new(then_value),
+                Box::new(else_value),
+                lhs_type,
             ));
         }
         let name = format!("__thaw_logical_left_{}", self.next_binding);
@@ -349,6 +400,56 @@ impl<'a> FnLowerer<'a> {
             (rhs, left_value)
         } else {
             (left_value, rhs)
+        };
+        let result = HirExpr::Block(vec![HirStmt::If(
+            condition,
+            vec![HirStmt::Return(Some(then_value))],
+            vec![HirStmt::Return(Some(else_value))],
+        )]);
+        self.wrap_call_argument_bindings(result, &[(name, lhs_type, lhs)])
+    }
+
+    /// `a && b` / `a || b` evaluate to one of the two operands unchanged, so
+    /// operands of different static types (`flag && count`) yield the union of
+    /// both types. This keeps the JS value; it does not narrow like TypeScript's
+    /// `false | number`.
+    fn lower_mixed_logical_expr(
+        &mut self,
+        lhs: HirExpr,
+        lhs_type: HirType,
+        rhs: HirExpr,
+        rhs_type: HirType,
+        is_and: bool,
+    ) -> Result<HirExpr, String> {
+        let mut members = Vec::new();
+        for ty in [&lhs_type, &rhs_type] {
+            let flat = match ty {
+                HirType::Union(inner) => inner.clone(),
+                other => vec![other.clone()],
+            };
+            for member in flat {
+                if !members.contains(&member) {
+                    members.push(member);
+                }
+            }
+        }
+        if members.len() < 2 {
+            return Err(format!(
+                "logical operands have incompatible types {lhs_type:?} and {rhs_type:?}"
+            ));
+        }
+        let union = HirType::Union(members);
+        let name = format!("__thaw_logical_left_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(name.clone(), lhs_type.clone());
+        let left = HirExpr::Var(name.clone());
+        let condition = self.truthiness_expr(left.clone(), &lhs_type)?;
+        let left_value = self.coerce_to_declared(&union, left)?;
+        let right_value = self.coerce_to_declared(&union, rhs)?;
+        let (then_value, else_value) = if is_and {
+            (right_value, left_value)
+        } else {
+            (left_value, right_value)
         };
         let result = HirExpr::Block(vec![HirStmt::If(
             condition,
@@ -778,6 +879,23 @@ impl<'a> FnLowerer<'a> {
         self.wrap_call_argument_bindings(result, &[(name, lhs_type, lhs)])
     }
 
+    /// ToString of an operand (template substitution, implicit concatenation):
+    /// unlike a property-key conversion, a Symbol operand throws a TypeError.
+    fn coerce_operand_to_string(&mut self, value: HirExpr) -> Result<HirExpr, String> {
+        if self.infer_expr_type(&value)? == HirType::Symbol {
+            return Ok(HirExpr::EvalThen(
+                Box::new(value),
+                Box::new(HirExpr::ThrowValue(
+                    Box::new(HirExpr::Lit(HirLit::Str(
+                        "\u{1}TypeError\u{1}Cannot convert a Symbol value to a string".into(),
+                    ))),
+                    Box::new(HirExpr::Lit(HirLit::Str(String::new()))),
+                )),
+            ));
+        }
+        self.coerce_primitive_to_string(value)
+    }
+
     fn coerce_primitive_to_string(&mut self, value: HirExpr) -> Result<HirExpr, String> {
         match self.infer_expr_type(&value)? {
             HirType::Str => Ok(value),
@@ -809,8 +927,17 @@ impl<'a> FnLowerer<'a> {
                 Box::new(HirExpr::Var("__thaw_js_handle_to_string".to_string())),
                 vec![value],
             )),
-            HirType::Null => Ok(HirExpr::Lit(HirLit::Str("null".to_string()))),
-            HirType::Undefined => Ok(HirExpr::Lit(HirLit::Str("undefined".to_string()))),
+            // The operand is a constant, but evaluating it may still have effects.
+            HirType::Null | HirType::Undefined => {
+                let text = HirExpr::Lit(HirLit::Str(
+                    if matches!(self.infer_expr_type(&value)?, HirType::Null) { "null" } else { "undefined" }.to_string(),
+                ));
+                if matches!(value, HirExpr::Lit(_) | HirExpr::Var(_) | HirExpr::UnionValue(..)) {
+                    Ok(text)
+                } else {
+                    Ok(HirExpr::Block(vec![HirStmt::Expr(value), HirStmt::Return(Some(text))]))
+                }
+            }
             HirType::Optional(payload) => {
                 let optional_type = HirType::Optional(payload.clone());
                 let name = format!("__thaw_string_optional_{}", self.next_binding);
@@ -883,12 +1010,45 @@ impl<'a> FnLowerer<'a> {
                 self.next_binding += 1;
                 self.scope.insert(name.clone(), union_type.clone());
                 let mut statements = Vec::with_capacity(members.len());
+                let is_carrier = HirType::Union(members.clone()) == crate::caught_exception_carrier_type();
                 for index in 0..members.len() {
+                    // A caught object / Json / live JS value (carrier members 6..=9): read it through
+                    // the same live Json view `.message` uses, so `String(e)` / `e.toString()` of a
+                    // class extending `Error` is `Name: message` rather than `[object Object]`.
+                    if is_carrier && (6..=9).contains(&index) {
+                        let live = self.caught_carrier_as_json(HirExpr::Var(name.clone()))?;
+                        let part = HirExpr::Call(
+                            Box::new(HirExpr::Var("__thaw_json_error_to_string".to_string())),
+                            vec![live],
+                        );
+                        if index + 1 == members.len() {
+                            statements.push(HirStmt::Return(Some(part)));
+                        } else {
+                            statements.push(HirStmt::If(
+                                HirExpr::BinOp(
+                                    BinOp::EqEqEq,
+                                    Box::new(HirExpr::UnionTag(
+                                        Box::new(HirExpr::Var(name.clone())),
+                                        members.clone(),
+                                    )),
+                                    Box::new(HirExpr::Lit(HirLit::F64(index as f64))),
+                                ),
+                                vec![HirStmt::Return(Some(part))],
+                                Vec::new(),
+                            ));
+                        }
+                        continue;
+                    }
                     let part = self.coerce_primitive_to_string(HirExpr::UnionValue(
                         Box::new(HirExpr::Var(name.clone())),
                         index,
                         members.clone(),
                     ))?;
+                    // A caught `Error` travels as a framed string (carrier member 3);
+                    // its string form is `Name: message`, a plain string is unchanged.
+                    let part = if index == 3 && is_carrier {
+                        HirExpr::Call(Box::new(HirExpr::Var("__thaw_error_to_string".to_string())), vec![part])
+                    } else { part };
                     if index + 1 == members.len() {
                         statements.push(HirStmt::Return(Some(part)));
                     } else {
@@ -1103,6 +1263,45 @@ impl<'a> FnLowerer<'a> {
                     None => Ok(result),
                 }
             }
+            // A caught native value (tags 20-29) carries no contents, only its
+            // category: Map/Set/WeakMap/WeakSet/Promise have a fixed
+            // `Object.prototype.toString` tag; Array/Bytes/Tuple would need a
+            // throw-time snapshot and fail explicitly when actually reached.
+            HirType::NativeException => {
+                let tag_name = "__thaw_string_native_tag".to_string();
+                let tag = HirExpr::Var(tag_name.clone());
+                let mut body = HirExpr::ThrowValue(
+                    Box::new(HirExpr::Lit(HirLit::Str(
+                        "caught native value cannot be converted to a string".into(),
+                    ))),
+                    Box::new(HirExpr::Lit(HirLit::Str(String::new()))),
+                );
+                for (tag_value, text) in [
+                    (29, "[object Promise]"), (26, "[object WeakSet]"), (25, "[object Set]"),
+                    (24, "[object WeakMap]"), (23, "[object Map]"), (28, "function () { [native code] }"),
+                ] {
+                    body = HirExpr::Conditional(
+                        Box::new(HirExpr::BinOp(
+                            BinOp::EqEqEq, Box::new(tag.clone()),
+                            Box::new(HirExpr::Lit(HirLit::I64(tag_value))),
+                        )),
+                        Box::new(HirExpr::Lit(HirLit::Str(text.into()))),
+                        Box::new(body),
+                        HirType::Str,
+                    );
+                }
+                Ok(HirExpr::Call(
+                    Box::new(HirExpr::Lambda(
+                        Vec::new(),
+                        vec![HirParam { name: tag_name, ty: HirType::I64 }],
+                        HirType::Str, Box::new(body),
+                    )),
+                    vec![HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_native_exception_tag".to_string())),
+                        vec![value],
+                    )],
+                ))
+            }
             other => Err(format!(
                 "string concatenation cannot convert native type {other:?}"
             )),
@@ -1250,6 +1449,8 @@ impl<'a> FnLowerer<'a> {
     fn lower_strict_equality(&mut self, lhs: HirExpr, rhs: HirExpr) -> Result<HirExpr, String> {
         let lhs_type = self.infer_expr_type(&lhs)?;
         let rhs_type = self.infer_expr_type(&rhs)?;
+        let source_lhs_type = lhs_type.clone();
+        let source_rhs_type = rhs_type.clone();
         // The sparse-array index check needs the original TypedIndex shape.
         // Its helper binds the index expression first and then the undefined
         // operand, so it remains a separate source-order-preserving path.
@@ -1274,6 +1475,34 @@ impl<'a> FnLowerer<'a> {
             self.scope.insert(name.clone(), lhs_type.clone());
             return self.wrap_call_argument_bindings(result, &[(name, lhs_type, lhs)]);
         }
+        let dynamic_nullish_literal = if lhs_type == HirType::JsValue
+            && matches!(&rhs, HirExpr::Lit(HirLit::Null | HirLit::Undefined))
+        {
+            Some(matches!(&rhs, HirExpr::Lit(HirLit::Null)))
+        } else if rhs_type == HirType::JsValue
+            && matches!(&lhs, HirExpr::Lit(HirLit::Null | HirLit::Undefined))
+        {
+            Some(matches!(&lhs, HirExpr::Lit(HirLit::Null)))
+        } else {
+            None
+        };
+        if let Some(compare_null) = dynamic_nullish_literal {
+            let value = if lhs_type == HirType::JsValue { lhs } else { rhs };
+            // Evaluate the live operand before the bootstrap helper's global lookup.
+            let name = format!("__thaw_strict_dynamic_nullish_{}", self.next_binding);
+            self.next_binding += 1;
+            self.scope.insert(name.clone(), HirType::JsValue);
+            let bound = HirExpr::Var(name.clone());
+            let result = if compare_null {
+                self.dynamic_value_is_null(bound.clone())
+            } else {
+                self.dynamic_value_is_undefined(bound)
+            };
+            return self.wrap_call_argument_bindings(
+                result,
+                &[(name, HirType::JsValue, value)],
+            );
+        }
         let lhs_name = format!("__thaw_strict_left_{}", self.next_binding);
         self.next_binding += 1;
         let rhs_name = format!("__thaw_strict_right_{}", self.next_binding);
@@ -1282,10 +1511,105 @@ impl<'a> FnLowerer<'a> {
         self.scope.insert(rhs_name.clone(), rhs_type.clone());
         let left = HirExpr::Var(lhs_name.clone());
         let right = HirExpr::Var(rhs_name.clone());
+        let caught_identity = Self::caught_object_identity(&left, &lhs_type, &right, &rhs_type)
+            .or_else(|| Self::caught_object_identity(&right, &rhs_type, &left, &lhs_type));
+        let carrier_type = crate::caught_exception_carrier_type();
+        let carrier_members = match &carrier_type {
+            HirType::Union(members) => members.clone(),
+            _ => unreachable!("caught exception carrier must remain a union"),
+        };
+        let native_exception_test = |value: &HirExpr, ty: &HirType| {
+            (ty == &carrier_type).then(|| {
+                HirExpr::BinOp(
+                    BinOp::EqEqEq,
+                    Box::new(HirExpr::UnionTag(
+                        Box::new(value.clone()),
+                        carrier_members.clone(),
+                    )),
+                    Box::new(HirExpr::Lit(HirLit::F64(9.0))),
+                )
+            })
+        };
+        let lhs_native_test = native_exception_test(&left, &lhs_type);
+        let rhs_native_test = native_exception_test(&right, &rhs_type);
+        let native_exception_guard = match (lhs_native_test, rhs_native_test) {
+            (Some(lhs), Some(rhs)) => Some(Self::strict_if(
+                lhs,
+                HirExpr::Lit(HirLit::Bool(true)),
+                rhs,
+            )),
+            (Some(test), None) | (None, Some(test)) => Some(test),
+            (None, None) => None,
+        };
+        // Native exception values have no general Json identity projection.
+        // Keep the established native-function owner comparison for this
+        // active carrier member, and make other native-vs-typed comparisons
+        // false without attempting a lossy or throwing Json conversion.
+        let native_exception_result = if lhs_type == carrier_type && rhs_type == carrier_type {
+            // Compare both original carrier operands in the native union
+            // path. Its active NativeException member reaches
+            // thaw_exception_native_same, which compares provenance owner
+            // identity instead of a lossy Json projection.
+            Some(HirExpr::UnionIsEqual(
+                Box::new(left.clone()),
+                Box::new(right.clone()),
+                carrier_members.clone(),
+            ))
+        } else if lhs_type == carrier_type
+            && Self::contains_function_value(&rhs_type)
+        {
+            Some(self.function_present_pair(
+                HirExpr::UnionValue(Box::new(left.clone()), 9, carrier_members.clone()),
+                &HirType::NativeException,
+                right.clone(),
+                &rhs_type,
+                true,
+            )?)
+        } else if rhs_type == carrier_type && Self::contains_function_value(&lhs_type) {
+            Some(self.function_present_pair(
+                left.clone(),
+                &lhs_type,
+                HirExpr::UnionValue(Box::new(right.clone()), 9, carrier_members.clone()),
+                &HirType::NativeException,
+                true,
+            )?)
+        } else {
+            None
+        };
+        // Preserve the carrier's native allocation identity before adapting it.
+        // All other strict comparisons must compare its active original value,
+        // not the tagged carrier record itself.
+        let (left, right, lhs_type, rhs_type) = if caught_identity.is_some() {
+            (left, right, lhs_type, rhs_type)
+        } else {
+            let mut left_type = lhs_type;
+            let mut right_type = rhs_type;
+            let left = if left_type == carrier_type {
+                left_type = HirType::Json;
+                self.caught_carrier_as_json(left)?
+            } else {
+                left
+            };
+            let right = if right_type == carrier_type {
+                right_type = HirType::Json;
+                self.caught_carrier_as_json(right)?
+            } else {
+                right
+            };
+            (left, right, left_type, right_type)
+        };
         let tagged_function_pair = Self::contains_function_value(&lhs_type)
             || Self::contains_function_value(&rhs_type);
-        let base = if tagged_function_pair {
+        let left_for_observable_absence = left.clone();
+        let right_for_observable_absence = right.clone();
+        let base = if let Some(identity) = caught_identity {
+            identity
+        } else if tagged_function_pair {
             self.function_present_pair(left.clone(), &lhs_type, right.clone(), &rhs_type, true)?
+        } else if let Some(result) = self.strict_optional_json_pair(
+            left.clone(), &lhs_type, right.clone(), &rhs_type,
+        )? {
+            result
         } else if let Some(result) =
             self.lower_optional_undefined_equality(left.clone(), right.clone())? {
             result
@@ -1314,9 +1638,9 @@ impl<'a> FnLowerer<'a> {
         } else if matches!(&rhs_type, HirType::Function(_, _) | HirType::CallableFunction(..))
             && lhs_type == HirType::Undefined {
             Self::function_pointer_is_undefined(right, &rhs_type)
-        } else if lhs_type == rhs_type {
-            HirExpr::BinOp(BinOp::EqEqEq, Box::new(left), Box::new(right))
-        } else if Self::strict_reference_type(&lhs_type) && Self::strict_reference_type(&rhs_type) {
+        } else if lhs_type == rhs_type
+            || Self::strict_reference_type(&lhs_type) && Self::strict_reference_type(&rhs_type)
+        {
             HirExpr::BinOp(BinOp::EqEqEq, Box::new(left), Box::new(right))
         } else {
             HirExpr::Lit(HirLit::Bool(false))
@@ -1339,8 +1663,8 @@ impl<'a> FnLowerer<'a> {
                     Box::new(right_status.clone()), Box::new(zero()))),
                 Box::new(HirExpr::Lit(HirLit::Bool(false))), HirType::Bool,
             );
-            let left_status_expr = self.function_observable_absence(left.clone(), &lhs_type);
-            let right_status_expr = self.function_observable_absence(right.clone(), &rhs_type);
+            let left_status_expr = self.function_observable_absence(left_for_observable_absence, &lhs_type);
+            let right_status_expr = self.function_observable_absence(right_for_observable_absence, &rhs_type);
             self.wrap_call_argument_bindings(
                 HirExpr::Conditional(Box::new(both_present), Box::new(base),
                     Box::new(HirExpr::BinOp(BinOp::EqEqEq,
@@ -1349,7 +1673,88 @@ impl<'a> FnLowerer<'a> {
                   (right_status_name, HirType::F64, right_status_expr)],
             )?
         } else { base };
-        self.wrap_call_argument_bindings(result, &[(lhs_name, lhs_type, lhs), (rhs_name, rhs_type, rhs)])
+        // Keep native-exception dispatch outside observable-absence checks too:
+        // those checks may inspect the Json projection of the normal branch.
+        let result = if let Some(guard) = native_exception_guard {
+            Self::strict_if(
+                guard,
+                native_exception_result.unwrap_or(HirExpr::Lit(HirLit::Bool(false))),
+                result,
+            )
+        } else {
+            result
+        };
+        self.wrap_call_argument_bindings(result, &[
+            (lhs_name, source_lhs_type, lhs),
+            (rhs_name, source_rhs_type, rhs),
+        ])
+    }
+
+    /// Compare an exact Optional<Json> only after checking presence. Map.get
+    /// uses this representation to distinguish a missing key from a stored
+    /// Json undefined while preserving the existing Json/live comparison for
+    /// the present payload.
+    fn strict_optional_json_pair(
+        &mut self,
+        left: HirExpr,
+        left_type: &HirType,
+        right: HirExpr,
+        right_type: &HirType,
+    ) -> Result<Option<HirExpr>, String> {
+        if matches!(left_type, HirType::Optional(payload) if payload.as_ref() == &HirType::Json) {
+            let present = self.lower_strict_equality(
+                HirExpr::OptionalValue(Box::new(left.clone()), HirType::Json),
+                right.clone(),
+            )?;
+            let absent = self.lower_strict_equality(
+                HirExpr::Lit(HirLit::Undefined),
+                right,
+            )?;
+            return Ok(Some(Self::strict_if(
+                HirExpr::OptionalIsNone(Box::new(left), HirType::Json),
+                absent,
+                present,
+            )));
+        }
+        if matches!(right_type, HirType::Optional(payload) if payload.as_ref() == &HirType::Json) {
+            let present = self.lower_strict_equality(
+                left.clone(),
+                HirExpr::OptionalValue(Box::new(right.clone()), HirType::Json),
+            )?;
+            let absent = self.lower_strict_equality(
+                left,
+                HirExpr::Lit(HirLit::Undefined),
+            )?;
+            return Ok(Some(Self::strict_if(
+                HirExpr::OptionalIsNone(Box::new(right), HirType::Json),
+                absent,
+                present,
+            )));
+        }
+        Ok(None)
+    }
+
+    /// `caught === original` for a thrown native object: the carrier keeps the owner pointer of the
+    /// original (member 6), so identity is the active tag plus pointer equality with that object.
+    fn caught_object_identity(
+        carrier: &HirExpr, carrier_type: &HirType, object: &HirExpr, object_type: &HirType,
+    ) -> Option<HirExpr> {
+        let carrier_members = match carrier_type {
+            HirType::Union(members) if *carrier_type == crate::caught_exception_carrier_type() => members,
+            _ => return None,
+        };
+        if !matches!(object_type, HirType::Object(fields) if !fields.is_empty()) {
+            return None;
+        }
+        Some(Self::strict_if(
+            HirExpr::BinOp(BinOp::EqEqEq,
+                Box::new(HirExpr::UnionTag(Box::new(carrier.clone()), carrier_members.clone())),
+                Box::new(HirExpr::Lit(HirLit::F64(6.0)))),
+            HirExpr::BinOp(BinOp::EqEqEq,
+                Box::new(HirExpr::UnionValue(Box::new(carrier.clone()), 6, carrier_members.clone())),
+                Box::new(object.clone())),
+            HirExpr::Lit(HirLit::Bool(false)),
+        ))
     }
 
     fn strict_if(condition: HirExpr, yes: HirExpr, no: HirExpr) -> HirExpr {
@@ -1388,6 +1793,13 @@ impl<'a> FnLowerer<'a> {
     }
 
     fn strict_json_vs_native(&mut self, json: HirExpr, native: HirExpr, ty: &HirType) -> Result<HirExpr, String> {
+        if matches!(ty, HirType::Object(fields)
+            if !fields.iter().any(|(name, _)| name.starts_with("__thaw_class_identity_\u{1e}"))
+                && Self::fixed_object_supports_live_projection(ty))
+        {
+            let projected = self.coerce_to_declared(&HirType::Json, native)?;
+            return self.strict_json_pair(json, projected);
+        }
         let handle = Self::strict_json_handle(json.clone());
         let live = self.strict_handle_vs_native(Self::strict_handle_value(handle.clone()), native.clone(), ty)?;
         let plain = match ty {
@@ -1438,11 +1850,14 @@ impl<'a> FnLowerer<'a> {
         let undefined = self.call_dynamic_strict_comparator(
             "__thaw_strict_equal_undefined_dynamic", Vec::new(), vec![handle.clone()])?;
         let null = self.call_dynamic_strict_comparator(
-            "__thaw_strict_equal_null_dynamic", Vec::new(), vec![handle])?;
-        let false_value = HirExpr::Lit(HirLit::Bool(false));
+            "__thaw_strict_equal_null_dynamic", Vec::new(), vec![handle.clone()])?;
+        // A native container reaches the JS realm as a shadow tagged with its origin serial, so a
+        // live JS object is `===` to it exactly when it is that container's shadow.
+        let identity = self.call_dynamic_strict_comparator(
+            "__thaw_strict_equal_dynamic", vec![json.clone()], vec![handle])?;
         let object = Self::strict_if(
             HirExpr::Call(Box::new(HirExpr::Var("__thaw_json_is_null".into())), vec![json]),
-            null, false_value);
+            null, identity);
         let native = Self::strict_if(test_kind("string"), string,
             Self::strict_if(test_kind("number"), number,
             Self::strict_if(test_kind("boolean"), boolean,
@@ -1599,6 +2014,31 @@ impl<'a> FnLowerer<'a> {
         }
         if left_fn || right_fn {
             let other = if left_fn { rhs_ty } else { lhs_ty };
+            // A caught native function keeps its original owner in the exception descriptor;
+            // identity is the checked projection back to that owner.
+            if strict && matches!(other, HirType::NativeException) {
+                let (descriptor, function, function_ty) = if left_fn {
+                    (rhs, lhs, lhs_ty)
+                } else {
+                    (lhs, rhs, rhs_ty)
+                };
+                let tag = crate::native_exception_tag(function_ty).ok_or("function exception has no native category")?;
+                let layout = crate::native_exception_layout_token(function_ty)
+                    .ok_or("function exception has no layout token")?;
+                let owner = HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_native_exception_owner".into())),
+                    vec![descriptor, HirExpr::Lit(HirLit::I64(tag as i64)), HirExpr::Lit(HirLit::Str(layout))],
+                );
+                let present = HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_native_exception_owner_present".into())),
+                    vec![owner.clone()],
+                );
+                return Ok(choose(present,
+                    HirExpr::BinOp(BinOp::EqEqEq,
+                        Box::new(HirExpr::TypedClosure(function_ty.clone(), Box::new(owner))),
+                        Box::new(function)),
+                    HirExpr::Lit(HirLit::Bool(false))));
+            }
             if strict {
                 return if matches!(other, HirType::Json | HirType::JsValue | HirType::Dictionary(_)) {
                     self.function_dynamic_pair(lhs, lhs_ty, rhs, rhs_ty, true)
@@ -1696,6 +2136,59 @@ impl<'a> FnLowerer<'a> {
     ) -> Result<HirExpr, String> {
         let lhs_type = self.infer_expr_type(&lhs)?;
         let rhs_type = self.infer_expr_type(&rhs)?;
+        if lhs_type == HirType::Json && rhs_type == HirType::Json {
+            // Two dynamic values may hold different primitive kinds, so `==`
+            // is not `===`: nullish pairs are equal and a string, number or
+            // boolean compares numerically against a different kind.
+            let left_name = format!("__thaw_loose_json_left_{}", self.next_binding);
+            let right_name = format!("__thaw_loose_json_right_{}", self.next_binding);
+            self.next_binding += 1;
+            self.scope.insert(left_name.clone(), HirType::Json);
+            self.scope.insert(right_name.clone(), HirType::Json);
+            let left = HirExpr::Var(left_name.clone());
+            let right = HirExpr::Var(right_name.clone());
+            let typeof_of = |value: &HirExpr| HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_json_typeof".into())),
+                vec![value.clone()],
+            );
+            let is_kind = |value: &HirExpr, kind: &str| HirExpr::BinOp(
+                BinOp::EqEqEq,
+                Box::new(typeof_of(value)),
+                Box::new(HirExpr::Lit(HirLit::Str(kind.into()))),
+            );
+            let strict = HirExpr::BinOp(
+                BinOp::EqEqEq, Box::new(left.clone()), Box::new(right.clone()),
+            );
+            let nullish = |value: &HirExpr| HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_json_is_nullish".into())),
+                vec![value.clone()],
+            );
+            let both_nullish = self.lower_logical_expr(nullish(&left), nullish(&right), true)?;
+            let mut primitive_pairs: Option<HirExpr> = None;
+            for (a, b) in [
+                ("string", "number"), ("number", "string"),
+                ("boolean", "number"), ("number", "boolean"),
+                ("boolean", "string"), ("string", "boolean"),
+            ] {
+                let pair = self.lower_logical_expr(is_kind(&left, a), is_kind(&right, b), true)?;
+                primitive_pairs = Some(match primitive_pairs {
+                    None => pair,
+                    Some(previous) => self.lower_logical_expr(previous, pair, false)?,
+                });
+            }
+            let numeric_equal = HirExpr::BinOp(
+                BinOp::EqEqEq,
+                Box::new(self.coerce_primitive_to_number(left.clone())?),
+                Box::new(self.coerce_primitive_to_number(right.clone())?),
+            );
+            let mixed = self.lower_logical_expr(primitive_pairs.expect("pairs"), numeric_equal, true)?;
+            let equal = self.lower_logical_expr(strict, both_nullish, false)?;
+            let equal = self.lower_logical_expr(equal, mixed, false)?;
+            return self.wrap_call_argument_bindings(
+                equal,
+                &[(left_name, HirType::Json, lhs), (right_name, HirType::Json, rhs)],
+            );
+        }
         if lhs_type == rhs_type {
             return Ok(HirExpr::BinOp(BinOp::EqEqEq, Box::new(lhs), Box::new(rhs)));
         }
@@ -1882,6 +2375,29 @@ impl<'a> FnLowerer<'a> {
         self.coerce_primitive_to_number_impl(value, false)
     }
 
+    fn dynamic_value_to_number(
+        &mut self,
+        value: HirExpr,
+        helper_name: &str,
+    ) -> Result<HirExpr, String> {
+        // Keep numeric conversion on the live QuickJS value: JSON graph
+        // projection drops symbol-keyed Symbol.toPrimitive methods.
+        let value = self.coerce_to_declared(&HirType::Json, value)?;
+        let argument = self.coerce_to_declared(
+            &HirType::Json,
+            HirExpr::ArrayLit(vec![value]),
+        )?;
+        let helper = HirExpr::Call(
+            Box::new(HirExpr::Var("getDynamicValue".into())),
+            vec![HirExpr::Lit(HirLit::Str(helper_name.into()))],
+        );
+        let result = HirExpr::Call(
+            Box::new(HirExpr::Var("callDynamicValue".into())),
+            vec![helper, argument],
+        );
+        Ok(HirExpr::JsonAsNumber(Box::new(result)))
+    }
+
     // Binary `+` needs to build its numeric branch even when a different
     // runtime branch concatenates a string. Keep BigInt/Symbol failures local
     // to that branch; ordinary numeric coercions retain their existing ABI.
@@ -1919,10 +2435,7 @@ impl<'a> FnLowerer<'a> {
                 vec![HirExpr::TypedClosure(HirType::Str, Box::new(value))],
             )),
             HirType::Json => Ok(HirExpr::JsonAsNumber(Box::new(value))),
-            HirType::JsValue => Ok(HirExpr::JsonAsNumber(Box::new(HirExpr::Call(
-                Box::new(HirExpr::Var("readDynamicValue".to_string())),
-                vec![value],
-            )))),
+            HirType::JsValue => self.dynamic_value_to_number(value, "__thaw_unary_plus"),
             HirType::Object(fields) => {
                 // Only the private Date layout follows Date valueOf
                 // semantics. A user object with a timestamp property
@@ -2114,22 +2627,21 @@ impl<'a> FnLowerer<'a> {
         let empty_arguments = self.wrap_native_value_as_json(
             HirExpr::ArrayLit(Vec::new()), HirType::Array(Box::new(HirType::Json)),
         )?;
-        let result = HirExpr::Call(
-            Box::new(HirExpr::Var("readDynamicValue".into())),
-            vec![HirExpr::Call(
-                Box::new(HirExpr::Var("callDynamicValueMixedHandle".into())),
-                vec![
-                    HirExpr::Call(
-                        Box::new(HirExpr::Var("getDynamicValue".into())),
-                        vec![HirExpr::Lit(HirLit::Str("__thaw_dynamic_add".into()))],
-                    ),
-                    empty_arguments,
-                    HirExpr::ArrayLit(vec![
-                        HirExpr::Var(lhs_handle.clone()), HirExpr::Var(rhs_handle.clone()),
-                    ]),
-                ],
-            )],
-        );
+        // A compiled-result read (`readDynamicValue`) refuses a BigInt like
+        // `JSON.stringify`; the host-lease wrapping keeps it a Json BigInt.
+        let result = HirExpr::JsValueAsJson(Box::new(HirExpr::Call(
+            Box::new(HirExpr::Var("callDynamicValueMixedHandle".into())),
+            vec![
+                HirExpr::Call(
+                    Box::new(HirExpr::Var("getDynamicValue".into())),
+                    vec![HirExpr::Lit(HirLit::Str("__thaw_dynamic_add".into()))],
+                ),
+                empty_arguments,
+                HirExpr::ArrayLit(vec![
+                    HirExpr::Var(lhs_handle.clone()), HirExpr::Var(rhs_handle.clone()),
+                ]),
+            ],
+        )));
         let lhs_live = self.add_bigint_live_handle(lhs)?;
         let rhs_live = self.add_bigint_live_handle(rhs)?;
         self.wrap_call_argument_bindings(result, &[
@@ -2568,6 +3080,7 @@ impl<'a> FnLowerer<'a> {
     /// (a live handle), which `coerce_strict_equality_operands` would
     /// reject as incompatible: equal exactly when their decimal digits
     /// agree.
+    #[allow(dead_code)]
     fn lower_mixed_bigint_equality(
         &mut self,
         lhs: HirExpr,
@@ -2639,6 +3152,57 @@ impl<'a> FnLowerer<'a> {
                 )),
                 vec![lhs, rhs],
             ));
+        }
+        // Dynamic operands compare as strings when both runtime values are
+        // strings (code-unit order) and numerically otherwise.
+        let string_or_json = |ty: &HirType| matches!(ty, HirType::Str | HirType::Json);
+        if (lhs_type == HirType::Json || rhs_type == HirType::Json)
+            && string_or_json(&lhs_type)
+            && string_or_json(&rhs_type)
+        {
+            let left_name = format!("__thaw_relational_left_{}", self.next_binding);
+            let right_name = format!("__thaw_relational_right_{}", self.next_binding);
+            self.next_binding += 1;
+            self.scope.insert(left_name.clone(), lhs_type.clone());
+            self.scope.insert(right_name.clone(), rhs_type.clone());
+            let left = HirExpr::Var(left_name.clone());
+            let right = HirExpr::Var(right_name.clone());
+            let both_strings = {
+                let left_is = self.add_operand_has_primitive_type(left.clone(), &lhs_type, "string");
+                let right_is = self.add_operand_has_primitive_type(right.clone(), &rhs_type, "string");
+                self.lower_logical_expr(left_is, right_is, true)?
+            };
+            let text = |value: HirExpr, ty: &HirType| {
+                if *ty == HirType::Json { HirExpr::JsonAsString(Box::new(value)) } else { value }
+            };
+            let string_compare = HirExpr::Call(
+                Box::new(HirExpr::Var(
+                    match op {
+                        BinOp::Lt => "__thaw_string_lt",
+                        BinOp::Gt => "__thaw_string_gt",
+                        BinOp::LtEq => "__thaw_string_lte",
+                        BinOp::GtEq => "__thaw_string_gte",
+                        _ => unreachable!(),
+                    }
+                    .to_string(),
+                )),
+                vec![text(left.clone(), &lhs_type), text(right.clone(), &rhs_type)],
+            );
+            let numeric = HirExpr::BinOp(
+                op,
+                Box::new(self.coerce_primitive_to_number(left)?),
+                Box::new(self.coerce_primitive_to_number(right)?),
+            );
+            let result = HirExpr::Conditional(
+                Box::new(both_strings),
+                Box::new(string_compare),
+                Box::new(numeric),
+                HirType::Bool,
+            );
+            return self.wrap_call_argument_bindings(
+                result,
+                &[(left_name, lhs_type, lhs), (right_name, rhs_type, rhs)],
+            );
         }
         Ok(HirExpr::BinOp(
             op,

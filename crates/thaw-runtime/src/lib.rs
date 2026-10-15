@@ -15,6 +15,8 @@
 //!
 //! Known limitations, acceptable for what this talks to: no TLS and one
 //! request per TCP connection.
+#![allow(clippy::missing_safety_doc)]
+#![cfg_attr(test, allow(unused_unsafe))]
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
@@ -112,7 +114,7 @@ pub unsafe extern "C" fn thaw_runtime_exception_report_text(
     if error.is_null() {
         return std::ptr::null_mut();
     }
-    let text: Vec<u8> = if error == native_text {
+    let text: Vec<u8> = if error == native_text || is_detached_report_text(error) {
         unsafe { CStr::from_ptr(error) }.to_bytes().to_vec()
     } else {
         match tag {
@@ -132,12 +134,19 @@ struct PromiseSubscription {
     resume: PromiseResumeFn,
     frame: *mut u8,
     // Rust subscriber and ready queues are invisible to the arena scanner.
-    // Pin a suspended arena frame until its resume callback returns.
+    // Pin a suspended arena frame and callback payloads until resume returns.
     _frame_root: thaw_arena::ArenaRoot,
+    _payload_roots: Vec<thaw_arena::ArenaRoot>,
+}
+
+struct ReadyContinuation {
+    subscription: PromiseSubscription,
+    result: *const u8,
+    _result_root: thaw_arena::ArenaRoot,
 }
 
 thread_local! {
-    static READY_CONTINUATIONS: RefCell<VecDeque<(PromiseSubscription, *const u8)>> =
+    static READY_CONTINUATIONS: RefCell<VecDeque<ReadyContinuation>> =
         const { RefCell::new(VecDeque::new()) };
     static TIMERS: RefCell<Vec<PromiseTimer>> = const { RefCell::new(Vec::new()) };
     static FD_WAITS: RefCell<Vec<PromiseFdWait>> = const { RefCell::new(Vec::new()) };
@@ -252,7 +261,10 @@ static PROMISE_SETTLED_EMPTY_REASON: &[u8] = b"\0";
 
 fn fd_poll_timeout_ms(timeout: Option<Duration>) -> i32 {
     match timeout {
-        Some(duration) => duration.as_nanos().div_ceil(1_000_000).min(i32::MAX as u128) as i32,
+        Some(duration) => duration
+            .as_nanos()
+            .div_ceil(1_000_000)
+            .min(i32::MAX as u128) as i32,
         None => -1,
     }
 }
@@ -354,7 +366,10 @@ fn poll_fd_waits(timeout: Option<Duration>) -> usize {
     let mut watcher_count = 0;
     for (watcher, events) in ready_watchers {
         let registered = FD_WATCHERS.with(|watchers| {
-            watchers.borrow().iter().any(|current| current.id == watcher.id)
+            watchers
+                .borrow()
+                .iter()
+                .any(|current| current.id == watcher.id)
         });
         if registered {
             (watcher.callback)(watcher.context, events);
@@ -443,7 +458,13 @@ pub extern "C" fn thaw_runtime_run_one_event() -> bool {
 }
 
 fn enqueue_continuation(subscription: PromiseSubscription, result: *const u8) {
-    READY_CONTINUATIONS.with(|ready| ready.borrow_mut().push_back((subscription, result)));
+    READY_CONTINUATIONS.with(|ready| {
+        ready.borrow_mut().push_back(ReadyContinuation {
+            subscription,
+            result,
+            _result_root: thaw_arena::ArenaRoot::new(result as usize),
+        });
+    });
 }
 
 fn promote_due_timers() {
@@ -489,7 +510,7 @@ pub extern "C" fn thaw_runtime_poll_one() -> u8 {
     promote_due_timers();
     let io_events = poll_fd_waits(Some(Duration::ZERO));
     let next = READY_CONTINUATIONS.with(|ready| ready.borrow_mut().pop_front());
-    let Some((subscription, result)) = next else {
+    let Some(continuation) = next else {
         report_registered_unhandled_rejections();
         // A rejection listener can enqueue a continuation or another rejection.
         // Recheck after dispatch so an idle drain does not stop before that work.
@@ -500,11 +521,14 @@ pub extern "C" fn thaw_runtime_poll_one() -> u8 {
                     promise.rejected && !promise.handled && !promise.reported_unhandled
                 })
             });
-        return u8::from(io_events != 0
-            || READY_CONTINUATIONS.with(|ready| !ready.borrow().is_empty())
-            || reporting_work);
+        return u8::from(
+            io_events != 0
+                || READY_CONTINUATIONS.with(|ready| !ready.borrow().is_empty())
+                || reporting_work,
+        );
     };
-    (subscription.resume)(subscription.frame, result);
+    (continuation.subscription.resume)(continuation.subscription.frame, continuation.result);
+    drop(continuation);
     1
 }
 
@@ -588,6 +612,13 @@ pub extern "C" fn thaw_runtime_shutdown_wait() {
 pub extern "C" fn thaw_runtime_drain_detached() -> usize {
     let mut count = 0;
     while ACTIVE_PROMISE_JOINS.with(Cell::get) != 0 {
+        // Past its deadline the invocation is abandoned: the awaiting handler
+        // and its completion promise are already released, so resuming the
+        // remaining children would settle freed outputs. The caller's purge
+        // discards them instead.
+        if invocation_deadline_remaining() == Some(Duration::ZERO) {
+            break;
+        }
         if thaw_runtime_poll_one() != 0 {
             count += 1;
             continue;
@@ -715,10 +746,14 @@ pub struct ThawPromise {
     exception_i64: i64,
     exception_bool: bool,
     exception_object: *const u8,
+    exception_native: *const ExceptionProvenance,
     aggregate_errors: *const u8,
     handled: bool,
     reported_unhandled: bool,
     subscribers: Vec<PromiseSubscription>,
+    internal_references: usize,
+    references: usize,
+    external_root: Option<thaw_arena::ArenaRoot>,
 }
 
 include!("runtime/promises.rs");

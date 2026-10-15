@@ -1,4 +1,49 @@
 impl<'a> FnLowerer<'a> {
+    fn lower_split_limit(&mut self, argument: Option<&HirExpr>) -> Result<HirExpr, String> {
+        let Some(argument) = argument else {
+            return Ok(HirExpr::Lit(HirLit::F64(-1.0)));
+        };
+        let ty = self.infer_expr_type(argument)?;
+        let missing = self.number_format_is_undefined(argument.clone(), &ty);
+        let number = self.number_format_to_number(argument.clone(), &ty)?;
+        Ok(HirExpr::Conditional(
+            Box::new(missing),
+            Box::new(HirExpr::Lit(HirLit::F64(-1.0))),
+            Box::new(number),
+            HirType::F64,
+        ))
+    }
+
+    fn split_limit_is_zero(limit: HirExpr) -> HirExpr {
+        let remainder = HirExpr::BinOp(
+            BinOp::Mod,
+            Box::new(HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_math_trunc".into())),
+                vec![limit],
+            )),
+            Box::new(HirExpr::Lit(HirLit::F64(4_294_967_296.0))),
+        );
+        HirExpr::Conditional(
+            Box::new(HirExpr::BinOp(
+                BinOp::EqEqEq,
+                Box::new(remainder.clone()),
+                Box::new(HirExpr::Lit(HirLit::F64(0.0))),
+            )),
+            Box::new(HirExpr::Lit(HirLit::Bool(true))),
+            Box::new(HirExpr::Conditional(
+                Box::new(HirExpr::BinOp(
+                    BinOp::EqEqEq,
+                    Box::new(remainder.clone()),
+                    Box::new(remainder),
+                )),
+                Box::new(HirExpr::Lit(HirLit::Bool(false))),
+                Box::new(HirExpr::Lit(HirLit::Bool(true))),
+                HirType::Bool,
+            )),
+            HirType::Bool,
+        )
+    }
+
     fn lower_native_text_method(
         &mut self,
         member: &MemberExpr,
@@ -178,7 +223,19 @@ impl<'a> FnLowerer<'a> {
                         return Err("native `.normalize()` expects zero or one argument".into());
                     }
                     let form = match arguments.first() {
-                        Some(argument) => self.coerce_primitive_to_string(argument.clone())?,
+                        Some(argument) => {
+                            let argument_type = self.infer_expr_type(argument)?;
+                            let missing = self.number_format_is_undefined(
+                                argument.clone(),
+                                &argument_type,
+                            );
+                            HirExpr::Conditional(
+                                Box::new(missing),
+                                Box::new(HirExpr::Lit(HirLit::Str("NFC".into()))),
+                                Box::new(self.coerce_primitive_to_string(argument.clone())?),
+                                HirType::Str,
+                            )
+                        }
                         None => HirExpr::Lit(HirLit::Str("NFC".into())),
                     };
                     let receiver_name =
@@ -262,12 +319,7 @@ impl<'a> FnLowerer<'a> {
                     let regex_type = regex_object_type();
                     if self.infer_expr_type(&arguments[0])? == regex_type {
                         let pattern = arguments[0].clone();
-                        let limit = match arguments.get(1) {
-                            Some(argument) => {
-                                self.coerce_primitive_to_number(argument.clone())?
-                            }
-                            None => HirExpr::Lit(HirLit::F64(-1.0)),
-                        };
+                        let limit = self.lower_split_limit(arguments.get(1))?;
                         let receiver_name =
                             format!("__thaw_regex_split_receiver_{}", self.next_binding);
                         self.next_binding += 1;
@@ -346,22 +398,35 @@ impl<'a> FnLowerer<'a> {
                         bindings.push((limit_name, HirType::F64, limit));
                         return self.wrap_call_argument_bindings(result, &bindings);
                     }
-                    let separator = self.coerce_primitive_to_string(arguments[0].clone())?;
-                    let limit = match arguments.get(1) {
-                        Some(argument) => self.coerce_primitive_to_number(argument.clone())?,
-                        None => HirExpr::Lit(HirLit::F64(-1.0)),
-                    };
+                    let raw_separator = arguments[0].clone();
+                    let separator_type = self.infer_expr_type(&raw_separator)?;
+                    let separator_is_undefined =
+                        self.number_format_is_undefined(raw_separator.clone(), &separator_type);
+                    let separator = self.coerce_primitive_to_string(raw_separator)?;
+                    let limit = self.lower_split_limit(arguments.get(1))?;
                     let receiver_name = format!("__thaw_split_receiver_{}", self.next_binding);
                     self.next_binding += 1;
-                    let separator_name =
-                        format!("__thaw_split_separator_{}", self.next_binding);
+                    let separator_name = format!("__thaw_split_separator_{}", self.next_binding);
                     self.next_binding += 1;
                     let limit_name = format!("__thaw_split_limit_{}", self.next_binding);
                     self.next_binding += 1;
                     self.scope.insert(receiver_name.clone(), HirType::Str);
                     self.scope.insert(separator_name.clone(), HirType::Str);
                     self.scope.insert(limit_name.clone(), HirType::F64);
-                    let result = HirExpr::Call(
+                    let array_type = HirType::Array(Box::new(HirType::Str));
+                    let empty = HirExpr::ArrayLit(Vec::new());
+                    let whole = HirExpr::ArrayLit(vec![HirExpr::Var(receiver_name.clone())]);
+                    let undefined_result = HirExpr::Conditional(
+                        Box::new(Self::split_limit_is_zero(HirExpr::Var(limit_name.clone()))),
+                        Box::new(empty),
+                        Box::new(whole),
+                        array_type.clone(),
+                    );
+                    let undefined_result = self.wrap_call_argument_bindings(
+                        undefined_result,
+                        &[(limit_name.clone(), HirType::F64, limit.clone())],
+                    )?;
+                    let split_result = HirExpr::Call(
                         Box::new(HirExpr::Var("__thaw_string_split".into())),
                         vec![
                             HirExpr::Var(receiver_name.clone()),
@@ -369,10 +434,21 @@ impl<'a> FnLowerer<'a> {
                             HirExpr::Var(limit_name.clone()),
                         ],
                     );
+                    let split_result = self.wrap_call_argument_bindings(
+                        split_result,
+                        &[
+                            (limit_name, HirType::F64, limit),
+                            (separator_name, HirType::Str, separator),
+                        ],
+                    )?;
+                    let result = HirExpr::Conditional(
+                        Box::new(separator_is_undefined),
+                        Box::new(undefined_result),
+                        Box::new(split_result),
+                        array_type,
+                    );
                     let mut bindings = vec![(receiver_name, HirType::Str, receiver)];
                     bindings.extend(spread_bindings);
-                    bindings.push((separator_name, HirType::Str, separator));
-                    bindings.push((limit_name, HirType::F64, limit));
                     return self.wrap_call_argument_bindings(result, &bindings);
                 }
         unreachable!("instance builtin category was checked before lowering")

@@ -5,6 +5,18 @@ impl<'ctx> HirCompiler<'ctx> {
         params: &[HirType],
         ret: &HirType,
     ) -> Result<BasicValueEnum<'ctx>, String> {
+        self.compile_js_callback_from_json_spreading(json, params, ret, false)
+    }
+
+    /// `spread_last` marks a callable whose trailing native `Array` parameter is a packed
+    /// rest array: its elements are passed to JS as individual arguments.
+    fn compile_js_callback_from_json_spreading(
+        &mut self,
+        json: BasicValueEnum<'ctx>,
+        params: &[HirType],
+        ret: &HirType,
+        spread_last: bool,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
         // A decoded Function can escape through a global or capture. Tracing
         // must be enabled before module initialization allocates the closure.
         self.tracks_owned_json_roots = true;
@@ -35,8 +47,7 @@ impl<'ctx> HirCompiler<'ctx> {
         );
         // This adapter is a separate LLVM function. Its exception branch
         // must not target a catch block in the function that creates it.
-        let outer_catch_stack = std::mem::take(&mut self.catch_stack);
-        let outer_async_completion = self.active_async_completion.take();
+        let adapter_body_result: Result<(), String> = isolated_codegen_scope!(self, {
         let entry = self.context.append_basic_block(adapter, "entry");
         self.builder.position_at_end(entry);
         let environment = adapter
@@ -77,16 +88,34 @@ impl<'ctx> HirCompiler<'ctx> {
             &[arguments.into()], "own_js_callback_arguments",
         ).map_err(|error| error.to_string())?;
         let marshal_failed = self.context.append_basic_block(adapter, "js_callback_marshal_failed");
-        self.catch_stack.push(marshal_failed);
+        self.push_catch_target(marshal_failed);
         let marshalled = (|| -> Result<(), String> {
             for (index, ty) in params.iter().enumerate() {
                 let value = adapter.get_nth_param((index + 1) as u32)
                     .ok_or("JS callback adapter is missing an argument")?;
+                if let (true, true, HirType::Array(element)) = (spread_last, index + 1 == params.len(), ty) {
+                    let packed = self.compile_native_array_to_json(value.into_pointer_value(), element)?;
+                    self.builder
+                        .build_call(
+                            self.module.get_function("thaw_json_array_extend").unwrap(),
+                            &[arguments.into(), packed.into()],
+                            "spread_rest_arguments",
+                        )
+                        .map_err(|error| error.to_string())?;
+                    self.builder
+                        .build_call(
+                            self.module.get_function("thaw_json_destroy").unwrap(),
+                            &[packed.into()],
+                            "destroy_packed_rest_arguments",
+                        )
+                        .map_err(|error| error.to_string())?;
+                    continue;
+                }
                 self.compile_json_array_push_native(arguments, value, ty)?;
             }
             Ok(())
         })();
-        self.catch_stack.pop();
+        self.pop_catch_target();
         marshalled?;
         self.builder.build_call(
             self.module.get_function("thaw_json_typed_decode_scope_end").unwrap(),
@@ -163,7 +192,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 .build_return(None)
                 .map_err(|error| error.to_string())?;
         } else {
-            let result_json = self.compile_decode_quickjs_graph(value.into())?;
+            let result_json = self.compile_decode_quickjs_graph(value)?;
 
             let decoded = self.compile_typed_dynamic_result(result_json, ret)?;
             self.builder
@@ -173,9 +202,10 @@ impl<'ctx> HirCompiler<'ctx> {
         self.builder.position_at_end(marshal_failed);
         self.compile_discard_typed_decode_scope()?;
         self.build_default_return()?;
-        self.catch_stack = outer_catch_stack;
-        self.active_async_completion = outer_async_completion;
+        Ok(())
+        });
         self.builder.position_at_end(parent);
+        adapter_body_result?;
         let this_adapter = self.compile_js_callback_this_adapter(
             adapter,
             params,
@@ -262,8 +292,7 @@ impl<'ctx> HirCompiler<'ctx> {
         );
         let parent = self.builder.get_insert_block()
             .ok_or("JS callback this adapter needs an insertion block")?;
-        let outer_catch_stack = std::mem::take(&mut self.catch_stack);
-        let outer_async_completion = self.active_async_completion.take();
+        let adapter_body_result: Result<(), String> = isolated_codegen_scope!(self, {
         let entry = self.context.append_basic_block(adapter, "entry");
         let legacy = self.context.append_basic_block(adapter, "legacy_receiver");
         let graph = self.context.append_basic_block(adapter, "graph_receiver");
@@ -367,7 +396,7 @@ impl<'ctx> HirCompiler<'ctx> {
         self.builder.build_unconditional_branch(keep).map_err(|error| error.to_string())?;
         self.builder.position_at_end(keep);
         let marshal_failed = self.context.append_basic_block(adapter, "js_callback_this_marshal_failed");
-        self.catch_stack.push(marshal_failed);
+        self.push_catch_target(marshal_failed);
         let marshalled = (|| -> Result<(), String> {
             for (index, ty) in params.iter().enumerate() {
                 let value = adapter.get_nth_param((index + 2) as u32)
@@ -376,7 +405,7 @@ impl<'ctx> HirCompiler<'ctx> {
             }
             Ok(())
         })();
-        self.catch_stack.pop();
+        self.pop_catch_target();
         marshalled?;
         self.builder.build_call(
             self.module.get_function("thaw_json_typed_decode_scope_end").unwrap(),
@@ -430,16 +459,17 @@ impl<'ctx> HirCompiler<'ctx> {
                 .map_err(|error| error.to_string())?;
             self.builder.build_return(None).map_err(|error| error.to_string())?;
         } else {
-            let result_json = self.compile_decode_quickjs_graph(value.into())?;
+            let result_json = self.compile_decode_quickjs_graph(value)?;
             let decoded = self.compile_typed_dynamic_result(result_json, ret)?;
             self.builder.build_return(Some(&decoded)).map_err(|error| error.to_string())?;
         }
         self.builder.position_at_end(marshal_failed);
         self.compile_discard_typed_decode_scope()?;
         self.build_default_return()?;
-        self.catch_stack = outer_catch_stack;
-        self.active_async_completion = outer_async_completion;
+        Ok(())
+        });
         self.builder.position_at_end(parent);
+        adapter_body_result?;
         Ok(adapter)
     }
 
@@ -706,6 +736,7 @@ impl<'ctx> HirCompiler<'ctx> {
         Ok(descriptors)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn compile_value_callback_from_closure(
         &mut self,
         closure: PointerValue<'ctx>,
@@ -733,7 +764,6 @@ impl<'ctx> HirCompiler<'ctx> {
             .add_function(&callback_name, adapter_type, Some(Linkage::Internal));
         let return_block = self.builder.get_insert_block().unwrap();
         let entry = self.context.append_basic_block(adapter, "entry");
-        self.builder.position_at_end(entry);
         // `adapter`'s own body is a *separate* LLVM function from whatever
         // is currently being compiled -- if that outer compilation is
         // itself inside a user `try` block (real example: a database call
@@ -749,8 +779,8 @@ impl<'ctx> HirCompiler<'ctx> {
         // failure). `adapter` has no enclosing `try` of its own, so it
         // must see an empty catch stack (propagate/default-return on
         // failure, matching a top-level function with no active catch).
-        let outer_catch_stack = std::mem::take(&mut self.catch_stack);
-        let outer_async_completion = self.active_async_completion.take();
+        let adapter_result = isolated_codegen_scope!(self, {
+        self.builder.position_at_end(entry);
         let context = adapter.get_nth_param(0).unwrap().into_pointer_value();
         let args_string = adapter.get_nth_param(1).unwrap();
         let args_json = self
@@ -891,17 +921,38 @@ impl<'ctx> HirCompiler<'ctx> {
                 .map_err(|error| error.to_string())?
                 .try_as_basic_value()
                 .basic()
-                .unwrap();
+                .unwrap()
+                .into_pointer_value();
+            // The JS wrapper replaced every non-graph argument at a
+            // `JsValue`/function position with its own handle placeholder
+            // (see `thaw_js_register_native_callback`'s mask), so the
+            // parsed marker at *this* position is trusted by position, not
+            // by content; the std readers only accept a branded marker.
+            let argument = if !graph_mode && rest_start != Some(index)
+                && matches!(param, HirType::JsValue | HirType::Function(..) | HirType::CallableFunction(..))
+            {
+                self.builder.build_call(
+                    self.module.get_function("thaw_json_brand_wrapper").unwrap(),
+                    &[argument.into()], "brand_callback_handle_argument",
+                ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                    .ok_or("thaw_json_brand_wrapper returned no value")?.into_pointer_value()
+            } else if !graph_mode && rest_start != Some(index) && matches!(param, HirType::Json) {
+                self.builder.build_call(
+                    self.module.get_function("thaw_json_brand_handle_placeholder").unwrap(),
+                    &[argument.into()], "brand_callback_json_handle_argument",
+                ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                    .ok_or("thaw_json_brand_handle_placeholder returned no value")?.into_pointer_value()
+            } else { argument };
             argument_json.push(argument);
             self.builder.build_store(argument_slots[graph_index], argument)
                 .map_err(|error| error.to_string())?;
-            self.catch_stack.push(conversion_failed);
+            self.push_catch_target(conversion_failed);
             let converted = if method_mode && index == 0 {
                 let HirType::Object(fields) = param else {
                     return Err("native method receiver requires an object type".into());
                 };
                 let (pointer, valid) = self.query_native_object_receiver(
-                    argument.into_pointer_value(), fields,
+                    argument, fields,
                 )?;
                 let accepted = self.context.append_basic_block(adapter, "native_method_receiver_valid");
                 let rejected = self.context.append_basic_block(adapter, "native_method_receiver_invalid");
@@ -913,9 +964,9 @@ impl<'ctx> HirCompiler<'ctx> {
                 Ok(self.builder.build_int_to_ptr(pointer, ptr_type, "native_method_original_receiver")
                     .map_err(|error| error.to_string())?.into())
             } else {
-                self.compile_json_value_to_native(argument, param)
+                self.compile_json_value_to_native(argument.into(), param)
             };
-            self.catch_stack.pop();
+            self.pop_catch_target();
             let converted = converted?;
             if let Some(slot) = handle_slots[index] {
                 self.builder.build_store(slot, converted)
@@ -927,7 +978,14 @@ impl<'ctx> HirCompiler<'ctx> {
             self.module.get_function("thaw_json_typed_decode_scope_end").unwrap(),
             &[self.context.i8_type().const_zero().into()], "finish_callback_conversion_scope",
         ).map_err(|error| error.to_string())?;
-        let code_slot = if graph_mode && !method_mode { unsafe {
+        // A projected method that is a non-arrow closure over a plain native object
+        // hides its receiver from the ordinary entry (slot 0 takes only the visible
+        // parameters), so it must be entered through the tagged `this` entry: the
+        // receiver is the borrowed host argument, kind 7, which that entry re-validates.
+        let tagged_method_receiver = method_mode && matches!(params.first(),
+            Some(HirType::Object(fields)) if !fields.first().is_some_and(|(name, _)|
+                name.starts_with("__thaw_class_identity_\u{1e}")));
+        let code_slot = if (graph_mode && !method_mode) || tagged_method_receiver { unsafe {
             self.builder.build_in_bounds_gep(
                 self.context.i8_type(), context,
                 &[self.context.i64_type().const_int(CLOSURE_THIS_ENTRY_OFFSET, false)],
@@ -939,7 +997,18 @@ impl<'ctx> HirCompiler<'ctx> {
             .build_load(ptr_type, code_slot, "napi_value_callback_code")
             .map_err(|error| error.to_string())?
             .into_pointer_value();
-        let closure_type = if graph_mode && !method_mode {
+        let closure_type = if tagged_method_receiver {
+            let word = self.builder.build_ptr_to_int(argument_json[0], self.context.i64_type(), "callback_method_receiver_word")
+                .map_err(|error| error.to_string())?;
+            let receiver = self.builder.build_insert_value(
+                self.receiver_type().get_undef(), self.context.i8_type().const_int(7, false),
+                0, "callback_method_receiver_kind",
+            ).map_err(|error| error.to_string())?.into_struct_value();
+            let receiver = self.builder.build_insert_value(receiver, word, 1, "callback_method_receiver_tagged")
+                .map_err(|error| error.to_string())?.into_struct_value();
+            callback_args[1] = receiver.into();
+            self.this_entry_function_type(&params[1..], ret)?
+        } else if graph_mode && !method_mode {
             let holder = holder_json.expect("graph callback has a holder");
             let word = self.builder.build_ptr_to_int(holder, self.context.i64_type(), "callback_holder_word")
                 .map_err(|error| error.to_string())?;
@@ -1005,11 +1074,7 @@ impl<'ctx> HirCompiler<'ctx> {
             )?;
             rejected
         } else {
-            self.builder.build_call(
-                self.module.get_function("thaw_json_callback_error").unwrap(),
-                &[pending.into()], "callback_error_result",
-            ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
-                .ok_or("thaw_json_callback_error returned no value")?
+            self.compile_callback_error_with_tuple(pending, "callback_error_result")?
         };
         self.builder
             .build_store(
@@ -1053,7 +1118,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     ).map_err(|error| error.to_string())?;
                 }
             }
-            for value in argument_json.iter().copied().chain(std::iter::once(args_json)) {
+            for value in argument_json.iter().copied().chain(std::iter::once(args_json.into_pointer_value())) {
                 self.builder.build_call(
                     self.module.get_function("thaw_json_destroy").unwrap(),
                     &[value.into()],
@@ -1063,14 +1128,19 @@ impl<'ctx> HirCompiler<'ctx> {
             self.builder
                 .build_return(Some(&promise))
                 .map_err(|error| error.to_string())?;
-            self.catch_stack = outer_catch_stack;
-            self.active_async_completion = outer_async_completion;
             self.builder.position_at_end(return_block);
             let HirType::Promise(resolved) = ret else {
                 unreachable!()
             };
+            // This early return skips the result-marshalling code below, the
+            // only user of `result_marshalling_failed`: terminate the unused
+            // block so the module verifies, then resume at `return_block`.
+            let resume = self.builder.get_insert_block().ok_or("no insert block")?;
+            self.builder.position_at_end(result_marshalling_failed);
+            self.builder.build_unreachable().map_err(|error| error.to_string())?;
+            self.builder.position_at_end(resume);
             let guarded = self.compile_host_callback_pending_guard(adapter, true)?;
-            let finish = self.compile_native_promise_callback_finisher(resolved)?;
+            let finish = self.compile_native_promise_callback_finisher(resolved, graph_wire)?;
             return Ok((
                 guarded,
                 closure,
@@ -1091,7 +1161,7 @@ impl<'ctx> HirCompiler<'ctx> {
         // array, or a projected callback registration has been acquired.
         // Its own target releases those additions before the common argument
         // failure cleanup; the outer callback's catch stack is not used.
-        self.catch_stack.push(result_marshalling_failed);
+        self.push_catch_target(result_marshalling_failed);
         let result_json = if matches!(ret, HirType::Undefined) {
             self.compile_napi_undefined_json()?
         } else if matches!(ret, HirType::Void) {
@@ -1187,12 +1257,20 @@ impl<'ctx> HirCompiler<'ctx> {
                     let method = self.compile_dynamic_value_placeholder_unchecked(method_handle.into())?;
                     self.compile_json_array_push_owned(result_json, method)?;
                 } else {
-                    self.compile_json_array_push_native_with_undefined(
+                    let outer_compiling_quickjs_dynamic_arguments =
+                        self.compiling_quickjs_dynamic_arguments;
+                    if !graph_wire {
+                        self.compiling_quickjs_dynamic_arguments = true;
+                    }
+                    let pushed = self.compile_json_array_push_native_with_undefined(
                         result_json,
                         result,
                         ret,
                         true,
-                    )?;
+                    );
+                    self.compiling_quickjs_dynamic_arguments =
+                        outer_compiling_quickjs_dynamic_arguments;
+                    pushed?;
                 }
                 self.builder
                     .build_call(
@@ -1210,7 +1288,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     .unwrap()
             }
         };
-        self.catch_stack.pop();
+        self.pop_catch_target();
         let marshalled = self.builder.get_insert_block().unwrap();
         self.builder.position_at_end(result_marshalling_failed);
         let projected = self.builder.build_load(self.context.i64_type(), projected_method_slot,
@@ -1257,7 +1335,7 @@ impl<'ctx> HirCompiler<'ctx> {
                         .map_err(|error| error.to_string())?;
                 }
             }
-            for value in argument_json.into_iter().chain(std::iter::once(args_json)) {
+            for value in argument_json.into_iter().chain(std::iter::once(args_json.into_pointer_value())) {
                 self.builder
                     .build_call(
                         self.module.get_function("thaw_json_destroy").unwrap(),
@@ -1304,11 +1382,11 @@ impl<'ctx> HirCompiler<'ctx> {
         self.builder
             .build_return(Some(&result))
             .map_err(|error| error.to_string())?;
-        self.catch_stack = outer_catch_stack;
-        self.active_async_completion = outer_async_completion;
-        self.builder.position_at_end(return_block);
         let guarded = self.compile_host_callback_pending_guard(adapter, false)?;
         Ok((guarded, closure, None))
+        });
+        self.builder.position_at_end(return_block);
+        adapter_result
     }
 
     /// A host may invoke this adapter while an outer generated frame has an
@@ -1380,10 +1458,8 @@ impl<'ctx> HirCompiler<'ctx> {
             )?;
             rejected
         } else {
-            self.builder.build_call(self.module.get_function("thaw_json_callback_error").unwrap(),
-                &[raised.into()], "frame_isolated_callback_exception")
-                .map_err(|error| error.to_string())?.try_as_basic_value().basic()
-                .ok_or("thaw_json_callback_error returned no value")?.into_pointer_value()
+            self.compile_callback_error_with_tuple(raised, "frame_isolated_callback_exception")?
+                .into_pointer_value()
         };
         for (slot, value) in &previous {
             self.builder.build_store(slot.as_pointer_value(), *value)
@@ -1403,6 +1479,7 @@ impl<'ctx> HirCompiler<'ctx> {
     fn compile_native_promise_callback_finisher(
         &mut self,
         resolved: &HirType,
+        graph_wire: bool,
     ) -> Result<PointerValue<'ctx>, String> {
         let name = format!("__thaw_native_promise_finish_{}", self.next_lambda);
         self.next_lambda += 1;
@@ -1413,8 +1490,7 @@ impl<'ctx> HirCompiler<'ctx> {
             Some(Linkage::Internal),
         );
         let return_block = self.builder.get_insert_block().unwrap();
-        let outer_catch_stack = std::mem::take(&mut self.catch_stack);
-        let outer_async_completion = self.active_async_completion.take();
+        let finisher_result = isolated_codegen_scope!(self, {
         let entry = self.context.append_basic_block(function, "entry");
         self.builder.position_at_end(entry);
         let promise = function.get_nth_param(0).unwrap().into_pointer_value();
@@ -1477,6 +1553,37 @@ impl<'ctx> HirCompiler<'ctx> {
             .try_as_basic_value()
             .basic()
             .ok_or("rejected native Promise has no error")?;
+        let get = |this: &Self, name: &str| -> Result<BasicValueEnum<'ctx>, String> {
+            Ok(this.builder.build_call(
+                this.module.get_function(name).ok_or("missing Promise exception getter")?,
+                &[promise.into()], name,
+            ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                .ok_or("Promise exception getter returned no value")?)
+        };
+        let tag = get(self, "thaw_promise_exception_tag")?;
+        let number = get(self, "thaw_promise_exception_f64")?;
+        let bigint = get(self, "thaw_promise_exception_i64")?;
+        let boolean = get(self, "thaw_promise_exception_bool")?.into_int_value();
+        let boolean = self.builder.build_int_z_extend(boolean, self.context.i8_type(),
+            "native_promise_error_bool_byte").map_err(|error| error.to_string())?;
+        let object = get(self, "thaw_promise_exception_object")?;
+        let native = get(self, "thaw_promise_exception_native")?;
+        let native_text = get(self, "thaw_promise_exception_native_text_copy")?;
+        let aggregate = get(self, "thaw_promise_exception_aggregate_errors")?;
+        // A non-null copy is available only when the Promise producer
+        // authenticated its rejection text. Keep that trusted payload as an
+        // exact pending/native-text alias in the captured tuple. Otherwise
+        // preserve the Promise's opaque result pointer unchanged.
+        let has_native_text = self.builder.build_is_not_null(native_text.into_pointer_value(),
+            "native_promise_has_trusted_text").map_err(|error| error.to_string())?;
+        let pending = self.builder.build_select(has_native_text, native_text, error,
+            "native_promise_pending_exception").map_err(|error| error.to_string())?;
+        let error = self.builder.build_call(
+            self.module.get_function("thaw_json_callback_error_tuple").unwrap(),
+            &[pending.into(), tag.into(), number.into(), bigint.into(), boolean.into(), object.into(), native.into(), native_text.into(), aggregate.into()],
+            "native_promise_error_packet",
+        ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+            .ok_or("native Promise exception packet returned no value")?;
         self.builder
             .build_call(
                 self.module.get_function("thaw_promise_destroy").unwrap(),
@@ -1510,7 +1617,16 @@ impl<'ctx> HirCompiler<'ctx> {
             // this same function's synchronous counterpart above -- a
             // resolved `Promise<Optional<Json>>`/`Promise<Nullish<Json>>`
             // value needs the same real-`undefined`-vs-`null` distinction.
-            self.compile_json_array_push_native_with_undefined(array, value, resolved, true)?;
+            let outer_compiling_quickjs_dynamic_arguments =
+                self.compiling_quickjs_dynamic_arguments;
+            if !graph_wire {
+                self.compiling_quickjs_dynamic_arguments = true;
+            }
+            let pushed =
+                self.compile_json_array_push_native_with_undefined(array, value, resolved, true);
+            self.compiling_quickjs_dynamic_arguments =
+                outer_compiling_quickjs_dynamic_arguments;
+            pushed?;
             self.builder
                 .build_call(
                     self.module.get_function("thaw_json_index").unwrap(),
@@ -1529,7 +1645,11 @@ impl<'ctx> HirCompiler<'ctx> {
         let result = self
             .builder
             .build_call(
-                self.module.get_function("thaw_json_stringify").unwrap(),
+                self.module.get_function(if graph_wire {
+                    "thaw_json_graph_encode"
+                } else {
+                    "thaw_json_stringify"
+                }).unwrap(),
                 &[result_json.into()],
                 "native_promise_result_string",
             )
@@ -1553,10 +1673,11 @@ impl<'ctx> HirCompiler<'ctx> {
         self.builder
             .build_return(Some(&result))
             .map_err(|error| error.to_string())?;
-        self.catch_stack = outer_catch_stack;
-        self.active_async_completion = outer_async_completion;
         self.builder.position_at_end(return_block);
         self.compile_host_callback_pending_guard(function, false)
+        });
+        self.builder.position_at_end(return_block);
+        finisher_result
     }
 
     /// Wraps a real compiled (native) closure as a live, retained QuickJS
@@ -1609,7 +1730,11 @@ impl<'ctx> HirCompiler<'ctx> {
         let [closure_expr] = args else {
             return Err("registerNativeCallback expects exactly one argument".into());
         };
-        let (params, ret, optional, has_rest) = match self.expr_hir_type(closure_expr) {
+        let callback_type = match self.expr_hir_type(closure_expr) {
+            Some(HirType::FunctionWithThis(_, visible)) => Some(*visible),
+            other => other,
+        };
+        let (params, ret, optional, has_rest) = match callback_type {
             Some(HirType::Function(params, ret)) => (params, *ret, false, false),
             Some(HirType::CallableFunction(mut params, _, rest, ret)) => {
                 let has_rest = rest.is_some();
@@ -1650,6 +1775,33 @@ impl<'ctx> HirCompiler<'ctx> {
         // case, the matching native-side decoder. A `u64` is plenty (32
         // real params would already be an extraordinary callback), and
         // JS's own bitwise operators only ever work on 32 bits anyway.
+        // A callback with a `Json`/`any` parameter must see live JS values: the
+        // legacy wrapper JSON.stringify's an object argument into a data
+        // snapshot, so a class instance (a connection `socket`, a request, a
+        // stream) loses its prototype methods and `socket.on(...)` cannot be
+        // called. The graph wrapper keeps non-root arguments live behind a host
+        // lease.
+        // A closure aliased to its original typed native function
+        // (`__thaw_closure_alias`) is a compiler-made adapter whose Json
+        // parameters only carry scalars; it keeps the legacy wrapper.
+        let aliased_adapter = {
+            let mut inner = closure_expr;
+            while let HirExpr::TypedClosure(_, body) = inner {
+                inner = body;
+            }
+            matches!(inner, HirExpr::Call(callee, _)
+                if matches!(callee.as_ref(), HirExpr::Var(name) if name == "__thaw_closure_alias"))
+        };
+        // ponytail: the graph encoder copies a byte view element by element
+        // (about 6x slower than the legacy replacer for a 4 MiB Buffer), so a
+        // callback that also takes a byte-buffer parameter keeps the legacy
+        // wrapper; speed up the graph encoder's byte path to drop this.
+        let takes_byte_buffer = params.iter().any(|param| *param == HirType::Bytes
+            || matches!(param, HirType::Array(element) if **element == HirType::F64));
+        let graph_mode = graph_mode
+            || (!aliased_adapter
+                && !takes_byte_buffer
+                && params.contains(&HirType::Json));
         let closure = self.compile_expr(closure_expr)?;
         if optional {
             let closure = closure.into_struct_value();
@@ -1800,6 +1952,10 @@ impl<'ctx> HirCompiler<'ctx> {
     ) -> Result<BasicValueEnum<'ctx>, String> {
         self.uses_quickjs = true;
         self.uses_quickjs_handles = true;
+        // Callback failures can carry tracked Box<Value> payloads across a
+        // JavaScript Error carrier. Start tracing before module initialization
+        // so the packet lease can preserve the existing arena owner graph.
+        self.tracks_owned_json_roots = true;
         let absent = self.builder.build_is_null(closure, "native_callback_is_undefined")
             .map_err(|error| error.to_string())?;
         let function = self.current_function();
@@ -2570,7 +2726,7 @@ impl<'ctx> HirCompiler<'ctx> {
         // Dropping a Host child may re-enter compiled code. The original
         // exception tuple must win over any cleanup callback's own state.
         let ptr = self.context.ptr_type(AddressSpace::default());
-        let globals = [
+        let globals: [(PointerValue<'ctx>, BasicTypeEnum<'ctx>, BasicValueEnum<'ctx>); 8] = [
             (self.pending_exception().as_pointer_value(), ptr.into(), ptr.const_null().into()),
             (self.pending_exception_native_text().as_pointer_value(), ptr.into(), ptr.const_null().into()),
             (self.pending_exception_object().as_pointer_value(), ptr.into(), ptr.const_null().into()),
@@ -2698,9 +2854,9 @@ impl<'ctx> HirCompiler<'ctx> {
             self.module.get_function("thaw_json_typed_decode_scope_own").unwrap(),
             &[json.into()], "own_typed_decode_input",
         ).map_err(|error| error.to_string())?;
-        self.catch_stack.push(cleanup);
+        self.push_catch_target(cleanup);
         let value = self.compile_typed_dynamic_result_inner(json, ty);
-        self.catch_stack.pop();
+        self.pop_catch_target();
         let value = value?;
         self.builder.build_call(
             self.module.get_function("thaw_json_typed_decode_scope_end").unwrap(),
@@ -2737,25 +2893,71 @@ impl<'ctx> HirCompiler<'ctx> {
                     .map_err(|error| error.to_string())?;
                 Ok(value)
             }
-            HirType::Json => Ok(json),
-            HirType::Dictionary(_) => Ok(json),
+            HirType::Json | HirType::Dictionary(_) => {
+                self.mark_fresh_owned_json_result(json)?;
+                Ok(json)
+            },
             HirType::Bytes => {
+                let is_buffer = self.builder.build_call(
+                    self.module.get_function("thaw_json_is_buffer").unwrap(),
+                    &[json.into()],
+                    "dynamic_bytes_is_buffer",
+                ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                    .ok_or("thaw_json_is_buffer returned no value")?.into_int_value();
+                self.compile_check_json_host_error(json, None)?;
+                let is_buffer = self.builder.build_int_compare(
+                    IntPredicate::NE,
+                    is_buffer,
+                    self.context.i8_type().const_zero(),
+                    "dynamic_bytes_buffer_present",
+                ).map_err(|error| error.to_string())?;
+                let function = self.current_function();
+                let buffer_block = self.context.append_basic_block(function, "dynamic_bytes_buffer");
+                let wrapper_block = self.context.append_basic_block(function, "dynamic_bytes_wrapper");
+                let done_block = self.context.append_basic_block(function, "dynamic_bytes_done");
+                self.builder.build_conditional_branch(is_buffer, buffer_block, wrapper_block)
+                    .map_err(|error| error.to_string())?;
+
+                self.builder.position_at_end(buffer_block);
+                let buffer_result = self.builder.build_call(
+                    self.module.get_function("thaw_json_to_number_array").unwrap(),
+                    &[json.into()],
+                    "dynamic_bytes_buffer_result",
+                ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                    .ok_or("thaw_json_to_number_array returned no value")?.into_pointer_value();
+                self.compile_check_json_host_error(buffer_result.into(), None)?;
+                let buffer_end = self.builder.get_insert_block().unwrap();
+                self.builder.build_unconditional_branch(done_block).map_err(|error| error.to_string())?;
+
+                self.builder.position_at_end(wrapper_block);
                 let key = self.builder.build_global_string_ptr("data", "bytes_result_data_key").map_err(|error| error.to_string())?;
                 let data = self.builder.build_call(
                     self.module.get_function("thaw_json_get").unwrap(),
                     &[json.into(), key.as_pointer_value().into()],
                     "dynamic_bytes_data",
-                ).map_err(|error| error.to_string())?.try_as_basic_value().basic().unwrap();
+                ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                    .ok_or("thaw_json_get returned no value")?;
                 self.compile_check_json_host_error(data, Some("thaw_json_destroy"))?;
-                let result = self.builder.build_call(
+                let wrapper_result = self.builder.build_call(
                     self.module.get_function("thaw_json_to_number_array").unwrap(),
                     &[data.into()],
-                    "dynamic_bytes_result",
-                ).map_err(|error| error.to_string())?.try_as_basic_value().basic().ok_or("thaw_json_to_number_array returned no value")?.into_pointer_value();
-                let wrapped = self.compile_array_wrap(result)?;
+                    "dynamic_bytes_wrapper_result",
+                ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+                    .ok_or("thaw_json_to_number_array returned no value")?.into_pointer_value();
+                self.compile_check_json_host_error(data, Some("thaw_json_destroy"))?;
                 self.builder.build_call(self.module.get_function("thaw_json_destroy").unwrap(),
                     &[data.into()], "destroy_dynamic_bytes_data")
                     .map_err(|error| error.to_string())?;
+                let wrapper_end = self.builder.get_insert_block().unwrap();
+                self.builder.build_unconditional_branch(done_block).map_err(|error| error.to_string())?;
+
+                self.builder.position_at_end(done_block);
+                let result = self.builder.build_phi(
+                    self.context.ptr_type(AddressSpace::default()),
+                    "dynamic_bytes_result",
+                ).map_err(|error| error.to_string())?;
+                result.add_incoming(&[(&buffer_result, buffer_end), (&wrapper_result, wrapper_end)]);
+                let wrapped = self.compile_array_wrap(result.as_basic_value().into_pointer_value())?;
                 self.compile_destroy_typed_input_if_detached(json, ty, None)?;
                 Ok(wrapped.into())
             }
@@ -2824,6 +3026,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     .basic()
                     .ok_or_else(|| "thaw_json_to_number_array returned no value".to_string())?
                     .into_pointer_value();
+                self.compile_check_json_host_error(result.into(), None)?;
                 let wrapped = self.compile_array_wrap(result)?;
                 self.compile_destroy_typed_input_if_detached(json, ty, None)?;
                 Ok(wrapped.into())
@@ -2894,8 +3097,92 @@ impl<'ctx> HirCompiler<'ctx> {
                     .map_err(|error| error.to_string())?;
                 Ok(self.context.i32_type().const_zero().into())
             }
+            // A decoded JSON result that the declaration types as `JsValue`
+            // (`Session.post(): Promise<JsValue>`): re-materialize it as a
+            // live handle, the same way `retainDynamicJson` does: through the
+            // origin-aware graph pair, so an ordinary `{timestamp}` / Symbol-
+            // or Error-looking string keeps its type instead of being revived
+            // from untyped legacy bytes.
+            HirType::JsValue => {
+                let text = self.builder.build_call(
+                    self.module.get_function("thaw_json_graph_encode").unwrap(),
+                    &[json.into()], "typed_dynamic_js_value_json",
+                ).map_err(|error| error.to_string())?.try_as_basic_value().basic().unwrap();
+                let text = self.compile_check_json_stringify_error(text)?;
+                let result = self.builder.build_call(
+                    self.module.get_function("thaw_js_retain_graph_result").unwrap(),
+                    &[text.into()], "typed_dynamic_js_value_retain",
+                ).map_err(|error| error.to_string())?.try_as_basic_value().basic().unwrap()
+                    .into_struct_value();
+                let handle = self.builder.build_extract_value(result, 0, "typed_dynamic_js_value_handle")
+                    .map_err(|error| error.to_string())?;
+                let error = self.builder.build_extract_value(result, 1, "typed_dynamic_js_value_error")
+                    .map_err(|error| error.to_string())?;
+                self.builder.build_call(
+                    self.module.get_function("thaw_cstring_destroy").unwrap(),
+                    &[text.into()], "destroy_typed_dynamic_js_value_json",
+                ).map_err(|error| error.to_string())?;
+                self.builder.build_call(
+                    self.module.get_function("thaw_json_destroy").unwrap(),
+                    &[json.into()], "destroy_typed_dynamic_js_value_source",
+                ).map_err(|error| error.to_string())?;
+                self.builder.build_store(self.pending_exception().as_pointer_value(), error)
+                    .map_err(|error| error.to_string())?;
+                self.clear_pending_native_text()?;
+                self.mark_pending_native_text(error)?;
+                self.branch_on_pending_exception()?;
+                Ok(handle)
+            }
             other => Err(format!("typed dynamic return does not support {other:?} yet")),
         }
     }
 
+}
+
+impl<'ctx> HirCompiler<'ctx> {
+    /// The JavaScript-facing error frame for a callback that threw, carrying the thrown value's
+    /// typed payload (see `thaw_json_callback_error_tuple`) so a native `catch` further out
+    /// receives the original number/boolean/bigint/owner rather than only its display text.
+    fn compile_callback_error_with_tuple(
+        &mut self,
+        pending: PointerValue<'ctx>,
+        name: &str,
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        let load = |this: &Self, symbol: &str, ty: BasicTypeEnum<'ctx>, label: &str| {
+            this.builder
+                .build_load(ty, this.pending_exception_value(symbol).as_pointer_value(), label)
+                .map_err(|error| error.to_string())
+        };
+        let tag = load(self, PENDING_EXCEPTION_VALUE_TAG_SYMBOL, self.context.i64_type().into(), "callback_thrown_tag")?;
+        let number = load(self, PENDING_EXCEPTION_F64_SYMBOL, self.context.f64_type().into(), "callback_thrown_f64")?;
+        let bigint = load(self, PENDING_EXCEPTION_I64_SYMBOL, self.context.i64_type().into(), "callback_thrown_i64")?;
+        let boolean = load(self, PENDING_EXCEPTION_BOOL_SYMBOL, self.context.bool_type().into(), "callback_thrown_bool")?;
+        let boolean = self.builder
+            .build_int_z_extend(boolean.into_int_value(), self.context.i8_type(), "callback_thrown_bool_byte")
+            .map_err(|error| error.to_string())?;
+        let ptr_type = self.context.ptr_type(AddressSpace::default());
+        let object = self.builder
+            .build_load(ptr_type, self.pending_exception_object().as_pointer_value(), "callback_thrown_object")
+            .map_err(|error| error.to_string())?;
+        let native = self.builder
+            .build_load(ptr_type, self.pending_exception_native().as_pointer_value(), "callback_thrown_native")
+            .map_err(|error| error.to_string())?;
+        let native_text = self.builder
+            .build_load(ptr_type, self.pending_exception_native_text().as_pointer_value(), "callback_thrown_native_text")
+            .map_err(|error| error.to_string())?;
+        let aggregate = self.builder
+            .build_load(ptr_type, self.pending_exception_aggregate_errors().as_pointer_value(), "callback_thrown_aggregate_errors")
+            .map_err(|error| error.to_string())?;
+        self.builder
+            .build_call(
+                self.module.get_function("thaw_json_callback_error_tuple").unwrap(),
+                &[pending.into(), tag.into(), number.into(), bigint.into(), boolean.into(),
+                  object.into(), native.into(), native_text.into(), aggregate.into()],
+                name,
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| "thaw_json_callback_error_tuple returned no value".to_string())
+    }
 }

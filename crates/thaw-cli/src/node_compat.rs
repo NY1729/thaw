@@ -196,6 +196,7 @@ fn command_output_with_timeout(
     timeout: std::time::Duration,
 ) -> Result<std::process::Output, String> {
     use std::process::Stdio;
+    use std::sync::{Arc, Mutex};
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -209,14 +210,52 @@ fn command_output_with_timeout(
         .map_err(|error| error.to_string())?;
     let stdout = child.stdout.take().unwrap();
     let stderr = child.stderr.take().unwrap();
-    let read = |mut pipe: Box<dyn std::io::Read + Send>| {
-        std::thread::spawn(move || {
-            let mut bytes = Vec::new();
-            pipe.read_to_end(&mut bytes).map(|_| bytes)
-        })
+    let read = |pipe: Box<dyn std::io::Read + Send>, capture: Arc<Mutex<Vec<u8>>>| {
+        std::thread::spawn(move || capture_pipe(pipe, capture))
     };
-    let stdout = read(Box::new(stdout));
-    let stderr = read(Box::new(stderr));
+    let stdout_capture = Arc::new(Mutex::new(Vec::new()));
+    let stderr_capture = Arc::new(Mutex::new(Vec::new()));
+    let stdout = read(Box::new(stdout), Arc::clone(&stdout_capture));
+    let stderr = read(Box::new(stderr), Arc::clone(&stderr_capture));
+    let timeout_error = |stdout: &Arc<Mutex<Vec<u8>>>, stderr: &Arc<Mutex<Vec<u8>>>| {
+        const TAIL: usize = 8192;
+        let format_tail = |label: &str, capture: &Arc<Mutex<Vec<u8>>>| {
+            match capture.try_lock() {
+                Ok(bytes) => {
+                    let start = bytes.len().saturating_sub(TAIL);
+                    let truncated = if start > 0 {
+                        " (truncated to last 8192 bytes)"
+                    } else {
+                        ""
+                    };
+                    format!(
+                        "\n{label}{truncated}: {}",
+                        String::from_utf8_lossy(&bytes[start..])
+                    )
+                }
+                Err(std::sync::TryLockError::Poisoned(poisoned)) => {
+                    let bytes = poisoned.into_inner();
+                    let start = bytes.len().saturating_sub(TAIL);
+                    let truncated = if start > 0 {
+                        " (truncated to last 8192 bytes)"
+                    } else {
+                        ""
+                    };
+                    format!(
+                        "\n{label}{truncated}: {}",
+                        String::from_utf8_lossy(&bytes[start..])
+                    )
+                }
+                Err(std::sync::TryLockError::WouldBlock) => format!("\n{label}: <capture busy>"),
+            }
+        };
+        format!(
+            "timed out after {} seconds{}{}",
+            timeout.as_secs(),
+            format_tail("stdout", stdout),
+            format_tail("stderr", stderr)
+        )
+    };
     let deadline = std::time::Instant::now() + timeout;
     loop {
         if let Some(status) = child.try_wait().map_err(|error| error.to_string())? {
@@ -226,15 +265,22 @@ fn command_output_with_timeout(
                     continue;
                 }
             } else {
-            let collect = |reader: std::thread::JoinHandle<std::io::Result<Vec<u8>>>| {
-                reader.join().map_err(|_| "output reader panicked".to_string())?
-                    .map_err(|error| error.to_string())
-            };
-            return Ok(std::process::Output {
-                status,
-                stdout: collect(stdout)?,
-                stderr: collect(stderr)?,
-            });
+                let collect = |reader: std::thread::JoinHandle<std::io::Result<()>>,
+                               capture: Arc<Mutex<Vec<u8>>>| {
+                    reader
+                        .join()
+                        .map_err(|_| "output reader panicked".to_string())?
+                        .map_err(|error| error.to_string())?;
+                    capture
+                        .lock()
+                        .map(|mut bytes| std::mem::take(&mut *bytes))
+                        .map_err(|_| "output capture lock poisoned".to_string())
+                };
+                return Ok(std::process::Output {
+                    status,
+                    stdout: collect(stdout, stdout_capture)?,
+                    stderr: collect(stderr, stderr_capture)?,
+                });
             }
         }
         if std::time::Instant::now() >= deadline {
@@ -245,8 +291,60 @@ fn command_output_with_timeout(
             }
             let _ = child.kill();
             let _ = child.wait();
-            return Err(format!("timed out after {} seconds", timeout.as_secs()));
+            return Err(timeout_error(&stdout_capture, &stderr_capture));
         }
         std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+fn capture_pipe(
+    mut pipe: impl std::io::Read,
+    capture: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+) -> std::io::Result<()> {
+    let mut chunk = [0u8; 8192];
+    loop {
+        let count = match pipe.read(&mut chunk) {
+            Ok(count) => count,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        };
+        if count == 0 {
+            return Ok(());
+        }
+        capture
+            .lock()
+            .map_err(|_| std::io::Error::other("output capture lock poisoned"))?
+            .extend_from_slice(&chunk[..count]);
+    }
+}
+
+#[cfg(test)]
+mod capture_pipe_tests {
+    use super::capture_pipe;
+    use std::io::{self, Read};
+    use std::sync::{Arc, Mutex};
+
+    struct InterruptedOnce(u8);
+
+    impl Read for InterruptedOnce {
+        fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
+            if self.0 == 0 {
+                self.0 = 1;
+                return Err(io::ErrorKind::Interrupted.into());
+            }
+            if self.0 == 2 || output.is_empty() {
+                return Ok(0);
+            }
+            self.0 = 2;
+            output[..6].copy_from_slice(b"marker");
+            Ok(6)
+        }
+    }
+
+    #[test]
+    fn capture_retries_interrupted_reads_before_eof() {
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        capture_pipe(InterruptedOnce(0), Arc::clone(&captured)).unwrap();
+        assert_eq!(*captured.lock().unwrap(), b"marker");
     }
 }

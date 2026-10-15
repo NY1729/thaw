@@ -9,7 +9,7 @@ impl<'ctx> HirCompiler<'ctx> {
     /// Capture one already-retained QuickJS exception as an owned JSON value.
     /// The graph encoder preserves the original JS identity and never assimilates
     /// thrown promises or thenables.
-    fn compile_original_quickjs_exception_handle(
+    pub(super) fn compile_original_quickjs_exception_handle(
         &mut self,
         handle: BasicValueEnum<'ctx>,
         consume_handle: bool,
@@ -78,7 +78,7 @@ impl<'ctx> HirCompiler<'ctx> {
         // Decoding consumes all graph leases and destroys the owned
         // wire. The fresh Box then follows the same arena-owned
         // lifetime as caught aliases and Promise pending transfers.
-        let decoded = self.compile_decode_quickjs_graph(wire.into())?;
+        let decoded = self.compile_decode_quickjs_graph(wire)?;
         let rooted = self.builder.build_call(
             self.module.get_function("thaw_json_track_arena_owned_root").unwrap(),
             &[decoded.into()], "root_original_exception",
@@ -96,6 +96,12 @@ impl<'ctx> HirCompiler<'ctx> {
         handle: BasicValueEnum<'ctx>,
         consume_handle: bool,
     ) -> Result<(), String> {
+        // Query before the capture below can consume the handle.
+        let parked = self.builder.build_call(
+            self.module.get_function("thaw_js_exception_native_token").unwrap(),
+            &[handle.into()], "original_exception_native_token",
+        ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
+            .ok_or("exception native token returned no value")?.into_int_value();
         let original = self.compile_original_quickjs_exception_handle(handle, consume_handle)?;
         self.builder.build_store(self.pending_exception().as_pointer_value(), original)
             .map_err(|error| error.to_string())?;
@@ -106,11 +112,12 @@ impl<'ctx> HirCompiler<'ctx> {
             self.pending_exception_value(PENDING_EXCEPTION_VALUE_TAG_SYMBOL).as_pointer_value(),
             self.context.i64_type().const_int(7, false),
         ).map_err(|error| error.to_string())?;
-        for (symbol, zero) in [
+        let zeros: [(&str, BasicValueEnum<'ctx>); 3] = [
             (PENDING_EXCEPTION_F64_SYMBOL, self.context.f64_type().const_zero().into()),
             (PENDING_EXCEPTION_I64_SYMBOL, self.context.i64_type().const_zero().into()),
             (PENDING_EXCEPTION_BOOL_SYMBOL, self.context.bool_type().const_zero().into()),
-        ] {
+        ];
+        for (symbol, zero) in zeros {
             self.builder.build_store(self.pending_exception_value(symbol).as_pointer_value(), zero)
                 .map_err(|error| error.to_string())?;
         }
@@ -118,6 +125,8 @@ impl<'ctx> HirCompiler<'ctx> {
             self.pending_exception_aggregate_errors().as_pointer_value(),
             self.context.ptr_type(AddressSpace::default()).const_null(),
         ).map_err(|error| error.to_string())?;
+        // A native throw that round-tripped through JavaScript gets its original value back.
+        self.compile_apply_parked_native_throw(parked)?;
         self.branch_on_pending_exception()
     }
 
@@ -155,6 +164,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .map_err(|error| error.to_string())?;
         self.compile_throw_type_error("Invalid JavaScript result graph")?;
         self.builder.position_at_end(valid);
+        self.mark_fresh_owned_json_result(decoded)?;
         Ok(decoded)
     }
     /// A live QuickJS-backed Json operation can execute a getter or coercion.
@@ -188,6 +198,7 @@ impl<'ctx> HirCompiler<'ctx> {
         self.clear_pending_native_text()?;
         self.mark_pending_native_text(error)?;
         self.branch_on_pending_exception()?;
+        self.builder.build_unconditional_branch(succeeded).map_err(|error| error.to_string())?;
         self.builder.position_at_end(succeeded);
         Ok(result)
     }
@@ -222,7 +233,9 @@ impl<'ctx> HirCompiler<'ctx> {
         let value = call.try_as_basic_value()
             .basic()
             .ok_or_else(|| "thaw_json_get did not return a value".to_string())?;
-        self.compile_check_json_host_error(value, Some("thaw_json_destroy"))
+        let value = self.compile_check_json_host_error(value, Some("thaw_json_destroy"))?;
+        self.mark_fresh_owned_json_result(value)?;
+        Ok(value)
     }
 
     fn compile_json_key(
@@ -242,7 +255,9 @@ impl<'ctx> HirCompiler<'ctx> {
             .try_as_basic_value()
             .basic()
             .ok_or_else(|| "thaw_json_get did not return a value".to_string())?;
-        self.compile_check_json_host_error(value, Some("thaw_json_destroy"))
+        let value = self.compile_check_json_host_error(value, Some("thaw_json_destroy"))?;
+        self.mark_fresh_owned_json_result(value)?;
+        Ok(value)
     }
 
     fn compile_json_set(
@@ -458,6 +473,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 element,
             )?;
         }
+        self.mark_fresh_owned_json_result(object)?;
         Ok(object)
     }
 
@@ -492,7 +508,9 @@ impl<'ctx> HirCompiler<'ctx> {
         let value = call.try_as_basic_value()
             .basic()
             .ok_or_else(|| "thaw_json_index did not return a value".to_string())?;
-        self.compile_check_json_host_error(value, Some("thaw_json_destroy"))
+        let value = self.compile_check_json_host_error(value, Some("thaw_json_destroy"))?;
+        self.mark_fresh_owned_json_result(value)?;
+        Ok(value)
     }
 
     fn compile_json_index_set(

@@ -47,7 +47,7 @@ aes = "0.8"
 base64 = "0.22"
 brotli = { version = "8", optional = true }
 cbc = { version = "0.1", features = ["alloc"] }
-flate2 = "1"
+flate2 = { version = "1", features = ["zlib-rs"] }
 getrandom = "0.2"
 httlib-huffman = "0.3.4"
 ecdsa = "0.16"

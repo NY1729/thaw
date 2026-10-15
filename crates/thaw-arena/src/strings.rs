@@ -3,10 +3,70 @@ use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::{c_char, CStr, CString};
+use std::rc::Rc;
 use std::sync::{Mutex, OnceLock};
 
 thread_local! {
     static LENGTHS: RefCell<HashMap<usize, (usize, bool)>> = RefCell::new(HashMap::new());
+    static OWNED_EXCEPTIONS: RefCell<HashMap<usize, Rc<crate::exception::ExceptionPacket>>> = RefCell::new(HashMap::new());
+}
+
+/// Binds a private exception packet to one trusted owned result string.
+/// The address is the authority; its bytes are never parsed for a token.
+pub fn bind_owned_exception(
+    pointer: *const c_char,
+    packet: Rc<crate::exception::ExceptionPacket>,
+) -> bool {
+    if pointer.is_null() {
+        return false;
+    }
+    OWNED_EXCEPTIONS.with(|entries| {
+        let mut entries = entries.borrow_mut();
+        if entries.contains_key(&(pointer as usize)) {
+            return false;
+        }
+        entries.insert(pointer as usize, packet);
+        true
+    })
+}
+
+/// Transfers the packet bound to the exact owned callback result pointer.
+pub fn take_owned_exception(
+    pointer: *const c_char,
+) -> Option<Rc<crate::exception::ExceptionPacket>> {
+    if pointer.is_null() {
+        return None;
+    }
+    OWNED_EXCEPTIONS.with(|entries| entries.borrow_mut().remove(&(pointer as usize)))
+}
+
+/// Borrows the authenticated packet associated with an owned result pointer.
+pub fn owned_exception(pointer: *const c_char) -> Option<Rc<crate::exception::ExceptionPacket>> {
+    if pointer.is_null() {
+        return None;
+    }
+    OWNED_EXCEPTIONS.with(|entries| entries.borrow().get(&(pointer as usize)).cloned())
+}
+
+/// Registers bytes owned by a native exception packet so embedded NULs remain data.
+pub fn register_exception_bytes(pointer: *const c_char, length: usize) {
+    if !pointer.is_null() {
+        LENGTHS.with(|lengths| {
+            // Exception packet bytes live in a Rust-owned Box, not the resettable arena.
+            // Keep their embedded-NUL length metadata until the packet releases them.
+            lengths
+                .borrow_mut()
+                .insert(pointer as usize, (length, true));
+        });
+    }
+}
+
+pub fn unregister_exception_bytes(pointer: *const c_char) {
+    if !pointer.is_null() {
+        LENGTHS.with(|lengths| {
+            lengths.borrow_mut().remove(&(pointer as usize));
+        });
+    }
 }
 
 fn owned_lengths() -> &'static Mutex<HashMap<usize, usize>> {
@@ -26,10 +86,14 @@ fn graph_transfers() -> &'static Mutex<HashMap<usize, Vec<u8>>> {
 /// # Safety
 /// `pointer` must be a live owned string from a trusted graph producer.
 pub unsafe fn register_owned_graph_wire(pointer: *const c_char) -> bool {
-    if pointer.is_null() { return false; }
+    if pointer.is_null() {
+        return false;
+    }
     let bytes = unsafe { NativeStr::from_ptr(pointer) }.to_bytes().to_vec();
     let mut transfers = graph_transfers().lock().unwrap();
-    if transfers.contains_key(&(pointer as usize)) { return false; }
+    if transfers.contains_key(&(pointer as usize)) {
+        return false;
+    }
     transfers.insert(pointer as usize, bytes);
     true
 }
@@ -38,8 +102,7 @@ pub unsafe fn register_owned_graph_wire(pointer: *const c_char) -> bool {
 /// # Safety
 /// `pointer` must be a live native string for this call.
 pub unsafe fn take_owned_graph_wire(pointer: *const c_char) -> bool {
-    unsafe { take_owned_graph_wire_snapshot(pointer) }
-        .is_some_and(|(_, bytes_match)| bytes_match)
+    unsafe { take_owned_graph_wire_snapshot(pointer) }.is_some_and(|(_, bytes_match)| bytes_match)
 }
 
 /// Consumes a grant and returns its trusted producer snapshot together with
@@ -47,11 +110,14 @@ pub unsafe fn take_owned_graph_wire(pointer: *const c_char) -> bool {
 /// retiring only leases from the original snapshot.
 /// # Safety
 /// `pointer` must be a live native string for this call.
-pub unsafe fn take_owned_graph_wire_snapshot(
-    pointer: *const c_char,
-) -> Option<(Vec<u8>, bool)> {
-    if pointer.is_null() { return None; }
-    let expected = graph_transfers().lock().unwrap().remove(&(pointer as usize));
+pub unsafe fn take_owned_graph_wire_snapshot(pointer: *const c_char) -> Option<(Vec<u8>, bool)> {
+    if pointer.is_null() {
+        return None;
+    }
+    let expected = graph_transfers()
+        .lock()
+        .unwrap()
+        .remove(&(pointer as usize));
     expected.map(|bytes| {
         let bytes_match = bytes == unsafe { NativeStr::from_ptr(pointer) }.to_bytes();
         (bytes, bytes_match)
@@ -72,7 +138,13 @@ impl<'a> NativeStr<'a> {
                     .get(&(pointer as usize))
                     .map(|&(length, _)| length)
             })
-            .or_else(|| owned_lengths().lock().unwrap().get(&(pointer as usize)).copied());
+            .or_else(|| {
+                owned_lengths()
+                    .lock()
+                    .unwrap()
+                    .get(&(pointer as usize))
+                    .copied()
+            });
         Self(match length {
             Some(length) => unsafe { std::slice::from_raw_parts(pointer.cast(), length) },
             None => unsafe { CStr::from_ptr(pointer) }.to_bytes(),
@@ -157,17 +229,28 @@ pub fn owned_string(bytes: impl AsRef<[u8]>) -> *mut c_char {
     let mut buffer = bytes.to_vec();
     buffer.push(0);
     let pointer = Box::into_raw(buffer.into_boxed_slice()) as *mut u8;
-    owned_lengths().lock().unwrap().insert(pointer as usize, bytes.len());
+    owned_lengths()
+        .lock()
+        .unwrap()
+        .insert(pointer as usize, bytes.len());
     pointer.cast()
 }
 
 /// # Safety
 /// `pointer` must be null or an owned native/C string, destroyed exactly once.
-pub unsafe fn destroy_string(pointer: *mut c_char) {
+pub unsafe fn destroy_string(pointer: *const c_char) {
+    // Takes ownership, so callers holding a `*const` (e.g. FFI result structs) need no cast.
+    let pointer = pointer.cast_mut();
     if pointer.is_null() {
         return;
     }
-    graph_transfers().lock().unwrap().remove(&(pointer as usize));
+    let exception =
+        OWNED_EXCEPTIONS.with(|entries| entries.borrow_mut().remove(&(pointer as usize)));
+    drop(exception);
+    graph_transfers()
+        .lock()
+        .unwrap()
+        .remove(&(pointer as usize));
     if let Some(length) = owned_lengths().lock().unwrap().remove(&(pointer as usize)) {
         unsafe {
             drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(
@@ -186,53 +269,6 @@ pub(crate) fn reset_lengths(tracing: bool) {
             literal || (tracing && !super::was_reclaimed(pointer))
         })
     });
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn wtf8_preserves_lone_surrogates_and_embedded_nul() {
-        let units = [0xd800, 0, 0xdc00, 0xd83d, 0xde00];
-        assert_eq!(wtf8_decode_utf16(&wtf8_encode_utf16(&units)), units);
-        assert_eq!(wtf8_encode_utf16(&[0xd800]), [0xed, 0xa0, 0x80]);
-    }
-
-    #[test]
-    fn utf16_replacement_preserves_units_and_substitution_patterns() {
-        let value = [0xd800, b'a' as u16, 0xdc00];
-        let replacement = [b'$' as u16, b'&' as u16, b'$' as u16, b'$' as u16];
-        assert_eq!(utf16_replace(&value, &[b'a' as u16], &replacement, false), [0xd800, b'a' as u16, b'$' as u16, 0xdc00]);
-        assert_eq!(utf16_replace(&[0xd800, 0xdc00], &[], &[b'-' as u16], true), [b'-' as u16, 0xd800, b'-' as u16, 0xdc00, b'-' as u16]);
-    }
-
-    #[test]
-    fn case_segments_keep_context_and_lone_surrogates() {
-        let units = [0xd800, 0x039f, 0x03a3, 0xdc00, 0x00df];
-        assert_eq!(utf16_map_segments(&units, |text, output| output.extend(text.to_lowercase().encode_utf16())), [0xd800, 0x03bf, 0x03c2, 0xdc00, 0x00df]);
-        assert_eq!(utf16_map_segments(&units, |text, output| output.extend(text.to_uppercase().encode_utf16())), [0xd800, 0x039f, 0x03a3, 0xdc00, 0x0053, 0x0053]);
-    }
-
-    #[test]
-    fn native_and_c_strings_keep_distinct_lengths() {
-        let pointer = owned_string(b"a\0b");
-        assert_eq!(unsafe { NativeStr::from_ptr(pointer) }.to_bytes(), b"a\0b");
-        assert_eq!(
-            unsafe { NativeStr::from_ptr(c"abc".as_ptr()) }.to_bytes(),
-            b"abc"
-        );
-        unsafe { destroy_string(pointer) };
-    }
-
-    #[test]
-    fn owned_string_keeps_embedded_nul_across_threads() {
-        let pointer = owned_string(b"a\0b") as usize;
-        std::thread::spawn(move || {
-            let pointer = pointer as *mut c_char;
-            assert_eq!(unsafe { NativeStr::from_ptr(pointer) }.to_bytes(), b"a\0b");
-            unsafe { destroy_string(pointer) };
-        }).join().unwrap();
-    }
 }
 
 // ---- WTF-8 <-> UTF-16 codec -------------------------------------------------
@@ -260,8 +296,7 @@ pub fn wtf8_decode_utf16(bytes: &[u8]) -> Vec<u16> {
             index += 1;
         } else if (0xC2..=0xDF).contains(&first) {
             if index + 1 < bytes.len() && wtf8_continuation(bytes[index + 1]) {
-                let code =
-                    ((u32::from(first) & 0x1F) << 6) | (u32::from(bytes[index + 1]) & 0x3F);
+                let code = ((u32::from(first) & 0x1F) << 6) | (u32::from(bytes[index + 1]) & 0x3F);
                 units.push(code as u16);
                 index += 2;
             } else {
@@ -359,7 +394,6 @@ pub fn wtf8_encode_utf16(units: &[u16]) -> Vec<u8> {
     bytes
 }
 
-
 /// Replaces UTF-16 string matches with ECMAScript string substitution patterns.
 pub fn utf16_replace(value: &[u16], search: &[u16], replacement: &[u16], all: bool) -> Vec<u16> {
     let mut output = Vec::new();
@@ -368,7 +402,10 @@ pub fn utf16_replace(value: &[u16], search: &[u16], replacement: &[u16], all: bo
         let found = if search.is_empty() {
             Some(cursor)
         } else {
-            value[cursor..].windows(search.len()).position(|part| part == search).map(|offset| cursor + offset)
+            value[cursor..]
+                .windows(search.len())
+                .position(|part| part == search)
+                .map(|offset| cursor + offset)
         };
         let Some(start) = found else { break };
         let end = start + search.len();
@@ -393,9 +430,13 @@ pub fn utf16_replace(value: &[u16], search: &[u16], replacement: &[u16], all: bo
             index += 1;
         }
         cursor = end;
-        if !all { break; }
+        if !all {
+            break;
+        }
         if search.is_empty() {
-            if cursor == value.len() { break; }
+            if cursor == value.len() {
+                break;
+            }
             output.push(value[cursor]);
             cursor += 1;
         }
@@ -405,10 +446,7 @@ pub fn utf16_replace(value: &[u16], search: &[u16], replacement: &[u16], all: bo
 }
 
 /// Maps contiguous valid UTF-16 text while preserving lone surrogates unchanged.
-pub fn utf16_map_segments(
-    units: &[u16],
-    mut map: impl FnMut(&str, &mut Vec<u16>),
-) -> Vec<u16> {
+pub fn utf16_map_segments(units: &[u16], mut map: impl FnMut(&str, &mut Vec<u16>)) -> Vec<u16> {
     let mut output = Vec::with_capacity(units.len());
     let mut segment = String::new();
     for character in char::decode_utf16(units.iter().copied()) {
@@ -423,4 +461,79 @@ pub fn utf16_map_segments(
     }
     map(&segment, &mut output);
     output
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exception_byte_lengths_survive_arena_reset_until_packet_release() {
+        let bytes = b"before\0after";
+        let pointer = crate::owned_string(bytes);
+        register_exception_bytes(pointer, bytes.len());
+        crate::thaw_arena_reset();
+        assert_eq!(unsafe { NativeStr::from_ptr(pointer) }.to_bytes(), bytes);
+        unregister_exception_bytes(pointer);
+        unsafe { crate::destroy_string(pointer) };
+    }
+
+    #[test]
+    fn wtf8_preserves_lone_surrogates_and_embedded_nul() {
+        let units = [0xd800, 0, 0xdc00, 0xd83d, 0xde00];
+        assert_eq!(wtf8_decode_utf16(&wtf8_encode_utf16(&units)), units);
+        assert_eq!(wtf8_encode_utf16(&[0xd800]), [0xed, 0xa0, 0x80]);
+    }
+
+    #[test]
+    fn utf16_replacement_preserves_units_and_substitution_patterns() {
+        let value = [0xd800, b'a' as u16, 0xdc00];
+        let replacement = [b'$' as u16, b'&' as u16, b'$' as u16, b'$' as u16];
+        assert_eq!(
+            utf16_replace(&value, &[b'a' as u16], &replacement, false),
+            [0xd800, b'a' as u16, b'$' as u16, 0xdc00]
+        );
+        assert_eq!(
+            utf16_replace(&[0xd800, 0xdc00], &[], &[b'-' as u16], true),
+            [b'-' as u16, 0xd800, b'-' as u16, 0xdc00, b'-' as u16]
+        );
+    }
+
+    #[test]
+    fn case_segments_keep_context_and_lone_surrogates() {
+        let units = [0xd800, 0x039f, 0x03a3, 0xdc00, 0x00df];
+        assert_eq!(
+            utf16_map_segments(&units, |text, output| output
+                .extend(text.to_lowercase().encode_utf16())),
+            [0xd800, 0x03bf, 0x03c2, 0xdc00, 0x00df]
+        );
+        assert_eq!(
+            utf16_map_segments(&units, |text, output| output
+                .extend(text.to_uppercase().encode_utf16())),
+            [0xd800, 0x039f, 0x03a3, 0xdc00, 0x0053, 0x0053]
+        );
+    }
+
+    #[test]
+    fn native_and_c_strings_keep_distinct_lengths() {
+        let pointer = owned_string(b"a\0b");
+        assert_eq!(unsafe { NativeStr::from_ptr(pointer) }.to_bytes(), b"a\0b");
+        assert_eq!(
+            unsafe { NativeStr::from_ptr(c"abc".as_ptr()) }.to_bytes(),
+            b"abc"
+        );
+        unsafe { destroy_string(pointer) };
+    }
+
+    #[test]
+    fn owned_string_keeps_embedded_nul_across_threads() {
+        let pointer = owned_string(b"a\0b") as usize;
+        std::thread::spawn(move || {
+            let pointer = pointer as *mut c_char;
+            assert_eq!(unsafe { NativeStr::from_ptr(pointer) }.to_bytes(), b"a\0b");
+            unsafe { destroy_string(pointer) };
+        })
+        .join()
+        .unwrap();
+    }
 }

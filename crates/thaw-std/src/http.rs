@@ -1,3 +1,5 @@
+use std::cell::RefCell;
+use std::collections::HashSet;
 use std::ffi::CString;
 use std::io::{Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
@@ -237,7 +239,9 @@ fn render_head(
 }
 
 fn render_response(mut response_spec: ResponseSpec, keep_alive: bool) -> Vec<u8> {
-    response_spec.headers.retain(|(name, _)| !name.eq_ignore_ascii_case("Content-Length"));
+    response_spec
+        .headers
+        .retain(|(name, _)| !name.eq_ignore_ascii_case("Content-Length"));
     let framing = format!("Content-Length: {}\r\n", response_spec.body.len());
     let mut response = render_head(
         response_spec.status,
@@ -382,6 +386,23 @@ struct ServerResponse {
     end_bytes: *const NativeClosure,
 }
 
+#[derive(Clone)]
+struct RequestListener {
+    callback: usize,
+    _root: Option<thaw_arena::ArenaRoot>,
+}
+
+impl RequestListener {
+    fn new(callback: usize) -> Self {
+        let root =
+            thaw_arena::contains_allocation(callback).then(|| thaw_arena::ArenaRoot::new(callback));
+        Self {
+            callback,
+            _root: root,
+        }
+    }
+}
+
 /// Everything one in-flight request/response needs that must outlive a
 /// single turn of the event loop. A synchronous handler runs start to
 /// finish inside `run_server_callback` and this could all be stack
@@ -453,15 +474,16 @@ struct RequestContext {
     /// `_body_string`, for the same reason.
     _body_hex: Option<CString>,
     /// `request.on("data", cb)` callbacks, in registration order. Each is
-    /// a raw closure pointer (`*const c_void` as `usize`), invoked once
+    /// a closure pointer and an owner pin when it belongs to the arena,
+    /// invoked once
     /// per chunk by `sync_request_body_buffer`/
     /// `deliver_request_body_listeners` (real connections)
     /// or never at all (one-shot helpers, which have no body).
-    request_data_listeners: Vec<usize>,
+    request_data_listeners: Vec<RequestListener>,
     /// `request.on("end", cb)` callbacks, fired once the body is
     /// complete (or immediately, for the always-bodyless one-shot
     /// helpers).
-    request_end_listeners: Vec<usize>,
+    request_end_listeners: Vec<RequestListener>,
     /// Set once `deliver_request_body_events` (the one-shot-helper path
     /// only) has run, so a listener registered late doesn't get a
     /// second replay and a re-entrant `on(...)` during delivery is a
@@ -876,8 +898,12 @@ unsafe extern "C" fn request_add_listener(
     }
     let context = request_context(environment);
     match string_from_ptr(event).as_str() {
-        "data" => context.request_data_listeners.push(callback as usize),
-        "end" => context.request_end_listeners.push(callback as usize),
+        "data" => context
+            .request_data_listeners
+            .push(RequestListener::new(callback as usize)),
+        "end" => context
+            .request_end_listeners
+            .push(RequestListener::new(callback as usize)),
         _ => {}
     }
     true
@@ -898,8 +924,8 @@ fn deliver_request_body_events(context: &mut RequestContext) {
     }
     context.body_events_delivered = true;
     let end_listeners = std::mem::take(&mut context.request_end_listeners);
-    for callback in end_listeners {
-        let callback = callback as *const c_void;
+    for listener in end_listeners {
+        let callback = listener.callback as *const c_void;
         unsafe {
             type Callback = unsafe extern "C" fn(*const c_void);
             let code = *(callback as *const *const c_void);
@@ -1005,25 +1031,23 @@ fn deliver_request_body_listeners(body_complete: bool, context_ptr: *mut Request
         context._delivered_offset = context._raw_body.len();
         (new_bytes, context.request_data_listeners.clone())
     };
-    if !new_bytes.is_empty() {
-        if !data_listeners.is_empty() {
-            let chunk = native_bytes_from_slice(&new_bytes);
-            for callback in data_listeners {
-                let callback = callback as *const c_void;
-                unsafe {
-                    type Callback = unsafe extern "C" fn(*const c_void, *mut u8);
-                    let code = *(callback as *const *const c_void);
-                    let callback_fn: Callback = std::mem::transmute(code);
-                    callback_fn(callback, chunk);
-                }
+    if !new_bytes.is_empty() && !data_listeners.is_empty() {
+        let chunk = native_bytes_from_slice(&new_bytes);
+        for listener in data_listeners {
+            let callback = listener.callback as *const c_void;
+            unsafe {
+                type Callback = unsafe extern "C" fn(*const c_void, *mut u8);
+                let code = *(callback as *const *const c_void);
+                let callback_fn: Callback = std::mem::transmute(code);
+                callback_fn(callback, chunk);
             }
         }
     }
     if body_complete {
         // Data callbacks may register an end listener for this same body.
         let end_listeners = unsafe { std::mem::take(&mut (*context_ptr).request_end_listeners) };
-        for callback in end_listeners {
-            let callback = callback as *const c_void;
+        for listener in end_listeners {
+            let callback = listener.callback as *const c_void;
             unsafe {
                 type Callback = unsafe extern "C" fn(*const c_void);
                 let code = *(callback as *const *const c_void);
@@ -1254,16 +1278,30 @@ fn normalize_status(status_code: f64) -> u16 {
     }
 }
 
-/// EOF closes only the peer's sending half; response writes remain valid.
+/// EOF closes only the peer's sending half; response writes remain valid once a response has started.
 fn client_hung_up(connection: &mut ConnectionState) -> bool {
-    if connection.peer_read_closed { return false; }
+    if connection.peer_read_closed {
+        return false;
+    }
     let mut probe = [0_u8; 1];
     match &connection.stream {
         Some(stream) => match stream.peek(&mut probe) {
-            Ok(0) => { connection.peer_read_closed = true; false }
+            // Node (httpAllowHalfOpen=false) aborts a request whose client hung up before any
+            // response started and releases the socket; a response already streaming may still be
+            // read by a half-closed peer, so that case is preserved.
+            Ok(0) => {
+                connection.peer_read_closed = true;
+                connection.awaiting_handler && !connection.streaming
+            }
             Ok(_) => false,
-            Err(error) if matches!(error.kind(), std::io::ErrorKind::WouldBlock
-                | std::io::ErrorKind::Interrupted) => false,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                ) =>
+            {
+                false
+            }
             Err(_) => true,
         },
         None => true,
@@ -1628,16 +1666,43 @@ fn sweep_idle_connections() -> Option<Instant> {
     next
 }
 
+thread_local! {
+    // `active_servers` is a Rust heap registry, not an arena root. Keep its
+    // state pointers alive only while present in that registry. The registry
+    // address scopes private test registries independently and ArenaRoot's
+    // !Send marker keeps each pin on the thread that drives its event loop.
+    static ACTIVE_SERVER_ROOTS: RefCell<Vec<((usize, usize), thaw_arena::ArenaRoot)>> =
+        const { RefCell::new(Vec::new()) };
+}
+
 fn register_server(state: *const ServerState) {
     register_server_in(active_servers(), state);
 }
 
 fn register_server_in(servers: &Mutex<Vec<usize>>, state: *const ServerState) {
+    let registry = servers as *const Mutex<Vec<usize>> as usize;
     let address = state as usize;
+    ACTIVE_SERVER_ROOTS.with(|roots| {
+        let mut roots = roots.borrow_mut();
+        if !roots
+            .iter()
+            .any(|((owner, state), _)| *owner == registry && *state == address)
+        {
+            roots.push(((registry, address), thaw_arena::ArenaRoot::new(address)));
+        }
+    });
     let mut servers = servers.lock().unwrap();
     if !servers.contains(&address) {
         servers.push(address);
     }
+}
+
+fn release_inactive_server_roots(registry: usize, active: &HashSet<usize>) {
+    ACTIVE_SERVER_ROOTS.with(|roots| {
+        roots
+            .borrow_mut()
+            .retain(|((owner, state), _)| *owner != registry || active.contains(state));
+    });
 }
 
 /// Keeps a short timer promise alive so the event loop's `poll` never
@@ -1697,7 +1762,12 @@ fn dispatch_server_events(servers: &Mutex<Vec<usize>>) -> (bool, bool) {
     // registers a server in this same list. Snapshot the stable
     // ServerState pointers, then invoke user code without the list
     // lock. A callback can also reopen the very server being closed.
+    let registry = servers as *const Mutex<Vec<usize>> as usize;
     let snapshot = servers.lock().unwrap().clone();
+    let _dispatch_roots = snapshot
+        .iter()
+        .map(|&address| thaw_arena::ArenaRoot::new(address))
+        .collect::<Vec<_>>();
     for &address in &snapshot {
         let state = unsafe { &*(address as *const ServerState) };
         if state.pending_listening.swap(false, Ordering::AcqRel) {
@@ -1742,15 +1812,29 @@ fn dispatch_server_events(servers: &Mutex<Vec<usize>>) -> (bool, bool) {
                 && state.connections.load(Ordering::Acquire) == 0
                 && state.close_requested.load(Ordering::Acquire))
     });
-    (current.is_empty(), pending_event)
+    let active = current.iter().copied().collect::<HashSet<_>>();
+    let empty = current.is_empty();
+    drop(current);
+    release_inactive_server_roots(registry, &active);
+    (empty, pending_event)
 }
 
 fn emit_event(listeners: &Mutex<Vec<EventListener>>) {
-    let callbacks = {
+    let owner = listeners as *const Mutex<Vec<EventListener>> as usize;
+    let (callbacks, _delivery_roots) = {
         let mut listeners = listeners.lock().unwrap();
         let callbacks = listeners.clone();
+        // Keep every callback in the complete delivery snapshot rooted before
+        // removing once records: an earlier callback may trigger an arena reset.
+        let roots = callbacks
+            .iter()
+            .map(|listener| thaw_arena::ArenaRoot::new(listener.callback))
+            .collect::<Vec<_>>();
+        for listener in callbacks.iter().filter(|listener| listener.once) {
+            thaw_arena::replace_reference(owner, listener.callback, 0);
+        }
         listeners.retain(|listener| !listener.once);
-        callbacks
+        (callbacks, roots)
     };
     for listener in callbacks {
         let callback = listener.callback as *const c_void;
@@ -1765,10 +1849,13 @@ fn emit_event(listeners: &Mutex<Vec<EventListener>>) {
 
 fn add_event_listener(listeners: &Mutex<Vec<EventListener>>, callback: *const c_void, once: bool) {
     if !callback.is_null() {
+        let address = callback as usize;
         listeners.lock().unwrap().push(EventListener {
-            callback: callback as usize,
+            callback: address,
             once,
         });
+        let owner = listeners as *const Mutex<Vec<EventListener>> as usize;
+        thaw_arena::replace_reference(owner, 0, address);
     }
 }
 
@@ -1790,6 +1877,10 @@ struct NativeServerError {
 
 fn emit_error(listeners: &Mutex<Vec<EventListener>>, error: &ServerError) {
     let callbacks = listeners.lock().unwrap().clone();
+    let _delivery_roots = callbacks
+        .iter()
+        .map(|listener| thaw_arena::ArenaRoot::new(listener.callback))
+        .collect::<Vec<_>>();
     if callbacks.is_empty() {
         eprintln!(
             "Unhandled 'error' event: {} ({})",
@@ -1920,50 +2011,50 @@ enum ParkedBodyFeed {
 fn feed_parked_request_body(connection_ptr: *mut ConnectionState) -> ParkedBodyFeed {
     let (context, body_complete) = {
         let connection = unsafe { &mut *connection_ptr };
-    if connection.response_ctx.is_null() || connection.body_complete {
-        return ParkedBodyFeed::Nothing;
-    }
-    let mut chunk = [0_u8; 4096];
-    let mut read_any = false;
-    loop {
-        let Some(socket) = connection.socket() else {
-            finish_connection(connection);
-            return ParkedBodyFeed::ConnectionClosed;
-        };
-        match socket.read(&mut chunk) {
-            Ok(0) => {
-                connection.peer_read_closed = true;
-                break;
-            }
-            Ok(length) => {
-                connection.request.extend_from_slice(&chunk[..length]);
-                read_any = true;
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
-            Err(_) => {
+        if connection.response_ctx.is_null() || connection.body_complete {
+            return ParkedBodyFeed::Nothing;
+        }
+        let mut chunk = [0_u8; 4096];
+        let mut read_any = false;
+        loop {
+            let Some(socket) = connection.socket() else {
                 finish_connection(connection);
                 return ParkedBodyFeed::ConnectionClosed;
+            };
+            match socket.read(&mut chunk) {
+                Ok(0) => {
+                    connection.peer_read_closed = true;
+                    break;
+                }
+                Ok(length) => {
+                    connection.request.extend_from_slice(&chunk[..length]);
+                    read_any = true;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(_) => {
+                    finish_connection(connection);
+                    return ParkedBodyFeed::ConnectionClosed;
+                }
             }
         }
-    }
-    // Genuinely nothing new (the very first read already `WouldBlock`ed):
-    // must report `Nothing`, not `Fed` -- `connection_ready`'s caller
-    // loops on `Fed` expecting real progress each time, and a nonblocking
-    // socket with no new data never blocks on its own, so returning `Fed`
-    // here would spin forever with no actual I/O to wait on.
-    if !read_any && !connection.peer_read_closed {
-        return ParkedBodyFeed::Nothing;
-    }
-    // Nothing between here and the entry check above can have nulled
-    // `response_ctx` (only `finish_connection` does, and that already
-    // returned early above).
-    let context = connection.response_ctx;
-    sync_request_body_buffer(connection, unsafe { &mut *context });
-    if connection.peer_read_closed && !connection.body_complete {
-        finish_connection(connection);
-        return ParkedBodyFeed::ConnectionClosed;
-    }
-    refresh_body_deadline(connection);
+        // Genuinely nothing new (the very first read already `WouldBlock`ed):
+        // must report `Nothing`, not `Fed` -- `connection_ready`'s caller
+        // loops on `Fed` expecting real progress each time, and a nonblocking
+        // socket with no new data never blocks on its own, so returning `Fed`
+        // here would spin forever with no actual I/O to wait on.
+        if !read_any && !connection.peer_read_closed {
+            return ParkedBodyFeed::Nothing;
+        }
+        // Nothing between here and the entry check above can have nulled
+        // `response_ctx` (only `finish_connection` does, and that already
+        // returned early above).
+        let context = connection.response_ctx;
+        sync_request_body_buffer(connection, unsafe { &mut *context });
+        if connection.peer_read_closed && !connection.body_complete {
+            finish_connection(connection);
+            return ParkedBodyFeed::ConnectionClosed;
+        }
+        refresh_body_deadline(connection);
         (context, connection.body_complete)
     };
     // No mutable ConnectionState or RequestContext borrow spans user code.
@@ -1997,10 +2088,14 @@ impl Drop for ConnectionReadyLease {
 extern "C" fn connection_ready(context: *mut u8, _events: i16) {
     let connection_ptr = context.cast::<ConnectionState>();
     let _ready_lease = unsafe { ConnectionReadyLease::new(connection_ptr) };
-    if unsafe { (*connection_ptr).retired } { return; }
+    if unsafe { (*connection_ptr).retired } {
+        return;
+    }
     loop {
-        let parked = unsafe { (*connection_ptr).awaiting_handler
-            || ((*connection_ptr).streaming && !(*connection_ptr).response_ended) };
+        let parked = unsafe {
+            (*connection_ptr).awaiting_handler
+                || ((*connection_ptr).streaming && !(*connection_ptr).response_ended)
+        };
         if parked {
             match feed_parked_request_body(connection_ptr) {
                 ParkedBodyFeed::ConnectionClosed => return,
@@ -2028,7 +2123,9 @@ extern "C" fn connection_ready(context: *mut u8, _events: i16) {
         if unsafe { (*connection_ptr).response.is_empty() } && !read_request(connection_ptr) {
             return;
         }
-        if unsafe { (*connection_ptr).retired } { return; }
+        if unsafe { (*connection_ptr).retired } {
+            return;
+        }
         // `write_response`, on a fully-sent keep-alive response, drains
         // the request it just answered and leaves any pipelined bytes in
         // `connection.request`. If a whole next request is already
@@ -2161,48 +2258,48 @@ fn parse_head(head: &[u8]) -> (String, String, bool, BodyPlan, Vec<(String, Stri
 fn try_buffered_request(connection_ptr: *mut ConnectionState) -> Option<bool> {
     {
         let connection = unsafe { &mut *connection_ptr };
-    if connection.head_end == 0 {
-        let index = connection
-            .request
-            .windows(4)
-            .position(|bytes| bytes == b"\r\n\r\n")?;
-        connection.head_end = index + 4;
-        let (_, _, _, body_plan, _) = parse_head(&connection.request[..connection.head_end]);
-        connection.body_plan = body_plan;
-        // Deliberately *not* pre-marking `body_complete` here even for
-        // `BodyPlan::None` -- `deliver_request_body_listeners`'s first
-        // call (right after dispatch) is the one place that transitions
-        // it false -> true *and* sets `connection.consumed` at that same
-        // moment; pre-setting it here would make that function's own
-        // `if connection.body_complete { return; }` guard skip ever
-        // running, leaving `consumed` at 0 forever and the same request
-        // bytes stuck in the buffer to be re-parsed (and re-dispatched)
-        // indefinitely on every keep-alive reuse.
-    }
-    // A `Content-Length` past the cap, or a chunked body that grows past
-    // it, is refused -- and the connection can't be reused (unread body
-    // bytes would desync it), so it's closed outright.
-    let body_seen = connection.request.len() - connection.head_end;
-    let over_cap = match connection.body_plan {
-        BodyPlan::Fixed(length) => length > MAX_REQUEST_BODY,
-        BodyPlan::Chunked => body_seen > MAX_REQUEST_BODY,
-        BodyPlan::None => false,
-    };
-    if over_cap {
-        finish_connection(connection);
-        return Some(false);
-    }
-    if connection.dispatched {
-        // Already running (or finished) -- nothing new to do here; more
-        // body bytes for it are delivered by `connection_ready`'s own
-        // continuation path instead, not by re-entering this function.
-        // Shouldn't be reachable in practice (the surrounding guards
-        // already keep `read_request` from being called again once
-        // dispatched), but stays safe rather than re-invoking the
-        // handler a second time if it ever is.
-        return Some(true);
-    }
-    connection.dispatched = true;
+        if connection.head_end == 0 {
+            let index = connection
+                .request
+                .windows(4)
+                .position(|bytes| bytes == b"\r\n\r\n")?;
+            connection.head_end = index + 4;
+            let (_, _, _, body_plan, _) = parse_head(&connection.request[..connection.head_end]);
+            connection.body_plan = body_plan;
+            // Deliberately *not* pre-marking `body_complete` here even for
+            // `BodyPlan::None` -- `deliver_request_body_listeners`'s first
+            // call (right after dispatch) is the one place that transitions
+            // it false -> true *and* sets `connection.consumed` at that same
+            // moment; pre-setting it here would make that function's own
+            // `if connection.body_complete { return; }` guard skip ever
+            // running, leaving `consumed` at 0 forever and the same request
+            // bytes stuck in the buffer to be re-parsed (and re-dispatched)
+            // indefinitely on every keep-alive reuse.
+        }
+        // A `Content-Length` past the cap, or a chunked body that grows past
+        // it, is refused -- and the connection can't be reused (unread body
+        // bytes would desync it), so it's closed outright.
+        let body_seen = connection.request.len() - connection.head_end;
+        let over_cap = match connection.body_plan {
+            BodyPlan::Fixed(length) => length > MAX_REQUEST_BODY,
+            BodyPlan::Chunked => body_seen > MAX_REQUEST_BODY,
+            BodyPlan::None => false,
+        };
+        if over_cap {
+            finish_connection(connection);
+            return Some(false);
+        }
+        if connection.dispatched {
+            // Already running (or finished) -- nothing new to do here; more
+            // body bytes for it are delivered by `connection_ready`'s own
+            // continuation path instead, not by re-entering this function.
+            // Shouldn't be reachable in practice (the surrounding guards
+            // already keep `read_request` from being called again once
+            // dispatched), but stays safe rather than re-invoking the
+            // handler a second time if it ever is.
+            return Some(true);
+        }
+        connection.dispatched = true;
     }
     Some(dispatch_request(connection_ptr))
 }
@@ -2266,25 +2363,18 @@ fn dispatch_request(connection_ptr: *mut ConnectionState) -> bool {
         let (method, target, keep_alive, _, headers) =
             parse_head(&connection.request[..connection.head_end]);
         let callback = unsafe { &*connection.server }.callback as *const c_void;
-    // The head is in and the handler is about to run -- cleared
-    // unconditionally here; `run_server_callback` re-arms it as a
-    // body-arrival deadline right after, once `sync_request_body_buffer`
-    // has determined whether the body is actually complete yet.
+        // The head is in and the handler is about to run -- cleared
+        // unconditionally here; `run_server_callback` re-arms it as a
+        // body-arrival deadline right after, once `sync_request_body_buffer`
+        // has determined whether the body is actually complete yet.
         connection.head_deadline = None;
-    // Set before running the handler: an `async` handler that suspends
-    // won't return through here, and `finish_response` needs the
-    // negotiated value when it renders the response later.
+        // Set before running the handler: an `async` handler that suspends
+        // won't return through here, and `finish_response` needs the
+        // negotiated value when it renders the response later.
         connection.keep_alive = keep_alive;
         (method, target, keep_alive, headers, callback)
     };
-    let outcome = run_server_callback(
-        callback,
-        &method,
-        &target,
-        &[],
-        &headers,
-        connection_ptr,
-    );
+    let outcome = run_server_callback(callback, &method, &target, &[], &headers, connection_ptr);
     if unsafe { (*connection_ptr).retired } {
         if let CallbackOutcome::Pending(context) = outcome {
             unsafe {
@@ -2402,7 +2492,11 @@ fn write_response(connection: &mut ConnectionState) -> FlushResult {
         connection.body_complete = false;
         connection.dispatched = false;
         if connection.peer_read_closed
-            && !connection.request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+            && !connection
+                .request
+                .windows(4)
+                .any(|bytes| bytes == b"\r\n\r\n")
+        {
             finish_connection(connection);
             return FlushResult::Closed;
         }
@@ -2463,8 +2557,14 @@ fn drain_pending_context_frees() {
 fn rewatch_connection(connection: &mut ConnectionState, interests: u8) -> bool {
     unsafe { thaw_runtime_unwatch_fd(connection.watcher) };
     connection.watcher = 0;
-    let interests = if connection.peer_read_closed { interests & !THAW_FD_READABLE } else { interests };
-    if interests == 0 { return true; }
+    let interests = if connection.peer_read_closed {
+        interests & !THAW_FD_READABLE
+    } else {
+        interests
+    };
+    if interests == 0 {
+        return true;
+    }
     let Some(fd) = connection.stream.as_ref().map(TcpStream::as_raw_fd) else {
         finish_connection(connection);
         return false;
@@ -2485,7 +2585,9 @@ fn rewatch_connection(connection: &mut ConnectionState, interests: u8) -> bool {
 }
 
 fn finish_connection(connection: &mut ConnectionState) {
-    if connection.retired { return; }
+    if connection.retired {
+        return;
+    }
     connection.retired = true;
     untrack_connection(connection);
     // An `async` handler that hasn't finished still holds a
@@ -2732,7 +2834,7 @@ pub extern "C" fn createServer(callback: *const c_void) -> *const c_void {
         code: server_on_error as *const c_void,
         context: state.cast(),
     }));
-    Box::into_raw(Box::new(Server {
+    let server = Box::into_raw(Box::new(Server {
         listen,
         listen_with_callback,
         listen_many,
@@ -2740,8 +2842,39 @@ pub extern "C" fn createServer(callback: *const c_void) -> *const c_void {
         close_with_callback,
         on,
         on_error,
-    }))
-    .cast()
+    }));
+    let state_address = state as usize;
+    thaw_arena::replace_reference(server as usize, 0, state_address);
+    for closure in [
+        listen,
+        listen_with_callback,
+        listen_many,
+        close,
+        close_with_callback,
+        on,
+        on_error,
+    ] {
+        thaw_arena::replace_reference(closure as usize, 0, state_address);
+    }
+    thaw_arena::replace_reference(state_address, 0, callback as usize);
+    unsafe {
+        thaw_arena::replace_reference(
+            state_address,
+            0,
+            &(*state).listening_listeners as *const Mutex<Vec<EventListener>> as usize,
+        );
+        thaw_arena::replace_reference(
+            state_address,
+            0,
+            &(*state).close_listeners as *const Mutex<Vec<EventListener>> as usize,
+        );
+        thaw_arena::replace_reference(
+            state_address,
+            0,
+            &(*state).error_listeners as *const Mutex<Vec<EventListener>> as usize,
+        );
+    }
+    server.cast()
 }
 
 #[cfg(test)]
@@ -2756,7 +2889,10 @@ mod tests {
         unsafe {
             assert!(handle.add(8).cast::<*mut u8>().read().is_null());
             assert_eq!(native_bytes_to_vec(handle), vec![7, 9]);
-            assert_eq!(thaw_runtime::thaw_array_delete_property(handle, c"0".as_ptr()), 1);
+            assert_eq!(
+                thaw_runtime::thaw_array_delete_property(handle, c"0".as_ptr()),
+                1
+            );
             let presence = handle.add(8).cast::<*mut u8>().read();
             assert!(!presence.is_null());
             assert_eq!(presence.cast::<u64>().read(), 2);
@@ -2779,6 +2915,302 @@ mod tests {
             pending_errors: Mutex::new(Vec::new()),
             close_requested: AtomicBool::new(false),
         })
+    }
+
+    fn allocate_test_server_callback() -> *mut u8 {
+        let callback = thaw_arena::thaw_arena_alloc(8, std::mem::align_of::<usize>());
+        assert!(!callback.is_null());
+        unsafe { callback.write_bytes(0, 8) };
+        callback
+    }
+
+    fn assert_test_callback_reclaimed(callback: usize) {
+        assert!(!thaw_arena::contains_allocation(callback));
+    }
+
+    fn assert_test_callback_live(callback: usize) {
+        assert!(thaw_arena::contains_allocation(callback));
+    }
+
+    fn allocate_test_event_callback(code: *const c_void, context: *mut c_void) -> *const c_void {
+        let callback = thaw_arena::thaw_arena_alloc(
+            std::mem::size_of::<NativeClosure>(),
+            std::mem::align_of::<NativeClosure>(),
+        )
+        .cast::<NativeClosure>();
+        assert!(!callback.is_null());
+        unsafe { callback.write(NativeClosure { code, context }) };
+        callback.cast()
+    }
+
+    #[test]
+    fn server_box_owner_keeps_primary_handler_until_server_handle_drops() {
+        std::thread::spawn(|| {
+            thaw_arena::thaw_arena_enable_tracing();
+            let callback = allocate_test_server_callback();
+            let server = createServer(callback.cast());
+            let owner = thaw_arena::ArenaRoot::new(server as usize);
+
+            thaw_arena::thaw_arena_reset();
+            assert_test_callback_live(callback as usize);
+
+            drop(owner);
+            thaw_arena::thaw_arena_reset();
+            assert_test_callback_reclaimed(callback as usize);
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    fn extracted_server_method_keeps_primary_handler_until_method_drops() {
+        std::thread::spawn(|| {
+            thaw_arena::thaw_arena_enable_tracing();
+            let callback = allocate_test_server_callback();
+            let server = createServer(callback.cast()).cast::<Server>();
+            let method = unsafe { (*server).on };
+            let owner = thaw_arena::ArenaRoot::new(method as usize);
+
+            thaw_arena::thaw_arena_reset();
+            assert_test_callback_live(callback as usize);
+
+            drop(owner);
+            thaw_arena::thaw_arena_reset();
+            assert_test_callback_reclaimed(callback as usize);
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    fn active_server_registry_root_releases_after_closed_server_drains() {
+        std::thread::spawn(|| {
+            thaw_arena::thaw_arena_enable_tracing();
+            let callback = allocate_test_server_callback();
+            let server = createServer(callback.cast()).cast::<Server>();
+            let state = unsafe { &*((*(*server).listen).context as *const ServerState) };
+            let servers = Mutex::new(Vec::new());
+            register_server_in(&servers, state);
+
+            thaw_arena::thaw_arena_reset();
+            assert_test_callback_live(callback as usize);
+
+            state.closed.store(true, Ordering::Release);
+            assert_eq!(dispatch_server_events(&servers), (true, false));
+            thaw_arena::thaw_arena_reset();
+            assert_test_callback_reclaimed(callback as usize);
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    fn generated_server_owner_survives_close_and_can_relisten() {
+        std::thread::spawn(|| {
+            thaw_arena::thaw_arena_enable_tracing();
+            let callback = allocate_test_server_callback();
+            let server_box = createServer(callback.cast());
+            let server = server_box.cast::<Server>();
+            let state = unsafe { &*((*(*server).listen).context as *const ServerState) };
+            let owner = thaw_arena::ArenaRoot::new(server_box as usize);
+            let servers = Mutex::new(Vec::new());
+            register_server_in(&servers, state);
+
+            thaw_arena::thaw_arena_reset();
+            assert_test_callback_live(callback as usize);
+
+            state.closed.store(true, Ordering::Release);
+            assert_eq!(dispatch_server_events(&servers), (true, false));
+            thaw_arena::thaw_arena_reset();
+            assert_test_callback_live(callback as usize);
+
+            state.closed.store(false, Ordering::Release);
+            register_server_in(&servers, state);
+            thaw_arena::thaw_arena_reset();
+            assert_test_callback_live(callback as usize);
+
+            drop(owner);
+            state.closed.store(true, Ordering::Release);
+            assert_eq!(dispatch_server_events(&servers), (true, false));
+            thaw_arena::thaw_arena_reset();
+            assert_test_callback_reclaimed(callback as usize);
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    fn active_server_roots_are_pruned_per_registry() {
+        std::thread::spawn(|| {
+            thaw_arena::thaw_arena_enable_tracing();
+            let first_callback = allocate_test_server_callback();
+            let first_server = createServer(first_callback.cast()).cast::<Server>();
+            let first_state =
+                unsafe { &*((*(*first_server).listen).context as *const ServerState) };
+            let first_registry = Mutex::new(Vec::new());
+            register_server_in(&first_registry, first_state);
+            thaw_arena::thaw_arena_reset();
+            assert_test_callback_live(first_callback as usize);
+
+            let second_callback = allocate_test_server_callback();
+            let second_server = createServer(second_callback.cast()).cast::<Server>();
+            let second_state =
+                unsafe { &*((*(*second_server).listen).context as *const ServerState) };
+            let second_registry = Mutex::new(Vec::new());
+            register_server_in(&second_registry, second_state);
+            thaw_arena::thaw_arena_reset();
+            assert_test_callback_live(first_callback as usize);
+            assert_test_callback_live(second_callback as usize);
+
+            first_state.closed.store(true, Ordering::Release);
+            assert_eq!(dispatch_server_events(&first_registry), (true, false));
+            thaw_arena::thaw_arena_reset();
+            assert_test_callback_reclaimed(first_callback as usize);
+            assert_test_callback_live(second_callback as usize);
+
+            second_state.closed.store(true, Ordering::Release);
+            assert_eq!(dispatch_server_events(&second_registry), (true, false));
+            thaw_arena::thaw_arena_reset();
+            assert_test_callback_reclaimed(second_callback as usize);
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    fn server_event_snapshot_roots_once_duplicates_through_reentry() {
+        struct Probe {
+            first: AtomicUsize,
+            later: AtomicUsize,
+            first_calls: AtomicUsize,
+            later_calls: AtomicUsize,
+            first_live_during_reset: AtomicBool,
+            later_live_during_reset: AtomicBool,
+            error: AtomicUsize,
+            error_calls: AtomicUsize,
+            error_live_during_reset: AtomicBool,
+        }
+        unsafe extern "C" fn first_callback(environment: *const c_void) {
+            let callback = &*(environment as *const NativeClosure);
+            let probe = &*(callback.context as *const Probe);
+            if probe.first_calls.fetch_add(1, Ordering::AcqRel) == 0 {
+                thaw_arena::thaw_arena_reset();
+                probe.first_live_during_reset.store(
+                    thaw_arena::contains_allocation(probe.first.load(Ordering::Acquire)),
+                    Ordering::Release,
+                );
+                probe.later_live_during_reset.store(
+                    thaw_arena::contains_allocation(probe.later.load(Ordering::Acquire)),
+                    Ordering::Release,
+                );
+            }
+        }
+        unsafe extern "C" fn later_callback(environment: *const c_void) {
+            let callback = &*(environment as *const NativeClosure);
+            let probe = &*(callback.context as *const Probe);
+            probe.later_calls.fetch_add(1, Ordering::AcqRel);
+        }
+        unsafe extern "C" fn error_callback(
+            environment: *const c_void,
+            _error: *const NativeServerError,
+        ) {
+            let callback = &*(environment as *const NativeClosure);
+            let probe = &*(callback.context as *const Probe);
+            probe.error_calls.fetch_add(1, Ordering::AcqRel);
+            thaw_arena::thaw_arena_reset();
+            probe.error_live_during_reset.store(
+                thaw_arena::contains_allocation(probe.error.load(Ordering::Acquire)),
+                Ordering::Release,
+            );
+        }
+
+        std::thread::spawn(|| {
+            thaw_arena::thaw_arena_enable_tracing();
+            let primary = allocate_test_server_callback();
+            let primary_setup_root = thaw_arena::ArenaRoot::new(primary as usize);
+            let server_box = createServer(primary.cast());
+            let server = server_box.cast::<Server>();
+            let state = unsafe { &*((*(*server).listen).context as *const ServerState) };
+            let server_setup_root = thaw_arena::ArenaRoot::new(server_box as usize);
+            // Move event closures into distinct arena generations while the
+            // temporary roots keep the factory graph alive during setup.
+            thaw_arena::thaw_arena_reset();
+            let probe = Probe {
+                first: AtomicUsize::new(0),
+                later: AtomicUsize::new(0),
+                first_calls: AtomicUsize::new(0),
+                later_calls: AtomicUsize::new(0),
+                first_live_during_reset: AtomicBool::new(false),
+                later_live_during_reset: AtomicBool::new(false),
+                error: AtomicUsize::new(0),
+                error_calls: AtomicUsize::new(0),
+                error_live_during_reset: AtomicBool::new(false),
+            };
+            let first = allocate_test_event_callback(
+                first_callback as *const c_void,
+                (&probe as *const Probe).cast_mut().cast(),
+            );
+            probe.first.store(first as usize, Ordering::Release);
+            add_event_listener(&state.listening_listeners, first, true);
+            add_event_listener(&state.listening_listeners, first, false);
+            let servers = Mutex::new(Vec::new());
+            register_server_in(&servers, state);
+            drop(server_setup_root);
+            drop(primary_setup_root);
+
+            thaw_arena::thaw_arena_reset();
+            assert_test_callback_live(primary as usize);
+            assert_test_callback_live(first as usize);
+
+            let later = allocate_test_event_callback(
+                later_callback as *const c_void,
+                (&probe as *const Probe).cast_mut().cast(),
+            );
+            probe.later.store(later as usize, Ordering::Release);
+            add_event_listener(&state.listening_listeners, later, true);
+            thaw_arena::thaw_arena_reset();
+            assert_test_callback_live(primary as usize);
+            assert_test_callback_live(first as usize);
+            assert_test_callback_live(later as usize);
+
+            state.pending_listening.store(true, Ordering::Release);
+            assert_eq!(dispatch_server_events(&servers), (false, false));
+            assert_eq!(probe.first_calls.load(Ordering::Acquire), 2);
+            assert_eq!(probe.later_calls.load(Ordering::Acquire), 1);
+            assert!(probe.first_live_during_reset.load(Ordering::Acquire));
+            assert!(probe.later_live_during_reset.load(Ordering::Acquire));
+
+            thaw_arena::thaw_arena_reset();
+            assert_test_callback_live(primary as usize);
+            assert_test_callback_live(first as usize);
+            assert_test_callback_reclaimed(later as usize);
+
+            let error = allocate_test_event_callback(
+                error_callback as *const c_void,
+                (&probe as *const Probe).cast_mut().cast(),
+            );
+            probe.error.store(error as usize, Ordering::Release);
+            add_event_listener(&state.error_listeners, error, false);
+            state.pending_errors.lock().unwrap().push(ServerError {
+                message: "owner probe".into(),
+                code: "OWNER_PROBE".into(),
+                port: 0.0,
+            });
+            assert_eq!(dispatch_server_events(&servers), (false, false));
+            assert_eq!(probe.error_calls.load(Ordering::Acquire), 1);
+            assert!(probe.error_live_during_reset.load(Ordering::Acquire));
+            thaw_arena::thaw_arena_reset();
+            assert_test_callback_live(error as usize);
+
+            state.closed.store(true, Ordering::Release);
+            assert_eq!(dispatch_server_events(&servers), (true, false));
+            thaw_arena::thaw_arena_reset();
+            assert_test_callback_reclaimed(primary as usize);
+            assert_test_callback_reclaimed(first as usize);
+            assert_test_callback_reclaimed(error as usize);
+        })
+        .join()
+        .unwrap();
     }
 
     // Unrun regression: both listening and error callbacks can register a
@@ -2834,7 +3266,9 @@ mod tests {
             if error_event {
                 first.pending_listening.store(false, Ordering::Release);
                 first.pending_errors.lock().unwrap().push(ServerError {
-                    message: "probe".into(), code: "PROBE".into(), port: 0.0,
+                    message: "probe".into(),
+                    code: "PROBE".into(),
+                    port: 0.0,
                 });
                 first.error_listeners.lock().unwrap().push(listener);
             } else {
@@ -2865,9 +3299,15 @@ mod tests {
             probe.lock_was_free.set(unlocked);
             if unlocked {
                 (*probe.server).closed.store(false, Ordering::Release);
-                (*probe.server).pending_errors.lock().unwrap().push(ServerError {
-                    message: "reopened".into(), code: "REOPEN".into(), port: 0.0,
-                });
+                (*probe.server)
+                    .pending_errors
+                    .lock()
+                    .unwrap()
+                    .push(ServerError {
+                        message: "reopened".into(),
+                        code: "REOPEN".into(),
+                        port: 0.0,
+                    });
                 register_server_in(&*probe.servers, probe.server);
             }
         }
@@ -2891,10 +3331,12 @@ mod tests {
         });
         let context = (&*probe as *const Probe).cast_mut().cast();
         let close_callback = Box::new(NativeClosure {
-            code: on_close as *const c_void, context,
+            code: on_close as *const c_void,
+            context,
         });
         let error_callback = Box::new(NativeClosure {
-            code: on_error as *const c_void, context,
+            code: on_error as *const c_void,
+            context,
         });
         first.close_listeners.lock().unwrap().push(EventListener {
             callback: (&*close_callback as *const NativeClosure) as usize,
@@ -2996,6 +3438,251 @@ mod tests {
         drain_pending_context_frees();
     }
 
+    #[test]
+    fn arena_request_listener_is_rooted_until_context_drop() {
+        std::thread::spawn(|| {
+            unsafe extern "C" fn on_data(environment: *const c_void, _chunk: *mut u8) {
+                let closure = &*(environment as *const NativeClosure);
+                (*(closure.context as *const AtomicUsize)).fetch_add(1, Ordering::AcqRel);
+            }
+            thaw_arena::thaw_arena_enable_tracing();
+            let calls = AtomicUsize::new(0);
+            let callback = thaw_arena::thaw_arena_alloc(
+                std::mem::size_of::<NativeClosure>(),
+                std::mem::align_of::<NativeClosure>(),
+            )
+            .cast::<NativeClosure>();
+            assert!(!callback.is_null());
+            unsafe {
+                callback.write(NativeClosure {
+                    code: on_data as *const c_void,
+                    context: &calls as *const AtomicUsize as *mut c_void,
+                })
+            };
+            let context_ptr = Box::into_raw(RequestContext::new(
+                "POST",
+                "/",
+                b"a",
+                &[],
+                std::ptr::null_mut(),
+            ));
+            assert!(unsafe {
+                request_add_listener(
+                    (*context_ptr).request.on.cast(),
+                    c"data".as_ptr(),
+                    callback.cast(),
+                )
+            });
+            thaw_arena::thaw_arena_reset();
+            assert!(thaw_arena::contains_allocation(callback as usize));
+            assert!(!thaw_arena::was_reclaimed(callback as usize));
+            unsafe { (*context_ptr)._raw_body.push(b'b') };
+            deliver_request_body_listeners(false, context_ptr);
+            assert_eq!(calls.load(Ordering::Acquire), 1);
+            unsafe { drop(Box::from_raw(context_ptr)) };
+            thaw_arena::thaw_arena_reset();
+            assert!(thaw_arena::was_reclaimed(callback as usize));
+
+            let foreign_calls = AtomicUsize::new(0);
+            let foreign = NativeClosure {
+                code: on_data as *const c_void,
+                context: &foreign_calls as *const AtomicUsize as *mut c_void,
+            };
+            let context_ptr = Box::into_raw(RequestContext::new(
+                "POST",
+                "/",
+                b"x",
+                &[],
+                std::ptr::null_mut(),
+            ));
+            assert!(unsafe {
+                request_add_listener(
+                    (*context_ptr).request.on.cast(),
+                    c"data".as_ptr(),
+                    (&foreign as *const NativeClosure).cast(),
+                )
+            });
+            thaw_arena::thaw_arena_reset();
+            deliver_request_body_listeners(false, context_ptr);
+            assert_eq!(foreign_calls.load(Ordering::Acquire), 1);
+            unsafe { drop(Box::from_raw(context_ptr)) };
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    fn arena_end_listener_releases_its_root_after_once_delivery() {
+        std::thread::spawn(|| {
+            unsafe extern "C" fn on_end(environment: *const c_void) {
+                let closure = &*(environment as *const NativeClosure);
+                (*(closure.context as *const AtomicUsize)).fetch_add(1, Ordering::AcqRel);
+            }
+            thaw_arena::thaw_arena_enable_tracing();
+            let calls = AtomicUsize::new(0);
+            let callback = thaw_arena::thaw_arena_alloc(
+                std::mem::size_of::<NativeClosure>(),
+                std::mem::align_of::<NativeClosure>(),
+            )
+            .cast::<NativeClosure>();
+            assert!(!callback.is_null());
+            unsafe {
+                callback.write(NativeClosure {
+                    code: on_end as *const c_void,
+                    context: &calls as *const AtomicUsize as *mut c_void,
+                })
+            };
+            let context_ptr = Box::into_raw(RequestContext::new(
+                "POST",
+                "/",
+                b"",
+                &[],
+                std::ptr::null_mut(),
+            ));
+            assert!(unsafe {
+                request_add_listener(
+                    (*context_ptr).request.on.cast(),
+                    c"end".as_ptr(),
+                    callback.cast(),
+                )
+            });
+            thaw_arena::thaw_arena_reset();
+            assert!(thaw_arena::contains_allocation(callback as usize));
+            assert!(!thaw_arena::was_reclaimed(callback as usize));
+            deliver_request_body_events(unsafe { &mut *context_ptr });
+            assert_eq!(calls.load(Ordering::Acquire), 1);
+            thaw_arena::thaw_arena_reset();
+            assert!(thaw_arena::was_reclaimed(callback as usize));
+            deliver_request_body_events(unsafe { &mut *context_ptr });
+            assert_eq!(calls.load(Ordering::Acquire), 1);
+            unsafe { drop(Box::from_raw(context_ptr)) };
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    fn arena_data_listener_snapshot_and_deferred_free_keep_roots() {
+        struct Probe {
+            context: *mut RequestContext,
+            second: *const c_void,
+            first_calls: AtomicUsize,
+            second_calls: AtomicUsize,
+            registered: AtomicBool,
+            first_retained: AtomicBool,
+            second_retained: AtomicBool,
+        }
+        unsafe extern "C" fn second(environment: *const c_void, _chunk: *mut u8) {
+            let closure = &*(environment as *const NativeClosure);
+            (*(closure.context as *const Probe))
+                .second_calls
+                .fetch_add(1, Ordering::AcqRel);
+        }
+        unsafe extern "C" fn first(environment: *const c_void, _chunk: *mut u8) {
+            let closure = &*(environment as *const NativeClosure);
+            let probe = &*(closure.context as *const Probe);
+            if probe.first_calls.fetch_add(1, Ordering::AcqRel) == 0 {
+                probe.registered.store(
+                    request_add_listener(
+                        (*probe.context).request.on.cast(),
+                        c"data".as_ptr(),
+                        probe.second,
+                    ),
+                    Ordering::Release,
+                );
+                PENDING_CONTEXT_FREE.with(|list| list.borrow_mut().push(probe.context));
+                drain_pending_context_frees();
+                let still_in_delivery = (*probe.context).delivery_depth > 0;
+                thaw_arena::thaw_arena_reset();
+                probe.first_retained.store(
+                    still_in_delivery
+                        && thaw_arena::contains_allocation(environment as usize)
+                        && !thaw_arena::was_reclaimed(environment as usize),
+                    Ordering::Release,
+                );
+                probe.second_retained.store(
+                    thaw_arena::contains_allocation(probe.second as usize)
+                        && !thaw_arena::was_reclaimed(probe.second as usize),
+                    Ordering::Release,
+                );
+            }
+        }
+        std::thread::spawn(|| {
+            thaw_arena::thaw_arena_enable_tracing();
+            let first_callback = thaw_arena::thaw_arena_alloc(
+                std::mem::size_of::<NativeClosure>(),
+                std::mem::align_of::<NativeClosure>(),
+            )
+            .cast::<NativeClosure>();
+            assert!(!first_callback.is_null());
+            unsafe {
+                first_callback.write(NativeClosure {
+                    code: first as *const c_void,
+                    context: std::ptr::null_mut(),
+                });
+            }
+            let context_ptr = Box::into_raw(RequestContext::new(
+                "POST",
+                "/",
+                b"a",
+                &[],
+                std::ptr::null_mut(),
+            ));
+            assert!(unsafe {
+                request_add_listener(
+                    (*context_ptr).request.on.cast(),
+                    c"data".as_ptr(),
+                    first_callback.cast(),
+                )
+            });
+            thaw_arena::thaw_arena_reset();
+            assert!(thaw_arena::contains_allocation(first_callback as usize));
+            assert!(!thaw_arena::was_reclaimed(first_callback as usize));
+
+            let second_callback = thaw_arena::thaw_arena_alloc(
+                std::mem::size_of::<NativeClosure>(),
+                std::mem::align_of::<NativeClosure>(),
+            )
+            .cast::<NativeClosure>();
+            assert!(!second_callback.is_null());
+            let probe = Probe {
+                context: context_ptr,
+                second: second_callback.cast(),
+                first_calls: AtomicUsize::new(0),
+                second_calls: AtomicUsize::new(0),
+                registered: AtomicBool::new(false),
+                first_retained: AtomicBool::new(false),
+                second_retained: AtomicBool::new(false),
+            };
+            unsafe {
+                first_callback.write(NativeClosure {
+                    code: first as *const c_void,
+                    context: &probe as *const Probe as *mut c_void,
+                });
+                second_callback.write(NativeClosure {
+                    code: second as *const c_void,
+                    context: &probe as *const Probe as *mut c_void,
+                });
+            }
+            deliver_request_body_listeners(false, context_ptr);
+            assert_eq!(probe.first_calls.load(Ordering::Acquire), 1);
+            assert_eq!(probe.second_calls.load(Ordering::Acquire), 0);
+            assert!(probe.registered.load(Ordering::Acquire));
+            assert!(probe.first_retained.load(Ordering::Acquire));
+            assert!(probe.second_retained.load(Ordering::Acquire));
+            unsafe { (*context_ptr)._raw_body.push(b'b') };
+            deliver_request_body_listeners(false, context_ptr);
+            assert_eq!(probe.first_calls.load(Ordering::Acquire), 2);
+            assert_eq!(probe.second_calls.load(Ordering::Acquire), 1);
+            drain_pending_context_frees();
+            thaw_arena::thaw_arena_reset();
+            assert!(thaw_arena::was_reclaimed(first_callback as usize));
+            assert!(thaw_arena::was_reclaimed(second_callback as usize));
+        })
+        .join()
+        .unwrap();
+    }
+
     // Unrun regression: a body listener may register another listener and
     // finish the response. The new listener only sees a later chunk; no
     // borrowed Vec slice or listener iterator survives the first callback.
@@ -3016,19 +3703,44 @@ mod tests {
             let context = (*(environment as *const NativeClosure)).context as *mut RequestContext;
             if FIRST.with(|calls| calls.get()) == 1 {
                 let callback = SECOND_CALLBACK.with(|callback| callback.get());
-                assert!(request_add_listener((*context).request.on.cast(), c"data".as_ptr(), callback));
-                assert!(response_end((*context).response.end.cast(), c"done".as_ptr()));
+                assert!(request_add_listener(
+                    (*context).request.on.cast(),
+                    c"data".as_ptr(),
+                    callback
+                ));
+                assert!(response_end(
+                    (*context).response.end.cast(),
+                    c"done".as_ptr()
+                ));
                 PENDING_CONTEXT_FREE.with(|list| list.borrow_mut().push(context));
                 drain_pending_context_frees();
             }
         }
         FIRST.with(|calls| calls.set(0));
         SECOND.with(|calls| calls.set(0));
-        let context_ptr = Box::into_raw(RequestContext::new("POST", "/", b"a", &[], std::ptr::null_mut()));
-        let first_callback = NativeClosure { code: first as *const c_void, context: context_ptr.cast() };
-        let second_callback = NativeClosure { code: second as *const c_void, context: context_ptr.cast() };
+        let context_ptr = Box::into_raw(RequestContext::new(
+            "POST",
+            "/",
+            b"a",
+            &[],
+            std::ptr::null_mut(),
+        ));
+        let first_callback = NativeClosure {
+            code: first as *const c_void,
+            context: context_ptr.cast(),
+        };
+        let second_callback = NativeClosure {
+            code: second as *const c_void,
+            context: context_ptr.cast(),
+        };
         SECOND_CALLBACK.with(|slot| slot.set((&second_callback as *const NativeClosure).cast()));
-        unsafe { (*context_ptr).request_data_listeners.push((&first_callback as *const NativeClosure) as usize) };
+        unsafe {
+            (*context_ptr)
+                .request_data_listeners
+                .push(RequestListener::new(
+                    (&first_callback as *const NativeClosure) as usize,
+                ))
+        };
         deliver_request_body_listeners(false, context_ptr);
         assert_eq!(FIRST.with(|calls| calls.get()), 1);
         assert_eq!(SECOND.with(|calls| calls.get()), 0);
@@ -3046,11 +3758,28 @@ mod tests {
     // Nested loop cleanup must keep both live until delivery unwinds.
     #[test]
     fn connection_retirement_waits_for_ready_stack() {
-        unsafe extern "C" fn end_in_data(environment: *const c_void, _chunk: *mut u8) {
-            let context = (*(environment as *const NativeClosure)).context as *mut RequestContext;
-            assert!(response_end((*context).response.end.cast(), c"done".as_ptr()));
-            drain_pending_context_frees();
+        struct Probe {
+            context: *mut RequestContext,
+            response_ended: AtomicBool,
+            listener_retained: AtomicBool,
         }
+        unsafe extern "C" fn end_in_data(environment: *const c_void, _chunk: *mut u8) {
+            let closure = &*(environment as *const NativeClosure);
+            let probe = &*(closure.context as *const Probe);
+            let context = probe.context;
+            probe.response_ended.store(
+                response_end((*context).response.end.cast(), c"done".as_ptr()),
+                Ordering::Release,
+            );
+            drain_pending_context_frees();
+            thaw_arena::thaw_arena_reset();
+            probe.listener_retained.store(
+                thaw_arena::contains_allocation(environment as usize)
+                    && !thaw_arena::was_reclaimed(environment as usize),
+                Ordering::Release,
+            );
+        }
+        thaw_arena::thaw_arena_enable_tracing();
         let server = Box::new(ServerState {
             callback: 0,
             closed: AtomicBool::new(false),
@@ -3065,14 +3794,29 @@ mod tests {
             close_requested: AtomicBool::new(false),
         });
         let connection = Box::into_raw(Box::new(ConnectionState {
-            stream: None, peer_read_closed: false, server: &*server,
-            request: Vec::new(), response: Vec::new(), written: 0,
-            watcher: 0, keep_alive: false, awaiting_handler: false,
-            response_ctx: std::ptr::null_mut(), streaming: false,
-            response_ended: false, head_deadline: None, head_end: 0,
-            body_plan: BodyPlan::None, consumed: 0, body_scan_offset: 0,
-            body_complete: false, dispatched: false, client_gone: false,
-            ready_depth: 0, retired: false, deferred_box_free: false,
+            stream: None,
+            peer_read_closed: false,
+            server: &*server,
+            request: Vec::new(),
+            response: Vec::new(),
+            written: 0,
+            watcher: 0,
+            keep_alive: false,
+            awaiting_handler: false,
+            response_ctx: std::ptr::null_mut(),
+            streaming: false,
+            response_ended: false,
+            head_deadline: None,
+            head_end: 0,
+            body_plan: BodyPlan::None,
+            consumed: 0,
+            body_scan_offset: 0,
+            body_complete: false,
+            dispatched: false,
+            client_gone: false,
+            ready_depth: 0,
+            retired: false,
+            deferred_box_free: false,
         }));
         track_connection(connection);
         ACTIVE_CONNECTIONS.fetch_add(1, Ordering::AcqRel);
@@ -3081,8 +3825,28 @@ mod tests {
             (*context).resumable = true;
             (*connection).response_ctx = context;
         }
-        let callback = NativeClosure { code: end_in_data as *const c_void, context: context.cast() };
-        unsafe { (*context).request_data_listeners.push((&callback as *const NativeClosure) as usize) };
+        let probe = Probe {
+            context,
+            response_ended: AtomicBool::new(false),
+            listener_retained: AtomicBool::new(false),
+        };
+        let callback = thaw_arena::thaw_arena_alloc(
+            std::mem::size_of::<NativeClosure>(),
+            std::mem::align_of::<NativeClosure>(),
+        )
+        .cast::<NativeClosure>();
+        assert!(!callback.is_null());
+        unsafe {
+            callback.write(NativeClosure {
+                code: end_in_data as *const c_void,
+                context: &probe as *const Probe as *mut c_void,
+            });
+            assert!(request_add_listener(
+                (*context).request.on.cast(),
+                c"data".as_ptr(),
+                callback.cast(),
+            ));
+        }
         {
             let _ready = unsafe { ConnectionReadyLease::new(connection) };
             deliver_request_body_listeners(false, context);
@@ -3095,6 +3859,10 @@ mod tests {
             assert_eq!(server.connections.load(Ordering::Acquire), 0);
         }
         drain_pending_context_frees();
+        assert!(probe.response_ended.load(Ordering::Acquire));
+        assert!(probe.listener_retained.load(Ordering::Acquire));
+        thaw_arena::thaw_arena_reset();
+        assert!(thaw_arena::was_reclaimed(callback as usize));
     }
 
     // Unrun regression: a peer can finish sending and still receive delayed chunks.
@@ -3103,29 +3871,51 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
         let (stream, _) = listener.accept().unwrap();
-        stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
-        client.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
         client.shutdown(Shutdown::Write).unwrap();
         let mut connection = ConnectionState {
-            stream: Some(stream), peer_read_closed: false,
-            server: std::ptr::null(), request: Vec::new(), response: Vec::new(),
-            written: 0, watcher: 0, keep_alive: false, awaiting_handler: true,
-            response_ctx: std::ptr::null_mut(), streaming: true, response_ended: false,
-            head_deadline: None, head_end: 0, body_plan: BodyPlan::None,
-            consumed: 0, body_scan_offset: 0, body_complete: true,
-            dispatched: true, client_gone: false,
-            ready_depth: 0, retired: false, deferred_box_free: false,
+            stream: Some(stream),
+            peer_read_closed: false,
+            server: std::ptr::null(),
+            request: Vec::new(),
+            response: Vec::new(),
+            written: 0,
+            watcher: 0,
+            keep_alive: false,
+            awaiting_handler: true,
+            response_ctx: std::ptr::null_mut(),
+            streaming: true,
+            response_ended: false,
+            head_deadline: None,
+            head_end: 0,
+            body_plan: BodyPlan::None,
+            consumed: 0,
+            body_scan_offset: 0,
+            body_complete: true,
+            dispatched: true,
+            client_gone: false,
+            ready_depth: 0,
+            retired: false,
+            deferred_box_free: false,
         };
         assert!(!client_hung_up(&mut connection));
         assert!(connection.peer_read_closed);
         assert!(!connection.client_gone);
         // EOF can follow the last body bytes already buffered by a prior read.
         let mut context = RequestContext::new("POST", "/", &[], &[], std::ptr::null_mut());
-        connection.response_ctx = &mut context;
+        connection.response_ctx = &mut *context;
         connection.request.extend_from_slice(b"abc");
         connection.body_plan = BodyPlan::Fixed(3);
         connection.body_complete = false;
-        assert!(matches!(feed_parked_request_body(&mut connection), ParkedBodyFeed::Fed));
+        assert!(matches!(
+            feed_parked_request_body(&mut connection),
+            ParkedBodyFeed::Fed
+        ));
         assert!(connection.body_complete);
         assert_eq!(context._raw_body, b"abc");
         connection.response_ctx = std::ptr::null_mut();
@@ -3133,7 +3923,10 @@ mod tests {
         // The parked async handler may resume and produce multiple chunks.
         for chunk in [b"first".as_slice(), b"second".as_slice()] {
             connection.response.extend_from_slice(chunk);
-            assert!(matches!(write_response(&mut connection), FlushResult::Pending));
+            assert!(matches!(
+                write_response(&mut connection),
+                FlushResult::Pending
+            ));
             assert!(connection.stream.is_some());
             assert_eq!(connection.watcher, 0);
             let mut received = vec![0; chunk.len()];
@@ -3143,32 +3936,46 @@ mod tests {
         // Already buffered pipeline requests survive peer send EOF too.
         connection.streaming = false;
         connection.keep_alive = true;
-        connection.request.extend_from_slice(b"GET /next HTTP/1.1\r\nHost: local\r\n\r\n");
+        connection
+            .request
+            .extend_from_slice(b"GET /next HTTP/1.1\r\nHost: local\r\n\r\n");
         connection.consumed = 0;
-        assert!(matches!(write_response(&mut connection), FlushResult::KeptAlive));
+        assert!(matches!(
+            write_response(&mut connection),
+            FlushResult::KeptAlive
+        ));
         assert!(connection.request.starts_with(b"GET /next"));
         assert_eq!(connection.watcher, 0);
     }
 
     #[test]
     fn buffered_response_uses_one_computed_content_length() {
-        let response = render_response(ResponseSpec {
-            status: 200,
-            headers: vec![
-                ("Content-Length".into(), "99".into()),
-                ("X-Trace".into(), "kept".into()),
-                ("cOnTeNt-LeNgTh".into(), "123".into()),
-            ],
-            body: "é".as_bytes().to_vec(),
-        }, true);
+        let response = render_response(
+            ResponseSpec {
+                status: 200,
+                headers: vec![
+                    ("Content-Length".into(), "99".into()),
+                    ("X-Trace".into(), "kept".into()),
+                    ("cOnTeNt-LeNgTh".into(), "123".into()),
+                ],
+                body: "é".as_bytes().to_vec(),
+            },
+            true,
+        );
         assert_eq!(response, "HTTP/1.1 200 OK\r\nX-Trace: kept\r\nContent-Length: 2\r\nConnection: keep-alive\r\n\r\né".as_bytes());
 
-        let response = render_response(ResponseSpec {
-            status: 200,
-            headers: vec![("X-Trace".into(), "kept".into())],
-            body: b"ok".to_vec(),
-        }, false);
-        assert_eq!(response, b"HTTP/1.1 200 OK\r\nX-Trace: kept\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok");
+        let response = render_response(
+            ResponseSpec {
+                status: 200,
+                headers: vec![("X-Trace".into(), "kept".into())],
+                body: b"ok".to_vec(),
+            },
+            false,
+        );
+        assert_eq!(
+            response,
+            b"HTTP/1.1 200 OK\r\nX-Trace: kept\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok"
+        );
     }
 
     #[test]
@@ -3185,13 +3992,19 @@ mod tests {
         assert!(set("x-tRaCe", "new"));
         assert_eq!(
             context.state.headers,
-            vec![("X-Keep".into(), "kept".into()), ("x-tRaCe".into(), "new".into())]
+            vec![
+                ("X-Keep".into(), "kept".into()),
+                ("x-tRaCe".into(), "new".into())
+            ]
         );
-        let buffered = render_response(ResponseSpec {
-            status: 200,
-            headers: context.state.headers.clone(),
-            body: Vec::new(),
-        }, false);
+        let buffered = render_response(
+            ResponseSpec {
+                status: 200,
+                headers: context.state.headers.clone(),
+                body: Vec::new(),
+            },
+            false,
+        );
         assert_eq!(buffered, b"HTTP/1.1 200 OK\r\nX-Keep: kept\r\nx-tRaCe: new\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
         let streamed = render_streaming_head(200, &context.state.headers, false);
         assert_eq!(streamed, b"HTTP/1.1 200 OK\r\nX-Keep: kept\r\nx-tRaCe: new\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n");
@@ -3613,8 +4426,13 @@ mod tests {
     fn request_get_header_return_survives_another_lookup_and_context_drop() {
         let (first, second, missing) = {
             let context = RequestContext::new(
-                "GET", "/", &[],
-                &[("x-first".into(), "alpha".into()), ("x-second".into(), "beta".into())],
+                "GET",
+                "/",
+                &[],
+                &[
+                    ("x-first".into(), "alpha".into()),
+                    ("x-second".into(), "beta".into()),
+                ],
                 std::ptr::null_mut(),
             );
             let closure = context.request.get_header;

@@ -34,6 +34,20 @@ fn frame_split_async_functions_return_objects_arrays_and_tuples_from_branches() 
 }
 
 #[test]
+fn frame_split_borrowed_promise_survives_repeated_await_consumers() {
+    let source = r#"
+        async function main(): Promise<void> {
+            const pending: Promise<number> = Promise.resolve(42);
+            const first: number = await pending;
+            const second: number = await pending;
+            console.log(first);
+            console.log(second);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "borrowed_promise_repeated_await"), "42\n42\n");
+}
+
+#[test]
 fn frame_split_extracts_awaits_from_arguments_and_literals_left_to_right() {
     let source = r#"
         interface Pair { left: number; right: number; }
@@ -570,4 +584,88 @@ fn frame_split_async_lambda_preserves_captured_variable_identity() {
         }
     "#;
     assert_eq!(compile_and_run(source, "async_capture_identity"), "1 2 2\n");
+}
+
+#[test]
+fn conditional_promise_awaits_preserve_selected_arm_ownership() {
+    let source = r#"
+        async function main(): Promise<void> {
+            const borrowed: Promise<number> = Promise.resolve(40);
+            const first: number = await (true ? Promise.resolve(1) : borrowed);
+            const second: number = await (false ? Promise.resolve(2) : borrowed);
+            const nested: number = await (
+                true
+                    ? (false ? Promise.resolve(3) : borrowed)
+                    : Promise.resolve(4)
+            );
+            const unionPromise: number = await (true ? Promise.resolve(5) : 6);
+            const unionValue: number = await (false ? Promise.resolve(7) : 8);
+            const nestedUnion: number = await (
+                true
+                    ? (false ? Promise.resolve(9) : 10)
+                    : Promise.resolve(11)
+            );
+            console.log(first, second, nested, unionPromise, unionValue, nestedUnion);
+        }
+    "#;
+    let module = thaw_parser::parse_typescript(source).unwrap();
+    let program = thaw_hir::lower_module(&module).unwrap();
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "conditional_promise_awaits");
+    compiler.compile_program(&program).unwrap();
+    assert_eq!(compile_and_run(source, "conditional_promise_awaits"), "1 40 40 5 8 10\n");
+}
+
+#[test]
+fn named_and_closure_returns_retain_borrowed_promises() {
+    let source = r#"
+        function named(value: Promise<number>, early: boolean): Promise<number> {
+            if (early) { return value; }
+            return value;
+        }
+        async function main(): Promise<void> {
+            const original: Promise<number> = Promise.resolve(42);
+            const arrow = (value: Promise<number>): Promise<number> => value;
+            const block = (value: Promise<number>): Promise<number> => {
+                if (true) { return value; }
+                return Promise.resolve(0);
+            };
+            const first: number = await named(original, true);
+            const second: number = await arrow(original);
+            const third: number = await block(original);
+            console.log(first, second, third);
+        }
+    "#;
+    let module = thaw_parser::parse_typescript(source).unwrap();
+    let program = thaw_hir::lower_module(&module).unwrap();
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "borrowed_promise_returns");
+    compiler.compile_program(&program).unwrap();
+    let ir = compiler.print_to_string();
+    assert!(ir.contains("borrowed_await_retain"));
+    assert_eq!(compile_and_run(source, "borrowed_promise_returns"), "42 42 42\n");
+}
+
+#[test]
+fn discarded_promise_results_release_only_the_selected_owned_value() {
+    let source = r#"
+        let calls: number = 0;
+        function make(): Promise<number> {
+            calls += 1;
+            return Promise.resolve(calls);
+        }
+        async function main(): Promise<void> {
+            const borrowed: Promise<number> = Promise.resolve(7);
+            make();
+            borrowed;
+            true ? make() : borrowed;
+            console.log(calls, await borrowed);
+        }
+    "#;
+    let module = thaw_parser::parse_typescript(source).unwrap();
+    let program = thaw_hir::lower_module(&module).unwrap();
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "discarded_promise_results");
+    compiler.compile_program(&program).unwrap();
+    assert_eq!(compile_and_run(source, "discarded_promise_results"), "2 7\n");
 }

@@ -12,7 +12,9 @@ pub struct ErrorFrame<'a> {
 
 fn encoded_width(bytes: &[u8], index: usize) -> Option<(usize, usize)> {
     let first = *bytes.get(index)?;
-    if first < 0x80 { return Some((1, 1)); }
+    if first < 0x80 {
+        return Some((1, 1));
+    }
     let (width, units) = match first {
         0xC2..=0xDF => (2, 1),
         0xE0..=0xEF => (3, 1),
@@ -20,10 +22,15 @@ fn encoded_width(bytes: &[u8], index: usize) -> Option<(usize, usize)> {
         _ => return None,
     };
     let tail = bytes.get(index + 1..index + width)?;
-    if tail.iter().any(|byte| byte & 0xC0 != 0x80) { return None; }
-    if width == 3 && first == 0xE0 && tail[0] < 0xA0 { return None; }
-    if width == 4 && ((first == 0xF0 && tail[0] < 0x90)
-        || (first == 0xF4 && tail[0] > 0x8F)) { return None; }
+    if tail.iter().any(|byte| byte & 0xC0 != 0x80) {
+        return None;
+    }
+    if width == 3 && first == 0xE0 && tail[0] < 0xA0 {
+        return None;
+    }
+    if width == 4 && ((first == 0xF0 && tail[0] < 0x90) || (first == 0xF4 && tail[0] > 0x8F)) {
+        return None;
+    }
     Some((width, units))
 }
 
@@ -44,27 +51,37 @@ fn boundary(bytes: &[u8], expected: usize) -> Option<usize> {
     while units < expected {
         let (width, count) = encoded_width(bytes, index)?;
         units = units.checked_add(count)?;
-        if units > expected { return None; }
+        if units > expected {
+            return None;
+        }
         index += width;
     }
     Some(index)
 }
 
-fn decimal<'a>(bytes: &'a [u8]) -> Option<(usize, &'a [u8])> {
+fn decimal(bytes: &[u8]) -> Option<(usize, &[u8])> {
     let end = bytes.iter().position(|byte| *byte == b':')?;
-    if end == 0 || !bytes[..end].iter().all(u8::is_ascii_digit) { return None; }
+    if end == 0 || !bytes[..end].iter().all(u8::is_ascii_digit) {
+        return None;
+    }
     let mut value = 0usize;
     for byte in &bytes[..end] {
-        value = value.checked_mul(10)?.checked_add((*byte - b'0') as usize)?;
+        value = value
+            .checked_mul(10)?
+            .checked_add((*byte - b'0') as usize)?;
     }
     Some((value, &bytes[end + 1..]))
 }
 
 pub fn encode_tagged(chain: &[u8], display: &[u8], original: Option<&[u8]>) -> Option<Vec<u8>> {
     let display_units = utf16_units(display)?;
-    let original_units = match original { Some(bytes) => Some(utf16_units(bytes)?), None => None };
-    let mut output = Vec::with_capacity(chain.len() + display.len()
-        + original.map_or(0, |bytes| bytes.len()) + 40);
+    let original_units = match original {
+        Some(bytes) => Some(utf16_units(bytes)?),
+        None => None,
+    };
+    let mut output = Vec::with_capacity(
+        chain.len() + display.len() + original.map_or(0, |bytes| bytes.len()) + 40,
+    );
     output.push(1);
     output.extend_from_slice(chain);
     output.push(1);
@@ -77,7 +94,9 @@ pub fn encode_tagged(chain: &[u8], display: &[u8], original: Option<&[u8]>) -> O
     }
     output.push(b':');
     output.extend_from_slice(display);
-    if let Some(original) = original { output.extend_from_slice(original); }
+    if let Some(original) = original {
+        output.extend_from_slice(original);
+    }
     Some(output)
 }
 
@@ -99,8 +118,15 @@ pub fn parse_tagged(bytes: &[u8]) -> Option<ErrorFrame<'_>> {
     let (original, suffix) = if let Some(units) = original_units {
         let end = boundary(framed, units)?;
         (Some(&framed[..end]), &framed[end..])
-    } else { (None, framed) };
-    Some(ErrorFrame { chain, display, original, suffix })
+    } else {
+        (None, framed)
+    };
+    Some(ErrorFrame {
+        chain,
+        display,
+        original,
+        suffix,
+    })
 }
 
 #[cfg(test)]
@@ -117,7 +143,10 @@ mod tests {
         assert_eq!(frame.chain, b"TypeError");
         assert_eq!(frame.display, display);
         assert_eq!(frame.original, Some(&original[..]));
-        assert_eq!(frame.suffix, b"\x02real cause\x03REAL_CODE\x05{\"status\":418}");
+        assert_eq!(
+            frame.suffix,
+            b"\x02real cause\x03REAL_CODE\x05{\"status\":418}"
+        );
     }
 
     #[test]

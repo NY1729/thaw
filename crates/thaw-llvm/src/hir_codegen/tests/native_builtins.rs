@@ -497,7 +497,7 @@ fn compiles_string_from_code_point() {
     "#;
     assert_eq!(
         compile_and_run(source, "string_from_code_point"),
-        "\nA\nHello\n😀\nA😀\nfirst\nsecond\nA😀\nawaited point\n😀\nInvalid code point\nInvalid code point\nInvalid code point\nInvalid code point\n"
+        "\nA\nHello\n😀\nA😀\nfirst\nsecond\nA😀\nawaited point\n😀\nInvalid code point\nInvalid code point\nInvalid code point\n"
     );
 }
 
@@ -2382,6 +2382,120 @@ fn compiles_array_from_a_generator() {
     );
 }
 
+#[test]
+fn compiles_array_from_a_real_typed_array_iterator() {
+    let source = r#"
+        function main(): void {
+            const bytes: JsValue = new Uint8Array([65, 240, 159, 152, 128]);
+            const copied: JsValue = new Uint8Array((bytes as any).buffer);
+            console.log(JSON.stringify(Array.from(copied)));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "array_from_real_typed_array_iterator"),
+        "[65,240,159,152,128]\n"
+    );
+}
+
+#[test]
+fn compiles_array_from_live_iterator_with_single_acquisition_and_receivers() {
+    let source = r#"
+        let sourceCalls = 0;
+        function produce(): JsValue {
+            sourceCalls++;
+            return getDynamicValue("arrayFromReceiverSource");
+        }
+        function main(): void {
+            loadScript("globalThis.arrayFromIteratorGetterCalls = 0; globalThis.arrayFromIteratorCalls = 0; globalThis.arrayFromIteratorNextCalls = 0; globalThis.arrayFromSourceNextCalls = 0; globalThis.arrayFromReceiverSource = {}; Object.defineProperty(arrayFromReceiverSource, Symbol.iterator, { get() { arrayFromIteratorGetterCalls++; return function() { if (this !== arrayFromReceiverSource) throw new Error('wrong source receiver'); arrayFromIteratorCalls++; let step = 0; let iterator; iterator = { next() { if (this !== iterator) throw new Error('wrong iterator receiver'); arrayFromIteratorNextCalls++; step++; return step <= 2 ? { value: step === 1 ? 7 : 8, done: false } : { done: true }; } }; return iterator; }; } }); Object.defineProperty(arrayFromReceiverSource, 'next', { value() { arrayFromSourceNextCalls++; throw new Error('source next used'); } });");
+            const values: Json = Array.from(produce());
+            console.log(JSON.stringify(values), sourceCalls, Number(getDynamicValue("arrayFromIteratorGetterCalls")), Number(getDynamicValue("arrayFromIteratorCalls")), Number(getDynamicValue("arrayFromIteratorNextCalls")), Number(getDynamicValue("arrayFromSourceNextCalls")));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "array_from_live_iterator_receiver_and_once"),
+        "[7,8] 1 1 1 3 0\n"
+    );
+}
+
+#[test]
+fn compiles_array_from_existing_next_only_dynamic_iterator() {
+    let source = r#"
+        function main(): void {
+            loadScript("globalThis.arrayFromNextOnlyCalls = 0; globalThis.arrayFromNextOnly = { next() { arrayFromNextOnlyCalls++; return arrayFromNextOnlyCalls === 1 ? { value: 9, done: false } : { done: true }; } };");
+            const iterator: JsValue = getDynamicValue("arrayFromNextOnly");
+            console.log(JSON.stringify(Array.from(iterator)), Number(getDynamicValue("arrayFromNextOnlyCalls")));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "array_from_existing_next_only_iterator"),
+        "[9] 2\n"
+    );
+}
+
+#[test]
+fn compiles_array_from_preserving_iterator_acquisition_throw() {
+    let source = r#"
+        function main(): void {
+            loadScript("globalThis.arrayFromAcquireNextCalls = 0; globalThis.arrayFromAcquireFailure = {}; Object.defineProperty(arrayFromAcquireFailure, Symbol.iterator, { get() { throw 'iter-acquire'; } }); Object.defineProperty(arrayFromAcquireFailure, 'next', { value() { arrayFromAcquireNextCalls++; return { done: true }; } });");
+            const source: JsValue = getDynamicValue("arrayFromAcquireFailure");
+            try {
+                Array.from(source);
+                console.log("missed acquisition throw");
+            } catch (error) {
+                console.log(error === "iter-acquire", Number(getDynamicValue("arrayFromAcquireNextCalls")));
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "array_from_iterator_acquisition_throw"),
+        "true 0\n"
+    );
+}
+
+#[test]
+fn compiles_array_from_first_boundary_object_acquisition_throw_identity() {
+    let source = r#"
+        function main(): void {
+            loadScript("globalThis.arrayFromObjectAcquireNextCalls = 0; globalThis.arrayFromObjectAcquireMarker = {}; globalThis.arrayFromObjectAcquireFailure = {}; Object.defineProperty(arrayFromObjectAcquireFailure, Symbol.iterator, { get() { throw arrayFromObjectAcquireMarker; } }); Object.defineProperty(arrayFromObjectAcquireFailure, 'next', { value() { arrayFromObjectAcquireNextCalls++; return { done: true }; } });");
+            const marker: JsValue = getDynamicValue("arrayFromObjectAcquireMarker");
+            const source: JsValue = getDynamicValue("arrayFromObjectAcquireFailure");
+            try {
+                Array.from(source);
+                console.log("missed acquisition throw");
+            } catch (error) {
+                console.log(error === marker, Number(getDynamicValue("arrayFromObjectAcquireNextCalls")));
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "array_from_first_boundary_object_acquisition_throw"),
+        "true 0\n"
+    );
+}
+
+#[test]
+fn compiles_array_from_first_boundary_undefined_acquisition_throw() {
+    let source = r#"
+        function main(): void {
+            loadScript("globalThis.arrayFromUndefinedAcquireNextCalls = 0; globalThis.arrayFromUndefinedAcquireFailure = {}; Object.defineProperty(arrayFromUndefinedAcquireFailure, Symbol.iterator, { get() { throw undefined; } }); Object.defineProperty(arrayFromUndefinedAcquireFailure, 'next', { value() { arrayFromUndefinedAcquireNextCalls++; return { done: true }; } });");
+            const source: JsValue = getDynamicValue("arrayFromUndefinedAcquireFailure");
+            let didThrow = false;
+            let caughtUndefined = false;
+            try {
+                Array.from(source);
+            } catch (error) {
+                didThrow = true;
+                caughtUndefined = error === undefined;
+            }
+            console.log(didThrow, caughtUndefined, Number(getDynamicValue("arrayFromUndefinedAcquireNextCalls")));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "array_from_first_boundary_undefined_acquisition_throw"),
+        "true true 0\n"
+    );
+}
+
 /// `Array.fromAsync(anAsyncGenerator())` -- the `async function*`
 /// sibling of `compiles_array_from_a_generator` above. `Array.fromAsync`
 /// otherwise delegates entirely to the embedded QuickJS realm's own
@@ -3893,7 +4007,7 @@ fn compiles_regex_test_and_exec_with_an_any_typed_receiver() {
     "#;
     assert_eq!(
         compile_and_run(source, "regex_test_and_exec_any_receiver"),
-        "true\nfalse\n[\"12-34\",\"12\",\"34\"]\n"
+        "true\nfalse\n[ '12-34', '12', '34' ]\n"
     );
 }
 
@@ -4383,24 +4497,21 @@ fn compiles_map_or_set_mutating_methods_for_any_typed_receivers() {
 }
 
 /// `.set()` on a `Map` stored in `any` behind a property chain (not a
-/// bare local variable) is a documented, narrower limitation, not a
-/// silent no-op or a crash -- see the doc comment on
-/// `compiles_map_or_set_mutating_methods_for_any_typed_receivers`.
+/// bare local variable) mutates the real map, as in Node; it used to be a
+/// documented limitation that failed to compile (see the doc comment on
+/// `compiles_map_or_set_mutating_methods_for_any_typed_receivers`).
 #[test]
 fn map_set_on_an_any_typed_property_chain_receiver_errors_clearly() {
+    // An `any` property holding a real native `Map` accepts `set`/`get` just
+    // like Node; it no longer needs a plain local variable receiver.
     let source = r#"
         function main(): void {
             const holder: { m: any } = { m: new Map<string, number>([["a", 1]]) };
             holder.m.set("b", 2);
+            console.log(holder.m.get("b"), holder.m.size);
         }
     "#;
-    let module = thaw_parser::parse_typescript(source).unwrap();
-    let error =
-        thaw_hir::lower_module(&module).expect_err("property-chain receiver should error");
-    assert!(
-        error.contains("plain local variable"),
-        "unexpected error: {error}"
-    );
+    assert_eq!(compile_and_run(source, "map_set_any_property_chain"), "2 2\n");
 }
 
 #[test]
@@ -6226,7 +6337,8 @@ fn delete_on_a_dynamic_any_object_preserves_remaining_key_order() {
     "#;
     assert_eq!(
         compile_and_run(source, "delete_preserves_key_order"),
-        "{\"b\":2,\"c\":3,\"d\":4}\n[\"b\",\"c\",\"d\"]\n{\"b\":2,\"d\":4}\n"
+        // `Object.keys` line verified against `node -e` (util.inspect formatting).
+        "{\"b\":2,\"c\":3,\"d\":4}\n[ 'b', 'c', 'd' ]\n{\"b\":2,\"d\":4}\n"
     );
 }
 
@@ -8020,15 +8132,69 @@ fn using_disposal_failures_continue_and_suppress_the_pending_error() {
             } catch (error) {
                 console.log(error.name);
                 console.log(error.message);
+                console.log(error.error.name);
                 console.log(error.error.message);
+                console.log(error.suppressed.name);
                 console.log(error.suppressed.message);
+                console.log(error.suppressed.suppressed.name);
                 console.log(error.suppressed.suppressed.message);
             }
         }
     "#;
     assert_eq!(
         compile_and_run(source, "using_suppressed_error"),
-        "dispose b\ndispose a\nSuppressedError\na\na\nb\nbody\n"
+        // Verified against real Node 24 (V8 13.6): disposal errors nest as
+        // SuppressedError(a, SuppressedError(b, body)); the implicitly created ones carry V8's
+        // default message "An error was suppressed during disposal" (an explicit
+        // `new SuppressedError(e, s)` has the empty message).
+        "dispose b\ndispose a\nSuppressedError\nAn error was suppressed during disposal\nError\na\nSuppressedError\nAn error was suppressed during disposal\nError\nbody\n"
+    );
+}
+
+#[test]
+fn using_single_disposal_error_and_explicit_suppressed_error_keep_distinct_messages() {
+    let source = r#"
+        function main(): void {
+            try {
+                using resource = {
+                    [Symbol.dispose]() { throw new Error("dispose"); }
+                };
+            } catch (error) {
+                console.log(error.name);
+                console.log(error.message);
+            }
+            const explicit = new SuppressedError(new Error("new"), new Error("old"));
+            console.log(explicit.name);
+            console.log(explicit.message);
+            console.log(explicit.error.message);
+            console.log(explicit.suppressed.message);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "using_single_disposal_error"),
+        "Error\ndispose\nSuppressedError\n\nnew\nold\n"
+    );
+}
+
+#[test]
+fn using_suppressed_error_projects_an_opaque_native_reason_through_its_carrier() {
+    let source = r#"
+        function main(): void {
+            try {
+                using resource = {
+                    [Symbol.dispose]() { throw new Error("dispose"); }
+                };
+                throw new Map<string, number>();
+            } catch (error) {
+                console.log(error.name);
+                console.log(error.error.message);
+                console.log(JSON.stringify(error.suppressed));
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "using_suppressed_native_reason"),
+        "SuppressedError\ndispose\n{}\n"
     );
 }
 
@@ -8084,6 +8250,29 @@ fn compiles_using_bindings_in_for_of() {
     assert_eq!(
         compile_and_run(source, "using_for_of"),
         "body a\ndispose a\ndispose b\nbody c\ndispose c\n"
+    );
+}
+
+#[test]
+fn escaped_using_for_of_captures_keep_distinct_iteration_values() {
+    let source = r#"
+        function make(name: string) {
+            return {
+                name,
+                [Symbol.dispose]() { console.log("dispose " + name); }
+            };
+        }
+        function main(): void {
+            const escaped: (() => string)[] = [];
+            for (using resource of [make("a"), make("b"), make("c")]) {
+                escaped.push(() => String(resource.name));
+            }
+            for (const read of escaped) console.log("escaped " + read());
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "escaped_using_for_of_captures"),
+        "dispose a\ndispose b\ndispose c\nescaped a\nescaped b\nescaped c\n"
     );
 }
 
@@ -8212,6 +8401,12 @@ fn compiles_turkish_and_azeri_string_casing() {
 
 /// `AggregateError` preserves statically typed errors and an arbitrary cause
 /// while retaining the existing tagged exception behavior when thrown.
+///
+/// A caught `AggregateError` is printed as Node prints an error that has no stack
+/// frames (verified with `e.stack = "AggregateError: all failed"` under Node 22):
+/// `[AggregateError: all failed] { [errors]: [ [Error: a] ] }`. Real Node also prints
+/// the stack trace, which a native binary has no equivalent of, so it is omitted.
+/// A statically typed error value still prints as its bare message (the first line).
 #[test]
 fn compiles_aggregate_error() {
     let source = r#"
@@ -8237,7 +8432,7 @@ fn compiles_aggregate_error() {
     "#;
     assert_eq!(
         compile_and_run(source, "aggregate_error"),
-        "\n1,2,3\n17\ntrue\nall failed\ntrue\nAggregateError\nall failed\n"
+        "\n1,2,3\n17\ntrue\n[AggregateError: all failed] { [errors]: [ [Error: a] ] }\ntrue\nAggregateError\nall failed\n"
     );
 }
 
@@ -8720,6 +8915,113 @@ fn compiles_escape_and_error_statics() {
         compile_and_run(source, "escape_and_error_statics"),
         "a%20b/c%3Fd%3D1%26x\n%u65E5%u672C\na b/c\n日本\ntrue\ntrue\ntrue\nfalse\nfalse\nError\nboom\n"
     );
+}
+
+#[test]
+fn caught_quickjs_error_console_reads_message_once_without_calling_to_string() {
+    let source = r#"
+        declare function __thaw_typed_js_7468726f77436f6e736f6c654572726f72(): void;
+        declare function __thaw_typed_js_636f6e736f6c654572726f72436f756e7473(): string;
+        function main(): void {
+            loadScript("globalThis.consoleMessageReads = 0; globalThis.consoleStringCalls = 0; const error = new Error('ignored'); Object.defineProperty(error, 'message', { configurable: true, get() { consoleMessageReads++; return 'caught message'; } }); error.toString = () => { consoleStringCalls++; return 'wrong text'; }; globalThis.throwConsoleError = () => { throw error; }; globalThis.consoleErrorCounts = () => consoleMessageReads + ':' + consoleStringCalls;");
+            try { __thaw_typed_js_7468726f77436f6e736f6c654572726f72(); }
+            catch (error) { console.log(error); }
+            console.log(__thaw_typed_js_636f6e736f6c654572726f72436f756e7473());
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "caught_quickjs_error_console_message_once"),
+        "caught message\n1:0\n"
+    );
+}
+
+#[test]
+fn caught_quickjs_error_console_propagates_message_getter_failure_without_partial_output() {
+    let source = r#"
+        declare function __thaw_typed_js_7468726f77436f6e736f6c654572726f72(): void;
+        declare function __thaw_typed_js_636f6e736f6c654572726f725265616473(): number;
+        function main(): void {
+            loadScript("globalThis.consoleMessageReads = 0; const error = new Error('not printed'); Object.defineProperty(error, 'message', { configurable: true, get() { consoleMessageReads++; throw new Error('message getter failed'); } }); globalThis.throwConsoleError = () => { throw error; }; globalThis.consoleErrorReads = () => consoleMessageReads;");
+            try {
+                try { __thaw_typed_js_7468726f77436f6e736f6c654572726f72(); }
+                catch (error) { console.log(error); }
+            } catch (messageError) {
+                console.log(messageError);
+            }
+            console.log(__thaw_typed_js_636f6e736f6c654572726f725265616473());
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "caught_quickjs_error_console_getter_failure"),
+        "message getter failed\n1\n"
+    );
+}
+
+#[test]
+fn caught_quickjs_plain_strings_and_fake_errors_keep_their_value_format() {
+    let source = r#"
+        declare function __thaw_typed_js_7468726f77507265666978537472696e67(): void;
+        declare function __thaw_typed_js_7468726f7746616b654572726f72(): void;
+        function main(): void {
+            loadScript("globalThis.throwPrefixString = () => { throw 'prefix:' + String.fromCharCode(31) + '@@iterator'; }; globalThis.throwFakeError = () => { throw { name: 'Error', message: 'fake' }; }");
+            try { __thaw_typed_js_7468726f77507265666978537472696e67(); }
+            catch (error) { console.log(error); }
+            try { __thaw_typed_js_7468726f7746616b654572726f72(); }
+            catch (error) { console.log(error); }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "caught_quickjs_plain_string_and_fake_error"),
+        "prefix:\u{1f}@@iterator\n{ name: 'Error', message: 'fake' }\n"
+    );
+}
+
+#[test]
+fn caught_quickjs_proxy_prototype_trap_propagates_without_partial_output() {
+    let source = r#"
+        declare function __thaw_typed_js_7468726f7750726f746f7479706554726170(): void;
+        function main(): void {
+            loadScript("const error = new Proxy(new Error('hidden'), { getPrototypeOf() { throw new Error('prototype trap failed'); } }); globalThis.throwPrototypeTrap = () => { throw error; };");
+            try {
+                try { __thaw_typed_js_7468726f7750726f746f7479706554726170(); }
+                catch (error) { console.log(error); }
+            } catch (predicateError) {
+                console.log(predicateError);
+            }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "caught_quickjs_error_prototype_trap"),
+        "prototype trap failed\n"
+    );
+}
+
+#[test]
+fn napi_caught_json_console_does_not_enable_quickjs() {
+    let source = r#"
+        declare function __thaw_typed_napi_6e61706963616c6c(): number;
+        function main(): void {
+            try { __thaw_typed_napi_6e61706963616c6c(); }
+            catch (error) { console.log(error); }
+        }
+    "#;
+    let module = thaw_parser::parse_typescript(source).unwrap();
+    let program = thaw_hir::lower_module(&module).unwrap();
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "napi_caught_json_console");
+    compiler.compile_program(&program).unwrap();
+    let ir = compiler.print_to_string();
+    assert!(compiler.uses_napi(), "{ir}");
+    assert!(!compiler.uses_quickjs(), "{ir}");
+    assert!(ir.contains("thaw_json_is_host_error_family"), "{ir}");
+    assert!(
+        !ir.lines().any(|line| {
+            line.split_ascii_whitespace().any(|word| word == "call")
+                && line.contains("@thaw_js_call_graph_result(")
+        }),
+        "N-API-only console emitted a QuickJS graph-call instruction:\n{ir}"
+    );
+    assert!(!ir.contains("thaw_js_register_callback_host_operations"), "{ir}");
 }
 
 /// `Reflect.defineProperty`/`getOwnPropertyDescriptor`/`isExtensible`/
@@ -9687,19 +9989,33 @@ fn compiles_well_known_symbols() {
 fn object_literal_to_primitive_is_consulted_by_coercions() {
     let source = r#"
         function main(): void {
+            let numberCalls = 0;
+            let stringCalls = 0;
             const obj = {
                 value: 5,
                 [Symbol.toPrimitive](hint: string): any {
-                    if (hint === "number") return this.value;
+                    if (hint === "number") { numberCalls++; return this.value; }
+                    stringCalls++;
                     return `obj(${this.value})`;
                 },
             };
-            console.log(+obj, `${obj}`);
+            console.log(+obj, `${obj}`, numberCalls, stringCalls);
+            loadScript("globalThis.dynamicUnaryCalls = 0; globalThis.dynamicUnaryObject = { [Symbol.toPrimitive](hint) { dynamicUnaryCalls++; if (hint !== 'number') throw new Error('wrong hint'); return 9; } }; globalThis.numberConstructorCalls = 0; globalThis.numberConstructorObject = { [Symbol.toPrimitive](hint) { numberConstructorCalls++; if (hint !== 'number') throw new Error('wrong Number hint'); return 12; } }; globalThis.unaryPlusBigInt = 1n; globalThis.numberConstructorBigInt = 1n; globalThis.unaryPlusSymbol = Symbol('value');");
+            const dynamicObject: JsValue = getDynamicValue("dynamicUnaryObject");
+            console.log(+dynamicObject, Number(getDynamicValue("dynamicUnaryCalls")));
+            const numberObject: JsValue = getDynamicValue("numberConstructorObject");
+            console.log(Number(numberObject), Number(getDynamicValue("numberConstructorCalls")));
+            const numberBigInt: JsValue = getDynamicValue("numberConstructorBigInt");
+            console.log(Number(numberBigInt));
+            const big: JsValue = getDynamicValue("unaryPlusBigInt");
+            const symbol: JsValue = getDynamicValue("unaryPlusSymbol");
+            try { console.log(+big); } catch (error) { console.log(error instanceof TypeError); }
+            try { console.log(+symbol); } catch (error) { console.log(error instanceof TypeError); }
         }
     "#;
     assert_eq!(
         compile_and_run(source, "object_literal_to_primitive_coercion"),
-        "5 obj(5)\n"
+        "5 obj(5) 1 1\n9 1\n12 1\n1\ntrue\ntrue\n"
     );
 }
 
@@ -10596,6 +10912,36 @@ fn date_constructor_uses_live_value_without_snapshot_or_user_date_globals() {
 }
 
 #[test]
+fn typed_quickjs_date_results_authenticate_and_preserve_timestamp() {
+    let source = r#"
+        declare function __thaw_typed_js_706f736974697665(): Date;
+        declare function __thaw_typed_js_6e65676174697665(): Date;
+        declare function __thaw_typed_js_696e76616c6964(): Date;
+        declare function __thaw_typed_js_706c61696e(): Date;
+        declare function __thaw_typed_js_666f72676564(): Date;
+        function main(): void {
+            loadScript("globalThis.positive = () => new Date(1704067200500); globalThis.negative = () => new Date(-86400000); globalThis.invalid = () => new Date(NaN); globalThis.plain = () => ({ timestamp: 17 }); globalThis.forged = () => ({ ['__thaw_class_identity_' + String.fromCharCode(30) + 'Date']: true, timestamp: 19 });");
+            const positive: Date = __thaw_typed_js_706f736974697665();
+            const negative: Date = __thaw_typed_js_6e65676174697665();
+            const invalid: Date = __thaw_typed_js_696e76616c6964();
+            console.log(positive instanceof Date, positive.getTime());
+            console.log(negative instanceof Date, negative.getTime());
+            console.log(invalid instanceof Date, Number.isNaN(invalid.getTime()));
+            try { __thaw_typed_js_706c61696e(); console.log("missed plain object"); }
+            catch (_) { console.log("rejected plain object"); }
+            try { __thaw_typed_js_666f72676564(); console.log("missed forged marker"); }
+            catch (_) { console.log("rejected forged marker"); }
+            const record: { timestamp: number } = { timestamp: 23 };
+            console.log(record.timestamp, record instanceof Date);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "typed_quickjs_date_results"),
+        "true 1704067200500\ntrue -86400000\ntrue true\nrejected plain object\nrejected forged marker\n23 false\n"
+    );
+}
+
+#[test]
 fn graph_callback_argument_conversion_failure_preserves_exception_and_skips_body() {
     let source = r#"
         let entered = 0;
@@ -10909,6 +11255,24 @@ fn decoded_js_function_argument_marshaling_failure_keeps_original_error() {
 }
 
 #[test]
+fn class_instance_with_getters_converts_to_a_structural_parameter_by_reading_them() {
+    let source = r#"
+        class Pair {
+            n = 3;
+            get double(): number { return this.n * 2; }
+        }
+        function total(item: { n: number; double: number }): number { return item.n + item.double; }
+        function main(): void {
+            const pair = new Pair();
+            const before = total(pair);
+            pair.n = 10;
+            console.log(before, total(pair));
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "getter_class_structural_param"), "9 30\n");
+}
+
+#[test]
 fn console_native_object_getter_failure_keeps_exception_and_next_log() {
     let source = r#"
         interface Box { value: number; }
@@ -10923,7 +11287,7 @@ fn console_native_object_getter_failure_keeps_exception_and_next_log() {
             console.log(good);
         }
     "#;
-    assert_eq!(compile_and_run(source, "console_native_getter_ownership"), "true 1\n{\"value\":4}\n");
+    assert_eq!(compile_and_run(source, "console_native_getter_ownership"), "true 1\n{ value: 4 }\n");
 }
 
 #[test]
@@ -11362,7 +11726,7 @@ fn native_projection_method_registration_retains_physical_receiver_hir_type() {
     for function in &program.functions {
         visit_stmts(&function.body, &mut registrations);
     }
-    assert_eq!(registrations, 2, "one getter and one setter");
+    assert_eq!(registrations, 3, "one getter, one setter and one data-define callback");
 }
 
 #[test]
@@ -11433,6 +11797,30 @@ fn iterator_yield_delegate_preserves_done_value() {
             console.log(iterator.next().value);
             console.log(iterator.next().value);
             console.log(iterator.next().done);
+            loadScript("globalThis.dynamicYieldSource = { [Symbol.iterator]() { let step = 0; return { next() { step++; return step === 1 ? { value: 2, done: false } : { value: 7, done: true }; } }; } }; globalThis.dynamicForOfDoneValueReads = 0; globalThis.dynamicEmptySource = { [Symbol.iterator]() { return { next() { return { get value() { dynamicForOfDoneValueReads++; return 99; }, done: true }; } }; } };");
+            const dynamicYieldSource: JsValue = getDynamicValue("dynamicYieldSource");
+            function* dynamicOuter(): Generator<number> {
+                const completion = yield* dynamicYieldSource;
+                yield completion;
+            }
+            const dynamicIterator = dynamicOuter();
+            console.log(dynamicIterator.next().value);
+            console.log(dynamicIterator.next().value);
+            console.log(dynamicIterator.next().done);
+            const dynamicEmpty: JsValue = getDynamicValue("dynamicEmptySource");
+            for (const value of dynamicEmpty) { console.log(value); }
+            console.log(Number(getDynamicValue("dynamicForOfDoneValueReads")));
+            loadScript("globalThis.dynamicReturnSource = { [Symbol.iterator]() { let step = 0; return { next() { step++; return step === 1 ? { value: 3, done: false } : { value: 7, done: true }; }, return() { return { value: 4, done: false }; } }; } };");
+            const dynamicReturnSource: JsValue = getDynamicValue("dynamicReturnSource");
+            function* dynamicReturnOuter(): Generator<number> {
+                const completion = yield* dynamicReturnSource;
+                yield completion;
+            }
+            const dynamicReturnIterator = dynamicReturnOuter();
+            console.log(dynamicReturnIterator.next().value);
+            console.log(dynamicReturnIterator.return(99).value);
+            console.log(dynamicReturnIterator.next().value);
+            console.log(dynamicReturnIterator.next().done);
             let reads = 0;
             const empty = {
                 [Symbol.iterator]() {
@@ -11452,9 +11840,129 @@ fn iterator_yield_delegate_preserves_done_value() {
     "#;
     assert_eq!(
         compile_and_run(source, "iterator_yield_delegate_done_value"),
-        "2\n7\ntrue\n0\n"
+        "2\n7\ntrue\n2\n7\ntrue\n0\n3\n4\n7\ntrue\n0\n"
     );
 }
+#[test]
+fn non_graph_native_callback_results_preserve_nested_callable_fields_sync_and_async() {
+    let source = r#"
+        declare function __thaw_typed_js_636f6e73756d6553796e63(callback: JsValue): string;
+        declare function __thaw_typed_js_636f6e73756d654173796e63(callback: JsValue): Promise<string>;
+
+        async function main(): Promise<void> {
+            loadScript("globalThis.consumeSync = callback => { const result = callback(); const next = result.next; return [typeof next, next === result.next, next(), next()].join(':'); }; globalThis.consumeAsync = async callback => { const result = await callback(); const next = result.next; return [typeof next, next === result.next, next(), next()].join(':'); };");
+            let syncCalls = 0;
+            const syncCallback: JsValue = registerNativeCallback(() => ({
+                next() { syncCalls++; return syncCalls; }
+            }));
+            console.log(__thaw_typed_js_636f6e73756d6553796e63(syncCallback));
+            releaseDynamicValue(syncCallback);
+
+            let asyncCalls = 0;
+            const asyncCallback: JsValue = registerNativeCallback(async (): Promise<{ next: () => number }> => {
+                await sleep(0);
+                return { next() { asyncCalls++; return asyncCalls; } };
+            });
+            console.log(await __thaw_typed_js_636f6e73756d654173796e63(asyncCallback));
+            releaseDynamicValue(asyncCallback);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "nested_native_callback_result_functions"),
+        "function:true:1:2\nfunction:true:1:2\n"
+    );
+}
+
+#[test]
+fn callback_returned_accessor_objects_stay_lazy_sync_and_async() {
+    let source = r#"
+        declare function __thaw_typed_js_636f6e73756d65446f6e65(callback: JsValue): string;
+        declare function __thaw_typed_js_636f6e73756d6556616c7565(callback: JsValue): string;
+        declare function __thaw_typed_js_636f6e73756d654173796e63446f6e65(callback: JsValue): Promise<string>;
+        declare function __thaw_typed_js_636f6e73756d654173796e6356616c7565(callback: JsValue): Promise<string>;
+
+        async function main(): Promise<void> {
+            loadScript("globalThis.consumeDone = callback => { const result = callback(); const step = result.next(); if (!step.done) void step.value; return [result.next === result.next, result.reads()].join(':'); }; globalThis.consumeValue = callback => { const result = callback(); const step = result.next(); if (!step.done) void step.value; return [result.next === result.next, result.reads()].join(':'); }; globalThis.consumeAsyncDone = async callback => { const result = await callback(); const step = result.next(); if (!step.done) void step.value; return [result.next === result.next, result.reads()].join(':'); }; globalThis.consumeAsyncValue = async callback => { const result = await callback(); const step = result.next(); if (!step.done) void step.value; return [result.next === result.next, result.reads()].join(':'); };");
+            let syncDoneReads = 0;
+            const syncDone: JsValue = registerNativeCallback(() => ({
+                next() { return { get value(): number { syncDoneReads++; return 9; }, done: true }; },
+                reads() { return syncDoneReads; }
+            }));
+            console.log(__thaw_typed_js_636f6e73756d65446f6e65(syncDone));
+            releaseDynamicValue(syncDone);
+
+            let syncValueReads = 0;
+            const syncValue: JsValue = registerNativeCallback(() => ({
+                next() { return { get value(): number { syncValueReads++; return 9; }, done: false }; },
+                reads() { return syncValueReads; }
+            }));
+            console.log(__thaw_typed_js_636f6e73756d6556616c7565(syncValue));
+            releaseDynamicValue(syncValue);
+
+            let asyncDoneReads = 0;
+            const asyncDone: JsValue = registerNativeCallback(async () => {
+                await sleep(0);
+                return {
+                    next() { return { get value(): number { asyncDoneReads++; return 9; }, done: true }; },
+                    reads() { return asyncDoneReads; }
+                };
+            });
+            console.log(await __thaw_typed_js_636f6e73756d654173796e63446f6e65(asyncDone));
+            releaseDynamicValue(asyncDone);
+
+            let asyncValueReads = 0;
+            const asyncValue: JsValue = registerNativeCallback(async () => {
+                await sleep(0);
+                return {
+                    next() { return { get value(): number { asyncValueReads++; return 9; }, done: false }; },
+                    reads() { return asyncValueReads; }
+                };
+            });
+            console.log(await __thaw_typed_js_636f6e73756d654173796e6356616c7565(asyncValue));
+            releaseDynamicValue(asyncValue);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "callback_returned_accessor_objects_stay_lazy"),
+        "true:0\ntrue:1\ntrue:0\ntrue:1\n"
+    );
+}
+
+#[test]
+fn adapted_callback_identity_is_shared_across_registration_modes() {
+    let source = r#"
+        function main(): void {
+            loadScript("globalThis.runFirstPair = () => { const a = globalThis.__callbackFirstA; const b = globalThis.__callbackFirstB; const same = a === b; a(); b(); return same; }; globalThis.runSecondPair = () => { const a = globalThis.__callbackSecondA; const b = globalThis.__callbackSecondB; const same = a === b; a(); b(); return same; };");
+            const global: JsValue = getDynamicValue("globalThis");
+            let firstReads = 0;
+            const first = () => ({ get value(): number { firstReads++; return 1; } });
+            const ordinaryFirst: JsValue = registerNativeCallback(first);
+            const graphSecond: JsValue = registerNativeCallbackGraph(first);
+            setDynamicProperty(global, "__callbackFirstA", ordinaryFirst);
+            setDynamicProperty(global, "__callbackFirstB", graphSecond);
+            console.log(Number(callDynamic("runFirstPair", JSON.parse("[]"))), firstReads);
+
+            let secondReads = 0;
+            const second = () => ({ get value(): number { secondReads++; return 2; } });
+            const graphFirst: JsValue = registerNativeCallbackGraph(second);
+            const ordinarySecond: JsValue = registerNativeCallback(second);
+            setDynamicProperty(global, "__callbackSecondA", graphFirst);
+            setDynamicProperty(global, "__callbackSecondB", ordinarySecond);
+            console.log(Number(callDynamic("runSecondPair", JSON.parse("[]"))), secondReads);
+
+            releaseDynamicValue(ordinaryFirst);
+            releaseDynamicValue(graphSecond);
+            releaseDynamicValue(graphFirst);
+            releaseDynamicValue(ordinarySecond);
+            releaseDynamicValue(global);
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "adapted_callback_cross_registration_identity"),
+        "1 0\n1 0\n"
+    );
+}
+
 #[test]
 fn array_from_length_mapper_receives_explicit_this_arg() {
     let source = r#"
@@ -11542,6 +12050,47 @@ fn set_intersection_uses_smaller_operand_order() {
     assert_eq!(compile_and_run(source, "set_intersection_order"), "2,1\n2,1\n1,2\n2,1\n");
 }
 
+/// `for...of` over an `any` value that is a live JS iterable follows the iteration
+/// protocol (custom `[Symbol.iterator]()`, a live Set, a live array), while a native
+/// JSON array keeps its direct loop.
+#[test]
+fn json_for_of_follows_the_iteration_protocol_for_live_iterables() {
+    let source = r#"
+        function main(): void {
+            loadScript("globalThis.itObj = { [Symbol.iterator]() { let i = 0; return { next() { i++; return i < 3 ? { value: i * 10, done: false } : { value: undefined, done: true }; } }; } }; globalThis.arr = [4,5]; globalThis.st = new Set([7,8]);");
+            const iterable: any = getDynamicValue("itObj");
+            for (const v of iterable) { console.log(v); }
+            const array: any = getDynamicValue("arr");
+            for (const v of array) { console.log(v); }
+            const set: any = getDynamicValue("st");
+            for (const v of set) { console.log(v); }
+            const parsed: any = JSON.parse("[1,2,3]");
+            let sum = 0;
+            for (const v of parsed) { sum += v; }
+            console.log(sum);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "json_for_of_iteration_protocol"), "10\n20\n4\n5\n7\n8\n6\n");
+}
+
+/// A value thrown by a live iterator's `next()` reaches the lexical catch unchanged.
+#[test]
+fn json_for_of_iterator_throws_keep_the_thrown_value() {
+    let source = r#"
+        function main(): void {
+            loadScript("globalThis.thr = { [Symbol.iterator]() { return { next() { throw 42; } }; } }; globalThis.thrObj = { [Symbol.iterator]() { return { next() { throw new RangeError('bad'); } }; } };");
+            const a: any = getDynamicValue("thr");
+            try { for (const v of a) { console.log(v); } } catch (e) { console.log("caught", e as number); }
+            const b: any = getDynamicValue("thrObj");
+            try { for (const v of b) { console.log(v); } } catch (e) { console.log("caught2", String(e)); }
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "json_for_of_iterator_throws"),
+        "caught 42\ncaught2 RangeError: bad\n"
+    );
+}
+
 // Unrun regression: exact iterator throws keep the original JS value through a lexical catch.
 #[test]
 fn exact_iterator_catch_preserves_thrown_identity() {
@@ -11561,4 +12110,194 @@ fn exact_iterator_catch_preserves_thrown_identity() {
         }
     "#;
     assert_eq!(compile_and_run(source, "exact_iterator_catch_identity"), "true\n");
+}
+
+#[test]
+fn set_constructor_collects_an_explicitly_typed_map_values_iterator() {
+    let source = r#"
+        function main(): void {
+            const map = new Map<string, number>([['a', 20], ['b', 22]]);
+            const set = new Set<number>(map.values());
+            const entries = new Map<string, number>(map.entries());
+            let total = 0;
+            for (const value of set) total += value;
+            console.log(map.get('a'), set.has(22), total, entries.get('b'));
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "set_constructor_map_values_iterator"),
+        "20 true 42 22\n"
+    );
+}
+
+#[test]
+fn unannotated_symbol_iterator_function_property_drives_for_of() {
+    let source = r#"
+        function* inner(): Generator<number> { yield 2; yield 3; }
+        function main(): void {
+            const iterable = { [Symbol.iterator]: function(): Generator<number> { return inner(); } };
+            let total = 0;
+            for (const value of iterable) total += value;
+            console.log(total);
+        }
+    "#;
+    assert_eq!(compile_and_run(source, "symbol_iterator_function_property"), "5\n");
+}
+
+#[test]
+fn symbol_iterator_builder_key_preserves_lookalike_string_property() {
+    let source = r#"
+        function main(): void {
+            const iterable: any = {
+                "__thaw_symbol_iterator": 17,
+                "\u001f@@iterator": 29,
+                [Symbol.iterator]() {
+                    let done = false;
+                    return { next(): { value: number; done: boolean } {
+                        const result = { value: 23, done };
+                        done = true;
+                        return result;
+                    } };
+                }
+            };
+            let sum = 0;
+            let count = 0;
+            for (const value of iterable) {
+                sum += value;
+                count++;
+            }
+            console.log(iterable["__thaw_symbol_iterator"]);
+            console.log(iterable["\u001f@@iterator"]);
+            console.log(Object.keys(iterable).length);
+            console.log(Object.getOwnPropertySymbols(iterable).length);
+            console.log(count, sum);
+            console.log(localSymbolMethod({ iterator: "own" }));
+        }
+        function localSymbolMethod(Symbol: { iterator: string }): number {
+            const value: any = {
+                [Symbol.iterator]() { return 31; }
+            };
+            return value.own();
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "symbol_iterator_builder_string_collision"),
+        "17\n29\n2\n1\n1 23\n31\n"
+    );
+}
+
+#[test]
+fn callback_annotated_with_a_subset_of_fields_writes_through_to_the_supplied_object() {
+    // The annotation names `c` and `a` only (not a prefix, different order); the callback is
+    // lowered at the supplied layout, so its writes reach the original object.
+    let source = r#"
+        function run(callback: (r: { a: number; b: number; c: string }) => void): void {
+            const owner = { a: 1, b: 2, c: "x" };
+            callback(owner);
+            console.log(owner.a, owner.b, owner.c);
+        }
+        function main(): void {
+            run((r: { c: string; a: number }): void => {
+                r.a = 7;
+                r.c = r.c + "!";
+            });
+        }
+    "#;
+    assert_eq!(
+        compile_and_run(source, "callback_field_subset_writes_through"),
+        "7 2 x!\n"
+    );
+}
+#[test]
+fn captured_fixed_two_argument_callback_alias_keeps_native_registration_type() {
+    use thaw_hir::{HirExpr, HirFunction, HirParam, HirProgram, HirStmt, HirType};
+
+    let callback_type = HirType::Function(
+        vec![HirType::Str, HirType::F64],
+        Box::new(HirType::Void),
+    );
+    let adapted_type = HirType::Function(
+        vec![HirType::Json, HirType::Json],
+        Box::new(HirType::Void),
+    );
+    let callback_param = HirParam { name: "callback".into(), ty: callback_type.clone() };
+    let adapter_callback = HirParam { name: "callback".into(), ty: callback_type.clone() };
+    let first = HirParam { name: "first".into(), ty: HirType::Json };
+    let second = HirParam { name: "second".into(), ty: HirType::Json };
+    let adapter = HirExpr::Lambda(
+        vec![adapter_callback],
+        vec![first.clone(), second.clone()],
+        HirType::Void,
+        Box::new(HirExpr::Block(vec![
+            HirStmt::Expr(HirExpr::Call(
+                Box::new(HirExpr::Var("callback".into())),
+                vec![
+                    HirExpr::JsonAsString(Box::new(HirExpr::Var(first.name))),
+                    HirExpr::JsonAsNumber(Box::new(HirExpr::Var(second.name))),
+                ],
+            )),
+            HirStmt::Return(None),
+        ])),
+    );
+    let binder = HirExpr::Lambda(
+        vec![],
+        vec![callback_param],
+        adapted_type,
+        Box::new(HirExpr::Block(vec![HirStmt::Return(Some(adapter))])),
+    );
+    let adapted = HirExpr::Call(
+        Box::new(binder),
+        vec![HirExpr::Var("original".into())],
+    );
+    let aliased = HirExpr::Call(
+        Box::new(HirExpr::Var("__thaw_closure_alias".into())),
+        vec![adapted, HirExpr::Var("original".into())],
+    );
+    let program = HirProgram {
+        functions: vec![
+            HirFunction {
+                name: "fixed".into(),
+                params: vec![
+                    HirParam { name: "value".into(), ty: HirType::Str },
+                    HirParam { name: "count".into(), ty: HirType::F64 },
+                ],
+                ret: HirType::Void,
+                is_async: false,
+                body: vec![HirStmt::Return(None)],
+            },
+            HirFunction {
+                name: "main".into(),
+                params: vec![],
+                ret: HirType::Void,
+                is_async: false,
+                body: vec![
+                    HirStmt::Let(
+                        "original".into(),
+                        callback_type,
+                        HirExpr::FunctionRef(
+                            "fixed".into(),
+                            vec![HirType::Str, HirType::F64],
+                            HirType::Void,
+                        ),
+                    ),
+                    HirStmt::Expr(HirExpr::Call(
+                        Box::new(HirExpr::Var("registerNativeCallback".into())),
+                        vec![aliased],
+                    )),
+                ],
+            },
+        ],
+        ..HirProgram::default()
+    };
+
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "captured_callback_alias_type");
+    compiler.compile_program(&program).unwrap();
+    let ir = compiler.print_to_string();
+    assert!(
+        ir.lines().any(|line| {
+            line.contains("call ") && line.contains("@thaw_js_register_native_callback(")
+        }),
+        "{ir}"
+    );
 }

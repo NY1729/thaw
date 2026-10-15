@@ -138,6 +138,21 @@ impl<'a> FnLowerer<'a> {
         }
     }
 
+    fn number_format_end_or_infinity(&mut self, value: Option<&HirExpr>) -> Result<HirExpr, String> {
+        let Some(value) = value else {
+            return Ok(HirExpr::Lit(HirLit::F64(f64::INFINITY)));
+        };
+        let ty = self.infer_expr_type(value)?;
+        let is_undefined = self.number_format_is_undefined(value.clone(), &ty);
+        let number = self.number_format_to_number(value.clone(), &ty)?;
+        Ok(HirExpr::Conditional(
+            Box::new(is_undefined),
+            Box::new(HirExpr::Lit(HirLit::F64(f64::INFINITY))),
+            Box::new(number),
+            HirType::F64,
+        ))
+    }
+
     fn lower_native_conversion_method(
         &mut self,
         member: &MemberExpr,
@@ -418,7 +433,7 @@ impl<'a> FnLowerer<'a> {
                         };
                         let range_error = || {
                             HirStmt::Throw(HirExpr::Lit(HirLit::Str(
-                                "toString() radix argument must be between 2 and 36".into(),
+                                "\u{1}RangeError\u{1}toString() radix argument must be between 2 and 36".into(),
                             )))
                         };
                         let body = HirExpr::Block(vec![
@@ -707,6 +722,15 @@ impl<'a> FnLowerer<'a> {
             return Ok(HirExpr::Call(
                 Box::new(HirExpr::Var("__thaw_json_property_is_enumerable".into())),
                 vec![receiver, key_value],
+            ));
+        }
+        // A string primitive owns enumerable index keys; the Json inspector
+        // already knows the string rules.
+        if matches!(&receiver_type, HirType::Str | HirType::StrLiteral(_)) {
+            let json = self.wrap_native_value_as_json(receiver, receiver_type)?;
+            return Ok(HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_json_property_is_enumerable".into())),
+                vec![json, key_value],
             ));
         }
         if !matches!(&receiver_type, HirType::Object(_)) {
