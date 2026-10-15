@@ -989,6 +989,22 @@ thread_local! {
     #[allow(clippy::vec_box)]
     static RETIRED_SCOPE_HANDLE_SLOTS: RefCell<Vec<Box<Value>>> = const { RefCell::new(Vec::new()) };
     static RETIRED_SCOPE_HANDLE_IDS: RefCell<HashSet<usize>> = RefCell::new(HashSet::new());
+    // JavaScript callback references whose native wrapper was retired. The
+    // bridge reports them with the next response so JavaScript can drop the
+    // strong `__thaw_napi_reference_<id>` global.
+    #[cfg(feature = "quickjs")]
+    static PENDING_JS_REFERENCE_RELEASES: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
+}
+
+#[cfg(feature = "quickjs")]
+pub(crate) fn take_pending_js_reference_releases() -> Vec<u64> {
+    PENDING_JS_REFERENCE_RELEASES.with(|pending| std::mem::take(&mut *pending.borrow_mut()))
+}
+
+#[cfg(feature = "quickjs")]
+pub(crate) fn cancel_pending_js_reference_release(id: u64) {
+    PENDING_JS_REFERENCE_RELEASES
+        .with(|pending| pending.borrow_mut().retain(|pending| *pending != id));
 }
 
 // The registries guarded by these mutexes are held only momentarily by other
@@ -1069,9 +1085,22 @@ impl Env {
             .property_keys
             .values()
             .chain(self.utf16_property_keys.values())
-            .chain(self.quickjs_references.values())
         {
             enqueue(*value, &live, &mut seen, &mut queue);
+        }
+        // A JavaScript callback wrapper stays alive only while native code
+        // holds it (a napi_ref of any count, a scope, another rooted value).
+        // Other QuickJS references are owned by the JavaScript side.
+        for value in self.quickjs_references.values() {
+            let is_function = matches!(unsafe { &**value }, Value::Function(_));
+            if !is_function
+                || self
+                    .references
+                    .iter()
+                    .any(|reference| !reference.deleted && reference.value == *value)
+            {
+                enqueue(*value, &live, &mut seen, &mut queue);
+            }
         }
         for (id, value) in &self.symbols {
             // Native/global IDs and provisional JS registrations have their
@@ -1551,6 +1580,18 @@ unsafe fn retire_scoped_value(
     }
     #[cfg(not(feature = "quickjs"))]
     let _ = quickjs_releases;
+    #[cfg(feature = "quickjs")]
+    if matches!(&*value, Value::Function(_)) {
+        let released: Vec<u64> = env_ref
+            .quickjs_references
+            .iter()
+            .filter_map(|(id, held)| (*held == value).then_some(*id))
+            .collect();
+        for id in released {
+            env_ref.quickjs_references.remove(&id);
+            PENDING_JS_REFERENCE_RELEASES.with(|pending| pending.borrow_mut().push(id));
+        }
+    }
     env_ref.instances.remove(&key);
     env_ref.live_constructor_returns.remove(&key);
     env_ref.prototypes.remove(&key);
