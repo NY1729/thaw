@@ -956,7 +956,7 @@ fn repl_server_evaluates_input_and_drives_commands() {
     let empty_node_modules = temp_registry("builtin_repl_server_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    assert_eq!(file_count, 4);
+    assert_eq!(file_count, 5);
     let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseRepl = module.exports;");
     let source = CString::new(script).unwrap();
     assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
@@ -973,13 +973,16 @@ fn repl_server_evaluates_input_and_drives_commands() {
 }
 
 #[test]
-fn cluster_primary_tracks_worker_lifecycle_and_messages() {
+fn cluster_primary_applies_settings_and_reports_setup_without_forking() {
     use std::ffi::{CStr, CString};
 
+    // Forking real workers needs a compiled executable (it re-runs itself); the lifecycle with a real child,
+    // its IPC channel, `online`, `message`, `disconnect` and `exit` is covered by the node-compat cases
+    // "cluster workers are real processes with an IPC channel" (output compared with Node 22).
     let dir = temp_registry("builtin_cluster_primary");
     fs::write(
             dir.join("index.js"),
-            "var cluster = require('node:cluster'); module.exports = async function () { var events = []; cluster.on('setup', function(settings) { events.push('setup:' + settings.exec); }); cluster.on('fork', function(worker) { events.push('fork:' + worker.id); }); cluster.on('online', function(worker) { events.push('online:' + worker.id); }); cluster.on('message', function(worker, message) { events.push('cluster-message:' + message.value); }); cluster.on('disconnect', function(worker) { events.push('cluster-disconnect:' + worker.id); }); cluster.on('exit', function(worker, code, signal) { events.push('cluster-exit:' + signal); }); cluster.setupPrimary({ exec: 'service.js', args: ['--serve'] }); cluster.schedulingPolicy = cluster.SCHED_NONE; var worker = cluster.fork({ PORT: '8080' }); worker.on('online', function() { events.push('worker-online'); }); worker.on('message', function(message) { events.push('worker-message:' + message.value); }); worker.on('disconnect', function() { events.push('worker-disconnect'); }); worker.on('exit', function(code, signal) { events.push('worker-exit:' + signal); }); worker.send({ value: 42 }, function(error) { events.push(error ? error.code : 'sent'); }); await new Promise(function(resolve) { cluster.disconnect(function() { events.push('all-disconnected'); resolve(); }); }); var connected = worker.isConnected(), exitedAfterDisconnect = worker.exitedAfterDisconnect; worker.kill('SIGKILL'); await Promise.resolve(); return [cluster.isPrimary, cluster.isMaster, cluster.isWorker, cluster.settings.exec, cluster.schedulingPolicy, worker.environment.PORT, connected, exitedAfterDisconnect, worker.isDead(), Object.keys(cluster.workers).length, events]; };",
+            "var cluster = require('node:cluster'); module.exports = async function () { var events = []; cluster.on('setup', function(settings) { events.push('setup:' + settings.exec + ':' + settings.args.join(',')); }); cluster.setupPrimary({ exec: 'service.js', args: ['--serve'] }); cluster.schedulingPolicy = cluster.SCHED_NONE; await new Promise(function(resolve) { cluster.disconnect(function() { events.push('all-disconnected'); resolve(); }); }); return [cluster.isPrimary, cluster.isMaster, cluster.isWorker, cluster.settings.exec, cluster.schedulingPolicy, Object.keys(cluster.workers).length, cluster.worker === undefined, events]; };",
         )
         .unwrap();
     let empty_node_modules = temp_registry("builtin_cluster_primary_modules");
@@ -995,7 +998,7 @@ fn cluster_primary_tracks_worker_lifecycle_and_messages() {
     let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
     assert_eq!(
         result,
-        r#"[true,true,false,"service.js",1,"8080",false,true,true,0,["setup:service.js","fork:1","worker-online","online:1","worker-message:42","cluster-message:42","sent","worker-disconnect","cluster-disconnect:1","all-disconnected","worker-exit:SIGKILL","cluster-exit:SIGKILL"]]"#
+        r#"[true,true,false,"service.js",1,0,true,["setup:service.js:--serve","all-disconnected"]]"#
     );
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);

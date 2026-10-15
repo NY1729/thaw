@@ -2385,7 +2385,7 @@
       if (timer && !timer.clock) timer.due = nativeDateNow() + timer.milliseconds;
       return this;
     },
-    close() { const timer = timers.get(id); if (timer) timer.cancelled = true; else if (record) record.cancelled = true; timers.delete(id); },
+    close() { const timer = timers.get(id); if (timer) timer.cancelled = true; else if (record) record.cancelled = true; timers.delete(id); destroyTimerResource(timer || record); },
     [Symbol.toPrimitive]() { return id; }
   });
   const schedule = (callback, delay, repeat, args, refed = true, api = 'setTimeout', forceReal = false, alreadyValidatedDelay = false) => {
@@ -2399,11 +2399,19 @@
                      asyncContext: thawAsyncContext.get(),
                      clock, due: (clock ? clock.now : nativeDateNow()) + (clock && api === 'setImmediate' ? -1 : milliseconds) };
     timers.set(id, record);
-    return timerHandle(id, record);
+    const handle = timerHandle(id, record);
+    const hookBus = globalThis.__thaw_async_hook_bus;
+    if (hookBus && hookBus.enabled && !forceReal)
+      record.asyncId = hookBus.init(api === 'setImmediate' ? 'Immediate' : 'Timeout', handle);
+    return handle;
+  };
+  // A timer that is cleared (or closed) before it fires is destroyed for async_hooks too.
+  const destroyTimerResource = timer => {
+    if (timer && timer.asyncId) globalThis.__thaw_async_hook_bus.destroy(timer.asyncId);
   };
   globalThis.setTimeout = (callback, delay = 0, ...args) =>
     schedule(callback, delay, false, args, true, 'setTimeout');
-  globalThis.clearTimeout = id => { const key = Number(id), timer = timers.get(key); if (timer) timer.cancelled = true; timers.delete(key); };
+  globalThis.clearTimeout = id => { const key = Number(id), timer = timers.get(key); if (timer) timer.cancelled = true; timers.delete(key); destroyTimerResource(timer); };
   globalThis.setInterval = (callback, delay = 0, ...args) =>
     schedule(callback, delay, true, args, true, 'setInterval');
   globalThis.clearInterval = globalThis.clearTimeout;
@@ -2417,6 +2425,8 @@
     if (timer) timer.refed = Boolean(refed);
   };
   const invokeTimer = (timer, propagate = false) => {
+    const hookBus = timer.asyncId ? globalThis.__thaw_async_hook_bus : null;
+    if (hookBus) hookBus.before(timer.asyncId);
     const previousAsyncContext = thawAsyncContext.swap(timer.asyncContext);
     try {
       if (propagate) return timer.callback(...timer.args);
@@ -2426,7 +2436,13 @@
         process.emit('uncaughtExceptionMonitor', error, 'uncaughtException');
         if (!process.emit('uncaughtException', error, 'uncaughtException')) throw error;
       }
-    } finally { thawAsyncContext.swap(previousAsyncContext); }
+    } finally {
+      thawAsyncContext.swap(previousAsyncContext);
+      if (hookBus) {
+        hookBus.after(timer.asyncId);
+        if (!timer.repeat) hookBus.destroy(timer.asyncId);
+      }
+    }
   };
   const nextMockTimer = (clock, through) => {
     let selected = null;
@@ -2625,7 +2641,10 @@
     if (typeof callback !== 'function') {
       throw new TypeError('process.nextTick callback must be a function');
     }
-    nextTickQueue.push({ callback, args, asyncContext: thawAsyncContext.get() });
+    const tick = { callback, args, asyncContext: thawAsyncContext.get() };
+    const hookBus = globalThis.__thaw_async_hook_bus;
+    if (hookBus && hookBus.enabled) tick.asyncId = hookBus.init('TickObject', { callback, args });
+    nextTickQueue.push(tick);
   };
   globalThis.__thaw_next_tick_queue_pending = () => nextTickQueue.length > 0;
   // Returns whether it actually ran anything -- callers that poll "is
@@ -2643,7 +2662,9 @@
       let index = 0;
       try {
         for (; index < batch.length; index++) {
-          const { callback, args, asyncContext } = batch[index];
+          const { callback, args, asyncContext, asyncId } = batch[index];
+          const hookBus = asyncId ? globalThis.__thaw_async_hook_bus : null;
+          if (hookBus) hookBus.before(asyncId);
           const previousAsyncContext = thawAsyncContext.swap(asyncContext);
           try {
             try {
@@ -2656,6 +2677,10 @@
             }
           } finally {
             thawAsyncContext.swap(previousAsyncContext);
+            if (hookBus) {
+              hookBus.after(asyncId);
+              hookBus.destroy(asyncId);
+            }
           }
         }
       } catch (error) {

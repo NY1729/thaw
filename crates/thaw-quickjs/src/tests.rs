@@ -15979,3 +15979,33 @@ fn date_wire_retain_json_result_preserves_own_undefined() {
         r#"[true,"undefined",true,1]"#
     );
 }
+
+#[test]
+fn async_zlib_runs_off_the_event_loop_thread() {
+    assert_eq!(
+        load(
+            r#"
+        globalThis.zlibAsyncProbe = function () {
+          const input = new Uint8Array(24 * 1024 * 1024);
+          const started = Date.now();
+          const handle = __thaw_zlib_async_start('compress', 'gzip', input, '');
+          const startMs = Date.now() - started;
+          const activeWhilePending = __thaw_zlib_active();
+          let finished = null;
+          const deadline = Date.now() + 120000;
+          while (!finished && Date.now() < deadline) {
+            finished = JSON.parse(__thaw_zlib_async_poll()).find(result => result.handle === handle) || null;
+          }
+          const bytes = finished && finished.ok ? new Uint8Array(__thaw_zlib_async_take(handle)) : null;
+          return JSON.stringify([startMs < 1000, activeWhilePending, Boolean(finished && finished.ok),
+            Boolean(bytes && bytes[0] === 31 && bytes[1] === 139), __thaw_zlib_active()]);
+        };
+    "#
+        ),
+        1
+    );
+    assert_eq!(
+        call("zlibAsyncProbe", "[]"),
+        "\"[true,true,true,true,false]\""
+    );
+}
