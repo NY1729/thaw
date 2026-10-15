@@ -3910,6 +3910,26 @@ impl<'a> FnLowerer<'a> {
         }
     }
 
+    /// A class instance with prototype methods can cross into `any` as a live
+    /// view of the native owner that still carries those methods. Instances
+    /// whose fields cannot all be projected keep the snapshot path.
+    pub(super) fn class_instance_supports_live_methods(&self, ty: &HirType) -> bool {
+        let HirType::Object(fields) = ty else { return false };
+        let decorated = fields.first().is_some_and(|(marker, _)| {
+            marker.strip_prefix("__thaw_class_identity_\u{1e}").is_some_and(|ancestry|
+                DECORATED_CLASS_NAMES.with(|names| {
+                    let names = names.borrow();
+                    ancestry.split('\u{1f}').any(|class| names.contains(class))
+                }))
+        });
+        !decorated
+            && !self.class_instance_projected_methods(ty).is_empty()
+            && fields.iter()
+                .filter(|(name, _)| !name.starts_with("__thaw_class_identity_\u{1e}")
+                    && !is_hidden_accessor_field(name))
+                .all(|(_, field)| Self::fixed_object_supports_live_projection(field))
+    }
+
     /// Whether a fixed object needs the live accessor bridge to preserve a
     /// getter at any depth reachable through ordinary object/function/promise
     /// fields. Arrays and union wrappers are intentionally left on the existing
@@ -4005,7 +4025,7 @@ impl<'a> FnLowerer<'a> {
                     && Self::fixed_object_supports_live_projection(result_type) =>
             {
                 let projected = self.lower_fixed_object_as_dynamic_accessor_object(
-                    value, fields, false, true,
+                    value, fields, false, true, false,
                 )?;
                 let json = HirExpr::Call(
                     Box::new(HirExpr::Var("__thaw_json_from_consumed_dynamic".into())),
@@ -4040,14 +4060,90 @@ impl<'a> FnLowerer<'a> {
         }
     }
 
+    /// Registers the native callback a live projection calls to read one
+    /// property: `read` is evaluated with `__thaw_this` bound to the owner.
+    fn projected_read_callback(
+        &mut self,
+        mut read: HirExpr,
+        mut read_type: HirType,
+        source_type: &HirType,
+        this_name: &str,
+    ) -> Result<HirExpr, String> {
+        let original_read_type = read_type.clone();
+        let (adapted_read, adapted_type) = self.adapt_callable_result_for_live_projection(
+            read, read_type.clone(),
+        )?;
+        if adapted_type != original_read_type {
+            let callback = HirExpr::Call(
+                Box::new(HirExpr::Var("registerNativeCallbackGraph".into())),
+                vec![HirExpr::TypedClosure(adapted_type, Box::new(adapted_read))],
+            );
+            read = HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_json_from_consumed_dynamic".into())),
+                vec![callback],
+            );
+            read_type = HirType::Json;
+        } else {
+            read = adapted_read;
+            read_type = adapted_type;
+        }
+        let callback = HirExpr::Lambda(
+            Vec::new(),
+            vec![HirParam { name: this_name.into(), ty: source_type.clone() }],
+            read_type, Box::new(read),
+        );
+        Ok(HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_register_native_method_callback_graph".into())),
+            vec![callback],
+        ))
+    }
+
+    /// The instance methods a class instance exposes through a live
+    /// projection (own and inherited, which each class symbol-table already
+    /// carries): `(property, symbol)`. Overload-mangled names are skipped.
+    pub(super) fn class_instance_projected_methods(
+        &self,
+        ty: &HirType,
+    ) -> Vec<(String, Symbol)> {
+        let Some(class) = class_name_from_type(ty) else { return Vec::new() };
+        let prefix = class_method_symbol(class, "");
+        let mut methods = self.signatures.keys()
+            .filter_map(|symbol| {
+                let name = symbol.strip_prefix(&prefix)?;
+                (!name.is_empty() && !name.contains("__thaw") && !name.contains('\u{1e}'))
+                    .then(|| (name.to_string(), symbol.clone()))
+            })
+            .collect::<Vec<_>>();
+        methods.sort();
+        methods
+    }
+
     fn lower_fixed_object_as_dynamic_accessor_object(
         &mut self,
         value: HirExpr,
         fields: &[(Symbol, HirType)],
         factory_body: bool,
         live: bool,
+        class_methods: bool,
     ) -> Result<HirExpr, String> {
         let source_type = HirType::Object(fields.to_vec());
+        // A class receiver is entered through the ordinary callback ABI, so its
+        // parameter must not carry the non-arrow `__thaw_this` name.
+        let this_name = if class_methods { "__thaw_class_owner" } else { "__thaw_this" };
+        let proto_methods = if class_methods {
+            self.class_instance_projected_methods(&source_type)
+        } else {
+            Vec::new()
+        };
+        // Private slots stay hidden, but `#x in value` still needs to see them.
+        let private_slots = if class_methods {
+            fields.iter()
+                .filter(|(name, _)| name.starts_with(PRIVATE_SLOT_PREFIX))
+                .map(|(name, _)| name.clone())
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
         let source_name = format!("__thaw_dynamic_accessor_object_{}", self.next_binding);
         self.next_binding += 1;
         self.scope.insert(source_name.clone(), source_type.clone());
@@ -4091,14 +4187,14 @@ impl<'a> FnLowerer<'a> {
                 absent_callback()
             } else {
                 let mut read = self.lower_fixed_object_property_read(
-                    HirExpr::Var("__thaw_this".into()), fields, name,
+                    HirExpr::Var(this_name.into()), fields, name,
                 )?;
                 let mut read_type = Self::fixed_object_property_read_type(fields, name)?;
                 if let HirType::Object(nested) = &read_type {
                     if Self::fixed_object_supports_live_projection(&read_type) {
                         // Preserve nested native storage identity when its
                         // receiver layout is safe to expose as a live host.
-                        read = self.lower_fixed_object_as_dynamic_accessor_object(read, nested, false, live)?;
+                        read = self.lower_fixed_object_as_dynamic_accessor_object(read, nested, false, live, false)?;
                         read_type = HirType::JsValue;
                     }
                 }
@@ -4112,35 +4208,7 @@ impl<'a> FnLowerer<'a> {
                     read_type = bound_type;
                     is_method = true;
                 }
-                let original_read_type = read_type.clone();
-                let (adapted_read, adapted_type) = self.adapt_callable_result_for_live_projection(
-                    read, read_type.clone(),
-                )?;
-                if adapted_type != original_read_type {
-                    let callback = HirExpr::Call(
-                        Box::new(HirExpr::Var("registerNativeCallbackGraph".into())),
-                        vec![HirExpr::TypedClosure(adapted_type, Box::new(adapted_read))],
-                    );
-                    read = HirExpr::Call(
-                        Box::new(HirExpr::Var("__thaw_json_from_consumed_dynamic".into())),
-                        vec![callback],
-                    );
-                    read_type = HirType::Json;
-                } else {
-                    read = adapted_read;
-                    read_type = adapted_type;
-                }
-                let callback = HirExpr::Lambda(
-                    Vec::new(),
-                    vec![HirParam {
-                        name: "__thaw_this".into(), ty: source_type.clone(),
-                    }],
-                    read_type, Box::new(read),
-                );
-                HirExpr::Call(
-                    Box::new(HirExpr::Var("__thaw_register_native_method_callback_graph".into())),
-                    vec![callback],
-                )
+                self.projected_read_callback(read, read_type, &source_type, this_name)?
             };
             let setter = if writable {
                 // PropAssign's LLVM path uses the visible field slot type,
@@ -4153,13 +4221,13 @@ impl<'a> FnLowerer<'a> {
                 let callback = HirExpr::Lambda(
                     Vec::new(),
                     vec![
-                        HirParam { name: "__thaw_this".into(), ty: source_type.clone() },
+                        HirParam { name: this_name.into(), ty: source_type.clone() },
                         HirParam { name: value_name.clone(), ty: field_type },
                     ],
                     HirType::Void,
                     Box::new(HirExpr::Block(vec![
                         HirStmt::Expr(HirExpr::PropAssign(
-                            Box::new(HirExpr::Var("__thaw_this".into())),
+                            Box::new(HirExpr::Var(this_name.into())),
                             source_type.clone(), name.clone(),
                             Box::new(HirExpr::Var(value_name)),
                         )),
@@ -4201,7 +4269,7 @@ impl<'a> FnLowerer<'a> {
                 let callback = HirExpr::Lambda(
                     Vec::new(),
                     vec![
-                        HirParam { name: "__thaw_this".into(), ty: source_type.clone() },
+                        HirParam { name: this_name.into(), ty: source_type.clone() },
                         HirParam { name: value_name.clone(), ty: field_type },
                         HirParam { name: flags_name.clone(), ty: HirType::F64 },
                     ],
@@ -4210,7 +4278,7 @@ impl<'a> FnLowerer<'a> {
                         HirStmt::Return(Some(HirExpr::Call(
                             Box::new(HirExpr::Var("__thaw_object_define_data_value".into())),
                             vec![
-                                HirExpr::Var("__thaw_this".into()),
+                                HirExpr::Var(this_name.into()),
                                 HirExpr::Lit(HirLit::Str(name.clone())),
                                 HirExpr::Var(value_name),
                                 HirExpr::Var(flags_name),
@@ -4280,6 +4348,19 @@ impl<'a> FnLowerer<'a> {
         body.extend(self.lower_ordered_fixed_field_statements(
             HirExpr::Var(source_name.clone()), fields, metadata_actions,
         )?);
+        let push = |array: &str, value| HirStmt::Expr(HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_array_push".into())),
+            vec![HirExpr::Var(array.to_string()), value],
+        ));
+        for property in proto_methods.iter().map(|(property, _)| property).chain(&private_slots) {
+            body.extend([
+                push(&keys_name, HirExpr::Lit(HirLit::Str(property.clone()))),
+                push(&readable_name, HirExpr::Lit(HirLit::Bool(true))),
+                push(&writable_name, HirExpr::Lit(HirLit::Bool(false))),
+                push(&accessor_name, HirExpr::Lit(HirLit::Bool(false))),
+                push(&methods_name, HirExpr::Lit(HirLit::Bool(true))),
+            ]);
+        }
         // One entry past the last key: the wrapper is a live reference to a native owner
         // (not the projection of a fresh `any` literal, which converts to a mutable copy).
         body.push(HirStmt::Expr(HirExpr::Call(
@@ -4306,9 +4387,24 @@ impl<'a> FnLowerer<'a> {
             &HirType::Json,
             HirExpr::Var(methods_name),
         )?;
+        let mut argument_list = vec![keys, readable, writable, accessors, methods];
+        if class_methods {
+            // The class name tells the builder to expose the methods as
+            // non-enumerable prototype members of a named class.
+            // The whole ancestry (`Derived\u{1f}Base...`), most derived first.
+            let ancestry = match &source_type {
+                HirType::Object(fields) => fields.first()
+                    .and_then(|(marker, _)| marker.strip_prefix("__thaw_class_identity_\u{1e}"))
+                    .unwrap_or("Object").to_string(),
+                _ => "Object".to_string(),
+            };
+            argument_list.push(self.coerce_to_declared(
+                &HirType::Json, HirExpr::Lit(HirLit::Str(ancestry)),
+            )?);
+        }
         let arguments = self.coerce_to_declared(
             &HirType::Json,
-            HirExpr::ArrayLit(vec![keys, readable, writable, accessors, methods]),
+            HirExpr::ArrayLit(argument_list),
         )?;
         let args_name = format!("__thaw_native_projection_args_{}", self.next_binding);
         self.next_binding += 1;
@@ -4338,6 +4434,52 @@ impl<'a> FnLowerer<'a> {
         body.extend(self.lower_ordered_fixed_field_statements(
             HirExpr::Var(source_name.clone()), fields, callback_actions,
         )?);
+        for (_, symbol) in &proto_methods {
+            let signature = self.signatures.get(symbol).cloned()
+                .ok_or_else(|| format!("class method `{symbol}` has no signature"))?;
+            let Some((_, rest)) = signature.params.split_first() else { continue };
+            let result = if signature.is_async && !matches!(signature.ret, HirType::Promise(_)) {
+                HirType::Promise(Box::new(signature.ret.clone()))
+            } else {
+                signature.ret.clone()
+            };
+            let mut method_params = Vec::new();
+            let mut arguments = vec![HirExpr::Var(this_name.into())];
+            for (index, ty) in rest.iter().enumerate() {
+                let name = format!("__thaw_class_method_arg_{}_{}", index, self.next_binding);
+                self.scope.insert(name.clone(), ty.clone());
+                arguments.push(HirExpr::Var(name.clone()));
+                method_params.push(HirParam { name, ty: ty.clone() });
+            }
+            self.next_binding += 1;
+            let bound = HirExpr::Lambda(
+                vec![HirParam { name: this_name.into(), ty: source_type.clone() }],
+                method_params, result.clone(),
+                Box::new(HirExpr::Call(Box::new(HirExpr::Var(symbol.clone())), arguments)),
+            );
+            let bound_type = match (&signature.native_rest, rest.last()) {
+                (Some(element), Some(HirType::Array(last))) if last.as_ref() == element =>
+                    HirType::CallableFunction(
+                        rest[..rest.len() - 1].to_vec(), HirOptionalMask::default(),
+                        Some(Box::new(element.clone())), Box::new(result),
+                    ),
+                _ => HirType::Function(rest.to_vec(), Box::new(result)),
+            };
+            let getter = self.projected_read_callback(bound, bound_type, &source_type, this_name)?;
+            body.push(push(&callbacks_name, getter));
+            body.push(push(&callbacks_name, HirExpr::Call(
+                Box::new(HirExpr::Var("getDynamicValue".into())),
+                vec![HirExpr::Lit(HirLit::Str("undefined".into()))],
+            )));
+        }
+        for _ in &private_slots {
+            for _ in 0..2 {
+                body.push(push(&callbacks_name, HirExpr::Call(
+                    Box::new(HirExpr::Var("getDynamicValue".into())),
+                    vec![HirExpr::Lit(HirLit::Str("undefined".into()))],
+                )));
+            }
+        }
         // These callbacks read the same pointer-keyed integrity state used by
         // direct native Object/Reflect operations. The JS wrapper must never
         // infer native extensibility from its own shadow target alone.
@@ -4408,6 +4550,12 @@ impl<'a> FnLowerer<'a> {
         body.extend(self.lower_ordered_fixed_field_statements(
             HirExpr::Var(source_name.clone()), fields, define_actions,
         )?);
+        for _ in proto_methods.iter().map(|_| ()).chain(private_slots.iter().map(|_| ())) {
+            body.push(push(&callbacks_name, HirExpr::Call(
+                Box::new(HirExpr::Var("getDynamicValue".into())),
+                vec![HirExpr::Lit(HirLit::Str("undefined".into()))],
+            )));
+        }
         let callback_body = body.split_off(callback_start);
         let failure_name = format!("__thaw_native_projection_failure_{}", self.next_binding);
         self.next_binding += 1;

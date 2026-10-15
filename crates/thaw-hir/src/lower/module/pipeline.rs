@@ -29,6 +29,9 @@ thread_local! {
     // with similar spelling must retain their public property semantics.
     static PRIVATE_CLASS_SLOTS: RefCell<HashMap<Symbol, HashMap<Symbol, Symbol>>> =
         RefCell::new(HashMap::new());
+    // Names of classes that carry decorators: their instances keep crossing
+    // dynamic boundaries as snapshots with a `constructor` token.
+    static DECORATED_CLASS_NAMES: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
 }
 
 fn class_has_decorators(class: &swc_ecma_ast::Class) -> bool {
@@ -156,6 +159,7 @@ fn class_names_referenced_as_values(
 
 pub fn lower_module(module: &Module) -> Result<HirProgram, String> {
     DECORATOR_CLASS_TOKENS.with(|tokens| tokens.borrow_mut().clear());
+    DECORATED_CLASS_NAMES.with(|names| names.borrow_mut().clear());
     PRIVATE_CLASS_SLOTS.with(|slots| slots.borrow_mut().clear());
     let merged = normalize_interface_merges(module)?;
     let normalized = normalize_top_level_destructuring(&merged)?;
@@ -1512,6 +1516,11 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
             DECORATOR_CLASS_TOKENS.with(|tokens| {
                 tokens.borrow_mut().insert(identity_marker, token_symbol);
             });
+            if class_has_decorators(&declaration.class) {
+                DECORATED_CLASS_NAMES.with(|names| {
+                    names.borrow_mut().insert(class_name.to_string());
+                });
+            }
         }
     }
 

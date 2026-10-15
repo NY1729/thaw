@@ -193,7 +193,7 @@ impl<'a> FnLowerer<'a> {
         self.next_binding += 1;
         let previous = self.scope.insert(owner.clone(), full_type.clone());
         let projection = self.lower_fixed_object_as_dynamic_accessor_object(
-            HirExpr::Var(owner.clone()), fields, true, true,
+            HirExpr::Var(owner.clone()), fields, true, true, false,
         );
         let factory = HirExpr::Lambda(
             vec![HirParam { name: owner.clone(), ty: full_type.clone() }],
@@ -1057,6 +1057,25 @@ impl<'a> FnLowerer<'a> {
                     )],
                 ));
             }
+            if let HirType::Object(fields) = &actual {
+                if !object_type_is_error_family(&actual)
+                    && self.class_instance_supports_live_methods(&actual)
+                {
+                    // Same copy-or-live policy as a plain object below, but the
+                    // view also carries the class's prototype methods.
+                    let live = !(matches!(value, HirExpr::ObjectLit(_))
+                        || Self::is_wrapped_object_literal(&value)
+                        || matches!(&value, HirExpr::Var(name)
+                            if self.fresh_object_bindings.contains(name)));
+                    let projected = self.lower_fixed_object_as_dynamic_accessor_object(
+                        value, fields, false, live, true,
+                    )?;
+                    return Ok(HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_json_from_consumed_dynamic".into())),
+                        vec![projected],
+                    ));
+                }
+            }
             // An instance of a *decorated* class (see `module/globals.rs`'s
             // `lower_class_decorator_tokens`/`DECORATOR_CLASS_TOKENS`) gets
             // one extra `constructor` field pointing at that class's own
@@ -1123,7 +1142,7 @@ impl<'a> FnLowerer<'a> {
                         || Self::is_wrapped_object_literal(&value)
                         || matches!(&value, HirExpr::Var(name)
                             if self.fresh_object_bindings.contains(name)));
-                    let projected = self.lower_fixed_object_as_dynamic_accessor_object(value, fields, false, live)?;
+                    let projected = self.lower_fixed_object_as_dynamic_accessor_object(value, fields, false, live, false)?;
                     // A projected object lookup yields a newly retained JS
                     // handle. The consuming Json conversion applies the
                     // runtime's copy-or-live policy and releases that handle.

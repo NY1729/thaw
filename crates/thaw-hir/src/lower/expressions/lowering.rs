@@ -1625,41 +1625,7 @@ impl<'a> FnLowerer<'a> {
                         let left_type = self.infer_expr_type(&left)?;
                         let right = self.lower_expr(&bin.right)?;
                         let right_type = self.infer_expr_type(&right)?;
-                        let left_name =
-                            format!("__thaw_dynamic_instanceof_left_{}", self.next_binding);
-                        self.next_binding += 1;
-                        let right_name =
-                            format!("__thaw_dynamic_instanceof_right_{}", self.next_binding);
-                        self.next_binding += 1;
-                        self.scope.insert(left_name.clone(), left_type.clone());
-                        self.scope.insert(right_name.clone(), right_type.clone());
-                        let json_arguments = self.coerce_to_declared(
-                            &HirType::Json,
-                            HirExpr::ArrayLit(vec![
-                                HirExpr::Var(left_name.clone()),
-                                HirExpr::Var(right_name.clone()),
-                            ]),
-                        )?;
-                        let result = HirExpr::JsonAsBool(Box::new(HirExpr::Call(
-                            Box::new(HirExpr::Var("callDynamicValueMixedExact".into())),
-                            vec![
-                                HirExpr::Call(
-                                    Box::new(HirExpr::Var("getDynamicValue".into())),
-                                    vec![HirExpr::Lit(HirLit::Str(
-                                        "__thaw_json_host_instanceof".into(),
-                                    ))],
-                                ),
-                                json_arguments,
-                                HirExpr::ArrayLit(Vec::new()),
-                            ],
-                        )));
-                        return self.wrap_call_argument_bindings(
-                            result,
-                            &[
-                                (left_name, left_type, left),
-                                (right_name, right_type, right),
-                            ],
-                        );
+                        return self.lower_host_instanceof(left, left_type, right, right_type);
                     }
                     let Expr::Ident(class) = bin.right.as_ref() else {
                         unreachable!("non-identifier instanceof RHS handled above");
@@ -1928,6 +1894,15 @@ impl<'a> FnLowerer<'a> {
                             return self.dynamic_value_instanceof(
                                 value,
                                 HirExpr::Var(token),
+                            );
+                        }
+                    }
+                    // An `any` holding a native class instance projected as a live
+                    // host: ask the engine against the class's real counterpart.
+                    if value_type == HirType::Json && !extends_error_family {
+                        if let Some(token) = self.decorator_class_token(class.sym.as_ref()) {
+                            return self.lower_host_instanceof(
+                                value, value_type, HirExpr::Var(token), HirType::JsValue,
                             );
                         }
                     }
