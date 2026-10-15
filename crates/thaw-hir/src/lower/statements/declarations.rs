@@ -826,7 +826,10 @@ impl<'a> FnLowerer<'a> {
                 if let Some(value) = static_string {
                     self.static_string_bindings.insert(hir_name.clone(), value);
                 }
-                if class_name_from_type(&actual_type).is_some() && actual_type != storage_type {
+                // `any` holds a Json snapshot, not the native object: an alias
+                // would dispatch methods on a pointer that is not a class instance.
+                if class_name_from_type(&actual_type).is_some() && actual_type != storage_type
+                    && !matches!(storage_type, HirType::Dynamic | HirType::Json | HirType::JsValue) {
                     self.native_class_aliases
                         .insert(hir_name.clone(), actual_type);
                 }

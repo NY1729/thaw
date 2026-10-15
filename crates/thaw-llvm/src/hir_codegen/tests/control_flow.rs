@@ -836,10 +836,11 @@ fn frame_split_runs_finally_before_catch_rethrow() {
             console.log("unreachable");
         }
     "#;
-    assert_eq!(
-        compile_and_run(source, "async_catch_rethrow_finally"),
-        "original\nfinally\n"
-    );
+    // Node reports the unhandled rejection of `main` and exits 1.
+    let (stdout, stderr, code) = compile_and_run_failing(source, "async_catch_rethrow_finally");
+    assert_eq!(stdout, "original\nfinally\n");
+    assert!(stderr.contains("Uncaught: wrapped"), "{stderr}");
+    assert_eq!(code, Some(1));
 }
 
 #[test]
