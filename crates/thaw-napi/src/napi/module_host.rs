@@ -239,6 +239,16 @@ fn ensure_quickjs_bridge() {
     );
 }
 
+// Tell JavaScript which callback references native code no longer holds, so it
+// can drop the strong `__thaw_napi_reference_<id>` global and the callback.
+#[cfg(feature = "quickjs")]
+fn attach_released_js_references(response: &mut serde_json::Value) {
+    let released = crate::take_pending_js_reference_releases();
+    if let (false, Some(object)) = (released.is_empty(), response.as_object_mut()) {
+        object.insert("released".into(), serde_json::json!(released));
+    }
+}
+
 #[cfg(feature = "quickjs")]
 unsafe extern "C" fn thaw_napi_call_typed_bridge(
     name: *const c_char,
@@ -248,7 +258,11 @@ unsafe extern "C" fn thaw_napi_call_typed_bridge(
     let input = NapiGraphInput::empty_dispatch();
     let result = text(name).and_then(|name| text(args).and_then(|args| {
         let value = call_value_impl(&name, &args, true, false, Some(&input))?;
-        quickjs_bridge_value(value).and_then(|wire| serde_json::to_string(&quickjs_wire_result("value", wire)).map_err(|error| error.to_string()))
+        quickjs_bridge_value(value).and_then(|wire| {
+            let mut result = quickjs_wire_result("value", wire);
+            attach_released_js_references(&mut result);
+            serde_json::to_string(&result).map_err(|error| error.to_string())
+        })
     }));
     let result = result.unwrap_or_else(|error| serde_json::json!({ "__thaw_error__": error }).to_string());
     CString::new(result).unwrap_or_default().into_raw()
@@ -1019,10 +1033,11 @@ unsafe extern "C" fn thaw_napi_handle_bridge(
             _ => Err(format!("unknown native addon handle operation `{operation}`")),
         }
     })();
-    let value = match result {
+    let mut value = match result {
         Ok(value) => value,
         Err(error) => serde_json::json!({ "__thaw_error__": error }),
     };
+    attach_released_js_references(&mut value);
     CString::new(value.to_string())
         .unwrap_or_default()
         .into_raw()
@@ -1628,6 +1643,7 @@ fn value_from_json_with_undefined(
                     _thaw_bridge: Some(bridge), _accessor_owner: None,
                 }));
                 env.quickjs_references.insert(reference, function);
+                crate::cancel_pending_js_reference_release(reference);
                 return Ok(function);
                 }
             }

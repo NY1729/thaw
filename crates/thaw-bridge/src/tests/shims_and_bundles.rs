@@ -1127,3 +1127,32 @@ fn commonjs_native_addon_view_uses_its_packages_qualified_exports() {
     assert_eq!(thaw_quickjs::eval_json("Object.getOwnPropertyDescriptor(process, 'dlopen').configurable"), Ok(Some("false".into())));
     assert_eq!(thaw_quickjs::thaw_js_load(CString::new("globalThis.process = globalThis.__thaw_saved_process; delete globalThis.__thaw_saved_process;").unwrap().as_ptr()), 1);
 }
+
+// Native code reports callbacks it no longer holds with its next response; the
+// strong `__thaw_napi_reference_<id>` global (and the callback) must go, and the
+// same function passed again must register under a fresh id.
+#[test]
+fn released_native_callback_references_drop_the_strong_global() {
+    use std::ffi::{CStr, CString};
+
+    let wrapped = wrap_as_commonjs_module("module.exports = {};", &[], &[], &[], "")
+        .replacen("return __thaw_addon;", "globalThis.__thaw_napi_test = { argument: __thaw_napi_argument, handle: __thaw_napi_handle }; return __thaw_addon;", 1);
+    let script = format!(
+        "globalThis.__thaw_napi_bridge_available = () => true; globalThis.__thaw_napi_bridge_exports = function() {{ return '{{\"names\":[],\"qualifiedPackages\":[]}}'; }}; \
+         globalThis.__thaw_napi_bridge_handle = function() {{ return JSON.stringify({{value: null, released: globalThis.napiReleased || []}}); }}; \
+         {wrapped} \
+         globalThis.releaseProbe = function() {{ \
+           var callback = function() {{ return 1; }}; \
+           var first = __thaw_napi_test.argument(callback).__thaw_napi_function__; \
+           var present = typeof globalThis['__thaw_napi_reference_' + first] === 'function'; \
+           globalThis.napiReleased = [first]; \
+           __thaw_napi_test.handle('noop', 0, '', []); globalThis.napiReleased = []; \
+           var gone = typeof globalThis['__thaw_napi_reference_' + first] === 'undefined'; \
+           var second = __thaw_napi_test.argument(callback).__thaw_napi_function__; \
+           return [present, gone, second !== first, typeof globalThis['__thaw_napi_reference_' + second] === 'function']; \
+         }};"
+    );
+    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
+    let result = thaw_quickjs::thaw_js_call(c"releaseProbe".as_ptr(), c"[]".as_ptr());
+    assert_eq!(unsafe { CStr::from_ptr(result) }.to_str().unwrap(), "[true,true,true,true]");
+}

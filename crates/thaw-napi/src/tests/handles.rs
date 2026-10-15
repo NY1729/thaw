@@ -1260,3 +1260,33 @@ fn run_script_without_quickjs_accepts_json_only() {
         assert!(matches!(value_ref(result), Ok(Value::Error(message)) if message.contains("QuickJS feature")));
     }
 }
+
+// A JavaScript callback wrapper lives only while native code holds it. Once the
+// scope closes with no napi_ref, the wrapper is retired and JavaScript is told
+// (with the next bridge response) to drop the strong callback global.
+#[cfg(feature = "quickjs")]
+#[test]
+fn unheld_javascript_callback_wrapper_is_retired_and_reported() {
+    unsafe {
+        let _ = crate::take_pending_js_reference_releases();
+        let mut env = Env::new();
+        let env_ptr: NapiEnv = &mut env;
+        let mut scope = ptr::null_mut();
+        assert_eq!(napi_open_handle_scope(env_ptr, &mut scope), NAPI_OK);
+        let dropped = value_from_json_with_undefined(&mut env, &serde_json::json!({ "__thaw_napi_function__": 8101 }), true).unwrap();
+        let held = value_from_json_with_undefined(&mut env, &serde_json::json!({ "__thaw_napi_function__": 8102 }), true).unwrap();
+        assert!(matches!(value_ref(dropped), Ok(Value::Function(_))));
+        let mut reference = ptr::null_mut();
+        assert_eq!(napi_create_reference(env_ptr, held, 1, &mut reference), NAPI_OK);
+        assert_eq!(napi_close_handle_scope(env_ptr, scope), NAPI_OK);
+        assert!(!env.quickjs_references.contains_key(&8101));
+        assert_eq!(env.quickjs_references.get(&8102), Some(&held));
+        assert_eq!(crate::take_pending_js_reference_releases(), vec![8101]);
+
+        // Dropping the last napi_ref releases the second wrapper as well.
+        assert_eq!(napi_delete_reference(env_ptr, reference), NAPI_OK);
+        sweep_pending_scope_values(env_ptr);
+        assert!(!env.quickjs_references.contains_key(&8102));
+        assert_eq!(crate::take_pending_js_reference_releases(), vec![8102]);
+    }
+}
