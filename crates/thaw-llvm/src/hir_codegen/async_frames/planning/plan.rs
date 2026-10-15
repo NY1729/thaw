@@ -85,6 +85,30 @@ impl<'ctx> HirCompiler<'ctx> {
                 Self::async_block_returns_on_all_paths(try_body)
                     && Self::async_block_returns_on_all_paths(catch_body)
             }
+            // `while (true)` without a `break` that leaves it never falls through.
+            HirStmt::While(HirExpr::Lit(HirLit::Bool(true)), body) => {
+                !Self::loop_body_can_break(body, 0)
+            }
+            _ => false,
+        })
+    }
+
+    /// Whether a `break` in `body` can leave the loop whose body this is;
+    /// `nested` counts the loops entered since.
+    fn loop_body_can_break(body: &[HirStmt], nested: usize) -> bool {
+        body.iter().any(|stmt| match stmt {
+            HirStmt::Break => nested == 0,
+            HirStmt::BreakDepth(depth) => *depth >= nested,
+            HirStmt::If(_, then_body, else_body) => {
+                Self::loop_body_can_break(then_body, nested)
+                    || Self::loop_body_can_break(else_body, nested)
+            }
+            HirStmt::Finally(body, _) => Self::loop_body_can_break(body, nested),
+            HirStmt::Try(try_body, _, catch_body, _) => {
+                Self::loop_body_can_break(try_body, nested)
+                    || Self::loop_body_can_break(catch_body, nested)
+            }
+            HirStmt::While(_, inner) => Self::loop_body_can_break(inner, nested + 1),
             _ => false,
         })
     }

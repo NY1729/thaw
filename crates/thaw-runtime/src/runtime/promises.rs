@@ -1499,6 +1499,83 @@ fn promise_any_errors(reasons: &[Option<PromiseAnyReason>]) -> *const u8 {
     wrap_array_handle(buffer).cast()
 }
 
+
+/// The rejection text of an all-rejected `Promise.any`: a framed
+/// `AggregateError` whose suffix carries an own-property bag (`\x05{json}`) with
+/// the `errors` array, so a caught value converted to `any` exposes
+/// `error.errors`. Reasons that have no JSON form (native objects, opaque
+/// pointers, undefined) are `null`; a native error text is embedded as its own
+/// string (it starts with `\x01`) and is revived as an Error by the reader.
+fn promise_any_rejection_text(reasons: &[Option<PromiseAnyReason>]) -> *const u8 {
+    let mut json = String::from("{\"errors\":[");
+    for (index, reason) in reasons.iter().enumerate() {
+        if index != 0 {
+            json.push(',');
+        }
+        match reason {
+            Some(reason) => push_aggregate_reason_json(&mut json, reason),
+            None => json.push_str("null"),
+        }
+    }
+    json.push_str("]}");
+    let Some(mut bytes) = thaw_arena::error_wire::encode_tagged(
+        b"AggregateError",
+        &PROMISE_ANY_REJECTED_ERROR[b"\x01AggregateError\x01".len()..PROMISE_ANY_REJECTED_ERROR.len() - 1],
+        None,
+    ) else {
+        return PROMISE_ANY_REJECTED_ERROR.as_ptr();
+    };
+    bytes.push(5);
+    bytes.extend_from_slice(json.as_bytes());
+    thaw_arena::arena_string(&bytes).cast::<u8>().cast_const()
+}
+
+fn push_json_string(output: &mut String, bytes: &[u8]) {
+    output.push('"');
+    for character in String::from_utf8_lossy(bytes).chars() {
+        match character {
+            '"' => output.push_str("\\\""),
+            '\\' => output.push_str("\\\\"),
+            character if (character as u32) < 0x20 => {
+                output.push_str(&format!("\\u{:04x}", character as u32));
+            }
+            character => output.push(character),
+        }
+    }
+    output.push('"');
+}
+
+fn push_aggregate_reason_json(output: &mut String, reason: &PromiseAnyReason) {
+    let text = |pointer: u64| -> Option<Vec<u8>> {
+        (pointer != 0).then(|| unsafe { thaw_arena::NativeStr::from_ptr(pointer as *const _) }.to_bytes().to_vec())
+    };
+    match reason.tag {
+        0 => {
+            let number = f64::from_bits(reason.payload);
+            if number.is_finite() {
+                output.push_str(&number.to_string());
+            } else {
+                output.push_str("null");
+            }
+        }
+        1 => output.push_str(&(reason.payload as i64).to_string()),
+        2 => output.push_str(if reason.payload != 0 { "true" } else { "false" }),
+        3 => match text(reason.payload) {
+            Some(bytes) => push_json_string(output, &bytes),
+            None => output.push_str("null"),
+        },
+        // Native error text and nested AggregateError records.
+        7 | 9 => {
+            let record = reason.payload as *const PromiseAnyErrorRecord;
+            match (!record.is_null()).then(|| text(unsafe { (*record).text } as u64)).flatten() {
+                Some(bytes) => push_json_string(output, &bytes),
+                None => output.push_str("null"),
+            }
+        }
+        _ => output.push_str("null"),
+    }
+}
+
 struct PromiseAnyState {
     output: *mut ThawPromise,
     _output: OutputRef,
@@ -1552,7 +1629,7 @@ extern "C" fn resume_promise_any_child(frame: *mut u8, result: *const u8) {
         });
         if !state.fulfilled {
             let errors = promise_any_errors(&state.reasons);
-            if reject_native_text(state.output, PROMISE_ANY_REJECTED_ERROR.as_ptr()) != 0 {
+            if reject_native_text(state.output, promise_any_rejection_text(&state.reasons)) != 0 {
                 set_promise_aggregate_errors(state.output, errors);
             }
         }
@@ -1578,7 +1655,7 @@ pub unsafe extern "C" fn thaw_promise_any(
     let output = thaw_promise_new();
     if len == 0 {
         let errors = promise_any_errors(&[]);
-        if reject_native_text(output, PROMISE_ANY_REJECTED_ERROR.as_ptr()) != 0 {
+        if reject_native_text(output, promise_any_rejection_text(&[])) != 0 {
             set_promise_aggregate_errors(output, errors);
         }
         return output;

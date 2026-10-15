@@ -343,6 +343,8 @@ include!("tests/values.rs");
 include!("tests/f_contracts.rs");
 include!("tests/i_contracts.rs");
 include!("tests/s_contracts.rs");
+include!("tests/p_contracts.rs");
+include!("tests/r_contracts.rs");
 
 #[test]
 fn immediate_jsvalue_identity_lambda_reads_capture_without_retaining_environment() {

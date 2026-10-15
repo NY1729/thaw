@@ -502,8 +502,19 @@ impl<'ctx> HirCompiler<'ctx> {
                 .map_err(|e| e.to_string())?;
         }
         let saved_async_completion = self.active_async_completion.replace(completion);
+        let saved_return_frame = self
+            .async_return_frames
+            .insert(completion, (frame, plan.ret.clone()));
         let block_result =
             self.compile_async_segment_block(&segment.stmts, frame, completion, plan);
+        match saved_return_frame {
+            Some(previous) => {
+                self.async_return_frames.insert(completion, previous);
+            }
+            None => {
+                self.async_return_frames.remove(&completion);
+            }
+        }
         self.active_async_completion = saved_async_completion;
         match block_result? {
             AsyncBlockExit::Returned => {

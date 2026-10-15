@@ -267,11 +267,12 @@ fn promise_combinators_accept_homogeneous_array_spreads() {
             if matches!(inner.as_ref(), HirExpr::PromiseAllArray(array, _)
                 if matches!(array.as_ref(), HirExpr::ArrayConcat(_, _)))
     ));
+    // allSettled settles each input on its own: the result is an array of
+    // per-status Json objects, joined by Promise.all.
     assert!(matches!(
         &main.body[1],
-        HirStmt::Expr(HirExpr::AwaitPromise(inner, _))
-            if matches!(inner.as_ref(), HirExpr::PromiseAllSettledArray(array, _)
-                if matches!(array.as_ref(), HirExpr::ArrayConcat(_, _)))
+        HirStmt::Expr(HirExpr::AwaitPromise(_, HirType::Array(element)))
+            if **element == HirType::Json
     ));
     assert!(matches!(
         &main.body[2],
@@ -350,7 +351,9 @@ fn promise_any_accepts_empty_and_rejects_mixed_and_non_promise_inputs() {
 }
 
 #[test]
-fn promise_all_settled_rejects_mixed_and_non_promise_inputs() {
+fn promise_all_settled_accepts_mixed_and_non_promise_inputs() {
+    // Each input settles on its own in Node, so heterogeneous result types and
+    // plain values are valid; every entry is a per-status object.
     let mixed = thaw_parser::parse_typescript(
         r#"
         async function numberValue(): Promise<number> { return 1; }
@@ -361,17 +364,13 @@ fn promise_all_settled_rejects_mixed_and_non_promise_inputs() {
         "#,
     )
     .unwrap();
-    assert!(lower_module(&mixed)
-        .unwrap_err()
-        .contains("Promise.allSettled element 1 resolves to Str, expected F64"));
+    lower_module(&mixed).unwrap();
 
     let plain = thaw_parser::parse_typescript(
         "async function main(): Promise<void> { await Promise.allSettled([1]); }",
     )
     .unwrap();
-    assert!(lower_module(&plain)
-        .unwrap_err()
-        .contains("Promise.allSettled element 0 must be a Promise"));
+    lower_module(&plain).unwrap();
 }
 
 #[test]

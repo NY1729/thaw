@@ -1496,6 +1496,20 @@ fn promise_any_ignores_rejections_and_uses_the_first_fulfillment() {
     assert_eq!(ACTIVE_PROMISE_JOINS.with(Cell::get), 0);
 }
 
+/// The framed `AggregateError` text of a fully rejected `Promise.any`: the
+/// message frame followed by the own-property bag carrying `errors`.
+fn aggregate_rejection_text(bag: &str) -> Vec<u8> {
+    let mut text = thaw_arena::error_wire::encode_tagged(
+        b"AggregateError",
+        b"All promises were rejected",
+        None,
+    )
+    .unwrap();
+    text.push(5);
+    text.extend_from_slice(bag.as_bytes());
+    text
+}
+
 #[test]
 fn promise_any_rejects_only_after_every_input_rejects() {
     let first = thaw_promise_new();
@@ -1510,9 +1524,10 @@ fn promise_any_rejects_only_after_every_input_rejects() {
     assert_eq!(thaw_promise_reject(second, second_error.as_ptr()), 1);
     thaw_runtime_run_until_idle();
     assert_eq!(thaw_promise_state(any), 2);
+    let text = thaw_runtime_run_until_resolved(any);
     assert_eq!(
-        thaw_runtime_run_until_resolved(any),
-        PROMISE_ANY_REJECTED_ERROR.as_ptr()
+        unsafe { CStr::from_ptr(text.cast()) }.to_bytes(),
+        aggregate_rejection_text(r#"{"errors":[null,null]}"#)
     );
     unsafe { thaw_promise_destroy(any) };
 }
@@ -1521,9 +1536,10 @@ fn promise_any_rejects_only_after_every_input_rejects() {
 fn promise_any_rejects_an_empty_input() {
     let any = unsafe { thaw_promise_any(std::ptr::null(), 0) };
     assert_eq!(thaw_promise_state(any), 2);
+    let text = thaw_runtime_run_until_resolved(any);
     assert_eq!(
-        thaw_runtime_run_until_resolved(any),
-        PROMISE_ANY_REJECTED_ERROR.as_ptr()
+        unsafe { CStr::from_ptr(text.cast()) }.to_bytes(),
+        aggregate_rejection_text(r#"{"errors":[]}"#)
     );
     unsafe { thaw_promise_destroy(any) };
 }
@@ -3945,7 +3961,7 @@ fn promise_any_nested_reason_and_native_text_outlive_child_handles() {
     let nested = unsafe { &*(first_payload as *const PromiseAnyErrorRecord) };
     assert_eq!(
         unsafe { CStr::from_ptr(nested.text.cast()) }.to_bytes(),
-        &PROMISE_ANY_REJECTED_ERROR[..PROMISE_ANY_REJECTED_ERROR.len() - 1]
+        aggregate_rejection_text(r#"{"errors":[77]}"#)
     );
     assert_eq!(unsafe { promise_any_reason_at(nested.errors, 0) }, (1, 77));
     assert_eq!(native_tag, 9);
