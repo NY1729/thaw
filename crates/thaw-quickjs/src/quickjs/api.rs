@@ -1047,6 +1047,36 @@ fn resolve_value_graph_impl<'js>(
     })
 }
 
+/// A method that returns its own receiver (`emitter.on(..)`, `readable.setEncoding(..)`,
+/// every fluent API) must hand back the live object, not a data snapshot of it:
+/// the snapshot copies own properties only, so the methods are gone and a later call
+/// on the `any` result failed with "invalid JavaScript value handle 0". The graph
+/// encoder already has a forced-root mode that transfers just a lease for the root.
+fn resolve_method_result_graph<'js>(
+    ctx: Ctx<'js>, result: Value<'js>, label: &str, receiver: Option<Value<'js>>,
+) -> Result<String, BoundaryError> {
+    let result = resolve_promise_value(&ctx, result, label, true)?;
+    let encode: Function = ctx.globals().get("__thaw_json_graph_encode_js")
+        .map_err(|error| error.to_string())?;
+    let returns_receiver = match &receiver {
+        Some(receiver) if result.is_object() => {
+            let identical = ctx.userdata::<NativeBundleOwner<'_>>()
+                .ok_or("intrinsic Object.is is unavailable")?.object_is.clone();
+            identical.call::<_, bool>((receiver.clone(), result.clone()))
+                .map_err(|error| error.to_string())?
+        }
+        _ => false,
+    };
+    let encoded = match receiver {
+        Some(receiver) if returns_receiver => encode.call((result, 0, true, false, receiver)),
+        _ => encode.call((result, 0, false, true)),
+    };
+    encoded.map_err(|error| match error {
+        rquickjs::Error::Exception => describe_tagged_exception(&ctx),
+        error => error.to_string().into(),
+    })
+}
+
 fn sleep_until_next_poll(delay: i64) {
     mark_loop_started();
     if delay > 0 {
@@ -4682,7 +4712,8 @@ pub extern "C" fn thaw_js_call_selected_method_graph_result(
     let args_json = to_str(args_json);
     let result = with_active_or_context(|ctx| {
         let value = invoke_selected_method(&ctx, receiver, selected, &args_json)?;
-        resolve_value_wire_impl(ctx, value, &format!("JavaScript method `{name}`"), true, true)
+        let receiver = value_for_handle(&ctx, receiver).ok();
+        resolve_method_result_graph(ctx, value, &format!("JavaScript method `{name}`"), receiver)
     });
     match result {
         Ok(value) => graph_ok_result(value, true),
@@ -4754,7 +4785,12 @@ fn thaw_js_call_method_result_impl(
     let args_json = to_str(args_json);
     let result = with_active_or_context(|ctx| {
         let value = invoke_method(&ctx, handle, &name, &args_json, graph_result)?;
-        resolve_value_wire_impl(ctx, value, &format!("JavaScript method `{name}`"), true, graph_result)
+        if graph_result {
+            let receiver = value_for_handle(&ctx, handle).ok();
+            resolve_method_result_graph(ctx, value, &format!("JavaScript method `{name}`"), receiver)
+        } else {
+            resolve_value_wire_impl(ctx, value, &format!("JavaScript method `{name}`"), true, graph_result)
+        }
     });
     match result {
         Ok(value) => graph_ok_result(value, graph_result),
@@ -6598,6 +6634,36 @@ mod forced_root_graph_wire_controls {
             destroy_value(scalar_value);
             drop(scalar_wire);
             release_input(scalar_handle);
+        }).join().unwrap();
+    }
+
+    #[test]
+    fn a_method_returning_its_receiver_transfers_a_lease_not_a_snapshot() {
+        std::thread::spawn(|| {
+            let _inputs = TestInputScope::new();
+            install_real_host_callbacks();
+            let receiver = retain_source(
+                "({ items: [1], on() { return this; }, copy() { return { items: this.items }; } })");
+            let no_args = CString::new(
+                r#"{"root":{"r":0},"nodes":[{"a":[]}],"leases":[],"napiLeases":[]}"#).unwrap();
+            let call = |method: &str| {
+                let name = CString::new(method).unwrap();
+                let result = thaw_js_call_method_graph_result(receiver, name.as_ptr(), no_args.as_ptr());
+                assert!(result.error.is_null(), "{method} failed");
+                let wire = unsafe { CStr::from_ptr(result.value) }.to_str().unwrap().to_owned();
+                serde_json::from_str::<serde_json::Value>(&wire).expect("graph wire parses")
+            };
+            let fluent = call("on");
+            let handle = fluent["nodes"][0]["hdl"].as_u64()
+                .unwrap_or_else(|| panic!("a method returning `this` must transfer a lease: {fluent}"));
+            assert_eq!(handle, receiver, "the lease is the receiver itself");
+            assert_eq!(fluent["leases"], serde_json::json!([receiver]));
+            // The lease holds its own reference; the decoder normally consumes it.
+            assert_eq!(thaw_js_release_handle(handle), 1);
+            let copy = call("copy");
+            assert!(copy["nodes"][0].get("o").is_some(),
+                "a fresh plain result still crosses as data: {copy}");
+            release_input(receiver);
         }).join().unwrap();
     }
 

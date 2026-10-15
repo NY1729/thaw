@@ -317,7 +317,16 @@ impl<'a> FnLowerer<'a> {
                                 }
                             }
                         }
-                        (self.infer_member_receiver_type(&inner_member.obj) == Some(HirType::JsValue))
+                        // A non-builtin method call on a `Json`/`any` receiver is routed to the
+                        // live object like a `JsValue` receiver (see the Json arm in
+                        // `lower_call`), so a call chained off it is also a dynamic value:
+                        // `app.use(a).use(b)` with `app: any` is as chainable as with a
+                        // `JsValue` `app`.
+                        let receiver = self.infer_member_receiver_type(&inner_member.obj);
+                        let live_json_method = receiver == Some(HirType::Json)
+                            && member_property_name(&inner_member.prop)
+                                .is_some_and(|method| !Self::is_native_instance_builtin(&method));
+                        (receiver == Some(HirType::JsValue) || live_json_method)
                             .then_some(HirType::JsValue)
                     }
                     _ => None,
