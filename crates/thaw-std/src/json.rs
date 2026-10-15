@@ -8425,6 +8425,23 @@ pub extern "C" fn thaw_json_array_extend(array: *mut Value, other: *mut Value) {
     }
 }
 
+/// Replaces the elements of Json array `target` in place with those of `source`
+/// and returns `target`: write-back for an array method run on a decoded copy.
+// ponytail: a live host (JS-owned) array target is left unchanged; write it back through the host if that is ever needed.
+#[no_mangle]
+pub extern "C" fn thaw_json_array_assign(target: *mut Value, source: *mut Value) -> *mut Value {
+    let Some(items) = (unsafe { source.as_ref() })
+        .and_then(Value::as_array)
+        .map(|items| items.to_vec())
+    else {
+        return target;
+    };
+    if let Some(slot) = (unsafe { target.as_ref() }).and_then(Value::as_array_mut) {
+        *slot = items;
+    }
+    target
+}
+
 #[no_mangle]
 pub extern "C" fn thaw_json_array_slice(value: *mut Value, start: i64) -> *mut Value {
     // A live JS array (a nested value of a native `any` wrapper) is read through its host.

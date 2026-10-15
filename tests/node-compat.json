@@ -635,7 +635,11 @@
     {
       "name": "process argv forwards command line arguments",
       "expect": "matched",
-      "args": ["alpha", "two words", "--count=3"],
+      "args": [
+        "alpha",
+        "two words",
+        "--count=3"
+      ],
       "source": "function main(): void { console.log(process.argv.slice(2).join('|')); }"
     },
     {
@@ -1122,6 +1126,11 @@
       "name": "extracted object method is callable as a value",
       "expect": "matched",
       "source": "const o = { k: 7, double(x: number): number { return x * 2; } };\nfunction main(): void {\n  const f = o.double;\n  console.log(f(4), typeof f, o.double(6));\n}\n"
+    },
+    {
+      "name": "array methods and write-back on an any array",
+      "expect": "matched",
+      "source": "function main(): void {\n  const j: any = JSON.parse('[3,1,2]');\n  const alias = j;\n  console.log(j.push(9), alias.length, alias[3]);\n  console.log(j.pop(), j.shift(), j.unshift(0), alias.join(','));\n  j.sort();\n  console.log(alias.join(','), j.map((x: number) => x * 2).join(','), j.filter((x: number) => x > 1).length);\n  console.log(j.reduce((s: number, x: number) => s + x, 0), j.some((x: number) => x > 2), j.slice(1).join(','));\n  const k: any = JSON.parse('{\"list\":[1,2]}');\n  k.list.push(3);\n  console.log(k.list.length, JSON.stringify(k));\n}\n"
     }
   ]
 }
