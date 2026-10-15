@@ -197,3 +197,28 @@ fn w2_tty_streams_use_their_descriptor() {
     drop(file);
     unsafe { libc::close(slave) };
 }
+
+#[test]
+fn w2_socket_write_after_a_peer_reset_reports_an_error_instead_of_throwing() {
+    // expected: node22. A write on a socket whose peer went away (or that is already destroyed) must never throw out of `write`:
+    // the failure is reported through the write callback / an 'error' event. (The TLS contract above used to fail intermittently
+    // with an uncaught "Broken pipe" because `write` threw inside a server handler.)
+    let body = r#####"const net = require('node:net');
+const srv = net.createServer(s => { setTimeout(() => s.destroy(), 30); });
+await new Promise(r => srv.listen(0, '127.0.0.1', r));
+let errors = 0, code, cb, threw = false;
+const kind = e => (e.code === 'EPIPE' || e.code === 'ECONNRESET') ? 'epipe-or-reset' : e.code;
+const c = net.connect({ port: srv.address().port, host: '127.0.0.1' });
+c.on('error', e => { errors++; code = kind(e); });
+await new Promise(r => c.once('connect', r));
+await new Promise(r => setTimeout(r, 100));
+try { for (let i = 0; i < 30; i++) { c.write('x'.repeat(65536), e => { if (e) cb = kind(e); }); await new Promise(r => setTimeout(r, 5)); } } catch (e) { threw = true; }
+await new Promise(r => setTimeout(r, 100));
+c.destroy(); srv.close();
+return { threw };
+"#####;
+    assert_eq!(
+        p2c_run("w2_write_after_reset", body),
+        r#####"{"threw":false}"#####
+    );
+}
