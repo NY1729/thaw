@@ -1043,7 +1043,7 @@ fn run_host_child(
         .stdin(stdio_for(stdio[0]))
         .stdout(stdio_for(stdio[1]))
         .stderr(stdio_for(stdio[2]));
-    let mut process = match process.spawn() {
+    let mut process = match spawn_retrying_text_busy(&mut process) {
         Ok(process) => process,
         Err(error) => {
             let _ = events.send(HostChildEvent::Error {
@@ -1150,6 +1150,25 @@ fn run_host_child(
     let _ = stdout_thread.join();
     let _ = stderr_thread.join();
     let _ = events.send(HostChildEvent::Exit { code, signal });
+}
+
+/// `Command::spawn`, retried while the kernel answers ETXTBSY.
+///
+/// A fork in another thread can briefly hold a copy of the write descriptor of a file that was just
+/// written, so exec'ing that file (a freshly copied or generated executable) fails with "Text file
+/// busy" until that other child reaches its own exec. The condition clears within milliseconds.
+fn spawn_retrying_text_busy(command: &mut Command) -> io::Result<std::process::Child> {
+    const ATTEMPTS: u32 = 20;
+    for attempt in 1.. {
+        match command.spawn() {
+            #[cfg(unix)]
+            Err(error) if error.raw_os_error() == Some(libc::ETXTBSY) && attempt < ATTEMPTS => {
+                std::thread::sleep(Duration::from_millis(5 * u64::from(attempt)));
+            }
+            result => return result,
+        }
+    }
+    unreachable!()
 }
 
 fn spawn_host_child(command: String, arguments_json: String, options_json: String) -> u32 {
@@ -1491,7 +1510,7 @@ fn run_child_process(command: String, arguments_json: String, options_json: Stri
         .get("killSignal")
         .and_then(serde_json::Value::as_i64)
         .map_or(15, |signal| signal as i32);
-    let mut child = match child.spawn() {
+    let mut child = match spawn_retrying_text_busy(&mut child) {
         Ok(child) => child,
         Err(error) => {
             return serde_json::json!({
@@ -2015,6 +2034,33 @@ mod process_credential_tests {
         (guard, helper.to_string_lossy().into_owned(), args, env)
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn spawning_a_file_that_is_still_open_for_writing_waits_for_it_instead_of_failing() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = std::env::temp_dir().join(format!("thaw-text-busy-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let script = directory.join("busy.sh");
+        std::fs::write(&script, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // While any descriptor open for writing exists, exec fails with ETXTBSY.
+        let writer = std::fs::OpenOptions::new().append(true).open(&script).unwrap();
+        assert_eq!(
+            Command::new(&script).spawn().err().and_then(|error| error.raw_os_error()),
+            Some(libc::ETXTBSY),
+            "the fixture must reproduce the busy file"
+        );
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(40));
+            drop(writer);
+        });
+        let mut command = Command::new(&script);
+        let status = spawn_retrying_text_busy(&mut command).expect("spawn must outlast the busy window").wait().unwrap();
+        release.join().unwrap();
+        let _ = std::fs::remove_dir_all(&directory);
+        assert!(status.success());
+    }
+
     #[cfg(all(unix, not(any(target_os = "vxworks", target_os = "espidf", target_os = "horizon", target_os = "vita", target_os = "l4re"))))]
     #[test]
     fn identity_helper_test_mode() {
@@ -2134,8 +2180,8 @@ mod process_credential_tests {
             assert!(std::time::Instant::now() < deadline, "credential child did not finish within two seconds");
             std::thread::yield_now();
         }
-        assert_eq!(events.first().unwrap()["type"], "spawn");
-        assert_eq!(events.last().unwrap()["type"], "exit");
+        assert_eq!(events.first().unwrap()["type"], "spawn", "events: {events:?}");
+        assert_eq!(events.last().unwrap()["type"], "exit", "events: {events:?}");
         assert_eq!(events.last().unwrap()["code"], 0);
         let output = String::from_utf8(stdout).unwrap();
         let identity = output.lines().find_map(|line| line.strip_prefix("THAW_CREDENTIAL_IDENTITY=")).expect("async identity helper output");
