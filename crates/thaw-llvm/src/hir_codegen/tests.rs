@@ -414,6 +414,7 @@ include!("tests/s_contracts.rs");
 include!("tests/p_contracts.rs");
 include!("tests/r_contracts.rs");
 include!("tests/t_contracts.rs");
+include!("tests/z_contracts.rs");
 
 #[test]
 fn immediate_jsvalue_identity_lambda_reads_capture_without_retaining_environment() {

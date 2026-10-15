@@ -1677,3 +1677,169 @@ pub fn normalize_constructor_functions(module: &Module) -> Result<Module, String
     }
     Ok(normalized)
 }
+
+/// A default expression that creates a closure must be evaluated in the callee's
+/// own scope: a closure built by the arity wrappers captures the wrappers' copy
+/// of every parameter, not the cell the body reads and writes. Such defaults
+/// (and the defaults after them) move into the body as
+/// `let p = p__thaw_arg === undefined ? <default> : p__thaw_arg`, the parameter
+/// itself becoming `p__thaw_arg?: T`. Needs an annotation or a literal default
+/// to name `T`; any other shape keeps the wrapper evaluation.
+pub fn normalize_default_parameter_closures(module: &Module) -> Module {
+    use swc_ecma_ast::*;
+    struct ClosureFinder(bool);
+    impl swc_ecma_visit::Visit for ClosureFinder {
+        fn visit_function(&mut self, _: &swc_ecma_ast::Function) {
+            self.0 = true;
+        }
+        fn visit_arrow_expr(&mut self, _: &ArrowExpr) {
+            self.0 = true;
+        }
+    }
+    fn creates_closure(expr: &Expr) -> bool {
+        let mut finder = ClosureFinder(false);
+        expr.visit_with(&mut finder);
+        finder.0
+    }
+    fn keyword(kind: TsKeywordTypeKind) -> Box<TsTypeAnn> {
+        Box::new(TsTypeAnn {
+            span: swc_common::DUMMY_SP,
+            type_ann: Box::new(TsType::TsKeywordType(TsKeywordType {
+                span: swc_common::DUMMY_SP,
+                kind,
+            })),
+        })
+    }
+    fn parameter_type(binding: &BindingIdent, default: &Expr) -> Option<Box<TsTypeAnn>> {
+        if let Some(annotation) = &binding.type_ann {
+            return Some(annotation.clone());
+        }
+        match default {
+            Expr::Lit(Lit::Num(_)) => Some(keyword(TsKeywordTypeKind::TsNumberKeyword)),
+            Expr::Lit(Lit::Str(_)) => Some(keyword(TsKeywordTypeKind::TsStringKeyword)),
+            Expr::Lit(Lit::Bool(_)) => Some(keyword(TsKeywordTypeKind::TsBooleanKeyword)),
+            _ => None,
+        }
+    }
+    /// The body statements that evaluate the moved defaults, or `None` (patterns untouched).
+    fn move_defaults(patterns: &mut [&mut Pat]) -> Option<Vec<Stmt>> {
+        let start = patterns.iter().position(
+            |pattern| matches!(&**pattern, Pat::Assign(assign) if creates_closure(&assign.right)),
+        )?;
+        let mut moved = Vec::new();
+        for pattern in &patterns[start..] {
+            let Pat::Assign(assign) = &**pattern else {
+                return None;
+            };
+            let Pat::Ident(binding) = assign.left.as_ref() else {
+                return None;
+            };
+            let annotation = parameter_type(binding, &assign.right)?;
+            moved.push((binding.id.clone(), annotation, assign.right.clone()));
+        }
+        let mut statements = Vec::new();
+        for (pattern, (id, annotation, default)) in patterns[start..].iter_mut().zip(moved) {
+            let supplied = Ident::new_no_ctxt(format!("{}__thaw_arg", id.sym).into(), swc_common::DUMMY_SP);
+            **pattern = Pat::Ident(BindingIdent {
+                id: Ident {
+                    optional: true,
+                    ..supplied.clone()
+                },
+                type_ann: Some(annotation.clone()),
+            });
+            let undefined = Box::new(Expr::Ident(Ident::new_no_ctxt(
+                "undefined".into(),
+                swc_common::DUMMY_SP,
+            )));
+            statements.push(Stmt::Decl(Decl::Var(Box::new(VarDecl {
+                span: swc_common::DUMMY_SP,
+                ctxt: Default::default(),
+                kind: VarDeclKind::Let,
+                declare: false,
+                decls: vec![VarDeclarator {
+                    span: swc_common::DUMMY_SP,
+                    name: Pat::Ident(BindingIdent {
+                        id: Ident::new_no_ctxt(id.sym.clone(), swc_common::DUMMY_SP),
+                        type_ann: Some(annotation),
+                    }),
+                    init: Some(Box::new(Expr::Cond(CondExpr {
+                        span: swc_common::DUMMY_SP,
+                        test: Box::new(Expr::Bin(BinExpr {
+                            span: swc_common::DUMMY_SP,
+                            op: BinaryOp::EqEqEq,
+                            left: Box::new(Expr::Ident(supplied.clone())),
+                            right: undefined,
+                        })),
+                        cons: default,
+                        alt: Box::new(Expr::Ident(supplied)),
+                    }))),
+                    definite: false,
+                }],
+            }))));
+        }
+        Some(statements)
+    }
+    struct Rewriter;
+    impl swc_ecma_visit::VisitMut for Rewriter {
+        fn visit_mut_function(&mut self, function: &mut swc_ecma_ast::Function) {
+            function.visit_mut_children_with(self);
+            if function_references_arguments(function) {
+                return;
+            }
+            let Some(body) = &mut function.body else {
+                return;
+            };
+            let mut patterns: Vec<&mut Pat> =
+                function.params.iter_mut().map(|param| &mut param.pat).collect();
+            if let Some(mut statements) = move_defaults(&mut patterns) {
+                statements.append(&mut body.stmts);
+                body.stmts = statements;
+            }
+        }
+
+        fn visit_mut_constructor(&mut self, constructor: &mut Constructor) {
+            constructor.visit_mut_children_with(self);
+            let Some(body) = &mut constructor.body else {
+                return;
+            };
+            let mut patterns = Vec::new();
+            for parameter in &mut constructor.params {
+                let ParamOrTsParamProp::Param(parameter) = parameter else {
+                    return;
+                };
+                patterns.push(&mut parameter.pat);
+            }
+            if let Some(mut statements) = move_defaults(&mut patterns) {
+                statements.append(&mut body.stmts);
+                body.stmts = statements;
+            }
+        }
+
+        fn visit_mut_arrow_expr(&mut self, arrow: &mut ArrowExpr) {
+            arrow.visit_mut_children_with(self);
+            let mut patterns: Vec<&mut Pat> = arrow.params.iter_mut().collect();
+            let Some(mut statements) = move_defaults(&mut patterns) else {
+                return;
+            };
+            match arrow.body.as_mut() {
+                ArrowFunctionBody::FunctionBody(body) => {
+                    statements.append(&mut body.stmts);
+                    body.stmts = statements;
+                }
+                ArrowFunctionBody::Expr(expr) => {
+                    statements.push(Stmt::Return(ReturnStmt {
+                        span: swc_common::DUMMY_SP,
+                        arg: Some(expr.clone()),
+                    }));
+                    *arrow.body = ArrowFunctionBody::FunctionBody(FunctionBody {
+                        span: swc_common::DUMMY_SP,
+                        stmts: statements,
+                    });
+                }
+            }
+        }
+    }
+    let mut module = module.clone();
+    module.visit_mut_with(&mut Rewriter);
+    module
+}

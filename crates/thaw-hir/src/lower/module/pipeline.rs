@@ -163,6 +163,7 @@ pub fn lower_module(module: &Module) -> Result<HirProgram, String> {
     let normalized = normalize_static_computed_class_members(&normalized);
     let normalized = normalize_private_class_members(&normalized);
     let normalized = normalize_constructor_functions(&normalized)?;
+    let normalized = normalize_default_parameter_closures(&normalized);
     let normalized = normalize_implicit_returns(&normalized);
     let normalized = normalize_uninitialized_globals(&normalized);
     let normalized = specialize_named_promise_rejection_callbacks(&normalized)?;
@@ -1245,6 +1246,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
         ))
     };
     let mut inherited_class_functions = Vec::new();
+    let mut inherited_static_globals = Vec::new();
     let mut inherited_virtual_class_decls = Vec::new();
     for derived in &class_decls {
         let derived_name = derived.ident.sym.to_string();
@@ -1541,6 +1543,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                     Expr::Ident(base) => Some(base.sym.to_string()),
                     _ => None,
                 });
+        let first_base = base_name.clone();
         while let Some(current_name) = base_name {
             // `Error`/`TypeError`/etc. are not real declared classes (see
             // `lower/module/classes.rs`'s synthetic base-layout branch) and
@@ -1593,12 +1596,50 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                         type_predicate: None,
                     },
                 );
+                // A write through a derived class creates that class's own
+                // property (shadowing the base's); reads fall back to the
+                // parent until then. Readonly fields can never be written.
+                let own_storage = format!("__thaw_inherited_static_{derived_name}_{field}");
+                let own_flag = format!("__thaw_inherited_static_own_{derived_name}_{field}");
+                let parent_value = if first_base.as_deref() == Some(current_name.as_str()) {
+                    HirExpr::Var(storage.clone())
+                } else {
+                    let parent = first_base.as_deref().expect("inherited field has a parent");
+                    HirExpr::Call(
+                        Box::new(HirExpr::Var(class_getter_symbol(parent, &field, true))),
+                        Vec::new(),
+                    )
+                };
+                let getter_body = if property.readonly {
+                    vec![HirStmt::Return(Some(HirExpr::Var(storage.clone())))]
+                } else {
+                    inherited_static_globals.push(crate::HirGlobal {
+                        name: own_storage.clone(),
+                        ty: ty.clone(),
+                        init: HirExpr::Var(storage.clone()),
+                        mutable: true,
+                    });
+                    inherited_static_globals.push(crate::HirGlobal {
+                        name: own_flag.clone(),
+                        ty: HirType::Bool,
+                        init: HirExpr::Lit(HirLit::Bool(false)),
+                        mutable: true,
+                    });
+                    vec![
+                        HirStmt::If(
+                            HirExpr::Var(own_flag.clone()),
+                            vec![HirStmt::Return(Some(HirExpr::Var(own_storage.clone())))],
+                            Vec::new(),
+                        ),
+                        HirStmt::Return(Some(parent_value)),
+                    ]
+                };
                 inherited_class_functions.push(HirFunction {
                     name: getter,
                     params: Vec::new(),
                     ret: ty.clone(),
                     is_async: false,
-                    body: vec![HirStmt::Return(Some(HirExpr::Var(storage.clone())))],
+                    body: getter_body,
                 });
                 if !property.readonly {
                     let setter = class_setter_symbol(derived_name, &field, true);
@@ -1638,8 +1679,12 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
                         is_async: false,
                         body: vec![
                             HirStmt::Expr(HirExpr::Assign(
-                                storage,
+                                own_storage,
                                 Box::new(HirExpr::Var(parameter.clone())),
+                            )),
+                            HirStmt::Expr(HirExpr::Assign(
+                                own_flag,
+                                Box::new(HirExpr::Lit(HirLit::Bool(true))),
                             )),
                             HirStmt::Return(Some(HirExpr::Var(parameter))),
                         ],
@@ -2019,6 +2064,7 @@ fn lower_normalized_module(module: &Module) -> Result<HirProgram, String> {
         &enum_values,
         &enum_reverse_values,
     )?);
+    globals.extend(inherited_static_globals);
     globals.extend(lower_class_decorator_tokens(
         &class_decls,
         &signatures,

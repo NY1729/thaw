@@ -100,7 +100,101 @@ impl<'ctx> HirCompiler<'ctx> {
         if !typed_array_call && !generic_array_call {
             return None;
         }
+        if let Err(error) = self.guard_array_mutation(name, args) {
+            return Some(Err(error));
+        }
         Some(self.compile_array_call(name, args))
+    }
+
+    /// Throws a `TypeError` when a mutating array method targets an array that
+    /// `Object.freeze`/`seal`/`preventExtensions` locked (the object-state
+    /// table is keyed by the array handle). Only programs that call those
+    /// functions pay for the check, and only for a receiver that can be
+    /// evaluated twice without observable effects.
+    pub(super) fn guard_array_mutation(
+        &mut self,
+        name: &str,
+        args: &[HirExpr],
+    ) -> Result<(), String> {
+        if !self.tracks_object_integrity {
+            return Ok(());
+        }
+        let suffix = name.rsplit("_array_").next().unwrap_or(name);
+        // 0: not extensible, 1: sealed, 2: frozen (the table's query codes).
+        let (query, message) = match suffix {
+            "push" | "unshift" | "splice" => (0, "Cannot add property, object is not extensible"),
+            "pop" | "shift" | "pop_optional" | "shift_optional" => {
+                (1, "Cannot delete property of [object Array]")
+            }
+            "reverse" | "copy_within" | "fill" | "sort" => {
+                (2, "Cannot assign to read only property of object '[object Array]'")
+            }
+            _ => return Ok(()),
+        };
+        let Some(receiver) = args.first() else {
+            return Ok(());
+        };
+        if !matches!(self.expr_hir_type(receiver), Some(HirType::Array(_))) {
+            return Ok(());
+        }
+        self.compile_guard_array_state(receiver, query, message)
+    }
+
+    pub(super) fn compile_guard_array_state(
+        &mut self,
+        receiver: &HirExpr,
+        query: u64,
+        message: &str,
+    ) -> Result<(), String> {
+        fn repeatable(expr: &HirExpr) -> bool {
+            match expr {
+                HirExpr::Var(_) => true,
+                HirExpr::PropAccess(object, _, _) => repeatable(object),
+                _ => false,
+            }
+        }
+        if !repeatable(receiver) {
+            return Ok(());
+        }
+        let handle = self.compile_expr(receiver)?;
+        self.compile_guard_array_handle(handle.into_pointer_value(), query, message)
+    }
+
+    pub(super) fn compile_guard_array_handle(
+        &mut self,
+        handle: inkwell::values::PointerValue<'ctx>,
+        query: u64,
+        message: &str,
+    ) -> Result<(), String> {
+        let state = self
+            .builder
+            .build_call(
+                self.module.get_function("thaw_object_state").unwrap(),
+                &[handle.into(), self.context.i8_type().const_int(query, false).into()],
+                "array_integrity_state",
+            )
+            .map_err(|error| error.to_string())?
+            .try_as_basic_value()
+            .basic()
+            .ok_or("thaw_object_state returned no value")?
+            .into_int_value();
+        // Query 0 answers "is extensible"; the others answer "is locked".
+        let blocked = if query == 0 {
+            self.builder.build_not(state, "array_not_extensible")
+                .map_err(|error| error.to_string())?
+        } else {
+            state
+        };
+        let function = self.current_function();
+        let throw = self.context.append_basic_block(function, "array_integrity_blocked");
+        let allowed = self.context.append_basic_block(function, "array_integrity_allowed");
+        self.builder
+            .build_conditional_branch(blocked, throw, allowed)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(throw);
+        self.compile_throw_type_error(message)?;
+        self.builder.position_at_end(allowed);
+        Ok(())
     }
 
     fn compile_array_call(
