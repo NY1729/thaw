@@ -193,8 +193,76 @@ fn compile_and_run_raw(
         .envs(envs.iter().copied())
         .output()
         .expect("failed to execute compiled binary");
+    if std::os::unix::process::ExitStatusExt::signal(&output.status).is_some() {
+        diagnose_crashed_binary(&exe_path, envs);
+    }
     let _ = std::fs::remove_dir_all(&dir);
     output
+}
+
+/// A compiled test program killed by a signal (heap corruption showed up this
+/// way intermittently in CI and never locally): collect evidence for the
+/// failure report instead of just the exit status. Re-runs the same binary a
+/// bounded number of times with glibc's checking allocator, which names the
+/// corruption kind, and, when `gdb` is installed, once under it for a
+/// backtrace. Only runs on the failure path; the test still fails.
+fn diagnose_crashed_binary(exe_path: &std::path::Path, envs: &[(&str, &str)]) {
+    eprintln!("--- crash diagnostics for {} ---", exe_path.display());
+    for command in [("uname", &["-srm"][..]), ("ldd", &["--version"][..])] {
+        if let Ok(out) = Command::new(command.0).args(command.1).output() {
+            let text = String::from_utf8_lossy(&out.stdout);
+            eprintln!("{}: {}", command.0, text.lines().next().unwrap_or(""));
+        }
+    }
+    let mut crashes = 0;
+    for attempt in 0..40 {
+        let out = Command::new(exe_path)
+            .envs(envs.iter().copied())
+            .env("MALLOC_CHECK_", "3")
+            .env("MALLOC_PERTURB_", ((attempt % 254) + 1).to_string())
+            .output();
+        let Ok(out) = out else { continue };
+        if std::os::unix::process::ExitStatusExt::signal(&out.status).is_some() {
+            crashes += 1;
+            if crashes <= 3 {
+                eprintln!(
+                    "checked rerun {attempt}: signal {:?}: stderr: {}",
+                    std::os::unix::process::ExitStatusExt::signal(&out.status),
+                    String::from_utf8_lossy(&out.stderr).trim()
+                );
+            }
+        }
+    }
+    eprintln!("checked reruns that crashed: {crashes}/40");
+    let gdb = Command::new("gdb").arg("--version").output().is_ok();
+    eprintln!("gdb available: {gdb}");
+    if gdb {
+        for attempt in 0..20 {
+            let Ok(out) = Command::new("gdb")
+                .args([
+                    "-batch",
+                    "-ex",
+                    "run",
+                    "-ex",
+                    "bt 25",
+                    "-ex",
+                    "info registers rip",
+                ])
+                .arg(exe_path)
+                .output()
+            else {
+                break;
+            };
+            let text = String::from_utf8_lossy(&out.stdout);
+            if text.contains("SIGABRT")
+                || text.contains("SIGSEGV")
+                || text.contains("received signal")
+            {
+                eprintln!("gdb attempt {attempt}:\n{text}");
+                break;
+            }
+        }
+    }
 }
 
 /// Builds `pkg` as a staticlib (if not already built) and returns the
