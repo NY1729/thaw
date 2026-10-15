@@ -1067,6 +1067,21 @@
       "name": "async return of a promise of a loop element",
       "expect": "matched",
       "source": "async function l(xs: number[]): Promise<number> { for (const x of xs) { if (x > 1) return Promise.resolve(x); } return -1; }\nasync function s(xs: string[]): Promise<string> { for (const x of xs) { return Promise.resolve(x); } return 'none'; }\nasync function main(): Promise<void> { console.log(await l([1, 2, 3])); console.log(await l([0, 1])); console.log(await s(['a', 'b'])); console.log(await s([])); }"
+    },
+    {
+      "name": "a chain of method calls that returns its own receiver stays a live object",
+      "expect": "matched",
+      "source": "import { EventEmitter } from 'node:events';\nfunction main(): void {\n  const e: any = new EventEmitter();\n  const f = () => {};\n  const k: any = e.on('b', f).on('c', f);\n  console.log(typeof k, k === e, k.listenerCount('c'));\n  const j: any = e.on('b', f).on('c', f).on('d', f);\n  console.log(j === e, j.listenerCount('d'));\n  k.marker = 5;\n  console.log(e.marker);\n}\n"
+    },
+    {
+      "name": "method chains on an any parameter and a returned chain are dynamic",
+      "expect": "matched",
+      "source": "import { EventEmitter } from 'node:events';\nfunction setup(app: any): void { const f = () => {}; app.on('b', f).on('c', f); }\nfunction chained(app: any): number { const f = () => {}; const k = app.on('x', f).on('y', f); return k.listenerCount('y'); }\nfunction make(e: any): any { const f = () => {}; return e.on('p', f).on('q', f); }\nfunction use(x: any): number { return x.listenerCount('q'); }\nfunction main(): void {\n  const e: any = new EventEmitter();\n  setup(e);\n  console.log(e.listenerCount('c'), chained(e), use(make(e)), make(e) === e);\n}\n"
+    },
+    {
+      "name": "chained receivers keep identity in closures and containers",
+      "expect": "matched",
+      "source": "import { EventEmitter } from 'node:events';\nimport { Readable, PassThrough } from 'node:stream';\nfunction main(): void {\n  const e: any = new EventEmitter();\n  const f = () => {};\n  const g = () => { const k: any = e.on('x', f).on('y', f); return k.listenerCount('x'); };\n  console.log(g());\n  const r: any = new Readable({ read() {} });\n  const r2: any = r.setEncoding('utf8').pause().resume();\n  console.log(r2 === r, r2.readableFlowing);\n  const p: any = new PassThrough();\n  const p2: any = p.setEncoding('utf8').setMaxListeners(20);\n  console.log(p2 === p, p2.getMaxListeners());\n  const arr: any[] = [e.on('p', f).on('q', f)];\n  const o: any = { held: e.on('m', f).on('n', f) };\n  console.log(arr[0] === e, arr[0].listenerCount('q'), o.held === e, o.held.listenerCount('n'));\n}\n"
     }
   ]
 }
