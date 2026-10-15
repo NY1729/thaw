@@ -60,16 +60,25 @@ impl<'ctx> HirCompiler<'ctx> {
                             ("reason".into(), HirType::Str),
                         ])))
                     }
+                    // An argument-binding wrapper `(lambda)(args)` that returns a Promise.
+                    HirExpr::Call(callee, _)
+                        if matches!(callee.as_ref(), HirExpr::Lambda(_, _, HirType::Promise(_), _)) =>
+                    {
+                        let HirExpr::Lambda(_, _, HirType::Promise(resolved), _) = callee.as_ref() else {
+                            unreachable!()
+                        };
+                        resolved.as_ref().clone()
+                    }
                     HirExpr::Call(callee, _) => {
                         let HirExpr::Var(name) = callee.as_ref() else {
-                            unreachable!()
+                            return Err(format!("unsupported frame await call target {callee:?}"));
                         };
                         self.frame_async_functions
                             .get(name)
                             .cloned()
                             .ok_or_else(|| format!("missing async result type for `{name}`"))?
                     }
-                    _ => unreachable!(),
+                    other => return Err(format!("unsupported frame await source {other:?}")),
                 };
                 *expr = HirExpr::Var(temporary.to_string());
                 return Ok(Some((awaited, ty)));

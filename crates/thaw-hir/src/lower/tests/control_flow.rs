@@ -2394,3 +2394,27 @@ fn unreachable_placeholders_exist_for_every_native_value_type() {
     }
     assert!(problems.is_empty(), "{problems:#?}");
 }
+
+/// A `for...of` element of an array parameter reads as `Optional<T>` (the array may be
+/// sparse); returning it from a function declared `number`/`string` must lower like a call
+/// argument does instead of failing with "value has type Optional(F64), expected F64".
+#[test]
+fn returning_a_for_of_element_of_an_array_parameter_lowers() {
+    let program = lower(
+        r#"
+            function firstNumber(values: number[]): number {
+                for (const value of values) { return value; }
+                return -1;
+            }
+            function firstString(values: string[]): string {
+                for (const value of values) { if (value.length > 1) return value; }
+                return "none";
+            }
+            async function firstAsync(values: number[]): Promise<number> {
+                for (const value of values) { if (value > 1) return value; }
+                return -1;
+            }
+        "#,
+    );
+    assert_eq!(program.functions.len(), 3);
+}

@@ -452,6 +452,10 @@ pub struct HirCompiler<'ctx> {
     async_lambda_captures: HashMap<String, Vec<HirParam>>,
     promise_returning_functions: HashSet<String>,
     active_async_completion: Option<PointerValue<'ctx>>,
+    /// Frame and result type of the async segment being emitted, keyed by its
+    /// completion handle. A `return` nested in a plain statement (loop body,
+    /// `try`) resolves this completion instead of returning from the segment.
+    async_return_frames: HashMap<PointerValue<'ctx>, (PointerValue<'ctx>, HirType)>,
     next_lambda: usize,
     uses_napi: bool,
     uses_quickjs: bool,
@@ -762,6 +766,7 @@ impl<'ctx> HirCompiler<'ctx> {
             async_lambda_captures: HashMap::new(),
             promise_returning_functions: HashSet::new(),
             active_async_completion: None,
+            async_return_frames: HashMap::new(),
             next_lambda: 0,
             uses_napi: false,
             uses_quickjs: false,

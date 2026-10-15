@@ -2765,6 +2765,17 @@ pub extern "C" fn thaw_json_parse(text: *const c_char) -> *mut Value {
     leak(value)
 }
 
+/// `thaw_json_parse` for the text of a caught error's own property
+/// (`__thaw_error_property_json`): framed error strings inside it, such as the
+/// entries of an `AggregateError.errors` array, become Error objects.
+#[no_mangle]
+pub extern "C" fn thaw_json_parse_error_property(text: *const c_char) -> *mut Value {
+    let bytes = unsafe { CStr::from_ptr(text) }.to_bytes();
+    let value = JsonParser::new(bytes).parse();
+    PARSE_ERROR.with(|error| error.set(value.is_none()));
+    leak(revive_framed_errors(value.unwrap_or(Value::Null)))
+}
+
 enum DestroyNode {
     Array(SharedArray),
     Object(SharedObject),
@@ -7723,39 +7734,119 @@ pub extern "C" fn thaw_json_receiver_number(value: f64) -> *mut Value {
 pub extern "C" fn thaw_json_receiver_string(value: *const c_char) -> *mut Value {
     // A framed error string (`\u{1}Name\u{1}message...` or the `\x1eE1:` wire header) that is
     // widened to `any` (`const err: any = caughtError`) must keep reading as an Error: expose
-    // `name`/`message`/`stack` as properties instead of leaking the raw frame text.
-    // ponytail: own-property bags (`code`, `cause`, ...) after the frame are not surfaced here.
+    // `name`/`message`/`stack` as properties instead of leaking the raw frame text, plus the
+    // own properties of a framed suffix (`\x02cause`, `\x03code`, `\x05{json bag}`).
     if !value.is_null() {
         let bytes = unsafe { CStr::from_ptr(value) }.to_bytes();
-        if bytes.first() == Some(&1) || bytes.starts_with(b"\x1eE1:") {
-            let (name, message) = unsafe { (thaw_error_name(value), thaw_error_message(value)) };
-            if !name.is_null() && !message.is_null() {
-                let name = string_value(name);
-                let message = string_value(message);
-                let header = {
-                    let n = match &name {
-                        Value::String(text) => text.as_str(),
-                        _ => "Error",
-                    };
-                    let m = match &message {
-                        Value::String(text) => text.as_str(),
-                        _ => "",
-                    };
-                    if m.is_empty() {
-                        n.to_string()
-                    } else {
-                        format!("{n}: {m}")
-                    }
-                };
-                let mut fields = indexmap::IndexMap::new();
-                fields.insert(b"name".to_vec(), name);
-                fields.insert(b"message".to_vec(), message);
-                fields.insert(b"stack".to_vec(), Value::String(header));
-                return leak(Value::shared_object(fields));
-            }
+        if let Some(error) = error_value_from_text(value, bytes) {
+            return leak(error);
         }
     }
     leak(string_value(value))
+}
+
+/// The Error-shaped object for a framed error string, or `None` when `bytes` is
+/// not one.
+fn error_value_from_text(value: *const c_char, bytes: &[u8]) -> Option<Value> {
+    if !(bytes.first() == Some(&1) || bytes.starts_with(b"\x1eE1:")) {
+        return None;
+    }
+    let (name, message) = unsafe { (thaw_error_name(value), thaw_error_message(value)) };
+    if name.is_null() || message.is_null() {
+        return None;
+    }
+    let name = string_value(name);
+    let message = string_value(message);
+    let header = {
+        let n = match &name {
+            Value::String(text) => text.as_str(),
+            _ => "Error",
+        };
+        let m = match &message {
+            Value::String(text) => text.as_str(),
+            _ => "",
+        };
+        if m.is_empty() {
+            n.to_string()
+        } else {
+            format!("{n}: {m}")
+        }
+    };
+    let mut fields = indexmap::IndexMap::new();
+    fields.insert(b"name".to_vec(), name);
+    fields.insert(b"message".to_vec(), message);
+    fields.insert(b"stack".to_vec(), Value::String(header));
+    if let Some(frame) = thaw_arena::error_wire::parse_tagged(bytes) {
+        add_error_suffix_properties(&mut fields, frame.suffix);
+    }
+    Some(Value::shared_object(fields))
+}
+
+/// Own properties carried after the frame: `\x02` cause text, `\x03` code text and
+/// `\x05` a JSON object of further properties. Strings inside the JSON bag that
+/// are themselves framed errors (they start with `\x01`) become Error objects, so
+/// `AggregateError.errors` holds real errors.
+fn add_error_suffix_properties(fields: &mut indexmap::IndexMap<Vec<u8>, Value>, suffix: &[u8]) {
+    let mut index = 0;
+    while index < suffix.len() {
+        let marker = suffix[index];
+        if !(2..=6).contains(&marker) {
+            index += 1;
+            continue;
+        }
+        let end = suffix[index + 1..]
+            .iter()
+            .position(|byte| (2..=6).contains(byte))
+            .map_or(suffix.len(), |offset| index + 1 + offset);
+        let segment = &suffix[index + 1..end];
+        match marker {
+            2 => {
+                fields.entry(b"cause".to_vec()).or_insert_with(|| {
+                    Value::String(String::from_utf8_lossy(segment).into_owned())
+                });
+            }
+            3 => {
+                fields.entry(b"code".to_vec()).or_insert_with(|| {
+                    Value::String(String::from_utf8_lossy(segment).into_owned())
+                });
+            }
+            5 => {
+                if let Some(bag) = JsonParser::new(segment).parse() {
+                    if let Some(object) = bag.as_object() {
+                        for (key, value) in object {
+                            fields
+                                .entry(key.clone())
+                                .or_insert_with(|| revive_framed_errors(value.clone()));
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        index = end;
+    }
+}
+
+fn revive_framed_errors(value: Value) -> Value {
+    match &value {
+        Value::String(text) if text.as_bytes().first() == Some(&1) => {
+            match CString::new(text.as_bytes()) {
+                Ok(owned) => {
+                    error_value_from_text(owned.as_ptr(), text.as_bytes()).unwrap_or(value)
+                }
+                Err(_) => value,
+            }
+        }
+        Value::Array(_) => {
+            if let Some(items) = value.as_array_mut() {
+                for item in items.iter_mut() {
+                    *item = revive_framed_errors(std::mem::replace(item, Value::Null));
+                }
+            }
+            value
+        }
+        _ => value,
+    }
 }
 
 #[no_mangle]

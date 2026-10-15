@@ -1686,7 +1686,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 let missing_end = self.builder.get_insert_block().unwrap();
                 self.builder.position_at_end(present_block);
                 let value = self.builder.build_call(
-                    self.module.get_function("thaw_json_parse").unwrap(),
+                    self.module.get_function("thaw_json_parse_error_property").unwrap(),
                     &[text.into()],
                     "parsed_error_property_json",
                 ).map_err(|error| error.to_string())?.try_as_basic_value().basic()

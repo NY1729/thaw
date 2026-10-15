@@ -507,6 +507,51 @@ impl<'ctx> HirCompiler<'ctx> {
             }
 
             HirStmt::Return(value) => {
+                // A `return` nested in a loop body or other plain statement of an
+                // async segment settles the function's Promise: store the result
+                // into the frame and resolve the completion, as the segment-level
+                // guarded return does.
+                if let Some((frame, ret)) = self
+                    .active_async_completion
+                    .and_then(|completion| self.async_return_frames.get(&completion).cloned().map(|f| (completion, f)))
+                    .map(|(completion, (frame, ret))| ((completion, frame), ret))
+                {
+                    let (completion, frame) = frame;
+                    match value {
+                        Some(expr) if ret != HirType::Void => {
+                            let result = self.compile_expr(expr)?;
+                            let result_slot =
+                                self.async_frame_field(frame, ASYNC_RESULT_OFFSET, "async_result")?;
+                            self.builder
+                                .build_store(result_slot, result)
+                                .map_err(|e| e.to_string())?;
+                        }
+                        None if ret == HirType::Void => {}
+                        Some(_) => {
+                            return Err(
+                                "void frame-split async function cannot return a value".to_string()
+                            )
+                        }
+                        None => {
+                            return Err(
+                                "value-returning frame-split async function cannot use `return;`"
+                                    .to_string(),
+                            )
+                        }
+                    }
+                    let function = self.current_function();
+                    let result = if ret == HirType::Void {
+                        frame
+                    } else {
+                        self.async_frame_field(frame, ASYNC_RESULT_OFFSET, "async_result")?
+                    };
+                    self.resolve_async_completion(
+                        completion,
+                        result,
+                        function.get_type().get_return_type().is_some(),
+                    )?;
+                    return Ok(true);
+                }
                 match value {
                     Some(expr) => {
                         let expr_ty = self.expr_hir_type(expr);

@@ -1410,7 +1410,31 @@ impl<'a> FnLowerer<'a> {
                             }
                             Some(value)
                         } else {
-                            Some(self.coerce_to_declared(&self.ret_type.clone(), value)?)
+                            // A `for...of` element of an array that may be sparse reads as
+                            // `Optional<T>`; a native `number`/`string` return takes it the
+                            // way a call argument does (`undefined` becomes NaN / "undefined").
+                            // ponytail: a declared `T | undefined` parameter stays a type
+                            // error (checked via `strict_nullable_bindings`); a local with
+                            // an explicit `T | undefined` annotation is not distinguished
+                            // from a sparse for-of element yet.
+                            // `return promise` from an `async` function settles with the
+                            // promise's value (as `return await promise`).
+                            let value = match self.infer_expr_type(&value)? {
+                                HirType::Promise(inner)
+                                    if *inner == self.ret_type && *inner != HirType::Void =>
+                                {
+                                    HirExpr::AwaitPromise(Box::new(value), *inner)
+                                }
+                                _ => value,
+                            };
+                            let strict = matches!(&value, HirExpr::Var(name)
+                                if self.strict_nullable_bindings.contains(name));
+                            let ret_type = self.ret_type.clone();
+                            Some(if strict {
+                                self.coerce_to_declared(&ret_type, value)?
+                            } else {
+                                self.coerce_primitive_array_argument(value, &ret_type)?
+                            })
                         }
                     }
                     None => {

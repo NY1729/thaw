@@ -2372,6 +2372,12 @@
       value: causeText.charCodeAt(0) === 1 ? thawErrorFromTagged(causeText) : causeText,
       writable: true, configurable: true, enumerable: false });
   };
+  // A string inside the property bag that is itself a tagged error text (an
+  // `AggregateError.errors` entry) becomes a real Error.
+  const reviveTaggedErrors = function (value) {
+    if (typeof value === 'string') return value.charCodeAt(0) === 1 ? thawErrorFromTagged(value) : value;
+    return Array.isArray(value) ? value.map(reviveTaggedErrors) : value;
+  };
   const thawErrorFromTagged = function (raw) {
     const frame = globalThis.__thaw_error_frame_parts(raw);
     if (frame) {
@@ -2382,7 +2388,7 @@
       if (propertiesIndex >= 0) {
         try {
           const properties = JSON.parse(frame.suffix.slice(propertiesIndex + 1));
-          for (const key in properties) error[key] = properties[key];
+          for (const key in properties) error[key] = reviveTaggedErrors(properties[key]);
         } catch (ignored) {}
       }
       return error;

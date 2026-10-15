@@ -243,6 +243,11 @@ impl<'ctx> HirCompiler<'ctx> {
         self.module
             .add_function("thaw_json_parse", json_parse_type, Some(Linkage::External));
         self.module.add_function(
+            "thaw_json_parse_error_property",
+            json_parse_type,
+            Some(Linkage::External),
+        );
+        self.module.add_function(
             "thaw_json_take_parse_error",
             self.context.i8_type().fn_type(&[], false),
             Some(Linkage::External),

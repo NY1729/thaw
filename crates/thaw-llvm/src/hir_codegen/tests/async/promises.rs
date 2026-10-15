@@ -679,7 +679,7 @@ fn frame_split_promise_all_settled_preserves_order_and_never_rejects() {
     "#;
     assert_eq!(
         compile_and_run(source, "promise_all_settled_order"),
-        "fulfilled\n1\n\nrejected\nbroken\nfulfilled\n3\n3\nfulfilled,rejected,fulfilled\n0\n"
+        "fulfilled\n1\nundefined\nrejected\nbroken\nfulfilled\n3\n3\nfulfilled,rejected,fulfilled\n0\n"
     );
 }
 
