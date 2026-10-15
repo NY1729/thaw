@@ -51,6 +51,9 @@ struct FnLowerer<'a> {
     sparse_arrays: HashSet<Symbol>,
     /// `__thaw_native_arg_N` temporaries bound to a fresh object literal (not a native owner).
     fresh_object_bindings: HashSet<Symbol>,
+    /// Set by the `any` declaration/assignment sites: the next native array converted to
+    /// `Json` is a live view that aliases the array instead of a copy.
+    alias_native_arrays: bool,
     conservative_sparse_arrays: HashSet<Symbol>,
     sparse_array_functions: HashSet<Symbol>,
     next_binding: usize,

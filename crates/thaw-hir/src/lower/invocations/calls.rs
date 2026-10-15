@@ -2339,7 +2339,14 @@ impl<'a> FnLowerer<'a> {
                         } else {
                             value
                         };
-                        let value = self.coerce_primitive_array_argument(value, declared).map_err(|error| {
+                        let user_function = !(is_generated_wrapper || direct_quickjs_typed_call
+                            || napi_constructor_typed_call)
+                            && signature.as_ref().is_some_and(|sig| !sig.is_extern);
+                        let value = if user_function {
+                            self.coerce_primitive_array_argument_aliasing(value, declared)
+                        } else {
+                            self.coerce_primitive_array_argument(value, declared)
+                        }.map_err(|error| {
                             format!("argument {} of `{callee_name}` is invalid: {error}", i + 1)
                         })?;
                         if (is_generated_wrapper || direct_quickjs_typed_call || napi_constructor_typed_call)

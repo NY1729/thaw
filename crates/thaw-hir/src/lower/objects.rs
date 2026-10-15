@@ -3889,12 +3889,26 @@ impl<'a> FnLowerer<'a> {
     /// marker. Keep that layout on the established snapshot path until a
     /// full concrete receiver shape can be recovered at allocation time.
     pub(super) fn fixed_object_supports_live_projection(ty: &HirType) -> bool {
+        Self::live_projection_supported(ty, &|_| false)
+    }
+
+    /// Like `fixed_object_supports_live_projection`, but a class instance
+    /// nested in the layout is acceptable when it can itself be exposed as a
+    /// live view that carries its methods.
+    pub(super) fn live_projection_supported_with_classes(&self, ty: &HirType) -> bool {
+        Self::live_projection_supported(ty, &|class| self.class_instance_supports_live_methods(class))
+    }
+
+    fn live_projection_supported(ty: &HirType, class_ok: &dyn Fn(&HirType) -> bool) -> bool {
         match ty {
-            HirType::Object(fields) => !fields.iter().any(|(name, _)|
-                    name.starts_with("__thaw_class_identity_\u{1e}"))
-                && fields.iter()
+            HirType::Object(fields) => {
+                if fields.iter().any(|(name, _)| name.starts_with("__thaw_class_identity_\u{1e}")) {
+                    return class_ok(ty);
+                }
+                fields.iter()
                     .filter(|(name, _)| !is_hidden_accessor_field(name))
-                    .all(|(_, field)| Self::fixed_object_supports_live_projection(field)),
+                    .all(|(_, field)| Self::live_projection_supported(field, class_ok))
+            }
             HirType::Function(params, _)
             | HirType::CallableFunction(params, _, _, _) =>
                 !matches!(params.first(), Some(HirType::Object(receiver))
@@ -3903,9 +3917,9 @@ impl<'a> FnLowerer<'a> {
                             && *marker != HirType::Bool)),
             HirType::Optional(inner) | HirType::Nullable(inner)
             | HirType::Nullish(inner) | HirType::Array(inner) =>
-                Self::fixed_object_supports_live_projection(inner),
+                Self::live_projection_supported(inner, class_ok),
             HirType::Union(members) | HirType::Tuple(members) =>
-                members.iter().all(Self::fixed_object_supports_live_projection),
+                members.iter().all(|member| Self::live_projection_supported(member, class_ok)),
             _ => true,
         }
     }
@@ -3922,12 +3936,19 @@ impl<'a> FnLowerer<'a> {
                     ancestry.split('\u{1f}').any(|class| names.contains(class))
                 }))
         });
+        // A class without methods of its own still needs the live view when a
+        // nested field is a class instance that carries methods.
+        let carries_methods = class_name_from_type(ty).is_some()
+            && (!self.class_instance_projected_methods(ty).is_empty()
+                || fields.iter().any(|(name, field)| !is_hidden_accessor_field(name)
+                    && matches!(field, HirType::Object(_))
+                    && self.class_instance_supports_live_methods(field)));
         !decorated
-            && !self.class_instance_projected_methods(ty).is_empty()
+            && carries_methods
             && fields.iter()
                 .filter(|(name, _)| !name.starts_with("__thaw_class_identity_\u{1e}")
                     && !is_hidden_accessor_field(name))
-                .all(|(_, field)| Self::fixed_object_supports_live_projection(field))
+                .all(|(_, field)| self.live_projection_supported_with_classes(field))
     }
 
     /// Whether a fixed object needs the live accessor bridge to preserve a
@@ -4190,11 +4211,23 @@ impl<'a> FnLowerer<'a> {
                     HirExpr::Var(this_name.into()), fields, name,
                 )?;
                 let mut read_type = Self::fixed_object_property_read_type(fields, name)?;
+                if let HirType::Array(element) = &read_type {
+                    // Under an `any` slot a native array field stays a live view.
+                    if self.alias_native_arrays {
+                        if let Ok(view) = self.lower_native_array_as_dynamic_view(read.clone(), element) {
+                            read = view;
+                            read_type = HirType::JsValue;
+                        }
+                    }
+                }
                 if let HirType::Object(nested) = &read_type {
-                    if Self::fixed_object_supports_live_projection(&read_type) {
+                    if self.live_projection_supported_with_classes(&read_type) {
                         // Preserve nested native storage identity when its
-                        // receiver layout is safe to expose as a live host.
-                        read = self.lower_fixed_object_as_dynamic_accessor_object(read, nested, false, live, false)?;
+                        // receiver layout is safe to expose as a live host;
+                        // a nested class instance also keeps its methods.
+                        let nested_class = nested.iter().any(|(name, _)|
+                            name.starts_with("__thaw_class_identity_\u{1e}"));
+                        read = self.lower_fixed_object_as_dynamic_accessor_object(read, nested, false, live || nested_class, nested_class)?;
                         read_type = HirType::JsValue;
                     }
                 }
@@ -4587,6 +4620,173 @@ impl<'a> FnLowerer<'a> {
         self.wrap_call_argument_bindings(
             HirExpr::Block(body), &[(source_name, source_type, value)],
         )
+    }
+
+    /// Element types whose JS values can be written back into a native array.
+    fn array_view_element_writable(element: &HirType) -> bool {
+        matches!(element, HirType::F64 | HirType::Str | HirType::Bool | HirType::Json | HirType::JsValue)
+    }
+
+    /// A native array crossing into `any` as a live view: the JS side reads and writes the
+    /// native array through callbacks, so `push`, `length` and index writes are shared both ways.
+    /// Returns a retained `JsValue` handle (same shape as the object projection).
+    pub(super) fn lower_native_array_as_dynamic_view(
+        &mut self,
+        value: HirExpr,
+        element: &HirType,
+    ) -> Result<HirExpr, String> {
+        let array_type = HirType::Array(Box::new(element.clone()));
+        let id = self.next_binding;
+        self.next_binding += 1;
+        let source = format!("__thaw_array_view_source_{id}");
+        let callbacks = format!("__thaw_array_view_callbacks_{id}");
+        let cached = format!("__thaw_array_view_cached_{id}");
+        let builder = format!("__thaw_array_view_builder_{id}");
+        let args = format!("__thaw_array_view_args_{id}");
+        let failure = format!("__thaw_array_view_failure_{id}");
+        let index = format!("__thaw_array_view_index_{id}");
+        let item = format!("__thaw_array_view_item_{id}");
+        let count = format!("__thaw_array_view_count_{id}");
+        self.scope.insert(source.clone(), array_type.clone());
+        self.scope.insert(callbacks.clone(), HirType::Array(Box::new(HirType::JsValue)));
+        self.scope.insert(index.clone(), HirType::F64);
+        self.scope.insert(item.clone(), element.clone());
+        self.scope.insert(count.clone(), HirType::F64);
+        let writable = Self::array_view_element_writable(element);
+        let layout = format!("array:{element:?}");
+        let capture = || vec![HirParam { name: source.clone(), ty: array_type.clone() }];
+        let source_var = || HirExpr::Var(source.clone());
+        let register = |lambda: HirExpr| HirExpr::Call(
+            Box::new(HirExpr::Var("registerNativeCallbackGraph".into())), vec![lambda]);
+        let void_body = |expr: HirExpr| HirExpr::Block(vec![HirStmt::Expr(expr), HirStmt::Return(None)]);
+        let length = register(HirExpr::Lambda(
+            capture(), Vec::new(), HirType::F64, Box::new(HirExpr::ArrayLen(Box::new(source_var()))),
+        ));
+        let read = {
+            let nested = std::mem::replace(&mut self.alias_native_arrays, true);
+            let converted = self.coerce_to_declared(&HirType::Json, HirExpr::TypedIndex(
+                Box::new(source_var()), Box::new(HirExpr::Var(index.clone())), element.clone(),
+            ));
+            self.alias_native_arrays = nested;
+            // State 2 is an explicit `undefined` element (state 0, a hole, never reaches here).
+            let explicit_undefined = HirExpr::BinOp(
+                BinOp::EqEqEq,
+                Box::new(HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_array_index_state".into())),
+                    vec![source_var(), HirExpr::Var(index.clone())],
+                )),
+                Box::new(HirExpr::Lit(HirLit::F64(2.0))),
+            );
+            let body = HirExpr::Conditional(
+                Box::new(explicit_undefined),
+                Box::new(HirExpr::Call(Box::new(HirExpr::Var("__thaw_json_undefined".into())), Vec::new())),
+                Box::new(converted?),
+                HirType::Json,
+            );
+            register(HirExpr::Lambda(
+                capture(), vec![HirParam { name: index.clone(), ty: HirType::F64 }],
+                HirType::Json, Box::new(body),
+            ))
+        };
+        let undefined = || HirExpr::Call(
+            Box::new(HirExpr::Var("getDynamicValue".into())),
+            vec![HirExpr::Lit(HirLit::Str("undefined".into()))],
+        );
+        let (assign, push) = if writable {
+            let value_param = || HirParam { name: item.clone(), ty: element.clone() };
+            (
+                register(HirExpr::Lambda(
+                    capture(),
+                    vec![HirParam { name: index.clone(), ty: HirType::F64 }, value_param()],
+                    HirType::Void,
+                    Box::new(void_body(HirExpr::IndexAssign(
+                        Box::new(source_var()), Box::new(HirExpr::Var(index.clone())),
+                        Box::new(HirExpr::Var(item.clone())),
+                    ))),
+                )),
+                register(HirExpr::Lambda(
+                    capture(), vec![value_param()], HirType::Void,
+                    Box::new(void_body(HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_array_push".into())),
+                        vec![source_var(), HirExpr::Var(item.clone())],
+                    ))),
+                )),
+            )
+        } else {
+            (undefined(), undefined())
+        };
+        let resize = register(HirExpr::Lambda(
+            capture(), vec![HirParam { name: count.clone(), ty: HirType::F64 }], HirType::Void,
+            Box::new(void_body(HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_array_resize".into())),
+                vec![source_var(), HirExpr::Var(count.clone())],
+            ))),
+        ));
+        let present = register(HirExpr::Lambda(
+            capture(), vec![HirParam { name: index.clone(), ty: HirType::F64 }], HirType::Bool,
+            Box::new(HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_array_has_index".into())),
+                vec![source_var(), HirExpr::Var(index.clone())],
+            )),
+        ));
+        let hole = register(HirExpr::Lambda(
+            capture(), vec![HirParam { name: index.clone(), ty: HirType::F64 }], HirType::Void,
+            Box::new(void_body(HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_array_set_hole".into())),
+                vec![source_var(), HirExpr::Var(index.clone())],
+            ))),
+        ));
+        let cached_type = HirType::Optional(Box::new(HirType::JsValue));
+        self.scope.insert(cached.clone(), cached_type.clone());
+        self.scope.insert(args.clone(), HirType::Json);
+        self.scope.insert(builder.clone(), HirType::JsValue);
+        self.scope.insert(failure.clone(), HirType::Str);
+        let push_callback = |callback: HirExpr| HirStmt::Expr(HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_array_push".into())),
+            vec![HirExpr::Var(callbacks.clone()), callback],
+        ));
+        let arguments = self.coerce_to_declared(
+            &HirType::Json, HirExpr::ArrayLit(vec![HirExpr::Lit(HirLit::Bool(writable))]),
+        )?;
+        let wrapper = HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_build_native_object_wrapper".into())),
+            vec![HirExpr::Var(builder.clone()), HirExpr::Var(args.clone()), HirExpr::Var(callbacks.clone())],
+        );
+        let interned = HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_intern_native_object".into())),
+            vec![source_var(), HirExpr::Lit(HirLit::Str(layout.clone())), wrapper],
+        );
+        let body = vec![
+            HirStmt::Let(cached.clone(), cached_type,
+                HirExpr::Call(Box::new(HirExpr::Var("__thaw_lookup_native_object".into())),
+                    vec![source_var(), HirExpr::Lit(HirLit::Str(layout))])),
+            HirStmt::If(
+                HirExpr::OptionalIsNone(Box::new(HirExpr::Var(cached.clone())), HirType::JsValue),
+                Vec::new(),
+                vec![HirStmt::Return(Some(HirExpr::OptionalValue(
+                    Box::new(HirExpr::Var(cached)), HirType::JsValue)))],
+            ),
+            HirStmt::Let(callbacks.clone(), HirType::Array(Box::new(HirType::JsValue)),
+                HirExpr::ArrayLit(Vec::new())),
+            HirStmt::Let(args.clone(), HirType::Json, arguments),
+            HirStmt::Let(builder.clone(), HirType::JsValue,
+                HirExpr::Call(Box::new(HirExpr::Var("getDynamicValue".into())),
+                    vec![HirExpr::Lit(HirLit::Str("__thaw_array_with_native_view".into()))])),
+            HirStmt::Try(
+                [length, read, assign, push, resize, hole, present].into_iter().map(push_callback).collect(),
+                failure.clone(),
+                vec![
+                    HirStmt::Expr(HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_release_native_projection_callbacks".into())),
+                        vec![HirExpr::Var(callbacks.clone())],
+                    )),
+                    HirStmt::Throw(HirExpr::Var(failure)),
+                ],
+                None,
+            ),
+            HirStmt::Return(Some(interned)),
+        ];
+        self.wrap_call_argument_bindings(HirExpr::Block(body), &[(source, array_type, value)])
     }
 
     fn lower_native_accessor_definition(

@@ -122,6 +122,19 @@ impl<'a> FnLowerer<'a> {
         self.lower_array_index(*array, ty, element, *index)
     }
 
+    /// `coerce_primitive_array_argument` for a user-visible `any` slot: a native array passed
+    /// there stays a live view of the array.
+    fn coerce_primitive_array_argument_aliasing(
+        &mut self,
+        value: HirExpr,
+        declared: &HirType,
+    ) -> Result<HirExpr, String> {
+        self.alias_native_arrays = Self::type_holds_any(declared);
+        let result = self.coerce_primitive_array_argument(value, declared);
+        self.alias_native_arrays = false;
+        result
+    }
+
     fn coerce_primitive_array_argument(
         &mut self,
         value: HirExpr,

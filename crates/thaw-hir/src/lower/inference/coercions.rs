@@ -320,6 +320,27 @@ impl<'a> FnLowerer<'a> {
     }
 
     /// Coerces a value into its declared native layout.
+    /// Whether a declared slot stores `any` values (directly or as an element).
+    fn type_holds_any(declared: &HirType) -> bool {
+        match declared {
+            HirType::Json => true,
+            HirType::Array(inner) | HirType::Optional(inner) | HirType::Nullable(inner)
+            | HirType::Nullish(inner) | HirType::Dictionary(inner) => Self::type_holds_any(inner),
+            HirType::Tuple(members) | HirType::Union(members) =>
+                members.iter().any(Self::type_holds_any),
+            _ => false,
+        }
+    }
+
+    /// `coerce_to_declared` for a user-visible `any` slot (declaration or assignment): a native
+    /// array stored there stays a live view of the array instead of becoming a copy.
+    fn coerce_to_declared_aliasing(&mut self, declared: &HirType, value: HirExpr) -> Result<HirExpr, String> {
+        self.alias_native_arrays = Self::type_holds_any(declared);
+        let result = self.coerce_to_declared(declared, value);
+        self.alias_native_arrays = false;
+        result
+    }
+
     fn coerce_to_declared(&mut self, declared: &HirType, value: HirExpr) -> Result<HirExpr, String> {
         if *declared == HirType::Dynamic {
             return Ok(value);
@@ -1135,7 +1156,7 @@ impl<'a> FnLowerer<'a> {
                 if (object_type_is_error_family(&actual)
                     || !fields.iter().any(|(name, _)|
                         name.starts_with("__thaw_class_identity_\u{1e}")))
-                    && Self::fixed_object_supports_live_projection(&actual) {
+                    && self.live_projection_supported_with_classes(&actual) {
                     // A fresh `any` literal converts to a mutable native copy; a projection of an
                     // existing native owner stays a live reference to it.
                     let live = !(matches!(value, HirExpr::ObjectLit(_))
@@ -1150,6 +1171,23 @@ impl<'a> FnLowerer<'a> {
                         Box::new(HirExpr::Var("__thaw_json_from_consumed_dynamic".into())),
                         vec![projected],
                     ));
+                }
+            }
+            if self.alias_native_arrays {
+                if let HirType::Array(element) = &actual {
+                    // A fresh literal is just a copy, unless its elements are class instances whose
+                    // methods and identity must stay reachable through the array.
+                    let fresh = (matches!(value, HirExpr::ArrayLit(_))
+                            && !self.class_instance_supports_live_methods(element))
+                        || matches!(&value, HirExpr::Var(name) if self.fresh_object_bindings.contains(name));
+                    if !fresh {
+                        if let Ok(view) = self.lower_native_array_as_dynamic_view(value.clone(), element) {
+                            return Ok(HirExpr::Call(
+                                Box::new(HirExpr::Var("__thaw_json_from_consumed_dynamic".into())),
+                                vec![view],
+                            ));
+                        }
+                    }
                 }
             }
             if json_convertible_native_type(&actual) {
