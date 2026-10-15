@@ -2133,14 +2133,51 @@ impl<'a> FnLowerer<'a> {
                         if property.sym == *"alloc" {
                             let (arguments, bindings) =
                                 self.lower_native_spread_values(&call.args, "Buffer.alloc")?;
-                            let [size] = arguments.as_slice() else {
-                                return Err("`Buffer.alloc` expects a size".into());
+                            // `Buffer.alloc(size, fill?, encoding?)`: a string fill is
+                            // decoded per `encoding` (default utf8), a number fills
+                            // with `n & 255`, a byte buffer repeats as given; the
+                            // pattern is repeated and truncated to `size`.
+                            let (size, fill, encoding) = match arguments.as_slice() {
+                                [size] => (size, None, None),
+                                [size, fill] => (size, Some(fill), None),
+                                [size, fill, encoding] => (size, Some(fill), Some(encoding)),
+                                _ => return Err("`Buffer.alloc` expects a size".into()),
                             };
                             let size = self.coerce_primitive_to_number(size.clone())?;
+                            let Some(fill) = fill else {
+                                return self.wrap_call_argument_bindings(
+                                    HirExpr::Call(
+                                        Box::new(HirExpr::Var("__thaw_bytes_alloc".to_string())),
+                                        vec![size],
+                                    ),
+                                    &bindings,
+                                );
+                            };
+                            let fill_type = self.infer_expr_type(fill)?;
+                            let pattern = match fill_type {
+                                HirType::Str => HirExpr::Call(
+                                    Box::new(HirExpr::Var("__thaw_bytes_from_string".to_string())),
+                                    vec![
+                                        fill.clone(),
+                                        encoding.cloned().unwrap_or_else(|| {
+                                            HirExpr::Lit(HirLit::Str("utf8".to_string()))
+                                        }),
+                                    ],
+                                ),
+                                HirType::Bytes => fill.clone(),
+                                HirType::Array(ref element) if **element == HirType::F64 => fill.clone(),
+                                _ => {
+                                    let number = self.coerce_primitive_to_number(fill.clone())?;
+                                    HirExpr::Call(
+                                        Box::new(HirExpr::Var("__thaw_bytes_from_array".to_string())),
+                                        vec![HirExpr::ArrayLit(vec![number])],
+                                    )
+                                }
+                            };
                             return self.wrap_call_argument_bindings(
                                 HirExpr::Call(
-                                    Box::new(HirExpr::Var("__thaw_bytes_alloc".to_string())),
-                                    vec![size],
+                                    Box::new(HirExpr::Var("__thaw_bytes_alloc_fill".to_string())),
+                                    vec![size, pattern],
                                 ),
                                 &bindings,
                             );

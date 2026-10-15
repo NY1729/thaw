@@ -80,9 +80,46 @@ impl<'ctx> HirCompiler<'ctx> {
             builder
         });
         let builder = promotion_builder.as_ref().unwrap_or(&self.builder);
-        let value = builder
+        let mut value = builder
             .build_load(ty, variable_cell, "captured_stack_value")
             .map_err(|error| error.to_string())?;
+        if *hir_ty == HirType::Json {
+            // A captured Json box can outlive its owner: native callbacks
+            // destroy their decoded argument boxes as soon as the callback
+            // returns, while a closure created inside it (a timer, an event
+            // listener) keeps reading the variable later. Give the closure its
+            // own box that shares the same containers and let the arena
+            // reachability graph free it once nothing refers to it.
+            let shared = builder
+                .build_call(
+                    self.module.get_function("thaw_json_share").unwrap(),
+                    &[value.into()],
+                    "captured_json_share",
+                )
+                .map_err(|error| error.to_string())?
+                .try_as_basic_value()
+                .basic()
+                .ok_or("thaw_json_share returned no value")?;
+            let rooted = builder
+                .build_call(
+                    self.module.get_function("thaw_json_track_arena_owned_root").unwrap(),
+                    &[shared.into()],
+                    "captured_json_root",
+                )
+                .map_err(|error| error.to_string())?
+                .try_as_basic_value()
+                .basic()
+                .ok_or("thaw_json_track_arena_owned_root returned no value")?
+                .into_pointer_value();
+            // A failed root destroys the shared box and reports a host error;
+            // keep the original pointer so the capture still has a valid box.
+            let failed = builder
+                .build_is_null(rooted, "captured_json_root_failed")
+                .map_err(|error| error.to_string())?;
+            value = builder
+                .build_select(failed, value.into_pointer_value(), rooted, "captured_json_value")
+                .map_err(|error| error.to_string())?;
+        }
         if defer_js_retain && *hir_ty == HirType::JsValue {
             // The condition may be this function's first QuickJS operation.
             // Establish the handle dependency before it is compiled, since an

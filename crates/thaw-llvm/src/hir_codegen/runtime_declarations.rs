@@ -1231,6 +1231,11 @@ impl<'ctx> HirCompiler<'ctx> {
             i8_ptr.fn_type(&[f64_type.into()], false),
             Some(Linkage::External),
         );
+        self.module.add_function(
+            "thaw_bytes_alloc_fill",
+            i8_ptr.fn_type(&[f64_type.into(), i8_ptr.into()], false),
+            Some(Linkage::External),
+        );
         // `Uint8Array.prototype.setFromHex`/`setFromBase64`: writes into the
         // buffer and returns an arena object with read/written f64 fields.
         self.module.add_function(
