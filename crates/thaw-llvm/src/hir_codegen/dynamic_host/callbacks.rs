@@ -1775,6 +1775,33 @@ impl<'ctx> HirCompiler<'ctx> {
         // case, the matching native-side decoder. A `u64` is plenty (32
         // real params would already be an extraordinary callback), and
         // JS's own bitwise operators only ever work on 32 bits anyway.
+        // A callback with a `Json`/`any` parameter must see live JS values: the
+        // legacy wrapper JSON.stringify's an object argument into a data
+        // snapshot, so a class instance (a connection `socket`, a request, a
+        // stream) loses its prototype methods and `socket.on(...)` cannot be
+        // called. The graph wrapper keeps non-root arguments live behind a host
+        // lease.
+        // A closure aliased to its original typed native function
+        // (`__thaw_closure_alias`) is a compiler-made adapter whose Json
+        // parameters only carry scalars; it keeps the legacy wrapper.
+        let aliased_adapter = {
+            let mut inner = closure_expr;
+            while let HirExpr::TypedClosure(_, body) = inner {
+                inner = body;
+            }
+            matches!(inner, HirExpr::Call(callee, _)
+                if matches!(callee.as_ref(), HirExpr::Var(name) if name == "__thaw_closure_alias"))
+        };
+        // ponytail: the graph encoder copies a byte view element by element
+        // (about 6x slower than the legacy replacer for a 4 MiB Buffer), so a
+        // callback that also takes a byte-buffer parameter keeps the legacy
+        // wrapper; speed up the graph encoder's byte path to drop this.
+        let takes_byte_buffer = params.iter().any(|param| *param == HirType::Bytes
+            || matches!(param, HirType::Array(element) if **element == HirType::F64));
+        let graph_mode = graph_mode
+            || (!aliased_adapter
+                && !takes_byte_buffer
+                && params.contains(&HirType::Json));
         let closure = self.compile_expr(closure_expr)?;
         if optional {
             let closure = closure.into_struct_value();

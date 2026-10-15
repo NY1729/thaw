@@ -922,6 +922,21 @@
       "name": "zlib completes off the loop while a net connect and writes are pending",
       "expect": "matched",
       "source": "import net from 'node:net'; import zlib from 'node:zlib';\nfunction main(): void {\n  const server = net.createServer((_socket: any) => {});\n  server.listen(0, '127.0.0.1', () => {\n    const port = (server.address() as any).port;\n    const client = net.connect({ host: '127.0.0.1', port });\n    client.on('error', () => {});\n    let ticks = 0;\n    const timer = setInterval(() => { ticks++; }, 2);\n    const input = Buffer.alloc(4 * 1024 * 1024); input.fill(97);\n    zlib.gzip(input, (e: any, packed: Buffer) => {\n      const gzipOk = e === null;\n      zlib.gunzip(packed, (e2: any, plain: Buffer) => {\n        const gunzipOk = e2 === null;\n        client.write('x', () => {\n          console.log('zlib', gzipOk, gunzipOk, plain.length === input.length);\n          console.log('timer ran during zlib', ticks > 0);\n          console.log('connected', client.remotePort === port);\n          clearInterval(timer); client.destroy(); server.close();\n        });\n      });\n    });\n  });\n}"
+    },
+    {
+      "name": "buffer alloc fills with a repeated pattern",
+      "expect": "matched",
+      "source": "function main(): void {\n  const a = Buffer.alloc(5, 'ab');\n  const b = Buffer.alloc(4, 7);\n  const c = Buffer.alloc(6, Buffer.from('xyz'));\n  const d = Buffer.alloc(4, 'aGk=', 'base64');\n  const e = Buffer.alloc(3, 'ff', 'hex');\n  const f = Buffer.alloc(3);\n  console.log(a.toString(), b.join(','), c.toString(), d.toString('hex'), e.toString('hex'), f.join(','));\n}\n"
+    },
+    {
+      "name": "captured any compares equal to null inside nested closures",
+      "expect": "matched",
+      "source": "import zlib from 'node:zlib';\nfunction main(): void {\n  const input = Buffer.from('hello world hello world');\n  zlib.gzip(input, (e: any, packed: Buffer) => {\n    zlib.gunzip(packed, (e2: any, plain: Buffer) => {\n      setTimeout(() => {\n        console.log('deep', e === null, e2 === null, plain.length === input.length);\n      }, 1);\n    });\n    const direct = e === null;\n    setTimeout(() => { console.log('mid', e === null, direct); }, 1);\n  });\n}\n"
+    },
+    {
+      "name": "connection handler can call methods on its any socket",
+      "expect": "matched",
+      "source": "import net from 'node:net';\nfunction main(): void {\n  const server = net.createServer((socket: any) => {\n    socket.on('data', (d: any) => { console.log('data', String(d)); socket.end('bye'); });\n    socket.on('error', (e: any) => console.log('err', e && e.code));\n  });\n  server.listen(0, '127.0.0.1', () => {\n    const port = (server.address() as any).port;\n    const c = net.connect(port, '127.0.0.1', () => c.write('hello'));\n    c.on('data', (d: any) => { console.log('client got', String(d)); });\n    c.on('close', () => { console.log('closed'); server.close(); });\n  });\n}\n"
     }
   ]
 }

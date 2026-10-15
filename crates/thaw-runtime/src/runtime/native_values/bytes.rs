@@ -756,3 +756,26 @@ pub extern "C" fn thaw_bytes_alloc(size: f64) -> *mut u8 {
     };
     unsafe { write_byte_array(&vec![0_u8; size]) }
 }
+
+#[no_mangle]
+/// `Buffer.alloc(size, fill)` -- `size` bytes made of `pattern` repeated (a
+/// truncated last repetition is kept). An empty or unreadable pattern leaves
+/// the buffer zero-filled, as `Buffer.alloc(size, "")` does.
+///
+/// # Safety
+///
+/// `pattern` must be null or point to a Thaw byte array.
+pub unsafe extern "C" fn thaw_bytes_alloc_fill(size: f64, pattern: *const u8) -> *mut u8 {
+    let size = if size.is_finite() && size > 0.0 {
+        size as usize
+    } else {
+        0
+    };
+    let pattern = unsafe { read_byte_array(pattern) }.unwrap_or_default();
+    let bytes = if pattern.is_empty() {
+        vec![0_u8; size]
+    } else {
+        pattern.iter().copied().cycle().take(size).collect()
+    };
+    unsafe { write_byte_array(&bytes) }
+}

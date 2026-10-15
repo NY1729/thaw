@@ -1058,7 +1058,7 @@ impl<'a> FnLowerer<'a> {
                     }
                     "__thaw_bytes_read_i64" => return Ok(HirType::I64),
                     "__thaw_bytes_equals" => return Ok(HirType::Bool),
-                    "__thaw_bytes_from_string" | "__thaw_bytes_alloc"
+                    "__thaw_bytes_from_string" | "__thaw_bytes_alloc" | "__thaw_bytes_alloc_fill"
                     | "__thaw_bytes_from_array" | "__thaw_bytes_concat"
                     | "__thaw_bytes_slice" => {
                         // `Bytes`, not `Array(F64)`, so a chained
