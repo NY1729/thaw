@@ -1393,6 +1393,17 @@ pub extern "C" fn thaw_js_run_until_native_resolved(promise: *const c_void) {
         let Ok(delay) = next_delay.call::<_, i64>(()) else {
             return;
         };
+        // `native_promise_state` above drains one continuation per turn, but a
+        // settled Promise can have several queued (its subscribers). Returning
+        // or sleeping to the next timer with some still ready would let the
+        // caller destroy `promise` while its frame is yet to resume.
+        let more_ready = {
+            let _active = ActiveNapiContext::enter(&ctx);
+            poll_native_continuations()
+        };
+        if more_ready {
+            continue;
+        }
         if delay < 0 {
             if platform_activity_pending(&ctx) {
                 std::thread::sleep(Duration::from_millis(1));
