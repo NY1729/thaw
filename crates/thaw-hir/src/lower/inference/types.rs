@@ -2728,7 +2728,7 @@ impl<'a> FnLowerer<'a> {
                     "getDynamicValue" => return Ok(HirType::JsValue),
                     "callDynamicValue" => return Ok(HirType::Json),
                     "callNativeAddonValue" => return Ok(HirType::Json),
-                    "callDynamicValueHandle" | "__thaw_to_iterator_exact" =>
+                    "callDynamicValueHandle" | "__thaw_to_iterator_exact" | "__thaw_to_async_iterator_exact" =>
                         return Ok(HirType::JsValue),
                     "resolveDynamicValue" => return Ok(HirType::JsValue),
                     "callDynamicValueWithValue" => return Ok(HirType::Json),

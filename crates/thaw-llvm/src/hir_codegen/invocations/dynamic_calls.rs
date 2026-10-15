@@ -46,7 +46,7 @@ impl<'ctx> HirCompiler<'ctx> {
     }
 
     fn compile_to_iterator_exact(
-        &mut self, args: &[HirExpr],
+        &mut self, args: &[HirExpr], asynchronous: bool,
     ) -> Result<BasicValueEnum<'ctx>, String> {
         let [source] = args else {
             return Err("exact iterator acquisition expects one source".into());
@@ -55,8 +55,13 @@ impl<'ctx> HirCompiler<'ctx> {
         self.uses_quickjs_handles = true;
         self.compile_register_js_callback_host_operations()?;
         let source = self.compile_expr(source)?.into_int_value();
+        let function = if asynchronous {
+            "thaw_js_to_async_iterator_exact_result"
+        } else {
+            "thaw_js_to_iterator_exact_result"
+        };
         let result = self.builder.build_call(
-            self.module.get_function("thaw_js_to_iterator_exact_result").unwrap(),
+            self.module.get_function(function).unwrap(),
             &[source.into()], "to_iterator_exact",
         ).map_err(|error| error.to_string())?.try_as_basic_value().basic()
             .ok_or("exact iterator acquisition returned no result")?.into_struct_value();
@@ -99,7 +104,8 @@ impl<'ctx> HirCompiler<'ctx> {
     ) -> Option<Result<BasicValueEnum<'ctx>, String>> {
         Some(match name {
             "loadScript" => self.compile_load_script(args),
-            "__thaw_to_iterator_exact" => self.compile_to_iterator_exact(args),
+            "__thaw_to_iterator_exact" => self.compile_to_iterator_exact(args, false),
+            "__thaw_to_async_iterator_exact" => self.compile_to_iterator_exact(args, true),
             "__thaw_dynamic_iterator_step_exact" => self.compile_dynamic_iterator_step_exact(args),
             "callDynamic" => self.compile_call_dynamic(args),
             "getDynamicValue" => self.compile_get_dynamic_value(args),

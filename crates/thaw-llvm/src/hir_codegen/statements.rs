@@ -587,6 +587,20 @@ impl<'ctx> HirCompiler<'ctx> {
                     self.compile_and_store_stack_promise_expression(slot, expr)?;
                 } else {
                     let val = self.compile_expr(expr)?;
+                    // A `RecursiveClosure` initializer already allocated the arena cell
+                    // the closures inside it captured and stored the value there; keep
+                    // that cell as the variable instead of rebinding it to the
+                    // statement's stack slot (later closures would otherwise capture a
+                    // stack address that dies with this function).
+                    let recursive_cell = matches!(expr, HirExpr::RecursiveClosure(self_name, ..) if self_name == name)
+                        .then(|| self.arena_variables.contains(name)
+                            .then(|| self.variables.get(name).map(|(cell, _)| *cell)).flatten())
+                        .flatten();
+                    if let Some(cell) = recursive_cell {
+                        self.variables.insert(name.clone(), (cell, llvm_ty));
+                        self.variable_hir_types.insert(name.clone(), ty.clone());
+                        return Ok(false);
+                    }
                     self.builder.build_store(slot, val).map_err(|e| e.to_string())?;
                 }
                 self.variables.insert(name.clone(), (slot, llvm_ty));

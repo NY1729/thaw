@@ -540,6 +540,7 @@ impl<'a> FnLowerer<'a> {
         iterator_name: Symbol,
         value_type: HirType,
         capture_completion: bool,
+        asynchronous: bool,
     ) -> Result<(HirExpr, HirType), String> {
         let result_name = format!("{iterator_name}_result");
         let control = format!("{iterator_name}_control");
@@ -575,7 +576,8 @@ impl<'a> FnLowerer<'a> {
                 HirExpr::Lit(HirLit::I64(match name {
                     "next" => 0, "return" => 1, "throw" => 2,
                     _ => unreachable!(),
-                } + if capture_completion { 3 } else { 0 })),
+                } + if capture_completion { 3 } else { 0 }
+                    + if asynchronous { 6 } else { 0 })),
                 HirExpr::Var(error.clone())],
         );
         let result_statements = |lowerer: &mut FnLowerer<'_>, name: Symbol, call: HirExpr|
@@ -881,7 +883,7 @@ impl<'a> FnLowerer<'a> {
                 let name = format!("__thaw_iterator_{}", self.next_binding);
                 self.next_binding += 1;
                 let (producer, producer_type) =
-                    self.dynamic_iterator_adapter(iterator, name, element.clone(), true)?;
+                    self.dynamic_iterator_adapter(iterator, name, element.clone(), true, false)?;
                 value = producer;
                 value_type = producer_type;
             }
@@ -1858,8 +1860,7 @@ impl<'a> FnLowerer<'a> {
                 // thrown JS values intact) when the value is a non-array host object.
                 // ponytail: the body is lowered twice per `Json` loop, so nested
                 // `Json` loops grow 2^depth; hoist the body into a closure if that bites.
-                if !for_of.is_await
-                    && self.for_of_json_mode.is_none()
+                if self.for_of_json_mode.is_none()
                     && self.for_of_prelowered.is_none()
                 {
                     let expected = (self.infer_member_receiver_type(&for_of.right)
@@ -2016,8 +2017,13 @@ impl<'a> FnLowerer<'a> {
                         values_type = HirType::JsValue;
                     }
                     if values_type == HirType::JsValue {
+                        // `for await` takes Symbol.asyncIterator first and awaits each step.
                         values = HirExpr::Call(
-                            Box::new(HirExpr::Var("__thaw_to_iterator_exact".into())),
+                            Box::new(HirExpr::Var(if for_of.is_await {
+                                "__thaw_to_async_iterator_exact"
+                            } else {
+                                "__thaw_to_iterator_exact"
+                            }.into())),
                             vec![values.clone()],
                         );
                         let name = format!("__thaw_iterator_{}", self.next_binding);
@@ -2028,6 +2034,7 @@ impl<'a> FnLowerer<'a> {
                                 name,
                                 HirType::Json,
                                 false,
+                                for_of.is_await,
                             )?;
                         values = producer;
                         values_type = producer_type;
@@ -2100,10 +2107,7 @@ impl<'a> FnLowerer<'a> {
                             };
                             (element, false)
                         }
-                        HirType::Json if !for_of.is_await => (HirType::Json, true),
-                        HirType::Json => {
-                            return Err("`for await...of` cannot await dynamic JSON values".into())
-                        }
+                        HirType::Json => (HirType::Json, true),
                         _ => return Err("`for...of` currently requires a typed array".into()),
                     };
                     let (mut item_type, await_item) = if for_of.is_await {

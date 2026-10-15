@@ -7,6 +7,8 @@
   const thawDateApply = Reflect.apply;
   const thawBootstrapDefineProperty = Object.defineProperty;
   const thawBootstrapIteratorKey = Symbol.iterator;
+  const thawBootstrapAsyncIteratorKey = Symbol.asyncIterator;
+  const thawBootstrapPromiseResolve = Promise.resolve.bind(Promise);
   const thawHostErrorPrototype = Error.prototype;
   const thawHostIsPrototypeOf = Object.prototype.isPrototypeOf;
   // Keep unary plus on opaque values in the QuickJS realm so its ToNumber
@@ -108,6 +110,74 @@
         },
       };
     }, enumerable: true, configurable: false, writable: false,
+  });
+  // `for await...of` over a dynamic value: Symbol.asyncIterator first, then the
+  // sync iterator wrapped like AsyncFromSyncIterator (the value is awaited).
+  thawBootstrapDefineProperty(globalThis, '__thaw_to_async_iterator', {
+    value: value => {
+      if (value == null) throw new TypeError('value is not async iterable');
+      const asyncMethod = value[thawBootstrapAsyncIteratorKey];
+      if (asyncMethod != null) {
+        if (typeof asyncMethod !== 'function') throw new TypeError('value is not async iterable');
+        const iterator = thawDateApply(asyncMethod, value, []);
+        if (iterator === null || (typeof iterator !== 'object' && typeof iterator !== 'function')) {
+          throw new TypeError('Result of the Symbol.asyncIterator method is not an object');
+        }
+        return iterator;
+      }
+      const method = value[thawBootstrapIteratorKey];
+      if (typeof method !== 'function') throw new TypeError('value is not async iterable');
+      const iterator = thawDateApply(method, value, []);
+      if (iterator === null || (typeof iterator !== 'object' && typeof iterator !== 'function')) {
+        throw new TypeError('Result of the Symbol.iterator method is not an object');
+      }
+      const settle = result => {
+        if (result === null || (typeof result !== 'object' && typeof result !== 'function')) {
+          throw new TypeError('Iterator result is not an object');
+        }
+        const done = !!result.done;
+        return thawBootstrapPromiseResolve(result.value).then(settled => ({ done, value: settled }));
+      };
+      return {
+        next: () => {
+          const next = iterator.next;
+          if (typeof next !== 'function') throw new TypeError('Iterator method is not callable');
+          return settle(thawDateApply(next, iterator, []));
+        },
+        return: () => {
+          const close = iterator.return;
+          return typeof close === 'function'
+            ? settle(thawDateApply(close, iterator, [])) : { value: undefined, done: true };
+        },
+        throw: error => {
+          const resume = iterator.throw;
+          return typeof resume === 'function'
+            ? settle(thawDateApply(resume, iterator, [error])) : { value: undefined, done: true };
+        },
+      };
+    }, enumerable: false, configurable: false, writable: false,
+  });
+  // The calling half of `__thaw_iterator_step_exact` for async iterators: the raw
+  // result (usually a promise) is awaited by the host before the record is read.
+  thawBootstrapDefineProperty(globalThis, '__thaw_iterator_call', {
+    value: (iterator, mode, error) => {
+      const method = iterator[mode === 2 ? 'throw' : mode === 1 ? 'return' : 'next'];
+      if (mode === 1 && method == null) return { done: true, value: undefined };
+      if (typeof method !== 'function') throw new TypeError('Iterator method is not callable');
+      return mode === 2 ? thawDateApply(method, iterator, [error]) : thawDateApply(method, iterator, []);
+    }, enumerable: false, configurable: false, writable: false,
+  });
+  thawBootstrapDefineProperty(globalThis, '__thaw_iterator_record', {
+    value: (step, mode, captureCompletion) => {
+      if (step === null || (typeof step !== 'object' && typeof step !== 'function')) {
+        throw new TypeError('Iterator result is not an object');
+      }
+      if (mode === 1 && !captureCompletion) return { done: true };
+      const done = !!step.done;
+      return done
+        ? (captureCompletion ? { done: true, value: step.value } : { done: true })
+        : { done: false, value: step.value };
+    }, enumerable: false, configurable: false, writable: false,
   });
   thawBootstrapDefineProperty(globalThis, '__thaw_iterator_step_exact', {
     value: (iterator, mode, error) => {
