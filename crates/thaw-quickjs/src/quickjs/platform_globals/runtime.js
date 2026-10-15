@@ -2200,6 +2200,93 @@
     },
     writable: false, configurable: false,
   });
+  // A native array held in `any` is a live view: reads and writes go through
+  // callbacks over the native array, so both sides observe every change.
+  // Array.prototype methods run on the Proxy and reach the native array through
+  // these traps; `[]` is only the Proxy target (it makes Array.isArray true and
+  // supplies the prototype).
+  thawGraphDefineProperty(globalThis, '__thaw_array_with_native_view', {
+    value: (canWrite, lenCb, getCb, setCb, pushCb, resizeCb, holeCb, presentCb) => {
+      const target = [];
+      const receiver = thawGraphObjectCreate(null);
+      const len = () => thawGraphApply(lenCb, receiver, []);
+      const at = index => thawGraphApply(getCb, receiver, [index]);
+      const has = index => index < len() && thawGraphApply(presentCb, receiver, [index]);
+      const indexOf = key => {
+        if (typeof key !== 'string') return -1;
+        const number = thawGraphNumber(key);
+        return number >>> 0 === number && number !== 4294967295
+          && thawGraphString(number) === key ? number : -1;
+      };
+      const write = (index, value) => {
+        if (!canWrite) return false;
+        const length = len();
+        if (index < length) { thawGraphApply(setCb, receiver, [index, value]); return true; }
+        if (index === length) { thawGraphApply(pushCb, receiver, [value]); return true; }
+        thawGraphApply(resizeCb, receiver, [index + 1]);
+        thawGraphApply(setCb, receiver, [index, value]);
+        return true;
+      };
+      const resize = value => {
+        const length = thawGraphNumber(value);
+        if (length >>> 0 !== length) throw new RangeError('Invalid array length');
+        thawGraphApply(resizeCb, receiver, [length]);
+        return true;
+      };
+      return new thawGraphProxy(target, {
+        get(_target, key, self) {
+          if (key === 'length') return len();
+          const index = indexOf(key);
+          if (index >= 0) return has(index) ? at(index) : undefined;
+          return thawGraphReflectGet(target, key, self);
+        },
+        set(_target, key, value) {
+          if (key === 'length') return resize(value);
+          const index = indexOf(key);
+          if (index < 0) return thawGraphReflectSet(target, key, value);
+          return write(index, value);
+        },
+        has(_target, key) {
+          if (key === 'length') return true;
+          const index = indexOf(key);
+          return index >= 0 ? has(index) : thawGraphReflectHas(target, key);
+        },
+        deleteProperty(_target, key) {
+          const index = indexOf(key);
+          if (index < 0) return thawGraphReflectDeleteProperty(target, key);
+          if (index < len()) thawGraphApply(holeCb, receiver, [index]);
+          return true;
+        },
+        ownKeys() {
+          const keys = [];
+          const length = len();
+          for (let index = 0; index < length; index++)
+            if (has(index)) thawGraphApply(thawGraphArrayPush, keys, [thawGraphString(index)]);
+          thawGraphApply(thawGraphArrayPush, keys, ['length']);
+          const extra = thawGraphReflectOwnKeys(target);
+          for (let i = 0; i < extra.length; i++)
+            if (extra[i] !== 'length') thawGraphApply(thawGraphArrayPush, keys, [extra[i]]);
+          return keys;
+        },
+        getOwnPropertyDescriptor(_target, key) {
+          if (key === 'length')
+            return { value: len(), writable: true, enumerable: false, configurable: false };
+          const index = indexOf(key);
+          if (index < 0) return thawGraphReflectGetOwnPropertyDescriptor(target, key);
+          if (!has(index)) return undefined;
+          return { value: at(index), writable: canWrite, enumerable: true, configurable: true };
+        },
+        defineProperty(_target, key, descriptor) {
+          if ('get' in descriptor || 'set' in descriptor) return false;
+          if (key === 'length') return 'value' in descriptor ? resize(descriptor.value) : true;
+          const index = indexOf(key);
+          if (index < 0) return thawGraphReflectDefineProperty(target, key, descriptor);
+          return 'value' in descriptor ? write(index, descriptor.value) : has(index);
+        },
+      });
+    },
+    writable: false, configurable: false,
+  });
   globalThis.__thaw_object_from_operations = (kinds, keysText, keyKinds, values, ...callbacks) => {
     const keys = thawGraphParse(keysText);
     const object = {};

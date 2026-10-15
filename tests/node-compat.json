@@ -1146,6 +1146,31 @@
       "name": "tagged template invalid escapes cook to undefined",
       "expect": "matched",
       "source": "function tag(s: TemplateStringsArray, ...v: number[]): string {\n  const parts: string[] = [];\n  for (let i = 0; i < s.length; i++) parts.push(s[i] === undefined ? 'U' : s[i]);\n  return parts.join('|') + '#' + s.raw.join('|') + '#' + (s[1] ?? 'dflt');\n}\nasync function main(): Promise<void> {\n  console.log(tag`a\\unicode${1}b`);\n  console.log(tag`ok${2}\\xz`);\n}\n"
+    },
+    {
+      "name": "native array aliases both ways through any",
+      "expect": "matched",
+      "source": "async function main(): Promise<void> {\n  const arr: number[] = [1, 2];\n  const a: any = arr;\n  a.push(3);\n  console.log(arr.length, arr.join(\",\"));\n  arr.push(4);\n  console.log(a.length, a[3]);\n  a[0] = 9;\n  console.log(arr[0]);\n  console.log(a.map((x: number) => x * 2).join(\",\"));\n  console.log(Array.isArray(a), JSON.stringify(a));\n}\n"
+    },
+    {
+      "name": "array methods and holes through an any view",
+      "expect": "matched",
+      "source": "class C { n = 1; bump(): number { this.n += 1; return this.n; } }\nasync function main(): Promise<void> {\n  const arr: number[] = [3, 1, 2];\n  const a: any = arr;\n  console.log(a);\n  console.log(a.length, a[1], a[5]);\n  a.sort();\n  console.log(arr.join(\",\"));\n  console.log(a.pop(), arr.length);\n  console.log(a.shift(), arr.join(\",\"));\n  a.unshift(7, 8);\n  console.log(arr.join(\",\"));\n  a.splice(1, 1, 5, 6);\n  console.log(arr.join(\",\"));\n  a.length = 2;\n  console.log(arr.join(\",\"), arr.length);\n  a[4] = 9;\n  console.log(arr.length);\n  for (const x of a) console.log(x);\n  console.log(Object.keys(a).join(\",\"));\n  console.log(a.indexOf(9), a.includes(7), a.reverse().join(\",\"));\n  console.log(JSON.stringify(a), String(a));\n  const names: string[] = [\"x\", \"y\"];\n  const n: any = names;\n  n.push(\"z\");\n  console.log(names.join(\"\"), n.join(\"-\"), n.map((s: string) => s + \"!\").join(\"\"));\n  const same: any = arr;\n  console.log(a === same);\n  const cs: C[] = [new C(), new C()];\n  const l: any = cs;\n  const e0 = l[0]; console.log(e0.bump(), cs[0].n, l.length);\n  const grid: number[][] = [[1], [2]];\n  const g: any = grid;\n  const g0 = g[0]; g0.push(5);\n  console.log(grid[0].length, JSON.stringify(g));\n  let t: any = 0;\n  t = arr;\n  t.push(100);\n  console.log(arr[arr.length - 1]);\n}\n"
+    },
+    {
+      "name": "array view survives indirection through params returns fields and literals",
+      "expect": "matched",
+      "source": "class Box { items: any = null; }\nfunction addOne(x: any): void { x.push(1); }\nfunction lenOf(x: any): number { return x.length; }\nfunction make(a: number[]): any { return a; }\nasync function main(): Promise<void> {\n  const arr: number[] = [5];\n  addOne(arr);\n  console.log(arr.length, lenOf(arr));\n  const m = make(arr);\n  m.push(2);\n  console.log(arr.length);\n  const b = new Box();\n  b.items = arr;\n  b.items.push(3);\n  console.log(arr.length);\n  const o: any = { list: arr };\n  o.list.push(4);\n  console.log(arr.length);\n  const holder: any[] = [arr];\n  holder[0].push(5);\n  console.log(arr.length);\n}\n"
+    },
+    {
+      "name": "class instances nested in literals and arrays stay live",
+      "expect": "matched",
+      "source": "class C { n = 1; bump(): number { this.n += 1; return this.n; } }\nasync function main(): Promise<void> {\n  const c = new C();\n  const o: any = { inner: c };\n  console.log(typeof o.inner.bump);\n  console.log(o.inner.n);\n  c.n = 5;\n  console.log(o.inner.n);\n  console.log(o.inner.bump(), c.n);\n  const l: any = [c];\n  console.log(l[0].n, typeof l[0].bump);\n}\n"
+    },
+    {
+      "name": "class field holding a class instance stays live through any",
+      "expect": "matched",
+      "source": "class Inner { v = 1; inc(): number { this.v++; return this.v; } }\nclass Outer { inner: Inner = new Inner(); name = \"o\"; }\nasync function main(): Promise<void> {\n  const o = new Outer();\n  const a: any = o;\n  console.log(a.inner.v, typeof a.inner.inc);\n  console.log(a.inner.inc(), o.inner.v);\n}\n"
     }
   ]
 }

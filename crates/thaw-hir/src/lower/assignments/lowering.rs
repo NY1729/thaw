@@ -1353,7 +1353,7 @@ impl<'a> FnLowerer<'a> {
                     && self.is_primitive_array_index(&assign.right, &ty) => {
                     self.coerce_primitive_array_argument(value, &ty)?
                 }
-                Some(ty) => self.coerce_to_declared(&ty, value)?,
+                Some(ty) => self.coerce_to_declared_aliasing(&ty, value)?,
                 None => value,
             },
             Target::Prop(_, HirType::Object(fields), field) => {
@@ -1362,7 +1362,7 @@ impl<'a> FnLowerer<'a> {
                         && self.is_primitive_array_index(&assign.right, ty) => {
                         self.coerce_primitive_array_argument(value, ty)?
                     }
-                    Some((_, ty)) => self.coerce_to_declared(ty, value)?,
+                    Some((_, ty)) => self.coerce_to_declared_aliasing(ty, value)?,
                     None => value,
                 }
             }

@@ -335,9 +335,17 @@ impl<'a> FnLowerer<'a> {
             self.coerce_to_declared(&HirType::Json, non_array)?
         };
         let (array_branch, dynamic, ty) = (array_branch, non_array, HirType::Json);
-        let condition = HirExpr::Call(
+        // A host-owned array (a live view of a native array, or a JS array) is mutated in place
+        // by the live dynamic call; only a plain JSON array takes the copy-and-write-back path.
+        let is_array = HirExpr::Call(
             Box::new(HirExpr::Var("__thaw_json_is_array".into())),
             vec![HirExpr::Var(receiver_name.clone())],
+        );
+        let has_handle = Self::strict_has_handle(Self::strict_json_handle(HirExpr::Var(receiver_name.clone())));
+        let condition = Self::strict_if(
+            is_array,
+            Self::strict_if(has_handle, HirExpr::Lit(HirLit::Bool(false)), HirExpr::Lit(HirLit::Bool(true))),
+            HirExpr::Lit(HirLit::Bool(false)),
         );
         let result = HirExpr::Conditional(Box::new(condition), Box::new(array_branch), Box::new(dynamic), ty);
         Ok(Some(self.wrap_call_argument_bindings(result, &[(receiver_name, HirType::Json, receiver)])?))

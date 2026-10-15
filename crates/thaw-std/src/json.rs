@@ -5923,11 +5923,25 @@ pub unsafe extern "C" fn thaw_json_array_join(
     separator: *const c_char,
 ) -> *const c_char {
     let separator = to_str(separator);
-    let Some(Value::Array(items)) = (unsafe { value.as_ref() }) else {
-        return CString::new("").unwrap_or_default().into_raw();
+    // A host-owned array (a live view of a native array, or a JS array) is read
+    // element by element through the host.
+    let host_items: Vec<Value>;
+    let items: &[Value] = match unsafe { value.as_ref() } {
+        Some(Value::Array(items)) => shared_array_ref(items),
+        Some(Value::Host(lease)) if host_query(lease, 4).as_deref() == Some("1") => {
+            let length = match host_get_property(lease, b"length") {
+                Value::Number(number) => number.as_u64().unwrap_or(0) as usize,
+                _ => 0,
+            };
+            host_items = (0..length)
+                .map(|index| host_get_property(lease, index.to_string().as_bytes()))
+                .collect();
+            &host_items
+        }
+        _ => return CString::new("").unwrap_or_default().into_raw(),
     };
     let mut joined = String::new();
-    for (index, item) in shared_array_ref(items).iter().enumerate() {
+    for (index, item) in items.iter().enumerate() {
         if index > 0 {
             joined.push_str(&separator);
         }
@@ -6766,6 +6780,20 @@ fn flatten_json_value(value: Value, depth: usize, out: &mut Vec<Value>) {
             for (index, item) in elements.iter().enumerate() {
                 if array_has_index(&items, index) {
                     flatten_json_value(item.clone(), depth - 1, out);
+                }
+            }
+        }
+        // A host-owned array (a live view of a native array, or a JS array) flattens like a
+        // plain one; holes are skipped.
+        Value::Host(lease) if depth > 0 && host_query(&lease, 4).as_deref() == Some("1") => {
+            let length = match host_get_property(&lease, b"length") {
+                Value::Number(number) => number.as_u64().unwrap_or(0) as usize,
+                _ => 0,
+            };
+            for index in 0..length {
+                let key = index.to_string();
+                if host_property_predicate(&lease, key.as_bytes(), 0) {
+                    flatten_json_value(host_get_property(&lease, key.as_bytes()), depth - 1, out);
                 }
             }
         }

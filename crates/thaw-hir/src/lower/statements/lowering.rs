@@ -1310,7 +1310,7 @@ impl<'a> FnLowerer<'a> {
         }
         let value = match &target {
             Target::Var(name) => match self.scope.get(name).cloned() {
-                Some(ty) => self.coerce_to_declared(&ty, value)?,
+                Some(ty) => self.coerce_to_declared_aliasing(&ty, value)?,
                 None => value,
             },
             Target::Prop(_, HirType::Object(fields), field) => {
@@ -1439,7 +1439,7 @@ impl<'a> FnLowerer<'a> {
                             Some(if strict {
                                 self.coerce_to_declared(&ret_type, value)?
                             } else {
-                                self.coerce_primitive_array_argument(value, &ret_type)?
+                                self.coerce_primitive_array_argument_aliasing(value, &ret_type)?
                             })
                         }
                     }
