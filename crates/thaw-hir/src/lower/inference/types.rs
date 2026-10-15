@@ -2072,7 +2072,13 @@ impl<'a> FnLowerer<'a> {
                         };
                         let array_type = HirType::Array(Box::new(HirType::Str));
                         self.expect_type(&HirType::F64, site, "tagged template site")?;
-                        self.expect_type(&array_type, cooked, "tagged template cooked strings")?;
+                        // Invalid escapes make some cooked entries `undefined`
+                        // (a null pointer in the same one-pointer layout).
+                        if self.infer_expr_type(cooked)?
+                            != HirType::Array(Box::new(HirType::Optional(Box::new(HirType::Str))))
+                        {
+                            self.expect_type(&array_type, cooked, "tagged template cooked strings")?;
+                        }
                         self.expect_type(&array_type, raw, "tagged template raw strings")?;
                         return Ok(array_type);
                     }

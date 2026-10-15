@@ -1431,13 +1431,14 @@ impl<'a> FnLowerer<'a> {
                 let mut cooked_strings = Vec::with_capacity(template.quasis.len());
                 let mut raw_strings = Vec::with_capacity(template.quasis.len());
                 for quasi in &template.quasis {
-                    let cooked = match quasi.cooked.as_ref() {
+                    // An invalid escape makes the cooked entry `undefined`; the
+                    // array keeps `Array<Str>`'s one-pointer-per-element layout.
+                    cooked_strings.push(HirExpr::Lit(match quasi.cooked.as_ref() {
                         Some(cooked) => {
                             hir_string_literal_from_wtf8(cooked.as_wtf8().as_bytes())
                         }
-                        None => HirLit::Str(quasi.raw.to_string()),
-                    };
-                    cooked_strings.push(HirExpr::Lit(cooked));
+                        None => HirLit::Undefined,
+                    }));
                     raw_strings.push(HirExpr::Lit(HirLit::Str(quasi.raw.to_string())));
                 }
                 // The tag function receives `cooked` -- `strings.raw` is a
@@ -2179,6 +2180,9 @@ impl<'a> FnLowerer<'a> {
                 {
                     lhs = self.lower_primitive_array_operand(lhs)?;
                     rhs = self.lower_primitive_array_operand(rhs)?;
+                } else if bin.op == BinaryOp::NullishCoalescing {
+                    // `arr[i] ?? d`: an out-of-range or null slot is absent.
+                    lhs = self.lower_primitive_array_operand(lhs)?;
                 }
                 let mut bindings = Vec::new();
                 if !matches!(

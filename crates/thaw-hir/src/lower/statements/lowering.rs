@@ -2506,7 +2506,7 @@ impl<'a> FnLowerer<'a> {
                     }
                     body.extend(item_stmts);
                     body.extend(self.lower_loop_body(&for_of.body)?);
-                    body = self.lower_using_scope(body, iteration_disposals, iteration_using_flags)?;
+                    body = self.lower_using_scope(body, iteration_disposals, iteration_using_flags, vec![0])?;
                     if generator_producer.is_none() {
                         let update = HirExpr::Assign(
                             index_name.clone(),

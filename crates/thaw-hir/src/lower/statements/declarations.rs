@@ -177,6 +177,59 @@ impl<'a> FnLowerer<'a> {
             args: Vec::new(),
             type_args: None,
         });
+        // `using x = null` / `undefined` is allowed and disposes nothing.
+        let binding = self.resolve_binding(source_name);
+        let nullish = |ty: &HirType| matches!(ty, HirType::Null | HirType::Undefined);
+        match self.scope.get(&binding).cloned() {
+            Some(ty) if nullish(&ty) => {
+                return Ok(HirStmt::Expr(HirExpr::Lit(HirLit::Undefined)));
+            }
+            Some(ty @ (HirType::Optional(_) | HirType::Nullable(_) | HirType::Nullish(_))) => {
+                // The comparison form each absence wrapper narrows on.
+                let (op, absent) = match ty {
+                    HirType::Optional(_) => (
+                        BinaryOp::NotEqEq,
+                        Expr::Ident(swc_ecma_ast::Ident::new_no_ctxt("undefined".into(), span)),
+                    ),
+                    HirType::Nullable(_) => (
+                        BinaryOp::NotEqEq,
+                        Expr::Lit(swc_ecma_ast::Lit::Null(swc_ecma_ast::Null { span })),
+                    ),
+                    _ => (
+                        BinaryOp::NotEq,
+                        Expr::Lit(swc_ecma_ast::Lit::Null(swc_ecma_ast::Null { span })),
+                    ),
+                };
+                let statement = Stmt::If(swc_ecma_ast::IfStmt {
+                    span,
+                    test: Box::new(Expr::Bin(swc_ecma_ast::BinExpr {
+                        span,
+                        op,
+                        left: Box::new(Expr::Ident(swc_ecma_ast::Ident::new_no_ctxt(
+                            source_name.into(),
+                            span,
+                        ))),
+                        right: Box::new(absent),
+                    })),
+                    cons: Box::new(Stmt::Expr(swc_ecma_ast::ExprStmt {
+                        span,
+                        expr: Box::new(if is_await {
+                            Expr::Await(AwaitExpr { span, arg: Box::new(call) })
+                        } else {
+                            call
+                        }),
+                    })),
+                    alt: None,
+                });
+                let statements = self.lower_stmt_seq(&statement)?;
+                return Ok(HirStmt::If(
+                    HirExpr::Lit(HirLit::Bool(true)),
+                    statements,
+                    Vec::new(),
+                ));
+            }
+            _ => {}
+        }
         let value = if is_await {
             self.lower_expr(&Expr::Await(AwaitExpr {
                 span,

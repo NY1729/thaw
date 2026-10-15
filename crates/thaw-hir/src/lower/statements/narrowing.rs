@@ -254,6 +254,8 @@ impl<'a> FnLowerer<'a> {
         let mut out = Vec::new();
         let mut using_disposals: Vec<HirStmt> = Vec::new();
         let mut using_flags = Vec::new();
+        // `out` index from which each resource is live.
+        let mut using_starts: Vec<usize> = Vec::new();
         for stmt in stmts {
             if let Stmt::Decl(Decl::Using(using_decl)) = stmt {
                 // Register each successful acquisition before the next initializer.
@@ -267,6 +269,7 @@ impl<'a> FnLowerer<'a> {
                             HirExpr::Lit(HirLit::Bool(false))));
                         out.push(HirStmt::Expr(HirExpr::Assign(flag.clone(),
                             Box::new(HirExpr::Lit(HirLit::Bool(true))))));
+                        using_starts.push(out.len());
                         let disposal = self.lower_using_disposal(
                             binding.id.sym.as_ref(),
                             using_decl.is_await,
@@ -335,7 +338,7 @@ impl<'a> FnLowerer<'a> {
                 }
             }
         }
-        self.lower_using_scope(out, using_disposals, using_flags)
+        self.lower_using_scope(out, using_disposals, using_flags, using_starts)
     }
 
     fn lower_using_scope(
@@ -343,10 +346,12 @@ impl<'a> FnLowerer<'a> {
         out: Vec<HirStmt>,
         mut using_disposals: Vec<HirStmt>,
         mut using_flags: Vec<HirStmt>,
+        using_starts: Vec<usize>,
     ) -> Result<Vec<HirStmt>, String> {
         if using_disposals.is_empty() {
             return Ok(out);
         }
+        let declared_order = using_disposals.clone();
         using_disposals.reverse();
         let mut name = "__thaw_using_finally".to_string();
         while self.scope.contains_key(&name) {
@@ -360,7 +365,38 @@ impl<'a> FnLowerer<'a> {
         )?;
         self.generator_finalizers
             .insert(catch_name.clone(), normal_disposal.clone());
-        let body = self.inject_finally_before_exits(out, &normal_disposal, false, 1)?;
+        // An exit only disposes the resources already acquired before it: a
+        // later resource's binding does not exist yet at an earlier `return`.
+        let mut body = Vec::new();
+        let mut exposed = Vec::new();
+        let mut rest = out;
+        let mut consumed = 0;
+        let mut boundaries = using_starts.clone();
+        boundaries.push(consumed + rest.len());
+        for (live, end) in boundaries.into_iter().enumerate() {
+            let segment: Vec<HirStmt> = rest.drain(..end - consumed).collect();
+            consumed = end;
+            let segment = if live == 0 {
+                segment
+            } else {
+                let live_disposals: Vec<HirStmt> =
+                    declared_order[..live].iter().rev().cloned().collect();
+                let disposal = self.lower_using_disposal_sequence(&live_disposals, None)?;
+                self.inject_finally_before_exits(segment, &disposal, false, 1)?
+            };
+            for stmt in &segment {
+                if let HirStmt::Let(name, ty, _) = stmt {
+                    if !self.scope.contains_key(name) {
+                        self.scope.insert(name.clone(), ty.clone());
+                        exposed.push(name.clone());
+                    }
+                }
+            }
+            body.extend(segment);
+        }
+        for name in exposed {
+            self.scope.remove(&name);
+        }
         // Every flag is initialized before any fallible acquisition in the Try.
         using_flags.push(crate::caught_exception_carrier_prelude(catch_name.clone()));
         using_flags.push(HirStmt::Try(

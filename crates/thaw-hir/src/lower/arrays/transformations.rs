@@ -182,6 +182,19 @@ impl<'a> FnLowerer<'a> {
                 )
             }
             HirType::Undefined => (HirExpr::Lit(HirLit::Undefined), HirExpr::Lit(HirLit::Undefined)),
+            // A null `string` slot is `undefined` (a tagged template's invalid-escape cooked entry).
+            HirType::Str => (
+                HirExpr::Conditional(
+                    Box::new(HirExpr::Call(
+                        Box::new(HirExpr::Var("__thaw_string_is_null".into())),
+                        vec![value.clone()],
+                    )),
+                    Box::new(HirExpr::OptionalNone(HirType::Str)),
+                    Box::new(HirExpr::OptionalSome(Box::new(value), HirType::Str)),
+                    ty.clone(),
+                ),
+                HirExpr::OptionalNone(HirType::Str),
+            ),
             HirType::Union(_) => {
                 let HirType::Union(members) = &ty else { unreachable!() };
                 let index = members.iter().position(|member| member == &HirType::Undefined).unwrap();
