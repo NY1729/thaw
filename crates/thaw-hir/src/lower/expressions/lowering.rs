@@ -3314,6 +3314,10 @@ impl<'a> FnLowerer<'a> {
                             // JavaScript array. Iterate its actual length through
                             // the same canonical reads as Array.from(tuple).
                             value = self.lower_tuple_as_json_array(value, elements.clone())?;
+                        } else if spread_source_type == HirType::Json {
+                            // An `any` array (plain, JS-owned or a live view of a native array)
+                            // decodes element by element, like the `Array<Json>` copy methods use.
+                            value = self.coerce_to_declared(&HirType::Array(Box::new(HirType::Json)), value)?;
                         } else if spread_source_type == HirType::Str {
                             value = HirExpr::Call(
                                 Box::new(HirExpr::Var("__thaw_string_to_array".to_string())),

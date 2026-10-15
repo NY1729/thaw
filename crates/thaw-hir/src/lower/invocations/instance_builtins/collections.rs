@@ -47,10 +47,12 @@ impl<'a> FnLowerer<'a> {
             }
             Expr::Member(member) => {
                 if let MemberProp::Computed(_) = &member.prop {
-                    let HirType::Array(element) = self.peek_type_without_lowering(&member.obj)? else {
-                        return None;
+                    return match self.peek_type_without_lowering(&member.obj)? {
+                        HirType::Array(element) => Some(*element),
+                        // An element of a dynamic value is itself dynamic.
+                        dynamic @ (HirType::JsValue | HirType::Json) => Some(dynamic),
+                        _ => None,
                     };
-                    return Some(*element);
                 }
                 let MemberProp::Ident(field) = &member.prop else {
                     return None;

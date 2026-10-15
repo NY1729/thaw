@@ -2030,10 +2030,10 @@
       const positions = new thawGraphMapConstructor();
       for (let i = 0; i < keys.length; i++) {
         thawGraphApply(thawGraphMapSet, positions, [keys[i], i]);
+        // A class method is a prototype member in Node: it is reachable through `get`/`in`
+        // below but is not an own property of the instance.
         if (isClass && methods[i]) {
-          thawGraphDefineProperty(target, keys[i], {
-            value: undefined, writable: true, enumerable: false, configurable: true,
-          });
+          continue;
         } else if (accessors[i]) {
           thawGraphDefineProperty(target, keys[i], {
             get: readable[i] ? callbacks[i * 2] : undefined,
@@ -2110,6 +2110,11 @@
           const index = thawGraphApply(thawGraphMapGet, positions, [key]);
           if (index === undefined) return thawGraphReflectGet(target, key, receiver);
           if (accessors[index]) return thawGraphReflectGet(target, key, receiver);
+          if (isClass && methods[index]) {
+            // An own property assigned over the method shadows it.
+            return thawGraphReflectGetOwnPropertyDescriptor(target, key)
+              ? thawGraphReflectGet(target, key, receiver) : method(index);
+          }
           const descriptor = thawGraphReflectGetOwnPropertyDescriptor(target, key);
           return descriptor.configurable || descriptor.writable ? value(index) : descriptor.value;
         },
@@ -2117,6 +2122,7 @@
           sync();
           const index = thawGraphApply(thawGraphMapGet, positions, [key]);
           if (index === undefined) return false;
+          if (isClass && methods[index]) return thawGraphReflectSet(target, key, value);
           if (accessors[index]) return thawGraphReflectSet(target, key, value, receiver);
           if (!(flags(key) & 1)) return false;
           write(index, value);
@@ -2126,15 +2132,22 @@
           sync();
           // Native fixed-layout fields cannot be removed from the owner.
           // Leaving the Proxy default would delete only its shadow slot.
-          if (thawGraphApply(thawGraphMapGet, positions, [key]) !== undefined) return false;
+          const index = thawGraphApply(thawGraphMapGet, positions, [key]);
+          if (index !== undefined && !(isClass && methods[index])) return false;
           return thawGraphReflectDeleteProperty(target, key);
+        },
+        has(_target, key) {
+          sync();
+          const index = thawGraphApply(thawGraphMapGet, positions, [key]);
+          if (isClass && index !== undefined && methods[index]) return true;
+          return thawGraphReflectHas(target, key);
         },
         ownKeys() { sync(); return thawGraphReflectOwnKeys(target); },
         getOwnPropertyDescriptor(_target, key) {
           sync();
           const descriptor = thawGraphReflectGetOwnPropertyDescriptor(target, key);
           const index = thawGraphApply(thawGraphMapGet, positions, [key]);
-          if (index === undefined || accessors[index] || !descriptor) return descriptor;
+          if (index === undefined || accessors[index] || !descriptor || (isClass && methods[index])) return descriptor;
           return { value: descriptor.configurable || descriptor.writable ? value(index) : descriptor.value,
             writable: descriptor.writable, enumerable: descriptor.enumerable,
             configurable: descriptor.configurable };
@@ -2149,6 +2162,7 @@
           sync();
           const index = thawGraphApply(thawGraphMapGet, positions, [key]);
           if (index === undefined) return false;
+          if (isClass && methods[index]) return thawGraphReflectDefineProperty(target, key, descriptor);
           const before = thawGraphReflectGetOwnPropertyDescriptor(target, key);
           const updated = { ...descriptor };
           if (!accessors[index]) {

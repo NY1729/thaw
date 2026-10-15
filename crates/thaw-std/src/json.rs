@@ -7702,7 +7702,12 @@ pub extern "C" fn thaw_json_array_push_number(array: *mut Value, value: f64) {
 #[no_mangle]
 pub extern "C" fn thaw_json_array_push_string(array: *mut Value, value: *const c_char) {
     if let Some(items) = (unsafe { array.as_ref() }).and_then(Value::as_array_mut) {
-        items.push(string_value(value));
+        // A null `Str` slot is an `undefined` element (a tagged template's invalid-escape cooked entry).
+        items.push(if value.is_null() {
+            napi_undefined_value()
+        } else {
+            string_value(value)
+        });
     }
 }
 

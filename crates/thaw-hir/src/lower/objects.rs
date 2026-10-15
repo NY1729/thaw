@@ -4624,7 +4624,15 @@ impl<'a> FnLowerer<'a> {
 
     /// Element types whose JS values can be written back into a native array.
     fn array_view_element_writable(element: &HirType) -> bool {
-        matches!(element, HirType::F64 | HirType::Str | HirType::Bool | HirType::Json | HirType::JsValue)
+        match element {
+            HirType::F64 | HirType::Str | HirType::Bool | HirType::Json | HirType::JsValue
+            | HirType::Array(_) | HirType::Tuple(_) => true,
+            // A class instance written from JS would decode to a plain copy that no longer
+            // carries the class identity, so those views stay read-only.
+            HirType::Object(fields) => !fields.iter()
+                .any(|(name, _)| name.starts_with("__thaw_class_identity_\u{1e}")),
+            _ => false,
+        }
     }
 
     /// A native array crossing into `any` as a live view: the JS side reads and writes the
