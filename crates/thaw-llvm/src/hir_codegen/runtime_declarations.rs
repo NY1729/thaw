@@ -2984,6 +2984,11 @@ impl<'ctx> HirCompiler<'ctx> {
             Some(Linkage::External),
         );
         self.module.add_function(
+            "thaw_js_to_async_iterator_exact_result",
+            exact_mixed_result_type.fn_type(&[self.context.i64_type().into()], false),
+            Some(Linkage::External),
+        );
+        self.module.add_function(
             "thaw_js_call_handle_mixed_exact_consuming_result",
             exact_mixed_result_type.fn_type(&[
                 self.context.i64_type().into(), i8_ptr.into(), i8_ptr.into(),

@@ -149,6 +149,9 @@ impl<'ctx> HirCompiler<'ctx> {
                     }
                 }
                 let val = self.compile_expr(value)?;
+                // Compiling the value can promote the variable to an arena cell (a closure
+                // inside it captured the variable), so look the slot up again.
+                let ptr = self.variables.get(name).map(|(cell, _)| *cell).unwrap_or(ptr);
                 self.builder.build_store(ptr, val).map_err(|e| e.to_string())?;
                 // A named binding now owns the produced Json value. Revoke
                 // its whole-statement discard candidate even when pure HIR

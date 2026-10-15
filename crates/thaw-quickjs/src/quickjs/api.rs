@@ -5658,10 +5658,22 @@ pub extern "C" fn thaw_js_resolve_handle_graph_result(handle: u64) -> ThawResult
 pub extern "C" fn thaw_js_to_iterator_exact_result(
     source_handle: u64,
 ) -> ThawCallWithExceptionResult {
+    to_iterator_exact_impl(source_handle, "__thaw_to_iterator")
+}
+
+/// `for await...of` acquisition: Symbol.asyncIterator, then the sync iterator.
+#[no_mangle]
+pub extern "C" fn thaw_js_to_async_iterator_exact_result(
+    source_handle: u64,
+) -> ThawCallWithExceptionResult {
+    to_iterator_exact_impl(source_handle, "__thaw_to_async_iterator")
+}
+
+fn to_iterator_exact_impl(source_handle: u64, helper: &str) -> ThawCallWithExceptionResult {
     enum Outcome { Value(u64), Exception(u64, bool) }
     let result: Result<Outcome, BoundaryError> = with_active_or_context(|ctx| {
         let source = value_for_handle(&ctx, source_handle)?;
-        let to_iterator: Function = ctx.globals().get("__thaw_to_iterator")
+        let to_iterator: Function = ctx.globals().get(helper)
             .map_err(|error| error.to_string())?;
         match to_iterator.call::<_, Value>((source,)) {
             Ok(iterator) => retain_value(&ctx, iterator).map(Outcome::Value),
@@ -5699,12 +5711,31 @@ pub extern "C" fn thaw_js_iterator_step_exact_result(
 ) -> ThawCallWithExceptionResult {
     enum Outcome { Value(u64), Exception(u64, bool) }
     let result: Result<Outcome, BoundaryError> = with_active_or_context(|ctx| {
-        if mode > 5 { return Err("Invalid iterator step mode".into()); }
+        if mode > 11 { return Err("Invalid iterator step mode".into()); }
+        // Modes 6..=11 are modes 0..=5 on an async iterator: the call's result is
+        // awaited (driving timers and I/O) before `done`/`value` are read.
+        let asynchronous = mode >= 6;
+        let mode = if asynchronous { mode - 6 } else { mode };
         let iterator = value_for_handle(&ctx, iterator_handle)?;
-        let step: Function = ctx.globals().get("__thaw_iterator_step_exact")
-            .map_err(|error| error.to_string())?;
         let error = if error_text.is_null() { String::new() } else { to_str(error_text) };
-        match step.call::<_, Value>((iterator, mode, error)) {
+        let stepped: Result<Value, rquickjs::Error> = if asynchronous {
+            (|| {
+                let call: Function = ctx.globals().get("__thaw_iterator_call")?;
+                let record: Function = ctx.globals().get("__thaw_iterator_record")?;
+                let capture = mode >= 3;
+                let mode = if capture { mode - 3 } else { mode };
+                let raw: Value = call.call((iterator, mode, error))?;
+                let assimilate: Function = ctx.eval("(value) => Promise.resolve(value)")?;
+                let promise: rquickjs::Promise = assimilate.call((raw,))?;
+                let step = finish_with_platform_events(&ctx, &promise)?;
+                record.call((step, mode, capture))
+            })()
+        } else {
+            let step: Function = ctx.globals().get("__thaw_iterator_step_exact")
+                .map_err(|error| error.to_string())?;
+            step.call::<_, Value>((iterator, mode, error))
+        };
+        match stepped {
             Ok(record) => retain_value(&ctx, record).map(Outcome::Value),
             Err(rquickjs::Error::Exception) => {
                 let thrown = ctx.catch();

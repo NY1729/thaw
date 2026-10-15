@@ -992,6 +992,41 @@
       "name": "worker data shares a SharedArrayBuffer",
       "expect": "matched",
       "source": "import { Worker } from 'node:worker_threads';\nasync function main(): Promise<void> {\n  const shared = new SharedArrayBuffer(8);\n  const view = new Int32Array(shared);\n  const worker = new Worker(`const { parentPort, workerData } = require('node:worker_threads'); const view = new Int32Array(workerData); Atomics.store(view, 0, 42); parentPort.postMessage(workerData instanceof SharedArrayBuffer);`, { eval: true, workerData: shared });\n  const kind: boolean = await new Promise<boolean>((resolve) => { worker.once('message', (value: boolean) => { resolve(value); }); });\n  await worker.terminate();\n  console.log(kind, view[0]);\n}"
+    },
+    {
+      "name": "handler can close the server constant it is initializing",
+      "expect": "matched",
+      "source": "import net from 'node:net';\nfunction main(): void {\n  const server = net.createServer((socket: any) => {\n    console.log('direct'); server.close();\n  });\n  server.listen(0, '127.0.0.1', () => {\n    const port = (server.address() as any).port;\n    const c = net.connect(port, '127.0.0.1', () => { c.end(); });\n  });\n}\n"
+    },
+    {
+      "name": "handler reads the server constant it is initializing after main returned",
+      "expect": "matched",
+      "source": "import net from 'node:net';\nfunction main(): void {\n  const server = net.createServer((socket: any) => { console.log('cb2', typeof server); });\n  server.listen(0, '127.0.0.1', () => {\n    const port = (server.address() as any).port;\n    const c = net.connect(port, '127.0.0.1', () => { c.end(); setTimeout(() => server.close(), 30); });\n  });\n}\n"
+    },
+    {
+      "name": "variable assigned a call whose callback captures the variable",
+      "expect": "matched",
+      "source": "import net from 'node:net';\nfunction main(): void {\n  let server: any;\n  server = net.createServer((socket: any) => {\n    console.log('t', typeof server);\n    server.close();\n  });\n  server.listen(0, '127.0.0.1', () => {\n    const port = (server.address() as any).port;\n    const c = net.connect(port, '127.0.0.1', () => { c.end(); });\n  });\n}\n"
+    },
+    {
+      "name": "for await over a Node Readable",
+      "expect": "matched",
+      "source": "import { Readable } from 'node:stream';\nasync function main(): Promise<void> {\n  const r = Readable.from(['a', 'b', 'c']);\n  for await (const chunk of r) { console.log('chunk', chunk); }\n  console.log('done');\n}\n"
+    },
+    {
+      "name": "for await over readline lines",
+      "expect": "matched",
+      "source": "import readline from 'node:readline';\nimport { Readable } from 'node:stream';\nasync function main(): Promise<void> {\n  const rl = readline.createInterface({ input: Readable.from(['x\\ny\\n']) });\n  for await (const line of rl) { console.log('line', line); }\n  console.log('done');\n}\n"
+    },
+    {
+      "name": "for await over dynamic async and sync iterables",
+      "expect": "matched",
+      "source": "async function main(): Promise<void> {\n  const src: any = new Function('return [Promise.resolve(1), 2, Promise.resolve(3)]')();\n  for await (const v of src) { console.log('v', v); }\n  const gen: any = new Function('return (async function* () { yield 10; yield 20; })()')();\n  for await (const g of gen) { console.log('g', g); }\n  const plain: any = [7, 8];\n  for await (const p of plain) { console.log('p', p); }\n}\n"
+    },
+    {
+      "name": "for await closes the iterator on break and propagates errors",
+      "expect": "matched",
+      "source": "async function main(): Promise<void> {\n  const gen: any = new Function('return (async function* () { try { yield 1; yield 2; yield 3; } finally { console.log(\"cleanup\"); } })()')();\n  for await (const x of gen) { console.log('x', x); if (x === 2) break; }\n  console.log('after break');\n  const bad: any = new Function('return { [Symbol.asyncIterator]() { return { next() { return Promise.reject(new Error(\"boom\")); } }; } }')();\n  try { for await (const q of bad) { console.log('q'); } } catch (e: any) { console.log('caught', e.message); }\n  const notIt: any = 5;\n  try { for await (const z of notIt) { console.log('z'); } } catch (e: any) { console.log('caught2', e instanceof TypeError); }\n}\n"
     }
   ]
 }
