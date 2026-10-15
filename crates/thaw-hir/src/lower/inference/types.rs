@@ -2364,6 +2364,14 @@ impl<'a> FnLowerer<'a> {
                         }
                         return Ok(target_type);
                     }
+                    "__thaw_json_array_assign" => {
+                        let [target, source] = args.as_slice() else {
+                            return Err("array write-back expects two operands".into());
+                        };
+                        self.expect_type(&HirType::Json, target, "array write-back target")?;
+                        self.expect_type(&HirType::Json, source, "array write-back source")?;
+                        return Ok(HirType::Json);
+                    }
                     "__thaw_json_array_slice" => {
                         let [value, start] = args.as_slice() else {
                             return Err("dynamic array rest expects two operands".into());
