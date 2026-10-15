@@ -4890,6 +4890,36 @@ impl<'a> FnLowerer<'a> {
         ))
     }
 
+    /// A receiver-aware method read as a value (`const f = o.method`) is a
+    /// function that still wants its receiver view as argument 1, so a later
+    /// `f()` could not even compile. Bind it to the owner it was read from.
+    /// ponytail: Node leaves `this` undefined here; binding accepts a superset.
+    fn bind_extracted_method(&mut self, read: HirExpr) -> Result<HirExpr, String> {
+        let HirExpr::PropAccess(owner, owner_type, name) = &read else {
+            return Ok(read);
+        };
+        let HirType::Object(fields) = owner_type else {
+            return Ok(read);
+        };
+        let Ok(read_type) = Self::fixed_object_property_read_type(fields, name) else {
+            return Ok(read);
+        };
+        let this = HirExpr::Var("__thaw_this".into());
+        let method = HirExpr::PropAccess(Box::new(this), owner_type.clone(), name.clone());
+        let Some((bound, bound_type)) =
+            self.bind_projected_method_receiver(&method, &read_type, owner_type)?
+        else {
+            return Ok(read);
+        };
+        let wrapper = HirExpr::Lambda(
+            Vec::new(),
+            vec![HirParam { name: "__thaw_this".into(), ty: owner_type.clone() }],
+            bound_type,
+            Box::new(HirExpr::Block(vec![HirStmt::Return(Some(bound))])),
+        );
+        Ok(HirExpr::Call(Box::new(wrapper), vec![owner.as_ref().clone()]))
+    }
+
     /// For a method field whose first parameter is the receiver-view object,
     /// returns a closure over `__thaw_this` taking only the remaining
     /// parameters, calling the method with a live receiver view of the owner.

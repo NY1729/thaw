@@ -486,7 +486,11 @@ fn frame_split_propagates_async_rejection_through_await_chain() {
     assert!(ir.contains("call i8 @thaw_promise_reject"));
     assert!(ir.contains("propagate_rejection"));
     assert!(ir.contains("@thaw_promise_forward_rejection"), "{ir}");
-    assert_eq!(compile_and_run(source, "async_rejection_chain"), "before\n");
+    // Node prints "before", reports the unhandled rejection and exits 1.
+    let (stdout, stderr, code) = compile_and_run_failing(source, "async_rejection_chain");
+    assert_eq!(stdout, "before\n");
+    assert!(stderr.contains("Uncaught: boom"), "{stderr}");
+    assert_eq!(code, Some(1));
 }
 
 #[test]
@@ -578,10 +582,11 @@ fn frame_split_rethrows_after_await_in_catch() {
             console.log("main-unreachable");
         }
     "#;
-    assert_eq!(
-        compile_and_run(source, "async_catch_rethrow"),
-        "before\noriginal\nrethrowing\n"
-    );
+    // Node reports the unhandled rejection of `main` and exits 1.
+    let (stdout, stderr, code) = compile_and_run_failing(source, "async_catch_rethrow");
+    assert_eq!(stdout, "before\noriginal\nrethrowing\n");
+    assert!(stderr.contains("Uncaught: wrapped"), "{stderr}");
+    assert_eq!(code, Some(1));
 }
 
 #[test]

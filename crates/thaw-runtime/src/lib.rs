@@ -605,6 +605,15 @@ pub extern "C" fn thaw_runtime_shutdown_wait() {
     std::thread::sleep(Duration::from_millis(1));
 }
 
+/// Reports rejections nobody handled yet. The generated entry point calls it
+/// before it destroys the async `main` completion promise: a `main` that
+/// throws before its first suspension is already rejected when it returns, so
+/// no poll ever saw it and destroying it would hide the failure (exit 0).
+#[no_mangle]
+pub extern "C" fn thaw_runtime_report_unhandled() {
+    report_registered_unhandled_rejections();
+}
+
 /// Drives detached Promise combinator children to completion. A rejected
 /// parent may already have resumed user code, but its child async frames still
 /// borrow the current request arena and must finish before that arena resets.

@@ -149,6 +149,15 @@ impl<'ctx> HirCompiler<'ctx> {
             }
             self.builder
                 .build_call(
+                    self.module
+                        .get_function("thaw_runtime_report_unhandled")
+                        .unwrap(),
+                    &[],
+                    "report_async_main_rejection",
+                )
+                .unwrap();
+            self.builder
+                .build_call(
                     self.module.get_function("thaw_promise_destroy").unwrap(),
                     &[completion.into()],
                     "destroy_async_main",

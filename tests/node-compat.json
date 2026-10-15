@@ -1117,6 +1117,11 @@
       "name": "client sockets honour allowHalfOpen and resetAndDestroy",
       "expect": "matched",
       "source": "import net from 'node:net';\nfunction main(): void {\n  const server = net.createServer((s: any) => { s.on('error', () => {}); s.end('hi'); });\n  server.listen(0, '127.0.0.1', () => {\n    const port = (server.address() as any).port;\n    const c: any = net.connect({ port: port, host: '127.0.0.1', allowHalfOpen: true });\n    let got = '';\n    c.on('data', (d: any) => { got += d; });\n    c.on('end', () => { console.log('end', c.writable, got); c.end(); });\n    c.on('close', () => {\n      console.log('client closed');\n      const c2: any = net.connect(port, '127.0.0.1');\n      c2.on('error', () => {});\n      c2.on('connect', () => { console.log(c2.resetAndDestroy() === c2); });\n      c2.on('close', () => { console.log('c2 closed'); server.close(); });\n    });\n  });\n}\n"
+    },
+    {
+      "name": "extracted object method is callable as a value",
+      "expect": "matched",
+      "source": "const o = { k: 7, double(x: number): number { return x * 2; } };\nfunction main(): void {\n  const f = o.double;\n  console.log(f(4), typeof f, o.double(6));\n}\n"
     }
   ]
 }

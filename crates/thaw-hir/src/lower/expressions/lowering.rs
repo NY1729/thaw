@@ -3558,7 +3558,10 @@ impl<'a> FnLowerer<'a> {
 
             Expr::Object(obj_lit) => self.lower_object_lit(obj_lit, None),
 
-            Expr::Member(member) => self.lower_member_read(member),
+            Expr::Member(member) => {
+                let read = self.lower_member_read(member)?;
+                self.bind_extracted_method(read)
+            }
 
             Expr::SuperProp(member) => {
                 let (_, base_type, base_name) = self
