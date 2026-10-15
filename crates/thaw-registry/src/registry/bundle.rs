@@ -126,7 +126,7 @@ fn runtime_export_specifiers_with_conditions(
                     let expanded = subpath.replacen('*', capture, 1);
                     if validate_export_subpath(&expanded).is_ok()
                         && package_subpath_runtime_target(
-                            manifest,
+                            &manifest,
                             &expanded,
                             conditions,
                         ).is_some()

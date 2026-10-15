@@ -1,10 +1,20 @@
   const thawAsyncContext = globalThis.__thaw_async_context_bootstrap;
+  const thawProcessMonotonicClock = globalThis.__thaw_process_monotonic_clock_bootstrap;
+  const thawProcessBigInt = BigInt;
   globalThis.global = globalThis;
   const thawDateConstructor = Date;
   const thawDateGetTime = Date.prototype.getTime;
   const thawDateApply = Reflect.apply;
   const thawBootstrapDefineProperty = Object.defineProperty;
   const thawBootstrapIteratorKey = Symbol.iterator;
+  const thawHostErrorPrototype = Error.prototype;
+  const thawHostIsPrototypeOf = Object.prototype.isPrototypeOf;
+  // Keep unary plus on opaque values in the QuickJS realm so its ToNumber
+  // operation performs ToPrimitive(number) once and rejects BigInt/Symbol.
+  thawBootstrapDefineProperty(globalThis, '__thaw_unary_plus', {
+    value: value => +value,
+    configurable: false, writable: false,
+  });
   Object.defineProperty(globalThis, '__thaw_date_from_live_value', {
     value: value => thawDateApply(thawDateGetTime, new thawDateConstructor(value), []),
     configurable: false, writable: false,
@@ -47,9 +57,21 @@
         globalThis.__thaw_same_native_callback(left, right)) return true;
     return decode(left, leftKind) == decode(right, rightKind);
   };
+  // Graph-decoded containers remember the serial of the native container they shadow.
+  const thawOriginSerials = new WeakMap();
+  const thawOriginSerialGet = WeakMap.prototype.get;
+  const thawOriginSerialSet = WeakMap.prototype.set;
+  const thawProjectedReceivers = new WeakSet();
+  const thawProjectedReceiverHas = WeakSet.prototype.has;
+  const thawProjectedReceiverAdd = WeakSet.prototype.add;
+  const thawSameOrigin = (left, right) => {
+    const serial = thawDateApply(thawOriginSerialGet, thawOriginSerials, [left]);
+    return serial !== undefined && serial === thawDateApply(thawOriginSerialGet, thawOriginSerials, [right]);
+  };
   globalThis.__thaw_strict_equal_dynamic = (left, right, leftKind, rightKind) =>
     ((leftKind === 3 || rightKind === 3) &&
-      globalThis.__thaw_same_native_callback(left, right)) || left === right;
+      globalThis.__thaw_same_native_callback(left, right)) || left === right
+      || ((typeof left === 'object' || typeof left === 'function') && thawSameOrigin(left, right));
   globalThis.__thaw_strict_equal_bigint_dynamic = (digits, value) =>
     typeof value === 'bigint' && value === BigInt(digits);
   globalThis.__thaw_strict_equal_number_dynamic = (text, value) =>
@@ -57,6 +79,7 @@
   globalThis.__thaw_strict_equal_null_dynamic = value => value === null;
   globalThis.__thaw_strict_equal_undefined_dynamic = value => value === undefined;
   globalThis.__thaw_typeof_dynamic_value = value => typeof value;
+  globalThis.__thaw_is_truthy_dynamic_value = value => !!value;
   globalThis.__thaw_is_undefined_dynamic_value = value => value === undefined;
   globalThis.__thaw_is_null_dynamic_value = value => value === null;
   globalThis.__thaw_is_nullish_dynamic_value = value => value == null;
@@ -88,10 +111,14 @@
   });
   thawBootstrapDefineProperty(globalThis, '__thaw_iterator_step_exact', {
     value: (iterator, mode, error) => {
+      const captureCompletion = mode >= 3;
+      if (captureCompletion) mode -= 3;
       const method = iterator[mode === 2 ? 'throw' : mode === 1 ? 'return' : 'next'];
-      // IteratorClose permits an absent return method. Its result must be an
-      // object, but close does not inspect that object's done or value fields.
-      if (mode === 1 && method == null) return { done: true };
+      // IteratorClose permits an absent return method. ForOf doesn't inspect
+      // its value; yield* preserves it as the delegate completion.
+      if (mode === 1 && method == null) {
+        return captureCompletion ? { done: true, value: undefined } : { done: true };
+      }
       if (typeof method !== 'function') throw new TypeError('Iterator method is not callable');
       const step = mode === 2
         ? thawDateApply(method, iterator, [error])
@@ -99,9 +126,11 @@
       if (step === null || (typeof step !== 'object' && typeof step !== 'function')) {
         throw new TypeError('Iterator result is not an object');
       }
-      if (mode === 1) return { done: true };
+      if (mode === 1 && !captureCompletion) return { done: true };
       const done = !!step.done;
-      return done ? { done: true } : { done: false, value: step.value };
+      return done
+        ? (captureCompletion ? { done: true, value: step.value } : { done: true })
+        : { done: false, value: step.value };
     }, enumerable: false, configurable: false, writable: false,
   });
   globalThis.__thaw_json_stringify_replacer = (value, space, replacer) =>
@@ -118,6 +147,11 @@
   const thawGraphRegExpConstructor = RegExp;
   const thawGraphBigInt = BigInt;
   const thawGraphNumber = Number;
+  thawBootstrapDefineProperty(globalThis, '__thaw_number_constructor', {
+    value: value => thawGraphNumber(value),
+    configurable: false,
+    writable: false,
+  });
   const thawGraphNumberIsFinite = Number.isFinite;
   const thawGraphNumberIsNaN = Number.isNaN;
   const thawGraphNumberIsInteger = Number.isInteger;
@@ -230,8 +264,7 @@
   const thawHostNativeSymbolID = symbol =>
     thawGraphApply(thawGraphWeakMapGet, thawHostNativeSymbolIDs, [symbol])
       ?? thawGraphApply(thawGraphMapGet, thawHostRegisteredSymbolIDs, [symbol]);
-  thawGraphDefineProperty(globalThis, '__thaw_json_host_native_symbol', {
-    value: handle => {
+  const thawHostNativeSymbolMake = handle => {
       const metadata = thawHostNativeSymbolMetadata(handle);
       const id = metadata.id;
       if (metadata.jsOrigin) {
@@ -265,7 +298,9 @@
           [symbol, { id, entry }]);
       }
       return symbol;
-    }, configurable: false, writable: false,
+    };
+  thawGraphDefineProperty(globalThis, '__thaw_json_host_native_symbol', {
+    value: thawHostNativeSymbolMake, configurable: false, writable: false,
   });
   thawGraphDefineProperty(globalThis, '__thaw_json_host_object_integrity', {
     value: (object, freeze) => {
@@ -376,11 +411,13 @@
   const nativeDateSetTime = thawGraphDateConstructor.prototype.setTime;
   globalThis.__thaw_json_host_date_set = (value, timestamp) =>
     thawGraphString(thawGraphApply(nativeDateSetTime, value, [timestamp]));
+  const thawNativeWrapperSet = new WeakSet();
   globalThis.__thaw_json_host_query = (value, operation) => {
     switch (operation) {
       case 0: return typeof value;
       case 1: return value ? '1' : '0';
-      case 2: return thawGraphString(thawGraphNumber(value));
+      // 2: String(value); numeric coercion has its own slot (16).
+      case 2: return thawGraphString(value);
       case 3: return thawGraphStringify(thawGraphString(value));
       case 4: return thawGraphArrayIsArray(value) ? '1' : '0';
       case 5: return value === undefined ? '1' : '0';
@@ -409,6 +446,14 @@
         return thawGraphObjectIs(number, -0) ? '-0' : thawGraphString(number);
       }
       case 15: return thawHostStringUnits(value);
+      // 17: a native fixed-layout owner wrapper (cannot grow, delete or hold `undefined`).
+      case 17: return thawGraphApply(thawNapiWeakSetHas, thawNativeWrapperSet, [value]) ? '1' : '0';
+      // 18/19/20: the wrapper's native integrity state (frozen / sealed / non-extensible).
+      case 18: return thawGraphObjectIsFrozen(value) ? '1' : '0';
+      case 19: return thawGraphObjectIsSealed(value) ? '1' : '0';
+      case 20: return thawNapiReflectIsExtensible(value) ? '0' : '1';
+      case 22:
+        return thawDateApply(thawHostIsPrototypeOf, thawHostErrorPrototype, [value]) ? '1' : '0';
       default: throw new thawGraphTypeError('Invalid native host query');
     }
   };
@@ -682,8 +727,8 @@
   const thawGraphNapiFunctionHandles = thawNapiSafeWeakMap();
   const thawGraphForeignReceiver = value => value !== null
     && (typeof value === 'object' || typeof value === 'function')
-    && thawGraphApply(thawGraphWeakMapGet, thawGraphNapiHandles, [value]) === undefined
-    && thawGraphApply(thawGraphWeakMapGet, thawGraphNapiFunctionHandles, [value]) === undefined
+    && thawGraphNapiHandles.get(value) === undefined
+    && thawGraphNapiFunctionHandles.get(value) === undefined
     ? value : undefined;
   thawGraphDefineProperty(globalThis, '__thaw_json_graph_native_pair_matches', {
     value: (value, nativeHandle, kind) => {
@@ -762,7 +807,7 @@
     var id = __thaw_napi_reference_ids.get(value);
     if (id && active.has(value)) return { __thaw_napi_ref__: id };
     var fresh = !id; if (fresh) { if (__thaw_napi_reference_allocator.next >= 9007199254740991) throw new thawNapiRangeErrorConstructor('native reference limit exceeded'); id = ++__thaw_napi_reference_allocator.next; __thaw_napi_reference_ids.set(value, id); }
-    if (typeof value === 'function') { if (fresh) { __thaw_napi_reference_values.set(id, thawNapiWeakRef ? new thawNapiWeakRef(value) : value); thawGraphDefineProperty(globalThis, '__thaw_napi_reference_' + id, { value: function() { var args = thawGraphApply(thawNapiArraySlice, arguments, []), meta = thawGraphApply(thawNapiArrayShift, args, []), receiver; if (meta && meta.__thaw_napi_argument_handles__) thawNapiArrayEach(meta.__thaw_napi_argument_handles__, function(entry) { var path = entry[0], parent = args; for (var i = 0; i + 1 < path.length; i++) { var own = thawGraphGetOwnPropertyDescriptor(parent, path[i]); if (!own) throw new thawGraphTypeError('invalid native callback path'); parent = own.value; } thawGraphDefineProperty(parent, path[path.length - 1], { value: __thaw_napi_proxy(entry[1]), writable: true, enumerable: true, configurable: true }); }); if (meta && meta.__thaw_napi_this_handle__) { var stored = __thaw_napi_proxies.get(meta.__thaw_napi_this_handle__); receiver = thawNapiDeref(stored); if (!receiver) receiver = __thaw_napi_proxy(meta.__thaw_napi_this_handle__); } var returned = thawGraphApply(value, receiver, args); return typeof returned === 'function' ? __thaw_napi_argument(returned) : returned; }, writable: false, configurable: false }); } return { __thaw_napi_function__: id }; }
+    if (typeof value === 'function') { if (fresh) { __thaw_napi_reference_values.set(id, thawNapiWeakRef ? new thawNapiWeakRef(value) : value); thawGraphDefineProperty(globalThis, '__thaw_napi_reference_' + id, { value: function() { var args = thawGraphApply(thawNapiArraySlice, arguments, []), meta = thawGraphApply(thawNapiArrayShift, args, []), receiver; if (meta && meta.__thaw_napi_argument_handles__) thawNapiArrayEach(meta.__thaw_napi_argument_handles__, function(entry) { var path = entry[0], parent = args; for (var i = 0; i + 1 < path.length; i++) { var own = thawGraphGetOwnPropertyDescriptor(parent, path[i]); if (!own) throw new thawGraphTypeError('invalid native callback path'); parent = own.value; } thawGraphDefineProperty(parent, path[path.length - 1], { value: __thaw_napi_proxy(entry[1]), writable: true, enumerable: true, configurable: true }); }); if (meta === true) receiver = thawGraphApply(thawNapiArrayShift, args, []); if (meta && meta.__thaw_napi_this_handle__) { var stored = __thaw_napi_proxies.get(meta.__thaw_napi_this_handle__); receiver = thawNapiDeref(stored); if (!receiver) receiver = __thaw_napi_proxy(meta.__thaw_napi_this_handle__); } var returned = thawGraphApply(value, receiver, args); return typeof returned === 'function' ? __thaw_napi_argument(returned) : returned; }, writable: false, configurable: false }); } return { __thaw_napi_function__: id }; }
     __thaw_napi_reference_values.set(id, thawNapiWeakRef ? new thawNapiWeakRef(value) : value);
     if (fresh && __thaw_napi_finalizers) __thaw_napi_finalizers.register(value, id);
     active.add(value);
@@ -846,6 +891,14 @@
         throw new thawGraphTypeError('Cannot synchronize native array length attributes');
     };
     var fallbackGetters = thawNapiSafeMap(), fallbackSetters = thawNapiSafeMap();
+    var sourceFunctions = thawNapiSafeMap();
+    var sourceFunction = function(source) {
+      var cacheKey = thawGraphStringify(source), cached = sourceFunctions.get(cacheKey);
+      if (cached !== undefined) return cached;
+      var decoded = thawGraphDescriptorSource(source);
+      if (typeof decoded === 'function') sourceFunctions.set(cacheKey, decoded);
+      return decoded;
+    };
     var descriptor = function(name) {
       if (arrayKind.value && name === 'length') {
         syncArrayLength();
@@ -853,8 +906,11 @@
       }
       var meta = graphProperty('descriptor_graph', [name]);
       if (!meta) { var stale = thawNapiReflectGetOwnPropertyDescriptor(target, name); if (stale && stale.configurable) thawNapiReflectDeleteProperty(target, name); fallbackGetters.delete(name); fallbackSetters.delete(name); return undefined; }
-      var getter = meta.getter_source ? thawGraphDescriptorSource(meta.getter_source) : undefined;
-      var setter = meta.setter_source ? thawGraphDescriptorSource(meta.setter_source) : undefined;
+      // A native accessor function must keep one identity across descriptor reads:
+      // a nonconfigurable accessor materialized on the Proxy target may not change
+      // its getter or setter later.
+      var getter = meta.getter_source ? sourceFunction(meta.getter_source) : undefined;
+      var setter = meta.setter_source ? sourceFunction(meta.setter_source) : undefined;
       if (meta.accessor && meta.getter && !getter) {
         getter = fallbackGetters.get(name);
         if (!getter) { getter = function() { return read(name, this); }; fallbackGetters.set(name, getter); }
@@ -862,6 +918,16 @@
       if (meta.accessor && meta.setter && !setter) {
         setter = fallbackSetters.get(name);
         if (!setter) { setter = function(value) { graphProperty('set_graph', [name, value, this]); }; fallbackSetters.set(name, setter); }
+      }
+      // Proxy invariant: a nonconfigurable accessor already materialized on the
+      // target keeps its exact getter/setter. The native accessor can no longer
+      // change either (it is nonconfigurable natively too), so reuse them.
+      if (meta.accessor) {
+        var current = thawNapiReflectGetOwnPropertyDescriptor(target, name);
+        if (current && !current.configurable && !thawGraphOwn(current, 'value')) {
+          getter = meta.getter ? current.get : undefined;
+          setter = meta.setter ? current.set : undefined;
+        }
       }
       var desc = meta.accessor ? { configurable: !!meta.configurable, enumerable: !!meta.enumerable, get: getter, set: setter } : { configurable: !!meta.configurable, enumerable: !!meta.enumerable, writable: !!meta.writable, value: read(name) };
       if (!meta.configurable) { if (!thawNapiReflectDefineProperty(target, name, desc)) throw new thawGraphTypeError('Cannot materialize native descriptor'); return thawNapiReflectGetOwnPropertyDescriptor(target, name); }
@@ -938,11 +1004,10 @@
     if (state) state.adoptSymbol(id, value);
     return value;
   };
-  const thawNapiSymbolRegister = (owner, value) => {
-      const state = thawGraphNapiSymbolState(owner);
-      if (!state) throw new thawGraphTypeError('Unknown native Symbol owner');
-      return state.registerSymbol(value);
-    };
+  // Only native code can reach this private operation, and a loaded or caller-owned
+  // environment names its own owner ID: create the owner's JS state on first use.
+  const thawNapiSymbolRegister = (owner, value) =>
+      thawGraphNapiState(owner).registerSymbol(value);
   const thawNapiSymbolLive = (owner, id) => {
       const state = thawGraphNapiSymbolState(owner);
       if (!state) throw new thawGraphTypeError('Unknown native Symbol owner');
@@ -952,11 +1017,26 @@
       const state = thawGraphNapiSymbolState(owner);
       return !!state && state.symbolPin(id, pin);
     };
+  const thawNapiSymbolGet = (owner, id) => {
+      const state = thawGraphNapiSymbolState(owner);
+      const symbol = state && state.symbolForNative(id);
+      if (typeof symbol === 'symbol') return symbol;
+      // Stable graph IDs are not native N-API handles. Resolve through the
+      // existing owner-checked operation and invoke the captured materializer
+      // so coercion sees the actual native Symbol and its description.
+      const resolved = thawGraphParse(thawGraphNapiBridgeHandle('symbol_handle',
+        id, '', '[]'));
+      if (!resolved || resolved.__thaw_error__ || !resolved.value
+        || typeof resolved.value !== 'string'
+        || thawGraphNapiOwnerOfHandle(resolved.value) !== thawGraphString(owner))
+        throw new thawGraphTypeError('Native Symbol owner is unavailable');
+      return thawHostNativeSymbolMake(resolved.value);
+    };
   // Register the owner operations once with Rust userdata, then remove every
   // bootstrap capability from the realm before user code can run. The native
   // positive root remains owned by the captured finalizer callback only.
   globalThis.__thaw_napi_graph_symbol_install(
-    thawNapiSymbolRegister, thawNapiSymbolLive, thawNapiSymbolPin);
+    thawNapiSymbolRegister, thawNapiSymbolLive, thawNapiSymbolPin, thawNapiSymbolGet);
   for (const name of ['__thaw_napi_graph_symbol_install',
     '__thaw_napi_graph_symbol_pin', '__thaw_napi_graph_symbol_unpin']) {
     if (!thawNapiBootstrapDeleteProperty(globalThis, name))
@@ -1019,6 +1099,7 @@
     const symbolHandles = new thawGraphMapConstructor();
     const retained = [];
     const retainedNapi = [];
+    let forcedRootLease = 0;
     const retain = value => {
       const handle = thawGraphRetain(value);
       thawGraphApply(thawGraphArrayPush, retained, [handle]);
@@ -1038,6 +1119,18 @@
       return thawGraphString(handle);
     };
     try {
+    if (handleMask === 0 && live === true && plainResult === false
+      && forceHandle !== undefined && root === forceHandle
+      && root !== null && (typeof root === 'object' || typeof root === 'function'
+        || typeof root === 'symbol')) {
+      forcedRootLease = thawGraphRetain(root);
+      if (!thawGraphNumberIsFinite(forcedRootLease)
+        || !thawGraphNumberIsSafeInteger(forcedRootLease) || forcedRootLease <= 0)
+        throw new thawGraphTypeError('Cannot retain graph handle');
+      const handleText = thawGraphString(forcedRootLease);
+      return '{"root":{"r":0},"nodes":[{"hdl":' + handleText
+        + '}],"leases":[' + handleText + '],"napiLeases":[]}';
+    }
     if (thawGraphArrayIsArray(root) && handleMask && !live) {
       thawGraphApply(thawGraphArrayForEach, root, [(item, index) => {
         if ((handleMask & (1 << index)) !== 0) {
@@ -1066,7 +1159,9 @@
       // Compiled result calls return JSON data, not live function handles.
       // Preserve JSON's undefined-like treatment without creating a lease
       // that the ordinary result path has no registered Host owner for.
-      if (plainResult && (typeof value === 'function' || typeof value === 'symbol'))
+      if (plainResult && typeof value === 'function')
+        return { u: 1, fn: typeof value.name === 'string' ? value.name : '' };
+      if (plainResult && typeof value === 'symbol')
         return { u: 1 };
       if (plainResult && typeof value === 'bigint')
         throw new thawGraphTypeError('Do not know how to serialize a BigInt');
@@ -1124,13 +1219,12 @@
         thawGraphApply(thawGraphArrayPush, nodes, [{ hdl: retainSymbol(value) }]);
       } else if (thawGraphApply(thawGraphWeakMapHas, handleCarriers, [value])) {
         thawGraphApply(thawGraphArrayPush, nodes, [{ hdl: thawGraphApply(thawGraphWeakMapGet, handleCarriers, [value]) }]);
-      } else if (thawGraphApply(thawGraphWeakMapHas, thawGraphNapiFunctionHandles, [value])) {
+      } else if (thawGraphNapiFunctionHandles.has(value)) {
         thawGraphApply(thawGraphArrayPush, nodes,
-          [{ nfn: retainNative(thawGraphApply(thawGraphWeakMapGet,
-            thawGraphNapiFunctionHandles, [value])), hdl: retain(value) }]);
-      } else if (thawGraphApply(thawGraphWeakMapHas, thawGraphNapiHandles, [value])) {
+          [{ nfn: retainNative(thawGraphNapiFunctionHandles.get(value)), hdl: retain(value) }]);
+      } else if (thawGraphNapiHandles.has(value)) {
         thawGraphApply(thawGraphArrayPush, nodes,
-          [{ nh: retainNative(thawGraphApply(thawGraphWeakMapGet, thawGraphNapiHandles, [value])) }]);
+          [{ nh: retainNative(thawGraphNapiHandles.get(value)) }]);
       } else if (live && index !== 0) {
         // Only the wrapper-created argument array is copied. Replacer
         // holders and values stay live: a Proxy/getter must not be visited
@@ -1207,6 +1301,7 @@
     return thawGraphStringify({ root: rootToken, nodes, leases: retained,
       napiLeases: retainedNapi });
     } catch (error) {
+      if (forcedRootLease !== 0) thawGraphRelease(forcedRootLease);
       for (let index = 0; index < retained.length; index++)
         thawGraphRelease(retained[index]);
       for (let index = 0; index < retainedNapi.length; index++)
@@ -1439,19 +1534,8 @@
         // The engine supplies the actual new.target. Carry it in the same
         // owned graph as the arguments; no mutable side channel may be
         // overwritten by a reentrant constructor/prototype getter.
-        // QuickJS's GetFunctionRealm walks through a Proxy to its target.
-        // This temporary Proxy suppresses only the probe's prototype Get;
-        // the native constructor below performs the one observable Get on
-        // the real newTarget. Object construction then yields the fallback
-        // Object.prototype belonging to newTarget's actual realm.
-        const realmProbe = new thawGraphProxy(newTarget, {
-          get(target, key, receiver) {
-            return key === 'prototype' ? undefined
-              : thawGraphReflectGet(target, key, receiver);
-          },
-        });
         const realmObject = thawNapiReflectConstruct(thawNapiIntrinsicObject,
-          [], realmProbe);
+          [], newTarget);
         const fallback = thawNapiReflectGetPrototypeOf(realmObject);
         const values = [newTarget, fallback];
         for (let index = 0; index < args.length; index++)
@@ -1596,7 +1680,7 @@
         return thawGraphPreventNativeExtensions(graphProperty, proxy, target);
       },
     });
-    thawGraphApply(thawGraphWeakMapSet, thawGraphNapiFunctionHandles, [proxy, handle]);
+    thawGraphNapiFunctionHandles.set(proxy, handle);
     const entry = thawNapiWeakRef ? new thawNapiWeakRef(proxy) : proxy;
     thawGraphApply(thawGraphMapSet, thawGraphNapiFunctions, [handle, entry]);
     if (thawGraphNapiFunctionFinalizer)
@@ -1675,6 +1759,11 @@
       if (own(token, 'v')) {
         if (token.v !== null && typeof token.v === 'object')
           throw new thawGraphTypeError('Invalid native JSON graph scalar');
+        // A well-known symbol crosses as its private `"\u001f@@name"` string
+        // token (the JSON reviver revives it the same way); re-key it here so
+        // a dynamic `defineProperty`/`fromEntries` key is the real symbol.
+        if (typeof token.v === 'string' && token.v.charCodeAt(0) === 0x1f
+            && token.v.startsWith('\u001f@@')) return globalThis.__thaw_property_key(token.v);
         return token.v;
       }
       if (own(token, 'u') && token.u === 1) return undefined;
@@ -1709,6 +1798,14 @@
         return thawGraphNumber(token.nf);
       throw new thawGraphTypeError('Invalid native JSON graph token');
     };
+    if (thawGraphArrayIsArray(graph.origins)) {
+      thawGraphApply(thawGraphArrayForEach, graph.origins, [(serial, index) => {
+        const node = graph.nodes[index];
+        if (thawGraphNumberIsSafeInteger(serial) && serial > 0 && node
+          && (own(node, 'a') || own(node, 'o')))
+          thawDateApply(thawOriginSerialSet, thawOriginSerials, [nodes[index], serial]);
+      }]);
+    }
     thawGraphApply(thawGraphArrayForEach, graph.nodes, [(node, index) => {
       if (own(node, 'a')) {
         thawGraphApply(thawGraphArrayForEach, node.a, [(token, slot) => {
@@ -1811,7 +1908,7 @@
     return response;
   };
   thawGraphDefineProperty(globalThis, '__thaw_object_with_native_getters', {
-    value: (keys, readable, writable, accessors, ...callbacks) => {
+    value: (keys, readable, writable, accessors, methods, ...callbacks) => {
       const target = {};
       const positions = new thawGraphMapConstructor();
       for (let i = 0; i < keys.length; i++) {
@@ -1834,6 +1931,15 @@
       const stateReceiver = thawGraphObjectCreate(null);
       let wrapper;
       const read = index => thawGraphApply(callbacks[index * 2], wrapper, []);
+      // A receiver-aware method reads as one stable function per wrapper. Each call rebinds to
+      // the call's own receiver when that is another projected owner (`m.call(otherView)`).
+      const methodFunctions = [];
+      const method = index => methodFunctions[index] ??= thawGraphDefineProperty(function (...args) {
+        const receiver = thawGraphApply(thawProjectedReceiverHas, thawProjectedReceivers, [this])
+          ? this : wrapper;
+        return thawGraphApply(thawGraphApply(callbacks[index * 2], receiver, []), undefined, args);
+      }, 'name', { value: keys[index], configurable: true });
+      const value = index => methods[index] ? method(index) : read(index);
       const write = (index, value) => thawGraphApply(callbacks[index * 2 + 1], wrapper, [value]);
       const defineWrite = (index, value, requested) =>
         thawGraphApply(defineWrites[index], wrapper, [value, requested]);
@@ -1867,7 +1973,7 @@
           } else if (current.configurable || current.writable) {
             const writableNow = !!(bits & 1) && !nativeFrozen;
             const update = { configurable, enumerable, writable: writableNow };
-            if (!writableNow || !configurable) update.value = read(i);
+            if (!writableNow || !configurable) update.value = value(i);
             thawGraphReflectDefineProperty(target, key, update);
           }
         }
@@ -1883,7 +1989,7 @@
           if (index === undefined) return thawGraphReflectGet(target, key, receiver);
           if (accessors[index]) return thawGraphReflectGet(target, key, receiver);
           const descriptor = thawGraphReflectGetOwnPropertyDescriptor(target, key);
-          return descriptor.configurable || descriptor.writable ? read(index) : descriptor.value;
+          return descriptor.configurable || descriptor.writable ? value(index) : descriptor.value;
         },
         set(_target, key, value, receiver) {
           sync();
@@ -1907,7 +2013,7 @@
           const descriptor = thawGraphReflectGetOwnPropertyDescriptor(target, key);
           const index = thawGraphApply(thawGraphMapGet, positions, [key]);
           if (index === undefined || accessors[index] || !descriptor) return descriptor;
-          return { value: descriptor.configurable || descriptor.writable ? read(index) : descriptor.value,
+          return { value: descriptor.configurable || descriptor.writable ? value(index) : descriptor.value,
             writable: descriptor.writable, enumerable: descriptor.enumerable,
             configurable: descriptor.configurable };
         },
@@ -1947,7 +2053,7 @@
             // write. Configurable non-writable fields accept a new value via
             // DefineOwnProperty, unlike ordinary assignment.
             if (!(current & 1) && !(current & 4)) {
-              if (!thawGraphObjectIs(descriptor.value, read(index))) return false;
+              if (!thawGraphObjectIs(descriptor.value, value(index))) return false;
             } else {
               if (!defineWrite(index, descriptor.value, requested)) return false;
             }
@@ -1955,7 +2061,7 @@
           // A fixed field can coerce the written value. Once the target
           // becomes non-configurable and non-writable, Proxy invariants need
           // its actual stored value, including for an attributes-only update.
-          if (!accessors[index]) updated.value = read(index);
+          if (!accessors[index]) updated.value = value(index);
           if (!thawGraphApply(setFlags, stateReceiver, [key, requested])) return false;
           if (!thawGraphReflectDefineProperty(target, key, updated)) return false;
           if (thawGraphObjectIsFrozen(target)) thawGraphApply(setState, stateReceiver, [3]);
@@ -1963,11 +2069,16 @@
           return true;
         },
       });
+      let hasAccessor = false;
+      for (let i = 0; i < keys.length; i++) if (accessors[i]) hasAccessor = true;
+      if (!hasAccessor && accessors[keys.length] !== true) thawGraphApply(thawNapiWeakSetAdd, thawNativeWrapperSet, [wrapper]);
+      thawGraphApply(thawProjectedReceiverAdd, thawProjectedReceivers, [wrapper]);
       return wrapper;
     },
     writable: false, configurable: false,
   });
-  globalThis.__thaw_object_from_operations = (kinds, keys, values, ...callbacks) => {
+  globalThis.__thaw_object_from_operations = (kinds, keysText, keyKinds, values, ...callbacks) => {
+    const keys = thawGraphParse(keysText);
     const object = {};
     let callback = 0;
     for (let i = 0; i < kinds.length; i++) {
@@ -1983,7 +2094,7 @@
         }
         continue;
       }
-      const key = keys[i];
+      const key = keyKinds[i] ? globalThis.__thaw_property_key(keys[i]) : keys[i];
       if (kind === 'data') {
         Object.defineProperty(object, key, {
           value: values[i], writable: true, enumerable: true, configurable: true,
@@ -2009,7 +2120,7 @@
     }
     return object;
   };
-  globalThis.__thaw_accessor_descriptor = (readable, writable, getter, setter, flags = 7) => ({
+  globalThis.__thaw_accessor_descriptor = (readable, writable, flags, getter, setter) => ({
     get: readable ? getter : undefined,
     set: writable ? setter : undefined,
     enumerable: !!(flags & 2),
@@ -2107,6 +2218,26 @@
     }
     return JSON.stringify(out);
   };
+  // An uncaught Worker exception crosses to the parent as `\u0006` + this JSON, so the 'error' event can carry the
+  // same class, message, stack, own properties and cause the Worker saw (`worker_threads`, registry workers.rs).
+  globalThis.__thaw_worker_error_wire = function (error) {
+    if (error === null || (typeof error !== 'object' && typeof error !== 'function')) {
+      return JSON.stringify({ thrown: typeof error === 'string' ? error : String(error), primitive: typeof error });
+    }
+    let properties = {};
+    try { properties = JSON.parse(globalThis.__thaw_error_properties_json(error) || '{}'); } catch (_) {}
+    const text = value => (typeof value === 'string' ? value : undefined);
+    const name = text(error.name), message = text(error.message);
+    let stack = text(error.stack);
+    // QuickJS stacks carry only the frames; Node's start with the `Name: message` header.
+    if (stack !== undefined && name !== undefined) {
+      const header = message ? `${name}: ${message}` : name;
+      if (!stack.startsWith(header)) stack = `${header}\n${stack}`;
+    }
+    const wire = { name, message, stack, properties };
+    if (error.cause !== undefined) wire.cause = JSON.parse(globalThis.__thaw_worker_error_wire(error.cause));
+    return JSON.stringify(wire);
+  };
   globalThis.__thaw_instanceof_dynamic_value = (value, target) =>
     typeof target === 'function' ? value instanceof target : false;
   // Rebuilds a real Error from the tagged exception string a native
@@ -2158,7 +2289,7 @@
       ? chain.slice(1).split('\u001f')[0] : chain.split('$')[0];
     return { name, display, original, suffix: body.slice(cursor) };
   };
-  globalThis.__thaw_error_from_tagged = function (raw) {
+  const thawErrorFromTagged = function (raw) {
     const frame = globalThis.__thaw_error_frame_parts(raw);
     if (frame) {
       const error = new Error(frame.original === null ? frame.display : frame.original);
@@ -2201,6 +2332,9 @@
     }
     return error;
   };
+  globalThis.__thaw_error_from_tagged = function (raw) {
+    return thawErrorFromTagged(raw);
+  };
   globalThis.__thaw_is_buffer_dynamic_value = value => Buffer.isBuffer(value);
   const timers = new Map();
   const nativeDateNow = Date.now.bind(Date);
@@ -2232,32 +2366,52 @@
   };
   const normalizeDelay = value => {
     const number = Number(value);
-    if (!Number.isFinite(number) || number < 0) return 0;
-    return Math.min(Math.trunc(number), 2147483647);
+    // Like Node, a delay beyond the 32-bit limit fires after 1ms (with a warning), it is not clamped.
+    if (number > 2147483647) {
+      if (typeof process !== 'undefined' && process.emitWarning) process.emitWarning(`${number} does not fit into a 32-bit signed integer.\nTimeout duration was set to 1.`, 'TimeoutOverflowWarning');
+      return 1;
+    }
+    if (!(number >= 0)) return 0;
+    return Math.trunc(number);
   };
-  const timerHandle = id => ({
+  const timerHandle = (id, record) => ({
     ref() { const timer = timers.get(id); if (timer && !timer.clock) timer.refed = true; return this; },
     unref() { const timer = timers.get(id); if (timer && !timer.clock) timer.refed = false; return this; },
     hasRef() { const timer = timers.get(id); return Boolean(timer && (timer.clock || timer.refed)); },
-    refresh() { const timer = timers.get(id); if (timer && !timer.clock) timer.due = nativeDateNow() + timer.milliseconds; return this; },
-    close() { timers.delete(id); },
+    // A one-shot timer that already fired can be re-armed; a cleared one cannot.
+    refresh() {
+      let timer = timers.get(id);
+      if (!timer && record && !record.cancelled && !record.repeat) { timer = record; timers.set(id, timer); }
+      if (timer && !timer.clock) timer.due = nativeDateNow() + timer.milliseconds;
+      return this;
+    },
+    close() { const timer = timers.get(id); if (timer) timer.cancelled = true; else if (record) record.cancelled = true; timers.delete(id); destroyTimerResource(timer || record); },
     [Symbol.toPrimitive]() { return id; }
   });
-  const schedule = (callback, delay, repeat, args, refed = true, api = 'setTimeout', forceReal = false) => {
+  const schedule = (callback, delay, repeat, args, refed = true, api = 'setTimeout', forceReal = false, alreadyValidatedDelay = false) => {
     if (typeof callback !== 'function') {
       throw new TypeError('timer callback must be a function');
     }
     const id = nextTimerId++;
-    const milliseconds = normalizeDelay(delay);
+    const milliseconds = alreadyValidatedDelay ? delay : normalizeDelay(delay);
     const clock = forceReal ? null : activeMockClock(api);
-    timers.set(id, { callback, args, repeat, milliseconds, refed,
+    const record = { callback, args, repeat, milliseconds, refed,
                      asyncContext: thawAsyncContext.get(),
-                     clock, due: (clock ? clock.now : nativeDateNow()) + (clock && api === 'setImmediate' ? -1 : milliseconds) });
-    return timerHandle(id);
+                     clock, due: (clock ? clock.now : nativeDateNow()) + (clock && api === 'setImmediate' ? -1 : milliseconds) };
+    timers.set(id, record);
+    const handle = timerHandle(id, record);
+    const hookBus = globalThis.__thaw_async_hook_bus;
+    if (hookBus && hookBus.enabled && !forceReal)
+      record.asyncId = hookBus.init(api === 'setImmediate' ? 'Immediate' : 'Timeout', handle);
+    return handle;
+  };
+  // A timer that is cleared (or closed) before it fires is destroyed for async_hooks too.
+  const destroyTimerResource = timer => {
+    if (timer && timer.asyncId) globalThis.__thaw_async_hook_bus.destroy(timer.asyncId);
   };
   globalThis.setTimeout = (callback, delay = 0, ...args) =>
     schedule(callback, delay, false, args, true, 'setTimeout');
-  globalThis.clearTimeout = id => { timers.delete(Number(id)); };
+  globalThis.clearTimeout = id => { const key = Number(id), timer = timers.get(key); if (timer) timer.cancelled = true; timers.delete(key); destroyTimerResource(timer); };
   globalThis.setInterval = (callback, delay = 0, ...args) =>
     schedule(callback, delay, true, args, true, 'setInterval');
   globalThis.clearInterval = globalThis.clearTimeout;
@@ -2271,6 +2425,8 @@
     if (timer) timer.refed = Boolean(refed);
   };
   const invokeTimer = (timer, propagate = false) => {
+    const hookBus = timer.asyncId ? globalThis.__thaw_async_hook_bus : null;
+    if (hookBus) hookBus.before(timer.asyncId);
     const previousAsyncContext = thawAsyncContext.swap(timer.asyncContext);
     try {
       if (propagate) return timer.callback(...timer.args);
@@ -2280,7 +2436,13 @@
         process.emit('uncaughtExceptionMonitor', error, 'uncaughtException');
         if (!process.emit('uncaughtException', error, 'uncaughtException')) throw error;
       }
-    } finally { thawAsyncContext.swap(previousAsyncContext); }
+    } finally {
+      thawAsyncContext.swap(previousAsyncContext);
+      if (hookBus) {
+        hookBus.after(timer.asyncId);
+        if (!timer.repeat) hookBus.destroy(timer.asyncId);
+      }
+    }
   };
   const nextMockTimer = (clock, through) => {
     let selected = null;
@@ -2348,15 +2510,32 @@
     refreshMockDate();
   };
   globalThis.__thaw_test_real_now = nativeDateNow;
+  // An exception that no caller can receive (a microtask, an event listener)
+  // is an uncaught exception: give 'uncaughtException' handlers the first
+  // chance, otherwise rethrow from a timer turn so the host sees it.
+  const reportUncaught = error => {
+    if (typeof process !== 'undefined' && process.emit) {
+      process.emit('uncaughtExceptionMonitor', error, 'uncaughtException');
+      if (process.emit('uncaughtException', error, 'uncaughtException')) return;
+    }
+    schedule(() => { throw error; }, 0, false, [], true, 'setImmediate', true);
+  };
+  Object.defineProperty(globalThis, '__thaw_report_uncaught', { value: reportUncaught, writable: true, configurable: true });
   globalThis.queueMicrotask = callback => {
     if (typeof callback !== 'function') {
       throw new TypeError('microtask callback must be a function');
     }
-    Promise.resolve().then(callback);
+    Promise.resolve().then(() => { try { callback(); } catch (error) { reportUncaught(error); } });
   };
   const consoleInspect = value => {
     if (typeof value === 'string') return value;
     if (typeof value === 'symbol' || typeof value === 'bigint') return String(value);
+    // An Error stringifies to `{}` under JSON.stringify; keep its name/message and own properties.
+    if (value instanceof Error) {
+      let text = String(value);
+      try { const own = JSON.stringify(value); if (own && own !== '{}') text += ' ' + own; } catch (_) {}
+      return text;
+    }
     try { const encoded = JSON.stringify(value); return encoded === undefined ? String(value) : encoded; }
     catch (_) { return '[Circular]'; }
   };
@@ -2462,7 +2641,10 @@
     if (typeof callback !== 'function') {
       throw new TypeError('process.nextTick callback must be a function');
     }
-    nextTickQueue.push({ callback, args, asyncContext: thawAsyncContext.get() });
+    const tick = { callback, args, asyncContext: thawAsyncContext.get() };
+    const hookBus = globalThis.__thaw_async_hook_bus;
+    if (hookBus && hookBus.enabled) tick.asyncId = hookBus.init('TickObject', { callback, args });
+    nextTickQueue.push(tick);
   };
   globalThis.__thaw_next_tick_queue_pending = () => nextTickQueue.length > 0;
   // Returns whether it actually ran anything -- callers that poll "is
@@ -2480,7 +2662,9 @@
       let index = 0;
       try {
         for (; index < batch.length; index++) {
-          const { callback, args, asyncContext } = batch[index];
+          const { callback, args, asyncContext, asyncId } = batch[index];
+          const hookBus = asyncId ? globalThis.__thaw_async_hook_bus : null;
+          if (hookBus) hookBus.before(asyncId);
           const previousAsyncContext = thawAsyncContext.swap(asyncContext);
           try {
             try {
@@ -2493,6 +2677,10 @@
             }
           } finally {
             thawAsyncContext.swap(previousAsyncContext);
+            if (hookBus) {
+              hookBus.after(asyncId);
+              hookBus.destroy(asyncId);
+            }
           }
         }
       } catch (error) {
@@ -2507,7 +2695,7 @@
   if (typeof globalThis.process === 'undefined') globalThis.process = {};
   const hostInfo = typeof globalThis.__thaw_os_identity === 'function'
     ? JSON.parse(globalThis.__thaw_os_identity()) : {};
-  const processStart = Date.now();
+  const processClockNanoseconds = () => thawProcessBigInt(thawProcessMonotonicClock());
   const processListeners = new Map();
   const processOn = (event, listener, once = false) => {
     if (typeof listener !== 'function') throw new TypeError('listener must be a function');
@@ -2520,13 +2708,24 @@
     processListeners.set(name, listeners);
     return globalThis.process;
   };
+  const processRemoveEntry = (name, entry) => {
+    const listeners = processListeners.get(name) || [];
+    const index = listeners.indexOf(entry);
+    if (index === -1) return globalThis.process;
+    listeners.splice(index, 1);
+    processListeners.set(name, listeners);
+    if (listeners.length === 0 && (name === 'SIGINT' || name === 'SIGTERM')) {
+      globalThis.__thaw_process_configure_signal(name, false);
+    }
+    return globalThis.process;
+  };
   const processOff = (event, listener) => {
     const name = String(event);
     const listeners = processListeners.get(name) || [];
-    const remaining = listeners.filter(entry => entry.listener !== listener);
-    processListeners.set(name, remaining);
-    if (remaining.length === 0 && (name === 'SIGINT' || name === 'SIGTERM')) {
-      globalThis.__thaw_process_configure_signal(name, false);
+    for (let index = listeners.length - 1; index >= 0; index--) {
+      if (listeners[index].listener === listener) {
+        return processRemoveEntry(name, listeners[index]);
+      }
     }
     return globalThis.process;
   };
@@ -2534,13 +2733,17 @@
     const name = String(event);
     const listeners = (processListeners.get(name) || []).slice();
     for (const entry of listeners) {
-      if (entry.once) processOff(name, entry.listener);
-      entry.listener(...args);
+      if (entry.once) {
+        if (entry.fired) continue;
+        entry.fired = true;
+        processRemoveEntry(name, entry);
+      }
+      thawDateApply(entry.listener, globalThis.process, args);
     }
     return listeners.length !== 0;
   };
   const hrtime = previous => {
-    const nanoseconds = BigInt(Date.now() - processStart) * 1000000n;
+    const nanoseconds = processClockNanoseconds();
     let seconds = Number(nanoseconds / 1000000000n);
     let remainder = Number(nanoseconds % 1000000000n);
     if (previous !== undefined) {
@@ -2550,11 +2753,14 @@
     }
     return [seconds, remainder];
   };
-  hrtime.bigint = () => BigInt(Date.now() - processStart) * 1000000n;
-  const processApply = Reflect.apply, processBufferFrom = Buffer.from,
+  hrtime.bigint = processClockNanoseconds;
+  // Buffer is defined later (buffer_crypto.js); capture Buffer.from on first use.
+  let processBufferFrom;
+  const processApply = Reflect.apply,
     processIsView = ArrayBuffer.isView, processQueueMicrotask = queueMicrotask,
     processRawWrite = globalThis.__thaw_process_write_bytes, processHexDigits = '0123456789abcdef';
   const processToBytes = (value, encoding) => {
+    processBufferFrom ??= Buffer.from;
     if (typeof value === 'string') return processApply(processBufferFrom, Buffer, [value, encoding || 'utf8']);
     if (processIsView(value)) return processApply(processBufferFrom, Buffer, [value.buffer, value.byteOffset, value.byteLength]);
     throw new TypeError('The chunk argument must be a string, Buffer, TypedArray, or DataView');
@@ -2633,8 +2839,8 @@
     removeListener(name, listener) { return this.off(name, listener); },
     resume() { stdinPaused = false; startStdin(); nextTick(drainStdin); return this; },
     pause() { stdinPaused = true; return this; },
-    ref() { return this; },
-    unref() { return this; }
+    ref() { globalThis.__thaw_process_set_stdin_ref(true); return this; },
+    unref() { globalThis.__thaw_process_set_stdin_ref(false); return this; }
   };
   if (stdin.isTTY) {
     stdin.isRaw = false;
@@ -2646,9 +2852,11 @@
     };
   }
   const previousPlatformPoll = globalThis.__thaw_poll_platform_events;
+  // User code may replace `JSON.parse`; the event-loop poll must not depend on it.
+  const intrinsicJsonParse = JSON.parse;
   globalThis.__thaw_poll_platform_events = () => {
     if (previousPlatformPoll) previousPlatformPoll();
-    stdinPending.push(...JSON.parse(globalThis.__thaw_process_poll_stdin()));
+    stdinPending.push(...intrinsicJsonParse(globalThis.__thaw_process_poll_stdin()));
     drainStdin();
   };
   globalThis.__thaw_run_main_file = filename => {
@@ -2712,7 +2920,11 @@
       globalThis.__thaw_process_exit(status);
     },
     nextTick,
-    uptime: () => (Date.now() - processStart) / 1000,
+    uptime: () => {
+      const nanoseconds = processClockNanoseconds();
+      return Number(nanoseconds / 1000000000n)
+        + Number(nanoseconds % 1000000000n) / 1000000000;
+    },
     hrtime,
     memoryUsage: () => ({ rss: 0, heapTotal: 0, heapUsed: 0, external: 0, arrayBuffers: 0 }),
     cpuUsage: () => ({ user: 0, system: 0 }),

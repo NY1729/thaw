@@ -1,0 +1,19 @@
+{
+  "cases": [
+    {
+      "name": "text-encode-into-native-writes",
+      "expect": "matched",
+      "source": "function main(): void { const encoder = new TextEncoder(); const output = new Uint8Array(5); output.set = (): void => {}; const result = encoder.encodeInto('A😀B', output); console.log(JSON.stringify([result, Array.from(output)])); }"
+    },
+    {
+      "name": "text-decode-real-buffer-sources",
+      "expect": "matched",
+      "source": "function main(): void { const bytes = new Uint8Array([65, 66, 67, 68]); const buffer = bytes.buffer; const view = new DataView(buffer, 1, 2); const shared = new SharedArrayBuffer(2); new Uint8Array(shared).set([88, 89]); let invalid = ''; try { new TextDecoder().decode({ buffer: buffer, byteOffset: 0, byteLength: 4 } as any); } catch (error: any) { invalid = error.name; } console.log(JSON.stringify([new TextDecoder().decode(buffer), new TextDecoder().decode(view), new TextDecoder().decode(shared), invalid])); }"
+    },
+    {
+      "name": "text-decode-fatal-reset",
+      "expect": "matched",
+      "source": "function main(): void { const decoder = new TextDecoder('utf-8', { fatal: true }); const first = decoder.decode(new Uint8Array([65]), { stream: true }); let failed = false; try { decoder.decode(new Uint8Array([255])); } catch (error: any) { failed = error.name === 'TypeError'; } const fresh = decoder.decode(new Uint8Array([239, 187, 191, 66])); console.log(JSON.stringify([first, failed, fresh])); }"
+    }
+  ]
+}

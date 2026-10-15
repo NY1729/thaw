@@ -20,12 +20,25 @@ fn build(
     )
 }
 
+fn path_builtin_name(name: &str) -> Option<&'static str> {
+    match name {
+        "path" | "node:path" => Some("node:path"),
+        "path/posix" | "node:path/posix" => Some("node:path/posix"),
+        "path/win32" | "node:path/win32" => Some("node:path/win32"),
+        _ => None,
+    }
+}
+
 fn registry_import_meta_resolutions(
     registry_dir: &Path,
     packages: &[String],
 ) -> std::collections::HashMap<String, String> {
     let mut resolutions = std::collections::HashMap::new();
     for specifier in packages {
+        if let Some(builtin) = path_builtin_name(specifier) {
+            resolutions.insert(specifier.clone(), builtin.to_string());
+            continue;
+        }
         if specifier.starts_with("node:") {
             resolutions.insert(specifier.clone(), specifier.clone());
             continue;
@@ -316,7 +329,11 @@ fn build_with_native_mode(
     runtime_packages.extend(use_packages.iter().cloned());
     static_packages.extend(use_packages.iter().cloned());
     for (specifier, location) in &external_specifiers {
-        let package = if specifier.starts_with("node:") {
+        let package = if let Some(builtin) = path_builtin_name(specifier) {
+            thaw_registry::resolve_builtin(builtin)
+                .map_err(|error| format!("{location}: {error}"))?;
+            specifier.clone()
+        } else if specifier.starts_with("node:") {
             thaw_registry::resolve_builtin(specifier)
                 .map_err(|error| format!("{location}: {error}"))?;
             specifier.clone()
@@ -422,6 +439,7 @@ fn build_with_native_mode(
     let mut native_addons = resolved_packages
         .iter()
         .filter(|package| runtime_packages.contains(*package))
+        .filter(|package| path_builtin_name(package).is_none())
         .filter_map(|package| thaw_registry::resolve(registry_dir, package).ok()?.native_addon)
         .collect::<Vec<_>>();
     native_addons.sort();
@@ -445,7 +463,9 @@ fn build_with_native_mode(
                 .into(),
         );
     }
-    let quickjs_reasons = quickjs_fallback_reasons(
+    let created_require_live_result =
+        module_graph::uses_created_require_live_result(input, &user_source)?;
+    let mut quickjs_reasons = quickjs_fallback_reasons(
         input,
         &user_source,
         &shim_source,
@@ -453,6 +473,14 @@ fn build_with_native_mode(
         &external_exports,
         &jit_fallback_reasons,
     );
+    if created_require_live_result {
+        quickjs_reasons.push(serde_json::json!({
+            "kind": "dynamic-operation",
+            "operation": "createRequire result handle",
+            "detail": "created-require calls preserve native JavaScript result identity",
+            "source": input.display().to_string(),
+        }));
+    }
     let manifest = serde_json::json!({
         "packages": resolved_packages,
         // Registry fallback wrappers contain `callDynamic(...)` even when a
@@ -461,6 +489,7 @@ fn build_with_native_mode(
         // QuickJS typed symbols are checked separately below.
         "quickjs": shim_source.contains("loadScript(")
             || source_uses_quickjs(&user_source)
+            || created_require_live_result
             || shim_source.contains("__thaw_typed_js_"),
         "quickjs_reasons": quickjs_reasons,
         "napi": shim_source.contains("loadNativeAddonEmbedded(")
@@ -472,7 +501,7 @@ fn build_with_native_mode(
         package_qualifier_identifiers(resolved_packages.iter().map(String::as_str));
     let transform = |source: &str, module_path: &Path, is_override: bool| {
         let input_name = if is_override && source != user_source.as_str() {
-            thaw_parser::common::FileName::Custom(format!("{} (in-memory entry override)", module_path.display()).into())
+            thaw_parser::common::FileName::Custom(format!("{} (in-memory entry override)", module_path.display()))
         } else {
             thaw_parser::common::FileName::Real(module_path.to_path_buf())
         };
@@ -487,7 +516,7 @@ fn build_with_native_mode(
             &input_name,
         )?;
         let qualified_name = if qualified != source {
-            thaw_parser::common::FileName::Custom(format!("{input_name} (registry rewrite stage 1)").into())
+            thaw_parser::common::FileName::Custom(format!("{input_name} (registry rewrite stage 1)"))
         } else {
             input_name
         };
@@ -507,7 +536,7 @@ fn build_with_native_mode(
             &qualified_name,
         )?;
         let methods_name = if methods != qualified {
-            thaw_parser::common::FileName::Custom(format!("{qualified_name} (registry rewrite stage 2)").into())
+            thaw_parser::common::FileName::Custom(format!("{qualified_name} (registry rewrite stage 2)"))
         } else {
             qualified_name
         };

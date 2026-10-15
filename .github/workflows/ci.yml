@@ -26,7 +26,7 @@ jobs:
     env:
       THAW_ACCEPTANCE_OUTPUT_DIR: ${{ github.workspace }}/target/acceptance
       LLVM_SYS_221_PREFIX: /opt/llvm-22
-      CARGO_BUILD_JOBS: "1"
+      CARGO_BUILD_JOBS: "2"
       CARGO_INCREMENTAL: "0"
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_PROFILE_TEST_DEBUG: "0"
@@ -38,6 +38,20 @@ jobs:
           df -h /
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y libuv1-dev
+      - name: Cache runtime static libraries
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/release
+            target/thaw-*
+          # The first key component mirrors thaw-cli/build.rs's runtime fingerprint,
+          # so an unchanged runtime reuses the archives and any other change still
+          # starts from the newest compatible cache through restore-keys.
+          key: thaw-runtime-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/thaw-arena/**', 'crates/thaw-icu-data/**', 'crates/thaw-runtime/**', 'crates/thaw-std/**', 'crates/thaw-jit/**', 'crates/thaw-quickjs/**', 'crates/thaw-napi/**') }}
+          restore-keys: |
+            thaw-runtime-${{ runner.os }}-
       - name: Install LLVM 22
         run: |
           curl -L https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.8/LLVM-22.1.8-Linux-X64.tar.xz -o /tmp/llvm.tar.xz
@@ -66,8 +80,6 @@ jobs:
           cargo clean
           cargo test --workspace --exclude thaw-cli --exclude thaw-llvm --exclude thaw-registry
           cargo test -p thaw-registry -- --test-threads=1
-          cargo test -p thaw-llvm -- --test-threads=1
-          cargo test -p thaw-cli -- --test-threads=1
       - name: Install Prisma example
         run: npm ci --prefix examples/hono-react-prisma-board
       - name: Test Hono, Prisma, and PostgreSQL
@@ -84,6 +96,70 @@ jobs:
           path: target/acceptance/*.json
           if-no-files-found: ignore
 
+  engine-tests:
+    strategy:
+      fail-fast: false
+      matrix:
+        crate: [thaw-llvm, thaw-cli]
+        shard: [0, 1, 2, 3]
+    runs-on: ubuntu-latest
+    env:
+      LLVM_SYS_221_PREFIX: /opt/llvm-22
+      LD_LIBRARY_PATH: /opt/llvm-22/lib
+      CARGO_BUILD_JOBS: "2"
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Free disk space
+        run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libuv1-dev
+      - name: Cache runtime static libraries
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/release
+            target/thaw-*
+          # The first key component mirrors thaw-cli/build.rs's runtime fingerprint,
+          # so an unchanged runtime reuses the archives and any other change still
+          # starts from the newest compatible cache through restore-keys.
+          key: thaw-runtime-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/thaw-arena/**', 'crates/thaw-icu-data/**', 'crates/thaw-runtime/**', 'crates/thaw-std/**', 'crates/thaw-jit/**', 'crates/thaw-quickjs/**', 'crates/thaw-napi/**') }}
+          restore-keys: |
+            thaw-runtime-${{ runner.os }}-
+      - name: Install LLVM 22
+        run: |
+          curl -L https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.8/LLVM-22.1.8-Linux-X64.tar.xz -o /tmp/llvm.tar.xz
+          echo "df0e1ecf16caf3489a272a5eea4eec9b0d82878f6477fa309504f918a0006384  /tmp/llvm.tar.xz" | sha256sum -c -
+          sudo mkdir -p /opt/llvm-22
+          sudo tar -xJf /tmp/llvm.tar.xz -C /opt/llvm-22 --strip-components=1
+      - name: Test ${{ matrix.crate }} (shard ${{ matrix.shard }} of 4)
+        env:
+          CRATE: ${{ matrix.crate }}
+          SHARD: ${{ matrix.shard }}
+        run: |
+          # The whole test binary used to run in one job (about half an hour for
+          # thaw-llvm alone). Each shard builds the binary once and runs its own
+          # quarter of the tests in one process, so cross-test interference inside
+          # a process is still exercised.
+          listing=$(cargo test -p "$CRATE" -- --list) || exit 1
+          mapfile -t tests < <(sed -n 's/: test$//p' <<< "$listing")
+          if (( ${#tests[@]} == 0 )); then
+            echo "No $CRATE tests were listed" >&2
+            exit 1
+          fi
+          selected=()
+          for index in "${!tests[@]}"; do
+            if (( index % 4 == SHARD )); then
+              selected+=("${tests[$index]}")
+            fi
+          done
+          echo "Running ${#selected[@]} of ${#tests[@]} $CRATE tests"
+          cargo test -p "$CRATE" -- --exact --test-threads=1 "${selected[@]}"
+
   npm-integration:
     strategy:
       fail-fast: false
@@ -93,7 +169,7 @@ jobs:
     env:
       LLVM_SYS_221_PREFIX: /opt/llvm-22
       LD_LIBRARY_PATH: /opt/llvm-22/lib
-      CARGO_BUILD_JOBS: "1"
+      CARGO_BUILD_JOBS: "2"
       CARGO_INCREMENTAL: "0"
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_PROFILE_TEST_DEBUG: "0"
@@ -105,6 +181,20 @@ jobs:
         run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y libuv1-dev
+      - name: Cache runtime static libraries
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/release
+            target/thaw-*
+          # The first key component mirrors thaw-cli/build.rs's runtime fingerprint,
+          # so an unchanged runtime reuses the archives and any other change still
+          # starts from the newest compatible cache through restore-keys.
+          key: thaw-runtime-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/thaw-arena/**', 'crates/thaw-icu-data/**', 'crates/thaw-runtime/**', 'crates/thaw-std/**', 'crates/thaw-jit/**', 'crates/thaw-quickjs/**', 'crates/thaw-napi/**') }}
+          restore-keys: |
+            thaw-runtime-${{ runner.os }}-
       - name: Install LLVM 22
         run: |
           curl -L https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.8/LLVM-22.1.8-Linux-X64.tar.xz -o /tmp/llvm.tar.xz

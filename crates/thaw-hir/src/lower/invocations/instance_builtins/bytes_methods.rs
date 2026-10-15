@@ -269,7 +269,53 @@ impl<'a> FnLowerer<'a> {
             _ => return Err("native `.set()` expects a source and an optional offset".into()),
         };
         let offset = self.coerce_primitive_to_number(offset)?;
-        let result = HirExpr::Call(
+        // Source and offset are read twice (range check, then copy): bind both once.
+        let source_type = self.infer_expr_type(&source)?;
+        let source_name = format!("__thaw_bytes_set_source_{}", self.next_binding);
+        let offset_name = format!("__thaw_bytes_set_offset_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(source_name.clone(), source_type.clone());
+        self.scope.insert(offset_name.clone(), HirType::F64);
+        bindings.push((source_name.clone(), source_type.clone(), source));
+        bindings.push((offset_name.clone(), HirType::F64, offset));
+        let source = HirExpr::Var(source_name);
+        let offset = HirExpr::Var(offset_name);
+        // A byte buffer shares the array layout, so both lengths read the same header.
+        let source_length = HirExpr::ArrayLen(Box::new(source.clone()));
+        let receiver_length = HirExpr::ArrayLen(Box::new(receiver.clone()));
+        // A source that does not fit raises RangeError before any byte is written.
+        let overflow = HirExpr::BinOp(
+            BinOp::Gt,
+            Box::new(HirExpr::BinOp(
+                BinOp::Add,
+                Box::new(offset.clone()),
+                Box::new(source_length),
+            )),
+            Box::new(receiver_length),
+        );
+        let negative = HirExpr::BinOp(
+            BinOp::Lt,
+            Box::new(offset.clone()),
+            Box::new(HirExpr::Lit(HirLit::F64(0.0))),
+        );
+        let out_of_range = HirExpr::Conditional(
+            Box::new(negative),
+            Box::new(HirExpr::Lit(HirLit::Bool(true))),
+            Box::new(overflow),
+            HirType::Bool,
+        );
+        let range_check = HirExpr::Conditional(
+            Box::new(out_of_range),
+            Box::new(HirExpr::ThrowValue(
+                Box::new(HirExpr::Lit(HirLit::Str(
+                    "\u{1}RangeError\u{1}offset is out of bounds".into(),
+                ))),
+                Box::new(HirExpr::Lit(HirLit::F64(0.0))),
+            )),
+            Box::new(HirExpr::Lit(HirLit::F64(0.0))),
+            HirType::F64,
+        );
+        let copy = HirExpr::Call(
             Box::new(HirExpr::Var("__thaw_bytes_copy".to_string())),
             vec![
                 source,
@@ -282,7 +328,7 @@ impl<'a> FnLowerer<'a> {
         // `Uint8Array.prototype.set` mutates the receiver but returns undefined.
         // Keep `__thaw_bytes_copy`'s numeric result for Buffer.copy callers.
         let result = HirExpr::EvalThen(
-            Box::new(result),
+            Box::new(HirExpr::EvalThen(Box::new(range_check), Box::new(copy))),
             Box::new(HirExpr::Lit(HirLit::Undefined)),
         );
         self.wrap_call_argument_bindings(result, &bindings)

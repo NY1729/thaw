@@ -399,7 +399,7 @@ extern "C" fn array_length(value: f64) -> f64 {
 #[cfg(all(target_arch = "x86_64", target_family = "unix"))]
 extern "C" fn array_value(value: f64) -> f64 {
     match unsafe { array_data(value) } {
-        Some((data, _)) => f64::from_bits(data as usize as u64),
+        Some((data, _)) => array_result(data as *mut u8),
         None => {
             CALL_ERROR.with(|error| error.set(INVALID_SYMBOL.as_ptr().cast()));
             0.0

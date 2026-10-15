@@ -1,6 +1,11 @@
 include!("async/syntax.rs");
 include!("async/callbacks.rs");
 include!("async/promises.rs");
+include!("async/resolver_provenance.rs");
 include!("async/expressions.rs");
 include!("async/control_flow.rs");
 include!("async/http_lambda.rs");
+include!("async/union_discard.rs");
+include!("async/union_discard_jit.rs");
+include!("async/union_discard_eval_then.rs");
+include!("async/eval_then_returns.rs");

@@ -10,7 +10,7 @@ fn fs_read_and_write_streams_integrate_with_node_streams() {
     let empty_node_modules = temp_registry("builtin_fs_streams_node_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    assert_eq!(file_count, 3);
+    assert_eq!(file_count, 4);
     let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFsStreams = module.exports;");
     let source = CString::new(script).unwrap();
     assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
@@ -41,7 +41,7 @@ fn fs_streams_use_incremental_positioned_host_io() {
     let empty_node_modules = temp_registry("builtin_fs_incremental_streams_node_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    assert_eq!(file_count, 3);
+    assert_eq!(file_count, 4);
     let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseIncrementalFsStreams = module.exports;");
     let source = CString::new(script).unwrap();
     assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
@@ -68,13 +68,13 @@ fn fs_write_streams_apply_backpressure_and_serialize_callbacks() {
     let dir = temp_registry("builtin_fs_stream_backpressure");
     fs::write(
             dir.join("index.js"),
-            "var fs = require('node:fs'); module.exports = async function (root) { var path = root + '/queued.txt', directPath = root + '/direct.txt', events = [], writer = fs.createWriteStream(path, { highWaterMark: 3 }); writer.on('drain', function() { events.push('drain'); }); writer.on('finish', function() { events.push('finish'); }); var first = writer.write('ab', function() { events.push('first'); }), second = writer.write('cd', function() { events.push('second'); }), beforeDrain = fs.readFileSync(path, 'utf8'); var finished = new Promise(function(resolve, reject) { writer.on('error', reject); writer.on('finish', resolve); }); writer.end('ef', function() { events.push('end'); }); await finished; await new Promise(function(resolve) { queueMicrotask(resolve); }); var direct = new fs.WriteStream(directPath, { highWaterMark: 1 }), directResult = direct.write('x'); var directFinished = new Promise(function(resolve, reject) { direct.on('error', reject); direct.on('finish', resolve); }); direct.end(); await directFinished; return [first, second, beforeDrain, writer.writableLength, writer.writableHighWaterMark, events, fs.readFileSync(path, 'utf8'), directResult, direct.writableHighWaterMark, fs.readFileSync(directPath, 'utf8')]; };",
+            "var fs = require('node:fs'); module.exports = async function (root) { var path = root + '/queued.txt', directPath = root + '/direct.txt', events = [], writer = fs.createWriteStream(path, { highWaterMark: 3 }); writer.on('drain', function() { events.push('drain'); }); writer.on('finish', function() { events.push('finish'); }); var first = writer.write('ab', function() { events.push('first'); }), second = writer.write('cd', function() { events.push('second'); }), beforeDrain; try { beforeDrain = fs.readFileSync(path, 'utf8'); } catch (error) { beforeDrain = 'ERR:' + error.code; } var finished = new Promise(function(resolve, reject) { writer.on('error', reject); writer.on('finish', resolve); }); writer.end('ef', function() { events.push('end'); }); await finished; await new Promise(function(resolve) { queueMicrotask(resolve); }); var direct = new fs.WriteStream(directPath, { highWaterMark: 1 }), directResult = direct.write('x'); var directFinished = new Promise(function(resolve, reject) { direct.on('error', reject); direct.on('finish', resolve); }); direct.end(); await directFinished; return [first, second, beforeDrain, writer.writableLength, writer.writableHighWaterMark, events, fs.readFileSync(path, 'utf8'), directResult, direct.writableHighWaterMark, fs.readFileSync(directPath, 'utf8')]; };",
         )
         .unwrap();
     let empty_node_modules = temp_registry("builtin_fs_stream_backpressure_node_modules");
     let (bundle, _, file_count, _) =
         bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
-    assert_eq!(file_count, 3);
+    assert_eq!(file_count, 4);
     let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.exerciseFsStreamBackpressure = module.exports;");
     let source = CString::new(script).unwrap();
     assert_eq!(thaw_quickjs::thaw_js_load(source.as_ptr()), 1);
@@ -90,7 +90,9 @@ fn fs_write_streams_apply_backpressure_and_serialize_callbacks() {
     let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
     assert_eq!(
         result,
-        r#"[true,false,"ab",0,3,["first","drain","second","end","finish"],"abcdef",false,1,"x"]"#
+        // Node 22.22.2 (same script): the file is opened asynchronously, so the synchronous read right
+        // after write() fails with ENOENT; no 'drain' is emitted once end() was called.
+        r#"[true,false,"ERR:ENOENT",0,3,["first","second","end","finish"],"abcdef",false,1,"x"]"#
     );
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);

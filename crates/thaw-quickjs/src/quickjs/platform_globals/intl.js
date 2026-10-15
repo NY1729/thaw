@@ -142,7 +142,12 @@
   // (`shared`/`startRange`/`endRange`). Used only when the opt-in ICU4C
   // backend isn't available, where the exact locale range pattern isn't
   // accessible.
-  function intlPartitionRange(startParts, endParts) {
+  // Number parts that form the digits of one value: ICU never splits them between the shared and the per-endpoint text
+  // (`1,234,567–1,234,999`, not `1,234,567–999`).
+  const INTL_NUMERIC_PART_TYPES = new Set(['integer', 'group', 'decimal', 'fraction', 'minusSign', 'plusSign',
+    'exponentSeparator', 'exponentMinusSign', 'exponentInteger', 'compact']);
+
+  function intlPartitionRange(startParts, endParts, keepNumbersWhole) {
     const equal = (a, b) => a.type === b.type && a.value === b.value;
     let prefix = 0;
     while (prefix < startParts.length && prefix < endParts.length && equal(startParts[prefix], endParts[prefix])) {
@@ -155,6 +160,15 @@
       equal(startParts[startParts.length - 1 - suffix], endParts[endParts.length - 1 - suffix])
     ) {
       suffix += 1;
+    }
+    if (keepNumbersWhole) {
+      const numeric = part => INTL_NUMERIC_PART_TYPES.has(part.type);
+      const firstNumeric = startParts.findIndex(numeric);
+      if (firstNumeric >= 0 && prefix > firstNumeric) prefix = firstNumeric;
+      let lastNumeric = -1;
+      startParts.forEach((part, index) => { if (numeric(part)) lastNumeric = index; });
+      const keepFrom = startParts.length - suffix;
+      if (lastNumeric >= 0 && keepFrom <= lastNumeric) suffix = Math.max(0, startParts.length - 1 - lastNumeric);
     }
     return {
       shared: startParts.slice(0, prefix),
@@ -1234,11 +1248,11 @@
     }
 
     _exactNotationDigits(value) {
-      // Compact notation has its own ICU rounding/formatting route. Retain
-      // its existing input ceiling until that separate route is repaired.
+      // Compact strings retain their 10k ceiling; BigInts match the native
+      // signed decimal input ceiling.
       if (this._notation === 'compact' &&
           ((typeof value === 'string' && value.trim().length > 10000) ||
-           (typeof value === 'bigint' && value.toString().length > 10000))) return null;
+           (typeof value === 'bigint' && value.toString().length > 32000))) return null;
       return this._notation === 'scientific' || this._notation === 'engineering'
         ? this._exactScientificDigits(value) : this._exactStandardDigits(value);
     }
@@ -1875,6 +1889,7 @@
       const { shared, startMiddle, endMiddle, trailing } = intlPartitionRange(
         this.formatToParts(start),
         this.formatToParts(end),
+        true,
       );
       return [...shared, ...startMiddle, { value: separator }, ...endMiddle, ...trailing]
         .map(part => part.value)
@@ -1948,6 +1963,7 @@
       const { shared, startMiddle, endMiddle, trailing } = intlPartitionRange(
         this.formatToParts(start),
         this.formatToParts(end),
+        true,
       );
       return [
         ...shared.map(part => ({ ...part, source: 'shared' })),

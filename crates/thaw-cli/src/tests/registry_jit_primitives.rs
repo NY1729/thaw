@@ -570,7 +570,7 @@ fn mixed_array_default_sort_uses_jit_without_quickjs() {
     );
     assert_eq!(
         String::from_utf8_lossy(&result.stdout),
-        "[1,10,2]\n[\"a\",\"b\",\"z\"]\n[false,true,true]\n[1,10,2]\n[\"a\",\"b\",\"z\"]\n[false,true,true]\n"
+        "[ 1, 10, 2 ]\n[ 'a', 'b', 'z' ]\n[ false, true, true ]\n[ 1, 10, 2 ]\n[ 'a', 'b', 'z' ]\n[ false, true, true ]\n"
     );
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -616,7 +616,7 @@ fn mixed_array_range_updates_use_jit_without_quickjs() {
     );
     assert_eq!(
         String::from_utf8_lossy(&result.stdout),
-        "[1,9,9]\n[\"a\",\"x\",\"x\"]\n[true,true,true]\n[2,3,3]\n[\"b\",\"c\",\"c\"]\n[false,false,false]\n[1,9,3]\n[\"a\",\"x\",\"c\"]\n[true,true,false]\n3\n3\n3\n3\n3\n3\n2\nb\nfalse\n1\na\ntrue\n9\nx\ntrue\n[2]\n[\"b\"]\n[false]\n[1,9,3]\n[\"a\",\"x\",\"c\"]\n[true,true,false]\n"
+        "[ 1, 9, 9 ]\n[ 'a', 'x', 'x' ]\n[ true, true, true ]\n[ 2, 3, 3 ]\n[ 'b', 'c', 'c' ]\n[ false, false, false ]\n[ 1, 9, 3 ]\n[ 'a', 'x', 'c' ]\n[ true, true, false ]\n3\n3\n3\n3\n3\n3\n2\nb\nfalse\n1\na\ntrue\n9\nx\ntrue\n[ 2 ]\n[ 'b' ]\n[ false ]\n[ 1, 9, 3 ]\n[ 'a', 'x', 'c' ]\n[ true, true, false ]\n"
     );
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -662,7 +662,7 @@ fn mixed_array_truthy_scans_use_jit_without_quickjs() {
     );
     assert_eq!(
         String::from_utf8_lossy(&result.stdout),
-        "true\ntrue\nfalse\ntrue\nfalse\ntrue\n2\nx\ntrue\n1\n3\n2\n[2,3]\n[\"x\",\"y\"]\n[true]\ntrue\ntrue\ntrue\ntrue\ntrue\n2\n1\n3\n2\n[1,2]\n[\"1\",\"2\"]\n[true,false]\n"
+        "true\ntrue\nfalse\ntrue\nfalse\ntrue\n2\nx\ntrue\n1\n3\n2\n[ 2, 3 ]\n[ 'x', 'y' ]\n[ true ]\ntrue\ntrue\ntrue\ntrue\ntrue\n2\n1\n3\n2\n[ 1, 2 ]\n[ '1', '2' ]\n[ true, false ]\n"
     );
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -705,7 +705,7 @@ fn mixed_array_comparison_scans_use_jit_without_quickjs() {
     assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
     assert_eq!(
         String::from_utf8_lossy(&result.stdout),
-        "true\ntrue\ntrue\nfalse\ntrue\ntrue\nb\n1\n2\n2\n[\"b\"]\n"
+        "true\ntrue\ntrue\nfalse\ntrue\ntrue\nb\n1\n2\n2\n[ 'b' ]\n"
     );
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -747,7 +747,7 @@ fn mixed_array_conversion_maps_use_jit_without_quickjs() {
     assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
     assert_eq!(
         String::from_utf8_lossy(&result.stdout),
-        "[2,-1]\n[2,0]\n[1,0]\n[false,true]\n[false,true]\n[false,true]\n[\"2\",\"-1\"]\n[\"a\",\"\"]\n[\"true\",\"false\"]\n[2,-1]\n[\"a\",\"\"]\n[true,false]\n[11,12]\n[3,4]\n[2,1]\n[false,true]\n[false,true]\n[false,true]\n[\"2:0\",\"3:1\"]\n[3,5]\n[4,6]\n11\n11\n9\n13\n13\n9\n23\n7\n6\nabc\n2\ncba\n12\nempty\n"
+        "[ 2, -1 ]\n[ 2, 0 ]\n[ 1, 0 ]\n[ false, true ]\n[ false, true ]\n[ false, true ]\n[ '2', '-1' ]\n[ 'a', '' ]\n[ 'true', 'false' ]\n[ 2, -1 ]\n[ 'a', '' ]\n[ true, false ]\n[ 11, 12 ]\n[ 3, 4 ]\n[ 2, 1 ]\n[ false, true ]\n[ false, true ]\n[ false, true ]\n[ '2:0', '3:1' ]\n[ 3, 5 ]\n[ 4, 6 ]\n11\n11\n9\n13\n13\n9\n23\n7\n6\nabc\n2\ncba\n12\nempty\n"
     );
     let _ = std::fs::remove_dir_all(dir);
 }

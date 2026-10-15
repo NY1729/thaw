@@ -645,3 +645,60 @@ fn uncaught_loop_throw_uses_jit_without_quickjs() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+
+/// Thrown dictionary literals are infallible to build (no spurious engine-error variant), and
+/// `typeof` probes on a caught aggregate's element or key select the matching variant.
+#[test]
+fn catch_of_literal_dictionaries_and_typeof_probes_specialize() {
+    const PARAMS: &str = "mode: number, numbers: number[], strings: string[], flags: Record<string, boolean>, labels: Record<string, string>";
+    let body = |catch: &str, throws: &str| {
+        format!(
+            "function f(mode, numbers, strings, flags, labels) {{ while (true) {{ try {{ {throws} }} catch (error) {{ {catch} }} }} return 0; }} module.exports = {{ f }};"
+        )
+    };
+    let cases = [
+        // Literal dictionaries of each element kind, read by dot and by string key.
+        body("return error.answer;", "throw { answer: 42 };"),
+        body("return error['answer'];", "throw { answer: 42 };"),
+        body("return error.label.length;", "throw { label: 'ab' };"),
+        body("return error.ok ? 1 : 0;", "throw { ok: false };"),
+        // A literal array and a literal dictionary thrown from different branches.
+        body(
+            "if (Array.isArray(error)) return error.length + error[0]; else return error['answer'];",
+            "if (mode > 0) throw [mode, 2]; throw { answer: 42 };",
+        ),
+        // typeof probes on an element (arrays) and on a key (dictionaries), with and without else.
+        body(
+            "if (typeof error[0] === 'number') return error[0]; if (typeof error[0] === 'string') return error[0].length; return 0;",
+            "if (mode === 0) throw numbers; throw strings;",
+        ),
+        body(
+            "if (typeof error.answer === 'boolean') return error.answer ? 1 : 0; if (typeof error.answer === 'string') return error.answer.length; return 0;",
+            "if (mode === 2) throw flags; throw labels;",
+        ),
+        body(
+            "if (typeof error[0] === 'number') return error[0]; if (typeof error.answer === 'boolean') return error.answer ? 1 : 0; return 0;",
+            "if (mode === 0) throw numbers; throw flags;",
+        ),
+    ];
+    let declaration = format!("export declare function f({PARAMS}): number;\n");
+    let functions = thaw_bridge::parse_dts(&declaration).unwrap();
+    for (index, bundle) in cases.iter().enumerate() {
+        assert!(
+            jit_numeric_export(bundle, "f", false, &functions[0]).is_some(),
+            "case {index} did not specialize: {bundle}"
+        );
+    }
+}
+
+/// A tagged value made only of numbers and booleans converts to a declared `number` result.
+#[test]
+fn callable_tables_mixing_numbers_and_booleans_convert_to_the_declared_number() {
+    let bundle = "function twice(value) { return value * 2; } function isBig(value) { return value > 100; } function same(value) { return value === 0; } const table = { twice, isBig, same }; function run(name, value) { return table[name](value); } function viaLocal(name, value) { const chosen = table[name]; return chosen(value); } module.exports = { run, viaLocal };";
+    let declarations = "export declare function run(name: string, value: number): number;\nexport declare function viaLocal(name: string, value: number): number;\n";
+    for function in thaw_bridge::parse_dts(declarations).unwrap() {
+        let operation = jit_numeric_export(bundle, &function.name, false, &function)
+            .unwrap_or_else(|| panic!("{} did not specialize", function.name));
+        assert!(operation.ends_with("dynnum"), "{operation}");
+    }
+}

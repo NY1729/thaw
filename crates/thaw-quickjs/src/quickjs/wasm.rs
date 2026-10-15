@@ -19,7 +19,7 @@ impl std::fmt::Display for WasmJsException {
         f.write_str("JavaScript WebAssembly callback exception")
     }
 }
-impl wasmi::core::HostError for WasmJsException {}
+impl wasmi::errors::HostError for WasmJsException {}
 
 std::thread_local! {
     static WASM_JS_EXCEPTIONS: std::cell::RefCell<(u32, HashMap<u32, WasmJsValue>)> =
@@ -112,6 +112,7 @@ struct WasmInstanceState {
     funcrefs: HashMap<u32, wasmi::Func>,
     funcref_ids: HashMap<String, u32>,
     foreign_funcrefs: HashMap<String, (u32, u32)>,
+    #[allow(clippy::type_complexity)]
     table_provenance: Vec<(
         std::rc::Rc<std::cell::RefCell<std::collections::HashSet<u32>>>,
         std::rc::Rc<std::cell::RefCell<HashMap<String, (u32, u32)>>>,
@@ -498,12 +499,15 @@ fn wasm_restore_value<'js>(ctx: Ctx<'js>, handle: u32) -> rquickjs::Result<Value
 fn wasm_reference_stats() -> String {
     let imports = WASM_JS_IMPORTS.with(|imports| imports.borrow().1.len());
     let values = WASM_JS_VALUES.with(|values| values.borrow().1.len());
-    let (modules, instances, store_externrefs) = WASM.with(|table| {
+    let (modules, instances, store_externrefs, memories, globals, tables) = WASM.with(|table| {
         let table = table.borrow();
         (
             table.modules.len(),
             table.instances.len(),
             table.shared_store.run(|context| context.data().externrefs.len()),
+            table.memories.len(),
+            table.globals.len(),
+            table.tables.len(),
         )
     });
     serde_json::json!({
@@ -512,6 +516,9 @@ fn wasm_reference_stats() -> String {
         "modules": modules,
         "instances": instances,
         "storeExternrefs": store_externrefs,
+        "memories": memories,
+        "globals": globals,
+        "tables": tables,
     })
     .to_string()
 }
@@ -761,6 +768,7 @@ fn wasm_redirect_table_groups(registry: &mut WasmTable, old: &[WasmTableGroup], 
     registry.group_redirects.retain(|(old, _)| std::rc::Rc::strong_count(old) > 1);
 }
 
+#[allow(clippy::type_complexity)]
 fn wasm_merge_table_groups(
     registry: &mut WasmTable,
     identities: &std::collections::HashSet<String>,
@@ -800,6 +808,7 @@ fn wasm_merge_table_groups(
     Some((owners, references))
 }
 
+#[allow(clippy::type_complexity)]
 fn wasm_join_function_groups(
     registry: &mut WasmTable,
     left_owners: &std::rc::Rc<std::cell::RefCell<std::collections::HashSet<u32>>>,
@@ -982,7 +991,7 @@ fn wasm_prepare_js_value(
             let mut converted = 0i64;
             // QuickJS applies ToBigInt and signed 64-bit wrapping directly.
             // No Caller borrow is held while user-defined coercion can reenter.
-            if unsafe { rquickjs::qjs::JS_ToBigInt64(ctx.as_ptr(), &mut converted, value.as_js_value()) } < 0 {
+            if unsafe { rquickjs::qjs::JS_ToBigInt64(ctx.as_raw().as_ptr(), &mut converted, value.as_raw()) } < 0 {
                 return Err(wasm_js_error(&ctx, rquickjs::Error::Exception));
             }
             Ok(WasmPreparedValue::Scalar(WasmVal::I64(converted)))
@@ -1708,7 +1717,7 @@ fn wasm_instance_runtime_value(
         let retained_handle = u32::try_from(handle).map_err(|_| "invalid retained WebAssembly function handle")?;
         let provenance = WASM.with(|registry| {
             let mut registry = registry.borrow_mut();
-            let Some(source) = registry.table_functions.get(&retained_handle) else { return None; };
+            let source = registry.table_functions.get(&retained_handle)?;
             let source = (source.owners.clone(), source.foreign_funcrefs.clone());
             let target = wasm_merge_table_groups(
                 &mut registry, &std::collections::HashSet::new(), Some(record.handle),
@@ -1881,7 +1890,7 @@ fn wasm_call_inner(instance_handle: u32, name: String, arguments: String) -> Str
         table.instances.remove(&instance_handle).map(|record| (record, false))
             .or_else(|| table.retained_instances.remove(&instance_handle).map(|record| (record, true)))
     });
-    let Some((mut record, retained)) = record else {
+    let Some((record, retained)) = record else {
         return serde_json::json!({ "ok": false, "error": "invalid or recursively entered WebAssembly.Instance" }).to_string();
     };
     let store = record.store.clone();
@@ -1923,7 +1932,7 @@ fn wasm_call_funcref_inner(instance_handle: u32, handle: u32, arguments: String)
         table.instances.remove(&instance_handle).map(|record| (record, false))
             .or_else(|| table.retained_instances.remove(&instance_handle).map(|record| (record, true)))
     });
-    let Some((mut record, retained)) = record else {
+    let Some((record, retained)) = record else {
         return serde_json::json!({ "ok": false, "error": "invalid or recursively entered WebAssembly.Instance" }).to_string();
     };
     let function = record.state.borrow().funcrefs.get(&handle).copied();
@@ -2009,7 +2018,7 @@ fn wasm_call_retained_table_function(handle: u32, arguments: &str) -> String {
 }
 
 fn wasm_instance_export_funcref(state: &mut WasmInstanceState, context: &impl wasmi::AsContext<Data = WasmStoreData>, name: &str) -> String {
-        let Some(function) = state.instance.get_func(&*context, &name) else {
+        let Some(function) = state.instance.get_func(context, name) else {
             return serde_json::json!({ "ok": false, "error": format!("WebAssembly export `{name}` is not a function") }).to_string();
         };
         if let Some(handle) = state.prepublished_table_functions.get(&format!("{function:?}")).copied() {
@@ -2019,7 +2028,7 @@ fn wasm_instance_export_funcref(state: &mut WasmInstanceState, context: &impl wa
                 "results": ty.results().iter().copied().map(wasm_type_name).collect::<Vec<_>>() });
             return serde_json::json!({ "ok": true, "value": value }).to_string();
         }
-        match wasm_value(WasmVal::from(function), state, &*context) {
+        match wasm_value(WasmVal::from(function), state, context) {
             Ok(value) => serde_json::json!({ "ok": true, "value": value }).to_string(),
             Err(error) => serde_json::json!({ "ok": false, "error": error }).to_string(),
         }
@@ -2033,7 +2042,7 @@ fn wasm_export_funcref(instance_handle: u32, name: String) -> String {
             return serde_json::json!({ "ok": false, "error": "invalid WebAssembly.Instance" })
                 .to_string();
         };
-        record.store.run(|mut context| wasm_instance_export_funcref(&mut record.state.borrow_mut(), &mut context, &name))
+        record.store.run(|context| wasm_instance_export_funcref(&mut record.state.borrow_mut(), &context, &name))
     })
 }
 
@@ -2041,13 +2050,13 @@ fn wasm_instance_global(state: &mut WasmInstanceState, context: &mut impl wasmi:
         let global = if let Some(key) = name.strip_prefix("import:") {
             state.imported_globals.get(key).copied()
         } else {
-            state.instance.get_global(&*context, &name)
+            state.instance.get_global(&*context, name)
         };
         let Some(global) = global else {
             return serde_json::json!({ "ok": false, "error": format!("WebAssembly export `{name}` is not a global") }).to_string();
         };
         if let Some(value) = value {
-            let encoded: serde_json::Value = match serde_json::from_str(&value) {
+            let encoded: serde_json::Value = match serde_json::from_str(value) {
                 Ok(value) => value,
                 Err(error) => return serde_json::json!({ "ok": false, "error": error.to_string() }).to_string(),
             };
@@ -2172,7 +2181,7 @@ fn wasm_global(instance_handle: u32, name: String, value: Option<String>) -> Str
 }
 
 fn wasm_memory_create(initial: u32, maximum: i64) -> String {
-    if maximum < -1 || maximum > 65_536 {
+    if !(-1..=65_536).contains(&maximum) {
         return serde_json::json!({ "ok": false, "error": "WebAssembly.Memory page limits are invalid" }).to_string();
     }
     let maximum = u32::try_from(maximum).ok();
@@ -2261,7 +2270,7 @@ fn wasm_instance_table(state: &mut WasmInstanceState, context: &mut impl wasmi::
         let table_value = if let Some(key) = name.strip_prefix("import:") {
             state.imported_tables.get(key).copied()
         } else {
-            state.instance.get_table(&*context, &name)
+            state.instance.get_table(&*context, name)
         };
         let Some(table_value) = table_value else {
             return serde_json::json!({ "ok": false, "error": format!("WebAssembly export `{name}` is not a table") }).to_string();
@@ -2277,7 +2286,6 @@ fn wasm_instance_table(state: &mut WasmInstanceState, context: &mut impl wasmi::
             },
             "set" | "grow" => {
                 let encoded: serde_json::Value = value
-                    .as_deref()
                     .and_then(|value| serde_json::from_str(value).ok())
                     .unwrap_or_else(|| serde_json::json!({ "t": "externref", "v": 0 }));
                 let element = table_value.ty(&*context).element();
@@ -2508,7 +2516,7 @@ fn wasm_retained_table(name: &str, operation: &str, index: u64, encoded: Option<
                         } else if retained_function {
                             wasm_retain_table_function(*function, references.clone(), owners.clone(), &context)
                         } else if let Some(owner) = native_owner {
-                            let identity = context.as_context().data().identity.clone();
+                            let identity = context.data().identity.clone();
                             let active = WASM_ACTIVE_CALLERS.with(|stack| {
                                 stack.borrow().iter().rev().find_map(|entry| {
                                     if !std::rc::Rc::ptr_eq(&entry.store_identity, &identity) { return None; }

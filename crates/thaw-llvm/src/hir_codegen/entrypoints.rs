@@ -8,6 +8,11 @@ impl<'ctx> HirCompiler<'ctx> {
         let (main_fn, entry) = self.new_c_main();
         let cleanup = self.context.append_basic_block(main_fn, "entry_cleanup");
         self.builder.position_at_end(entry);
+        // Live JS handles reaching a graph encoder or reader on the main thread
+        // need the host operations whichever dynamic helper created them.
+        if self.uses_quickjs_handles {
+            self.compile_register_js_callback_host_operations().unwrap();
+        }
         let quickjs_failure = self
             .builder
             .build_alloca(self.context.i32_type(), "quickjs_event_loop_status")
@@ -584,7 +589,7 @@ impl<'ctx> HirCompiler<'ctx> {
     }
 
     fn configure_unhandled_rejection_reporter(&self) {
-        let reporter = if self.uses_quickjs_handles {
+        let reporter = if self.uses_quickjs || self.uses_quickjs_handles {
             self.module
                 .get_function("thaw_js_emit_unhandled_rejection_result")
                 .unwrap()
@@ -602,7 +607,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 "configure_unhandled_rejection_reporter",
             )
             .unwrap();
-        let handled_reporter = if self.uses_quickjs_handles {
+        let handled_reporter = if self.uses_quickjs || self.uses_quickjs_handles {
             self.module
                 .get_function("thaw_js_emit_rejection_handled_result")
                 .unwrap()
@@ -694,7 +699,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .builder
             .build_is_not_null(pending, "process_exception_failed")
             .unwrap();
-        let (exception_failure, reported, native_handler_error, listener_error) = if self.uses_quickjs_handles {
+        let (exception_failure, reported, native_handler_error, listener_error) = if self.uses_quickjs || self.uses_quickjs_handles {
             let emission = self.builder.build_call(
                 self.module.get_function("thaw_js_emit_uncaught_result").unwrap(),
                 &[pending_report.into()],
@@ -815,7 +820,7 @@ impl<'ctx> HirCompiler<'ctx> {
             .builder
             .build_is_not_null(rejection, "process_rejection_failed")
             .unwrap();
-        let (rejection_failure, reported_rejection, rejection_listener_error) = if self.uses_quickjs_handles {
+        let (rejection_failure, reported_rejection, rejection_listener_error) = if self.uses_quickjs || self.uses_quickjs_handles {
             let emission = self.builder.build_call(
                 self.module.get_function("thaw_js_emit_unhandled_rejection_result").unwrap(),
                 &[rejection.into()],
@@ -881,7 +886,7 @@ impl<'ctx> HirCompiler<'ctx> {
             &[rejection.into()],
             "destroy_detached_rejection_report",
         ).unwrap();
-        let rejection_reporter = if self.uses_quickjs_handles {
+        let rejection_reporter = if self.uses_quickjs || self.uses_quickjs_handles {
             self.module
                 .get_function("thaw_js_emit_unhandled_rejection_result")
                 .unwrap()
@@ -1236,6 +1241,7 @@ impl<'ctx> HirCompiler<'ctx> {
         self.builder.build_unconditional_branch(ordinary).unwrap();
         self.builder.position_at_end(begin);
         if self.uses_napi {
+            let collect = self.context.append_basic_block(function, "terminal_shutdown_collect");
             let poll = self.context.append_basic_block(function, "terminal_shutdown_poll");
             let release = self.context.append_basic_block(function, "terminal_shutdown_release_handles");
             let close = self.context.append_basic_block(function, "terminal_shutdown_close");
@@ -1246,7 +1252,18 @@ impl<'ctx> HirCompiler<'ctx> {
             let started = self.builder.build_int_compare(
                 IntPredicate::NE, started, started.get_type().const_zero(), "napi_shutdown_started",
             ).unwrap();
-            self.builder.build_conditional_branch(started, poll, wait).unwrap();
+            self.builder.build_conditional_branch(started, collect, wait).unwrap();
+            self.builder.position_at_end(collect);
+            // The N-API pin barrier may depend on ordinary QuickJS function
+            // finalizers. Collect once while addon Envs are still live; the
+            // normal event-loop and N-API poll path below drains their jobs.
+            if self.uses_quickjs {
+                self.builder.build_call(
+                    self.module.get_function("thaw_js_collect_garbage").unwrap(), &[],
+                    "collect_terminal_graph_roots",
+                ).unwrap();
+            }
+            self.builder.build_unconditional_branch(poll).unwrap();
             self.builder.position_at_end(poll);
             // A live unreferenced handle can keep the phase barrier closed.
             // Retry with its Env and library retained until its owner closes it.
@@ -1260,6 +1277,12 @@ impl<'ctx> HirCompiler<'ctx> {
             ).unwrap();
             self.report_napi_shutdown_errors(failure, shutdown_error_seen);
             self.drive_terminal_work(failure, quickjs_failure, false);
+            if self.uses_quickjs {
+                self.builder.build_call(
+                    self.module.get_function("thaw_js_collect_garbage").unwrap(), &[],
+                    "collect_terminal_work_garbage",
+                ).unwrap();
+            }
             let ready = self.builder.build_call(
                 self.module.get_function("thaw_napi_poll_shutdown").unwrap(), &[],
                 "confirm_napi_shutdown",
@@ -1269,6 +1292,24 @@ impl<'ctx> HirCompiler<'ctx> {
             ).unwrap();
             let new_errors = self.report_napi_shutdown_errors(failure, shutdown_error_seen);
             let new_work = self.drive_terminal_work(failure, quickjs_failure, false);
+            let pending_after_gc = if self.uses_quickjs {
+                self.builder.build_call(
+                    self.module.get_function("thaw_js_collect_garbage").unwrap(), &[],
+                    "collect_terminal_work_garbage_again",
+                ).unwrap();
+                self.builder.build_call(
+                    self.module.get_function("thaw_js_terminal_work_pending").unwrap(), &[],
+                    "shutdown_work_pending_after_gc",
+                ).unwrap().try_as_basic_value().basic().unwrap().into_int_value()
+            } else {
+                self.context.i8_type().const_zero()
+            };
+            let pending_after_gc = self.builder.build_int_compare(
+                IntPredicate::NE, pending_after_gc, pending_after_gc.get_type().const_zero(),
+                "shutdown_more_work_after_gc",
+            ).unwrap();
+            let new_work = self.builder.build_or(new_work, pending_after_gc,
+                "shutdown_work_or_gc_jobs").unwrap();
             let unsettled = self.builder.build_or(new_errors, new_work, "shutdown_more_work").unwrap();
             let quiescent = self.builder.build_not(unsettled, "shutdown_quiescent").unwrap();
             let may_close = self.builder.build_and(ready, quiescent, "shutdown_can_close").unwrap();
@@ -1290,6 +1331,12 @@ impl<'ctx> HirCompiler<'ctx> {
             self.builder.build_conditional_branch(released_handles, wait, finished).unwrap();
         }
         self.builder.position_at_end(finished);
+        if self.uses_quickjs {
+            self.builder.build_call(
+                self.module.get_function("thaw_js_shutdown_context").unwrap(), &[],
+                "shutdown_quickjs_context",
+            ).unwrap();
+        }
         let process_failure = self.builder.build_load(
             self.context.bool_type(), failure, "terminal_failure_status",
         ).unwrap().into_int_value();

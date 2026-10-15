@@ -1,3 +1,31 @@
+/// Non-empty and made only of `Let` statements.
+fn only_lets(statements: &[HirStmt]) -> bool {
+    !statements.is_empty() && statements.iter().all(|statement| matches!(statement, HirStmt::Let(..)))
+}
+
+fn collect_loop_targets(stmts: &[HirStmt], depth: usize, out: &mut Vec<(char, usize, usize)>) {
+    for stmt in stmts {
+        match stmt {
+            HirStmt::Break => out.push(('b', depth, depth)),
+            HirStmt::BreakDepth(target) => out.push(('b', depth, depth - target)),
+            HirStmt::Continue => out.push(('c', depth, depth)),
+            HirStmt::ContinueDepth(target) => out.push(('c', depth, depth - target)),
+            HirStmt::If(_, yes, no) => {
+                collect_loop_targets(yes, depth, out);
+                collect_loop_targets(no, depth, out);
+            }
+            HirStmt::While(_, body) | HirStmt::Finally(body, _) => {
+                collect_loop_targets(body, depth + usize::from(matches!(stmt, HirStmt::While(..))), out);
+            }
+            HirStmt::Try(body, _, catch_body, _) => {
+                collect_loop_targets(body, depth, out);
+                collect_loop_targets(catch_body, depth, out);
+            }
+            _ => {}
+        }
+    }
+}
+
 #[test]
 fn creates_distinct_native_instantiations_for_polymorphic_uses() {
     let program = lower(
@@ -138,7 +166,9 @@ fn mutual_recursion_between_unannotated_class_methods_reports_an_error() {
 }
 
 #[test]
-fn lowers_boolean_logical_operators_to_short_circuit_closures() {
+fn lowers_boolean_logical_operators_to_single_evaluation_conditionals() {
+    // Operands that are plain bindings have no side effects to sequence, so `&&`/`||`
+    // lower straight to a short-circuiting conditional (`a && b` => `a ? b : a`).
     let program = lower(
         r#"function main(): void {
             const a = true;
@@ -151,14 +181,40 @@ fn lowers_boolean_logical_operators_to_short_circuit_closures() {
         let HirStmt::Expr(HirExpr::Call(_, arguments)) = statement else {
             panic!("expected console call");
         };
-        let HirExpr::Call(callee, call_arguments) = &arguments[0] else {
-            panic!("expected immediately invoked logical closure");
+        assert!(
+            matches!(&arguments[0], HirExpr::Conditional(_, _, _, HirType::Bool)),
+            "expected a direct short-circuit conditional: {:?}", arguments[0]
+        );
+    }
+
+    // A boolean result can keep the left call directly in the conditional test. The
+    // right call stays in only the branch where JavaScript evaluates it.
+    let program = lower(
+        r#"function f(): boolean { return true; }
+        function main(): void {
+            console.log(f() && f());
+            console.log(f() || f());
+        }"#,
+    );
+    let main = program.functions.iter().find(|function| function.name == "main").unwrap();
+    for (statement, is_and) in main.body.iter().zip([true, false]) {
+        let HirStmt::Expr(HirExpr::Call(_, arguments)) = statement else {
+            panic!("expected console call");
         };
-        assert_eq!(call_arguments.len(), 1);
-        assert!(matches!(
-            callee.as_ref(),
-            HirExpr::Lambda(_, params, HirType::Bool, _) if params.len() == 1
-        ));
+        let HirExpr::Conditional(test, yes, no, HirType::Bool) = &arguments[0] else {
+            panic!("expected direct short-circuit conditional: {:?}", arguments[0]);
+        };
+        assert!(matches!(test.as_ref(), HirExpr::Call(callee, args)
+            if matches!(callee.as_ref(), HirExpr::Var(name) if name == "f") && args.is_empty()));
+        if is_and {
+            assert!(matches!(yes.as_ref(), HirExpr::Call(callee, args)
+                if matches!(callee.as_ref(), HirExpr::Var(name) if name == "f") && args.is_empty()));
+            assert!(matches!(no.as_ref(), HirExpr::Lit(HirLit::Bool(false))));
+        } else {
+            assert!(matches!(yes.as_ref(), HirExpr::Lit(HirLit::Bool(true))));
+            assert!(matches!(no.as_ref(), HirExpr::Call(callee, args)
+                if matches!(callee.as_ref(), HirExpr::Var(name) if name == "f") && args.is_empty()));
+        }
     }
 }
 
@@ -286,10 +342,12 @@ fn desugars_do_while_and_checks_condition_before_continue() {
     let HirStmt::If(_, continue_body, _) = &body[1] else {
         panic!("expected source if statement");
     };
+    // The guard before `continue` leaves the loop with a depth-0 break (the innermost loop,
+    // i.e. the same exit as a plain `Break`).
     assert!(matches!(
         continue_body.as_slice(),
         [HirStmt::If(_, _, else_body), HirStmt::Continue]
-            if else_body == &[HirStmt::Break]
+            if else_body == &[HirStmt::Break] || else_body == &[HirStmt::BreakDepth(0)]
     ));
 }
 
@@ -337,20 +395,7 @@ fn desugars_for_of_assignment_to_existing_variable() {
 }
 
 #[test]
-fn lowers_switch_to_selected_case_state_without_switch_breaks() {
-    fn contains_break(stmts: &[HirStmt]) -> bool {
-        stmts.iter().any(|stmt| match stmt {
-            HirStmt::Break => true,
-            HirStmt::If(_, then_body, else_body) => {
-                contains_break(then_body) || contains_break(else_body)
-            }
-            HirStmt::Try(body, _, catch_body, _) => {
-                contains_break(body) || contains_break(catch_body)
-            }
-            HirStmt::While(_, _) => false,
-            _ => false,
-        })
-    }
+fn lowers_switch_to_one_shot_selected_case_loop() {
     let program = lower(
         r#"function main(): void {
             switch (2) {
@@ -360,13 +405,444 @@ fn lowers_switch_to_selected_case_state_without_switch_breaks() {
             }
         }"#,
     );
-    assert!(program.functions[0].body.len() > 4);
-    assert!(!contains_break(&program.functions[0].body));
-    assert!(matches!(
-        &program.functions[0].body[0],
-        HirStmt::Let(name, HirType::F64, HirExpr::Lit(HirLit::F64(2.0)))
-            if name.starts_with("__thaw_switch_value_")
-    ));
+    let [HirStmt::While(HirExpr::Lit(HirLit::Bool(true)), body)] =
+        program.functions[0].body.as_slice()
+    else { panic!("switch should lower to one one-shot loop"); };
+    assert!(matches!(body.first(), Some(HirStmt::Let(name, HirType::F64, HirExpr::Lit(HirLit::F64(2.0)))) if name.starts_with("__thaw_switch_value_")));
+    assert!(body.iter().any(|stmt| matches!(stmt, HirStmt::Break)));
+    fn has_dispatch(stmts: &[HirStmt]) -> bool {
+        stmts.iter().any(|stmt| match stmt {
+            HirStmt::If(HirExpr::BinOp(BinOp::EqEqEq, left, _), yes, no) => matches!(left.as_ref(), HirExpr::Var(name) if name.starts_with("__thaw_switch_selected_")) || has_dispatch(yes) || has_dispatch(no),
+            HirStmt::If(_, yes, no) => has_dispatch(yes) || has_dispatch(no),
+            _ => false,
+        })
+    }
+    assert!(has_dispatch(body));
+    fn has_case_break(stmts: &[HirStmt]) -> bool {
+        stmts.iter().any(|stmt| match stmt {
+            HirStmt::If(_, yes, no) => yes.iter().any(|item| matches!(item, HirStmt::Break))
+                || has_case_break(yes) || has_case_break(no),
+            _ => false,
+        })
+    }
+    assert!(matches!(body.last(), Some(HirStmt::Break)), "one-shot terminal break");
+    assert!(has_case_break(body), "source break remains inside selected-case dispatch");
+}
+
+#[test]
+fn thaw_exhaustive_switch_keeps_the_outer_definite_exit_sentinel() {
+    let program = lower("function value(flag: boolean): number { switch (flag) { case true: return 1; default: return 0; } }");
+    let Some(HirStmt::While(HirExpr::Lit(HirLit::Bool(true)), body)) = program.functions[0].body.first() else {
+        panic!("expected one-shot switch loop");
+    };
+    assert!(matches!(body.last(), Some(HirStmt::Break)));
+    assert!(!body.iter().any(|stmt| matches!(stmt, HirStmt::Throw(HirExpr::Lit(HirLit::Str(message))) if message == "unreachable exhaustive switch")));
+    assert!(matches!(program.functions[0].body.last(), Some(HirStmt::Throw(HirExpr::Lit(HirLit::Str(message)))) if message == "unreachable exhaustive switch"));
+}
+
+#[test]
+fn thaw_labeled_block_unnamed_continue_targets_iteration() {
+    let program = lower("function main(): void { while (true) { a: { b: { continue; } } } }");
+    let [HirStmt::While(_, body)] = program.functions[0].body.as_slice() else { panic!("expected source loop"); };
+    let [HirStmt::While(_, a)] = body.as_slice() else { panic!("expected a label wrapper"); };
+    let [HirStmt::While(_, b), HirStmt::Break] = a.as_slice() else { panic!("expected b label wrapper and a tail break"); };
+    assert_eq!(b, &[HirStmt::ContinueDepth(2), HirStmt::Break]);
+    let mut targets = Vec::new();
+    collect_loop_targets(&program.functions[0].body, 0, &mut targets);
+    assert!(targets.contains(&('c', 3, 1)));
+}
+
+#[test]
+fn thaw_labeled_block_unnamed_break_targets_iteration() {
+    let program = lower("function main(): void { while (true) { a: { b: { break; } } } }");
+    let [HirStmt::While(_, body)] = program.functions[0].body.as_slice() else { panic!("expected source loop"); };
+    let [HirStmt::While(_, a)] = body.as_slice() else { panic!("expected a label wrapper"); };
+    let [HirStmt::While(_, b), HirStmt::Break] = a.as_slice() else { panic!("expected b label wrapper and a tail break"); };
+    assert_eq!(b, &[HirStmt::BreakDepth(2), HirStmt::Break]);
+    let mut targets = Vec::new();
+    collect_loop_targets(&program.functions[0].body, 0, &mut targets);
+    assert!(targets.contains(&('b', 3, 1)));
+}
+
+#[test]
+fn thaw_labeled_block_unnamed_break_targets_switch() {
+    let program = lower("function main(): void { switch (1) { default: a: { break; console.log(1); } } }");
+    let [HirStmt::While(HirExpr::Lit(HirLit::Bool(true)), body)] = program.functions[0].body.as_slice() else { panic!("expected switch frame"); };
+    fn has_target(stmts: &[HirStmt]) -> bool {
+        stmts.iter().any(|stmt| match stmt {
+            HirStmt::BreakDepth(1) => true,
+            HirStmt::If(_, yes, no) => has_target(yes) || has_target(no),
+            HirStmt::While(_, body) => has_target(body),
+            _ => false,
+        })
+    }
+    assert!(has_target(body));
+}
+
+#[test]
+fn thaw_named_and_nested_targets_resolve_to_their_exact_source_frames() {
+    let chained = lower("function main() { outer: inner: while (true) { continue outer; break inner; } }");
+    let mut targets = Vec::new();
+    collect_loop_targets(&chained.functions[0].body, 0, &mut targets);
+    assert!(targets.contains(&('c', 1, 1)), "chained label continue: {targets:?}");
+    assert!(targets.contains(&('b', 1, 1)), "chained label break: {targets:?}");
+
+    let blocks = lower("function main() { while (true) { outer: { inner: { break outer; } } } }");
+    let mut targets = Vec::new();
+    collect_loop_targets(&blocks.functions[0].body, 0, &mut targets);
+    assert!(targets.contains(&('b', 3, 2)), "outer block break: {targets:?}");
+
+    let inner_block = lower("function main() { while (true) { outer: { inner: { break inner; } } } }");
+    let mut targets = Vec::new();
+    collect_loop_targets(&inner_block.functions[0].body, 0, &mut targets);
+    assert!(targets.contains(&('b', 3, 3)), "inner block break: {targets:?}");
+    fn has_source_and_generated_label_break(stmts: &[HirStmt]) -> bool {
+        stmts.iter().any(|stmt| match stmt {
+            HirStmt::While(_, body) => matches!(body.as_slice(), [HirStmt::BreakDepth(0), HirStmt::Break])
+                || has_source_and_generated_label_break(body),
+            HirStmt::If(_, yes, no) => has_source_and_generated_label_break(yes) || has_source_and_generated_label_break(no),
+            _ => false,
+        })
+    }
+    assert!(has_source_and_generated_label_break(&inner_block.functions[0].body), "source break must precede, and remain distinct from, the generated label tail");
+
+    let labeled_switch = lower("function main() { target: switch (1) { default: while (true) { break target; } } }");
+    let mut targets = Vec::new();
+    collect_loop_targets(&labeled_switch.functions[0].body, 0, &mut targets);
+    assert!(targets.contains(&('b', 3, 1)), "labeled switch break: {targets:?}");
+
+    let nested_switch = lower("function main() { switch (1) { default: switch (2) { default: break; } break; } }");
+    let mut targets = Vec::new();
+    collect_loop_targets(&nested_switch.functions[0].body, 0, &mut targets);
+    assert!(targets.contains(&('b', 2, 2)), "inner switch break: {targets:?}");
+    assert!(targets.contains(&('b', 1, 1)), "outer switch break: {targets:?}");
+    fn has_source_break_in_dispatch(stmts: &[HirStmt]) -> bool {
+        stmts.iter().any(|stmt| match stmt {
+            HirStmt::While(_, body) => body.last() == Some(&HirStmt::Break)
+                && body.iter().any(|item| matches!(item, HirStmt::If(_, yes, _) if yes.contains(&HirStmt::Break)))
+                || has_source_break_in_dispatch(body),
+            HirStmt::If(_, yes, no) => has_source_break_in_dispatch(yes) || has_source_break_in_dispatch(no),
+            _ => false,
+        })
+    }
+    assert!(has_source_break_in_dispatch(&nested_switch.functions[0].body), "source breaks stay inside case dispatch, separate from generated tails");
+
+    let inner_loop = lower("function main() { while (true) { label: { while (true) { break; continue; } } } }");
+    let mut targets = Vec::new();
+    collect_loop_targets(&inner_loop.functions[0].body, 0, &mut targets);
+    assert!(targets.contains(&('b', 3, 3)), "inner loop break remains local: {targets:?}");
+    assert!(targets.contains(&('c', 3, 3)), "inner loop continue remains local: {targets:?}");
+}
+
+#[test]
+fn thaw_switch_continue_skips_switch_and_labels() {
+    let program = lower("function main(): void { while (true) { switch (1) { default: a: { continue; } } } }");
+    fn has_target(stmts: &[HirStmt]) -> bool {
+        stmts.iter().any(|stmt| match stmt {
+            HirStmt::ContinueDepth(2) => true,
+            HirStmt::If(_, yes, no) => has_target(yes) || has_target(no),
+            HirStmt::While(_, body) => has_target(body),
+            _ => false,
+        })
+    }
+    assert!(has_target(&program.functions[0].body));
+}
+
+#[test]
+fn thaw_for_advance_precedes_only_continues_that_leave_the_for_loop() {
+    let program = lower("function main(): void { for (let i = 0; i < 3; i++) { a: { b: { continue; } } } }");
+    fn count_update_before_continue(stmts: &[HirStmt]) -> usize {
+        stmts.windows(2).filter(|pair| matches!(pair,
+            [HirStmt::Expr(HirExpr::PostfixUpdate(name, BinOp::Add)), HirStmt::ContinueDepth(2)] if name == "i"
+        )).count() + stmts.iter().map(|stmt| match stmt {
+            HirStmt::If(_, yes, no) => count_update_before_continue(yes) + count_update_before_continue(no),
+            HirStmt::While(_, body) | HirStmt::Finally(body, _) => count_update_before_continue(body),
+            HirStmt::Try(body, _, catch_body, _) => count_update_before_continue(body) + count_update_before_continue(catch_body),
+            _ => 0,
+        }).sum::<usize>()
+    }
+    assert_eq!(count_update_before_continue(&program.functions[0].body), 1);
+    let nested = lower("function main(): void { for (let i = 0; i < 3; i++) { a: { while (true) { continue; break; } } } }");
+    fn has_update_before_plain_continue(stmts: &[HirStmt]) -> bool {
+        stmts.windows(2).any(|pair| matches!(pair,
+            [HirStmt::Expr(HirExpr::PostfixUpdate(name, BinOp::Add)), HirStmt::Continue] if name == "i"
+        )) || stmts.iter().any(|stmt| match stmt {
+            HirStmt::If(_, yes, no) => has_update_before_plain_continue(yes) || has_update_before_plain_continue(no),
+            HirStmt::While(_, body) | HirStmt::Finally(body, _) => has_update_before_plain_continue(body),
+            HirStmt::Try(body, _, catch_body, _) => has_update_before_plain_continue(body) || has_update_before_plain_continue(catch_body),
+            _ => false,
+        })
+    }
+    assert!(!has_update_before_plain_continue(&nested.functions[0].body));
+}
+
+#[test]
+fn thaw_for_of_continue_has_one_advance_and_using_cleanup_before_it() {
+    let program = lower("function main() { for (const value of [1, 2]) { label: { continue; } } }");
+    fn advances_before_continue(stmts: &[HirStmt]) -> usize {
+        stmts.windows(2).filter(|pair| matches!(pair,
+            [HirStmt::Expr(HirExpr::Assign(name, value)), HirStmt::ContinueDepth(1)]
+                if name.starts_with("__thaw_for_of_index_")
+                    && matches!(value.as_ref(), HirExpr::BinOp(BinOp::Add, _, _))
+        )).count() + stmts.iter().map(|stmt| match stmt {
+            HirStmt::If(_, yes, no) => advances_before_continue(yes) + advances_before_continue(no),
+            HirStmt::While(_, body) | HirStmt::Finally(body, _) => advances_before_continue(body),
+            HirStmt::Try(body, _, catch_body, _) => advances_before_continue(body) + advances_before_continue(catch_body),
+            _ => 0,
+        }).sum::<usize>()
+    }
+    assert_eq!(advances_before_continue(&program.functions[0].body), 1);
+
+    let using = lower("function make() { return { [Symbol.dispose]() {} }; } function main() { for (using item of [make()]) { label: { continue; } } }");
+    fn count_finally(stmts: &[HirStmt]) -> usize {
+        stmts.iter().map(|stmt| match stmt {
+            HirStmt::Finally(body, _) => 1 + count_finally(body),
+            HirStmt::If(_, yes, no) => count_finally(yes) + count_finally(no),
+            HirStmt::While(_, body) => count_finally(body),
+            HirStmt::Try(body, _, catch_body, _) => count_finally(body) + count_finally(catch_body),
+            _ => 0,
+        }).sum()
+    }
+    let mut targets = Vec::new();
+    collect_loop_targets(&using.functions[1].body, 0, &mut targets);
+    assert_eq!(targets.iter().filter(|(kind, _, _)| *kind == 'c').count(), 1);
+    fn disposal_has_pending_binding(stmts: &[HirStmt]) -> bool {
+        stmts.iter().any(|stmt| match stmt {
+            HirStmt::Let(name, ..) => name.starts_with("__thaw_using_pending"),
+            HirStmt::If(_, yes, no) => disposal_has_pending_binding(yes) || disposal_has_pending_binding(no),
+            HirStmt::Try(body, _, catch_body, _) => disposal_has_pending_binding(body) || disposal_has_pending_binding(catch_body),
+            HirStmt::Finally(body, _) | HirStmt::While(_, body) => disposal_has_pending_binding(body),
+            _ => false,
+        })
+    }
+    fn has_dispose_advance_continue(stmts: &[HirStmt]) -> usize {
+        stmts.windows(3).filter(|triple| matches!(triple,
+            [HirStmt::Finally(disposal, _), HirStmt::Expr(HirExpr::Assign(name, value)), HirStmt::ContinueDepth(1)]
+                if name.starts_with("__thaw_for_of_index_")
+                    && matches!(value.as_ref(), HirExpr::BinOp(BinOp::Add, _, _))
+                    && disposal_has_pending_binding(disposal)
+        )).count() + stmts.iter().map(|stmt| match stmt {
+            HirStmt::If(_, yes, no) => has_dispose_advance_continue(yes) + has_dispose_advance_continue(no),
+            HirStmt::While(_, body) | HirStmt::Finally(body, _) => has_dispose_advance_continue(body),
+            HirStmt::Try(body, _, catch_body, _) => has_dispose_advance_continue(body) + has_dispose_advance_continue(catch_body),
+            _ => 0,
+        }).sum::<usize>()
+    }
+    assert_eq!(has_dispose_advance_continue(&using.functions[1].body), 1,
+        "iteration disposal runs once before the one advance for the crossing continue");
+    assert!(count_finally(&using.functions[1].body) >= 1);
+
+    let for_in = lower("function main() { for (const key in { a: 1 }) { label: { continue; } } }");
+    fn for_in_advances_before_continue(stmts: &[HirStmt]) -> usize {
+        stmts.windows(2).filter(|pair| matches!(pair,
+            [HirStmt::Expr(HirExpr::Assign(name, value)), HirStmt::ContinueDepth(1)]
+                if name.starts_with("__thaw_for_in_index_")
+                    && matches!(value.as_ref(), HirExpr::BinOp(BinOp::Add, _, _))
+        )).count() + stmts.iter().map(|stmt| match stmt {
+            HirStmt::If(_, yes, no) => for_in_advances_before_continue(yes) + for_in_advances_before_continue(no),
+            HirStmt::While(_, body) | HirStmt::Finally(body, _) => for_in_advances_before_continue(body),
+            HirStmt::Try(body, _, catch_body, _) => for_in_advances_before_continue(body) + for_in_advances_before_continue(catch_body),
+            _ => 0,
+        }).sum::<usize>()
+    }
+    assert_eq!(for_in_advances_before_continue(&for_in.functions[0].body), 1);
+}
+
+#[test]
+fn thaw_do_while_guard_precedes_continue_through_a_label() {
+    let program = lower("function main(): void { let more = true; do { label: { continue; } } while (more); }");
+    let HirStmt::While(HirExpr::Lit(HirLit::Bool(true)), body) = &program.functions[0].body[1] else {
+        panic!("expected desugared do-while");
+    };
+    fn has_guard_before_target(stmts: &[HirStmt]) -> bool {
+        stmts.windows(2).any(|pair| matches!(pair,
+            [HirStmt::If(_, _, else_body), HirStmt::ContinueDepth(1)] if else_body == &[HirStmt::BreakDepth(1)]
+        )) || stmts.iter().any(|stmt| match stmt {
+            HirStmt::If(_, yes, no) => has_guard_before_target(yes) || has_guard_before_target(no),
+            HirStmt::While(_, body) => has_guard_before_target(body),
+            _ => false,
+        })
+    }
+    assert!(has_guard_before_target(body));
+    assert!(matches!(body.last(), Some(HirStmt::If(_, _, else_body)) if else_body == &[HirStmt::Break]));
+}
+
+#[test]
+fn thaw_unmatched_source_transfers_keep_their_diagnostics() {
+    fn first_statement(source: &str) -> Stmt {
+        let module = thaw_parser::parse_typescript(source).expect("valid control-flow setup");
+        let ModuleItem::Stmt(Stmt::Decl(Decl::Fn(function))) = &module.body[0] else {
+            panic!("expected function declaration");
+        };
+        function.function.body.as_ref().unwrap().stmts[0].clone()
+    }
+    fn lowering_error(stmt: &Stmt) -> String {
+        let signatures = HashMap::<Symbol, FnSignature>::new();
+        let interfaces = HashMap::<Symbol, HirType>::new();
+        let generic_interfaces = GenericInterfaces::new();
+        let enum_values = EnumValues::new();
+        let enum_reverse_values = EnumReverseValues::new();
+        FnLowerer::new(
+            &signatures, &interfaces, &generic_interfaces, &enum_values,
+            &enum_reverse_values, HirType::Void, None,
+        ).lower_stmt_seq(stmt).unwrap_err()
+    }
+    let loop_with_break = first_statement("function main() { while (true) { break; } }");
+    let Stmt::While(while_stmt) = loop_with_break else { panic!("expected while"); };
+    let Stmt::Block(body) = while_stmt.body.as_ref() else { panic!("expected block"); };
+    assert!(lowering_error(&body.stmts[0]).contains("`break` used outside a loop or switch"));
+
+    let loop_with_continue = first_statement("function main() { while (true) { continue; } }");
+    let Stmt::While(while_stmt) = loop_with_continue else { panic!("expected while"); };
+    let Stmt::Block(body) = while_stmt.body.as_ref() else { panic!("expected block"); };
+    assert!(lowering_error(&body.stmts[0]).contains("`continue` used outside a loop"));
+
+    let switch_with_continue = first_statement("function main() { while (true) { switch (1) { default: continue; } } }");
+    let Stmt::While(while_stmt) = switch_with_continue else { panic!("expected while"); };
+    let Stmt::Block(body) = while_stmt.body.as_ref() else { panic!("expected block"); };
+    assert!(matches!(body.stmts[0], Stmt::Switch(_)));
+    let Stmt::Switch(switch_stmt) = &body.stmts[0] else { unreachable!() };
+    assert!(lowering_error(&Stmt::Switch(switch_stmt.clone())).contains("`continue` used outside a loop"));
+
+    for (source, expected) in [
+        ("function main() { while (true) { label: { break; } } }", "`break` used outside a loop or switch"),
+        ("function main() { while (true) { label: { continue; } } }", "`continue` used outside a loop"),
+    ] {
+        let wrapper = first_statement(source);
+        let Stmt::While(loop_stmt) = wrapper else { panic!("expected valid loop scaffold"); };
+        let Stmt::Block(loop_body) = loop_stmt.body.as_ref() else { panic!("expected loop block"); };
+        assert!(matches!(loop_body.stmts[0], Stmt::Labeled(_)));
+        assert!(lowering_error(&loop_body.stmts[0]).contains(expected));
+    }
+
+    let mut non_loop_continue = first_statement(
+        "function main() { while (true) { label: while (true) { continue label; } } }",
+    );
+    let Stmt::While(outer_loop) = &mut non_loop_continue else { panic!("expected outer loop"); };
+    let Stmt::Block(outer_body) = outer_loop.body.as_mut() else { panic!("expected outer body"); };
+    let Stmt::Labeled(label) = &mut outer_body.stmts[0] else { panic!("expected label"); };
+    let Stmt::While(label_loop) = label.body.as_ref() else { panic!("expected labeled loop"); };
+    label.body = label_loop.body.clone();
+    assert!(lowering_error(&non_loop_continue).contains("continue label `label` does not name a loop"));
+
+    let mut unknown_break = first_statement("function main() { known: while (true) { break known; } }");
+    let Stmt::Labeled(label) = &mut unknown_break else { panic!("expected label"); };
+    let Stmt::While(loop_stmt) = label.body.as_mut() else { panic!("expected loop"); };
+    let Stmt::Block(body) = loop_stmt.body.as_mut() else { panic!("expected block"); };
+    let Stmt::Break(break_stmt) = &mut body.stmts[0] else { panic!("expected break"); };
+    break_stmt.label.as_mut().unwrap().sym = "missing".into();
+    assert!(lowering_error(&unknown_break).contains("unknown break label `missing`"));
+
+    let mut unknown_continue = first_statement("function main() { known: while (true) { continue known; } }");
+    let Stmt::Labeled(label) = &mut unknown_continue else { panic!("expected label"); };
+    let Stmt::While(loop_stmt) = label.body.as_mut() else { panic!("expected loop"); };
+    let Stmt::Block(body) = loop_stmt.body.as_mut() else { panic!("expected block"); };
+    let Stmt::Continue(continue_stmt) = &mut body.stmts[0] else { panic!("expected continue"); };
+    continue_stmt.label.as_mut().unwrap().sym = "missing".into();
+    assert!(lowering_error(&unknown_continue).contains("unknown continue label `missing`"));
+
+    let mut duplicate = first_statement("function main() { outer: { inner: { debugger; } } }");
+    let Stmt::Labeled(outer) = &mut duplicate else { panic!("expected outer label"); };
+    let outer_name = outer.label.sym.clone();
+    let Stmt::Block(outer_body) = outer.body.as_mut() else { panic!("expected outer block"); };
+    let Stmt::Labeled(inner) = &mut outer_body.stmts[0] else { panic!("expected inner label"); };
+    inner.label.sym = outer_name;
+    assert!(lowering_error(&duplicate).contains("duplicate active label `outer`"));
+
+    let mut nested = thaw_parser::parse_typescript(
+        "function main() { outer: while (true) { function inner() { inner: while (true) { continue inner; } } } }",
+    ).expect("valid nested-function setup");
+    let ModuleItem::Stmt(Stmt::Decl(Decl::Fn(main))) = &mut nested.body[0] else { panic!("expected main"); };
+    let Stmt::Labeled(outer) = &mut main.function.body.as_mut().unwrap().stmts[0] else { panic!("expected outer label"); };
+    let Stmt::While(outer_loop) = outer.body.as_mut() else { panic!("expected outer loop"); };
+    let Stmt::Block(outer_body) = outer_loop.body.as_mut() else { panic!("expected outer body"); };
+    let Stmt::Decl(Decl::Fn(inner)) = &mut outer_body.stmts[0] else { panic!("expected inner function"); };
+    let Stmt::Labeled(inner_label) = &mut inner.function.body.as_mut().unwrap().stmts[0] else { panic!("expected inner label"); };
+    let Stmt::While(inner_loop) = inner_label.body.as_mut() else { panic!("expected inner loop"); };
+    let Stmt::Block(inner_body) = inner_loop.body.as_mut() else { panic!("expected inner body"); };
+    let Stmt::Continue(continue_stmt) = &mut inner_body.stmts[0] else { panic!("expected continue"); };
+    continue_stmt.label = Some(outer.label.clone());
+    assert!(lower_module(&nested).unwrap_err().contains("unknown continue label `outer`"));
+
+    let same_name_continue = thaw_parser::parse_typescript(
+        "function main() { outer: while (true) { function inner() { inner: while (true) { continue inner; } } } }",
+    ).expect("same-name function and label control is valid TypeScript");
+    assert!(lower_module(&same_name_continue).is_ok(), "a label reference must not make the named function recursive");
+
+    let recursive_expression = thaw_parser::parse_typescript(
+        "const f = function inner(n: number): number { return n ? inner(n - 1) : 0; };",
+    ).expect("true named-function recursion control is valid TypeScript");
+    let ModuleItem::Stmt(Stmt::Decl(Decl::Var(declaration))) = &recursive_expression.body[0] else { panic!("expected variable declaration"); };
+    let Expr::Fn(recursive_function) = declaration.decls[0].init.as_ref().expect("function initializer").as_ref() else { panic!("expected named function expression"); };
+    assert!(named_function_is_recursive(recursive_function), "a value reference to the function name must remain recursive");
+
+    let mut nested_unlabelled_break = thaw_parser::parse_typescript(
+        "function main() { outer: while (true) { function inner() { while (true) { break; } } } }",
+    ).expect("valid nested-function break setup");
+    let ModuleItem::Stmt(Stmt::Decl(Decl::Fn(main))) = &mut nested_unlabelled_break.body[0] else { panic!("expected main"); };
+    let Stmt::Labeled(outer) = &mut main.function.body.as_mut().unwrap().stmts[0] else { panic!("expected outer label"); };
+    let Stmt::While(outer_loop) = outer.body.as_mut() else { panic!("expected outer loop"); };
+    let Stmt::Block(outer_body) = outer_loop.body.as_mut() else { panic!("expected outer body"); };
+    let Stmt::Decl(Decl::Fn(inner)) = &mut outer_body.stmts[0] else { panic!("expected inner function"); };
+    let inner_stmts = &mut inner.function.body.as_mut().unwrap().stmts;
+    let Stmt::While(inner_loop) = &inner_stmts[0] else { panic!("expected valid inner loop"); };
+    let Stmt::Block(inner_body) = inner_loop.body.as_ref() else { panic!("expected inner body"); };
+    let transfer = inner_body.stmts[0].clone();
+    inner_stmts[0] = transfer;
+    assert!(lower_module(&nested_unlabelled_break).unwrap_err().contains("`break` used outside a loop or switch"));
+
+    let restored_outer_label = thaw_parser::parse_typescript(
+        "function main() { outer: while (true) { function inner() { outer: while (true) { continue outer; } } continue outer; } }",
+    ).expect("nested functions have their own labels and restore the outer loop context");
+    assert!(lower_module(&restored_outer_label).is_ok(), "nested label reuse and the outer continue after the function both lower");
+
+    fn outer_label(module: &swc_ecma_ast::Module) -> swc_ecma_ast::Ident {
+        let ModuleItem::Stmt(Stmt::Decl(Decl::Fn(main))) = &module.body[0] else { panic!("expected main"); };
+        let Stmt::Labeled(label) = &main.function.body.as_ref().unwrap().stmts[0] else { panic!("expected outer label"); };
+        label.label.clone()
+    }
+    struct RetargetContinue {
+        target: swc_ecma_ast::Ident,
+    }
+    impl swc_ecma_visit::VisitMut for RetargetContinue {
+        fn visit_mut_continue_stmt(&mut self, statement: &mut swc_ecma_ast::ContinueStmt) {
+            if statement.label.is_some() {
+                statement.label = Some(self.target.clone());
+            }
+        }
+    }
+    for (form, source) in [
+        ("anonymous function", "function main() { outer: while (true) { const inner = function() { inner: while (true) { continue inner; } }; } }"),
+        ("arrow", "function main() { outer: while (true) { const inner = () => { inner: while (true) { continue inner; } }; } }"),
+        ("async arrow", "function main() { outer: while (true) { const inner = async () => { inner: while (true) { continue inner; } }; } }"),
+        ("contextual arrow", "function main() { outer: while (true) { const inner: () => void = () => { inner: while (true) { continue inner; } }; } }"),
+        ("generator function", "function main() { outer: while (true) { const inner = function*(): Generator<number> { inner: while (true) { continue inner; } yield 1; }; } }"),
+    ] {
+        let valid = thaw_parser::parse_typescript(source).expect("valid nested closure transfer setup");
+        assert!(lower_module(&valid).is_ok(), "{form} with its own labeled continue lowers");
+        let mut invalid = valid;
+        let target = outer_label(&invalid);
+        invalid.visit_mut_with(&mut RetargetContinue { target });
+        assert_eq!(lower_module(&invalid).unwrap_err(), "unknown continue label `outer`", "{form} cannot target an enclosing function label");
+    }
+
+    let mut nested_unnamed = thaw_parser::parse_typescript(
+        "function main() { outer: while (true) { function inner() { while (true) { continue; } } } }",
+    ).expect("valid nested-function setup");
+    let ModuleItem::Stmt(Stmt::Decl(Decl::Fn(main))) = &mut nested_unnamed.body[0] else { panic!("expected main"); };
+    let Stmt::Labeled(outer) = &mut main.function.body.as_mut().unwrap().stmts[0] else { panic!("expected outer label"); };
+    let Stmt::While(outer_loop) = outer.body.as_mut() else { panic!("expected outer loop"); };
+    let Stmt::Block(outer_body) = outer_loop.body.as_mut() else { panic!("expected outer body"); };
+    let Stmt::Decl(Decl::Fn(inner)) = &mut outer_body.stmts[0] else { panic!("expected inner function"); };
+    let inner_stmts = &mut inner.function.body.as_mut().unwrap().stmts;
+    let Stmt::While(inner_loop) = &inner_stmts[0] else { panic!("expected valid inner loop"); };
+    let Stmt::Block(inner_body) = inner_loop.body.as_ref() else { panic!("expected inner body"); };
+    let transfer = inner_body.stmts[0].clone();
+    inner_stmts[0] = transfer;
+    assert!(lower_module(&nested_unnamed).unwrap_err().contains("`continue` used outside a loop"));
+
+    let program = lower("function main() { label: {} label: {} }");
+    assert_eq!(program.functions.len(), 1);
 }
 
 #[test]
@@ -381,29 +857,80 @@ fn lowers_try_catch() {
         }"#,
     );
     let f = &program.functions[0];
-    assert_eq!(
-        f.body,
-        vec![HirStmt::Try(
-            vec![
-                HirStmt::Expr(HirExpr::Call(
-                    Box::new(HirExpr::Var(
-                        "__thaw_set_pending_exception_tag".into()
-                    )),
-                    vec![HirExpr::Lit(HirLit::I64(4))],
-                )),
-                HirStmt::Throw(HirExpr::Call(
-                    Box::new(HirExpr::Var("@@thaw_trusted_exception_text".into())),
-                    vec![HirExpr::Lit(HirLit::Str("boom".into()))],
-                )),
-            ],
-            "e".into(),
-            vec![HirStmt::Expr(HirExpr::Call(
-                Box::new(HirExpr::Var("console.log".into())),
-                vec![HirExpr::Var("e".into())],
-            ))],
-            Some("e".into()),
-        )]
-    );
+    let text = format!("{:?}", f.body);
+    assert!(text.contains("__thaw_clear_pending_exception_provenance"), "{text}");
+    assert!(text.contains("__thaw_set_pending_exception_tag"), "{text}");
+    assert!(text.contains("I64(4)"), "{text}");
+    assert!(text.contains("@@thaw_published_exception_text"), "{text}");
+    assert!(!text.contains("@@thaw_trusted_exception_text"), "{text}");
+    assert!(text.contains("boom"), "{text}");
+    assert!(text.contains("console.log"), "{text}");
+}
+
+#[test]
+fn finally_separates_text_only_throws_from_fresh_published_tuples() {
+    let program = lower(r#"
+        function plain(input: any): void {
+            try { throw "outer"; }
+            catch (error) { const { value } = input; }
+            finally { console.log("cleanup"); }
+        }
+        function fresh(): void {
+            try { throw "outer"; }
+            catch (error) { throw 17; }
+            finally { console.log("cleanup"); }
+        }
+    "#);
+    let plain = program.functions.iter().find(|function| function.name == "plain").unwrap();
+    let plain_text = format!("{:?}", plain.body);
+    assert!(plain_text.contains("@@thaw_trusted_exception_text"), "{plain_text}");
+    assert!(plain_text.contains("@@thaw_published_exception_text"), "{plain_text}");
+    assert!(!plain_text.contains("@@thaw_rethrow_pending_exception"), "{plain_text}");
+
+    let fresh = program.functions.iter().find(|function| function.name == "fresh").unwrap();
+    let fresh_text = format!("{:?}", fresh.body);
+    assert!(fresh_text.contains("@@thaw_rethrow_pending_exception"), "{fresh_text}");
+    assert!(fresh_text.contains("__thaw_pending_exception_native"), "{fresh_text}");
+}
+
+#[test]
+fn throw_union_publishes_only_active_member_and_uses_safe_diagnostics() {
+    let program = lower(r#"
+        function main(reason: number | string | { value: number }): void {
+            try { throw reason; } catch (error) { console.log(error); }
+        }
+    "#);
+    let text = format!("{:?}", program.functions[0].body);
+    assert!(text.contains("UnionTag"), "{text}");
+    assert!(text.contains("UnionValue"), "{text}");
+    assert!(text.contains("__thaw_set_pending_exception_f64"), "{text}");
+    assert!(text.contains("__thaw_set_pending_exception_object"), "{text}");
+    assert!(text.contains("[exception value]"), "{text}");
+    assert!(!text.contains("__thaw_js_handle_to_string"), "{text}");
+}
+
+#[test]
+fn promise_reject_uses_the_same_json_exception_owner_without_coercion() {
+    let program = lower(r#"
+        function main(reason: any): void { Promise.reject(reason); }
+    "#);
+    let text = format!("{:?}", program.functions[0].body);
+    assert!(text.contains("__thaw_clear_pending_exception_provenance"), "{text}");
+    assert!(text.contains("__thaw_set_pending_exception_json"), "{text}");
+    assert!(text.contains("[exception value]"), "{text}");
+    assert!(!text.contains("__thaw_js_handle_to_string"), "{text}");
+}
+
+#[test]
+fn throw_borrowed_jsvalue_uses_exact_capture_instead_of_placeholder_json() {
+    let program = lower(r#"
+        declare function reason(): JsValue;
+        function main(): void { try { throw reason(); } catch (error) { console.log(error); } }
+    "#);
+    let text = format!("{:?}", program.functions[0].body);
+    assert!(text.contains("__thaw_capture_exception_js_value"), "{text}");
+    assert!(text.contains("__thaw_set_pending_exception_json"), "{text}");
+    assert!(!text.contains("JsValueAsJson"), "{text}");
 }
 
 #[test]
@@ -420,7 +947,7 @@ fn lowers_finally_onto_normal_return_and_rethrow_paths() {
         }
         function main(): void { console.log(f()); }"#,
     );
-    let HirStmt::Try(body, _, catch_body, _) = &program.functions[0].body[0] else {
+    let HirStmt::Try(body, _, catch_body, _) = &program.functions[0].body[1] else {
         panic!("expected lowered try");
     };
     assert!(matches!(body.as_slice(), [HirStmt::Let(..), HirStmt::Finally(cleanup, 1), HirStmt::Return(Some(HirExpr::Var(_)))]
@@ -430,12 +957,55 @@ fn lowers_finally_onto_normal_return_and_rethrow_paths() {
     };
     assert!(matches!(guarded.as_slice(),
         [.., HirStmt::Try(captured, _, failed, _), HirStmt::Finally(_, 1), HirStmt::Finally(rethrow, 1)]
-            if matches!(captured.as_slice(), [HirStmt::Let(..)])
+            if only_lets(captured)
                 && matches!(failed.as_slice(), [HirStmt::Finally(_, 1), HirStmt::Finally(throw, 1)]
                     if matches!(throw.as_slice(), [HirStmt::Throw(_)]))
                 && matches!(rethrow.as_slice(), [HirStmt::Throw(_)])), "{guarded:?}");
-    assert!(matches!(failure.as_slice(), [HirStmt::Let(..), HirStmt::Finally(_, 0), HirStmt::Throw(_)]), "{failure:?}");
-    assert!(matches!(program.functions[0].body[1], HirStmt::Expr(_)));
+    // A caught exception publishes its provenance through a run of Lets before the finalizer.
+    assert!(matches!(failure.as_slice(), [lets @ .., HirStmt::Finally(_, 0), HirStmt::Throw(_)] if only_lets(lets)), "{failure:?}");
+    assert!(matches!(program.functions[0].body[2], HirStmt::Expr(_)));
+}
+
+#[test]
+fn source_target_cleanup_is_attached_only_to_exits_that_cross_its_try() {
+    let crossing = lower("function main() { while (true) { try { switch (1) { default: label: { continue; } } } finally { console.log(1); } } }");
+    fn finally_before_continue(stmts: &[HirStmt]) -> usize {
+        stmts.windows(2).filter(|pair| matches!(pair,
+            [HirStmt::Finally(_, _), HirStmt::ContinueDepth(_)]
+        )).count() + stmts.iter().map(|stmt| match stmt {
+            HirStmt::If(_, yes, no) => finally_before_continue(yes) + finally_before_continue(no),
+            HirStmt::While(_, body) | HirStmt::Finally(body, _) => finally_before_continue(body),
+            HirStmt::Try(body, _, catch_body, _) => finally_before_continue(body) + finally_before_continue(catch_body),
+            _ => 0,
+        }).sum::<usize>()
+    }
+    assert_eq!(finally_before_continue(&crossing.functions[0].body), 1);
+
+    let contained = lower("function main() { try { switch (1) { default: break; } } finally { console.log(1); } }");
+    fn switch_frame_has_inner_finalizer(stmts: &[HirStmt]) -> bool {
+        stmts.iter().any(|stmt| match stmt {
+            HirStmt::While(_, body) => body.iter().any(|item| matches!(item, HirStmt::Finally(..)))
+                || switch_frame_has_inner_finalizer(body),
+            HirStmt::If(_, yes, no) => switch_frame_has_inner_finalizer(yes) || switch_frame_has_inner_finalizer(no),
+            HirStmt::Try(body, _, catch_body, _) => switch_frame_has_inner_finalizer(body) || switch_frame_has_inner_finalizer(catch_body),
+            _ => false,
+        })
+    }
+    assert!(!switch_frame_has_inner_finalizer(&contained.functions[0].body));
+
+    let switch_break = lower("function main() { switch (1) { default: label: { try { break; } finally { console.log(2); } } } }");
+    fn finalizer_before_switch_break(stmts: &[HirStmt]) -> usize {
+        stmts.windows(2).filter(|pair| matches!(pair,
+            [HirStmt::Finally(_, _), HirStmt::BreakDepth(1)]
+        )).count() + stmts.iter().map(|stmt| match stmt {
+            HirStmt::If(_, yes, no) => finalizer_before_switch_break(yes) + finalizer_before_switch_break(no),
+            HirStmt::While(_, body) | HirStmt::Finally(body, _) => finalizer_before_switch_break(body),
+            HirStmt::Try(body, _, catch_body, _) => finalizer_before_switch_break(body) + finalizer_before_switch_break(catch_body),
+            _ => 0,
+        }).sum::<usize>()
+    }
+    assert_eq!(finalizer_before_switch_break(&switch_break.functions[0].body), 1,
+        "the switch exit crosses exactly this try's finalizer");
 }
 
 #[test]
@@ -454,24 +1024,24 @@ fn finally_snapshots_return_and_throw_values_before_mutation() {
     "#);
     let returned = program.functions.iter().find(|function| function.name == "returned").unwrap();
     let thrown = program.functions.iter().find(|function| function.name == "thrown").unwrap();
-    let HirStmt::Try(return_body, _, _, _) = &returned.body[1] else {
+    let HirStmt::Try(return_body, _, _, _) = &returned.body[2] else {
         panic!("expected return try");
     };
     assert!(matches!(return_body.as_slice(),
         [HirStmt::Let(_, _, HirExpr::Var(_)), HirStmt::Finally(_, 1), HirStmt::Return(Some(HirExpr::Var(_)))]),
         "{return_body:?}");
-    let HirStmt::Try(_, _, throw_body, _) = &thrown.body[1] else {
+    let HirStmt::Try(_, _, throw_body, _) = &thrown.body[2] else {
         panic!("expected throw try");
     };
     assert!(matches!(throw_body.as_slice(), [HirStmt::Try(guarded, _, failure, _)]
         if matches!(guarded.as_slice(),
             [.., HirStmt::Try(captured, _, failed, _), HirStmt::Finally(_, 1), HirStmt::Finally(rethrow, 1)]
-                if captured.len() == 7 && captured.iter().all(|stmt| matches!(stmt, HirStmt::Let(..)))
+                if captured.len() == 8 && captured.iter().all(|stmt| matches!(stmt, HirStmt::Let(..)))
                     && matches!(failed.as_slice(), [HirStmt::Finally(_, 1), HirStmt::Finally(throw, 1)]
                         if matches!(throw.as_slice(), [HirStmt::Throw(_)]))
                     && matches!(rethrow.as_slice(), [HirStmt::Throw(HirExpr::Call(callee, args))]
                         if matches!(callee.as_ref(), HirExpr::Var(name)
-                            if name == "@@thaw_rethrow_pending_exception") && args.len() == 9))
+                            if name == "@@thaw_rethrow_pending_exception") && args.len() == 10))
             && matches!(failure.as_slice(), [HirStmt::Let(..), HirStmt::Finally(_, 0), HirStmt::Throw(_)])),
         "{throw_body:?}");
 }
@@ -487,7 +1057,7 @@ fn finally_runs_when_catch_exit_expression_itself_throws() {
         }
     "#);
     let choose = program.functions.iter().find(|function| function.name == "choose").unwrap();
-    let HirStmt::Try(_, _, catch_body, _) = &choose.body[0] else {
+    let HirStmt::Try(_, _, catch_body, _) = &choose.body[1] else {
         panic!("expected try");
     };
     assert!(matches!(catch_body.as_slice(), [HirStmt::Try(guarded, _, failure, _)]
@@ -510,7 +1080,7 @@ fn finally_preserves_pending_throw_tuple_after_handled_inner_throw() {
         }
     "#);
     let keep = program.functions.iter().find(|function| function.name == "keep").unwrap();
-    let HirStmt::Try(_, _, catch_body, _) = &keep.body[0] else {
+    let HirStmt::Try(_, _, catch_body, _) = &keep.body[1] else {
         panic!("expected try");
     };
     let [HirStmt::Try(guarded, _, _, _)] = catch_body.as_slice() else {
@@ -524,7 +1094,7 @@ fn finally_preserves_pending_throw_tuple_after_handled_inner_throw() {
     };
     assert!(matches!(callee.as_ref(), HirExpr::Var(name)
         if name == "@@thaw_rethrow_pending_exception"));
-    assert_eq!(args.len(), 9);
+    assert_eq!(args.len(), 10);
 }
 
 #[test]
@@ -536,7 +1106,7 @@ fn abrupt_finalizer_precedes_captured_return() {
         }
     "#);
     let chosen = program.functions.iter().find(|function| function.name == "chosen").unwrap();
-    let HirStmt::Try(body, _, _, _) = &chosen.body[1] else {
+    let HirStmt::Try(body, _, _, _) = &chosen.body[2] else {
         panic!("expected try");
     };
     assert!(matches!(body.first(), Some(HirStmt::Let(_, _, HirExpr::Var(_)))), "{body:?}");
@@ -560,12 +1130,12 @@ fn renames_catch_binding_that_shadows_an_outer_local() {
         }"#,
     );
     let body = &program.functions[0].body;
-    let HirStmt::Try(_, catch_name, catch_body, _) = &body[1] else {
+    let HirStmt::Try(_, catch_name, catch_body, _) = &body[2] else {
         panic!("expected lowered try");
     };
-    assert_eq!(catch_name, "error__thaw_local_0");
-    assert!(format!("{:?}", catch_body).contains("error__thaw_local_0"));
-    assert!(format!("{:?}", body[2]).contains("Var(\"error\")"));
+    assert!(catch_name.starts_with("error__thaw_local_"), "{catch_name}");
+    assert!(format!("{:?}", catch_body).contains(catch_name.as_str()));
+    assert!(format!("{:?}", body[3]).contains("Var(\"error\")"));
 }
 
 #[test]
@@ -577,11 +1147,49 @@ fn explicit_null_throw_uses_distinct_exception_reason_tag() {
 }
 
 #[test]
+fn native_promise_throw_publishes_its_typed_identity_without_string_coercion() {
+    let program = lower(r#"
+        function rejectPromise(value: Promise<number>): void {
+            try { throw value; } catch (error) { console.log(error); }
+        }
+    "#);
+    let text = format!("{:?}", program.functions.iter()
+        .find(|function| function.name == "rejectPromise").unwrap().body);
+    assert!(text.contains("__thaw_set_pending_exception_native"), "{text}");
+    assert!(text.contains("I64(29)"), "{text}");
+    assert!(text.contains("Promise"), "{text}");
+}
+
+#[test]
+fn native_exception_tags_cover_native_categories_and_exact_layouts() {
+    let cases = [
+        (HirType::Symbol, 20),
+        (HirType::Array(Box::new(HirType::F64)), 21),
+        (HirType::Bytes, 22),
+        (HirType::Map(Box::new(HirType::Str), Box::new(HirType::F64)), 23),
+        (HirType::WeakMap(Box::new(HirType::Str), Box::new(HirType::F64)), 24),
+        (HirType::Set(Box::new(HirType::F64)), 25),
+        (HirType::WeakSet(Box::new(HirType::F64)), 26),
+        (HirType::Tuple(vec![HirType::F64, HirType::Str]), 27),
+        (HirType::FunctionWithThis(Box::new(HirType::F64), Box::new(HirType::Str)), 28),
+    ];
+    for (ty, expected_tag) in cases {
+        assert_eq!(crate::native_exception_tag(&ty), Some(expected_tag));
+        assert!(crate::native_exception_layout_token(&ty).is_some());
+    }
+    assert_ne!(
+        crate::native_exception_layout_token(&HirType::Array(Box::new(HirType::F64))),
+        crate::native_exception_layout_token(&HirType::Array(Box::new(HirType::Str))),
+    );
+}
+
+#[test]
 fn promise_catch_direct_rethrow_uses_binding_snapshot_marker() {
     let program = lower(r#"function main(): void { Promise.reject<number>(1).catch(error => { throw error; }); }"#);
     let text = format!("{:?}", program);
     assert!(text.contains("@@thaw_rethrow_pending_exception"), "{text}");
     assert!(text.contains("@@thaw_promise_rejection:"), "{text}");
+    assert!(text.contains("@@thaw_promise_rejection:") && text.contains(":native"), "{text}");
 }
 
 #[test]
@@ -679,18 +1287,1003 @@ fn nested_exit_finalizer_suspends_both_exited_catches() {
     assert!(contains_skip(&value.body, 2), "{:#?}", value.body);
 }
 
-#[test]
-fn rethrow_tag_preserves_object_text_in_catch_binding() {
-    for source_name in ["error_object", "error_object_object"] {
-        let source = format!("function main(): void {{ try {{ throw 42; }} catch ({source_name}) {{ throw {source_name}; }} }}");
-        let program = lower(&source);
-        let HirStmt::Try(_, binding, catch_body, _) = &program.functions[0].body[0] else {
-            panic!("expected catch");
-        };
-        let body = format!("{catch_body:?}");
-        assert!(body.contains(&format!("Var(\"{binding}__thaw_exception_object\")")), "{body}");
-        assert!(body.contains(&format!("Var(\"{binding}__thaw_exception_tag\")")), "{body}");
+fn thaw_rethrow_cleanup_match_source_catch_pair(
+    pair: &[HirStmt],
+) -> Option<(&str, &[HirStmt])> {
+    let [
+        HirStmt::Let(
+            prelude_name,
+            prelude_type,
+            HirExpr::UnionInject(seed, 4, prelude_members),
+        ),
+        HirStmt::Try(_, catch_name, catch_body, _),
+    ] = pair else {
+        return None;
+    };
+    let carrier = crate::caught_exception_carrier_type();
+    let HirType::Union(members) = &carrier else {
+        panic!("caught-exception carrier must be a union");
+    };
+    (prelude_type == &carrier
+        && prelude_members == members
+        && seed.as_ref() == &HirExpr::Lit(HirLit::Undefined)
+        && catch_name == prelude_name)
+        .then_some((catch_name.as_str(), catch_body))
+}
+
+fn thaw_rethrow_cleanup_collect_source_catches(
+    statements: &[HirStmt],
+) -> Vec<(&str, &[HirStmt])> {
+    fn visit<'a>(
+        statements: &'a [HirStmt],
+        catches: &mut Vec<(&'a str, &'a [HirStmt])>,
+    ) {
+        for pair in statements.windows(2) {
+            if let Some(catch) = thaw_rethrow_cleanup_match_source_catch_pair(pair) {
+                catches.push(catch);
+            }
+        }
+        for statement in statements {
+            match statement {
+                HirStmt::Try(body, _, catch_body, _) => {
+                    visit(body, catches);
+                    visit(catch_body, catches);
+                }
+                HirStmt::If(_, yes, no) => {
+                    visit(yes, catches);
+                    visit(no, catches);
+                }
+                HirStmt::While(_, body) | HirStmt::Finally(body, _) => visit(body, catches),
+                _ => {}
+            }
+        }
     }
+
+    let mut catches = Vec::new();
+    visit(statements, &mut catches);
+    catches
+}
+
+fn thaw_rethrow_cleanup_find_direct_source_catch(
+    statements: &[HirStmt],
+) -> (&str, &[HirStmt]) {
+    let catches = statements
+        .windows(2)
+        .filter_map(thaw_rethrow_cleanup_match_source_catch_pair)
+        .collect::<Vec<_>>();
+    assert_eq!(catches.len(), 1, "expected one direct source catch pair in this scope");
+    catches[0]
+}
+
+fn thaw_rethrow_cleanup_find_publisher<'a>(
+    statements: &'a [HirStmt],
+    expected_prefix: &[HirStmt],
+    source_value: &HirExpr,
+    source_type: &HirType,
+) -> (&'a str, &'a [HirStmt]) {
+    let mut selected = None;
+    for (index, statement) in statements.iter().enumerate() {
+        let HirStmt::Let(name, ty, initializer) = statement else {
+            continue;
+        };
+        if name.starts_with("__thaw_thrown_value_")
+            && ty == source_type
+            && initializer == source_value
+        {
+            assert!(selected.is_none(), "more than one matching publication Let");
+            selected = Some((index, name.as_str()));
+        }
+    }
+    let (index, name) = selected.expect("expected the exact thrown-value Let");
+    assert_eq!(index, expected_prefix.len(), "unexpected statements before publisher Let: {statements:#?}");
+    assert_eq!(&statements[..index], expected_prefix, "publisher prefix was not fully accounted for");
+    let tail = &statements[index..];
+    assert!(matches!(tail.get(1), Some(HirStmt::Expr(HirExpr::Call(callee, args)))
+        if callee.as_ref() == &HirExpr::Var("__thaw_clear_pending_exception_provenance".into())
+            && args.is_empty()), "expected stale-provenance clear after the one-evaluation Let: {tail:?}");
+    let Some(HirStmt::Throw(HirExpr::Call(callee, args))) = tail.last() else {
+        panic!("expected published-display throw last: {tail:?}");
+    };
+    assert_eq!(callee.as_ref(), &HirExpr::Var("@@thaw_published_exception_text".into()));
+    assert_eq!(args.len(), 1, "published display marker takes one display argument");
+    (name, tail)
+}
+
+fn thaw_rethrow_cleanup_bool_count(value: bool) -> usize {
+    if value { 1 } else { 0 }
+}
+
+fn thaw_rethrow_cleanup_merge_effect_counts(total: &mut [usize; 6], add: [usize; 6]) {
+    for (slot, amount) in total.iter_mut().zip(add) {
+        *slot += amount;
+    }
+}
+
+/// Bounded visitor for the publisher's scalar display and the current native-object
+/// registration prelude. It fails closed on any HIR form outside those emitted shapes.
+/// Count slots: target calls, target-symbol references, outer reads, outer writes,
+/// outer captures, and outer-name declarations.
+fn thaw_rethrow_cleanup_scan_effect_expr(
+    expression: &HirExpr,
+    target: &str,
+    outer: &str,
+) -> [usize; 6] {
+    match expression {
+        HirExpr::Lit(_) => [0; 6],
+        HirExpr::Var(name) => {
+            let mut counts = [0; 6];
+            counts[1] += thaw_rethrow_cleanup_bool_count(name == target);
+            counts[2] += thaw_rethrow_cleanup_bool_count(name == outer);
+            counts
+        }
+        HirExpr::Call(callee, args) => {
+            let mut counts = [0; 6];
+            if let HirExpr::Var(name) = callee.as_ref() {
+                if name == target {
+                    assert!(args.is_empty(), "the effectful control input must be zero-argument");
+                    counts[0] += 1;
+                }
+            }
+            thaw_rethrow_cleanup_merge_effect_counts(
+                &mut counts,
+                thaw_rethrow_cleanup_scan_effect_expr(callee, target, outer),
+            );
+            for argument in args {
+                thaw_rethrow_cleanup_merge_effect_counts(
+                    &mut counts,
+                    thaw_rethrow_cleanup_scan_effect_expr(argument, target, outer),
+                );
+            }
+            counts
+        }
+        HirExpr::Lambda(captures, _, _, body) => {
+            let mut counts = [0; 6];
+            for capture in captures {
+                counts[1] += thaw_rethrow_cleanup_bool_count(capture.name == target);
+                counts[4] += thaw_rethrow_cleanup_bool_count(capture.name == outer);
+            }
+            thaw_rethrow_cleanup_merge_effect_counts(
+                &mut counts,
+                thaw_rethrow_cleanup_scan_effect_expr(body, target, outer),
+            );
+            counts
+        }
+        HirExpr::BinOp(_, left, right)
+        | HirExpr::EvalThen(left, right)
+        | HirExpr::Index(left, right)
+        | HirExpr::TypedIndex(left, right, _)
+        | HirExpr::JsonKey(left, right)
+        | HirExpr::JsonIndex(left, right)
+        | HirExpr::JsonDelete(left, right)
+        | HirExpr::DynamicPropAccess(left, right, _, _) => {
+            let mut counts = thaw_rethrow_cleanup_scan_effect_expr(left, target, outer);
+            thaw_rethrow_cleanup_merge_effect_counts(
+                &mut counts,
+                thaw_rethrow_cleanup_scan_effect_expr(right, target, outer),
+            );
+            counts
+        }
+        HirExpr::Conditional(test, yes, no, _) => {
+            let mut counts = thaw_rethrow_cleanup_scan_effect_expr(test, target, outer);
+            thaw_rethrow_cleanup_merge_effect_counts(
+                &mut counts,
+                thaw_rethrow_cleanup_scan_effect_expr(yes, target, outer),
+            );
+            thaw_rethrow_cleanup_merge_effect_counts(
+                &mut counts,
+                thaw_rethrow_cleanup_scan_effect_expr(no, target, outer),
+            );
+            counts
+        }
+        HirExpr::UnionInject(value, _, _)
+        | HirExpr::UnionTag(value, _)
+        | HirExpr::UnionValue(value, _, _)
+        | HirExpr::ArrayLen(value)
+        | HirExpr::JsonGet(value, _)
+        | HirExpr::PropAccess(value, _, _)
+        | HirExpr::JsonAsNumber(value)
+        | HirExpr::JsonAsString(value)
+        | HirExpr::JsonAsBool(value)
+        | HirExpr::JsValueAsJson(value)
+        | HirExpr::OptionalIsNone(value, _)
+        | HirExpr::OptionalValue(value, _)
+        | HirExpr::NullableIsNone(value, _)
+        | HirExpr::NullableValue(value, _)
+        | HirExpr::NullishIsNull(value, _)
+        | HirExpr::NullishIsUndefined(value, _)
+        | HirExpr::NullishIsNone(value, _)
+        | HirExpr::NullishValue(value, _) => {
+            thaw_rethrow_cleanup_scan_effect_expr(value, target, outer)
+        }
+        HirExpr::PropAssign(object, _, _, value) => {
+            let mut counts = thaw_rethrow_cleanup_scan_effect_expr(object, target, outer);
+            thaw_rethrow_cleanup_merge_effect_counts(
+                &mut counts,
+                thaw_rethrow_cleanup_scan_effect_expr(value, target, outer),
+            );
+            counts
+        }
+        HirExpr::JsonSet(object, key, value, _, _)
+        | HirExpr::JsonIndexSet(object, key, value)
+        | HirExpr::IndexAssign(object, key, value) => {
+            let mut counts = thaw_rethrow_cleanup_scan_effect_expr(object, target, outer);
+            thaw_rethrow_cleanup_merge_effect_counts(
+                &mut counts,
+                thaw_rethrow_cleanup_scan_effect_expr(key, target, outer),
+            );
+            thaw_rethrow_cleanup_merge_effect_counts(
+                &mut counts,
+                thaw_rethrow_cleanup_scan_effect_expr(value, target, outer),
+            );
+            counts
+        }
+        HirExpr::Assign(name, value) => {
+            let mut counts = [0; 6];
+            counts[1] += thaw_rethrow_cleanup_bool_count(name == target);
+            counts[3] += thaw_rethrow_cleanup_bool_count(name == outer);
+            thaw_rethrow_cleanup_merge_effect_counts(
+                &mut counts,
+                thaw_rethrow_cleanup_scan_effect_expr(value, target, outer),
+            );
+            counts
+        }
+        HirExpr::PostfixUpdate(name, _) => {
+            let mut counts = [0; 6];
+            counts[1] += thaw_rethrow_cleanup_bool_count(name == target);
+            counts[2] += thaw_rethrow_cleanup_bool_count(name == outer);
+            counts[3] += thaw_rethrow_cleanup_bool_count(name == outer);
+            counts
+        }
+        HirExpr::Block(statements) => {
+            thaw_rethrow_cleanup_scan_effect_stmts(statements, target, outer)
+        }
+        HirExpr::ArrayLit(elements)
+        | HirExpr::ArrayConcat(elements, _)
+        | HirExpr::DynamicCall(_, elements)
+        | HirExpr::FfiCall(_, elements) => {
+            let mut counts = [0; 6];
+            for element in elements {
+                thaw_rethrow_cleanup_merge_effect_counts(
+                    &mut counts,
+                    thaw_rethrow_cleanup_scan_effect_expr(element, target, outer),
+                );
+            }
+            counts
+        }
+        HirExpr::ObjectLit(fields) | HirExpr::JsonObjectLit(fields, _) => {
+            let mut counts = [0; 6];
+            for (_, value) in fields {
+                thaw_rethrow_cleanup_merge_effect_counts(
+                    &mut counts,
+                    thaw_rethrow_cleanup_scan_effect_expr(value, target, outer),
+                );
+            }
+            counts
+        }
+        HirExpr::TypedClosure(_, value) | HirExpr::NonArrowFunction(value) => {
+            thaw_rethrow_cleanup_scan_effect_expr(value, target, outer)
+        }
+        HirExpr::OptionalSome(value, _)
+        | HirExpr::NullableSome(value, _)
+        | HirExpr::NullishSome(value, _)
+        | HirExpr::ArrayAlloc(value, _)
+        | HirExpr::Await(value)
+        | HirExpr::AwaitPromise(value, _) => {
+            thaw_rethrow_cleanup_scan_effect_expr(value, target, outer)
+        }
+        HirExpr::ThrowValue(error, fallback) => {
+            let mut counts = thaw_rethrow_cleanup_scan_effect_expr(error, target, outer);
+            thaw_rethrow_cleanup_merge_effect_counts(
+                &mut counts,
+                thaw_rethrow_cleanup_scan_effect_expr(fallback, target, outer),
+            );
+            counts
+        }
+        HirExpr::JsonAsNative(value, _) => {
+            thaw_rethrow_cleanup_scan_effect_expr(value, target, outer)
+        }
+        HirExpr::ArraySetLen(array, length, _) => {
+            let mut counts = thaw_rethrow_cleanup_scan_effect_expr(array, target, outer);
+            thaw_rethrow_cleanup_merge_effect_counts(
+                &mut counts,
+                thaw_rethrow_cleanup_scan_effect_expr(length, target, outer),
+            );
+            counts
+        }
+        HirExpr::FunctionCallWithThis(callee, this_arg, args, _, _)
+        | HirExpr::FunctionBindThis(callee, this_arg, args, _, _) => {
+            let mut counts = thaw_rethrow_cleanup_scan_effect_expr(callee, target, outer);
+            thaw_rethrow_cleanup_merge_effect_counts(
+                &mut counts,
+                thaw_rethrow_cleanup_scan_effect_expr(this_arg, target, outer),
+            );
+            for argument in args {
+                thaw_rethrow_cleanup_merge_effect_counts(
+                    &mut counts,
+                    thaw_rethrow_cleanup_scan_effect_expr(argument, target, outer),
+                );
+            }
+            counts
+        }
+        HirExpr::ObjectAlloc(_)
+        | HirExpr::ClassAlloc(_)
+        | HirExpr::EnvVar(_)
+        | HirExpr::FunctionRef(..)
+        | HirExpr::FunctionRefThis(..)
+        | HirExpr::MethodRef(..)
+        | HirExpr::OptionalNone(_)
+        | HirExpr::NullableNone(_)
+        | HirExpr::NullishNull(_)
+        | HirExpr::NullishUndefined(_) => [0; 6],
+        other => panic!("unreviewed HIR in bounded rethrow effect scan: {other:?}"),
+    }
+}
+
+fn thaw_rethrow_cleanup_scan_effect_stmts(
+    statements: &[HirStmt],
+    target: &str,
+    outer: &str,
+) -> [usize; 6] {
+    let mut counts = [0; 6];
+    for statement in statements {
+        let next = match statement {
+            HirStmt::Expr(expression) | HirStmt::Throw(expression) => {
+                thaw_rethrow_cleanup_scan_effect_expr(expression, target, outer)
+            }
+            HirStmt::Return(value) => value.as_ref().map_or([0; 6], |value| {
+                thaw_rethrow_cleanup_scan_effect_expr(value, target, outer)
+            }),
+            HirStmt::Let(name, _, initializer) => {
+                let mut next = [0; 6];
+                next[1] += thaw_rethrow_cleanup_bool_count(name == target);
+                next[5] += thaw_rethrow_cleanup_bool_count(name == outer);
+                thaw_rethrow_cleanup_merge_effect_counts(
+                    &mut next,
+                    thaw_rethrow_cleanup_scan_effect_expr(initializer, target, outer),
+                );
+                next
+            }
+            HirStmt::If(condition, yes, no) => {
+                let mut next = thaw_rethrow_cleanup_scan_effect_expr(condition, target, outer);
+                thaw_rethrow_cleanup_merge_effect_counts(
+                    &mut next,
+                    thaw_rethrow_cleanup_scan_effect_stmts(yes, target, outer),
+                );
+                thaw_rethrow_cleanup_merge_effect_counts(
+                    &mut next,
+                    thaw_rethrow_cleanup_scan_effect_stmts(no, target, outer),
+                );
+                next
+            }
+            HirStmt::While(condition, body) => {
+                let mut next = thaw_rethrow_cleanup_scan_effect_expr(condition, target, outer);
+                thaw_rethrow_cleanup_merge_effect_counts(
+                    &mut next,
+                    thaw_rethrow_cleanup_scan_effect_stmts(body, target, outer),
+                );
+                next
+            }
+            HirStmt::Try(body, _, catch_body, _) => {
+                let mut next = thaw_rethrow_cleanup_scan_effect_stmts(body, target, outer);
+                thaw_rethrow_cleanup_merge_effect_counts(
+                    &mut next,
+                    thaw_rethrow_cleanup_scan_effect_stmts(catch_body, target, outer),
+                );
+                next
+            }
+            HirStmt::Finally(body, _) => {
+                thaw_rethrow_cleanup_scan_effect_stmts(body, target, outer)
+            }
+            other => panic!("unreviewed statement in bounded rethrow effect scan: {other:?}"),
+        };
+        thaw_rethrow_cleanup_merge_effect_counts(&mut counts, next);
+    }
+    counts
+}
+
+fn thaw_rethrow_cleanup_guard_arm<'a>(
+    guard: &'a HirStmt,
+    thrown_name: &str,
+    index: usize,
+    members: &[HirType],
+) -> &'a [HirStmt] {
+    let HirStmt::If(condition, then_body, else_body) = guard else {
+        panic!("expected one active-member guard at index {index}: {guard:?}");
+    };
+    let expected_condition = HirExpr::BinOp(
+        BinOp::EqEqEq,
+        Box::new(HirExpr::UnionTag(
+            Box::new(HirExpr::Var(thrown_name.into())),
+            members.to_vec(),
+        )),
+        Box::new(HirExpr::Lit(HirLit::F64(index as f64))),
+    );
+    assert_eq!(condition, &expected_condition, "wrong active-member guard at {index}");
+    assert!(else_body.is_empty(), "unexpected else arm at carrier member {index}: {else_body:?}");
+    then_body
+}
+
+fn thaw_rethrow_cleanup_member_value(
+    thrown_name: &str,
+    index: usize,
+    members: &[HirType],
+) -> HirExpr {
+    HirExpr::UnionValue(
+        Box::new(HirExpr::Var(thrown_name.into())),
+        index,
+        members.to_vec(),
+    )
+}
+
+fn thaw_rethrow_cleanup_call_statement(name: &str, args: Vec<HirExpr>) -> HirStmt {
+    HirStmt::Expr(HirExpr::Call(Box::new(HirExpr::Var(name.into())), args))
+}
+
+fn thaw_rethrow_cleanup_expected_member_typeof(
+    index: usize,
+    parameter: &str,
+    members: &[HirType],
+) -> HirExpr {
+    let value = thaw_rethrow_cleanup_member_value(parameter, index, members);
+    match (&members[index], index) {
+        (HirType::F64, 0) => HirExpr::Lit(HirLit::Str("number".into())),
+        (HirType::I64, 1) => HirExpr::Lit(HirLit::Str("bigint".into())),
+        (HirType::Bool, 2) => HirExpr::Lit(HirLit::Str("boolean".into())),
+        (HirType::Str, 3) => HirExpr::Lit(HirLit::Str("string".into())),
+        (HirType::Undefined, 4) => HirExpr::Lit(HirLit::Str("undefined".into())),
+        (HirType::Null, 5) | (HirType::Object(_), 6) => {
+            HirExpr::Lit(HirLit::Str("object".into()))
+        }
+        (HirType::Json, 7) => HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_json_typeof".into())),
+            vec![value],
+        ),
+        (HirType::JsValue, 8) => HirExpr::JsonAsString(Box::new(HirExpr::Call(
+            Box::new(HirExpr::Var("callDynamicValueWithValue".into())),
+            vec![
+                HirExpr::Call(
+                    Box::new(HirExpr::Var("getDynamicValue".into())),
+                    vec![HirExpr::Lit(HirLit::Str("__thaw_typeof_dynamic_value".into()))],
+                ),
+                value,
+            ],
+        ))),
+        (HirType::NativeException, 9) => HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_exception_typeof".into())),
+            vec![HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_native_exception_tag".into())),
+                vec![value],
+            )],
+        ),
+        other => panic!("unexpected carrier typeof member {other:?} at {index}"),
+    }
+}
+
+fn thaw_rethrow_cleanup_assert_typeof_member_chain(
+    statements: &[HirStmt],
+    parameter: &str,
+    members: &[HirType],
+    index: usize,
+) {
+    let result = thaw_rethrow_cleanup_expected_member_typeof(index, parameter, members);
+    let returned = [HirStmt::Return(Some(result))];
+    if index + 1 == members.len() {
+        assert_eq!(statements, returned, "last carrier typeof category must be the terminal return");
+        return;
+    }
+    let [HirStmt::If(condition, yes, no)] = statements else {
+        panic!("expected one guarded typeof category branch at {index}: {statements:#?}");
+    };
+    let expected_condition = HirExpr::BinOp(
+        BinOp::EqEqEq,
+        Box::new(HirExpr::UnionTag(
+            Box::new(HirExpr::Var(parameter.into())),
+            members.to_vec(),
+        )),
+        Box::new(HirExpr::Lit(HirLit::F64(index as f64))),
+    );
+    assert_eq!(condition, &expected_condition, "typeof wrapper routed the wrong carrier category at {index}");
+    assert_eq!(yes, &returned, "typeof carrier member {index} returned the wrong category");
+    assert!(!no.is_empty(), "typeof category chain ended before all carrier members");
+    thaw_rethrow_cleanup_assert_typeof_member_chain(no, parameter, members, index + 1);
+}
+
+fn thaw_rethrow_cleanup_assert_number_typeof_condition(
+    condition: &HirExpr,
+    catch_name: &str,
+    members: &[HirType],
+) {
+    // Strict equality binds both operands once:
+    // ((left) => ((right) => left === right)("number"))(typeof ...).
+    let HirExpr::Call(wrapper, wrapper_args) = condition else {
+        panic!("expected strict equality between typeof result and number literal: {condition:#?}");
+    };
+    let HirExpr::Lambda(_, left, HirType::Bool, wrapper_body) = wrapper.as_ref() else {
+        panic!("expected the strict-equality left binding lambda: {wrapper:#?}");
+    };
+    let HirExpr::Call(compare_lambda, compare_args) = wrapper_body.as_ref() else {
+        panic!("expected the strict-equality right binding call: {wrapper_body:#?}");
+    };
+    assert_eq!(compare_args, &vec![HirExpr::Lit(HirLit::Str("number".into()))]);
+    let HirExpr::Lambda(_, right, HirType::Bool, compare) = compare_lambda.as_ref() else {
+        panic!("expected the strict-equality comparison lambda: {compare_lambda:#?}");
+    };
+    assert_eq!(compare.as_ref(), &HirExpr::BinOp(
+        BinOp::EqEqEq,
+        Box::new(HirExpr::Var(left[0].name.clone())),
+        Box::new(HirExpr::Var(right[0].name.clone())),
+    ));
+    let [value_typeof] = wrapper_args.as_slice() else {
+        panic!("strict equality binds exactly one left operand: {wrapper_args:#?}");
+    };
+    let HirExpr::Call(callee, args) = value_typeof else {
+        panic!("expected the source-backed one-evaluation carrier typeof wrapper: {value_typeof:#?}");
+    };
+    let HirExpr::Lambda(captures, params, HirType::Str, body) = callee.as_ref() else {
+        panic!("expected a string-returning typeof lambda: {callee:#?}");
+    };
+    assert!(captures.is_empty(), "typeof wrapper should not capture a different binding: {captures:#?}");
+    assert_eq!(params.len(), 1);
+    let parameter = &params[0];
+    assert_eq!(parameter.ty, HirType::Union(members.to_vec()));
+    assert_eq!(args, &vec![HirExpr::Var(catch_name.into())]);
+    let HirExpr::Block(branches) = body.as_ref() else {
+        panic!("expected guarded per-member typeof branch chain: {body:#?}");
+    };
+    thaw_rethrow_cleanup_assert_typeof_member_chain(branches, &parameter.name, members, 0);
+}
+
+fn thaw_rethrow_cleanup_expected_carrier_display(
+    thrown_name: &str,
+    members: &[HirType],
+) -> HirExpr {
+    let mut display = HirExpr::Lit(HirLit::Str("[exception value]".into()));
+    for index in (0..members.len()).rev() {
+        let tag = HirExpr::BinOp(
+            BinOp::EqEqEq,
+            Box::new(HirExpr::UnionTag(
+                Box::new(HirExpr::Var(thrown_name.into())),
+                members.to_vec(),
+            )),
+            Box::new(HirExpr::Lit(HirLit::F64(index as f64))),
+        );
+        let member_value = thaw_rethrow_cleanup_member_value(thrown_name, index, members);
+        let selected = match (&members[index], index) {
+            (HirType::F64, 0) => HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_number_to_string".into())),
+                vec![member_value],
+            ),
+            (HirType::I64, 1) => HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_i64_to_string".into())),
+                vec![member_value],
+            ),
+            (HirType::Bool, 2) => HirExpr::Call(
+                Box::new(HirExpr::Var("__thaw_bool_to_string".into())),
+                vec![member_value],
+            ),
+            (HirType::Str, 3) => member_value,
+            (HirType::Undefined, 4) => HirExpr::Lit(HirLit::Str("undefined".into())),
+            (HirType::Null, 5) => HirExpr::Lit(HirLit::Str("null".into())),
+            (HirType::Object(_), 6)
+            | (HirType::Json, 7)
+            | (HirType::JsValue, 8)
+            | (HirType::NativeException, 9) => {
+                HirExpr::Lit(HirLit::Str("[exception value]".into()))
+            }
+            other => panic!("unexpected carrier display member {other:?} at {index}"),
+        };
+        display = HirExpr::Conditional(
+            Box::new(tag),
+            Box::new(selected),
+            Box::new(display),
+            HirType::Str,
+        );
+    }
+    display
+}
+
+fn thaw_rethrow_cleanup_assert_projection_prelude(
+    prelude: &HirExpr,
+    thrown_name: &str,
+    members: &[HirType],
+    effect_name: &str,
+) {
+    let expected_member = thaw_rethrow_cleanup_member_value(thrown_name, 6, members);
+    let HirExpr::Call(wrapper_callee, args) = prelude else {
+        panic!("expected one registration wrapper call in the guarded object arm: {prelude:#?}");
+    };
+    assert_eq!(args, &vec![expected_member]);
+    let HirExpr::Lambda(wrapper_captures, wrapper_params, wrapper_return, wrapper_body) = wrapper_callee.as_ref() else {
+        panic!("expected Lambda-wrapped owner registration: {wrapper_callee:#?}");
+    };
+    assert!(wrapper_captures.iter().all(|capture| capture.name != thrown_name));
+    let [owner] = wrapper_params.as_slice() else {
+        panic!("expected one private native owner parameter: {wrapper_params:#?}");
+    };
+    let HirType::Object(_) = &owner.ty else {
+        panic!("projection owner must retain its fixed Object type: {:?}", owner.ty);
+    };
+    assert_eq!(owner.ty, members[6]);
+    assert!(owner.name.starts_with("__thaw_full_native_owner_"));
+    assert_ne!(owner.name, thrown_name);
+    assert_eq!(wrapper_return, &owner.ty, "owner wrapper must return its same typed owner");
+
+    let HirExpr::EvalThen(registrations, returned_owner) = wrapper_body.as_ref() else {
+        panic!("expected registration EvalThen followed by the owner return: {wrapper_body:#?}");
+    };
+    assert_eq!(returned_owner.as_ref(), &HirExpr::Var(owner.name.clone()));
+    let HirExpr::EvalThen(layout_registration, projector_registration) = registrations.as_ref() else {
+        panic!("expected layout registration before projector registration: {registrations:#?}");
+    };
+    let HirExpr::Call(layout_callee, layout_args) = layout_registration.as_ref() else {
+        panic!("expected native layout registration call: {layout_registration:#?}");
+    };
+    assert_eq!(layout_callee.as_ref(), &HirExpr::Var("__thaw_register_native_object_layout".into()));
+    assert_eq!(layout_args.len(), 2);
+    assert_eq!(layout_args[0], HirExpr::Var(owner.name.clone()));
+    assert!(matches!(&layout_args[1], HirExpr::Lit(HirLit::Bool(_))));
+
+    let HirExpr::Call(projector_callee, projector_args) = projector_registration.as_ref() else {
+        panic!("expected native projector registration call: {projector_registration:#?}");
+    };
+    assert_eq!(projector_callee.as_ref(), &HirExpr::Var("__thaw_register_native_object_projector".into()));
+    assert_eq!(projector_args.len(), 3);
+    assert_eq!(projector_args[0], HirExpr::Var(owner.name.clone()));
+    assert!(matches!(&projector_args[1], HirExpr::Lit(HirLit::Str(_))));
+    let HirExpr::Lambda(factory_captures, factory_params, HirType::JsValue, factory_body) = &projector_args[2] else {
+        panic!("expected lazy JsValue projector factory: {:#?}", projector_args[2]);
+    };
+    assert!(factory_params.is_empty(), "projector factory has no ordinary parameters");
+    assert_eq!(factory_captures.len(), 1, "factory captures only its private owner");
+    assert_eq!(factory_captures[0].name.as_str(), owner.name.as_str());
+    assert_eq!(factory_captures[0].ty, owner.ty);
+    let HirExpr::Call(inner_callee, inner_args) = factory_body.as_ref() else {
+        panic!("expected projector factory to pass its captured owner to the accessor builder: {factory_body:#?}");
+    };
+    assert_eq!(inner_args, &vec![HirExpr::Var(owner.name.clone())]);
+    let HirExpr::Lambda(_, inner_params, HirType::JsValue, inner_body) = inner_callee.as_ref() else {
+        panic!("expected the source-backed accessor-builder Lambda: {inner_callee:#?}");
+    };
+    assert!(matches!(inner_body.as_ref(), HirExpr::Block(_)));
+    assert_eq!(inner_params.len(), 1);
+    assert_eq!(inner_params[0].ty, owner.ty);
+
+    // All registration/projection HIR inside the wrapper and lazy factory is traversed.
+    // Unknown nodes fail closed; no outer carrier binding may be read, captured, declared,
+    // or assigned from that private owner route.
+    let counts = thaw_rethrow_cleanup_scan_effect_expr(wrapper_callee, effect_name, thrown_name);
+    assert_eq!(counts, [0; 6], "projection prelude reached the effect input or outer thrown slot");
+}
+
+fn thaw_rethrow_cleanup_assert_carrier_publication(
+    thrown_name: &str,
+    tail: &[HirStmt],
+    effect_name: &str,
+) {
+    let carrier = crate::caught_exception_carrier_type();
+    let HirType::Union(members) = &carrier else {
+        panic!("caught-exception carrier must be a union");
+    };
+    assert_eq!(tail.len(), 13, "carrier publication is Let, clear, ten guards, marker: {tail:#?}");
+    let HirStmt::Let(name, ty, _) = &tail[0] else {
+        panic!("expected carrier thrown-value Let: {tail:#?}");
+    };
+    assert_eq!(name, thrown_name);
+    assert_eq!(ty, &carrier);
+    assert!(matches!(&tail[1], HirStmt::Expr(HirExpr::Call(callee, args))
+        if callee.as_ref() == &HirExpr::Var("__thaw_clear_pending_exception_provenance".into())
+            && args.is_empty()));
+    for index in 0..members.len() {
+        let arm = thaw_rethrow_cleanup_guard_arm(&tail[2 + index], thrown_name, index, members);
+        let value = thaw_rethrow_cleanup_member_value(thrown_name, index, members);
+        match index {
+            0 => assert_eq!(arm, &[thaw_rethrow_cleanup_call_statement(
+                "__thaw_set_pending_exception_f64", vec![value],
+            )]),
+            1 => assert_eq!(arm, &[thaw_rethrow_cleanup_call_statement(
+                "__thaw_set_pending_exception_i64", vec![value],
+            )]),
+            2 => assert_eq!(arm, &[thaw_rethrow_cleanup_call_statement(
+                "__thaw_set_pending_exception_bool", vec![value],
+            )]),
+            3 => assert_eq!(arm, &[thaw_rethrow_cleanup_call_statement(
+                "__thaw_set_pending_exception_tag", vec![HirExpr::Lit(HirLit::I64(4))],
+            )]),
+            4 => assert_eq!(arm, &[thaw_rethrow_cleanup_call_statement(
+                "__thaw_set_pending_exception_tag", vec![HirExpr::Lit(HirLit::I64(5))],
+            )]),
+            5 => assert_eq!(arm, &[thaw_rethrow_cleanup_call_statement(
+                "__thaw_set_pending_exception_tag", vec![HirExpr::Lit(HirLit::I64(6))],
+            )]),
+            6 => {
+                // The one registration expression is allowed only inside the matched guard.
+                let [HirStmt::Expr(prelude), object_setter] = arm else {
+                    panic!("expected accounted projection prelude followed by setter only: {arm:#?}");
+                };
+                thaw_rethrow_cleanup_assert_projection_prelude(
+                    prelude, thrown_name, members, effect_name,
+                );
+                assert_eq!(object_setter, &thaw_rethrow_cleanup_call_statement(
+                    "__thaw_set_pending_exception_object", vec![value],
+                ));
+            }
+            7 => assert_eq!(arm, &[thaw_rethrow_cleanup_call_statement(
+                "__thaw_set_pending_exception_json", vec![value],
+            )]),
+            8 => assert_eq!(arm, &[thaw_rethrow_cleanup_call_statement(
+                "__thaw_set_pending_exception_json",
+                vec![HirExpr::Call(
+                    Box::new(HirExpr::Var("__thaw_capture_exception_js_value".into())),
+                    vec![value],
+                )],
+            )]),
+            9 => assert_eq!(arm, &[thaw_rethrow_cleanup_call_statement(
+                "__thaw_set_pending_exception_native_value", vec![value],
+            )]),
+            _ => unreachable!("carrier member count is pinned by the source type"),
+        }
+    }
+    let Some(HirStmt::Throw(HirExpr::Call(callee, args))) = tail.last() else {
+        unreachable!("publisher helper checked the final throw");
+    };
+    assert_eq!(callee.as_ref(), &HirExpr::Var("@@thaw_published_exception_text".into()));
+    assert_eq!(args, &vec![thaw_rethrow_cleanup_expected_carrier_display(thrown_name, members)]);
+}
+
+#[test]
+fn thaw_rethrow_cleanup_named_suffix_catches_publish_the_visible_carrier() {
+    for source_name in ["error_object", "error_object_object"] {
+        let source = format!(
+            "function main(): void {{ try {{ throw 42; }} catch ({source_name}) {{ throw {source_name}; }} }}"
+        );
+        let program = lower(&source);
+        let catches = thaw_rethrow_cleanup_collect_source_catches(&program.functions[0].body);
+        assert_eq!(catches.len(), 1, "expected one structurally paired source catch");
+        let (binding, catch_body) = catches[0];
+        let input = HirExpr::Var(binding.to_string());
+        let carrier = crate::caught_exception_carrier_type();
+        let (thrown_name, tail) =
+            thaw_rethrow_cleanup_find_publisher(catch_body, &[], &input, &carrier);
+        thaw_rethrow_cleanup_assert_carrier_publication(
+            thrown_name, tail, "thaw_rethrow_cleanup_effectful_input",
+        );
+    }
+}
+
+#[test]
+fn thaw_rethrow_cleanup_unannotated_alias_keeps_and_publishes_the_carrier() {
+    let program = lower(
+        "function main(): void { try { throw 42; } catch (e) { const alias = e; throw alias; } }",
+    );
+    let catches = thaw_rethrow_cleanup_collect_source_catches(&program.functions[0].body);
+    assert_eq!(catches.len(), 1);
+    let (binding, catch_body) = catches[0];
+    let carrier = crate::caught_exception_carrier_type();
+    let aliases = catch_body.iter().filter_map(|statement| match statement {
+        HirStmt::Let(name, ty, HirExpr::Var(initializer))
+            if ty == &carrier && initializer == binding => Some(name.as_str()),
+        _ => None,
+    }).collect::<Vec<_>>();
+    assert_eq!(aliases.len(), 1, "expected one same-carrier alias initialized from the catch binding");
+    let alias = aliases[0];
+    let expected_prefix = [HirStmt::Let(
+        alias.into(), carrier.clone(), HirExpr::Var(binding.into()),
+    )];
+    let (thrown_name, tail) = thaw_rethrow_cleanup_find_publisher(
+        catch_body,
+        &expected_prefix,
+        &HirExpr::Var(alias.into()),
+        &carrier,
+    );
+    thaw_rethrow_cleanup_assert_carrier_publication(
+        thrown_name, tail, "thaw_rethrow_cleanup_effectful_input",
+    );
+}
+
+#[test]
+fn thaw_rethrow_cleanup_mutation_retags_and_publishes_the_current_binding() {
+    let program = lower(
+        "function main(): void { try { throw 1; } catch (e) { e = 42; throw e; } }",
+    );
+    let catches = thaw_rethrow_cleanup_collect_source_catches(&program.functions[0].body);
+    assert_eq!(catches.len(), 1);
+    let (binding, catch_body) = catches[0];
+    let carrier = crate::caught_exception_carrier_type();
+    let HirType::Union(members) = &carrier else { panic!("expected carrier union"); };
+    let assignments = catch_body.iter().filter_map(|statement| match statement {
+        HirStmt::Expr(HirExpr::Assign(name, value)) => Some((name.as_str(), value.as_ref())),
+        _ => None,
+    }).collect::<Vec<_>>();
+    assert_eq!(assignments.len(), 1, "expected one direct write to the visible catch binding");
+    assert_eq!(assignments[0].0, binding);
+    let injected = HirExpr::UnionInject(
+        Box::new(HirExpr::Lit(HirLit::F64(42.0))),
+        0,
+        members.clone(),
+    );
+    assert_eq!(assignments[0].1, &injected);
+    let expected_prefix = [HirStmt::Expr(HirExpr::Assign(
+        binding.into(), Box::new(injected),
+    ))];
+    // After `e = 42` the binding is narrowed to its F64 member, so the rethrow
+    // publishes that member read from the retagged carrier as a scalar.
+    let (thrown_name, tail) = thaw_rethrow_cleanup_find_publisher(
+        catch_body,
+        &expected_prefix,
+        &HirExpr::UnionValue(Box::new(HirExpr::Var(binding.into())), 0, members.clone()),
+        &HirType::F64,
+    );
+    assert_eq!(tail.len(), 4, "{tail:?}");
+    assert!(matches!(&tail[2], HirStmt::Expr(HirExpr::Call(callee, args))
+        if callee.as_ref() == &HirExpr::Var("__thaw_set_pending_exception_f64".into())
+            && args.as_slice() == [HirExpr::Var(thrown_name.into())]), "{tail:?}");
+}
+
+#[test]
+fn thaw_rethrow_cleanup_nested_shadow_publishes_the_outer_carrier_alias() {
+    let program = lower(
+        "function main(): void { try { throw 1; } catch (e) { const alias = e; try { throw 2; } catch (e) { throw alias; } } }",
+    );
+    let (outer_binding, outer_body) =
+        thaw_rethrow_cleanup_find_direct_source_catch(&program.functions[0].body);
+    let (inner_binding, inner_body) =
+        thaw_rethrow_cleanup_find_direct_source_catch(outer_body);
+    assert_ne!(outer_binding, inner_binding, "same source name must resolve to distinct catch slots");
+    let carrier = crate::caught_exception_carrier_type();
+    let aliases = outer_body.iter().filter_map(|statement| match statement {
+        HirStmt::Let(name, ty, HirExpr::Var(initializer))
+            if ty == &carrier && initializer == outer_binding => Some(name.as_str()),
+        _ => None,
+    }).collect::<Vec<_>>();
+    assert_eq!(aliases.len(), 1, "expected the outer alias to retain its source binding");
+    let alias = aliases[0];
+    let (thrown_name, tail) = thaw_rethrow_cleanup_find_publisher(
+        inner_body,
+        &[],
+        &HirExpr::Var(alias.into()),
+        &carrier,
+    );
+    thaw_rethrow_cleanup_assert_carrier_publication(
+        thrown_name, tail, "thaw_rethrow_cleanup_effectful_input",
+    );
+}
+
+#[test]
+fn thaw_rethrow_cleanup_number_typeof_narrowing_uses_member_zero_f64() {
+    let program = lower(
+        "function main(): void { try { throw 1; } catch (e) { if (typeof e === \"number\") throw e; } }",
+    );
+    let catches = thaw_rethrow_cleanup_collect_source_catches(&program.functions[0].body);
+    assert_eq!(catches.len(), 1);
+    let (binding, catch_body) = catches[0];
+    let carrier = crate::caught_exception_carrier_type();
+    let HirType::Union(members) = &carrier else { panic!("expected carrier union"); };
+    let [HirStmt::If(condition, yes, no)] = catch_body else {
+        panic!("expected exactly the source typeof branch in the catch body: {catch_body:#?}");
+    };
+    assert!(no.is_empty(), "typeof fixture's alternate branch must be empty: {no:#?}");
+    thaw_rethrow_cleanup_assert_number_typeof_condition(condition, binding, members);
+    let selected = HirExpr::UnionValue(
+        Box::new(HirExpr::Var(binding.into())),
+        0,
+        members.clone(),
+    );
+    let (thrown_name, tail) = thaw_rethrow_cleanup_find_publisher(
+        yes,
+        &[],
+        &selected,
+        &HirType::F64,
+    );
+    assert_eq!(tail.len(), 4, "scalar publication has Let, clear, setter, marker: {tail:#?}");
+    assert_eq!(tail[2], thaw_rethrow_cleanup_call_statement(
+        "__thaw_set_pending_exception_f64",
+        vec![HirExpr::Var(thrown_name.into())],
+    ));
+    let Some(HirStmt::Throw(HirExpr::Call(_, display))) = tail.last() else {
+        unreachable!("publisher finder checked the marker");
+    };
+    assert_eq!(display, &vec![HirExpr::Call(
+        Box::new(HirExpr::Var("__thaw_number_to_string".into())),
+        vec![HirExpr::Var(thrown_name.into())],
+    )]);
+}
+
+#[test]
+fn thaw_rethrow_cleanup_common_publisher_checks_all_carrier_arms_structurally() {
+    let signatures = HashMap::new();
+    let interfaces = HashMap::new();
+    let generic_interfaces = GenericInterfaces::new();
+    let enum_values = EnumValues::new();
+    let enum_reverse_values = EnumReverseValues::new();
+    let mut lowerer = FnLowerer::new(
+        &signatures,
+        &interfaces,
+        &generic_interfaces,
+        &enum_values,
+        &enum_reverse_values,
+        HirType::Void,
+        None,
+    );
+    let carrier = crate::caught_exception_carrier_type();
+    let effectful_input = HirExpr::Call(
+        Box::new(HirExpr::Var("thaw_rethrow_cleanup_effectful_input".into())),
+        Vec::new(),
+    );
+    let statements = lowerer
+        .lower_throw_value_statements(effectful_input.clone(), carrier.clone())
+        .expect("the existing carrier publisher accepts the carrier type");
+    let (thrown_name, tail) = thaw_rethrow_cleanup_find_publisher(
+        &statements,
+        &[],
+        &effectful_input,
+        &carrier,
+    );
+    thaw_rethrow_cleanup_assert_carrier_publication(
+        thrown_name, tail, "thaw_rethrow_cleanup_effectful_input",
+    );
+    let counts = thaw_rethrow_cleanup_scan_effect_stmts(
+        &statements, "thaw_rethrow_cleanup_effectful_input", thrown_name,
+    );
+    assert_eq!(counts[0], 1, "effectful input call must occur exactly once in the complete helper output");
+    assert_eq!(counts[1], 1, "effectful input function symbol must occur only as that call target");
+    assert_eq!(counts[3], 0, "publisher may not assign the thrown-value local");
+    assert_eq!(counts[4], 0, "publisher may not capture the thrown-value local");
+    assert_eq!(counts[5], 1, "the only thrown-value local declaration is the initial Let");
+}
+
+#[test]
+fn thaw_rethrow_cleanup_member_six_routes_original_pointer_to_object_setter() {
+    let signatures = HashMap::new();
+    let interfaces = HashMap::new();
+    let generic_interfaces = GenericInterfaces::new();
+    let enum_values = EnumValues::new();
+    let enum_reverse_values = EnumReverseValues::new();
+    let mut lowerer = FnLowerer::new(
+        &signatures,
+        &interfaces,
+        &generic_interfaces,
+        &enum_values,
+        &enum_reverse_values,
+        HirType::Void,
+        None,
+    );
+    let carrier = crate::caught_exception_carrier_type();
+    let HirType::Union(members) = &carrier else { panic!("expected carrier union"); };
+    let original_pointer = HirExpr::Var("thaw_rethrow_cleanup_original_native_pointer".into());
+    let member_six_input = HirExpr::UnionInject(
+        Box::new(original_pointer.clone()),
+        6,
+        members.clone(),
+    );
+    let statements = lowerer
+        .lower_throw_value_statements(member_six_input.clone(), carrier.clone())
+        .expect("the existing carrier publisher accepts a member-six carrier");
+    let (thrown_name, tail) = thaw_rethrow_cleanup_find_publisher(
+        &statements,
+        &[],
+        &member_six_input,
+        &carrier,
+    );
+    thaw_rethrow_cleanup_assert_carrier_publication(
+        thrown_name, tail, "thaw_rethrow_cleanup_effectful_input",
+    );
+    let counts = thaw_rethrow_cleanup_scan_effect_stmts(
+        &statements, "thaw_rethrow_cleanup_effectful_input", thrown_name,
+    );
+    assert_eq!(counts[0], 0);
+    assert_eq!(counts[1], 0);
+    assert_eq!(counts[3], 0);
+    assert_eq!(counts[4], 0);
+    assert_eq!(counts[5], 1);
+    let HirStmt::Let(_, ty, initializer) = &tail[0] else {
+        panic!("expected carrier thrown-value Let");
+    };
+    assert_eq!(ty, &carrier);
+    assert_eq!(initializer, &HirExpr::UnionInject(
+        Box::new(original_pointer),
+        6,
+        members.clone(),
+    ));
 }
 
 #[test]
@@ -704,7 +2297,10 @@ fn anonymous_catch_preserves_outer_underscore_binding() {
     let body = &program.functions[0].body;
     let HirStmt::Let(outer, _, _) = &body[0] else { panic!("expected outer binding"); };
     let mut catch_names = Vec::new();
-    for statement in &body[1..3] {
+    // Each catch is now preceded by its carrier `Let`, so select the `Try` statements.
+    let tries = body.iter().filter(|statement| matches!(statement, HirStmt::Try(..))).collect::<Vec<_>>();
+    assert_eq!(tries.len(), 2, "{body:?}");
+    for statement in tries {
         let HirStmt::Try(_, name, catch_body, _) = statement else { panic!("expected catch"); };
         assert!(name.starts_with("@@thaw_anonymous_catch"), "{name}");
         assert_ne!(name, outer);
@@ -712,4 +2308,89 @@ fn anonymous_catch_preserves_outer_underscore_binding() {
         catch_names.push(name);
     }
     assert_ne!(catch_names[0], catch_names[1]);
+}
+
+
+// --- native catch carrier: casts and Json projection (tags 20-29) ---
+
+#[test]
+fn caught_native_value_cast_lowers_for_each_native_category() {
+    // `error as T` on a caught native value builds an unreachable placeholder of `T` for the
+    // incompatible-category branch; every category must produce one (never "cannot synthesize").
+    let mut problems = Vec::new();
+    for (thrown, target) in [
+        ("new Map<string, number>()", "Map<string, number>"),
+        ("new Set<number>()", "Set<number>"),
+        ("new Uint8Array(2)", "Uint8Array"),
+        ("Promise.resolve(1)", "Promise<number>"),
+    ] {
+        let source = format!(
+            "function main(): void {{ try {{ throw {thrown}; }} catch (error) {{ const value = error as {target}; console.log(value); }} }}"
+        );
+        let module = thaw_parser::parse_typescript(&source).expect("parse error");
+        match lower_module(&module) {
+            Err(error) => problems.push(format!("`{target}`: lowering failed: {error}")),
+            Ok(program) => {
+                let text = format!("{:?}", program.functions[0].body);
+                if !text.contains("__thaw_native_exception_owner") || !text.contains("incompatible category or layout") {
+                    problems.push(format!("`{target}`: not cast through its native owner"));
+                }
+            }
+        }
+    }
+    assert!(problems.is_empty(), "{problems:#?}");
+}
+
+#[test]
+fn caught_native_exception_json_projection_is_tag_driven() {
+    let adapter = format!("{:?}", crate::caught_exception_json_adapter());
+    assert!(adapter.contains("__thaw_caught_adapter_tag"), "{adapter}");
+    assert!(adapter.contains("__thaw_native_exception_tag"), "{adapter}");
+    // Symbol and Function project to undefined; Map/Set/WeakMap/WeakSet/Promise to `{}`.
+    for tag in [20, 28, 23, 24, 25, 26, 29] {
+        assert!(adapter.contains(&format!("I64({tag})")), "tag {tag} has no projection arm: {adapter}");
+    }
+    // Array/Bytes/Tuple contents would need a snapshot: no arm, so they hit the explicit error.
+    for tag in [21, 22, 27] {
+        assert!(!adapter.contains(&format!("I64({tag})")), "tag {tag} must not be projected: {adapter}");
+    }
+    assert!(adapter.contains("caught native value has no Json projection"), "{adapter}");
+    assert!(adapter.contains("__thaw_json_object_from_json_entries"), "{adapter}");
+}
+
+#[test]
+fn unreachable_placeholders_exist_for_every_native_value_type() {
+    // An object-literal getter's declared return type gets an unreachable placeholder
+    // (`unreachable_value`); each type below used to fail with "cannot synthesize".
+    let mut problems = Vec::new();
+    for (ty, value) in [
+        ("bigint", "1n"),
+        ("symbol", "Symbol(\"s\")"),
+        ("Map<string, number>", "new Map<string, number>()"),
+        ("Set<number>", "new Set<number>()"),
+        ("Promise<number>", "Promise.resolve(1)"),
+        ("Promise<void>", "Promise.resolve()"),
+        ("[number, string]", "[1, \"a\"]"),
+        ("() => number", "(): number => 1"),
+    ] {
+        let source = format!(
+            "function main(): void {{ const holder = {{ get value(): {ty} {{ return {value}; }} }}; console.log(holder.value); }}"
+        );
+        let module = thaw_parser::parse_typescript(&source).expect("parse error");
+        if let Err(error) = lower_module(&module) {
+            problems.push(format!("`{ty}`: {error}"));
+        }
+    }
+    // A setter's parameter type gets one too; its empty-ish body has no return check, which
+    // `Uint8Array` and equal-member tuples would otherwise trip over (they infer as `Array(F64)`).
+    for ty in ["Uint8Array", "[number, number]", "symbol", "Map<string, number>", "Promise<number>", "WeakMap<object, number>", "WeakSet<object>"] {
+        let source = format!(
+            "function main(): void {{ const holder = {{ set value(next: {ty}) {{ console.log(next); }} }}; }}"
+        );
+        let module = thaw_parser::parse_typescript(&source).expect("parse error");
+        if let Err(error) = lower_module(&module) {
+            problems.push(format!("setter `{ty}`: {error}"));
+        }
+    }
+    assert!(problems.is_empty(), "{problems:#?}");
 }

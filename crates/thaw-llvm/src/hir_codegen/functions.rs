@@ -94,9 +94,12 @@ impl<'ctx> HirCompiler<'ctx> {
             HirType::Json | HirType::Dictionary(_) => {
                 Ok(self.context.ptr_type(AddressSpace::default()).into())
             }
+            HirType::NativeException => Ok(self.context.ptr_type(AddressSpace::default()).into()),
             HirType::JsValue => Ok(self.context.i64_type().into()),
             HirType::Null => Ok(self.context.bool_type().into()),
-            HirType::Function(_, _) | HirType::CallableFunction(..) => {
+            // A `this`-taking closure is the same closure pointer; the tagged
+            // receiver entry lives in its environment.
+            HirType::Function(_, _) | HirType::CallableFunction(..) | HirType::FunctionWithThis(..) => {
                 Ok(self.context.ptr_type(AddressSpace::default()).into())
             }
             HirType::Promise(_) => Ok(self.context.ptr_type(AddressSpace::default()).into()),

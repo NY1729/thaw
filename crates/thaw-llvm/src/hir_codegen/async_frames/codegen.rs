@@ -38,11 +38,14 @@ impl<'ctx> HirCompiler<'ctx> {
         let entry = self.context.append_basic_block(ramp, "entry");
         self.builder.position_at_end(entry);
         self.variables.clear();
+        self.stack_promise_slots.clear();
         self.for_iteration_frame_slots.clear();
         self.catch_native_text.clear();
         self.variable_hir_types.clear();
         self.arena_variables.clear();
-        self.catch_stack.clear();
+        self.clear_catch_context();
+        self.loop_scopes.clear();
+        self.loop_promotion_scopes.clear();
         self.seed_global_variables();
 
         let alloc = self.module.get_function("thaw_arena_alloc").unwrap();
@@ -103,8 +106,16 @@ impl<'ctx> HirCompiler<'ctx> {
         self.builder
             .build_store(waiting_slot, ptr_ty.const_null())
             .map_err(|e| e.to_string())?;
-        for (index, (name, _)) in plan.locals.iter().enumerate() {
+        for (index, (name, ty)) in plan.locals.iter().enumerate() {
             if name.starts_with("@@thaw_for_iteration_") {
+                let slot = self.async_frame_field(
+                    frame,
+                    self.async_local_offset(plan, index)?,
+                    &format!("frame_{name}"),
+                )?;
+                self.builder.build_store(slot, ptr_ty.const_null())
+                    .map_err(|error| error.to_string())?;
+            } else if matches!(ty, HirType::Promise(_)) {
                 let slot = self.async_frame_field(
                     frame,
                     self.async_local_offset(plan, index)?,
@@ -117,7 +128,7 @@ impl<'ctx> HirCompiler<'ctx> {
         self.bind_async_frame_locals(frame, plan)?;
         // Arena allocation is not zeroed outside tracing mode. Initialize
         // compiler-private provenance before any source statement executes.
-        for (_, native_slot, original_slot, valid_slot) in self.catch_native_text.values() {
+        for (_, native_slot, original_slot, valid_slot, _) in self.catch_native_text.values() {
             for slot in [native_slot, original_slot] {
                 self.builder.build_store(*slot, ptr_ty.const_null())
                     .map_err(|error| error.to_string())?;
@@ -146,23 +157,27 @@ impl<'ctx> HirCompiler<'ctx> {
             let (slot, _) = self.variables.get(&param.name).copied().ok_or_else(|| {
                 format!("missing async frame parameter slot for `{}`", param.name)
             })?;
-            self.builder
-                .build_store(slot, param_value)
-                .map_err(|e| e.to_string())?;
+            self.store_arena_promise_slot(frame, slot, &param.ty, param_value)?;
         }
         self.emit_async_segment(&segments[0], frame, completion, resume, 1, true, plan, None)?;
 
         let resume_entry = self.context.append_basic_block(resume, "entry");
         self.builder.position_at_end(resume_entry);
         self.variables.clear();
+        self.stack_promise_slots.clear();
         self.for_iteration_frame_slots.clear();
         self.catch_native_text.clear();
         self.variable_hir_types.clear();
         self.arena_variables.clear();
-        self.catch_stack.clear();
+        self.clear_catch_context();
+        self.loop_scopes.clear();
+        self.loop_promotion_scopes.clear();
         self.seed_global_variables();
         let resume_frame = resume.get_nth_param(0).unwrap().into_pointer_value();
         let resume_result = resume.get_nth_param(1).unwrap().into_pointer_value();
+        // The rejection handlers below store into the catch cells (`catch_native_text`), which
+        // the per-state binding further down only fills in later.
+        self.bind_async_frame_locals(resume_frame, plan)?;
         let waiting_slot =
             self.async_frame_field(resume_frame, ASYNC_WAITING_OFFSET, "waiting_slot")?;
         let waiting = self
@@ -285,7 +300,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     .map_err(|e| e.to_string())?;
             }
             let binding_slot = self.catch_native_text.get(&handler.catch_binding)
-                .map(|(binding, _, _, _)| *binding)
+                .map(|(binding, _, _, _, _)| *binding)
                 .ok_or_else(|| format!("missing catch provenance for `{}`", handler.catch_binding))?;
             let native_text = self.builder.build_call(
                 self.module.get_function("thaw_promise_exception_native_text_copy").unwrap(),
@@ -300,17 +315,17 @@ impl<'ctx> HirCompiler<'ctx> {
             self.builder.build_store(binding_slot, caught_value)
                 .map_err(|e| e.to_string())?;
             let original_slot = self.catch_native_text.get(&handler.catch_binding)
-                .map(|(_, _, original, _)| *original)
+                .map(|(_, _, original, _, _)| *original)
                 .ok_or_else(|| format!("missing catch original for `{}`", handler.catch_binding))?;
             self.builder.build_store(original_slot, caught_value)
                 .map_err(|e| e.to_string())?;
             let valid_slot = self.catch_native_text.get(&handler.catch_binding)
-                .map(|(_, _, _, valid)| *valid)
+                .map(|(_, _, _, valid, _)| *valid)
                 .ok_or_else(|| format!("missing catch validity for `{}`", handler.catch_binding))?;
             self.builder.build_store(valid_slot, self.context.bool_type().const_int(1, false))
                 .map_err(|e| e.to_string())?;
             let native_slot = self.catch_native_text.get(&handler.catch_binding)
-                .map(|(_, native, _, _)| *native)
+                .map(|(_, native, _, _, _)| *native)
                 .ok_or_else(|| format!("missing catch provenance for `{}`", handler.catch_binding))?;
             self.builder.build_store(native_slot, native_text).map_err(|e| e.to_string())?;
             for (suffix, getter) in [
@@ -320,6 +335,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 ("f64", "thaw_promise_exception_f64"),
                 ("i64", "thaw_promise_exception_i64"),
                 ("bool", "thaw_promise_exception_bool"),
+                ("native", "thaw_promise_exception_native"),
             ] {
                 let name = format!("{}__thaw_exception_{suffix}", handler.catch_binding);
                 let index = plan
@@ -347,6 +363,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     .build_store(slot, value)
                     .map_err(|e| e.to_string())?;
             }
+            self.store_async_caught_carrier(resume_frame, plan, &handler.catch_binding)?;
             self.builder
                 .build_call(
                     self.module.get_function("thaw_promise_destroy").unwrap(),
@@ -423,11 +440,14 @@ impl<'ctx> HirCompiler<'ctx> {
         for (index, block) in case_blocks.into_iter().enumerate() {
             self.builder.position_at_end(block);
             self.variables.clear();
+            self.stack_promise_slots.clear();
             self.for_iteration_frame_slots.clear();
             self.catch_native_text.clear();
             self.variable_hir_types.clear();
             self.arena_variables.clear();
-            self.catch_stack.clear();
+            self.clear_catch_context();
+            self.loop_scopes.clear();
+            self.loop_promotion_scopes.clear();
             self.seed_global_variables();
             self.bind_async_frame_captures(resume_frame, plan)?;
             self.bind_async_frame_locals(resume_frame, plan)?;
@@ -565,15 +585,21 @@ impl<'ctx> HirCompiler<'ctx> {
             let sync_rejection = self
                 .context
                 .append_basic_block(function, "await_operand_rejected");
-            self.catch_stack.push(sync_rejection);
+            self.push_catch_target(sync_rejection);
             let waiting = match awaited {
                 HirExpr::Call(callee, args) if matches!(callee.as_ref(), HirExpr::Var(name) if name == "fetch") => {
                     self.compile_single_arg_call("thaw_http_get_async", args, "async_fetch")
                 }
                 _ => self.compile_expr(awaited),
             };
-            self.catch_stack.pop();
-            let waiting = waiting?.into_pointer_value();
+            let waiting = waiting.and_then(|waiting| {
+                self.retain_borrowed_promise_for_consumption(
+                    awaited,
+                    waiting.into_pointer_value(),
+                )
+            });
+            self.pop_catch_target();
+            let waiting = waiting?;
             let fulfilled_block = self.builder.get_insert_block().unwrap();
             let await_ready = self.context.append_basic_block(function, "await_operand_ready");
             self.builder
@@ -664,7 +690,7 @@ impl<'ctx> HirCompiler<'ctx> {
             }
         } else {
             if let Some(state) = segment.await_next {
-                if !plan.segments.get(state).is_some_and(|next| next.resume_target.is_none()) {
+                if plan.segments.get(state).is_none_or(|next| next.resume_target.is_some()) {
                     return Err("synchronous frame transition needs a state without an await result".into());
                 }
                 // The resume entry treats a null waiting handle as a direct
@@ -733,6 +759,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 &format!("frame_{name}"),
             )?;
             self.async_frame_cells.insert(slot);
+            self.async_frame_slot_owners.insert(slot, frame);
             if name.starts_with("@@thaw_for_iteration_") {
                 let cell = self.builder.build_load(
                     self.context.ptr_type(AddressSpace::default()), slot,
@@ -748,7 +775,10 @@ impl<'ctx> HirCompiler<'ctx> {
         }
         for binding in &plan.generated_catch_bindings {
             let name = Self::async_catch_native_name(binding);
-            let catch_slot = self.variables.get(binding).map(|(slot, _)| *slot)
+            // In carrier mode `binding` is the carrier local; the caught text has its own cell.
+            let text_name = Self::async_catch_text_name(binding);
+            let catch_slot = self.variables.get(&text_name).or_else(|| self.variables.get(binding))
+                .map(|(slot, _)| *slot)
                 .ok_or_else(|| format!("missing async catch binding `{binding}`"))?;
             let native_slot = self.variables.get(&name).map(|(slot, _)| *slot)
                 .ok_or_else(|| format!("missing async native text cell `{name}`"))?;
@@ -758,7 +788,12 @@ impl<'ctx> HirCompiler<'ctx> {
             let valid_name = Self::async_catch_valid_name(binding);
             let valid_slot = self.variables.get(&valid_name).map(|(slot, _)| *slot)
                 .ok_or_else(|| format!("missing async catch validity cell `{valid_name}`"))?;
-            self.catch_native_text.insert(binding.clone(), (catch_slot, native_slot, original_slot, valid_slot));
+            let exception_native_name = format!("{binding}__thaw_exception_native");
+            let exception_native_slot = self.variables.get(&exception_native_name)
+                .map(|(slot, _)| *slot)
+                .ok_or_else(|| format!("missing async native exception descriptor cell `{exception_native_name}`"))?;
+            self.catch_native_text.insert(binding.clone(),
+                (catch_slot, native_slot, original_slot, valid_slot, exception_native_slot));
         }
         Ok(())
     }
@@ -767,13 +802,17 @@ impl<'ctx> HirCompiler<'ctx> {
         &mut self,
         name: &str,
         ty: &HirType,
-        value: BasicValueEnum<'ctx>,
+        expression: &HirExpr,
     ) -> Result<(), String> {
         let frame_slot = *self.for_iteration_frame_slots.get(name)
             .ok_or_else(|| format!("missing iteration frame slot for `{name}`"))?;
         let llvm_ty = self.basic_type(ty)?;
         let cell = self.build_arena_cell(&self.builder, llvm_ty, name)?;
-        self.builder.build_store(cell, value).map_err(|error| error.to_string())?;
+        if matches!(ty, HirType::Promise(_)) {
+            let ptr_ty = self.context.ptr_type(AddressSpace::default());
+            self.builder.build_store(cell, ptr_ty.const_null()).map_err(|error| error.to_string())?;
+        }
+        let value = self.compile_and_store_arena_promise_expression(cell, cell, ty, expression)?;
         self.builder.build_store(frame_slot, cell).map_err(|error| error.to_string())?;
         self.variables.insert(name.to_string(), (cell, llvm_ty));
         self.variable_hir_types.insert(name.to_string(), ty.clone());
@@ -832,6 +871,10 @@ impl<'ctx> HirCompiler<'ctx> {
         plan: &FrameAsyncPlan,
     ) -> Result<AsyncBlockExit, String> {
         for stmt in stmts {
+            let saved_catches = CatchContext {
+                scopes: self.catch_stack.clone(),
+            };
+            let statement_result = (|| -> Result<AsyncBlockExit, String> {
             let synchronous_catch = match stmt {
                 HirStmt::If(HirExpr::Var(guard), _, _) => plan
                     .guarded_rethrow_handlers
@@ -848,7 +891,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 _ => None,
             };
             if let Some((catch_block, _, _)) = &synchronous_catch {
-                self.catch_stack.push(*catch_block);
+                self.push_catch_target(*catch_block);
             }
             if let HirStmt::If(guard, then_body, else_body) = stmt {
                 let guarded = match (then_body.as_slice(), else_body.as_slice()) {
@@ -871,10 +914,10 @@ impl<'ctx> HirCompiler<'ctx> {
                         .build_conditional_branch(condition, initialize, continue_block)
                         .map_err(|e| e.to_string())?;
                     self.builder.position_at_end(initialize);
-                    let value = self.compile_expr(expr)?;
                     if self.for_iteration_frame_slots.contains_key(name) {
-                        self.store_for_iteration_cell(name, ty, value)?;
+                        self.store_for_iteration_cell(name, ty, expr)?;
                     } else {
+                        let value = self.compile_expr(expr)?;
                         let (slot, slot_ty) = self.variables.get(name).copied()
                             .ok_or_else(|| format!("missing async frame slot for `{name}`"))?;
                         if slot_ty != self.basic_type(ty)? {
@@ -890,7 +933,7 @@ impl<'ctx> HirCompiler<'ctx> {
                         self.reload_for_iteration_cell(name, ty)?;
                     }
                     self.finish_async_guarded_stmt(&synchronous_catch, frame, plan)?;
-                    continue;
+                    return Ok(AsyncBlockExit::Continue);
                 }
                 if let Some((HirStmt::Return(value), expected)) = guarded {
                     let function = self.current_function();
@@ -925,7 +968,7 @@ impl<'ctx> HirCompiler<'ctx> {
                             }
                             self.builder.position_at_end(continue_block);
                             self.finish_async_guarded_stmt(&synchronous_catch, frame, plan)?;
-                            continue;
+                            return Ok(AsyncBlockExit::Continue);
                         }
                         Some(expr) if plan.ret != HirType::Void => {
                             let result = self.compile_expr(expr)?;
@@ -955,7 +998,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     )?;
                     self.builder.position_at_end(continue_block);
                     self.finish_async_guarded_stmt(&synchronous_catch, frame, plan)?;
-                    continue;
+                    return Ok(AsyncBlockExit::Continue);
                 }
                 if let Some((HirStmt::Throw(error_expr), expected)) = guarded {
                     let enclosing_handler = match guard {
@@ -1030,7 +1073,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     }
                     self.builder.position_at_end(continue_block);
                     self.finish_async_guarded_stmt(&synchronous_catch, frame, plan)?;
-                    continue;
+                    return Ok(AsyncBlockExit::Continue);
                 }
             }
             if matches!(stmt, HirStmt::Return(None)) {
@@ -1073,9 +1116,8 @@ impl<'ctx> HirCompiler<'ctx> {
                 return Ok(AsyncBlockExit::Rejected);
             }
             if let HirStmt::Let(name, ty, expr) = stmt {
-                let value = self.compile_expr(expr)?;
                 if self.for_iteration_frame_slots.contains_key(name) {
-                    self.store_for_iteration_cell(name, ty, value)?;
+                    self.store_for_iteration_cell(name, ty, expr)?;
                 } else {
                     let index = plan.locals.iter().position(|(local, _)| local == name)
                         .ok_or_else(|| format!("missing async frame slot for `{name}`"))?;
@@ -1085,7 +1127,8 @@ impl<'ctx> HirCompiler<'ctx> {
                         &format!("frame_{name}"),
                     )?;
                     self.async_frame_cells.insert(slot);
-                    self.builder.build_store(slot, value).map_err(|e| e.to_string())?;
+                    self.async_frame_slot_owners.insert(slot, frame);
+                    self.compile_and_store_arena_promise_expression(frame, slot, ty, expr)?;
                     self.variables.insert(name.clone(), (slot, self.basic_type(ty)?));
                 }
             } else if self.compile_stmt(stmt)? {
@@ -1093,6 +1136,14 @@ impl<'ctx> HirCompiler<'ctx> {
                 return Ok(AsyncBlockExit::Returned);
             }
             self.finish_async_guarded_stmt(&synchronous_catch, frame, plan)?;
+            Ok(AsyncBlockExit::Continue)
+            })();
+            self.replace_catch_context(saved_catches);
+            match statement_result? {
+                AsyncBlockExit::Continue => {}
+                AsyncBlockExit::Returned => return Ok(AsyncBlockExit::Returned),
+                AsyncBlockExit::Rejected => return Ok(AsyncBlockExit::Rejected),
+            }
         }
         Ok(AsyncBlockExit::Continue)
     }
@@ -1106,19 +1157,19 @@ impl<'ctx> HirCompiler<'ctx> {
     ) -> Result<(), String> {
         let ptr_ty = self.context.ptr_type(AddressSpace::default());
         let binding_slot = self.catch_native_text.get(&handler.catch_binding)
-            .map(|(binding, _, _, _)| *binding)
+            .map(|(binding, _, _, _, _)| *binding)
             .ok_or_else(|| format!("missing catch provenance for `{}`", handler.catch_binding))?;
         self.builder.build_store(binding_slot, pending).map_err(|e| e.to_string())?;
         let original_slot = self.catch_native_text.get(&handler.catch_binding)
-            .map(|(_, _, original, _)| *original)
+            .map(|(_, _, original, _, _)| *original)
             .ok_or_else(|| format!("missing catch original for `{}`", handler.catch_binding))?;
         self.builder.build_store(original_slot, pending).map_err(|e| e.to_string())?;
         let valid_slot = self.catch_native_text.get(&handler.catch_binding)
-            .map(|(_, _, _, valid)| *valid)
+            .map(|(_, _, _, valid, _)| *valid)
             .ok_or_else(|| format!("missing catch validity for `{}`", handler.catch_binding))?;
         self.builder.build_store(valid_slot, self.context.bool_type().const_int(1, false))
             .map_err(|e| e.to_string())?;
-        let pending_metadata: [(&str, &str, BasicTypeEnum<'ctx>); 7] = [
+        let pending_metadata: [(&str, &str, BasicTypeEnum<'ctx>); 8] = [
             ("native_text", PENDING_EXCEPTION_NATIVE_TEXT_SYMBOL, ptr_ty.into()),
             ("object", PENDING_EXCEPTION_OBJECT_SYMBOL, ptr_ty.into()),
             ("aggregate", PENDING_EXCEPTION_AGGREGATE_SYMBOL, ptr_ty.into()),
@@ -1126,6 +1177,7 @@ impl<'ctx> HirCompiler<'ctx> {
             ("f64", PENDING_EXCEPTION_F64_SYMBOL, self.context.f64_type().into()),
             ("i64", PENDING_EXCEPTION_I64_SYMBOL, self.context.i64_type().into()),
             ("bool", PENDING_EXCEPTION_BOOL_SYMBOL, self.context.bool_type().into()),
+            ("native", PENDING_EXCEPTION_NATIVE_SYMBOL, ptr_ty.into()),
         ];
         for (suffix, symbol, ty) in pending_metadata {
             let name = if suffix == "native_text" {
@@ -1146,6 +1198,45 @@ impl<'ctx> HirCompiler<'ctx> {
                 .map_err(|e| e.to_string())?;
             self.builder.build_store(slot, value).map_err(|e| e.to_string())?;
         }
+        self.store_async_caught_carrier(frame, plan, &handler.catch_binding)?;
+        Ok(())
+    }
+
+    /// Carrier mode only (HIR declared the catch binding as the caught-exception carrier):
+    /// pack the text/owner/native/tag/number/bigint/bool cells captured above into the
+    /// carrier, exactly like the lexical `compile_try` does. A split async catch already
+    /// owns its JSON through the runtime pending-transfer API, so nothing is re-shared.
+    fn store_async_caught_carrier(
+        &self,
+        frame: PointerValue<'ctx>,
+        plan: &FrameAsyncPlan,
+        binding: &str,
+    ) -> Result<(), String> {
+        let text_name = Self::async_catch_text_name(binding);
+        if !plan.locals.iter().any(|(local, _)| *local == text_name) {
+            return Ok(());
+        }
+        let slot = |this: &Self, local: &str| -> Result<PointerValue<'ctx>, String> {
+            let index = plan.locals.iter().position(|(name, _)| name == local)
+                .ok_or_else(|| format!("missing async catch cell `{local}`"))?;
+            this.async_frame_field(frame, this.async_local_offset(plan, index)?, "caught_carrier_field")
+        };
+        let ptr_ty = self.context.ptr_type(AddressSpace::default());
+        let i64_ty = self.context.i64_type();
+        let load = |this: &Self, local: &str, ty: BasicTypeEnum<'ctx>| -> Result<BasicValueEnum<'ctx>, String> {
+            let cell = slot(this, local)?;
+            this.builder.build_load(ty, cell, "caught_carrier_input").map_err(|e| e.to_string())
+        };
+        let text = load(self, &text_name, ptr_ty.into())?.into_pointer_value();
+        let owner = load(self, &format!("{binding}__thaw_exception_object"), ptr_ty.into())?.into_pointer_value();
+        let native = load(self, &format!("{binding}__thaw_exception_native"), ptr_ty.into())?.into_pointer_value();
+        let tag = load(self, &format!("{binding}__thaw_exception_tag"), i64_ty.into())?.into_int_value();
+        let number = load(self, &format!("{binding}__thaw_exception_f64"), self.context.f64_type().into())?.into_float_value();
+        let bigint = load(self, &format!("{binding}__thaw_exception_i64"), i64_ty.into())?.into_int_value();
+        let boolean = load(self, &format!("{binding}__thaw_exception_bool"), self.context.bool_type().into())?.into_int_value();
+        let carrier = self.pack_caught_exception_carrier(text, owner, native, tag, number, bigint, boolean, owner)?;
+        let target = slot(self, binding)?;
+        self.builder.build_store(target, carrier).map_err(|e| e.to_string())?;
         Ok(())
     }
 
@@ -1162,7 +1253,7 @@ impl<'ctx> HirCompiler<'ctx> {
         let Some((catch_block, next_block, handler)) = boundary else {
             return Ok(());
         };
-        self.catch_stack.pop();
+        self.pop_catch_target();
         if self.builder.get_insert_block().unwrap().get_terminator().is_none() {
             self.builder.build_unconditional_branch(*next_block).map_err(|e| e.to_string())?;
         }
@@ -1187,7 +1278,7 @@ impl<'ctx> HirCompiler<'ctx> {
             self.builder.build_store(slot, self.context.bool_type().const_int(enabled as u64, false))
                 .map_err(|e| e.to_string())?;
         }
-        self.capture_pending_async_catch(frame, plan, handler, pending)?;
+        self.capture_pending_async_catch(frame, plan, handler, pending.into_pointer_value())?;
         self.builder.build_store(self.pending_exception().as_pointer_value(), ptr_ty.const_null())
             .map_err(|e| e.to_string())?;
         self.clear_pending_native_text()?;

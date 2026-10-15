@@ -1,3 +1,4 @@
+#![cfg_attr(test, allow(unused_unsafe))]
 pub mod ast;
 pub mod codegen;
 pub mod hir_codegen;

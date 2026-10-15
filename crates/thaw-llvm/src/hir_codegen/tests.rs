@@ -4,6 +4,9 @@ fn cc_command() -> Command {
     let mut command = Command::new("cc");
     if cfg!(target_os = "linux") {
         command.arg("-no-pie");
+        // thaw-runtime's num-bigint pulls in libm (log/exp/log2); the real `thaw build` link adds -lm too.
+        // Listed first with --no-as-needed so the DSO is kept even though the archives come later.
+        command.args(["-Wl,--no-as-needed", "-lm"]);
     }
     command
 }
@@ -96,6 +99,37 @@ fn compile_and_run_output_with_env(
     test_name: &str,
     envs: &[(&str, &str)],
 ) -> (String, String) {
+    let output = compile_and_run_raw(source, test_name, envs);
+    assert!(
+        output.status.success(),
+        "binary exited {:?} (terminated by signal {:?}): stdout: {} stderr: {}",
+        output.status.code(),
+        std::os::unix::process::ExitStatusExt::signal(&output.status),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    (
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+
+/// For programs that must end unsuccessfully (an unhandled rejection of
+/// `main` exits 1 in Node as well): `(stdout, stderr, exit code)`.
+fn compile_and_run_failing(source: &str, test_name: &str) -> (String, String, Option<i32>) {
+    let output = compile_and_run_raw(source, test_name, &[]);
+    (
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+        output.status.code(),
+    )
+}
+
+fn compile_and_run_raw(
+    source: &str,
+    test_name: &str,
+    envs: &[(&str, &str)],
+) -> std::process::Output {
     let module = thaw_parser::parse_typescript(source).unwrap();
     let program = thaw_hir::lower_module(&module).unwrap();
 
@@ -159,18 +193,8 @@ fn compile_and_run_output_with_env(
         .envs(envs.iter().copied())
         .output()
         .expect("failed to execute compiled binary");
-    assert!(
-        output.status.success(),
-        "binary exited {:?}: {}",
-        output.status.code(),
-        String::from_utf8_lossy(&output.stderr)
-    );
-
     let _ = std::fs::remove_dir_all(&dir);
-    (
-        String::from_utf8_lossy(&output.stdout).into_owned(),
-        String::from_utf8_lossy(&output.stderr).into_owned(),
-    )
+    output
 }
 
 /// Builds `pkg` as a staticlib (if not already built) and returns the
@@ -316,3 +340,142 @@ include!("tests/native_builtins.rs");
 include!("tests/ffi.rs");
 include!("tests/types.rs");
 include!("tests/values.rs");
+include!("tests/f_contracts.rs");
+include!("tests/i_contracts.rs");
+
+#[test]
+fn immediate_jsvalue_identity_lambda_reads_capture_without_retaining_environment() {
+    let value = HirParam {
+        name: "value".into(),
+        ty: HirType::JsValue,
+    };
+    let program = HirProgram {
+        functions: vec![HirFunction {
+            name: "immediate_capture".into(),
+            params: vec![value.clone()],
+            ret: HirType::JsValue,
+            is_async: false,
+            body: vec![HirStmt::Return(Some(HirExpr::Call(
+                Box::new(HirExpr::Lambda(
+                    vec![value.clone()],
+                    Vec::new(),
+                    HirType::JsValue,
+                    Box::new(HirExpr::Var("value".into())),
+                )),
+                Vec::new(),
+            )))],
+        }],
+        ..HirProgram::default()
+    };
+    let context = Context::create();
+    let mut compiler = HirCompiler::new(&context, "immediate_capture");
+    compiler.compile_program(&program).unwrap();
+    let ir = compiler.print_to_string();
+    let symbol = ir.find("@immediate_capture(").unwrap();
+    let start = ir[..symbol].rfind("define ").unwrap();
+    let end = ir[symbol..]
+        .find("\n}")
+        .map(|offset| symbol + offset)
+        .unwrap();
+    let function_ir = &ir[start..end];
+    assert!(
+        function_ir.contains("load i64"),
+        "expected the original JsValue parameter to be read: {function_ir}"
+    );
+    assert!(
+        !function_ir.contains("thaw_js_retain_handle"),
+        "identity capture must not retain an environment: {function_ir}"
+    );
+    assert!(
+        !function_ir.contains("__thaw_lambda_"),
+        "identity capture must not construct a closure: {function_ir}"
+    );
+}
+
+#[test]
+fn typed_quickjs_wrapper_lease_requires_all_paths_to_return_native_jsvalue() {
+    let signature = thaw_hir::DynamicSignature {
+        backend: thaw_hir::DynamicBackend::QuickJs,
+        symbol: "__thaw_typed_js_test".into(),
+        params: Vec::new(),
+        ret: HirType::JsValue,
+    };
+    let dynamic_return =
+        || HirStmt::Return(Some(HirExpr::DynamicCall(signature.clone(), Vec::new())));
+    let proven = HirFunction {
+        name: "__thaw_typed_wrapper_js_proven".into(),
+        params: Vec::new(),
+        ret: HirType::JsValue,
+        is_async: false,
+        body: vec![
+            HirStmt::If(
+                HirExpr::BinOp(
+                    BinOp::EqEqEq,
+                    Box::new(HirExpr::OptionalIsNone(
+                        Box::new(HirExpr::Var("options".into())),
+                        HirType::JsValue,
+                    )),
+                    Box::new(HirExpr::Lit(HirLit::Bool(false))),
+                ),
+                vec![dynamic_return()],
+                Vec::new(),
+            ),
+            dynamic_return(),
+        ],
+    };
+    assert!(is_proven_typed_quickjs_wrapper(&proven));
+
+    let alias = HirFunction {
+        name: "__thaw_typed_wrapper_js_alias".into(),
+        params: vec![HirParam {
+            name: "value".into(),
+            ty: HirType::JsValue,
+        }],
+        ret: HirType::JsValue,
+        is_async: false,
+        body: vec![HirStmt::Return(Some(HirExpr::Var("value".into())))],
+    };
+    assert!(!is_proven_typed_quickjs_wrapper(&alias));
+
+    let json_alias = HirFunction {
+        name: "__thaw_typed_wrapper_js_json_alias".into(),
+        params: vec![HirParam {
+            name: "value".into(),
+            ty: HirType::Json,
+        }],
+        ret: HirType::Json,
+        is_async: false,
+        body: vec![HirStmt::Return(Some(HirExpr::Var("value".into())))],
+    };
+    assert!(!is_proven_typed_quickjs_wrapper(&json_alias));
+
+    let escaping_argument = HirFunction {
+        name: "__thaw_typed_wrapper_js_escaping_argument".into(),
+        params: Vec::new(),
+        ret: HirType::JsValue,
+        is_async: false,
+        body: vec![HirStmt::Return(Some(HirExpr::DynamicCall(
+            signature.clone(),
+            vec![HirExpr::Call(
+                Box::new(HirExpr::Var("store_and_return".into())),
+                vec![HirExpr::Var("borrowed".into())],
+            )],
+        )))],
+    };
+    assert!(!is_proven_typed_quickjs_wrapper(&escaping_argument));
+
+    let side_effecting_body = HirFunction {
+        name: "__thaw_typed_wrapper_js_side_effect".into(),
+        params: Vec::new(),
+        ret: HirType::JsValue,
+        is_async: false,
+        body: vec![
+            HirStmt::Expr(HirExpr::Call(
+                Box::new(HirExpr::Var("store_borrowed".into())),
+                vec![HirExpr::Var("borrowed".into())],
+            )),
+            dynamic_return(),
+        ],
+    };
+    assert!(!is_proven_typed_quickjs_wrapper(&side_effecting_body));
+}

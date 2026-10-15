@@ -17,4 +17,5 @@ ureq = "3.4.0"
 [dev-dependencies]
 brotli = "8"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+libc = "0.2"
 thaw-quickjs = { path = "../thaw-quickjs" }

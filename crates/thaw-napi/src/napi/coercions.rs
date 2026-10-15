@@ -338,6 +338,10 @@ unsafe fn javascript_string_utf16(
             arrays.remove(&(value as usize));
             result
         }
+        #[cfg(feature = "quickjs")]
+        Value::Symbol { id, .. } if env.as_ref().is_some_and(|env| env.graph_owner_id != 0) => {
+            qjs_native_symbol_string_units(env, *id)
+        }
         _ => Ok(javascript_string(env, value, arrays)
             .map_err(|_| coercion_type_error(env, "a Symbol cannot be converted to a string"))?
             .encode_utf16().collect()),
@@ -350,6 +354,24 @@ unsafe fn qjs_abstract_string_units(env: NapiEnv, handle: u64, array_element: bo
     let _foreign_dispatch = ForeignCallbackGuard::new();
     let result = thaw_quickjs::thaw_js_abstract_to_string_units_result(
         handle, u8::from(array_element));
+    qjs_string_units_from_result(env, result)
+}
+
+/// ToString of a native-graph Symbol through the engine's own Symbol, so the
+/// engine's real TypeError becomes the pending exception.
+#[cfg(feature = "quickjs")]
+unsafe fn qjs_native_symbol_string_units(env: NapiEnv, id: u64)
+    -> Result<Vec<u16>, NapiStatus> {
+    let owner = env.as_ref().map_or(0, |env| env.graph_owner_id);
+    let _foreign_dispatch = ForeignCallbackGuard::new();
+    let result = thaw_quickjs::thaw_js_napi_symbol_abstract_to_string_units_result(owner, id);
+    qjs_string_units_from_result(env, result)
+}
+
+#[cfg(feature = "quickjs")]
+unsafe fn qjs_string_units_from_result(
+    env: NapiEnv, result: thaw_quickjs::ThawStringCoercionResult,
+) -> Result<Vec<u16>, NapiStatus> {
     if result.exception_handle != 0 {
         let (exception, duplicate) = {
             let Ok(owner) = env_mut(env) else {

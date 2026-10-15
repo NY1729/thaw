@@ -1,3 +1,4 @@
+#[derive(Clone)]
 struct NarrowingSnapshot {
     optional: HashMap<Symbol, HirType>,
     nullable: HashMap<Symbol, HirType>,
@@ -10,6 +11,12 @@ struct NarrowingSnapshot {
 struct FnLowerer<'a> {
     scope: HashMap<Symbol, HirType>,
     immutable_bindings: HashSet<Symbol>,
+    /// `var` names already declared in the current function, mapped to the
+    /// HIR binding they own; a redeclaration reuses that binding.
+    function_var_names: HashMap<String, Symbol>,
+    /// Declared (annotated) function/method parameters whose type may be `undefined`/`null`:
+    /// an un-narrowed property read on one is a compile error, as in `tsc`.
+    strict_nullable_bindings: HashSet<Symbol>,
     static_string_bindings: HashMap<Symbol, String>,
     narrowings: HashMap<Symbol, HirType>,
     nullable_narrowings: HashMap<Symbol, HirType>,
@@ -26,6 +33,11 @@ struct FnLowerer<'a> {
     object_array_property_discriminants: HashMap<Symbol, ObjectArrayPropertyDiscriminants>,
     object_function_property_discriminants: HashMap<Symbol, ObjectFunctionPropertyDiscriminants>,
     destructured_union_correlations: HashMap<Symbol, DestructuredUnionCorrelation>,
+    /// `for...of` over a `Json` value is lowered twice (array loop / live-iterable protocol);
+    /// `Some(true)` selects the live-iterable lowering, `Some(false)` the array loop.
+    for_of_json_mode: Option<bool>,
+    /// The right-hand side already lowered by the `for...of` dispatch.
+    for_of_prelowered: Option<HirExpr>,
     destructuring_default_types: HashMap<Symbol, HirType>,
     function_value_discriminants: HashMap<Symbol, HashMap<Symbol, Vec<Option<HirLit>>>>,
     function_value_array_discriminants: HashMap<Symbol, HashMap<Symbol, Vec<Option<HirLit>>>>,
@@ -37,6 +49,8 @@ struct FnLowerer<'a> {
     bindings: HashMap<Symbol, Vec<Symbol>>,
     used_hir_bindings: HashSet<Symbol>,
     sparse_arrays: HashSet<Symbol>,
+    /// `__thaw_native_arg_N` temporaries bound to a fresh object literal (not a native owner).
+    fresh_object_bindings: HashSet<Symbol>,
     conservative_sparse_arrays: HashSet<Symbol>,
     sparse_array_functions: HashSet<Symbol>,
     next_binding: usize,
@@ -66,6 +80,10 @@ struct FnLowerer<'a> {
     promise_catch_bindings: HashSet<Symbol>,
     promise_catch_parameter: Option<Symbol>,
     loop_depth: usize,
+    /// Emitted HIR depths for source breakable statements (iterations and switches).
+    source_break_depths: Vec<usize>,
+    /// Emitted HIR depths for source iterations only.
+    source_continue_depths: Vec<usize>,
     labels: Vec<(Symbol, usize, bool)>,
     super_initializer: Option<(Symbol, HirType, Symbol)>,
     class_static_context: bool,

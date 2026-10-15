@@ -173,7 +173,7 @@ fn symbols_have_unique_identity_and_property_namespace() {
             );
             assert!(present);
         }
-        let json = json_from_value(object).unwrap();
+        let json = json_from_value_with_undefined_for_env(env_ptr, object, false).unwrap();
         assert_eq!(json, serde_json::json!({"2": 3.0, "same": 1.0}));
     }
 }
@@ -1452,10 +1452,15 @@ fn object_type_tags_are_stable_and_unique() {
 }
 
 fn lock_async_test() -> std::sync::MutexGuard<'static, ()> {
-    ASYNC_TEST_LOCK
+    let guard = ASYNC_TEST_LOCK
         .get_or_init(|| Mutex::new(()))
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    // The ready queue is process-wide and an event names its owning thread
+    // through a pointer to work a finished test already freed. Under the lock
+    // no other async test is live, so anything still queued is such a leftover.
+    ready_events().lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clear();
+    guard
 }
 
 #[test]
@@ -2017,6 +2022,7 @@ fn scoped_accessor_js_roots_drop_only_after_owner_metadata_is_removed() {
         let mut scope = ptr::null_mut();
         assert_eq!(napi_open_handle_scope(env_ptr, &mut scope), NAPI_OK);
         let owner = env.alloc(Value::Object(HashMap::new()));
+        #[allow(clippy::arc_with_non_send_sync)]
         let roots = Arc::new(QuickJsAccessorRoots {
             getter: 0, setter: 0,
             getter_native: ptr::null_mut(), setter_native: ptr::null_mut(),

@@ -4,12 +4,16 @@
     const seen = new Map(), nodes = [];
     const encode = input => {
       if (((typeof input === 'object' && input !== null) || typeof input === 'function')
-          && uncloneable.has(input)) {
+          && isCloneUncloneable(uncloneable, input)) {
         throw new DOMException('Object is marked as uncloneable', 'DataCloneError');
       }
+      if (input !== null && typeof input === 'object' && isUnsupportedCloneObject(input)) {
+        throw new DOMException('value cannot be cloned', 'DataCloneError');
+      }
       if (input === undefined) return { p: 'undefined' };
-      if (typeof input === 'number' && !Number.isFinite(input)) return { p: String(input) };
+      if (typeof input === 'number' && (!Number.isFinite(input) || Object.is(input, -0))) return { p: String(input === 0 ? '-0' : input) };
       if (typeof input === 'bigint') return { p: 'bigint', v: String(input) };
+      if (typeof input === 'symbol') throw new DOMException('value cannot be cloned', 'DataCloneError');
       if (input === null || (typeof input !== 'object' && typeof input !== 'function')) return { v: input };
       if (seen.has(input)) return { r: seen.get(input) };
       if (typeof input === 'function') throw new DOMException('value cannot be cloned', 'DataCloneError');
@@ -22,8 +26,8 @@
         }
         node = { t: 'Array', l: length, v: entries };
       }
-      else if (input instanceof Date) node = { t: 'Date', v: input.getTime() };
-      else if (input instanceof RegExp) node = { t: 'RegExp', s: input.source, f: input.flags, i: input.lastIndex };
+      else if (input instanceof Date) node = { t: 'Date', v: encode(input.getTime()) };
+      else if (input instanceof RegExp) node = { t: 'RegExp', s: input.source, f: input.flags };
       else if (input instanceof Map) node = { t: 'Map', v: Array.from(input, entry => [encode(entry[0]), encode(entry[1])]) };
       else if (input instanceof Set) node = { t: 'Set', v: Array.from(input, encode) };
       else if (typeof globalThis.MessagePort === 'function' && input instanceof globalThis.MessagePort) {
@@ -34,7 +38,14 @@
       }
       else if (input instanceof ArrayBuffer) node = { t: 'ArrayBuffer', v: Array.from(new Uint8Array(input), byte => byte.toString(16).padStart(2, '0')).join('') };
       else if (ArrayBuffer.isView(input)) node = { t: input instanceof DataView ? 'DataView' : 'TypedArray', c: input.constructor.name, b: encode(input.buffer), o: input.byteOffset, l: input instanceof DataView ? input.byteLength : input.length };
-      else node = { t: 'Object', v: Object.keys(input).map(key => [key, encode(input[key])]) };
+      else {
+        const blobSnapshot = blobFileCloneSnapshot(input);
+        const values = blobSnapshot
+          ? Object.keys(blobSnapshot).map(key => [key, encode(blobSnapshot[key])])
+          : [];
+        for (const key of Object.keys(input)) values.push([key, encode(input[key])]);
+        node = { t: 'Object', v: values };
+      }
       nodes[id] = node; return { r: id };
     };
     return JSON.stringify({ root: encode(value), nodes });
@@ -44,6 +55,7 @@
     const primitive = item => {
       if ('r' in item) return values[item.r];
       if (item.p === 'undefined') return undefined;
+      if (item.p === '-0') return -0;
       if (item.p === 'NaN') return NaN;
       if (item.p === 'Infinity') return Infinity;
       if (item.p === '-Infinity') return -Infinity;
@@ -52,8 +64,8 @@
     };
     graph.nodes.forEach((node, id) => {
       if (node.t === 'Array') values[id] = new Array(node.l);
-      else if (node.t === 'Date') values[id] = new Date(node.v);
-      else if (node.t === 'RegExp') { values[id] = new RegExp(node.s, node.f); values[id].lastIndex = node.i; }
+      else if (node.t === 'Date') values[id] = new Date(typeof node.v === 'object' && node.v !== null ? primitive(node.v) : node.v);
+      else if (node.t === 'RegExp') values[id] = new RegExp(node.s, node.f);
       else if (node.t === 'Map') values[id] = new Map();
       else if (node.t === 'Set') values[id] = new Set();
       else if (node.t === 'MessagePort') {

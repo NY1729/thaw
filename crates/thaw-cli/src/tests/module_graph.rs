@@ -42,6 +42,227 @@ fn create_require_literal_calls_are_external_dependencies() {
 }
 
 #[test]
+fn created_require_calls_preserve_live_results_and_binding_identity() {
+    use swc_ecma_visit::{Visit, VisitWith};
+    use thaw_parser::ast::{Callee, Expr};
+    use std::collections::HashMap;
+
+    #[derive(Default)]
+    struct Calls {
+        helper: Vec<(String, String)>,
+        raw_r: usize,
+        resolve: usize,
+        side_effect: usize,
+        properties: std::collections::HashSet<String>,
+    }
+    impl Visit for Calls {
+        fn visit_member_expr(&mut self, member: &thaw_parser::ast::MemberExpr) {
+            if matches!(member.obj.as_ref(), Expr::Ident(ident) if ident.sym.as_ref() == "__thawmod0_r") {
+                if let thaw_parser::ast::MemberProp::Ident(property) = &member.prop {
+                    self.properties.insert(property.sym.to_string());
+                }
+            }
+            member.visit_children_with(self);
+        }
+        fn visit_call_expr(&mut self, call: &thaw_parser::ast::CallExpr) {
+            if let Callee::Expr(callee) = &call.callee {
+                match callee.as_ref() {
+                    Expr::Ident(ident) if ident.sym.to_string().starts_with("__thawmod0_created_require_result") => {
+                        let callable = call.args.first().and_then(|arg| match arg.expr.as_ref() {
+                            Expr::Ident(ident) => Some(ident.sym.to_string()), _ => None,
+                        }).unwrap_or_default();
+                        let argument = call.args.get(1).map(|arg| match arg.expr.as_ref() {
+                            Expr::Call(inner) => match &inner.callee {
+                                Callee::Expr(callee) => match callee.as_ref() {
+                                    Expr::Ident(ident) => ident.sym.to_string(), _ => String::new(),
+                                }, _ => String::new(),
+                            }, _ => String::new(),
+                        }).unwrap_or_default();
+                        self.helper.push((callable, argument));
+                    }
+                    Expr::Ident(ident) if matches!(ident.sym.as_ref(), "r" | "__thawmod0_r") => self.raw_r += 1,
+                    Expr::Ident(ident) if ident.sym.to_string().ends_with("sideEffect") => self.side_effect += 1,
+                    Expr::Member(member) if matches!(&member.prop, thaw_parser::ast::MemberProp::Ident(prop) if prop.sym == *"resolve") => self.resolve += 1,
+                    _ => {}
+                }
+            }
+            call.visit_children_with(self);
+        }
+    }
+
+    let dir = std::env::temp_dir().join(format!("thaw-created-require-live-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let entry = dir.join("main.ts");
+    let source = r#"
+        import { createRequire as make } from 'node:module';
+        import * as moduleApi from 'node:module';
+        const r = make(import.meta.url);
+        const created_require_result = 1;
+        function callDynamicValueHandle(callable: unknown, args: unknown): string { return 'user binding'; }
+        function sideEffect(): string { console.log('argument'); return 'dynamic-only'; }
+        const dynamic = r(sideEffect());
+        const nodeTty = r('node:tty');
+        const bareTty = r('tty');
+        const resolved = r.resolve('node:tty');
+        const cache = r.cache;
+        const addon = r.addon;
+        const spreadArgs: [string] = ['tty'];
+        const spreadResult = r(...spreadArgs);
+        function shadow(r: (specifier: string) => string): string { return r('shadow'); }
+        function shadowImport(make: (url: string) => (specifier: string) => unknown): unknown {
+            const nested = make(import.meta.url);
+            return nested('shadowed-import');
+        }
+        function nestedImmutable(): unknown {
+            const nested = make(import.meta.url);
+            return nested('nested-immutable-only');
+        }
+        function nestedMutable(): unknown {
+            let nested = make(import.meta.url);
+            return nested('mutable-only');
+        }
+        function nestedNamespace(): unknown {
+            const local = moduleApi.createRequire(import.meta.url);
+            return local('nested-namespace-only');
+        }
+        if (true) { var blockVar = make(import.meta.url); }
+        blockVar('var-block-only');
+        for (var forVar = make(import.meta.url); false;) { }
+        forVar('var-for-only');
+        function varAcrossBlocks(): unknown {
+            { var siblingVar = make(import.meta.url); }
+            { return siblingVar('var-sibling-only'); }
+        }
+        const namedFunction = function make(url: string): any {
+            if (url === 'stop') return (specifier: string) => 'plain:' + specifier;
+            const localRequire = make('stop');
+            return localRequire('function-self-only');
+        };
+        const NamedClass = class make {
+            method(): any {
+                // @ts-ignore the named class self binding intentionally shadows the imported callable spelling.
+                const localRequire = make('stop');
+                return localRequire('class-self-only');
+            }
+        };
+        let mutable = make(import.meta.url);
+        mutable = make(import.meta.url);
+        const reassigned = mutable('reassigned');
+    "#;
+    std::fs::write(&entry, source).unwrap();
+    let external_exports = HashMap::from([(
+        "node:module".to_string(),
+        HashMap::from([("createRequire".to_string(), "__node_module_createRequire".to_string())]),
+    )]);
+    let module = module_graph::bundle(
+        &entry, source, &external_exports, &Default::default(), &Default::default(), &Default::default(),
+    ).unwrap();
+    let mut calls = Calls::default();
+    module.visit_with(&mut calls);
+    assert_eq!(calls.helper.len(), 5, "named, namespace, and nested immutable created bindings use the live route");
+    assert_eq!(calls.raw_r, 2, "the shadowing parameter and spread calls remain ordinary");
+    assert_eq!(calls.resolve, 1, "property calls on the created require remain intact");
+    assert!(calls.properties.contains("resolve") && calls.properties.contains("cache") && calls.properties.contains("addon"),
+        "created-require property reads stay on the original function");
+    assert_eq!(calls.side_effect, 1, "the nonliteral argument is evaluated once");
+    assert!(calls.helper.iter().any(|(callable, argument)| callable == "__thawmod0_r" && argument == "__thawmod0_sideEffect"),
+        "the live helper receives the created callable before the original argument expression");
+    assert_eq!(calls.helper.iter().filter(|(callable, _)| callable == "nested").count(), 1,
+        "the nested immutable local resolves through its lexical binding; the sibling mutable local does not route live values");
+    assert!(module.body.iter().any(|item| format!("{item:?}").contains("__thawmod0_created_require_result_1")),
+        "the generated helper avoids a user binding with its default name");
+    assert!(module.body.iter().any(|item| format!("{item:?}").contains("callDynamicValueHandle")),
+        "the private helper uses the existing live-value intrinsic after source renaming");
+    assert!(module.body.iter().any(|item| format!("{item:?}").contains("__thawmod0_callDynamicValueHandle")),
+        "a user binding with the intrinsic's spelling is renamed and cannot capture the helper");
+
+    let static_specs = module_graph::external_static_specifiers(&entry, source).unwrap();
+    assert!(static_specs.contains("node:tty"));
+    assert!(static_specs.contains("tty"));
+    assert!(static_specs.contains("node:module"));
+    assert!(!static_specs.contains("dynamic-only"));
+    assert!(!static_specs.contains("shadow"));
+    assert!(!static_specs.contains("shadowed-import"), "a shadowed creator parameter must not create a false dependency");
+    assert!(static_specs.contains("reassigned"), "mutable created-require calls still contribute literal dependencies");
+    assert!(static_specs.contains("mutable-only"), "nested mutable aliases retain literal dependency discovery without live rewriting");
+    assert!(static_specs.contains("nested-immutable-only"));
+    assert!(static_specs.contains("nested-namespace-only"));
+    assert!(static_specs.contains("var-block-only"), "block-declared var aliases remain visible to outside calls");
+    assert!(static_specs.contains("var-for-only"), "for-initializer var aliases remain visible to outside calls");
+    assert!(static_specs.contains("var-sibling-only"), "function-owned var aliases are shared with sibling blocks for discovery");
+    assert!(!static_specs.contains("function-self-only"), "a named function expression's self binding shadows the imported creator");
+    assert!(!static_specs.contains("class-self-only"), "a named class expression's self binding shadows the imported creator");
+
+    let namespace_source = "import * as moduleApi from 'node:module'; const r = moduleApi.createRequire(import.meta.url); const loaded = r('tty');";
+    std::fs::write(&entry, namespace_source).unwrap();
+    let namespace_module = module_graph::bundle(
+        &entry, namespace_source, &external_exports, &Default::default(), &Default::default(), &Default::default(),
+    ).unwrap();
+    let mut namespace_calls = Calls::default();
+    namespace_module.visit_with(&mut namespace_calls);
+    assert_eq!(namespace_calls.helper.len(), 1, "namespace createRequire uses the same live route");
+
+    let body_scope_source = r#"
+        import { createRequire as make } from 'node:module';
+        const r = (specifier: string): string => specifier;
+        function functionConst(defaultArg: string = r('function-const-default-only')): unknown {
+            const r = make(import.meta.url);
+            return r('function-const-body-only');
+        }
+        const arrowConst = (defaultArg: string = r('arrow-const-default-only')): unknown => {
+            const r = make(import.meta.url);
+            return r('arrow-const-body-only');
+        };
+        function functionVar(defaultArg: string = r('function-var-default-only')): unknown {
+            var r = make(import.meta.url);
+            return r('function-var-body-only');
+        }
+        const arrowVar = (defaultArg: string = r('arrow-var-default-only')): unknown => {
+            var r = make(import.meta.url);
+            return r('arrow-var-body-only');
+        };
+    "#;
+    std::fs::write(&entry, body_scope_source).unwrap();
+    let body_scope_module = module_graph::bundle(
+        &entry, body_scope_source, &external_exports, &Default::default(), &Default::default(), &Default::default(),
+    ).unwrap();
+    let mut body_scope_calls = Calls::default();
+    body_scope_module.visit_with(&mut body_scope_calls);
+    assert_eq!(body_scope_calls.helper.len(), 2,
+        "only immutable body const aliases use the live route; mutable var aliases stay raw");
+    #[derive(Default)]
+    struct RawBodyCalls(Vec<String>);
+    impl Visit for RawBodyCalls {
+        fn visit_call_expr(&mut self, call: &thaw_parser::ast::CallExpr) {
+            let is_r = matches!(&call.callee, Callee::Expr(callee)
+                if matches!(callee.as_ref(), Expr::Ident(ident) if matches!(ident.sym.as_ref(), "r" | "__thawmod0_r")));
+            if is_r {
+                if let Some(Expr::Lit(thaw_parser::ast::Lit::Str(specifier))) =
+                    call.args.first().map(|argument| argument.expr.as_ref())
+                {
+                    self.0.push(specifier.value.to_string_lossy().into_owned());
+                }
+            }
+            call.visit_children_with(self);
+        }
+    }
+    let mut raw_body_calls = RawBodyCalls::default();
+    body_scope_module.visit_with(&mut raw_body_calls);
+    let raw_var_body_calls = raw_body_calls.0.iter().filter(|specifier| {
+        matches!(specifier.as_str(), "function-var-body-only" | "arrow-var-body-only")
+    }).count();
+    assert_eq!(raw_var_body_calls, 2, "mutable function-body var calls remain ordinary calls");
+    let body_scope_specs = module_graph::external_static_specifiers(&entry, body_scope_source).unwrap();
+    for specifier in ["function-const-body-only", "arrow-const-body-only", "function-var-body-only", "arrow-var-body-only"] {
+        assert!(body_scope_specs.contains(specifier), "function-body alias should retain {specifier}");
+    }
+    for specifier in ["function-const-default-only", "arrow-const-default-only", "function-var-default-only", "arrow-var-default-only"] {
+        assert!(!body_scope_specs.contains(specifier), "parameter default must not be classified by body alias {specifier}");
+    }
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn sourced_reexport_does_not_fall_back_to_a_same_named_local() {
     let dir = std::env::temp_dir().join(format!("thaw-reexport-source-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
@@ -119,7 +340,7 @@ fn type_only_module_keeps_link_features_for_retained_function_bodies() {
 fn type_only_registry_package_does_not_load_its_bundle() {
     let dir = std::env::temp_dir().join(format!("thaw-type-registry-{}", std::process::id()));
     let registry = dir.join("registry");
-    let package = registry.join("modules").join("types-only");
+    let package = registry.join("types-only");
     std::fs::create_dir_all(&package).unwrap();
     std::fs::write(package.join("package.d.ts"), "export interface Shape { value: number; }\nexport function f(): number;\nexport const value: number;\nexport class Client { read(): number; }\n").unwrap();
     std::fs::write(package.join("bundle.js"), "throw new Error('type-only bundle ran');\n").unwrap();
@@ -792,7 +1013,7 @@ fn dynamic_import_failure_cache_survives_lambda_arena_reset() {
 #[test]
 fn dynamic_external_import_defers_package_script() {
     let dir = std::env::temp_dir().join(format!("thaw-lazy-package-{}", std::process::id()));
-    let package = dir.join("registry/modules/later");
+    let package = dir.join("registry/later");
     std::fs::create_dir_all(&package).unwrap();
     std::fs::write(package.join("package.d.ts"), "export function value(): number;").unwrap();
     std::fs::write(package.join("bundle.js"),
@@ -828,7 +1049,7 @@ fn dynamic_import_initializes_static_dependencies_only_on_first_call() {
 #[test]
 fn side_effect_only_external_dynamic_import_is_deferred() {
     let dir = std::env::temp_dir().join(format!("thaw-lazy-side-effect-{}", std::process::id()));
-    let package = dir.join("registry/modules/side-effect");
+    let package = dir.join("registry/side-effect");
     std::fs::create_dir_all(&package).unwrap();
     std::fs::write(package.join("package.d.ts"), "export interface Marker { value: number; }").unwrap();
     std::fs::write(package.join("bundle.js"), "console.log('package loaded');").unwrap();
@@ -1185,7 +1406,7 @@ fn registry_transform_receives_each_module_path_for_source_maps() {
     let observed = std::cell::RefCell::new(Vec::new());
     let transform = |source: &str, path: &Path, is_override: bool| {
         let name = if is_override && source != entry_source {
-            FileName::Custom(format!("{} (in-memory entry override)", path.display()).into())
+            FileName::Custom(format!("{} (in-memory entry override)", path.display()))
         } else {
             FileName::Real(path.to_path_buf())
         };
@@ -1207,7 +1428,7 @@ fn registry_transform_receives_each_module_path_for_source_maps() {
     let overrides = std::cell::RefCell::new(Vec::new());
     let override_transform = |source: &str, path: &Path, is_override: bool| {
         if is_override {
-            let name = FileName::Custom(format!("{} (in-memory entry override)", path.display()).into());
+            let name = FileName::Custom(format!("{} (in-memory entry override)", path.display()));
             let (module, map) = thaw_parser::parse_typescript_with_source_map_named(source, name.clone())?;
             assert_eq!(map.lookup_char_pos(module.body[0].span().lo).file.name.as_ref(), &name);
             overrides.borrow_mut().push(name);
@@ -1338,5 +1559,173 @@ fn lambda_trace_sync_failure_posts_an_error_before_reentering_handler() {
     server.join().unwrap();
     let _ = child.kill();
     let _ = child.wait();
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn renames_instanceof_value_rhs_and_preserves_external_class_identifiers() {
+    use swc_ecma_visit::{Visit, VisitWith};
+
+    let dir = std::env::temp_dir()
+        .join(format!("thaw-instanceof-value-rhs-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("local.ts"), "export class LocalError {}\n").unwrap();
+    let entry = dir.join("main.ts");
+    let source = r#"
+        import assert, { ExternalError as ImportedError, Holder, key as importedKey, makeConstructor, ExternalError } from "assert-fixture";
+        import alias from "assert-fixture";
+        import * as namespace from "assert-fixture";
+        import { LocalError } from "./local";
+        class LocalDeclaredError {}
+        const value: any = {};
+        function references(): boolean {
+            value instanceof assert.AssertionError;
+            value instanceof alias.AssertionError;
+            value instanceof namespace.ExternalError;
+            value instanceof Holder.AssertionError;
+            value instanceof assert[importedKey];
+            value instanceof assert["AssertionError"];
+            value instanceof makeConstructor();
+            value instanceof LocalError;
+            value instanceof LocalDeclaredError;
+            value instanceof ImportedError;
+            value instanceof ExternalError;
+            function shadow(assert: any): boolean {
+                return value instanceof assert.AssertionError;
+            }
+            return true;
+        }
+    "#;
+    std::fs::write(&entry, source).unwrap();
+    let external_exports = std::collections::HashMap::from([(
+        "assert-fixture".to_string(),
+        std::collections::HashMap::from([
+            ("default".to_string(), "__thaw_test_default_value".to_string()),
+            ("Holder".to_string(), "__thaw_test_holder".to_string()),
+            ("key".to_string(), "__thaw_test_key".to_string()),
+            (
+                "makeConstructor".to_string(),
+                "__thaw_test_make_constructor".to_string(),
+            ),
+            ("ExternalError".to_string(), "__thaw_test_external_error".to_string()),
+        ]),
+    )]);
+    let module = module_graph::bundle(
+        &entry,
+        source,
+        &external_exports,
+        &Default::default(),
+        &Default::default(),
+        &Default::default(),
+    )
+    .unwrap();
+
+    struct InstanceofRhs(Vec<thaw_parser::ast::Expr>);
+    impl Visit for InstanceofRhs {
+        fn visit_bin_expr(&mut self, binary: &thaw_parser::ast::BinExpr) {
+            if binary.op == thaw_parser::ast::BinaryOp::InstanceOf {
+                self.0.push(*binary.right.clone());
+            }
+            binary.visit_children_with(self);
+        }
+    }
+    let mut rhs = InstanceofRhs(Vec::new());
+    module.visit_with(&mut rhs);
+
+    use thaw_parser::ast::{Callee, Expr, Lit, MemberProp};
+    fn ident(expression: &Expr, expected: &str) -> bool {
+        matches!(expression, Expr::Ident(value) if value.sym == expected)
+    }
+    fn dot_member(expression: &Expr, object: &str, property: &str) -> bool {
+        matches!(expression, Expr::Member(member)
+            if ident(&member.obj, object)
+                && matches!(&member.prop, MemberProp::Ident(name) if name.sym == property))
+    }
+    fn computed_member_ident(expression: &Expr, object: &str, key: &str) -> bool {
+        matches!(expression, Expr::Member(member)
+            if ident(&member.obj, object)
+                && matches!(&member.prop, MemberProp::Computed(computed)
+                    if ident(&computed.expr, key)))
+    }
+
+    assert_eq!(
+        rhs.0.len(),
+        12,
+        "expected every authored instanceof RHS in order: {:#?}",
+        rhs.0
+    );
+    assert!(
+        dot_member(&rhs.0[0], "__thaw_test_default_value", "AssertionError"),
+        "default import member target: {:#?}",
+        rhs.0[0]
+    );
+    assert!(
+        dot_member(&rhs.0[1], "__thaw_test_default_value", "AssertionError"),
+        "default alias member target: {:#?}",
+        rhs.0[1]
+    );
+    assert!(
+        ident(&rhs.0[2], "__thaw_test_external_error"),
+        "namespace export member target: {:#?}",
+        rhs.0[2]
+    );
+    assert!(
+        dot_member(&rhs.0[3], "__thaw_test_holder", "AssertionError"),
+        "named holder member target: {:#?}",
+        rhs.0[3]
+    );
+    assert!(
+        computed_member_ident(&rhs.0[4], "__thaw_test_default_value", "__thaw_test_key"),
+        "computed imported key target: {:#?}",
+        rhs.0[4]
+    );
+    assert!(matches!(&rhs.0[5], Expr::Member(member)
+        if ident(&member.obj, "__thaw_test_default_value")
+            && matches!(&member.prop, MemberProp::Computed(computed)
+                if matches!(computed.expr.as_ref(), Expr::Lit(Lit::Str(value)) if value.value.to_string_lossy() == "AssertionError"))), "computed string member target: {:#?}", rhs.0[5]);
+    assert!(matches!(&rhs.0[6], Expr::Call(call)
+        if matches!(&call.callee, Callee::Expr(callee) if ident(callee, "__thaw_test_make_constructor"))
+            && call.args.is_empty()), "RHS call target: {:#?}", rhs.0[6]);
+
+    struct ClassIds(Vec<String>);
+    impl Visit for ClassIds {
+        fn visit_class_decl(&mut self, declaration: &thaw_parser::ast::ClassDecl) {
+            self.0.push(declaration.ident.sym.to_string());
+            declaration.visit_children_with(self);
+        }
+    }
+    let mut classes = ClassIds(Vec::new());
+    module.visit_with(&mut classes);
+    let relative_class = classes.0.iter()
+        .find(|name| name.ends_with("LocalError") && !name.ends_with("LocalDeclaredError"))
+        .expect("bundled relative LocalError class declaration");
+    let same_module_class = classes.0.iter()
+        .find(|name| name.ends_with("LocalDeclaredError"))
+        .expect("bundled same-module LocalDeclaredError class declaration");
+    assert!(
+        ident(&rhs.0[7], relative_class),
+        "relative class RHS must target its bundled declaration {relative_class}: {:#?}",
+        rhs.0[7]
+    );
+    assert!(
+        ident(&rhs.0[8], same_module_class),
+        "same-module class RHS must target its bundled declaration {same_module_class}: {:#?}",
+        rhs.0[8]
+    );
+    assert!(
+        ident(&rhs.0[9], "ImportedError"),
+        "bare external alias must retain ImportedError: {:#?}",
+        rhs.0[9]
+    );
+    assert!(
+        ident(&rhs.0[10], "ExternalError"),
+        "bare external name must retain ExternalError: {:#?}",
+        rhs.0[10]
+    );
+    assert!(
+        dot_member(&rhs.0[11], "assert", "AssertionError"),
+        "shadowed parameter member must retain local assert: {:#?}",
+        rhs.0[11]
+    );
     let _ = std::fs::remove_dir_all(dir);
 }

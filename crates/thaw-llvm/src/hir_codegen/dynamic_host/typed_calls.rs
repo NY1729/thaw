@@ -1,4 +1,444 @@
+fn ordinary_quickjs_typed_call(signature: &DynamicSignature) -> bool {
+    signature.backend == DynamicBackend::QuickJs
+        && ![
+            "$getter$",
+            "$setter$",
+            "$method$",
+            "$methodvoid$",
+            "$staticgetter$",
+            "$staticsetter$",
+            "$staticmethod$",
+            "$staticmethodvoid$",
+            "$new$",
+        ]
+        .iter()
+        .any(|prefix| signature.symbol.starts_with(prefix))
+}
+
 impl<'ctx> HirCompiler<'ctx> {
+    fn begin_fresh_event_key_argument_scope(&mut self) {
+        self.begin_fresh_event_key_argument_scope_with_owner(None);
+    }
+
+    fn begin_fresh_event_key_argument_scope_with_owner(
+        &mut self,
+        typed_json_owner: Option<TypedJsonArgumentOwner>,
+    ) {
+        let catch_depth = self.catch_stack.len();
+        let function_name = self.current_function().get_name().to_string_lossy().into_owned();
+        self.fresh_event_key_argument_scopes.push(FreshEventKeyArgumentScope {
+            catch_depth,
+            function_name,
+            typed_json_owner,
+            handles: Vec::new(),
+            json_values: Vec::new(),
+            argument_array: None,
+            native_handle_ledgers: Vec::new(),
+        });
+    }
+
+    fn track_typed_dynamic_argument_array(
+        &mut self,
+        value: BasicValueEnum<'ctx>,
+    ) -> Result<(), String> {
+        let function = self.current_function();
+        let function_name = function.get_name().to_string_lossy().into_owned();
+        let scope_index = self.fresh_event_key_argument_scopes.iter().rposition(
+            |scope| scope.function_name == function_name,
+        ).ok_or_else(|| "typed dynamic argument array has no active owner scope".to_string())?;
+        if self.fresh_event_key_argument_scopes[scope_index].argument_array.is_some() {
+            return Err("typed dynamic argument array was already registered".into());
+        }
+        let entry = function.get_first_basic_block().unwrap();
+        let entry_builder = self.context.create_builder();
+        if let Some(first) = entry.get_first_instruction() {
+            entry_builder.position_before(&first);
+        } else {
+            entry_builder.position_at_end(entry);
+        }
+        let active = entry_builder.build_alloca(self.context.i8_type(), "typed_dynamic_argument_array_active")
+            .map_err(|error| error.to_string())?;
+        entry_builder.build_store(active, self.context.i8_type().const_zero())
+            .map_err(|error| error.to_string())?;
+        self.builder.build_store(active, self.context.i8_type().const_int(1, false))
+            .map_err(|error| error.to_string())?;
+        self.fresh_event_key_argument_scopes[scope_index].argument_array = Some(FreshJsonArgumentArray {
+            value: value.into_pointer_value(),
+            active,
+        });
+        Ok(())
+    }
+
+    fn disarm_typed_dynamic_argument_array(
+        &mut self,
+        array: FreshJsonArgumentArray<'ctx>,
+    ) -> Result<(), String> {
+        self.builder.build_store(array.active, self.context.i8_type().const_zero())
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    fn release_typed_dynamic_argument_array_if_active(
+        &mut self,
+        array: FreshJsonArgumentArray<'ctx>,
+    ) -> Result<(), String> {
+        let active = self.builder.build_load(
+            self.context.i8_type(), array.active, "typed_dynamic_argument_array_is_active",
+        ).map_err(|error| error.to_string())?.into_int_value();
+        let should_release = self.builder.build_int_compare(
+            inkwell::IntPredicate::NE, active, self.context.i8_type().const_zero(),
+            "typed_dynamic_argument_array_should_release",
+        ).map_err(|error| error.to_string())?;
+        let function = self.current_function();
+        let release = self.context.append_basic_block(function, "release_typed_dynamic_argument_array");
+        let done = self.context.append_basic_block(function, "typed_dynamic_argument_array_released");
+        self.builder.build_conditional_branch(should_release, release, done)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(release);
+        self.builder.build_call(
+            self.module.get_function("thaw_json_destroy").unwrap(),
+            &[array.value.into()], "destroy_unwound_typed_dynamic_argument_array",
+        ).map_err(|error| error.to_string())?;
+        self.builder.build_store(array.active, self.context.i8_type().const_zero())
+            .map_err(|error| error.to_string())?;
+        self.builder.build_unconditional_branch(done).map_err(|error| error.to_string())?;
+        self.builder.position_at_end(done);
+        Ok(())
+    }
+
+    fn finish_fresh_event_key_argument_scope(
+        &mut self,
+    ) -> Result<Vec<FreshEventKeyHandle<'ctx>>, String> {
+        let (handles, array) = self.finish_fresh_event_key_argument_scope_with_array()?;
+        if let Some(array) = array {
+            self.disarm_typed_dynamic_argument_array(array)?;
+        }
+        Ok(handles)
+    }
+
+    fn finish_fresh_event_key_argument_scope_with_array(
+        &mut self,
+    ) -> Result<(Vec<FreshEventKeyHandle<'ctx>>, Option<FreshJsonArgumentArray<'ctx>>), String> {
+        let scope = self.fresh_event_key_argument_scopes.pop()
+            .ok_or_else(|| "fresh event-key argument scope underflow".to_string())?;
+        Ok((scope.handles, scope.argument_array))
+    }
+
+    fn begin_fresh_event_key_transfer_scope(
+        &mut self,
+        handles: &[FreshEventKeyHandle<'ctx>],
+        argument_array: Option<FreshJsonArgumentArray<'ctx>>,
+    ) {
+        let catch_depth = self.catch_stack.len();
+        let function_name = self.current_function().get_name().to_string_lossy().into_owned();
+        self.fresh_event_key_argument_scopes.push(FreshEventKeyArgumentScope {
+            catch_depth,
+            function_name,
+            typed_json_owner: None,
+            handles: handles.to_vec(),
+            json_values: Vec::new(),
+            argument_array,
+            native_handle_ledgers: Vec::new(),
+        });
+    }
+
+    fn track_fresh_event_key_handle(&mut self, handle: inkwell::values::IntValue<'ctx>) -> Result<(), String> {
+        let function_name = self.current_function().get_name().to_string_lossy().into_owned();
+        if self.fresh_event_key_argument_scopes.iter().any(|scope| scope.function_name == function_name) {
+            let entry = self.current_function().get_first_basic_block().unwrap();
+            let entry_builder = self.context.create_builder();
+            if let Some(first) = entry.get_first_instruction() {
+                entry_builder.position_before(&first);
+            } else {
+                entry_builder.position_at_end(entry);
+            }
+            let active = entry_builder.build_alloca(self.context.i8_type(), "fresh_event_key_active")
+                .map_err(|error| error.to_string())?;
+            entry_builder.build_store(active, self.context.i8_type().const_zero())
+                .map_err(|error| error.to_string())?;
+            self.builder.build_store(active, self.context.i8_type().const_int(1, false))
+                .map_err(|error| error.to_string())?;
+            if let Some(scope) = self.fresh_event_key_argument_scopes.iter_mut().rev()
+                .find(|scope| scope.function_name == function_name)
+            {
+                scope.handles.push(FreshEventKeyHandle { handle, active });
+            }
+        }
+        Ok(())
+    }
+
+    fn track_typed_wrapper_json_argument(
+        &mut self,
+        value: inkwell::values::PointerValue<'ctx>,
+        owner: &TypedJsonArgumentOwner,
+    ) -> Result<(), String> {
+        let function = self.current_function();
+        let function_name = function.get_name().to_string_lossy().into_owned();
+        let Some(scope_index) = self.fresh_event_key_argument_scopes.iter()
+            .rposition(|scope| scope.function_name == function_name)
+        else {
+            return Ok(());
+        };
+        if self.fresh_event_key_argument_scopes[scope_index].typed_json_owner.as_ref() != Some(owner) {
+            return Ok(());
+        }
+        let entry = function.get_first_basic_block().unwrap();
+        let entry_builder = self.context.create_builder();
+        if let Some(first) = entry.get_first_instruction() {
+            entry_builder.position_before(&first);
+        } else {
+            entry_builder.position_at_end(entry);
+        }
+        let active = entry_builder.build_alloca(self.context.i8_type(), "typed_wrapper_json_active")
+            .map_err(|error| error.to_string())?;
+        entry_builder.build_store(active, self.context.i8_type().const_zero())
+            .map_err(|error| error.to_string())?;
+        self.builder.build_store(active, self.context.i8_type().const_int(1, false))
+            .map_err(|error| error.to_string())?;
+        self.fresh_event_key_argument_scopes[scope_index]
+            .json_values.push(FreshJsonArgument { value, active });
+        Ok(())
+    }
+
+    fn release_fresh_json_argument_if_active(
+        &mut self,
+        owned: &FreshJsonArgument<'ctx>,
+    ) -> Result<(), String> {
+        let active = self.builder.build_load(self.context.i8_type(), owned.active, "typed_wrapper_json_is_active")
+            .map_err(|error| error.to_string())?.into_int_value();
+        let should_release = self.builder.build_int_compare(
+            inkwell::IntPredicate::NE, active, self.context.i8_type().const_zero(),
+            "typed_wrapper_json_should_release",
+        ).map_err(|error| error.to_string())?;
+        let function = self.current_function();
+        let release = self.context.append_basic_block(function, "release_typed_wrapper_json_argument");
+        let done = self.context.append_basic_block(function, "typed_wrapper_json_released");
+        self.builder.build_conditional_branch(should_release, release, done)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(release);
+        self.builder.build_call(
+            self.module.get_function("thaw_json_destroy").unwrap(),
+            &[owned.value.into()], "destroy_typed_wrapper_json_argument",
+        ).map_err(|error| error.to_string())?;
+        self.builder.build_store(owned.active, self.context.i8_type().const_zero())
+            .map_err(|error| error.to_string())?;
+        self.builder.build_unconditional_branch(done).map_err(|error| error.to_string())?;
+        self.builder.position_at_end(done);
+        Ok(())
+    }
+
+    fn finish_typed_wrapper_argument_scope_for_constructor(
+        &mut self,
+        expected_owner: &TypedJsonArgumentOwner,
+    ) -> Result<FreshConstructorArguments<'ctx>, String> {
+        if !matches!(expected_owner, TypedJsonArgumentOwner::NapiConstructor(_)) {
+            return Err("constructor argument scope has the wrong JSON owner kind".into());
+        }
+        let scope = self.fresh_event_key_argument_scopes.pop()
+            .ok_or_else(|| "typed-wrapper argument scope underflow".to_string())?;
+        let function_name = self.current_function().get_name().to_string_lossy().into_owned();
+        if scope.function_name != function_name
+            || scope.typed_json_owner.as_ref() != Some(expected_owner)
+            || !scope.native_handle_ledgers.is_empty()
+        {
+            return Err("typed-wrapper constructor argument scope ownership mismatch".into());
+        }
+        let array = scope.argument_array
+            .ok_or_else(|| "N-API constructor argument scope has no tracked array".to_string())?;
+        Ok((scope.handles, scope.json_values, Some(array)))
+    }
+
+    fn with_typed_wrapper_argument_scope<F>(
+        &mut self,
+        owner: TypedJsonArgumentOwner,
+        invoke: F,
+    ) -> Result<inkwell::values::BasicValueEnum<'ctx>, String>
+    where
+        F: FnOnce(&mut Self) -> Result<inkwell::values::BasicValueEnum<'ctx>, String>,
+    {
+        self.begin_fresh_event_key_argument_scope_with_owner(Some(owner.clone()));
+        let result = invoke(self);
+        let scope = self.finish_typed_wrapper_argument_scope(&owner);
+        match (result, scope) {
+            (Err(error), _) => Err(error),
+            (Ok(_), Err(error)) => Err(error),
+            (Ok(value), Ok((handles, json_values))) => {
+                for json in &json_values {
+                    self.release_fresh_json_argument_if_active(json)?;
+                }
+                self.release_fresh_event_key_handles(&handles)?;
+                Ok(value)
+            }
+        }
+    }
+
+    fn finish_typed_wrapper_argument_scope(
+        &mut self,
+        expected_owner: &TypedJsonArgumentOwner,
+    ) -> Result<(Vec<FreshEventKeyHandle<'ctx>>, Vec<FreshJsonArgument<'ctx>>), String> {
+        let scope = self.fresh_event_key_argument_scopes.pop()
+            .ok_or_else(|| "typed-wrapper argument scope underflow".to_string())?;
+        let function_name = self.current_function().get_name().to_string_lossy().into_owned();
+        if scope.function_name != function_name
+            || scope.typed_json_owner.as_ref() != Some(expected_owner)
+            || !scope.native_handle_ledgers.is_empty()
+        {
+            return Err("typed-wrapper argument scope ownership mismatch".into());
+        }
+        if let Some(array) = scope.argument_array {
+            self.disarm_typed_dynamic_argument_array(array)?;
+        }
+        Ok((scope.handles, scope.json_values))
+    }
+
+    fn release_fresh_event_key_if_active(
+        &mut self,
+        owned: &FreshEventKeyHandle<'ctx>,
+    ) -> Result<(), String> {
+        let active = self.builder.build_load(self.context.i8_type(), owned.active, "fresh_event_key_is_active")
+            .map_err(|error| error.to_string())?.into_int_value();
+        let should_release = self.builder.build_int_compare(
+            inkwell::IntPredicate::NE, active, self.context.i8_type().const_zero(),
+            "fresh_event_key_should_release",
+        ).map_err(|error| error.to_string())?;
+        let function = self.current_function();
+        let release = self.context.append_basic_block(function, "release_fresh_event_key");
+        let done = self.context.append_basic_block(function, "fresh_event_key_released");
+        self.builder.build_conditional_branch(should_release, release, done)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(release);
+        self.builder.build_call(
+            self.module.get_function("thaw_js_release_handle").unwrap(),
+            &[owned.handle.into()], "release_transferred_event_key",
+        ).map_err(|error| error.to_string())?;
+        self.builder.build_store(owned.active, self.context.i8_type().const_zero())
+            .map_err(|error| error.to_string())?;
+        self.builder.build_unconditional_branch(done).map_err(|error| error.to_string())?;
+        self.builder.position_at_end(done);
+        Ok(())
+    }
+
+    pub(super) fn begin_live_native_projection_scope(
+        &mut self,
+        ledger: NativeHandleLedger<'ctx>,
+    ) {
+        let catch_depth = self.catch_stack.len();
+        let function_name = self.current_function().get_name().to_string_lossy().into_owned();
+        self.fresh_event_key_argument_scopes.push(FreshEventKeyArgumentScope {
+            catch_depth,
+            function_name,
+            typed_json_owner: None,
+            handles: Vec::new(),
+            json_values: Vec::new(),
+            argument_array: None,
+            native_handle_ledgers: vec![ledger],
+        });
+    }
+
+    pub(super) fn finish_live_native_projection_scope(&mut self) -> Result<(), String> {
+        let scope = self.fresh_event_key_argument_scopes.pop()
+            .ok_or_else(|| "live native projection scope underflow".to_string())?;
+        if !scope.handles.is_empty() || scope.native_handle_ledgers.len() != 1 {
+            return Err("live native projection scope ownership mismatch".into());
+        }
+        Ok(())
+    }
+
+    pub(super) fn release_native_handle_ledger(
+        &mut self,
+        ledger: NativeHandleLedger<'ctx>,
+    ) -> Result<(), String> {
+        let ptr_ty = self.context.ptr_type(inkwell::AddressSpace::default());
+        let buffer = self.builder.build_load(ptr_ty, ledger.buffer, "native_handle_ledger_buffer")
+            .map_err(|error| error.to_string())?.into_pointer_value();
+        let present = self.builder.build_is_not_null(buffer, "native_handle_ledger_present")
+            .map_err(|error| error.to_string())?;
+        let release = self.context.append_basic_block(self.current_function(), "release_native_handle_ledger");
+        let done = self.context.append_basic_block(self.current_function(), "native_handle_ledger_released");
+        self.builder.build_conditional_branch(present, release, done)
+            .map_err(|error| error.to_string())?;
+        self.builder.position_at_end(release);
+        self.builder.build_call(
+            self.module.get_function("thaw_js_release_native_handle_array").unwrap(),
+            &[buffer.into()], "release_native_projection_handles",
+        ).map_err(|error| error.to_string())?;
+        self.builder.build_store(ledger.buffer, ptr_ty.const_null())
+            .map_err(|error| error.to_string())?;
+        self.builder.build_store(ledger.capacity, self.context.i64_type().const_zero())
+            .map_err(|error| error.to_string())?;
+        self.builder.build_unconditional_branch(done).map_err(|error| error.to_string())?;
+        self.builder.position_at_end(done);
+        Ok(())
+    }
+
+    pub(super) fn release_live_native_projection_ledgers_before_throw(&mut self) -> Result<(), String> {
+        let function_name = self.current_function().get_name().to_string_lossy().into_owned();
+        let ledgers = self.fresh_event_key_argument_scopes.iter()
+            .filter(|scope| scope.function_name == function_name)
+            .flat_map(|scope| scope.native_handle_ledgers.iter().copied())
+            .collect::<Vec<_>>();
+        for ledger in ledgers {
+            self.release_native_handle_ledger(ledger)?;
+        }
+        Ok(())
+    }
+
+    fn emit_fresh_event_key_cleanup_before_catch(
+        &mut self,
+        catch_index: Option<usize>,
+    ) -> Result<(), String> {
+        let function_name = self.current_function().get_name().to_string_lossy().into_owned();
+        let owned = self.fresh_event_key_argument_scopes.iter()
+            .filter(|scope| scope.function_name == function_name)
+            .filter(|scope| catch_index.is_none_or(|index| scope.catch_depth > index))
+            .flat_map(|scope| scope.handles.iter().rev().cloned())
+            .collect::<Vec<_>>();
+        for handle in &owned {
+            self.release_fresh_event_key_if_active(handle)?;
+        }
+        let json_values = self.fresh_event_key_argument_scopes.iter()
+            .filter(|scope| scope.function_name == function_name)
+            .filter(|scope| catch_index.is_none_or(|index| scope.catch_depth > index))
+            .flat_map(|scope| scope.json_values.iter().rev().copied())
+            .collect::<Vec<_>>();
+        for value in &json_values {
+            self.release_fresh_json_argument_if_active(value)?;
+        }
+        let arrays = self.fresh_event_key_argument_scopes.iter().rev()
+            .filter(|scope| scope.function_name == function_name)
+            .filter(|scope| catch_index.is_none_or(|index| scope.catch_depth > index))
+            .filter_map(|scope| scope.argument_array)
+            .collect::<Vec<_>>();
+        for array in arrays {
+            self.release_typed_dynamic_argument_array_if_active(array)?;
+        }
+        let ledgers = self.fresh_event_key_argument_scopes.iter()
+            .filter(|scope| scope.function_name == function_name)
+            .filter(|scope| catch_index.is_none_or(|index| scope.catch_depth > index))
+            .flat_map(|scope| scope.native_handle_ledgers.iter().copied())
+            .collect::<Vec<_>>();
+        for ledger in ledgers {
+            self.release_native_handle_ledger(ledger)?;
+        }
+        Ok(())
+    }
+
+    fn release_fresh_event_key_handles(
+        &mut self,
+        handles: &[FreshEventKeyHandle<'ctx>],
+    ) -> Result<(), String> {
+        for handle in handles {
+            self.release_fresh_event_key_if_active(handle)?;
+        }
+        Ok(())
+    }
+
+    fn fresh_event_key_raw_handles(
+        handles: &[FreshEventKeyHandle<'ctx>],
+    ) -> Vec<inkwell::values::IntValue<'ctx>> {
+        handles.iter().map(|owned| owned.handle).collect()
+    }
+
     fn compile_typed_dynamic_call(
         &mut self,
         signature: &DynamicSignature,
@@ -841,6 +1281,18 @@ impl<'ctx> HirCompiler<'ctx> {
         self.compiling_quickjs_dynamic_arguments = signature.backend == DynamicBackend::QuickJs;
         let mut returned_bytes_argument = None;
         let mut callback_values = Vec::with_capacity(function_argument.len());
+        let typed_json_owner = if ordinary_quickjs_typed_call(signature) {
+            Some(TypedJsonArgumentOwner::DirectQuickJs(signature.symbol.clone()))
+        } else if signature.backend == DynamicBackend::Napi
+            && signature.ret == HirType::JsValue
+            && napi_constructor_export_name(&signature.symbol).is_some()
+        {
+            Some(TypedJsonArgumentOwner::NapiConstructor(signature.symbol.clone()))
+        } else {
+            None
+        };
+        self.begin_fresh_event_key_argument_scope_with_owner(typed_json_owner.clone());
+        self.track_typed_dynamic_argument_array(array)?;
         for (index, (arg, ty)) in args.iter().zip(&signature.params).enumerate() {
             if signature.backend == DynamicBackend::Napi
                 && function_argument
@@ -889,6 +1341,27 @@ impl<'ctx> HirCompiler<'ctx> {
                 })?;
         }
         self.compiling_quickjs_dynamic_arguments = outer_compiling_quickjs_dynamic_arguments;
+        let preserves_array_for_constructor_lookup =
+            signature.backend == DynamicBackend::Napi
+                && signature.ret == HirType::JsValue
+                && napi_constructor_export_name(&signature.symbol).is_some();
+        let (fresh_argument_handles, fresh_json_arguments, fresh_argument_array) =
+            if preserves_array_for_constructor_lookup {
+                let owner = typed_json_owner.as_ref()
+                    .ok_or_else(|| "N-API constructor has no typed JSON owner".to_string())?;
+                self.finish_typed_wrapper_argument_scope_for_constructor(owner)?
+            } else if let Some(owner) = typed_json_owner.as_ref() {
+                let (handles, json_values) = self.finish_typed_wrapper_argument_scope(owner)?;
+                (handles, json_values, None)
+            } else {
+                (self.finish_fresh_event_key_argument_scope()?, Vec::new(), None)
+            };
+        // The argument array now owns each cloned Host lease independently.
+        // Release the marked source boxes for every result type. Partial
+        // argument failures still unwind through the active owner scope above.
+        for argument in &fresh_json_arguments {
+            self.release_fresh_json_argument_if_active(argument)?;
+        }
         let name = self
             .builder
             .build_global_string_ptr(&signature.symbol, "dynamic_symbol")
@@ -906,7 +1379,11 @@ impl<'ctx> HirCompiler<'ctx> {
                     .try_as_basic_value()
                     .basic()
                     .unwrap();
-                let args_json = self.compile_check_json_stringify_error_with_cleanup(args_json, &[array])?;
+                let raw_fresh_handles = Self::fresh_event_key_raw_handles(&fresh_argument_handles);
+                let args_json = self.compile_check_json_stringify_error_with_inputs_and_handles(
+                    args_json, &[array], &[], &[], &raw_fresh_handles,
+                )?;
+                self.release_fresh_event_key_handles(&fresh_argument_handles)?;
                 let result = if !function_argument.is_empty() {
                     let functions =
                         self.compile_napi_function_arguments(&callback_values, &function_argument)?;
@@ -962,7 +1439,13 @@ impl<'ctx> HirCompiler<'ctx> {
                 .builder
                 .build_global_string_ptr(constructor_name, "napi_constructor_name")
                 .map_err(|error| error.to_string())?;
+            // Looking up a missing N-API constructor can set a pending
+            // exception before argument graph encoding starts. Keep fresh
+            // scalar handles and the argument array visible to that exception
+            // edge; normal graph-error cleanup owns the array after lookup.
+            self.begin_fresh_event_key_transfer_scope(&fresh_argument_handles, fresh_argument_array);
             let constructor = self.compile_napi_export_handle(constructor_name.as_pointer_value())?;
+            let _ = self.finish_fresh_event_key_argument_scope()?;
             let args_json = self
                 .builder
                 .build_call(
@@ -974,7 +1457,11 @@ impl<'ctx> HirCompiler<'ctx> {
                 .try_as_basic_value()
                 .basic()
                 .unwrap();
-            let args_json = self.compile_check_json_stringify_error_with_cleanup(args_json, &[array])?;
+            let raw_fresh_handles = Self::fresh_event_key_raw_handles(&fresh_argument_handles);
+            let args_json = self.compile_check_json_stringify_error_with_inputs_and_handles(
+                args_json, &[array], &[], &[], &raw_fresh_handles,
+            )?;
+            self.release_fresh_event_key_handles(&fresh_argument_handles)?;
             let result = self
                 .builder
                 .build_call(
@@ -1007,13 +1494,9 @@ impl<'ctx> HirCompiler<'ctx> {
             return Ok(value);
         }
         if signature.backend == DynamicBackend::QuickJs && signature.ret == HirType::JsValue {
+            // The constructor route below predates the exact-call helper and needs
+            // QuickJS handle support even though it does not enter that helper.
             self.uses_quickjs_handles = true;
-            // `napi_constructor_export_name` is plain `"$new$Class..."`
-            // runtime-key parsing, not actually NAPI-specific despite the
-            // name -- reused here for a Fallback (QuickJS-NG) class's own
-            // `new Class(...)` construction (real example: hono's
-            // `Hono`), the same way the `DynamicBackend::Napi` branch
-            // above uses it for a native addon's.
             if let Some(constructor_name) = napi_constructor_export_name(&signature.symbol) {
                 let constructor_name = self
                     .builder
@@ -1041,7 +1524,11 @@ impl<'ctx> HirCompiler<'ctx> {
                     .try_as_basic_value()
                     .basic()
                     .unwrap();
-                let args_json = self.compile_check_json_stringify_error_with_cleanup(args_json, &[array])?;
+                let raw_fresh_handles = Self::fresh_event_key_raw_handles(&fresh_argument_handles);
+                let args_json = self.compile_check_json_stringify_error_with_inputs_and_handles(
+                    args_json, &[array], &[], &[], &raw_fresh_handles,
+                )?;
+                self.release_fresh_event_key_handles(&fresh_argument_handles)?;
                 let result = self
                     .builder
                     .build_call(
@@ -1078,67 +1565,9 @@ impl<'ctx> HirCompiler<'ctx> {
                 self.branch_on_pending_exception()?;
                 return Ok(value);
             }
-            let callable = self
-                .builder
-                .build_call(
-                    self.module.get_function("thaw_js_get_global").unwrap(),
-                    &[name.as_pointer_value().into()],
-                    "typed_dynamic_callable",
-                )
-                .map_err(|error| error.to_string())?
-                .try_as_basic_value()
-                .basic()
-                .unwrap();
-            let args_json = self
-                .builder
-                .build_call(
-                    self.module.get_function("thaw_json_graph_encode").unwrap(),
-                    &[array.into()],
-                    "typed_dynamic_callable_args",
-                )
-                .map_err(|error| error.to_string())?
-                .try_as_basic_value()
-                .basic()
-                .unwrap();
-            let args_json = self.compile_check_json_stringify_error_with_cleanup(args_json, &[array])?;
-            let result = self
-                .builder
-                .build_call(
-                    self.module
-                        .get_function("thaw_js_call_handle_handle_graph_args_result")
-                        .unwrap(),
-                    &[
-                        callable.into(),
-                        args_json.into(),
-                        self.context.bool_type().const_int(1, false).into(),
-                    ],
-                    "typed_dynamic_callable_result",
-                )
-                .map_err(|error| error.to_string())?
-                .try_as_basic_value()
-                .basic()
-                .unwrap()
-                .into_struct_value();
-            let value = self
-                .builder
-                .build_extract_value(result, 0, "typed_dynamic_callable_value")
-                .map_err(|error| error.to_string())?;
-            let error = self
-                .builder
-                .build_extract_value(result, 1, "typed_dynamic_callable_error")
-                .map_err(|error| error.to_string())?;
-            self.destroy_typed_host_arguments(array, args_json)?;
-            self.builder.build_call(
-                self.module.get_function("thaw_js_release_handle").unwrap(),
-                &[callable.into()],
-                "release_typed_dynamic_callable",
-            ).map_err(|error| error.to_string())?;
-            self.builder
-                .build_store(self.pending_exception().as_pointer_value(), error)
-                .map_err(|error| error.to_string())?;
-            self.clear_pending_native_text()?;
-            self.mark_pending_native_text(error)?;
-            self.branch_on_pending_exception()?;
+            let value = self.compile_typed_quickjs_exact_call(
+                name.as_pointer_value(), array, false, &fresh_argument_handles,
+            )?;
             return Ok(value);
         }
         if signature.backend == DynamicBackend::Napi && !function_argument.is_empty() {
@@ -1152,17 +1581,27 @@ impl<'ctx> HirCompiler<'ctx> {
                 array,
                 "thaw_napi_call_with_functions_typed_graph_result",
                 &[functions.into(), count.into()],
+                &fresh_argument_handles,
             )?;
             return self.compile_typed_dynamic_result(json, &signature.ret);
         }
-        let backend = match signature.backend {
-            DynamicBackend::Jit => unreachable!("JIT calls return before JSON marshalling"),
-            DynamicBackend::QuickJs => "thaw_js_call_graph_result",
-            DynamicBackend::Napi => "thaw_napi_call_typed_graph_result",
+        let result = if signature.backend == DynamicBackend::QuickJs {
+            let handle = self.compile_typed_quickjs_exact_call(
+                name.as_pointer_value(), array, true, &fresh_argument_handles,
+            )?;
+            let json = self.compile_original_quickjs_exception_handle(handle, true)?;
+            self.compile_typed_dynamic_result(json, &signature.ret)?
+        } else {
+            let backend = match signature.backend {
+                DynamicBackend::Jit => unreachable!("JIT calls return before JSON marshalling"),
+                DynamicBackend::QuickJs => unreachable!("QuickJS calls use exact exception transport"),
+                DynamicBackend::Napi => "thaw_napi_call_typed_graph_result",
+            };
+            let json = self.compile_json_backend_values_with_extra(
+                name.as_pointer_value().into(), array, backend, &[], &fresh_argument_handles,
+            )?;
+            self.compile_typed_dynamic_result(json, &signature.ret)?
         };
-        let json =
-            self.compile_json_backend_values(name.as_pointer_value().into(), array, backend)?;
-        let result = self.compile_typed_dynamic_result(json, &signature.ret)?;
         if let Some(argument) = returned_bytes_argument {
             self.builder
                 .build_call(
@@ -1180,6 +1619,55 @@ impl<'ctx> HirCompiler<'ctx> {
             return Ok(argument.into());
         }
         Ok(result)
+    }
+
+    fn compile_typed_quickjs_exact_call(
+        &mut self,
+        name: inkwell::values::PointerValue<'ctx>,
+        array: BasicValueEnum<'ctx>,
+        resolve_success: bool,
+        fresh_argument_handles: &[FreshEventKeyHandle<'ctx>],
+    ) -> Result<BasicValueEnum<'ctx>, String> {
+        self.uses_quickjs = true;
+        self.uses_quickjs_handles = true;
+        self.compile_register_js_callback_host_operations()?;
+        let callable = self.builder.build_call(
+            self.module.get_function("thaw_js_get_global").unwrap(),
+            &[name.into()], "typed_exact_callable",
+        ).map_err(|error| error.to_string())?
+            .try_as_basic_value().basic().ok_or("QuickJS global lookup returned no handle")?
+            .into_int_value();
+        let args_json = self.builder.build_call(
+            self.module.get_function("thaw_json_graph_encode").unwrap(),
+            &[array.into()], "typed_exact_args_json",
+        ).map_err(|error| error.to_string())?
+            .try_as_basic_value().basic().ok_or("QuickJS argument graph encoding returned no string")?;
+        let mut cleanup_handles = vec![callable];
+        cleanup_handles.extend(Self::fresh_event_key_raw_handles(fresh_argument_handles));
+        let args_json = self.compile_check_json_stringify_error_with_inputs_and_handles(
+            args_json, &[array], &[], &[], &cleanup_handles,
+        )?;
+        self.release_fresh_event_key_handles(fresh_argument_handles)?;
+        let i64_type = self.context.i64_type();
+        let handles = self.builder.build_alloca(
+            i64_type.array_type(1), "typed_exact_empty_handles",
+        ).map_err(|error| error.to_string())?;
+        self.builder.build_store(handles, i64_type.const_zero())
+            .map_err(|error| error.to_string())?;
+        let function = if resolve_success {
+            "thaw_js_call_handle_mixed_exact_resolved_consuming_result"
+        } else {
+            "thaw_js_call_handle_mixed_exact_consuming_result"
+        };
+        let result = self.builder.build_call(
+            self.module.get_function(function).unwrap(),
+            &[callable.into(), args_json.into(), handles.into()],
+            "typed_exact_call_result",
+        ).map_err(|error| error.to_string())?
+            .try_as_basic_value().basic().ok_or("exact QuickJS call returned no result")?
+            .into_struct_value();
+        self.destroy_typed_host_arguments(array, args_json)?;
+        self.compile_exact_iterator_handle_result(result, "typed exact call")
     }
 
 }

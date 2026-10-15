@@ -1,3 +1,13 @@
+fn tls_ca_spec(value: Value<'_>) -> Result<Option<String>, String> {
+    if value.is_undefined() {
+        return Ok(None);
+    }
+    let value = value
+        .as_string()
+        .ok_or_else(|| "CA must be a string".to_string())?;
+    value.to_string().map(Some).map_err(|error| error.to_string())
+}
+
 fn url_snapshot(url: &url::Url) -> String {
     serde_json::json!({
         "href": url.as_str(),
@@ -218,6 +228,7 @@ struct NativeBundleOwner<'js> {
     origin_modules: RefCell<HashMap<String, NativeBundleOriginModule>>,
     then: Function<'js>,
     object_is: Function<'js>,
+    array_is_array: Function<'js>,
 }
 
 unsafe impl<'js> rquickjs::JsLifetime<'js> for NativeBundleOwner<'js> {
@@ -1031,6 +1042,7 @@ fn ensure_context() {
         slot.get_or_insert_with(|| {
             let runtime = Runtime::new().expect("failed to create a QuickJS runtime");
             runtime.set_loader(BundleModuleResolver, BundleModuleLoader);
+            runtime.set_host_promise_rejection_tracker(Some(Box::new(track_js_promise_rejection)));
             let context = Context::full(&runtime).expect("failed to create a QuickJS context");
             context.with(|ctx| {
                 install_shared_array_buffer_functions(&ctx);
@@ -1038,6 +1050,8 @@ fn ensure_context() {
                     .expect("failed to capture intrinsic Promise.then");
                 let intrinsic_object_is: Function = ctx.eval("Object.is")
                     .expect("failed to capture intrinsic Object.is");
+                let intrinsic_array_is_array: Function = ctx.eval("Array.isArray")
+                    .expect("failed to capture intrinsic Array.isArray");
                 ctx.store_userdata(NativeBundleOwner {
                     next_sequence: Cell::new(0),
                     sources: RefCell::new(HashMap::new()),
@@ -1048,7 +1062,9 @@ fn ensure_context() {
                     origin_modules: RefCell::new(HashMap::new()),
                     then: intrinsic_then,
                     object_is: intrinsic_object_is,
+                    array_is_array: intrinsic_array_is_array,
                 }).expect("native bundle owner userdata is already borrowed");
+                ctx.store_userdata(VmContexts::default()).expect("vm contexts userdata is already borrowed");
                 ctx.globals().prop("__thaw_register_native_bundle",
                     Function::new(ctx.clone(), register_native_bundle)
                         .expect("failed to create native bundle registrar"))
@@ -1126,7 +1142,7 @@ fn ensure_context() {
                 })
                 .expect("failed to create JavaScript stderr writer");
                 let raw_process_write = Function::new(ctx.clone(), |fd: i32, encoded: String| -> rquickjs::Result<()> {
-                    if !matches!(fd, 1 | 2) || encoded.len() % 2 != 0 || !encoded.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                    if !matches!(fd, 1 | 2) || !encoded.len().is_multiple_of(2) || !encoded.bytes().all(|byte| byte.is_ascii_hexdigit()) {
                         return Err(rquickjs::Error::new_from_js_message("process stream", "fd 1/2 and valid hex bytes", "invalid raw process output"));
                     }
                     let bytes = hex_decode(&encoded);
@@ -1155,6 +1171,12 @@ fn ensure_context() {
                     .expect("failed to create process stdin poller");
                 let stdin_active = Function::new(ctx.clone(), host_stdin_active)
                     .expect("failed to create process stdin activity probe");
+                ignore_sigpipe();
+                let stdin_set_ref = Function::new(ctx.clone(), set_host_stdin_ref)
+                    .expect("failed to create process stdin ref switch");
+                ctx.globals()
+                    .set("__thaw_process_set_stdin_ref", stdin_set_ref)
+                    .expect("failed to install process stdin ref switch");
                 ctx.globals()
                     .set("__thaw_process_start_stdin", stdin_start)
                     .expect("failed to install process stdin starter");
@@ -1452,6 +1474,50 @@ fn ensure_context() {
                     kill_host_child(handle, signal)
                 })
                 .expect("failed to create child process killer");
+                for (name, function) in [
+                    (
+                        "__thaw_zlib_async_start",
+                        Function::new(ctx.clone(), zlib_async_start)
+                            .expect("failed to create async zlib starter"),
+                    ),
+                    (
+                        "__thaw_zlib_async_poll",
+                        Function::new(ctx.clone(), zlib_async_poll)
+                            .expect("failed to create async zlib poller"),
+                    ),
+                    (
+                        "__thaw_zlib_async_take",
+                        Function::new(ctx.clone(), zlib_async_take)
+                            .expect("failed to create async zlib result taker"),
+                    ),
+                    (
+                        "__thaw_zlib_active",
+                        Function::new(ctx.clone(), zlib_async_active)
+                            .expect("failed to create async zlib activity probe"),
+                    ),
+                ] {
+                    ctx.globals()
+                        .set(name, function)
+                        .expect("failed to install async zlib function");
+                }
+                // The callback receives its own `Ctx`: capturing a clone here would keep the context alive forever
+                // (a closure stored on the global object that owns the context) and fail JS_FreeRuntime at exit.
+                let async_hooks_promise_hook_switch = Function::new(ctx.clone(), |ctx: Ctx<'_>, enabled: bool| {
+                    set_async_hooks_promise_hook(&ctx, enabled)
+                })
+                .expect("failed to create async_hooks promise hook switch");
+                ctx.globals()
+                    .set("__thaw_async_hooks_promise_hook", async_hooks_promise_hook_switch)
+                    .expect("failed to install async_hooks promise hook switch");
+                let loop_stats = Function::new(ctx.clone(), host_loop_stats)
+                    .expect("failed to create event loop statistics probe");
+                ctx.globals()
+                    .set("__thaw_loop_stats", loop_stats)
+                    .expect("failed to install event loop statistics probe");
+                let child_ref = Function::new(ctx.clone(), |handle: u32, refed: bool| {
+                    set_host_child_ref(handle, refed)
+                })
+                .expect("failed to create child process ref setter");
                 let child_poll = Function::new(ctx.clone(), poll_host_children)
                     .expect("failed to create child process poller");
                 let child_active = Function::new(ctx.clone(), host_children_active)
@@ -1504,6 +1570,9 @@ fn ensure_context() {
                 ctx.globals()
                     .set("__thaw_child_process_kill", child_kill)
                     .expect("failed to install child process killer");
+                ctx.globals()
+                    .set("__thaw_child_process_ref", child_ref)
+                    .expect("failed to install child process ref setter");
                 ctx.globals()
                     .set("__thaw_child_process_poll", child_poll)
                     .expect("failed to install child process poller");
@@ -1876,13 +1945,15 @@ fn ensure_context() {
                     ctx.clone(),
                     |operation: String,
                      format: String,
-                     value: String|
+                     value: String,
+                     options: rquickjs::function::Opt<String>|
                      -> rquickjs::Result<String> {
                         let input = hex_decode(&value);
+                        let options = ZlibOptions::parse(options.0.as_deref().unwrap_or(""));
                         let result = if operation == "compress" {
-                            compress_bytes(&format, &input)
+                            compress_bytes_with(&format, &input, &options)
                         } else {
-                            decompress_bytes(&format, &input)
+                            decompress_bytes_with(&format, &input, &options)
                         };
                         result.map(|bytes| hex_encode(&bytes)).map_err(|error| {
                             rquickjs::Error::new_from_js_message(
@@ -1894,6 +1965,13 @@ fn ensure_context() {
                     },
                 )
                 .expect("failed to create JavaScript compression function");
+                // `vm.Script` / `runInThisContext`: evaluate (or only compile) classic-script source under the caller's
+                // filename so syntax errors and stacks name it, and so script-only grammar (no top-level `return`) applies.
+                let vm_eval = Function::new(ctx.clone(), host_vm_eval)
+                .expect("failed to create JavaScript vm evaluator");
+                let vm_create = Function::new(ctx.clone(), host_vm_create).expect("failed to create JavaScript vm context factory");
+                let vm_free = Function::new(ctx.clone(), host_vm_free).expect("failed to create JavaScript vm context releaser");
+                let vm_run = Function::new(ctx.clone(), host_vm_run).expect("failed to create JavaScript vm context runner");
                 let web_zlib_streams = Rc::new(RefCell::new(HashMap::<u32, WebZlibStream>::new()));
                 let next_web_zlib_stream = Rc::new(Cell::new(1u32));
                 let create_web_zlib_stream = {
@@ -1901,9 +1979,13 @@ fn ensure_context() {
                     let next = Rc::clone(&next_web_zlib_stream);
                     Function::new(
                         ctx.clone(),
-                        move |operation: String, format: String| -> rquickjs::Result<u32> {
+                        move |operation: String,
+                              format: String,
+                              options: rquickjs::function::Opt<String>|
+                              -> rquickjs::Result<u32> {
+                            let options = ZlibOptions::parse(options.0.as_deref().unwrap_or(""));
                             let stream =
-                                WebZlibStream::new(&operation, &format).map_err(|error| {
+                                WebZlibStream::new(&operation, &format, &options).map_err(|error| {
                                     rquickjs::Error::new_from_js_message(
                                         "zlib stream",
                                         "handle",
@@ -1980,13 +2062,29 @@ fn ensure_context() {
                     .expect("failed to create JavaScript filesystem function")
                 };
                 let tcp_connect = Function::new(ctx.clone(), |host: String, port: u32| {
-                    net_connect(&host, port as u16)
+                    match checked_port(port) { Ok(port) => net_connect(&host, port), Err(error) => error }
                 })
                 .expect("failed to create JavaScript TCP connector");
+                let tcp_connect_start = Function::new(ctx.clone(), |host: String, port: u32| net_connect_start(&host, port))
+                    .expect("failed to create JavaScript asynchronous TCP connector");
+                let dns_lookup_start_function = Function::new(ctx.clone(), dns_lookup_start)
+                    .expect("failed to create JavaScript asynchronous DNS lookup");
+                let dns_query_start_function = Function::new(ctx.clone(), |name: String, rrtype: String, servers: String, timeout_ms: u32, tries: u32| dns_query_start(name, rrtype, servers, timeout_ms, tries))
+                    .expect("failed to create JavaScript DNS query starter");
+                let dns_default_servers_function = Function::new(ctx.clone(), dns_default_servers)
+                    .expect("failed to create JavaScript DNS server reader");
+                let async_op_poll_function = Function::new(ctx.clone(), async_op_poll)
+                    .expect("failed to create JavaScript asynchronous operation poller");
+                let async_op_cancel_function = Function::new(ctx.clone(), async_op_cancel)
+                    .expect("failed to create JavaScript asynchronous operation canceller");
                 let tcp_write = Function::new(ctx.clone(), |handle: u32, value: String| {
                     net_write(handle, &hex_decode(&value))
                 })
                 .expect("failed to create JavaScript TCP writer");
+                let net_set_option_function = Function::new(ctx.clone(), |kind: String, handle: u32, option: String, enable: bool, delay_ms: u32| net_set_option(&kind, handle, &option, enable, delay_ms))
+                    .expect("failed to create JavaScript socket option setter");
+                let tcp_pending = Function::new(ctx.clone(), |handle: u32| net_pending_bytes(handle))
+                    .expect("failed to create JavaScript TCP pending-bytes reader");
                 let tcp_finish = Function::new(ctx.clone(), |handle: u32| net_finish(handle))
                     .expect("failed to create JavaScript TCP finisher");
                 let tcp_shutdown =
@@ -1999,7 +2097,7 @@ fn ensure_context() {
                 let tcp_destroy = Function::new(ctx.clone(), |handle: u32| net_destroy(handle))
                     .expect("failed to create JavaScript TCP closer");
                 let tcp_listen = Function::new(ctx.clone(), |host: String, port: u32| {
-                    net_listen(&host, port as u16)
+                    match checked_port(port) { Ok(port) => net_listen(&host, port), Err(error) => error }
                 })
                 .expect("failed to create JavaScript TCP listener");
                 let tcp_accept = Function::new(ctx.clone(), |handle: u32| net_accept(handle))
@@ -2029,6 +2127,10 @@ fn ensure_context() {
                 let udp_connect_function = Function::new(ctx.clone(), |handle: u32, host: String, port: u32| {
                     match u16::try_from(port) { Ok(port) if port != 0 => udp_connect(handle, &host, port), _ => "err|EINVAL|invalid UDP port".to_string() }
                 }).expect("failed to create JavaScript UDP connector");
+                let udp_option_function = Function::new(ctx.clone(), |handle: u32, name: String, a: String, b: String, c: String| udp_option(handle, &name, &a, &b, &c))
+                    .expect("failed to create JavaScript UDP option setter");
+                let udp_set_broadcast_function = Function::new(ctx.clone(), |handle: u32, enabled: bool| udp_set_broadcast(handle, enabled))
+                    .expect("failed to create JavaScript UDP broadcast setter");
                 let udp_disconnect_function = Function::new(ctx.clone(), |handle: u32| udp_disconnect(handle))
                     .expect("failed to create JavaScript UDP disconnector");
                 let udp_close_function =
@@ -2036,17 +2138,20 @@ fn ensure_context() {
                         .expect("failed to create JavaScript UDP closer");
                 let tls_connect_function = Function::new(
                     ctx.clone(),
-                    |host: String, port: u32, server_name: String, ca: String| {
+                    |host: String, port: u32, server_name: String, ca: Value<'_>| {
+                        let ca_spec = match tls_ca_spec(ca) { Ok(value) => value, Err(error) => return format!("err:{error}") };
+                        let port = match checked_port(port) { Ok(port) => port, Err(error) => return error };
                         tls_connect(TlsClientOptions {
                             host: &host,
-                            port: port as u16,
+                            port,
                             server_name: &server_name,
-                            ca_spec: &ca,
+                            ca_spec: ca_spec.as_deref(),
                             cert_spec: "",
                             key_spec: "",
                             alpn_spec: "",
                             report_alpn: false,
                             reject_unauthorized: true,
+                            defer_name_verification: false,
                         })
                     },
                 )
@@ -2056,19 +2161,22 @@ fn ensure_context() {
                     |host: String,
                      port: u32,
                      server_name: String,
-                     ca: String,
+                     ca: Value<'_>,
                      cert: String,
                      key: String| {
+                        let ca_spec = match tls_ca_spec(ca) { Ok(value) => value, Err(error) => return format!("err:{error}") };
+                        let port = match checked_port(port) { Ok(port) => port, Err(error) => return error };
                         tls_connect(TlsClientOptions {
                             host: &host,
-                            port: port as u16,
+                            port,
                             server_name: &server_name,
-                            ca_spec: &ca,
+                            ca_spec: ca_spec.as_deref(),
                             cert_spec: &cert,
                             key_spec: &key,
                             alpn_spec: "",
                             report_alpn: false,
                             reject_unauthorized: true,
+                            defer_name_verification: false,
                         })
                     },
                 )
@@ -2078,26 +2186,61 @@ fn ensure_context() {
                     |host: String,
                      port: u32,
                      server_name: String,
-                     ca: String,
+                     ca: Value<'_>,
                      cert: String,
                      key: String,
                      options: String| {
-                        let (verification, alpn) =
-                            options.split_once('|').unwrap_or(("1", options.as_str()));
+                        let ca_spec = match tls_ca_spec(ca) { Ok(value) => value, Err(error) => return format!("err:{error}") };
+                        let mut option_parts = options.splitn(3, '|');
+                        let verification = option_parts.next().unwrap_or("1");
+                        let alpn = option_parts.next().unwrap_or("");
+                        let defer_name_verification = option_parts.next() == Some("1");
+                        let port = match checked_port(port) { Ok(port) => port, Err(error) => return error };
                         tls_connect(TlsClientOptions {
                             host: &host,
-                            port: port as u16,
+                            port,
                             server_name: &server_name,
-                            ca_spec: &ca,
+                            ca_spec: ca_spec.as_deref(),
                             cert_spec: &cert,
                             key_spec: &key,
                             alpn_spec: alpn,
                             report_alpn: true,
                             reject_unauthorized: verification != "0",
+                            defer_name_verification,
                         })
                     },
                 )
                 .expect("failed to create JavaScript TLS options connector");
+                let tls_connect_start_function = Function::new(
+                    ctx.clone(),
+                    |host: String,
+                     port: u32,
+                     server_name: String,
+                     ca: Value<'_>,
+                     cert: String,
+                     key: String,
+                     options: String| {
+                        let ca_spec = match tls_ca_spec(ca) { Ok(value) => value, Err(error) => return async_op_ready(format!("err:{error}")) };
+                        let mut option_parts = options.splitn(3, '|');
+                        let verification = option_parts.next().unwrap_or("1");
+                        let alpn = option_parts.next().unwrap_or("");
+                        let defer_name_verification = option_parts.next() == Some("1");
+                        let port = match checked_port(port) { Ok(port) => port, Err(error) => return async_op_ready(error) };
+                        tls_connect_start(TlsClientOptions {
+                            host: &host,
+                            port,
+                            server_name: &server_name,
+                            ca_spec: ca_spec.as_deref(),
+                            cert_spec: &cert,
+                            key_spec: &key,
+                            alpn_spec: alpn,
+                            report_alpn: true,
+                            reject_unauthorized: verification != "0",
+                            defer_name_verification,
+                        })
+                    },
+                )
+                .expect("failed to create JavaScript asynchronous TLS connector");
                 let tls_write_function =
                     Function::new(ctx.clone(), |handle: u32, value: String| {
                         tls_write(handle, &hex_decode(&value))
@@ -2117,17 +2260,30 @@ fn ensure_context() {
                         .expect("failed to create JavaScript TLS closer");
                 let tls_alpn_function = Function::new(ctx.clone(), |handle: u32| tls_alpn(handle))
                     .expect("failed to create JavaScript TLS ALPN reader");
+                let tls_session_info_function =
+                    Function::new(ctx.clone(), |handle: u32| tls_session_info(handle))
+                        .expect("failed to create JavaScript TLS session info reader");
                 let tls_peer_certificate_function =
                     Function::new(ctx.clone(), |handle: u32| tls_certificate(handle, true))
                         .expect("failed to create JavaScript TLS peer certificate reader");
                 let tls_local_certificate_function =
                     Function::new(ctx.clone(), |handle: u32| tls_certificate(handle, false))
                         .expect("failed to create JavaScript TLS local certificate reader");
+                let tls_peer_chain_function = Function::new(ctx.clone(), |handle: u32| tls_peer_chain(handle))
+                    .expect("failed to create JavaScript TLS peer chain reader");
+                let tls_certificate_metadata_hex_function = Function::new(ctx.clone(), |hex: String| tls_certificate_metadata_hex(&hex))
+                    .expect("failed to create JavaScript TLS certificate metadata reader");
                 let tls_peer_certificate_metadata_function =
                     Function::new(ctx.clone(), |handle: u32| {
                         tls_certificate_metadata(handle, true)
                     })
                     .expect("failed to create JavaScript TLS peer certificate metadata reader");
+                let tls_authorization_function =
+                    Function::new(ctx.clone(), |handle: u32| tls_authorization(handle))
+                        .expect("failed to create JavaScript TLS authorization reader");
+                let tls_canonical_ip_function =
+                    Function::new(ctx.clone(), |host: String| tls_canonical_ip(&host))
+                        .expect("failed to create JavaScript TLS IP canonicalizer");
                 let tls_local_certificate_metadata_function =
                     Function::new(ctx.clone(), |handle: u32| {
                         tls_certificate_metadata(handle, false)
@@ -2136,12 +2292,13 @@ fn ensure_context() {
                 let tls_server_listen_function = Function::new(
                     ctx.clone(),
                     |host: String, port: u32, cert: String, key: String| {
+                        let port = match checked_port(port) { Ok(port) => port, Err(error) => return error };
                         tls_server_listen(TlsServerOptions {
                             host: &host,
-                            port: port as u16,
+                            port,
                             cert_spec: &cert,
                             key_spec: &key,
-                            ca_spec: "",
+                            ca_spec: None,
                             request_cert: false,
                             reject_unauthorized: true,
                             alpn_spec: "",
@@ -2155,14 +2312,16 @@ fn ensure_context() {
                      port: u32,
                      cert: String,
                      key: String,
-                     ca: String,
+                     ca: Value<'_>,
                      reject_unauthorized: bool| {
+                        let ca_spec = match tls_ca_spec(ca) { Ok(value) => value, Err(error) => return format!("err:{error}") };
+                        let port = match checked_port(port) { Ok(port) => port, Err(error) => return error };
                         tls_server_listen(TlsServerOptions {
                             host: &host,
-                            port: port as u16,
+                            port,
                             cert_spec: &cert,
                             key_spec: &key,
-                            ca_spec: &ca,
+                            ca_spec: ca_spec.as_deref(),
                             request_cert: true,
                             reject_unauthorized,
                             alpn_spec: "",
@@ -2176,15 +2335,17 @@ fn ensure_context() {
                      port: u32,
                      cert: String,
                      key: String,
-                     ca: String,
+                     ca: Value<'_>,
                      flags: u32,
                      alpn: String| {
+                        let ca_spec = match tls_ca_spec(ca) { Ok(value) => value, Err(error) => return format!("err:{error}") };
+                        let port = match checked_port(port) { Ok(port) => port, Err(error) => return error };
                         tls_server_listen(TlsServerOptions {
                             host: &host,
-                            port: port as u16,
+                            port,
                             cert_spec: &cert,
                             key_spec: &key,
-                            ca_spec: &ca,
+                            ca_spec: ca_spec.as_deref(),
                             request_cert: flags & 1 != 0,
                             reject_unauthorized: flags & 2 != 0,
                             alpn_spec: &alpn,
@@ -2756,6 +2917,15 @@ fn ensure_context() {
                     .set("__thaw_hpack_huffman_decode", hpack_huffman_decode)
                     .expect("failed to install HPACK Huffman decoder");
                 ctx.globals()
+                    .set("__thaw_memory_usage", Function::new(ctx.clone(), host_memory_usage).expect("failed to create heap accounting function"))
+                    .expect("failed to install heap accounting function");
+                ctx.globals()
+                    .set("__thaw_vm_eval", vm_eval)
+                    .expect("failed to install JavaScript vm evaluator");
+                ctx.globals().set("__thaw_vm_create", vm_create).expect("failed to install JavaScript vm context factory");
+                ctx.globals().set("__thaw_vm_free", vm_free).expect("failed to install JavaScript vm context releaser");
+                ctx.globals().set("__thaw_vm_run", vm_run).expect("failed to install JavaScript vm context runner");
+                ctx.globals()
                     .set("__thaw_zlib_hex", zlib_hex)
                     .expect("failed to install JavaScript compression function");
                 ctx.globals()
@@ -2774,8 +2944,32 @@ fn ensure_context() {
                     .set("__thaw_net_connect", tcp_connect)
                     .expect("failed to install JavaScript TCP connector");
                 ctx.globals()
+                    .set("__thaw_net_connect_start", tcp_connect_start)
+                    .expect("failed to install JavaScript asynchronous TCP connector");
+                ctx.globals()
+                    .set("__thaw_dns_lookup_start", dns_lookup_start_function)
+                    .expect("failed to install JavaScript asynchronous DNS lookup");
+                ctx.globals()
+                    .set("__thaw_dns_query_start", dns_query_start_function)
+                    .expect("failed to install JavaScript DNS query starter");
+                ctx.globals()
+                    .set("__thaw_dns_default_servers", dns_default_servers_function)
+                    .expect("failed to install JavaScript DNS server reader");
+                ctx.globals()
+                    .set("__thaw_async_poll", async_op_poll_function)
+                    .expect("failed to install JavaScript asynchronous operation poller");
+                ctx.globals()
+                    .set("__thaw_async_cancel", async_op_cancel_function)
+                    .expect("failed to install JavaScript asynchronous operation canceller");
+                ctx.globals()
                     .set("__thaw_net_write", tcp_write)
                     .expect("failed to install JavaScript TCP writer");
+                ctx.globals()
+                    .set("__thaw_net_set_option", net_set_option_function)
+                    .expect("failed to install JavaScript socket option setter");
+                ctx.globals()
+                    .set("__thaw_net_pending", tcp_pending)
+                    .expect("failed to install JavaScript TCP pending-bytes reader");
                 ctx.globals()
                     .set("__thaw_net_finish", tcp_finish)
                     .expect("failed to install JavaScript TCP finisher");
@@ -2816,6 +3010,12 @@ fn ensure_context() {
                     .set("__thaw_udp_connect", udp_connect_function)
                     .expect("failed to install JavaScript UDP connector");
                 ctx.globals()
+                    .set("__thaw_udp_option", udp_option_function)
+                    .expect("failed to install JavaScript UDP option setter");
+                ctx.globals()
+                    .set("__thaw_udp_set_broadcast", udp_set_broadcast_function)
+                    .expect("failed to install JavaScript UDP broadcast setter");
+                ctx.globals()
                     .set("__thaw_udp_disconnect", udp_disconnect_function)
                     .expect("failed to install JavaScript UDP disconnector");
                 ctx.globals()
@@ -2837,6 +3037,9 @@ fn ensure_context() {
                     )
                     .expect("failed to install JavaScript TLS options connector");
                 ctx.globals()
+                    .set("__thaw_tls_connect_start", tls_connect_start_function)
+                    .expect("failed to install JavaScript asynchronous TLS connector");
+                ctx.globals()
                     .set("__thaw_tls_write", tls_write_function)
                     .expect("failed to install JavaScript TLS writer");
                 ctx.globals()
@@ -2855,6 +3058,9 @@ fn ensure_context() {
                     .set("__thaw_tls_alpn", tls_alpn_function)
                     .expect("failed to install JavaScript TLS ALPN reader");
                 ctx.globals()
+                    .set("__thaw_tls_session_info", tls_session_info_function)
+                    .expect("failed to install JavaScript TLS session info reader");
+                ctx.globals()
                     .set("__thaw_tls_peer_certificate", tls_peer_certificate_function)
                     .expect("failed to install JavaScript TLS peer certificate reader");
                 ctx.globals()
@@ -2869,6 +3075,18 @@ fn ensure_context() {
                         tls_peer_certificate_metadata_function,
                     )
                     .expect("failed to install JavaScript TLS peer certificate metadata reader");
+                ctx.globals()
+                    .set("__thaw_tls_peer_chain", tls_peer_chain_function)
+                    .expect("failed to install JavaScript TLS peer chain reader");
+                ctx.globals()
+                    .set("__thaw_tls_certificate_metadata_hex", tls_certificate_metadata_hex_function)
+                    .expect("failed to install JavaScript TLS certificate metadata reader");
+                ctx.globals()
+                    .set("__thaw_tls_authorization", tls_authorization_function)
+                    .expect("failed to install JavaScript TLS authorization reader");
+                ctx.globals()
+                    .set("__thaw_tls_canonical_ip", tls_canonical_ip_function)
+                    .expect("failed to install JavaScript TLS IP canonicalizer");
                 ctx.globals()
                     .set(
                         "__thaw_tls_local_certificate_metadata",
@@ -2930,25 +3148,133 @@ fn ensure_context() {
                     .expect("failed to install graph handle functions");
                 install_async_context_bootstrap(&ctx)
                     .expect("failed to install async context bootstrap");
+                let process_clock_origin = std::time::Instant::now();
+                let process_monotonic_clock = Function::new(ctx.clone(), move || -> String {
+                    process_clock_origin.elapsed().as_nanos().to_string()
+                })
+                .expect("failed to create native process monotonic clock");
+                ctx.globals()
+                    .set("__thaw_process_monotonic_clock_bootstrap", process_monotonic_clock)
+                    .expect("failed to install native process monotonic clock");
+                let clone_unsupported_bootstrap = Function::new(
+                    ctx.clone(),
+                    |value: Value<'_>| value.is_promise() || value.is_proxy(),
+                )
+                .expect("failed to create clone brand bootstrap");
+                ctx.globals()
+                    .set("__thaw_clone_unsupported_bootstrap", clone_unsupported_bootstrap)
+                    .expect("failed to install clone brand bootstrap");
+                let clone_error_bootstrap = Function::new(
+                    ctx.clone(),
+                    |value: Value<'_>| value.is_error(),
+                )
+                .expect("failed to create clone Error brand bootstrap");
+                ctx.globals()
+                    .set("__thaw_clone_error_bootstrap", clone_error_bootstrap)
+                    .expect("failed to install clone Error brand bootstrap");
                 let platform_result = ctx.eval::<(), _>(PLATFORM_GLOBALS);
                 ctx.globals().remove("__thaw_async_context_bootstrap")
                     .expect("failed to remove async context bootstrap");
+                ctx.globals().remove("__thaw_process_monotonic_clock_bootstrap")
+                    .expect("failed to remove process monotonic clock bootstrap");
+                ctx.globals().remove("__thaw_clone_unsupported_bootstrap")
+                    .expect("failed to remove clone brand bootstrap");
+                ctx.globals().remove("__thaw_clone_error_bootstrap")
+                    .expect("failed to remove clone Error brand bootstrap");
                 platform_result.expect("failed to install JavaScript platform globals");
+                install_native_exception_bridge(&ctx)
+                    .expect("failed to install native exception carrier bridge");
             });
             (runtime, context)
         });
     });
 }
 
+thread_local! {
+    static PENDING_NATIVE_GRAPH_RELEASES: RefCell<Vec<PendingNativeGraphRelease>> = const { RefCell::new(Vec::new()) };
+    static NATIVE_GRAPH_RELEASES_OUTSTANDING: Cell<usize> = const { Cell::new(0) };
+    static NATIVE_GRAPH_RELEASES_DRAINING: Cell<bool> = const { Cell::new(false) };
+    static ENGINE_ENTRY_DEPTH: Cell<usize> = const { Cell::new(0) };
+    static REALM_CLOSING: Cell<bool> = const { Cell::new(false) };
+}
+
+struct EngineEntryGuard;
+
+impl EngineEntryGuard {
+    fn enter() -> Self {
+        ENGINE_ENTRY_DEPTH.with(|depth| depth.set(depth.get().saturating_add(1)));
+        Self
+    }
+}
+
+impl Drop for EngineEntryGuard {
+    fn drop(&mut self) {
+        let _ = ENGINE_ENTRY_DEPTH.try_with(|depth| depth.set(depth.get().saturating_sub(1)));
+    }
+}
+
+fn drain_native_graph_releases() {
+    if ENGINE_ENTRY_DEPTH.try_with(Cell::get).unwrap_or(usize::MAX) != 0
+        || ACTIVE_NAPI_CONTEXT.try_with(|active| !active.get().is_null()).unwrap_or(true)
+        || REALM_CLOSING.try_with(Cell::get).unwrap_or(true)
+        || !JS.try_with(|slot| slot.try_borrow_mut().is_ok_and(|slot| slot.is_some())).unwrap_or(false)
+    {
+        return;
+    }
+    drain_native_graph_release_queue();
+}
+
+fn drain_native_graph_release_queue() {
+    let Ok(entered) = NATIVE_GRAPH_RELEASES_DRAINING.try_with(|draining| {
+        !draining.replace(true)
+    }) else { return; };
+    if !entered { return; }
+    struct DrainGuard;
+    impl Drop for DrainGuard {
+        fn drop(&mut self) { let _ = NATIVE_GRAPH_RELEASES_DRAINING.try_with(|draining| draining.set(false)); }
+    }
+    let _guard = DrainGuard;
+    let mut failed = Vec::new();
+    while let Some(batch) = PENDING_NATIVE_GRAPH_RELEASES.try_with(|pending| {
+        pending.try_borrow_mut().ok().map(|mut pending| std::mem::take(&mut *pending))
+    }).ok().flatten() {
+        if batch.is_empty() { break; }
+        for release in batch {
+            let success = release.callback.is_some_and(|callback| callback(release.token) != 0);
+            if success {
+                let _ = NATIVE_GRAPH_RELEASES_OUTSTANDING.try_with(|count| count.set(count.get().saturating_sub(1)));
+            } else {
+                failed.push(release);
+            }
+        }
+    }
+    if !failed.is_empty() {
+        let _ = PENDING_NATIVE_GRAPH_RELEASES.try_with(|pending| {
+            let Ok(mut pending) = pending.try_borrow_mut() else { return; };
+            pending.extend(failed);
+        });
+    }
+}
+
+fn native_graph_releases_pending() -> bool {
+    NATIVE_GRAPH_RELEASES_OUTSTANDING.try_with(|count| count.get() != 0).unwrap_or(true)
+        || PENDING_NATIVE_GRAPH_RELEASES.try_with(|pending| pending.try_borrow().map_or(true, |pending| !pending.is_empty()))
+            .unwrap_or(true)
+}
+
 fn with_context<R>(f: impl FnOnce(Ctx<'_>) -> R) -> R {
-    ensure_context();
-    JS.with(|cell| {
-        cell.borrow()
-            .as_ref()
-            .expect("QuickJS context was initialized")
-            .1
-            .with(f)
-    })
+    let outer = ENGINE_ENTRY_DEPTH.with(|depth| depth.get() == 0);
+    {
+        let _initialization_entry = EngineEntryGuard::enter();
+        ensure_context();
+    }
+    if outer { drain_native_graph_releases(); }
+    let entry = EngineEntryGuard::enter();
+    let result = JS.with(|cell| cell.borrow().as_ref()
+        .expect("QuickJS context was initialized").1.with(f));
+    drop(entry);
+    if outer { drain_native_graph_releases(); }
+    result
 }
 
 /// Like [`with_context`], but reuses the currently-active `Ctx` (see

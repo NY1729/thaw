@@ -54,6 +54,7 @@ fn declared_array_of(declared: &str, parameter: &str) -> bool {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(dead_code)]
 fn rewrite_external_class_methods_with_static(
     source: &str,
     classes: &[ClassConstructorRewrite],
@@ -74,6 +75,7 @@ fn rewrite_external_class_methods_with_static(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(dead_code)]
 fn rewrite_external_class_methods_with_static_qualified(
     source: &str,
     classes: &[ClassConstructorRewrite],
@@ -1621,9 +1623,30 @@ fn rewrite_external_class_methods_with_static_qualified_named(
         }
     }
 
+    /// A parameter type that carries no information of its own: `Json`/`JsValue` (an unresolved
+    /// generic widened to the top type), possibly wrapped in any number of `T | null | undefined`
+    /// layers.
+    fn is_opaque_generic(ty: &thaw_hir::HirType) -> bool {
+        match ty {
+            thaw_hir::HirType::Json | thaw_hir::HirType::JsValue => true,
+            thaw_hir::HirType::Optional(inner)
+            | thaw_hir::HirType::Nullable(inner)
+            | thaw_hir::HirType::Nullish(inner) => is_opaque_generic(inner),
+            _ => false,
+        }
+    }
+
     fn overload_type_score(declared: &thaw_hir::HirType, actual: &thaw_hir::HirType) -> Option<u8> {
         match (declared, actual) {
             (thaw_hir::HirType::Json, _) => Some(0),
+            // An unresolved generic (`T | null | undefined`, `T` widened to `Json`) is as opaque
+            // as a bare `Json` parameter: it accepts any argument, weakly.
+            (
+                thaw_hir::HirType::Optional(inner)
+                | thaw_hir::HirType::Nullable(inner)
+                | thaw_hir::HirType::Nullish(inner),
+                _,
+            ) if is_opaque_generic(inner) => Some(0),
             (thaw_hir::HirType::Union(elements), actual) => elements
                 .iter()
                 .filter_map(|element| overload_type_score(element, actual))
@@ -1866,6 +1889,8 @@ fn rewrite_external_class_methods_with_static_qualified_named(
         /// (`import { parse } from "csv-parse"`) -- see the bare-call
         /// `Expr::Ident` branch below for why this exists.
         imported_from: std::collections::HashMap<String, String>,
+        // Local names bound by `import name from "pkg"` (the package's default export).
+        default_imports: std::collections::HashSet<String>,
         import_aliases: std::collections::HashMap<String, String>,
         methods: &'a [ClassMethodRewrite],
         method_contexts: &'a [ClassMethodContext],
@@ -2677,7 +2702,15 @@ fn rewrite_external_class_methods_with_static_qualified_named(
                     let qualified_name = self
                         .imported_from
                         .get(name.sym.as_str())
-                        .map(|package| format!("{}_{}", sanitize_identifier(package), name.sym));
+                        .map(|package| {
+                            // A default import is known by its package, not by the local name.
+                            let export = if self.default_imports.contains(name.sym.as_str()) {
+                                "default"
+                            } else {
+                                name.sym.as_str()
+                            };
+                            qualified_export_alias(package, export)
+                        });
                     // A traceable named import always narrows to its own
                     // package's alias, even when that package contributes no
                     // overload candidates of its own (a single-overload
@@ -3134,6 +3167,7 @@ fn rewrite_external_class_methods_with_static_qualified_named(
 
     let (module, cm) = thaw_parser::parse_typescript_with_source_map_named(source, source_name.clone())?;
     let mut imported_from: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut default_imports = std::collections::HashSet::new();
     let mut import_aliases = std::collections::HashMap::new();
     for item in &module.body {
         let ModuleItem::ModuleDecl(ModuleDecl::Import(import)) = item else {
@@ -3167,11 +3201,11 @@ fn rewrite_external_class_methods_with_static_qualified_named(
                 }
                 ImportSpecifier::Default(default) => {
                     imported_from.insert(default.local.sym.to_string(), package.to_string());
+                    default_imports.insert(default.local.sym.to_string());
                     let identity = package_qualifiers.get(package)
                         .map_or("default".to_string(), |qualifier| format!("{qualifier}::default"));
                     import_aliases.insert(default.local.sym.to_string(), identity);
                 }
-                _ => {}
             }
         }
     }
@@ -3247,6 +3281,7 @@ fn rewrite_external_class_methods_with_static_qualified_named(
         factories,
         functions,
         imported_from,
+        default_imports,
         import_aliases,
         methods,
         method_contexts,

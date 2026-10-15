@@ -667,6 +667,49 @@ fn bundled_direct_node_require_uses_the_loaded_addon() {
     let _ = fs::remove_dir_all(node_modules);
 }
 
+/// A package may ship binary assets (a versioned shared library such as
+/// `libfoo.so.1.2.3`, an image, a data blob) that another package's `exports`
+/// map or a relative `require` points at. They are not modules: the bundler
+/// must leave them out (like `.node`/`.wasm`) instead of failing to read them
+/// as UTF-8 text, whatever their extension.
+#[test]
+fn binary_assets_reached_by_require_are_left_out_of_the_bundle() {
+    let node_modules = temp_registry("bundle_binary_assets_node_modules");
+    let package = node_modules.join("pkg");
+    let libs = node_modules.join("@vendor/libs");
+    fs::create_dir_all(package.join("data")).unwrap();
+    fs::create_dir_all(libs.join("lib")).unwrap();
+    fs::write(
+        package.join("index.js"),
+        "var path = null; try { path = require('@vendor/libs/binary'); } catch (_) {} \
+         try { require('./data/blob.bin'); } catch (_) {} module.exports = path;",
+    )
+    .unwrap();
+    fs::write(
+        libs.join("package.json"),
+        r#"{"name":"@vendor/libs","exports":{"./binary":"./lib/libvendor.so.1.2.3"}}"#,
+    )
+    .unwrap();
+    // ELF magic with NUL bytes, and an unrelated-extension blob that is not UTF-8.
+    fs::write(libs.join("lib/libvendor.so.1.2.3"), b"\x7fELF\x02\x01\x01\x00\x00\x00").unwrap();
+    fs::write(package.join("data/blob.bin"), [0xffu8, 0xfe, 0xfd, 0x80]).unwrap();
+
+    let (bundle, _, file_count, _) =
+        bundle_commonjs_package(&node_modules, "pkg", &package, "index.js").unwrap();
+    assert_eq!(file_count, 1, "only the JavaScript entry point is a module");
+    assert!(!bundle.contains("ELF") && !bundle.contains("\u{fffd}"), "binary content must not be embedded as module source");
+    let _ = fs::remove_dir_all(node_modules);
+}
+
+#[test]
+fn module_source_text_separates_text_modules_from_binary_assets() {
+    assert_eq!(module_source_text(b"module.exports = 1;".to_vec()).as_deref(), Some("module.exports = 1;"));
+    assert_eq!(module_source_text("// \u{3042} utf-8 text\n".as_bytes().to_vec()).as_deref(), Some("// \u{3042} utf-8 text\n"));
+    assert!(module_source_text(vec![0xff, 0xfe, 0x00]).is_none());
+    assert!(module_source_text(b"\x7fELF\x00\x01".to_vec()).is_none());
+    assert!(module_source_text(vec![0x80; 16]).is_none());
+}
+
 /// A dependency subpath whose `exports` offers `{ default, node, import }`
 /// but no `require` -- real-world example: `@babel/runtime/helpers/extends`
 /// (`{"node":"./helpers/extends.js","import":"./helpers/esm/extends.js",
@@ -925,7 +968,8 @@ fn bare_requests_use_calling_file_but_package_import_targets_use_manifest_root()
     fs::write(far.join("index.js"), "module.exports = 'far-v2';").unwrap();
 
     let (bundle, _, file_count, versions) = bundle_commonjs_package(&modules, "app", &app, "lib/entry.js").unwrap();
-    assert_eq!(file_count, 3);
+    // entry + both dep index.js + the two manifests the resolver consults (app: `imports`, near dep: version/main).
+    assert_eq!(file_count, 5);
     assert!(bundle.contains("\"dep\": \"app/lib/node_modules/dep/index.js\""), "{bundle}");
     assert!(bundle.contains("\"#dep\": \"app/node_modules/dep/index.js\""), "{bundle}");
     assert!(bundle.contains("near-v3"));
@@ -1069,7 +1113,7 @@ fn package_imports_external_targets_use_nested_dependency_and_selected_pattern()
     assert!(bundle.contains("owner/node_modules/dependency/public/feature.js"));
     assert_eq!(versions.get("dependency").map(String::as_str), Some("2.0.0"));
     assert!(!bundle.contains("module.exports = 9"), "external imports target must resolve from the defining package root");
-    assert!(matches!(resolve_package_import(&modules, &package.join("lib/entry.js"), "#dep/private/hidden", &["require", "node", "default"]), None));
+    assert!(resolve_package_import(&modules, &package.join("lib/entry.js"), "#dep/private/hidden", &["require", "node", "default"]).is_none());
     assert!(matches!(resolve_package_import(&modules, &package.join("lib/entry.js"), "#builtin", &["require", "node", "default"]), Some(PackageImportResolution::Builtin(name)) if name == "fs"));
     let _ = fs::remove_dir_all(root);
 }
@@ -1422,9 +1466,11 @@ fn bundled_require_cache_and_commonjs_this_respect_module_format() {
 #[test]
 fn async_commonjs_factory_keeps_top_level_this_after_await() {
     use std::ffi::{CStr, CString};
+    // Node 22: `import()` of a CommonJS module exposes `this.x = …` only through `default`
+    // (cjs-module-lexer does not see `this.`), so the namespace has no `answer` — read `default.answer`.
     let package = temp_registry("bundle_async_factory_context");
     let modules = temp_registry("bundle_async_factory_context_modules");
-    fs::write(package.join("index.js"), "module.exports = async function() { var value = await import('./late.cjs'); return value.answer; };").unwrap();
+    fs::write(package.join("index.js"), "module.exports = async function() { var value = await import('./late.cjs'); return value.default.answer; };").unwrap();
     fs::write(package.join("late.cjs"), "await Promise.resolve(); this.answer = 42;").unwrap();
     let (bundle, _, _, _) = bundle_commonjs_package(&modules, "pkg", &package, "index.js").unwrap();
     let script = format!("globalThis.module = {{exports: {{}}}}; globalThis.exports = module.exports; globalThis.require = function(name) {{ throw new Error(name); }}; {bundle} globalThis.asyncFactoryContext = module.exports;");
@@ -1563,7 +1609,11 @@ fn native_mixed_rewrite_uses_private_opaque_edge_and_origin_reads() {
     assert!(rewritten.contains("import { origin as __thaw_esm_origin_"), "{rewritten}");
     assert!(rewritten.contains("import \"./legacy.cjs\";"), "{rewritten}");
     assert!(rewritten.contains(".readImport(\"./legacy.cjs\", \"value\")"), "{rewritten}");
-    assert!(rewritten.contains(".selectDynamic("), "{rewritten}");
+    // Dynamic imports go through the private origin: it validates the link
+    // first and `completeDynamic` selects the namespace (`selectDynamic` is
+    // now an internal step of `completeDynamic`).
+    assert!(rewritten.contains(".validateDynamic("), "{rewritten}");
+    assert!(rewritten.contains(".completeDynamic("), "{rewritten}");
     assert!(!rewritten.contains("export { local as renamed }"), "{rewritten}");
     assert!(!rewritten.contains("export { value as indirect } from"), "{rewritten}");
     assert!(!rewritten.contains("export * from"), "{rewritten}");

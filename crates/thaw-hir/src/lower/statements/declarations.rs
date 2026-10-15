@@ -188,7 +188,49 @@ impl<'a> FnLowerer<'a> {
         Ok(HirStmt::Expr(value))
     }
 
+    /// The HIR binding a repeated `var name` declaration must reuse: `var`
+    /// is function-scoped, so a second declaration of the same name in the
+    /// same function is the same variable (an initializer assigns to it).
+    fn reusable_var_binding(&self, var_decl: &VarDecl, pattern: &Pat) -> Option<Symbol> {
+        let Pat::Ident(binding) = pattern else { return None };
+        if var_decl.kind != VarDeclKind::Var || binding.type_ann.is_some() {
+            return None;
+        }
+        let name = binding.id.sym.to_string();
+        let owned = self.function_var_names.get(&name)?;
+        (self.resolve_binding(&name) == *owned && self.scope.contains_key(owned))
+            .then(|| owned.clone())
+    }
+
     fn lower_var_decl(&mut self, var_decl: &VarDecl) -> Result<Vec<HirStmt>, String> {
+        if var_decl.kind != VarDeclKind::Var {
+            return self.lower_var_decl_inner(var_decl);
+        }
+        let mut statements = Vec::new();
+        for declarator in &var_decl.decls {
+            if let Some(owned) = self.reusable_var_binding(var_decl, &declarator.name) {
+                if let Some(init) = &declarator.init {
+                    let value = self.lower_expr(init)?;
+                    let declared = self.scope.get(&owned).cloned().ok_or("unknown `var` binding")?;
+                    let value = self.coerce_to_declared(&declared, value)?;
+                    self.record_binding_write(&owned);
+                    statements.push(HirStmt::Expr(HirExpr::Assign(owned, Box::new(value))));
+                }
+                continue;
+            }
+            let mut single = var_decl.clone();
+            single.decls = vec![declarator.clone()];
+            statements.extend(self.lower_var_decl_inner(&single)?);
+            if let Pat::Ident(binding) = &declarator.name {
+                let name = binding.id.sym.to_string();
+                let owned = self.resolve_binding(&name);
+                self.function_var_names.insert(name, owned);
+            }
+        }
+        Ok(statements)
+    }
+
+    fn lower_var_decl_inner(&mut self, var_decl: &VarDecl) -> Result<Vec<HirStmt>, String> {
         let mut statements = Vec::new();
         for decl in &var_decl.decls {
             if let Pat::Ident(binding) = &decl.name {

@@ -65,10 +65,7 @@ fn parse_typescript_source(
     let cm: Lrc<SourceMap> = Default::default();
     let handler = Handler::with_emitter_writer(Box::new(std::io::stderr()), Some(cm.clone()));
 
-    let fm = cm.new_source_file(
-        Lrc::new(filename),
-        source.to_string(),
-    );
+    let fm = cm.new_source_file(Lrc::new(filename), source.to_string());
 
     let syntax = Syntax::Typescript(TsSyntax {
         tsx: false,
@@ -85,7 +82,10 @@ fn parse_typescript_source(
         "failed to parse TypeScript source".to_string()
     })?;
     let errors = parser.take_errors();
-    if !errors.is_empty() {
+    // Published `.d.ts` files are third-party text: recoverable grammar complaints that only
+    // matter to executable code (execa's `arguments?: readonly string[]` parameter name under
+    // strict mode) must not reject an otherwise parseable declaration.
+    if !declarations && !errors.is_empty() {
         for error in errors {
             error.into_diagnostic(&handler).emit();
         }
@@ -120,10 +120,7 @@ pub fn parse_javascript_with_source_map_named(
 ) -> Result<(Module, Lrc<SourceMap>), String> {
     let cm: Lrc<SourceMap> = Default::default();
     let handler = Handler::with_emitter_writer(Box::new(std::io::stderr()), Some(cm.clone()));
-    let fm = cm.new_source_file(
-        Lrc::new(filename),
-        source.to_string(),
-    );
+    let fm = cm.new_source_file(Lrc::new(filename), source.to_string());
 
     let syntax = Syntax::Es(EsSyntax::default());
     let lexer = Lexer::new(syntax, Default::default(), StringInput::from(&*fm), None);
@@ -146,29 +143,77 @@ pub fn parse_javascript_with_source_map_named(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use swc_ecma_ast::{Decl, ModuleItem, Stmt};
     use swc_common::Spanned;
+    use swc_ecma_ast::{Decl, ModuleItem, Stmt};
 
     #[test]
     fn named_parsers_record_source_map_filename() {
         let path = std::path::PathBuf::from("src/diagnostic.ts");
         let filename = FileName::Real(path);
-        let (ts, ts_map) = parse_typescript_with_source_map_named("export const x: number = 1;", filename.clone()).unwrap();
-        assert_eq!(ts_map.lookup_char_pos(ts.body[0].span().lo).file.name.as_ref(), &filename);
-        let (dts, dts_map) = parse_declarations_with_source_map_named("export const x: number;", filename.clone()).unwrap();
-        assert_eq!(dts_map.lookup_char_pos(dts.body[0].span().lo).file.name.as_ref(), &filename);
-        let (js, js_map) = parse_javascript_with_source_map_named("export const x = 1;", filename.clone()).unwrap();
-        assert_eq!(js_map.lookup_char_pos(js.body[0].span().lo).file.name.as_ref(), &filename);
+        let (ts, ts_map) =
+            parse_typescript_with_source_map_named("export const x: number = 1;", filename.clone())
+                .unwrap();
+        assert_eq!(
+            ts_map
+                .lookup_char_pos(ts.body[0].span().lo)
+                .file
+                .name
+                .as_ref(),
+            &filename
+        );
+        let (dts, dts_map) =
+            parse_declarations_with_source_map_named("export const x: number;", filename.clone())
+                .unwrap();
+        assert_eq!(
+            dts_map
+                .lookup_char_pos(dts.body[0].span().lo)
+                .file
+                .name
+                .as_ref(),
+            &filename
+        );
+        let (js, js_map) =
+            parse_javascript_with_source_map_named("export const x = 1;", filename.clone())
+                .unwrap();
+        assert_eq!(
+            js_map
+                .lookup_char_pos(js.body[0].span().lo)
+                .file
+                .name
+                .as_ref(),
+            &filename
+        );
     }
 
     #[test]
     fn source_only_wrappers_preserve_historical_filenames() {
         let (ts, ts_map) = parse_typescript_with_source_map("export const x: number = 1;").unwrap();
-        assert_eq!(ts_map.lookup_char_pos(ts.body[0].span().lo).file.name.as_ref(), &FileName::Custom("input.ts".into()));
+        assert_eq!(
+            ts_map
+                .lookup_char_pos(ts.body[0].span().lo)
+                .file
+                .name
+                .as_ref(),
+            &FileName::Custom("input.ts".into())
+        );
         let (dts, dts_map) = parse_declarations_with_source_map("export const x: number;").unwrap();
-        assert_eq!(dts_map.lookup_char_pos(dts.body[0].span().lo).file.name.as_ref(), &FileName::Custom("input.ts".into()));
+        assert_eq!(
+            dts_map
+                .lookup_char_pos(dts.body[0].span().lo)
+                .file
+                .name
+                .as_ref(),
+            &FileName::Custom("input.ts".into())
+        );
         let (js, js_map) = parse_javascript_with_source_map("export const x = 1;").unwrap();
-        assert_eq!(js_map.lookup_char_pos(js.body[0].span().lo).file.name.as_ref(), &FileName::Custom("input.js".into()));
+        assert_eq!(
+            js_map
+                .lookup_char_pos(js.body[0].span().lo)
+                .file
+                .name
+                .as_ref(),
+            &FileName::Custom("input.js".into())
+        );
     }
 
     #[test]

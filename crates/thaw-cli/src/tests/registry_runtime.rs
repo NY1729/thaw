@@ -8,8 +8,19 @@ fn import_meta_resolution_prefers_the_selected_registry_backend() {
     std::fs::create_dir_all(&package).unwrap();
     std::fs::write(package.join("bundle.js"), "module.exports = {};").unwrap();
     std::fs::write(package.join("native.node"), []).unwrap();
-    let resolutions =
-        registry_import_meta_resolutions(&dir, &["pkg".to_string(), "node:fs".to_string()]);
+    let path_names = [
+        "path",
+        "node:path",
+        "path/posix",
+        "node:path/posix",
+        "path/win32",
+        "node:path/win32",
+    ];
+    let mut names = vec!["pkg".to_string(), "node:fs".to_string()];
+    names.extend(path_names.iter().map(|name| (*name).to_string()));
+    names.extend(["pathology", "path/other", "@scope/path", "./path", "path?x"]
+        .iter().map(|name| (*name).to_string()));
+    let resolutions = registry_import_meta_resolutions(&dir, &names);
     assert_eq!(
         resolutions.get("pkg"),
         Some(&module_graph::file_url(&package.join("native.node")))
@@ -18,6 +29,46 @@ fn import_meta_resolution_prefers_the_selected_registry_backend() {
         resolutions.get("node:fs").map(String::as_str),
         Some("node:fs")
     );
+    for (name, canonical) in path_names.iter().zip([
+        "node:path",
+        "node:path",
+        "node:path/posix",
+        "node:path/posix",
+        "node:path/win32",
+        "node:path/win32",
+    ]) {
+        assert_eq!(resolutions.get(*name).map(String::as_str), Some(canonical));
+    }
+    assert!(["pathology", "path/other", "@scope/path", "./path", "path?x"]
+        .iter().all(|name| !resolutions.contains_key(*name)));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn path_subpaths_share_the_root_when_win32_loads_first() {
+    let dir = std::env::temp_dir().join(format!("thaw-cli-path-load-order-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(
+        &entry,
+        r#"import win32, { posix as winPosix, win32 as winWin32 } from 'path/win32';
+import nodeWin32, { posix as nodeWinPosix, win32 as nodeWinWin32 } from 'node:path/win32';
+import posix, { posix as posixPosix, win32 as posixWin32 } from 'path/posix';
+import nodePosix, { posix as nodePosixPosix, win32 as nodePosixWin32 } from 'node:path/posix';
+import path, { posix as rootPosix, win32 as rootWin32 } from 'path';
+import nodePath from 'node:path';
+function main(): void {
+  console.log(JSON.stringify([win32 === rootWin32, nodeWin32 === rootWin32, winPosix === rootPosix, nodeWinPosix === rootPosix, winWin32 === rootWin32, nodeWinWin32 === rootWin32]));
+  console.log(JSON.stringify([posix === rootPosix, nodePosix === rootPosix, posixPosix === rootPosix, nodePosixPosix === rootPosix, posixWin32 === rootWin32, nodePosixWin32 === rootWin32, path === rootPosix, nodePath === rootPosix]));
+  console.log(JSON.stringify([rootPosix.join('a', 'b'), rootWin32.join('a', 'b')]));
+}"#,
+    ).unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &dir.join("registry"), &[]).unwrap();
+    let result = Command::new(output).output().unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    assert_eq!(String::from_utf8_lossy(&result.stdout),
+        "[true,true,true,true,true,true]\n[true,true,true,true,true,true,true,true]\n[\"a/b\",\"a\\\\b\"]\n");
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -121,7 +172,8 @@ fn imports_supported_node_builtin_modules() {
                     console.log(os.arch() + ":" + os.platform() + ":" + os.type() + ":" + os.tmpdir());
                     console.log(Boolean(isatty(1)));
                     console.log(String(querystring.stringify({ a: [1, 2], space: "two words" })));
-                    console.log(String(querystring.parse("a=1&a=2&space=two+words")));
+                    // Node: String() of these null-prototype objects throws, so print them as JSON.
+                    console.log(JSON.stringify(querystring.parse("a=1&a=2&space=two+words")));
                     const emitter = new EventEmitter();
                     let emitted: number = 0;
                     emitter.once("value", (value): void => { emitted = Number(value); });
@@ -130,7 +182,7 @@ fn imports_supported_node_builtin_modules() {
                     console.log(emitted);
                     console.log(String(readDynamicValue(pathToFileURL("/tmp/a b"))));
                     console.log(fileURLToPath(pathToFileURL("/tmp/a b")));
-                    console.log(String(urlToHttpOptions(pathToFileURL("/tmp/a b"))));
+                    console.log(JSON.stringify(urlToHttpOptions(pathToFileURL("/tmp/a b"))));
                 }
             "#,
         )
@@ -3264,5 +3316,65 @@ fn mixed_number_boolean_ternaries_stringify_the_selected_jit_value() {
     let result = Command::new(&output).output().unwrap();
     assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
     assert_eq!(String::from_utf8_lossy(&result.stdout), "42\nfalse\nfalse\n42\n");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+
+#[test]
+fn json_host_index_assignment_keeps_valid_graph_and_discards_invalid_graph() {
+    let dir = std::env::temp_dir().join(format!(
+        "thaw-cli-json-index-graph-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let entry = dir.join("main.ts");
+    std::fs::write(&entry, r#"
+function main(): void {
+  loadScript("globalThis.__thaw_index_child = Symbol('index-child'); globalThis.__thaw_index_capture = value => { globalThis.__thaw_index_captured = value; return true; }; globalThis.__thaw_index_matches = () => !!globalThis.__thaw_index_captured && globalThis.__thaw_index_captured.nested === globalThis.__thaw_index_child; globalThis.__thaw_index_refs_total = () => __thaw_value_handle_refs.reduce((sum, refs) => sum + refs, 0);");
+  const child: JsValue = getDynamicValue("__thaw_index_child");
+  const capture: JsValue = getDynamicValue("__thaw_index_capture");
+  const matches: JsValue = getDynamicValue("__thaw_index_matches");
+  const refsTotal: JsValue = getDynamicValue("__thaw_index_refs_total");
+  const values: Json[] = [JSON.parse("null")];
+
+  // A valid write transfers the fresh JSON host into the array. The existing
+  // JsonGraph call bridge must still revive its nested live Symbol identity.
+  values[0] = { nested: child };
+  callDynamicValue(capture, __thaw_json_argument_array(values[0]));
+  if (callDynamicValue(matches, __thaw_json_argument_array()) !== true)
+    throw new Error("valid JSON index write lost nested JsValue identity");
+  const validRefs = Number(callDynamicValue(refsTotal, __thaw_json_argument_array()));
+
+  // A rejected negative index leaves the fresh RHS untransferred; discarding
+  // that JSON host must release its nested graph lease.
+  values[-1] = { nested: child };
+  if (values.length !== 1)
+    throw new Error("negative JSON index unexpectedly extended the array");
+  if (Number(callDynamicValue(refsTotal, __thaw_json_argument_array())) !== validRefs)
+    throw new Error("discarded negative-index JSON host leaked a graph lease");
+
+  // The failed array write still returns its fresh RHS. Its result remains
+  // live when the assignment value is consumed by a subsequent JSONGraph call.
+  const assigned: Json = (values[-1] = { nested: child });
+  if (values.length !== 1)
+    throw new Error("used negative-index assignment unexpectedly extended the array");
+  if (Number(callDynamicValue(refsTotal, __thaw_json_argument_array())) !== validRefs + 1)
+    throw new Error("used assignment result did not retain its nested graph lease");
+  callDynamicValue(capture, __thaw_json_argument_array(assigned));
+  if (callDynamicValue(matches, __thaw_json_argument_array()) !== true)
+    throw new Error("used failed-assignment result lost nested JsValue identity");
+  if (Number(callDynamicValue(refsTotal, __thaw_json_argument_array())) !== validRefs + 1)
+    throw new Error("used failed-assignment result was destroyed before its consumer");
+
+  releaseDynamicValue(child);
+  releaseDynamicValue(refsTotal);
+  releaseDynamicValue(matches);
+  releaseDynamicValue(capture);
+}
+"#).unwrap();
+    let output = dir.join("app");
+    build(&entry, &output, &[], &[], &[], &dir.join("registry"), &[]).unwrap();
+    let result = Command::new(output).output().unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
     let _ = std::fs::remove_dir_all(dir);
 }

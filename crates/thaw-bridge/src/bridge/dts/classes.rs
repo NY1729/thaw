@@ -255,7 +255,7 @@ fn constructor_interface_classes(
         let mut substitution = outer.clone();
         for (index, parameter) in parameters.iter().enumerate() {
             let argument = arguments.get(index).map(|value| value.as_ref())
-                .or_else(|| parameter.default.as_deref())?;
+                .or(parameter.default.as_deref())?;
             let DtsType::Native(value) = resolve_ts_type_with_substitution(
                 argument, &substitution, interfaces, generic_interfaces, &mut Vec::new(),
             ) else { return None };
@@ -623,6 +623,7 @@ fn inherited_class_members(
 /// `TsTypeRef` resolves it via `resolve_interfaces` same as a top-level
 /// one), but never bridgeable as a *class* since nothing here ever
 /// extracted its own methods/constructors.
+#[allow(dead_code)]
 fn extract_class_decls(item: &ModuleItem) -> Vec<(&str, &Class)> {
     match item {
         ModuleItem::Stmt(swc_ecma_ast::Stmt::Decl(decl)) => extract_class_decls_from_decl(decl),
@@ -640,6 +641,7 @@ fn extract_class_decls(item: &ModuleItem) -> Vec<(&str, &Class)> {
     }
 }
 
+#[allow(dead_code)]
 fn extract_class_decls_from_decl(decl: &Decl) -> Vec<(&str, &Class)> {
     match decl {
         Decl::Class(class) => vec![(class.ident.sym.as_str(), &class.class)],
@@ -653,7 +655,7 @@ fn extract_class_decls_from_decl(decl: &Decl) -> Vec<(&str, &Class)> {
     }
 }
 
-fn scoped_class_decls<'a>(module: &'a Module) -> Vec<(String, String, &'a Class)> {
+fn scoped_class_decls(module: &Module) -> Vec<(String, String, &Class)> {
     fn walk<'a>(item: &'a ModuleItem, scope: &str, names: &mut Vec<(String, String, &'a Class)>) {
         if let ModuleItem::ModuleDecl(ModuleDecl::ExportDefaultDecl(export)) = item {
             if let DefaultDecl::Class(class) = &export.decl {
@@ -805,7 +807,7 @@ fn lower_class_params(
                     classify_ts_type(&annotation.type_ann, interfaces, generic_interfaces)
                 })
                 .unwrap_or_else(|| DtsType::Unsupported("missing type annotation".into()));
-            (binding.id.sym.to_string(), ty)
+            (safe_param_name(binding.id.sym.as_ref()), ty)
         })
         .collect()
 }
@@ -1326,7 +1328,7 @@ fn lower_dts_class(
                     let ty = rest.type_ann.as_ref().map(|annotation| {
                         classify_ts_type(rest_element_type(&annotation.type_ann), interfaces, generic_interfaces)
                     }).unwrap_or_else(|| DtsType::Unsupported("missing rest type annotation".into()));
-                    Some((binding.id.sym.to_string(), ty))
+                    Some((safe_param_name(binding.id.sym.as_ref()), ty))
                 }),
                 overloaded: false,
             }),

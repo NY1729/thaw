@@ -1618,7 +1618,7 @@ fn generated_declaration_labels_are_custom_and_keep_parse_fallbacks() {
 
     let origin = Path::new("/logical/package/index.d.ts");
     let source_name = FileName::Custom(
-        format!("{} (unwrapped declaration entry)", origin.display()).into(),
+        format!("{} (unwrapped declaration entry)", origin.display()),
     );
     let source = "import Core, { type Shape } from './core';\nexport class Child extends Core {}";
     let (module, source_map) =
@@ -3039,6 +3039,83 @@ fn optional_dependency_target_matches_complete_architecture_and_libc_suffixes() 
     assert!(!optional_dependency_matches_target("@example/addon-linux-x64-musl", "linux-x64-glibc"));
 }
 
+// The "platform package ships the executable" rule is shape-driven: any package that lists
+// platform-specific optional dependencies qualifies, whatever its name.
+#[test]
+fn optional_dependency_executable_is_selected_for_any_package_with_platform_packages() {
+    let (platform, arch, _) = target_prebuild_components();
+    let node_modules = std::env::temp_dir().join(format!("thaw-optional-exe-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&node_modules);
+    // (main package, platform package, declared `bin` of the platform package, executable path)
+    let cases = [
+        ("esbuild", format!("@esbuild/{platform}-{arch}"), Some(serde_json::json!("bin/esbuild")), "bin/esbuild"),
+        ("@acme/tool", format!("@acme/tool-{platform}-{arch}"), Some(serde_json::json!({ "acme-tool": "dist/acme-tool" })), "dist/acme-tool"),
+        // No declared `bin`: the conventional `bin/<package leaf>` is used.
+        ("plain", format!("plain-{platform}-{arch}"), None, "bin/plain"),
+    ];
+    for (main, platform_package, bin, executable) in cases {
+        let root = node_modules.join(&platform_package);
+        fs::create_dir_all(root.join(executable).parent().unwrap()).unwrap();
+        fs::write(root.join(executable), b"#!/bin/sh\n").unwrap();
+        let mut manifest = serde_json::json!({ "name": platform_package });
+        if let Some(bin) = bin { manifest["bin"] = bin; }
+        fs::write(root.join("package.json"), manifest.to_string()).unwrap();
+        let parent = serde_json::json!({ "name": main, "optionalDependencies": { platform_package.clone(): "1.0.0" } });
+        let selected = select_optional_dependency_executable(&node_modules, &parent).unwrap();
+        assert_eq!(selected, Some(root.join(executable)), "package `{main}`");
+    }
+    // A package without platform-specific optional dependencies has no platform executable.
+    let none = serde_json::json!({ "name": "esbuild" });
+    assert_eq!(select_optional_dependency_executable(&node_modules, &none).unwrap(), None);
+    let _ = fs::remove_dir_all(node_modules);
+}
+
+#[test]
+fn package_runtime_env_merges_curated_defaults_with_the_packages_own_declaration() {
+    let curated = package_runtime_env(&serde_json::json!({ "name": "@prisma/client" }));
+    assert_eq!(curated.get("PRISMA_QUERY_ENGINE_LIBRARY").map(String::as_str), Some("$self"));
+    let declared = package_runtime_env(&serde_json::json!({
+        "name": "some-native-pkg",
+        "thaw": { "runtimeEnv": { "SOME_LIBRARY": "$self", "IGNORED": 3 } }
+    }));
+    assert_eq!(declared.len(), 1);
+    assert_eq!(declared.get("SOME_LIBRARY").map(String::as_str), Some("$self"));
+    // The package's own declaration wins over the curated table.
+    let overridden = package_runtime_env(&serde_json::json!({
+        "name": "@prisma/client",
+        "thaw": { "runtimeEnv": { "PRISMA_QUERY_ENGINE_LIBRARY": "/custom" } }
+    }));
+    assert_eq!(overridden.get("PRISMA_QUERY_ENGINE_LIBRARY").map(String::as_str), Some("/custom"));
+    assert!(package_runtime_env(&serde_json::json!({ "name": "left-pad" })).is_empty());
+}
+
+#[test]
+fn resolved_package_applies_runtime_env_defaults_without_overriding_the_process_environment() {
+    use std::ffi::CString;
+    let registry = temp_registry("runtime_env_defaults");
+    let package = registry.join("env-pkg");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(package.join("package.d.ts"), "export declare function f(): void;\n").unwrap();
+    fs::write(package.join("bundle.js"), "globalThis.__env_pkg_loaded = true;\n").unwrap();
+    fs::write(
+        package.join("runtime-env.json"),
+        r#"{ "LIBRARY_PATH_VAR": "$self", "NESTED_VAR": "$self/lib", "USER_SET_VAR": "$self" }"#,
+    )
+    .unwrap();
+    let resolved = resolve(&registry, "env-pkg").unwrap();
+    assert_eq!(resolved.runtime_env.len(), 3);
+    let source = resolved.bundle_js.unwrap();
+    assert!(source.ends_with("globalThis.__env_pkg_loaded = true;\n"));
+    let setup = "globalThis.__saved_process = globalThis.process; globalThis.process = { env: { USER_SET_VAR: 'mine' }, execPath: '/opt/app' };";
+    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(setup).unwrap().as_ptr()), 1);
+    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(source).unwrap().as_ptr()), 1);
+    assert_eq!(thaw_quickjs::eval_json("process.env.LIBRARY_PATH_VAR"), Ok(Some("\"/opt/app\"".into())));
+    assert_eq!(thaw_quickjs::eval_json("process.env.NESTED_VAR"), Ok(Some("\"/opt/app/lib\"".into())));
+    assert_eq!(thaw_quickjs::eval_json("process.env.USER_SET_VAR"), Ok(Some("\"mine\"".into())));
+    assert_eq!(thaw_quickjs::thaw_js_load(CString::new("globalThis.process = globalThis.__saved_process;").unwrap().as_ptr()), 1);
+    let _ = fs::remove_dir_all(registry);
+}
+
 #[test]
 fn glibc_shared_library_collection_skips_musl_optional_dependency() {
     let (platform, arch, libc) = target_prebuild_components();
@@ -3529,7 +3606,10 @@ fn parser_identifies_commonjs_export_assignments() {
 fn rewrites_literal_dynamic_import_to_an_async_bundle_require() {
     let rewritten =
         rewrite_esm_to_commonjs("function load() { return import('./feature.js'); }").unwrap();
-    assert!(rewritten.contains("requireAsync(String('./feature.js'))"));
+    // The specifier is stringified inside `requireAsync` itself (a failing
+    // `toString` becomes a rejected promise), so the rewrite no longer wraps
+    // the argument in `String(...)`.
+    assert!(rewritten.contains("requireAsync('./feature.js')"));
     assert!(!rewritten.contains("import("));
 }
 
@@ -4011,6 +4091,12 @@ fn builtin_declarations_cover_typed_buffer_crypto_and_fs_overloads() {
     let test_reporters = resolve_builtin("node:test/reporters").unwrap().dts_source;
     assert!(test_reporters.contains("class Reporter"));
     assert!(test_reporters.contains("dot(source: Json): Reporter"));
+
+    for specifier in ["node:path", "node:path/posix", "node:path/win32"] {
+        let declarations = resolve_builtin(specifier).unwrap().dts_source;
+        assert!(declarations.contains("export declare const posix: any;"), "{specifier}: {declarations}");
+        assert!(declarations.contains("export declare const win32: any;"), "{specifier}: {declarations}");
+    }
 }
 
 /// `resolve_bare_require` used to resolve every bare specifier against
@@ -4208,7 +4294,10 @@ fn installed_declarations_resolve_multihop_function_aliases_and_explicit_module_
     add_installed(&registry, &scratch.join("node_modules"), "alias-kit").unwrap();
     let declarations = resolve(&registry, "alias-kit").unwrap().dts_source;
     assert!(declarations.contains("declare function api(value: string): string"), "{declarations}");
-    assert!(declarations.contains("function original(value: number): number"), "{declarations}");
+    // `null` is not a legal function name, so the declaration carries a
+    // private public-alias name and is exported as `null` below.
+    assert!(declarations.contains("function __thaw_public_6e756c6c_"), "{declarations}");
+    assert!(declarations.contains("(value: number): number;"), "{declarations}");
     assert!(declarations.contains("export { __thaw_public_6e756c6c_"), "{declarations}");
     assert!(declarations.contains(" as null };"), "{declarations}");
     assert!(!declarations.contains("function null("), "{declarations}");
@@ -4307,9 +4396,13 @@ fn callable_const_alias_extracts_only_its_own_declarator() {
     add_installed(&registry, &scratch.join("node_modules"), "multidecl-kit").unwrap();
     let declarations = resolve(&registry, "multidecl-kit").unwrap().dts_source;
     assert!(declarations.contains("const c: () => string;"), "{declarations}");
-    assert!(declarations.contains("const ic: StringCall;"), "{declarations}");
+    // `StringCall` is private to `impl.d.ts`, so the declarator's reference is
+    // spelled through that file's support namespace.
+    assert!(declarations.contains("const ic: __thaw_support_"), "{declarations}");
+    assert!(declarations.contains(".StringCall;"), "{declarations}");
     assert!(declarations.contains("let lc: () => string;"), "{declarations}");
-    assert!(declarations.contains("var vc: StringCall;"), "{declarations}");
+    assert!(declarations.contains("var vc: __thaw_support_"), "{declarations}");
+    assert!(!declarations.contains("NumberCall"), "{declarations}");
     assert!(declarations.contains("let __thaw_public_766f6964_"), "{declarations}");
     assert!(declarations.contains(" as void };"), "{declarations}");
     assert!(declarations.contains("var __thaw_public_6e756c6c_"), "{declarations}");
@@ -4863,10 +4956,14 @@ fn retained_entry_and_appended_types_rewrite_after_import_removal() {
         "interface LeafId { value: number; }\nexport interface LeafModel { id: LeafId; }\n",
     ).unwrap();
     let output = dts_source_with_reexported_functions(&entry, source).unwrap();
-    assert!(output.contains("class EntryModel extends __thaw_support_"), "{output}");
-    assert!(output.contains(".Base { id: __thaw_support_"), "{output}");
+    // The removed default import is materialized under its local binding (as
+    // in the default-import-extends and named-class-alias tests), so only the
+    // two private id types move to support namespaces.
+    assert!(output.contains("class EntryModel extends Base { id: __thaw_support_"), "{output}");
+    assert!(output.contains("declare class Base { ready(): boolean; }"), "{output}");
+    assert!(output.contains("export type { Base };"), "{output}");
     assert!(output.contains("interface LeafModel { id: __thaw_support_"), "{output}");
-    assert_eq!(output.matches("type __thaw_private_support_marker__ = never").count(), 3, "{output}");
+    assert_eq!(output.matches("type __thaw_private_support_marker__ = never").count(), 2, "{output}");
     assert!(thaw_parser::parse_declarations(&output).is_ok(), "{output}");
     let _ = fs::remove_dir_all(dir);
 }

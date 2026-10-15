@@ -93,6 +93,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 | "__thaw_bytes_index_of"
                 | "__thaw_bytes_byte_length"
                 | "__thaw_bytes_alloc"
+                | "__thaw_bytes_alloc_fill"
                 | "__thaw_bytes_set_from_string"
         );
         if !typed_array_call && !generic_array_call {
@@ -354,6 +355,27 @@ impl<'ctx> HirCompiler<'ctx> {
                         self.module.get_function("thaw_bytes_alloc").unwrap(),
                         &[size.into()],
                         "bytes_alloc",
+                    )
+                    .map_err(|error| error.to_string())?
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or("Buffer.alloc returned no value".to_string())?
+                    .into_pointer_value();
+                return Ok(self.compile_array_wrap(result)?.into());
+            }
+            "__thaw_bytes_alloc_fill" => {
+                let [size, pattern] = args else {
+                    return Err("Buffer.alloc with a fill expects two operands".into());
+                };
+                let size = self.compile_expr(size)?;
+                let pattern = self.compile_expr(pattern)?.into_pointer_value();
+                let pattern = self.compile_array_data(pattern)?;
+                let result = self
+                    .builder
+                    .build_call(
+                        self.module.get_function("thaw_bytes_alloc_fill").unwrap(),
+                        &[size.into(), pattern.into()],
+                        "bytes_alloc_fill",
                     )
                     .map_err(|error| error.to_string())?
                     .try_as_basic_value()

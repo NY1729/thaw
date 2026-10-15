@@ -14,7 +14,6 @@ impl Drop for InvocationArenaReset {
         // invocation and resume a pointer into since-reused memory.
         purge_pending_async_state();
         thaw_arena::thaw_arena_reset();
-        prune_object_states();
     }
 }
 

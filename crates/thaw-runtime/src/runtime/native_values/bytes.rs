@@ -62,7 +62,7 @@ fn decode_string(text: &[u8], encoding: &str) -> Vec<u8> {
     match encoding {
         "hex" => {
             let mut bytes = Vec::with_capacity(text.len() / 2);
-            for pair in text.chunks_exact(2) {
+            for pair in text.as_chunks::<2>().0 {
                 let (Some(high), Some(low)) = ((pair[0] as char).to_digit(16), (pair[1] as char).to_digit(16)) else {
                     break;
                 };
@@ -415,7 +415,7 @@ pub unsafe extern "C" fn thaw_bytes_read(
         return 0.0;
     }
     let offset = offset as usize;
-    if !offset.checked_add(width).is_some_and(|end| end <= bytes.len()) {
+    if offset.checked_add(width).is_none_or(|end| end > bytes.len()) {
         return 0.0;
     }
     let mut le_bytes = vec![0u8; width];
@@ -500,7 +500,7 @@ pub unsafe extern "C" fn thaw_bytes_read_i64(buf: *const u8, offset: f64, le: f6
         return 0;
     }
     let offset = offset as usize;
-    if !offset.checked_add(8).is_some_and(|end| end <= bytes.len()) {
+    if offset.checked_add(8).is_none_or(|end| end > bytes.len()) {
         return 0;
     }
     let mut le_bytes = [0u8; 8];
@@ -755,4 +755,27 @@ pub extern "C" fn thaw_bytes_alloc(size: f64) -> *mut u8 {
         0
     };
     unsafe { write_byte_array(&vec![0_u8; size]) }
+}
+
+#[no_mangle]
+/// `Buffer.alloc(size, fill)` -- `size` bytes made of `pattern` repeated (a
+/// truncated last repetition is kept). An empty or unreadable pattern leaves
+/// the buffer zero-filled, as `Buffer.alloc(size, "")` does.
+///
+/// # Safety
+///
+/// `pattern` must be null or point to a Thaw byte array.
+pub unsafe extern "C" fn thaw_bytes_alloc_fill(size: f64, pattern: *const u8) -> *mut u8 {
+    let size = if size.is_finite() && size > 0.0 {
+        size as usize
+    } else {
+        0
+    };
+    let pattern = unsafe { read_byte_array(pattern) }.unwrap_or_default();
+    let bytes = if pattern.is_empty() {
+        vec![0_u8; size]
+    } else {
+        pattern.iter().copied().cycle().take(size).collect()
+    };
+    unsafe { write_byte_array(&bytes) }
 }

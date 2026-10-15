@@ -137,7 +137,7 @@ fn add_builtin_module(
         return;
     };
     visited.push(key.clone());
-    let source_name = thaw_parser::common::FileName::Custom(format!("node:{name} (generated builtin module)").into());
+    let source_name = thaw_parser::common::FileName::Custom(format!("node:{name} (generated builtin module)"));
     let mut requires = Vec::new();
     for specifier in analyze_module_named(source, &source_name).specs {
         let (resolution, suffix) = split_module_suffix(&specifier);
@@ -367,6 +367,16 @@ fn bundle_commonjs_package(
     )
 }
 
+/// The module text of `bytes`, or `None` when the file is a binary asset
+/// (invalid UTF-8, or NUL bytes in its first 8 KiB -- text modules have none).
+fn module_source_text(bytes: Vec<u8>) -> Option<String> {
+    let head = &bytes[..bytes.len().min(8192)];
+    if head.contains(&0) {
+        return None;
+    }
+    String::from_utf8(bytes).ok()
+}
+
 fn bundle_commonjs_package_cached(
     node_modules_dir: &Path,
     root_package: &str,
@@ -404,8 +414,14 @@ fn bundle_commonjs_package_cached(
         let (source, analysis, source_name) = if let Some(cached) = source_cache.modules.get(&source_cache_key) {
             cached.clone()
         } else {
-            let source = fs::read_to_string(&abs_path)
+            let bytes = fs::read(&abs_path)
                 .map_err(|e| format!("failed to read `{key}` while bundling: {e}"))?;
+            // A require/exports target that is not text (a shared library, an
+            // image, any binary asset a package ships) is not a module: leave it
+            // out of the bundle like `.node`/`.wasm`, so it is reached by path.
+            let Some(source) = module_source_text(bytes) else {
+                continue;
+            };
             let had_shebang = source.starts_with("#!") && source.contains('\n');
             let is_json = abs_path.extension().is_some_and(|ext| ext == "json");
             let source = source
@@ -420,9 +436,9 @@ fn bundle_commonjs_package_cached(
                 source
             };
             let source_name = if is_json {
-                thaw_parser::common::FileName::Custom(format!("{} (generated JSON module)", abs_path.display()).into())
+                thaw_parser::common::FileName::Custom(format!("{} (generated JSON module)", abs_path.display()))
             } else if had_shebang {
-                thaw_parser::common::FileName::Custom(format!("{} (after shebang removal)", abs_path.display()).into())
+                thaw_parser::common::FileName::Custom(format!("{} (after shebang removal)", abs_path.display()))
             } else {
                 thaw_parser::common::FileName::Real(abs_path.clone())
             };
@@ -631,14 +647,13 @@ fn bundle_commonjs_package_cached(
                     && !spec.starts_with("./")
                     && !spec.starts_with("../")
             })
-            .cloned()
         {
-            let (resolution_spec, suffix) = split_module_suffix(&spec);
+            let (resolution_spec, suffix) = split_module_suffix(spec);
             for import_condition in [false, true] {
                 if !(if import_condition {
-                    analysis.import_condition_specs.contains(&spec)
+                    analysis.import_condition_specs.contains(spec)
                 } else {
-                    analysis.require_condition_specs.contains(&spec)
+                    analysis.require_condition_specs.contains(spec)
                 }) {
                     continue;
                 }
