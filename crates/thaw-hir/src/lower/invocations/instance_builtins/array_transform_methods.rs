@@ -54,6 +54,15 @@ impl<'a> FnLowerer<'a> {
         let mut flattened = false;
         for _ in 0..depth {
             let HirType::Array(element) = &current_type else { unreachable!() };
+            if let HirType::Optional(payload) = element.as_ref() {
+                if let HirType::Array(inner) = payload.as_ref() {
+                    let inner = inner.as_ref().clone();
+                    result = self.lower_array_flat_optional(result, current_type, inner.clone())?;
+                    current_type = HirType::Array(Box::new(HirType::Optional(Box::new(inner))));
+                    flattened = true;
+                    continue;
+                }
+            }
             let HirType::Array(inner) = element.as_ref() else { break };
             let inner = inner.as_ref().clone();
             result = self.lower_array_flat_one(result, current_type, inner.clone())?;
@@ -1118,6 +1127,20 @@ impl<'a> FnLowerer<'a> {
                         let HirType::Array(element) = &current_type else {
                             unreachable!()
                         };
+                        if let HirType::Optional(payload) = element.as_ref() {
+                            if let HirType::Array(inner) = payload.as_ref() {
+                                let inner = inner.as_ref().clone();
+                                result = self.lower_array_flat_optional(
+                                    result,
+                                    current_type,
+                                    inner.clone(),
+                                )?;
+                                current_type =
+                                    HirType::Array(Box::new(HirType::Optional(Box::new(inner))));
+                                flattened = true;
+                                continue;
+                            }
+                        }
                         let HirType::Array(inner) = element.as_ref() else {
                             break;
                         };

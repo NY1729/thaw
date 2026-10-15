@@ -1515,12 +1515,53 @@ fn lambda_trace_header_reaches_warm_quickjs_string_and_json_handlers() {
 }
 
 #[test]
+fn lambda_runtime_gives_up_instead_of_spinning_when_the_runtime_api_is_unreachable() {
+    let dir = std::env::temp_dir().join(format!("thaw-api-down-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let entry = dir.join("handler.ts");
+    std::fs::write(&entry, "function handler(event: string): string { return event; }").unwrap();
+    let output = dir.join("bootstrap");
+    build(&entry, &output, &[], &[], &[], &dir.join("registry"), &[]).unwrap();
+    // A port nothing listens on: bind, remember the address, close.
+    let address = {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.local_addr().unwrap().to_string()
+    };
+    let started = std::time::Instant::now();
+    let mut child = Command::new(&output)
+        .env("AWS_LAMBDA_RUNTIME_API", address)
+        .stderr(std::process::Stdio::piped())
+        .spawn().unwrap();
+    let mut stderr = child.stderr.take().unwrap();
+    let reader = std::thread::spawn(move || {
+        let mut text = String::new();
+        let _ = stderr.read_to_string(&mut text);
+        text
+    });
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if started.elapsed() > Duration::from_secs(60) {
+            let _ = child.kill();
+            panic!("the runtime kept retrying an unreachable Runtime API for 60 s");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let log = reader.join().unwrap();
+    assert!(!status.success(), "exit status {status:?}");
+    assert!(log.contains("giving up after"), "{log}");
+    assert!(log.lines().count() < 100, "the failure log must stay bounded: {} lines", log.lines().count());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn lambda_trace_sync_failure_posts_an_error_before_reentering_handler() {
     let dir = std::env::temp_dir().join(format!("thaw-trace-sync-error-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let entry = dir.join("handler.ts");
     std::fs::write(&entry, r#"function handler(event: string): string {
-        loadScript("if (!globalThis.traceLocked) { Object.defineProperty(process.env, '_X_AMZN_TRACE_ID', { set() { delete process.env._X_AMZN_TRACE_ID; throw new Error('blocked'); }, configurable: true }); globalThis.traceLocked = true; }");
+        loadScript("if (!globalThis.traceLocked) { const original = process.env; process.env = new Proxy({}, { set() { process.env = original; throw new Error('blocked'); } }); globalThis.traceLocked = true; }");
         return event;
     }"#).unwrap();
     let output = dir.join("bootstrap");

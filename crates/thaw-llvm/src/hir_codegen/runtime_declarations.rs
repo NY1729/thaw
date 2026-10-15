@@ -957,6 +957,11 @@ impl<'ctx> HirCompiler<'ctx> {
             Some(Linkage::External),
         );
         self.module.add_function(
+            "thaw_array_presence_rest",
+            array_presence_slice_type,
+            Some(Linkage::External),
+        );
+        self.module.add_function(
             "thaw_array_to_reversed",
             array_reverse_type,
             Some(Linkage::External),

@@ -910,6 +910,42 @@ pub unsafe extern "C" fn thaw_array_presence_slice(
 }
 
 #[no_mangle]
+/// Returns the presence mask of a destructuring-rest copy: every entry is an
+/// own element of the new array, so a hole in the source becomes an explicit
+/// `undefined` (state 2) instead of staying a hole.
+///
+/// # Safety
+/// `presence` must be null for a dense array or point to a readable Thaw
+/// presence mask containing a `u64` length followed by one byte per entry.
+pub unsafe extern "C" fn thaw_array_presence_rest(
+    presence: *const u8,
+    array_length: usize,
+    start: f64,
+    end: f64,
+) -> *mut u8 {
+    if presence.is_null() {
+        return std::ptr::null_mut();
+    }
+    let start = relative_array_index(start, array_length);
+    let end = relative_array_index(end, array_length);
+    let count = end.saturating_sub(start);
+    let output = thaw_arena::thaw_arena_alloc(8 + count, 1);
+    if output.is_null() {
+        return std::ptr::null_mut();
+    }
+    let mask_length = unsafe { presence.cast::<u64>().read() as usize };
+    unsafe {
+        output.cast::<u64>().write(count as u64);
+        for index in 0..count {
+            let source = start + index;
+            let state = if source < mask_length { presence.add(8 + source).read() } else { 1 };
+            output.add(8 + index).write(if state == 0 { 2 } else { state });
+        }
+    }
+    output
+}
+
+#[no_mangle]
 /// Returns an arena-owned shallow concatenation of two native arrays.
 ///
 /// # Safety

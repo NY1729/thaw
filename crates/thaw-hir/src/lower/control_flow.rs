@@ -713,20 +713,93 @@ fn capture_finally_throw(&mut self, value: HirExpr) -> Result<(Vec<HirStmt>, Hir
 }
 }
 
+/// `for (...; ...; update) { try { continue; } catch ... }`: the loop epilogue
+/// (update, copy-back, do-while guard) is appended to the HIR body and is also
+/// injected before every `continue`, which puts it *inside* a `try` whose
+/// `catch` then wrongly handles an exception the epilogue throws. When a
+/// `continue` targeting this loop sits inside a `try`, the body is wrapped in a
+/// run-once inner loop instead: such a `continue` becomes a break out of that
+/// inner loop (so the `try` has already been left) and the epilogue runs after
+/// it. Every other break/continue that leaves the original loop is shifted one
+/// level out.
+fn lift_continue_out_of_try(body: Vec<HirStmt>) -> Vec<HirStmt> {
+    if !has_target_continue_in_try(&body, 0, false) {
+        return body;
+    }
+    let mut once = rewrite_for_once_loop(body, 0);
+    once.push(HirStmt::Break);
+    vec![HirStmt::While(HirExpr::Lit(HirLit::Bool(true)), once)]
+}
+
+fn has_target_continue_in_try(stmts: &[HirStmt], nested_depth: usize, in_try: bool) -> bool {
+    stmts.iter().any(|stmt| match stmt {
+        HirStmt::Continue => in_try && nested_depth == 0,
+        HirStmt::ContinueDepth(depth) => in_try && *depth == nested_depth,
+        HirStmt::If(_, then_body, else_body) => {
+            has_target_continue_in_try(then_body, nested_depth, in_try)
+                || has_target_continue_in_try(else_body, nested_depth, in_try)
+        }
+        HirStmt::Finally(body, _) => has_target_continue_in_try(body, nested_depth, in_try),
+        // The `using` scope's own `Try` already runs its disposal before every exit
+        // (`inject_finally_before_exits`); only a user-written `try` needs lifting.
+        HirStmt::Try(body, catch_name, catch_body, _) => {
+            let user_try = !catch_name.starts_with("__thaw_using_finally");
+            has_target_continue_in_try(body, nested_depth, in_try || user_try)
+                || has_target_continue_in_try(catch_body, nested_depth, in_try)
+        }
+        HirStmt::While(_, body) => has_target_continue_in_try(body, nested_depth + 1, in_try),
+        _ => false,
+    })
+}
+
+fn rewrite_for_once_loop(stmts: Vec<HirStmt>, nested_depth: usize) -> Vec<HirStmt> {
+    stmts
+        .into_iter()
+        .map(|stmt| match stmt {
+            // The run-once loop is `nested_depth` loops out from here.
+            HirStmt::Continue if nested_depth == 0 => HirStmt::Break,
+            HirStmt::ContinueDepth(depth) if depth == nested_depth => HirStmt::BreakDepth(depth),
+            HirStmt::Break if nested_depth == 0 => HirStmt::BreakDepth(1),
+            HirStmt::BreakDepth(depth) if depth >= nested_depth => HirStmt::BreakDepth(depth + 1),
+            HirStmt::ContinueDepth(depth) if depth > nested_depth => {
+                HirStmt::ContinueDepth(depth + 1)
+            }
+            HirStmt::If(cond, then_body, else_body) => HirStmt::If(
+                cond,
+                rewrite_for_once_loop(then_body, nested_depth),
+                rewrite_for_once_loop(else_body, nested_depth),
+            ),
+            HirStmt::Finally(body, suspended) => {
+                HirStmt::Finally(rewrite_for_once_loop(body, nested_depth), suspended)
+            }
+            HirStmt::Try(body, catch_name, catch_body, hidden) => HirStmt::Try(
+                rewrite_for_once_loop(body, nested_depth),
+                catch_name,
+                rewrite_for_once_loop(catch_body, nested_depth),
+                hidden,
+            ),
+            HirStmt::While(cond, body) => {
+                HirStmt::While(cond, rewrite_for_once_loop(body, nested_depth + 1))
+            }
+            other => other,
+        })
+        .collect()
+}
+
 /// A classic `for (...; ...; update)` is represented as a HIR `while` with
 /// `update` appended to its body. A source-level `continue` must execute that
 /// update before beginning the next condition check. Recurse through branches
 /// belonging to this loop, but stop at nested loops whose `continue`s target
 /// the nested loop instead.
 fn inject_for_update_before_continue(stmts: Vec<HirStmt>, update: &HirExpr) -> Vec<HirStmt> {
-    inject_before_target_continue(stmts, 0, &|_| vec![HirStmt::Expr(update.clone())])
+    inject_before_target_continue(lift_continue_out_of_try(stmts), 0, &|_| vec![HirStmt::Expr(update.clone())])
 }
 
 fn inject_for_advance_before_continue(
     stmts: Vec<HirStmt>,
     advance: &[HirStmt],
 ) -> Vec<HirStmt> {
-    inject_before_target_continue(stmts, 0, &|_| advance.to_vec())
+    inject_before_target_continue(lift_continue_out_of_try(stmts), 0, &|_| advance.to_vec())
 }
 
 fn inject_before_target_continue(
@@ -777,7 +850,7 @@ fn inject_before_target_continue(
 /// loop with a condition guard at the tail. Source-level `continue` also has
 /// to execute that guard before starting the next iteration.
 fn inject_do_while_guard_before_continue(stmts: Vec<HirStmt>, condition: &HirExpr) -> Vec<HirStmt> {
-    inject_before_target_continue(stmts, 0, &|depth| vec![HirStmt::If(
+    inject_before_target_continue(lift_continue_out_of_try(stmts), 0, &|depth| vec![HirStmt::If(
         condition.clone(),
         Vec::new(),
         vec![HirStmt::BreakDepth(depth)],

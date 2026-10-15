@@ -1120,7 +1120,7 @@ impl<'a> FnLowerer<'a> {
                         }
                         return Ok(ty);
                     }
-                    "__thaw_array_slice" => {
+                    "__thaw_array_slice" | "__thaw_array_rest" => {
                         if args.len() != 3 {
                             return Err("array slice expects three operands".into());
                         }

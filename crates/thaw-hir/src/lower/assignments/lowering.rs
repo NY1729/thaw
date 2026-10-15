@@ -1694,7 +1694,7 @@ impl<'a> FnLowerer<'a> {
                         let Some(element_pattern) = element_pattern else { continue };
                         if let Pat::Rest(rest) = element_pattern {
                             let rest_value = HirExpr::Call(
-                                Box::new(HirExpr::Var("__thaw_array_slice".into())),
+                                Box::new(HirExpr::Var("__thaw_array_rest".into())),
                                 vec![
                                     value.clone(),
                                     HirExpr::Lit(HirLit::F64(index as f64)),

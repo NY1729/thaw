@@ -2932,7 +2932,20 @@
       },
       defineProperty(target, key, descriptor) {
         if (typeof key === 'symbol') return Reflect.defineProperty(target, key, descriptor);
-        if ('value' in descriptor) hostSet(key, String(descriptor.value));
+        // Node's process.env only accepts a configurable, writable, enumerable data descriptor.
+        const reject = message => {
+          const error = new TypeError(message);
+          error.code = 'ERR_INVALID_OBJECT_DEFINE_PROPERTY';
+          throw error;
+        };
+        if ('get' in descriptor || 'set' in descriptor) {
+          reject("'process.env' does not accept an accessor(getter/setter) descriptor");
+        }
+        if (descriptor.configurable !== true || descriptor.writable !== true
+            || descriptor.enumerable !== true || !('value' in descriptor)) {
+          reject("'process.env' only accepts a configurable, writable, and enumerable data descriptor");
+        }
+        hostSet(key, String(descriptor.value));
         return true;
       },
       deleteProperty(target, key) {

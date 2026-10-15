@@ -1056,7 +1056,7 @@ fn http2_h2c_sessions_exchange_real_frames_over_tcp() {
     let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
     assert_eq!(
         result,
-        r#"[true,true,"200","text/plain","/demo",20000,"hello thaw","12345678",true,false,12,0,"symbol"]"#
+        r#"[true,true,200,"text/plain","/demo",20000,"hello thaw","12345678",true,false,12,0,"symbol"]"#
     );
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
@@ -1095,7 +1095,7 @@ fn http2_stream_terminal_paths_drain_queue_and_suppress_late_frames() {
           paused.on('end', function() { pausedEvents.push('end'); });
           paused.on('close', function() { pausedEvents.push('close'); });
           session._frame(0, 1, paused.id, Buffer.from('body'));
-          var beforeResume = [session._streams.has(paused.id), paused.closed, !!paused.readableEnded, paused._queuedData.length, pausedEvents.length];
+          var beforeResume = [session._streams.has(paused.id), paused.closed, !!paused.readableEnded, paused._chunks.length, pausedEvents.length];
           paused.resume();
           var closeOnData = 0, callbackResults = [], finishes = 0;
           session._send = function(value) { frames.push(Buffer.from(value)); if (value[3] === 0 && value[8] === closeOnData) { var active = session._streams.get(closeOnData); if (active) active.close(); } return true; };
@@ -1242,7 +1242,7 @@ fn http2_flow_control_resumes_large_bidirectional_bodies() {
     let arguments = CString::new("[]").unwrap();
     let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
     let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
-    assert_eq!(result, r#"[false,true,"201","100000",120000,122,122]"#);
+    assert_eq!(result, r#"[false,true,201,"100000",120000,122,122]"#);
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
 }
@@ -1708,7 +1708,7 @@ fn http2_tls_sessions_negotiate_h2_with_alpn() {
     let arguments = CString::new("[]").unwrap();
     let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
     let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
-    assert_eq!(result, r#"[true,true,"h2","h2","200","encrypted"]"#);
+    assert_eq!(result, r#"[true,true,"h2","h2",200,"encrypted"]"#);
     peer.join().unwrap();
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
@@ -3094,6 +3094,7 @@ module.exports = function() {
   safeDestroy(natural);
   var upload = new http2.ServerHttp2Stream(natural, 1);
   natural._streams.set(1, upload);
+  upload.resume();
   natural.close(function(error) { if (!error) naturalDone++; });
   natural.close(function(error) { if (!error) naturalDone++; });
   check(!natural.destroyed && naturalWire.filter(function(value) { return value[3] === 7; }).length === 1, 'close did not wait for the active stream or repeated close sent another GOAWAY');
