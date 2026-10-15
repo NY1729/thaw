@@ -3674,6 +3674,77 @@ fn net_accepted_socket_keeps_write_half_only_when_requested() {
     }
 }
 
+/// Runs `body` (a CommonJS module exporting `function(port)`) against a Rust TCP peer; returns (script result, peer result).
+fn run_net_client_against_peer<T: Send + 'static>(name: &str, body: &str, peer: impl FnOnce(std::net::TcpStream) -> T + Send + 'static) -> (String, T) {
+    use std::ffi::{CStr, CString};
+    use std::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let handle = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        stream.set_read_timeout(Some(std::time::Duration::from_secs(3))).unwrap();
+        peer(stream)
+    });
+    let dir = temp_registry(name);
+    fs::write(dir.join("index.js"), body).unwrap();
+    let modules = temp_registry(&format!("{name}_modules"));
+    let (bundle, _, _, _) = bundle_commonjs_package(&modules, "pkg", &dir, "index.js").unwrap();
+    let script = format!("globalThis.module = {{ exports: {{}} }}; globalThis.exports = globalThis.module.exports; {bundle} globalThis.exerciseClient = module.exports;");
+    assert_eq!(thaw_quickjs::thaw_js_load(CString::new(script).unwrap().as_ptr()), 1);
+    let result = thaw_quickjs::thaw_js_call(CString::new("exerciseClient").unwrap().as_ptr(), CString::new(format!("[{port}]")).unwrap().as_ptr());
+    let result = unsafe { CStr::from_ptr(result) }.to_string_lossy().into_owned();
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&modules);
+    (result, handle.join().unwrap())
+}
+
+#[test]
+fn net_client_socket_keeps_write_half_when_allow_half_open() {
+    use std::io::{Read, Write};
+    use std::net::Shutdown;
+
+    for allow_half_open in [true, false] {
+        let body = format!(
+            r#"var net = require('node:net'); module.exports = function(port) {{ return new Promise(function(resolve) {{
+  var socket = net.connect({{ port: port, host: '127.0.0.1', allowHalfOpen: {allow_half_open} }}), events = [];
+  socket.on('data', function() {{}}); socket.on('error', function() {{}});
+  socket.on('end', function() {{ events.push('end:' + socket.writable); if ({allow_half_open}) setTimeout(function() {{ socket.end('late'); }}, 20); }});
+  socket.on('close', function() {{ events.push('close'); resolve(events); }});
+}}); }};"#
+        );
+        let (result, received) = run_net_client_against_peer("net_client_half_open", &body, |mut stream| {
+            stream.write_all(b"hi").unwrap();
+            stream.shutdown(Shutdown::Write).unwrap();
+            let mut late = String::new();
+            let _ = stream.read_to_string(&mut late);
+            late
+        });
+        assert_eq!(result, if allow_half_open { r#"["end:true","close"]"# } else { r#"["end:false","close"]"# });
+        assert_eq!(received, if allow_half_open { "late" } else { "" });
+    }
+}
+
+#[test]
+fn net_socket_reset_and_destroy_sends_rst() {
+    use std::io::Read;
+
+    let (result, error) = run_net_client_against_peer(
+        "net_reset_and_destroy",
+        r#"var net = require('node:net'); module.exports = function(port) { return new Promise(function(resolve) {
+  var socket = net.connect({ port: port, host: '127.0.0.1' }), events = [];
+  socket.on('error', function() {}); socket.on('close', function() { events.push('close'); var again = new net.Socket(); again.on('error', function(e) { events.push(e.code); resolve(events); }); again.resetAndDestroy(); });
+  socket.on('connect', function() { events.push(socket.resetAndDestroy() === socket); });
+}); };"#,
+        |mut stream| {
+            let mut buffer = [0u8; 8];
+            stream.read(&mut buffer).err().map(|error| error.kind())
+        },
+    );
+    assert_eq!(result, r#"[true,"close","ERR_SOCKET_CLOSED"]"#);
+    assert_eq!(error, Some(std::io::ErrorKind::ConnectionReset));
+}
+
 #[test]
 fn http_server_finishes_buffered_pipeline_after_peer_half_close() {
     use std::ffi::{CStr, CString};

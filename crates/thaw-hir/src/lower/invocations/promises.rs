@@ -508,6 +508,64 @@ impl<'a> FnLowerer<'a> {
         )))
     }
 
+    /// `await x` where `x` is `Json`/`any`: a value with a callable `then`
+    /// (a user-written thenable) is assimilated through QuickJS's own
+    /// `Promise.resolve` -- same settle-at-the-boundary path as
+    /// `try_dynamic_promise_combinator`; any other value is returned as is.
+    fn lower_await_json_thenable(&mut self, value: HirExpr) -> Result<HirExpr, String> {
+        let name = format!("__thaw_await_json_{}", self.next_binding);
+        self.next_binding += 1;
+        self.scope.insert(name.clone(), HirType::Json);
+        let ident = || Expr::Ident(swc_ecma_ast::Ident::new_no_ctxt(name.as_str().into(), swc_common::DUMMY_SP));
+        let str_lit = |text: &str| Expr::Lit(Lit::Str(swc_ecma_ast::Str {
+            span: swc_common::DUMMY_SP, value: text.into(), raw: None,
+        }));
+        let typeof_of = |arg: Expr| Expr::Unary(swc_ecma_ast::UnaryExpr {
+            span: swc_common::DUMMY_SP, op: swc_ecma_ast::UnaryOp::TypeOf, arg: Box::new(arg),
+        });
+        let strictly = |left: Expr, right: Expr| Expr::Bin(swc_ecma_ast::BinExpr {
+            span: swc_common::DUMMY_SP, op: swc_ecma_ast::BinaryOp::EqEqEq,
+            left: Box::new(left), right: Box::new(right),
+        });
+        let then_member = Expr::Member(swc_ecma_ast::MemberExpr {
+            span: swc_common::DUMMY_SP,
+            obj: Box::new(ident()),
+            prop: MemberProp::Ident(swc_ecma_ast::IdentName::new("then".into(), swc_common::DUMMY_SP)),
+        });
+        let is_object = strictly(typeof_of(ident()), str_lit("object"));
+        let not_null = Expr::Bin(swc_ecma_ast::BinExpr {
+            span: swc_common::DUMMY_SP, op: swc_ecma_ast::BinaryOp::NotEqEq,
+            left: Box::new(ident()),
+            right: Box::new(Expr::Lit(Lit::Null(swc_ecma_ast::Null { span: swc_common::DUMMY_SP }))),
+        });
+        let has_then = strictly(typeof_of(then_member), str_lit("function"));
+        let and = |left: Expr, right: Expr| Expr::Bin(swc_ecma_ast::BinExpr {
+            span: swc_common::DUMMY_SP, op: swc_ecma_ast::BinaryOp::LogicalAnd,
+            left: Box::new(left), right: Box::new(right),
+        });
+        let test = self.lower_expr(&and(and(is_object, not_null), has_then))?;
+        let argument = self.coerce_to_declared(&HirType::Json, HirExpr::Var(name.clone()))?;
+        let args = self.coerce_to_declared(&HirType::Json, HirExpr::ArrayLit(vec![argument]))?;
+        let resolved = HirExpr::Call(
+            Box::new(HirExpr::Var("callDynamicMethod".to_string())),
+            vec![
+                HirExpr::Call(
+                    Box::new(HirExpr::Var("getDynamicValue".to_string())),
+                    vec![HirExpr::Lit(HirLit::Str("Promise".to_string()))],
+                ),
+                HirExpr::Lit(HirLit::Str("resolve".to_string())),
+                args,
+            ],
+        );
+        let result = HirExpr::Conditional(
+            Box::new(test),
+            Box::new(resolved),
+            Box::new(HirExpr::Await(Box::new(HirExpr::Var(name.clone())))),
+            HirType::Json,
+        );
+        self.wrap_call_argument_bindings(result, &[(name, HirType::Json, value)])
+    }
+
     fn lower_promise_static_call(
         &mut self,
         callee_name: &str,

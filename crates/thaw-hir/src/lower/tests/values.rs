@@ -2917,6 +2917,20 @@ fn optional_object_method_call_keeps_receiver_parameter() {
 }
 
 #[test]
+fn object_method_returning_this_copies_back_and_returns_the_owner() {
+    let program = lower(r#"
+        function main(): boolean {
+            const o = { n: 0, inc() { this.n++; return this; } };
+            return o.inc().inc() === o;
+        }
+    "#);
+    let main = program.functions.iter().find(|function| function.name == "main").unwrap();
+    let lowered = format!("{:?}", main.body);
+    assert!(lowered.contains("__thaw_method_receiver_copy_"), "{lowered}");
+    assert!(lowered.contains("PropAssign"), "{lowered}");
+}
+
+#[test]
 fn rest_function_bind_checks_missing_property_before_bound_arguments() {
     let program = lower(r#"
         function effect(): number { return 1; }

@@ -2111,7 +2111,7 @@ fn ensure_context() {
                     if retain_on_eof.0.unwrap_or(false) { net_poll_read_impl(handle, true) } else { net_poll_read(handle) }
                 })
                     .expect("failed to create JavaScript TCP polling reader");
-                let tcp_destroy = Function::new(ctx.clone(), |handle: u32| net_destroy(handle))
+                let tcp_destroy = Function::new(ctx.clone(), |handle: u32, reset: rquickjs::function::Opt<bool>| net_destroy_with(handle, reset.0.unwrap_or(false)))
                     .expect("failed to create JavaScript TCP closer");
                 let tcp_listen = Function::new(ctx.clone(), |host: String, port: u32| {
                     match checked_port(port) { Ok(port) => net_listen(&host, port), Err(error) => error }
