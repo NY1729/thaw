@@ -15752,6 +15752,29 @@ fn recorded_web_platform_contracts_match() {
 }
 
 #[test]
+fn recorded_byte_stream_contracts_match() {
+    let cases: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/b_contracts.json")).unwrap();
+    let mut failures = Vec::new();
+    for (name, case) in cases.as_object().unwrap() {
+        let function = format!("__b_{}", name);
+        let source = format!(
+            "async function {function}() {{ {}\n}}",
+            case["source"].as_str().unwrap()
+        );
+        assert_eq!(load(&source), 1, "{name} must load");
+        let actual = call(&function, "[]");
+        if actual != case["expected"].as_str().unwrap() {
+            failures.push(format!(
+                "{name}: expected {} got {actual}",
+                case["expected"]
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
 fn date_wire_legacy_parse_preserves_own_undefined() {
     assert_eq!(
         load(
