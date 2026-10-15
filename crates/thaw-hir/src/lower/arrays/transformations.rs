@@ -908,6 +908,164 @@ impl<'a> FnLowerer<'a> {
         )
     }
 
+    /// `(T[] | undefined)[]` `.flat()`: every present inner array is spread and
+    /// an `undefined` slot stays an `undefined` element, so the result is a
+    /// `(T | undefined)[]`. Holes of the outer array are skipped.
+    fn lower_array_flat_optional(
+        &mut self,
+        receiver: HirExpr,
+        outer_type: HirType,
+        inner_element: HirType,
+    ) -> Result<HirExpr, String> {
+        let inner_array_type = HirType::Array(Box::new(inner_element.clone()));
+        let slot_type = HirType::Optional(Box::new(inner_array_type.clone()));
+        let result_element = HirType::Optional(Box::new(inner_element.clone()));
+        let result_type = HirType::Array(Box::new(result_element.clone()));
+        let fresh = |lowerer: &mut Self, label: &str, ty: HirType| {
+            let name = format!("__thaw_flat_opt_{label}_{}", lowerer.next_binding);
+            lowerer.next_binding += 1;
+            lowerer.scope.insert(name.clone(), ty);
+            name
+        };
+        let receiver_name = fresh(self, "receiver", outer_type.clone());
+        let length_name = fresh(self, "length", HirType::F64);
+        let total_name = fresh(self, "total", HirType::F64);
+        let outer_index = fresh(self, "outer", HirType::F64);
+        let inner_index = fresh(self, "inner", HirType::F64);
+        let destination = fresh(self, "dest", HirType::F64);
+        let slot_name = fresh(self, "slot", slot_type.clone());
+        let inner_name = fresh(self, "inner_array", inner_array_type.clone());
+        let inner_length = fresh(self, "inner_len", HirType::F64);
+        let result_name = fresh(self, "result", result_type.clone());
+        let number = |value| HirExpr::Lit(HirLit::F64(value));
+        let var = |name: &str| HirExpr::Var(name.into());
+        let add = |left, right| HirExpr::BinOp(BinOp::Add, Box::new(left), Box::new(right));
+        let assign = |name: &str, value| HirStmt::Expr(HirExpr::Assign(name.into(), Box::new(value)));
+        let increment = |name: &str| assign(name, add(var(name), number(1.0)));
+        let has_outer = || HirExpr::Call(
+            Box::new(HirExpr::Var("__thaw_array_has_index".into())),
+            vec![var(&receiver_name), var(&outer_index)],
+        );
+        let load_slot = || HirStmt::Let(
+            slot_name.clone(),
+            slot_type.clone(),
+            HirExpr::TypedIndex(
+                Box::new(var(&receiver_name)),
+                Box::new(var(&outer_index)),
+                slot_type.clone(),
+            ),
+        );
+        let is_none = || HirExpr::OptionalIsNone(Box::new(var(&slot_name)), inner_array_type.clone());
+        let load_inner = || HirStmt::Let(
+            inner_name.clone(),
+            inner_array_type.clone(),
+            HirExpr::OptionalValue(Box::new(var(&slot_name)), inner_array_type.clone()),
+        );
+        let outer_loop = |body: Vec<HirStmt>| {
+            HirStmt::While(
+                HirExpr::BinOp(BinOp::Lt, Box::new(var(&outer_index)), Box::new(var(&length_name))),
+                body,
+            )
+        };
+        let mut count_body = vec![HirStmt::If(
+            has_outer(),
+            vec![
+                load_slot(),
+                HirStmt::If(
+                    is_none(),
+                    vec![increment(&total_name)],
+                    vec![
+                        load_inner(),
+                        assign(
+                            &total_name,
+                            add(var(&total_name), HirExpr::ArrayLen(Box::new(var(&inner_name)))),
+                        ),
+                    ],
+                ),
+            ],
+            Vec::new(),
+        )];
+        count_body.push(increment(&outer_index));
+        let wrapped = |lowerer: &mut Self, value: HirExpr| {
+            lowerer.coerce_to_declared(&result_element, value)
+        };
+        let element_value = wrapped(
+            self,
+            HirExpr::TypedIndex(
+                Box::new(var(&inner_name)),
+                Box::new(var(&inner_index)),
+                inner_element.clone(),
+            ),
+        )?;
+        let fill_body = vec![
+            HirStmt::If(
+                has_outer(),
+                vec![
+                    load_slot(),
+                    HirStmt::If(
+                        is_none(),
+                        vec![
+                            HirStmt::Expr(HirExpr::IndexAssign(
+                                Box::new(var(&result_name)),
+                                Box::new(var(&destination)),
+                                Box::new(HirExpr::OptionalNone(inner_element.clone())),
+                            )),
+                            increment(&destination),
+                        ],
+                        vec![
+                            load_inner(),
+                            HirStmt::Let(inner_length.clone(), HirType::F64, HirExpr::ArrayLen(Box::new(var(&inner_name)))),
+                            HirStmt::Let(inner_index.clone(), HirType::F64, number(0.0)),
+                            HirStmt::While(
+                                HirExpr::BinOp(BinOp::Lt, Box::new(var(&inner_index)), Box::new(var(&inner_length))),
+                                vec![
+                                    HirStmt::If(
+                                        HirExpr::Call(
+                                            Box::new(HirExpr::Var("__thaw_array_has_index".into())),
+                                            vec![var(&inner_name), var(&inner_index)],
+                                        ),
+                                        vec![
+                                            HirStmt::Expr(HirExpr::IndexAssign(
+                                                Box::new(var(&result_name)),
+                                                Box::new(var(&destination)),
+                                                Box::new(element_value),
+                                            )),
+                                            increment(&destination),
+                                        ],
+                                        Vec::new(),
+                                    ),
+                                    increment(&inner_index),
+                                ],
+                            ),
+                        ],
+                    ),
+                ],
+                Vec::new(),
+            ),
+            increment(&outer_index),
+        ];
+        let body = HirExpr::Block(vec![
+            HirStmt::Let(length_name.clone(), HirType::F64, HirExpr::ArrayLen(Box::new(var(&receiver_name)))),
+            HirStmt::Let(total_name.clone(), HirType::F64, number(0.0)),
+            HirStmt::Let(outer_index.clone(), HirType::F64, number(0.0)),
+            outer_loop(count_body),
+            HirStmt::Let(
+                result_name.clone(),
+                result_type,
+                HirExpr::ArrayAlloc(Box::new(var(&total_name)), result_element.clone()),
+            ),
+            assign(&outer_index, number(0.0)),
+            HirStmt::Let(destination.clone(), HirType::F64, number(0.0)),
+            outer_loop(fill_body),
+            HirStmt::Return(Some(HirExpr::ArraySetLen(
+                Box::new(var(&result_name)),
+                Box::new(var(&destination)),
+                result_element,
+            ))),
+        ]);
+        self.wrap_call_argument_bindings(body, &[(receiver_name, outer_type, receiver)])
+    }
+
     fn lower_array_flat_one(
         &mut self,
         receiver: HirExpr,

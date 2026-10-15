@@ -1525,6 +1525,37 @@ impl<'a> FnLowerer<'a> {
                 } else {
                     args
                 };
+                // A tag function may declare fewer parameters than the template has
+                // substitutions: JavaScript still evaluates every substitution, in
+                // order, and the callee ignores the extras.
+                let fixed_param_count = tag_name
+                    .and_then(|name| self.signatures.get(name))
+                    .filter(|signature| {
+                        signature.generic_type_params.is_empty() && signature.native_rest.is_none()
+                    })
+                    .map(|signature| signature.params.len());
+                let mut extra_statements = Vec::new();
+                let args = match fixed_param_count {
+                    Some(cap) if args.len() > cap && cap >= 1 => {
+                        let mut kept = Vec::with_capacity(cap);
+                        for (index, argument) in args.into_iter().enumerate() {
+                            if index == 0 {
+                                kept.push(argument);
+                                continue;
+                            }
+                            let argument_type = self.infer_expr_type(&argument)?;
+                            let temp = format!("__thaw_template_arg_{}", self.next_binding);
+                            self.next_binding += 1;
+                            self.scope.insert(temp.clone(), argument_type.clone());
+                            extra_statements.push(HirStmt::Let(temp.clone(), argument_type, argument));
+                            if kept.len() < cap {
+                                kept.push(HirExpr::Var(temp));
+                            }
+                        }
+                        kept
+                    }
+                    _ => args,
+                };
                 let call = HirExpr::Call(Box::new(tag), args);
                 // `infer_expr_type` (not the simpler `_inner` variant
                 // `wrap_call_argument_bindings` uses for its own upfront
@@ -1542,7 +1573,15 @@ impl<'a> FnLowerer<'a> {
                     Box::new(HirExpr::Var("__thaw_template_strings_register".to_string())),
                     vec![HirExpr::Var(cooked_name.clone()), HirExpr::ArrayLit(raw_strings)],
                 ));
-                let body = HirExpr::Block(vec![register, HirStmt::Return(Some(call))]);
+                let mut body_statements = vec![register];
+                body_statements.extend(extra_statements);
+                if call_type == HirType::Void {
+                    body_statements.push(HirStmt::Expr(call));
+                    body_statements.push(HirStmt::Return(None));
+                } else {
+                    body_statements.push(HirStmt::Return(Some(call)));
+                }
+                let body = HirExpr::Block(body_statements);
                 let mut referenced = BTreeSet::new();
                 collect_referenced_bindings(&body, &mut referenced);
                 let captures = referenced

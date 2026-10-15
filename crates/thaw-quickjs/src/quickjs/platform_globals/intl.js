@@ -235,6 +235,29 @@
     return intlOffsetString(zoned.offsetMinutes, false);
   }
 
+  // CLDR flexible day periods (`B` / ECMA-402 `dayPeriod`): "in the afternoon",
+  // "noon", ... ICU4X ships only AM/PM names, so the per-locale rule runs and
+  // names are generated from Node's ICU (the ECMA-402 oracle) for the curated
+  // locales: `[minuteOfDay, name]` runs per width (a string value aliases an
+  // earlier width) plus the exact `noon`/`midnight` names. ICU's rule: noon /
+  // midnight apply only when every displayed time field is zero.
+  // ponytail: regenerate with the node generator when the curated list grows.
+  const INTL_FLEXIBLE_DAY_PERIODS = {"en-US":{"narrow":[[0,"in the morning"],[720,"in the afternoon"],[1080,"in the evening"],[1260,"at night"]],"short":"narrow","long":"narrow","noon":{"narrow":"n","short":"noon","long":"noon"}},"en-GB":{"narrow":[[0,"in the morning"],[720,"in the afternoon"],[1080,"in the evening"],[1260,"at night"]],"short":"narrow","long":"narrow","noon":{"narrow":"n","short":"noon","long":"noon"}},"es":{"narrow":[[0,"de la madrugada"],[360,"de la mañana"],[720,"de la tarde"],[1200,"de la noche"]],"short":"narrow","long":"narrow","noon":{"narrow":"del mediodía","short":"del mediodía","long":"del mediodía"}},"es-419":{"narrow":[[0,"de la madrugada"],[360,"de la mañana"],[720,"de la tarde"],[1200,"de la noche"]],"short":"narrow","long":"narrow","noon":{"narrow":"del mediodía","short":"del mediodía","long":"del mediodía"}},"fr":{"narrow":[[0,"matin"],[240,"mat."],[720,"ap.m."],[1080,"soir"]],"short":[[0,"matin"],[720,"après-midi"],[1080,"soir"]],"long":[[0,"du matin"],[720,"de l’après-midi"],[1080,"du soir"]],"noon":{"narrow":"midi","short":"midi","long":"midi"}},"de":{"narrow":[[0,"nachts"],[300,"morgens"],[600,"vorm."],[720,"mittags"],[780,"nachm."],[1080,"abends"]],"short":"narrow","long":[[0,"nachts"],[300,"morgens"],[600,"vormittags"],[720,"mittags"],[780,"nachmittags"],[1080,"abends"]]},"it":{"narrow":[[0,"di notte"],[360,"di mattina"],[720,"di pomeriggio"],[1080,"di sera"]],"short":"narrow","long":[[0,"di notte"],[360,"di mattina"],[720,"del pomeriggio"],[1080,"di sera"]],"noon":{"narrow":"mezzogiorno","short":"mezzogiorno","long":"mezzogiorno"}},"pt":{"narrow":[[0,"da madrugada"],[360,"da manhã"],[720,"da tarde"],[1140,"da noite"]],"short":"narrow","long":"narrow","noon":{"narrow":"meio-dia","short":"meio-dia","long":"meio-dia"}},"pt-BR":{"narrow":[[0,"da madrugada"],[360,"da manhã"],[720,"da tarde"],[1140,"da noite"]],"short":"narrow","long":"narrow","noon":{"narrow":"meio-dia","short":"meio-dia","long":"meio-dia"}},"nl":{"narrow":[[0,"’s nachts"],[360,"’s ochtends"],[720,"’s middags"],[1080,"’s avonds"]],"short":"narrow","long":"narrow"},"sv":{"narrow":[[0,"på natten"],[300,"på morg."],[600,"på förm."],[720,"på efterm."],[1080,"på kvällen"]],"short":"narrow","long":[[0,"på natten"],[300,"på morgonen"],[600,"på förmiddagen"],[720,"på eftermiddagen"],[1080,"på kvällen"]]},"pl":{"narrow":[[0,"w nocy"],[360,"rano"],[600,"przed poł."],[720,"po poł."],[1080,"wiecz."],[1260,"w nocy"]],"short":[[0,"w nocy"],[360,"rano"],[600,"przed południem"],[720,"po południu"],[1080,"wieczorem"],[1260,"w nocy"]],"long":"short","noon":{"narrow":"w poł.","short":"w południe","long":"w południe"}},"ru":{"narrow":[[0,"ночи"],[240,"утра"],[720,"дня"],[1080,"веч."],[1320,"ночи"]],"short":[[0,"ночи"],[240,"утра"],[720,"дня"],[1080,"вечера"],[1320,"ночи"]],"long":"short","noon":{"narrow":"полд.","short":"полд.","long":"полдень"}},"uk":{"narrow":[[0,"ночі"],[240,"ранку"],[720,"дня"],[1080,"вечора"]],"short":"narrow","long":"narrow"},"tr":{"narrow":[[0,"gece"],[360,"sabah"],[660,"öğleden önce"],[720,"öğleden sonra"],[1080,"akşamüstü"],[1140,"akşam"],[1260,"gece"]],"short":"narrow","long":"narrow","noon":{"narrow":"ö","short":"öğle","long":"öğle"}},"ar":{"narrow":[[0,"منتصف الليل"],[60,"ليلاً"],[180,"فجرًا"],[360,"صباحًا"],[720,"ظهرًا"],[780,"بعد الظهر"],[1080,"مساءً"]],"short":[[0,"في المساء"],[60,"ليلاً"],[180,"فجرًا"],[360,"ص"],[720,"ظهرًا"],[780,"بعد الظهر"],[1080,"مساءً"]],"long":[[0,"في المساء"],[60,"ليلاً"],[180,"في الصباح"],[360,"صباحًا"],[720,"ظهرًا"],[780,"بعد الظهر"],[1080,"مساءً"]]},"ar-SA":{"narrow":[[0,"منتصف الليل"],[60,"ليلاً"],[180,"فجرًا"],[360,"صباحًا"],[720,"ظهرًا"],[780,"بعد الظهر"],[1080,"مساءً"]],"short":[[0,"في المساء"],[60,"ل"],[180,"فجرًا"],[360,"ص"],[720,"ظهرًا"],[780,"بعد الظهر"],[1080,"مساءً"]],"long":[[0,"في المساء"],[60,"ليلاً"],[180,"في الصباح"],[360,"صباحًا"],[720,"ظهرًا"],[780,"بعد الظهر"],[1080,"مساءً"]]},"he":{"narrow":[[0,"בלילה"],[180,"לפנות בוקר"],[360,"בבוקר"],[720,"בצהריים"],[960,"אחה״צ"],[1080,"בערב"],[1320,"בלילה"]],"short":[[0,"לילה"],[180,"לפנות בוקר"],[360,"בוקר"],[720,"צהריים"],[960,"אחר הצהריים"],[1080,"ערב"],[1320,"לילה"]],"long":[[0,"בלילה"],[180,"לפנות בוקר"],[360,"בבוקר"],[720,"בצהריים"],[960,"אחר הצהריים"],[1080,"בערב"],[1320,"בלילה"]]},"hi":{"narrow":[[0,"रात"],[240,"सुबह"],[720,"दोपहर"],[960,"शाम"],[1200,"रात"]],"short":"narrow","long":"narrow"},"bn":{"narrow":[[0,"রাত্রি"],[240,"ভোর"],[360,"সকাল"],[720,"দুপুর"],[960,"বিকাল"],[1080,"সন্ধ্যা"],[1200,"রাত্রি"]],"short":"narrow","long":[[0,"রাত্রিবেলায়"],[240,"ভোরবেলায়"],[360,"সকালবেলায়"],[720,"দুপুরবেলায়"],[960,"বিকাল"],[1080,"সন্ধ্যাবেলায়"],[1200,"রাত্রিবেলায়"]]},"ja":{"narrow":[[0,"夜中"],[240,"朝"],[720,"昼"],[960,"夕方"],[1140,"夜"],[1380,"夜中"]],"short":"narrow","long":"narrow","noon":{"narrow":"正午","short":"正午","long":"正午"}},"ko":{"narrow":[[0,"밤"],[180,"아침"],[360,"오전"],[720,"오후"],[1080,"저녁"],[1260,"밤"]],"short":"narrow","long":"narrow","noon":{"narrow":"정오","short":"정오","long":"정오"}},"zh-Hans":{"narrow":[[0,"凌晨"],[300,"早上"],[480,"上午"],[720,"中午"],[780,"下午"],[1140,"晚上"]],"short":"narrow","long":[[0,"凌晨"],[300,"清晨"],[480,"上午"],[720,"中午"],[780,"下午"],[1140,"晚上"]]},"zh-Hant":{"narrow":[[0,"凌晨"],[300,"清晨"],[480,"上午"],[720,"中午"],[780,"下午"],[1140,"晚上"]],"short":"narrow","long":"narrow"},"th":{"narrow":[[0,"กลางคืน"],[360,"เช้า"],[720,"เที่ยง"],[780,"บ่าย"],[960,"เย็น"],[1080,"ค่ำ"],[1260,"กลางคืน"]],"short":[[0,"กลางคืน"],[360,"ในตอนเช้า"],[720,"ในตอนบ่าย"],[780,"บ่าย"],[960,"ในตอนเย็น"],[1080,"ค่ำ"],[1260,"กลางคืน"]],"long":"short","noon":{"short":"เที่ยง","long":"เที่ยง"}},"vi":{"narrow":[[0,"đêm"],[240,"sáng"],[720,"chiều"],[1080,"tối"],[1260,"đêm"]],"short":"narrow","long":"narrow","noon":{"narrow":"tr","short":"TR","long":"trưa"}},"id":{"narrow":[[0,"pagi"],[600,"siang"],[900,"sore"],[1080,"malam"]],"short":"narrow","long":"narrow","noon":{"narrow":"tengah hari","short":"tengah hari","long":"tengah hari"}},"ms":{"narrow":[[0,"pagi"],[720,"tengah hari"],[840,"petang"],[1140,"malam"]],"short":"narrow","long":[[0,"tengah malam"],[60,"pagi"],[720,"tengah hari"],[840,"petang"],[1140,"malam"]]},"fil":{"narrow":[[0,"ng umaga"],[360,"madaling-araw"],[720,"ng hapon"],[960,"ng gabi"]],"short":"narrow","long":"narrow","noon":{"narrow":"tanghaling-tapat","short":"tanghaling-tapat","long":"tanghaling-tapat"}},"el":{"narrow":[[0,"βράδυ"],[240,"πρωί"],[720,"μεσημ."],[1020,"απόγ."],[1200,"βράδυ"]],"short":"narrow","long":[[0,"το βράδυ"],[240,"το πρωί"],[720,"το μεσημέρι"],[1020,"το απόγευμα"],[1200,"το βράδυ"]]},"ro":{"narrow":[[0,"noaptea"],[300,"dimineața"],[720,"după-amiaza"],[1080,"seara"],[1320,"noaptea"]],"short":"narrow","long":"narrow","noon":{"narrow":"amiază","short":"amiază","long":"la amiază"}},"cs":{"narrow":[[0,"n."],[240,"r."],[540,"d."],[720,"o."],[1080,"v."],[1320,"n."]],"short":[[0,"v n."],[240,"r."],[540,"dop."],[720,"odp."],[1080,"več."],[1320,"v n."]],"long":[[0,"v noci"],[240,"ráno"],[540,"dopoledne"],[720,"odpoledne"],[1080,"večer"],[1320,"v noci"]],"noon":{"narrow":"pol.","short":"pol.","long":"poledne"}},"hu":{"narrow":[[0,"éjjel"],[240,"hajnal"],[360,"reggel"],[540,"de."],[720,"délután"],[1080,"este"],[1260,"éjjel"]],"short":[[0,"éjjel"],[240,"hajnal"],[360,"reggel"],[540,"de."],[720,"du."],[1080,"este"],[1260,"éjjel"]],"long":[[0,"éjjel"],[240,"hajnal"],[360,"reggel"],[540,"délelőtt"],[720,"délután"],[1080,"este"],[1260,"éjjel"]],"noon":{"narrow":"dél","short":"dél","long":"dél"}},"da":{"narrow":[[0,"om natten"],[300,"om morgenen"],[600,"om formiddagen"],[720,"om eftermiddagen"],[1080,"om aftenen"]],"short":"narrow","long":"narrow"},"fi":{"narrow":[[0,"yöllä"],[300,"aamulla"],[600,"ap."],[720,"ip."],[1080,"illalla"],[1380,"yöllä"]],"short":[[0,"yöllä"],[300,"aamulla"],[600,"aamup."],[720,"iltap."],[1080,"illalla"],[1380,"yöllä"]],"long":[[0,"yöllä"],[300,"aamulla"],[600,"aamupäivällä"],[720,"iltapäivällä"],[1080,"illalla"],[1380,"yöllä"]],"noon":{"narrow":"kp.","short":"keskip.","long":"keskipäivällä"}},"nb":{"narrow":[[0,"nt."],[360,"mg."],[600,"fm."],[720,"em."],[1080,"kv."]],"short":[[0,"natt"],[360,"morg."],[600,"form."],[720,"etterm."],[1080,"kveld"]],"long":[[0,"på natten"],[360,"på morgenen"],[600,"på formiddagen"],[720,"på ettermiddagen"],[1080,"på kvelden"]]},"ca":{"narrow":[[0,"matinada"],[360,"matí"],[720,"migdia"],[780,"tarda"],[1140,"vespre"],[1260,"nit"]],"short":"narrow","long":"narrow"},"hr":{"narrow":[[0,"noću"],[240,"ujutro"],[720,"popodne"],[1080,"navečer"],[1260,"noću"]],"short":"narrow","long":[[0,"noću"],[240,"ujutro"],[720,"poslije podne"],[1080,"navečer"],[1260,"noću"]],"noon":{"narrow":"podne","short":"podne","long":"podne"}},"sk":{"narrow":[[0,"v n."],[240,"ráno"],[540,"dop."],[720,"pop."],[1080,"več."],[1320,"v n."]],"short":[[0,"v noci"],[240,"ráno"],[540,"dopol."],[720,"popol."],[1080,"večer"],[1320,"v noci"]],"long":[[0,"v noci"],[240,"ráno"],[540,"dopoludnia"],[720,"popoludní"],[1080,"večer"],[1320,"v noci"]],"noon":{"narrow":"nap.","short":"napol.","long":"napoludnie"}},"bg":{"narrow":[[0,"през нощта"],[240,"сутринта"],[660,"на обяд"],[840,"следобед"],[1080,"вечерта"],[1320,"през нощта"]],"short":"narrow","long":"narrow"},"fa":{"narrow":[[0,"نیمه‌شب"],[60,"بامداد"],[240,"صبح"],[720,"ظهر"],[780,"عصر"],[1140,"شب"]],"short":"narrow","long":[[0,"نیمه‌شب"],[60,"بامداد"],[240,"صبح"],[720,"بعدازظهر"],[780,"عصر"],[1140,"شب"]]}};
+
+  function intlFlexibleDayPeriodName(locale, width, zoned, hasMinute, hasSecond) {
+    const entry = INTL_FLEXIBLE_DAY_PERIODS[locale];
+    if (!entry || !entry[width]) return null;
+    const exact = (!hasMinute || zoned.minute === 0) && (!hasSecond || zoned.second === 0);
+    if (exact && zoned.hour === 12 && entry.noon && entry.noon[width]) return entry.noon[width];
+    if (exact && zoned.hour === 0 && entry.midnight && entry.midnight[width]) return entry.midnight[width];
+    let runs = entry[width];
+    if (typeof runs === 'string') runs = entry[runs];
+    const minuteOfDay = zoned.hour * 60 + zoned.minute;
+    let name = null;
+    for (const run of runs) { if (run[0] <= minuteOfDay) name = run[1]; else break; }
+    return name;
+  }
+
   function intlHourParts(hourCycle, hour24) {
     // Real Intl's own quirk (confirmed against real Node): a
     // `hourCycle` of `'h23'`/`'h24'` always zero-pads the hour even
@@ -559,6 +582,11 @@
           ? JSON.parse(__thaw_intl_datetime_resolved_options(this.locale)) : null;
         this._hourCycle = resolved && resolved.hourCycle ? resolved.hourCycle : 'h12';
       }
+      // ICU's flexible day period (`B`) exists only in 12-hour patterns: under a
+      // 24-hour cycle `dayPeriod` has no effect once an hour is shown (Node's
+      // resolvedOptions drops it too).
+      if (this._dayPeriod !== undefined && this._hour !== undefined &&
+          (this._hourCycle === 'h23' || this._hourCycle === 'h24')) this._dayPeriod = undefined;
       intlValidateDateTimeFields(opts);
     }
 
@@ -605,9 +633,21 @@
       if (!zoned.valid) {
         throw new RangeError('Invalid time value');
       }
-      return this._useRealLocaleData
+      const parts = this._useRealLocaleData
         ? this._formatToPartsRealLocale(zoned)
         : this._formatToPartsEnglishFastPath(zoned);
+      return this._dayPeriod === undefined ? parts : this._withFlexibleDayPeriod(parts, zoned);
+    }
+
+    // Swap the AM/PM-style `dayPeriod` part for the locale's flexible name; a
+    // bare `{ dayPeriod }` request renders only that name.
+    _withFlexibleDayPeriod(parts, zoned) {
+      const name = intlFlexibleDayPeriodName(
+        this.locale, this._dayPeriod, zoned,
+        this._minute !== undefined, this._second !== undefined || this._fractionalSecondDigits !== undefined);
+      if (name === null) return parts;
+      if (!parts.length) return [{ type: 'dayPeriod', value: name }];
+      return parts.map(part => part.type === 'dayPeriod' ? { type: 'dayPeriod', value: name } : part);
     }
 
     // Real per-locale month/weekday/era/day-period names, field
@@ -763,11 +803,13 @@
         // ICU4X calendar-period patterns do (`ja` `{year,month:'numeric'}`
         // -> `"2024/07"`, Node `"2024/7"`) -- strip a single leading zero.
         // Not year (4-digit) nor hour (h23/h24 genuinely pad, per above).
+        // A minute/second next to a larger unit is part of an `hm`/`ms`/`hms`
+        // pattern and stays two digits.
         const numericUnpadFor = {
           month: this._month,
           day: this._day,
-          minute: this._minute,
-          second: this._second,
+          minute: this._hour ? undefined : this._minute,
+          second: this._hour || this._minute ? undefined : this._second,
         };
         for (const part of parts) {
           if (numericUnpadFor[part.type] === 'numeric' && /^0\d$/.test(part.value)) {
@@ -914,9 +956,10 @@
           const padded = this._hour === '2-digit' || padByDefault;
           fields.push(['hour', padded ? intlPad(displayHour, 2) : String(displayHour)]);
         }
-        if (this._minute) fields.push(['minute', this._minute === '2-digit' ? intlPad(zoned.minute, 2) : String(zoned.minute)]);
+        // A minute/second shown next to a larger unit is part of an ICU `hm`/`ms`/`hms` pattern and always has two digits.
+        if (this._minute) fields.push(['minute', this._minute === '2-digit' || this._hour || this._second ? intlPad(zoned.minute, 2) : String(zoned.minute)]);
         if (this._second) {
-          const whole = this._second === '2-digit' ? intlPad(zoned.second, 2) : String(zoned.second);
+          const whole = this._second === '2-digit' || this._minute || this._hour ? intlPad(zoned.second, 2) : String(zoned.second);
           fields.push(['second', whole]);
           if (this._fractionalSecondDigits !== undefined) {
             fields.push(['fractionalSecond', intlPad(zoned.millisecond, 3).slice(0, this._fractionalSecondDigits), '.']);
@@ -1438,7 +1481,9 @@
       const digits = fracPart ? `${intPart}.${fracPart}` : intPart;
       const signedDigits = `${sign}${digits}`;
       if (this._style === 'percent' && typeof __thaw_intl_percent_format === 'function') {
-        const result = digits.length > 32000 && typeof __thaw_intl_percent_format_large === 'function'
+        // The cached percent formatter emits no group parts to strip, so an
+        // ungrouped request swaps the grouped core out through the exact-core path.
+        const result = (digits.length > 32000 || !groupDigits) && typeof __thaw_intl_percent_format_large === 'function'
           ? __thaw_intl_percent_format_large(this.locale, this._styleProbeRepresentative(signedDigits),
               this._renderDigits(digits, groupDigits), groupDigits)
           : __thaw_intl_percent_format(this.locale, signedDigits, groupDigits);

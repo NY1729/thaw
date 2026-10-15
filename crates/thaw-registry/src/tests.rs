@@ -1517,3 +1517,4 @@ include!("tests/k_contracts.rs");
 include!("tests/j_contracts.rs");
 include!("tests/l_contracts.rs");
 include!("tests/w2_contracts.rs");
+include!("tests/h2_contracts.rs");

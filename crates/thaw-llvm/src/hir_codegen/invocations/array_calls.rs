@@ -71,6 +71,7 @@ impl<'ctx> HirCompiler<'ctx> {
                 | "__thaw_array_copy_within"
                 | "__thaw_array_fill"
                 | "__thaw_array_slice"
+                | "__thaw_array_rest"
                 | "__thaw_bytes_slice"
                 | "__thaw_array_to_reversed"
                 | "__thaw_array_push"
@@ -664,7 +665,7 @@ impl<'ctx> HirCompiler<'ctx> {
             // `__thaw_bytes_slice` is `__thaw_array_slice` with a `Bytes`
             // result type (see thaw-hir inference) -- identical codegen:
             // the receiver is bound as an `Array(F64)` either way.
-            "__thaw_array_slice" | "__thaw_bytes_slice" => {
+            "__thaw_array_slice" | "__thaw_array_rest" | "__thaw_bytes_slice" => {
                 if args.len() != 3 {
                     return Err("array slice expects three operands".to_string());
                 }
@@ -706,7 +707,11 @@ impl<'ctx> HirCompiler<'ctx> {
                     .builder
                     .build_call(
                         self.module
-                            .get_function("thaw_array_presence_slice")
+                            .get_function(if name == "__thaw_array_rest" {
+                                "thaw_array_presence_rest"
+                            } else {
+                                "thaw_array_presence_slice"
+                            })
                             .unwrap(),
                         &[presence.into(), length.into(), start.into(), end.into()],
                         "array_slice_presence",

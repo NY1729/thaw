@@ -7953,7 +7953,7 @@ fn intl_locale_resolves_curated_and_uncurated_tags_without_throwing() {
     assert_eq!(call("malformedTagIsInvalid", "[]"), r#"{"valid":false}"#);
     assert_eq!(
         call("likelySubtags", "[]"),
-        r#"[{"valid":true,"language":"ja","script":"Jpan","region":"JP"},{"valid":true,"language":"zh","script":"Hant","region":"TW"},{"valid":true,"language":"en","script":"Latn","region":"US"}]"#
+        r#"[{"valid":true,"tag":"ja-Jpan-JP","language":"ja","script":"Jpan","region":"JP"},{"valid":true,"tag":"zh-Hant-TW","language":"zh","script":"Hant","region":"TW"},{"valid":true,"tag":"en-Latn-US","language":"en","script":"Latn","region":"US"}]"#
     );
 }
 
@@ -13547,7 +13547,8 @@ fn intl_datetime_resolved_hour_cycle_matches_locale_and_midnight() {
     );
     assert_eq!(
         call("localizedMidnight", "[]"),
-        serde_json::json!(["h24", "٢٤"]).to_string()
+        // CLDR 48 (Node 22) gives `ar` Latin digits by default, so the h24 midnight hour is "24".
+        serde_json::json!(["h24", "24"]).to_string()
     );
 }
 
@@ -16100,4 +16101,32 @@ fn async_zlib_runs_off_the_event_loop_thread() {
         call("zlibAsyncProbe", "[]"),
         "\"[true,true,true,true,false]\""
     );
+}
+
+/// Intl number/day-period contracts recorded from real Node 22 (fixtures/h2_intl_contracts.json). `native_*` cases need the real CLDR
+/// data behind the `intl` feature; the others also hold for the English-only fallback.
+#[test]
+fn recorded_intl_contracts_match() {
+    let cases: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/h2_intl_contracts.json")).unwrap();
+    let mut failures = Vec::new();
+    for (name, case) in cases.as_object().unwrap() {
+        if name.starts_with("native_") && !cfg!(feature = "intl") {
+            continue;
+        }
+        let function = format!("__h2_intl_{}", name);
+        let source = format!(
+            "async function {function}() {{ {}\n}}",
+            case["source"].as_str().unwrap()
+        );
+        assert_eq!(load(&source), 1, "{name} must load");
+        let actual = call(&function, "[]");
+        if actual != case["expected"].as_str().unwrap() {
+            failures.push(format!(
+                "{name}: expected {} got {actual}",
+                case["expected"]
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

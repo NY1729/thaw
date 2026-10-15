@@ -4400,6 +4400,79 @@ impl<'a> FnLowerer<'a> {
                         let uniform_existing = matches!(target_type, HirType::Json | HirType::Dictionary(_))
                             && source_types.iter().all(|source_type| *source_type == target_type);
                         let mut result = target.clone();
+                        // `Object.assign(jsonTarget, nativeObjectWithGetters)` reads and
+                        // writes one property at a time, so a getter observes the
+                        // properties already copied and an exception leaves them behind.
+                        let property_wise = target_type == HirType::Json
+                            && !sources.is_empty()
+                            && source_types.iter().all(|source_type| match source_type {
+                                HirType::Object(fields) => {
+                                    // Property-wise copying exists for getters; an accessor
+                                    // pair with only a setter keeps the snapshot path.
+                                    let accessor = |prefix: &str, name: &str| {
+                                        fields.iter().any(|(field, _)| {
+                                            field.strip_prefix(prefix) == Some(name)
+                                        })
+                                    };
+                                    let has_getter = fields
+                                        .iter()
+                                        .any(|(field, _)| field.starts_with("__thaw_getter_"));
+                                    let setter_only = fields.iter().any(|(field, _)| {
+                                        field.strip_prefix("__thaw_setter_").is_some_and(|name| {
+                                            !accessor("__thaw_getter_", name)
+                                        })
+                                    });
+                                    has_getter
+                                        && !setter_only
+                                        && ecmascript_field_order(fields).into_iter().all(|index| {
+                                            let (name, ty) = &fields[index];
+                                            !name.starts_with('\u{1f}') && json_convertible_native_type(ty)
+                                        })
+                                }
+                                _ => false,
+                            });
+                        if property_wise {
+                            let target_name = format!("__thaw_assign_target_{}", self.next_binding);
+                            self.next_binding += 1;
+                            self.scope.insert(target_name.clone(), HirType::Json);
+                            let mut statements = vec![HirStmt::Let(
+                                target_name.clone(),
+                                HirType::Json,
+                                target.clone(),
+                            )];
+                            for (source, source_type) in sources.iter().zip(&source_types) {
+                                let HirType::Object(fields) = source_type else { unreachable!() };
+                                let source_name = format!("__thaw_assign_source_{}", self.next_binding);
+                                self.next_binding += 1;
+                                self.scope.insert(source_name.clone(), source_type.clone());
+                                statements.push(HirStmt::Let(
+                                    source_name.clone(),
+                                    source_type.clone(),
+                                    source.clone(),
+                                ));
+                                for index in ecmascript_field_order(fields) {
+                                    let (name, field_type) = &fields[index];
+                                    let value = self.coerce_to_declared(
+                                        &HirType::Json,
+                                        HirExpr::PropAccess(
+                                            Box::new(HirExpr::Var(source_name.clone())),
+                                            source_type.clone(),
+                                            name.clone(),
+                                        ),
+                                    )?;
+                                    let _ = field_type;
+                                    statements.push(HirStmt::Expr(HirExpr::JsonSet(
+                                        Box::new(HirExpr::Var(target_name.clone())),
+                                        Box::new(HirExpr::Lit(HirLit::Str(name.clone()))),
+                                        Box::new(value),
+                                        HirType::Json,
+                                        false,
+                                    )));
+                                }
+                            }
+                            statements.push(HirStmt::Return(Some(HirExpr::Var(target_name))));
+                            return self.wrap_call_argument_bindings(HirExpr::Block(statements), &bindings);
+                        }
                         if uniform_existing {
                             for source in sources {
                                 result = HirExpr::Call(

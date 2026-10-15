@@ -1527,7 +1527,8 @@ impl<'a> FnLowerer<'a> {
                             self.next_binding += 1;
                             self.scope.insert(receiver_name.clone(), array_type.clone());
                             self.scope.insert(separator_name.clone(), HirType::Str);
-                            let result = if let HirType::Json = element.as_ref() {
+                            let result = if matches!(element.as_ref(), HirType::Json | HirType::JsValue) {
+                                let slot_type = element.as_ref().clone();
                                 // A native Array<Json> uses this HIR loop. Its slots
                                 // have join semantics: null and undefined become empty,
                                 // while present values keep ordinary String conversion.
@@ -1545,9 +1546,9 @@ impl<'a> FnLowerer<'a> {
                                     HirExpr::TypedIndex(
                                         Box::new(HirExpr::Var(receiver_name.clone())),
                                         Box::new(HirExpr::Var(index_name.clone())),
-                                        HirType::Json,
+                                        slot_type.clone(),
                                     ),
-                                    &HirType::Json,
+                                    &slot_type,
                                 )?;
                                 let concat = |lhs: HirExpr, rhs: HirExpr| {
                                     HirExpr::Call(

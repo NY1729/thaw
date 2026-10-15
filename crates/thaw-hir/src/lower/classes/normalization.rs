@@ -27,6 +27,48 @@ fn normalize_top_level_class_expressions(module: &Module) -> Result<Module, Stri
                     });
                 }
             }
+            // `const Outer = class Inner {}` is observed as `Outer.name === "Inner"`;
+            // the declaration form carries the binding's name, so keep the
+            // expression's own name as an explicit static `name` member.
+            if let Some(internal) = &expression.ident {
+                let has_name = class.body.iter().any(|member| {
+                    matches!(member, swc_ecma_ast::ClassMember::ClassProp(property)
+                        if property.is_static
+                            && matches!(&property.key, swc_ecma_ast::PropName::Ident(key) if key.sym == *"name"))
+                });
+                if internal.sym != binding.id.sym && !has_name {
+                    class.body.push(swc_ecma_ast::ClassMember::ClassProp(swc_ecma_ast::ClassProp {
+                        span: swc_common::DUMMY_SP,
+                        key: swc_ecma_ast::PropName::Ident(swc_ecma_ast::IdentName::new(
+                            "name".into(),
+                            swc_common::DUMMY_SP,
+                        )),
+                        value: Some(Box::new(Expr::Lit(Lit::Str(swc_ecma_ast::Str {
+                            span: swc_common::DUMMY_SP,
+                            value: internal.sym.as_ref().into(),
+                            raw: None,
+                        })))),
+                        type_ann: Some(Box::new(swc_ecma_ast::TsTypeAnn {
+                            span: swc_common::DUMMY_SP,
+                            type_ann: Box::new(swc_ecma_ast::TsType::TsKeywordType(
+                                swc_ecma_ast::TsKeywordType {
+                                    span: swc_common::DUMMY_SP,
+                                    kind: swc_ecma_ast::TsKeywordTypeKind::TsStringKeyword,
+                                },
+                            )),
+                        })),
+                        is_static: true,
+                        decorators: Vec::new(),
+                        accessibility: None,
+                        is_abstract: false,
+                        is_optional: false,
+                        is_override: false,
+                        readonly: false,
+                        declare: false,
+                        definite: false,
+                    }));
+                }
+            }
             body.push(ModuleItem::Stmt(Stmt::Decl(Decl::Class(ClassDecl {
                 ident: binding.id.clone(),
                 declare: false,

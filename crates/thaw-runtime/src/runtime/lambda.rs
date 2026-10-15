@@ -27,10 +27,59 @@ pub extern "C" fn thaw_runtime_run(handler: HandlerFn, error_slot: HandlerErrorS
         "AWS_LAMBDA_RUNTIME_API is not set -- is this running inside a Lambda execution environment?",
     );
 
+    let mut consecutive_failures = 0u32;
     loop {
-        if let Err(err) = handle_one_invocation(&runtime_api, handler, error_slot) {
-            eprintln!("thaw-runtime: {err}");
+        match handle_one_invocation(&runtime_api, handler, error_slot) {
+            Ok(()) => consecutive_failures = 0,
+            Err(err) => {
+                eprintln!("thaw-runtime: {err}");
+                consecutive_failures += 1;
+                match failure_backoff(consecutive_failures) {
+                    Some(delay) => std::thread::sleep(delay),
+                    None => {
+                        // An unreachable Runtime API will not recover by
+                        // retrying forever; like the managed runtimes, exit
+                        // non-zero so the environment is replaced.
+                        eprintln!(
+                            "thaw-runtime: giving up after {consecutive_failures} consecutive failures"
+                        );
+                        std::process::exit(1);
+                    }
+                }
+            }
         }
+    }
+}
+
+/// Maximum number of consecutive invocation-loop failures before the runtime exits.
+const MAX_CONSECUTIVE_FAILURES: u32 = 20;
+
+/// Delay before retrying after the `consecutive`-th failure in a row (25 ms doubling to
+/// 500 ms, about 8 s in total), or `None` once the runtime should give up. A short bounded
+/// retry still covers a Runtime API that is not listening yet at process start.
+fn failure_backoff(consecutive: u32) -> Option<std::time::Duration> {
+    if consecutive >= MAX_CONSECUTIVE_FAILURES {
+        return None;
+    }
+    let millis = (25u64 << (consecutive - 1).min(5)).min(500);
+    Some(std::time::Duration::from_millis(millis))
+}
+
+#[cfg(test)]
+mod failure_backoff_tests {
+    use super::{failure_backoff, MAX_CONSECUTIVE_FAILURES};
+    use std::time::Duration;
+
+    #[test]
+    fn retries_back_off_then_give_up() {
+        assert_eq!(failure_backoff(1), Some(Duration::from_millis(25)));
+        assert_eq!(failure_backoff(2), Some(Duration::from_millis(50)));
+        assert_eq!(failure_backoff(5), Some(Duration::from_millis(400)));
+        assert_eq!(failure_backoff(6), Some(Duration::from_millis(500)));
+        assert_eq!(failure_backoff(MAX_CONSECUTIVE_FAILURES - 1), Some(Duration::from_millis(500)));
+        assert_eq!(failure_backoff(MAX_CONSECUTIVE_FAILURES), None);
+        let total: Duration = (1..MAX_CONSECUTIVE_FAILURES).filter_map(failure_backoff).sum();
+        assert!(total < Duration::from_secs(10), "bounded total delay: {total:?}");
     }
 }
 
