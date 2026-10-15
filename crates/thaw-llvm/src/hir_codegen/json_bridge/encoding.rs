@@ -972,7 +972,7 @@ impl<'ctx> HirCompiler<'ctx> {
                         &abi_params,
                         ret,
                         has_rest,
-                        false,
+                        json_callback_wants_graph(&abi_params),
                     )?;
                     value = self.compile_dynamic_value_placeholder(value)?;
                     "thaw_json_object_set_json"
@@ -1748,7 +1748,7 @@ impl<'ctx> HirCompiler<'ctx> {
                     &abi_params,
                     ret,
                     has_rest,
-                    false,
+                    json_callback_wants_graph(&abi_params),
                 )?;
                 value = self.compile_dynamic_value_placeholder(value)?;
                 "thaw_json_array_push_json"

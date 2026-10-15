@@ -947,6 +947,16 @@
       "name": "byte stream tee gives byob and default branches independent chunks",
       "expect": "matched",
       "source": "import { ReadableStream } from 'node:stream/web'; async function main(): Promise<void> { const run: any = new Function('return (async () => { const stream = new ReadableStream({ type: \\'bytes\\', start(c) { c.enqueue(new Uint8Array([1, 2, 3, 4, 5])); c.close(); } });const branches = stream.tee(); const a = branches[0].getReader({ mode: \\'byob\\' }); const b = branches[1].getReader();const x = await a.read(new Uint8Array(8), { min: 5 }); const y = await b.read();return [x.value.byteLength, y.value.byteLength, x.value.buffer !== y.value.buffer].join(\\' \\'); })()'); console.log(await run()); }"
+    },
+    {
+      "name": "stream controller methods work on any callback parameters inside option objects",
+      "expect": "matched",
+      "source": "function main(): void {\n  const log: string[] = [];\n  const rs = new ReadableStream({ start(c: any) { c.enqueue('a'); c.enqueue('b'); c.close(); } });\n  const reader = rs.getReader();\n  reader.read()\n    .then((x: any) => { log.push('r1 ' + x.value + ' ' + x.done); return reader.read(); })\n    .then((x: any) => { log.push('r2 ' + x.value + ' ' + x.done); return reader.read(); })\n    .then((x: any) => { log.push('r3 ' + x.done);\n      const ws = new WritableStream({ write(chunk: any, controller: any) { log.push('w ' + chunk + ' ' + typeof controller.error); } });\n      const w = ws.getWriter();\n      return w.write('x').then(() => w.close()); })\n    .then(() => {\n      const ts = new TransformStream({ transform(chunk: any, controller: any) { controller.enqueue(String(chunk).toUpperCase()); }, flush(controller: any) { controller.enqueue('END'); } });\n      const tw = ts.writable.getWriter(); const tr = ts.readable.getReader();\n      tw.write('q'); tw.close();\n      return tr.read().then((x: any) => { log.push('t1 ' + x.value); return tr.read(); }).then((x: any) => { log.push('t2 ' + x.value); return tr.read(); }).then((x: any) => log.push('t3 ' + x.done)); })\n    .then(() => {\n      const bs = new ReadableStream({ type: 'bytes', start(c: any) { c.enqueue(new Uint8Array([7, 8, 9])); c.close(); } });\n      return bs.getReader({ mode: 'byob' }).read(new Uint8Array(8)); })\n    .then((x: any) => { log.push('byob ' + x.done + ' ' + x.value.length + ' ' + x.value[0]); console.log(log.join('\\n')); });\n}\n"
+    },
+    {
+      "name": "any callback parameters in object fields and array elements receive live values",
+      "expect": "matched",
+      "source": "import { EventEmitter } from 'node:events';\nfunction main(): void {\n  const ee = new EventEmitter();\n  const handlers = { first: (a: any) => console.log('first', JSON.stringify(a)) };\n  ee.on('go', handlers.first);\n  ee.on('go', (a: any, b: any) => console.log('second', JSON.stringify(a), b));\n  ee.emit('go', { k: [1, 2] }, 'two');\n  const sources = [{ cb: (v: any) => console.log('src0', JSON.stringify(v)) }, { cb: (v: any) => console.log('src1', JSON.stringify(v)) }];\n  for (const s of sources) { s.cb({ n: 1 }); }\n  const p = new Promise((resolve: any) => { resolve({ ok: true }); });\n  p.then((v: any) => console.log('promise', JSON.stringify(v)));\n}\n"
     }
   ]
 }
