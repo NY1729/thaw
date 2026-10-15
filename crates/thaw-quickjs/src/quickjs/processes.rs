@@ -1038,10 +1038,11 @@ fn run_host_child(
             return;
         }
     };
+    let stdio = child_stdio_modes(&options);
     process
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .stdin(stdio_for(stdio[0]))
+        .stdout(stdio_for(stdio[1]))
+        .stderr(stdio_for(stdio[2]));
     let mut process = match process.spawn() {
         Ok(process) => process,
         Err(error) => {
@@ -1168,6 +1169,7 @@ fn spawn_host_child(command: String, arguments_json: String, options_json: Strin
                 commands: command_sender,
                 events: event_receiver,
                 thread: Some(thread),
+                refed: true,
             },
         );
         handle
@@ -1207,7 +1209,110 @@ fn kill_host_child(handle: u32, signal: i32) -> bool {
 }
 
 fn host_children_active() -> bool {
-    HOST_CHILDREN.with(|table| !table.borrow().children.is_empty())
+    HOST_CHILDREN.with(|table| table.borrow().children.values().any(|child| child.refed))
+}
+
+/// QuickJS promise hook: forwards promise creation (`init`, with the parent promise) and resolution to the
+/// JavaScript `async_hooks` dispatcher. Installed only while an `async_hooks` hook is enabled.
+unsafe extern "C" fn async_hooks_promise_hook(
+    ctx: *mut rquickjs::qjs::JSContext,
+    kind: rquickjs::qjs::JSPromiseHookType,
+    promise: rquickjs::qjs::JSValue,
+    parent: rquickjs::qjs::JSValue,
+    _opaque: *mut std::ffi::c_void,
+) {
+    use rquickjs::qjs;
+    // before/after only cover thenable jobs in QuickJS; init and resolve carry the information hooks need.
+    if kind != qjs::JSPromiseHookType_JS_PROMISE_HOOK_INIT
+        && kind != qjs::JSPromiseHookType_JS_PROMISE_HOOK_RESOLVE
+    {
+        return;
+    }
+    // SAFETY: called by the engine with a live context and live values; every value created here is freed.
+    unsafe {
+        let global = qjs::JS_GetGlobalObject(ctx);
+        let function = qjs::JS_GetPropertyStr(ctx, global, c"__thaw_async_hooks_promise".as_ptr());
+        if qjs::JS_IsFunction(ctx, function) {
+            let mut arguments = [qjs::JS_NewFloat64(f64::from(kind)), promise, parent];
+            let result = qjs::JS_Call(ctx, function, qjs::JS_UNDEFINED, 3, arguments.as_mut_ptr());
+            if qjs::JS_IsException(result) {
+                let error = qjs::JS_GetException(ctx);
+                qjs::JS_FreeValue(ctx, error);
+            }
+            qjs::JS_FreeValue(ctx, result);
+        }
+        qjs::JS_FreeValue(ctx, function);
+        qjs::JS_FreeValue(ctx, global);
+    }
+}
+
+fn set_async_hooks_promise_hook(ctx: &Ctx<'_>, enabled: bool) {
+    // SAFETY: the runtime pointer comes from the live context that is installing the hook.
+    unsafe {
+        let runtime = rquickjs::qjs::JS_GetRuntime(ctx.as_raw().as_ptr());
+        rquickjs::qjs::JS_SetPromiseHook(
+            runtime,
+            if enabled { Some(async_hooks_promise_hook) } else { None },
+            std::ptr::null_mut(),
+        );
+    }
+}
+
+thread_local! {
+    static LOOP_START: Cell<Option<std::time::Instant>> = const { Cell::new(None) };
+    static LOOP_IDLE: Cell<Duration> = const { Cell::new(Duration::ZERO) };
+}
+
+/// The event loop starts when the main script has finished and the host first turns it (or sleeps in it).
+fn mark_loop_started() {
+    LOOP_START.with(|start| {
+        if start.get().is_none() {
+            start.set(Some(std::time::Instant::now()));
+        }
+    });
+}
+
+fn record_loop_idle(slept: Duration) {
+    LOOP_IDLE.with(|idle| idle.set(idle.get() + slept));
+}
+
+/// `[active_ms, idle_ms]` since the event loop started (`[0, 0]` before it did): the time the loop spent
+/// sleeping for the next timer/event is idle, everything else is active.
+fn host_loop_stats() -> Vec<f64> {
+    let Some(start) = LOOP_START.with(Cell::get) else {
+        return vec![0.0, 0.0];
+    };
+    let idle = LOOP_IDLE.with(Cell::get).min(start.elapsed());
+    vec![(start.elapsed() - idle).as_secs_f64() * 1000.0, idle.as_secs_f64() * 1000.0]
+}
+
+/// `ChildProcess.ref()` / `unref()`: only referenced children keep the event loop alive.
+fn set_host_child_ref(handle: u32, refed: bool) {
+    HOST_CHILDREN.with(|table| {
+        if let Some(child) = table.borrow_mut().children.get_mut(&handle) {
+            child.refed = refed;
+        }
+    });
+}
+
+/// The `stdio` modes the JS layer hands to the host: "pipe" (the default), "inherit" or "ignore".
+fn child_stdio_modes(options: &serde_json::Value) -> [&str; 3] {
+    let mode = |index: usize| {
+        match options.get("stdio").and_then(|stdio| stdio.get(index)).and_then(|mode| mode.as_str()) {
+            Some("inherit") => "inherit",
+            Some("ignore") => "ignore",
+            _ => "pipe",
+        }
+    };
+    [mode(0), mode(1), mode(2)]
+}
+
+fn stdio_for(mode: &str) -> Stdio {
+    match mode {
+        "inherit" => Stdio::inherit(),
+        "ignore" => Stdio::null(),
+        _ => Stdio::piped(),
+    }
 }
 
 fn start_host_stdin() {
@@ -2090,4 +2195,77 @@ fn sync_child_without_input_gets_a_closed_stdin_pipe_not_the_parents() {
     )).unwrap();
     assert_eq!(record["timedOut"], false);
     assert_eq!(hex_decode(record["stdout"].as_str().unwrap()), b"eof");
+}
+
+#[cfg(all(test, unix))]
+mod m_wave_tests {
+    use super::*;
+
+    fn drain(handle_active: impl Fn() -> bool, deadline: std::time::Instant) -> Vec<serde_json::Value> {
+        let mut events = Vec::new();
+        loop {
+            events.extend(serde_json::from_str::<Vec<serde_json::Value>>(&poll_host_children()).unwrap());
+            if !handle_active() {
+                return events;
+            }
+            assert!(std::time::Instant::now() < deadline, "child did not finish in time");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    #[test]
+    fn an_unreferenced_child_does_not_keep_the_event_loop_alive_until_it_is_referenced_again() {
+        let handle = spawn_host_child(
+            "sleep".to_string(),
+            serde_json::json!(["30"]).to_string(),
+            serde_json::json!({ "stdio": ["ignore", "ignore", "ignore"] }).to_string(),
+        );
+        assert!(host_children_active(), "a fresh child is referenced");
+        set_host_child_ref(handle, false);
+        assert!(!host_children_active(), "an unreferenced child must not count as activity");
+        set_host_child_ref(handle, true);
+        assert!(host_children_active());
+        assert!(kill_host_child(handle, libc::SIGKILL));
+        drain(host_children_active, std::time::Instant::now() + Duration::from_secs(5));
+        assert!(!host_children_active());
+    }
+
+    #[test]
+    fn inherited_and_ignored_stdio_attach_no_pipes_to_the_host() {
+        let handle = spawn_host_child(
+            "sh".to_string(),
+            serde_json::json!(["-c", "echo to-stdout; echo to-stderr >&2"]).to_string(),
+            serde_json::json!({ "stdio": ["ignore", "ignore", "ignore"] }).to_string(),
+        );
+        let events = drain(host_children_active, std::time::Instant::now() + Duration::from_secs(5));
+        let _ = handle;
+        assert!(
+            !events.iter().any(|event| event["type"] == "stdout" || event["type"] == "stderr"),
+            "ignored stdio must not be piped: {events:?}"
+        );
+        let handle = spawn_host_child(
+            "sh".to_string(),
+            serde_json::json!(["-c", "echo piped-out"]).to_string(),
+            serde_json::json!({}).to_string(),
+        );
+        let events = drain(host_children_active, std::time::Instant::now() + Duration::from_secs(5));
+        let _ = handle;
+        let output: Vec<u8> = events
+            .iter()
+            .filter(|event| event["type"] == "stdout")
+            .flat_map(|event| hex_decode(event["value"].as_str().unwrap()))
+            .collect();
+        assert_eq!(output, b"piped-out\n", "the default stays piped");
+    }
+
+    #[test]
+    fn event_loop_statistics_split_sleeping_from_working() {
+        mark_loop_started();
+        let before = host_loop_stats();
+        sleep_until_next_poll(5);
+        std::thread::sleep(Duration::from_millis(0));
+        let after = host_loop_stats();
+        assert!(after[1] > before[1], "sleeping in the loop is idle time: {before:?} -> {after:?}");
+        assert!(after[0] >= 0.0 && after[1] >= 0.0);
+    }
 }

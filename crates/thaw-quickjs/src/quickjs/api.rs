@@ -1048,8 +1048,11 @@ fn resolve_value_graph_impl<'js>(
 }
 
 fn sleep_until_next_poll(delay: i64) {
+    mark_loop_started();
     if delay > 0 {
+        let slept = std::time::Instant::now();
         std::thread::sleep(Duration::from_millis((delay as u64).min(1)));
+        record_loop_idle(slept.elapsed());
     }
 }
 
@@ -1122,6 +1125,7 @@ fn platform_activity_pending(ctx: &Ctx<'_>) -> bool {
     [
         "__thaw_worker_active",
         "__thaw_child_process_active",
+        "__thaw_zlib_active",
         "__thaw_stdin_active",
     ]
         .into_iter()
@@ -1274,6 +1278,7 @@ fn run_event_loop_turn() -> std::ops::ControlFlow<i32> {
 
 #[no_mangle]
 pub extern "C" fn thaw_js_run_event_loop() -> i32 {
+    mark_loop_started();
     loop {
         match run_event_loop_turn() {
             // A turn boundary is a quiescent point: no native frame is

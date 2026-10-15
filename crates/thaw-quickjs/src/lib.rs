@@ -308,6 +308,8 @@ struct TlsListener {
 #[derive(Default)]
 struct TlsCertificates {
     peer: Option<Vec<u8>>,
+    /// The whole certificate chain the peer sent (leaf first), for `getPeerCertificate(true)`.
+    peer_chain: Vec<Vec<u8>>,
     local: Option<Vec<u8>>,
     authorized: bool,
     authorization_error: Option<String>,
@@ -452,6 +454,8 @@ struct HostChild {
     commands: Sender<HostChildCommand>,
     events: Receiver<HostChildEvent>,
     thread: Option<JoinHandle<()>>,
+    /// `ChildProcess.unref()` clears this: an unreferenced child no longer keeps the event loop alive.
+    refed: bool,
 }
 
 struct HostChildTable {
@@ -1826,6 +1830,8 @@ fn dns_lookup_json(hostname: String) -> String {
 
 include!("quickjs/processes.rs");
 
+include!("quickjs/dns_client.rs");
+
 include!("quickjs/intl.rs");
 
 include!("quickjs/intl_time_zone_names.rs");
@@ -1922,6 +1928,7 @@ fn dispatch_pending_process_signal(ctx: &Ctx<'_>) {
 }
 
 include!("quickjs/context.rs");
+include!("quickjs/vm_context.rs");
 
 include!("quickjs/platform_globals.rs");
 

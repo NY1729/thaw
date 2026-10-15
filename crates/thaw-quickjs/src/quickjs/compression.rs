@@ -23,6 +23,78 @@ impl ZlibOptions {
     }
 }
 
+type ZlibJobResult = Result<Vec<u8>, String>;
+
+thread_local! {
+    static ZLIB_JOBS: RefCell<HashMap<u32, Receiver<ZlibJobResult>>> = RefCell::new(HashMap::new());
+    static ZLIB_DONE: RefCell<HashMap<u32, Vec<u8>>> = RefCell::new(HashMap::new());
+    static ZLIB_NEXT_JOB: Cell<u32> = const { Cell::new(1) };
+}
+
+/// Starts a one-shot (de)compression on its own thread and returns its handle; the result is collected by
+/// `zlib_async_poll`, so a large buffer never holds the event loop. The input is read straight from the
+/// typed array (no text encoding of the payload).
+fn zlib_async_start<'js>(
+    operation: String,
+    format: String,
+    value: rquickjs::TypedArray<'js, u8>,
+    options: String,
+) -> u32 {
+    let input = value.as_bytes().map(<[u8]>::to_vec).unwrap_or_default();
+    let options = ZlibOptions::parse(&options);
+    let (sender, receiver) = mpsc::channel();
+    std::thread::spawn(move || {
+        let result = if operation == "compress" {
+            compress_bytes_with(&format, &input, &options)
+        } else {
+            decompress_bytes_with(&format, &input, &options)
+        };
+        let _ = sender.send(result.map_err(|error| error.to_string()));
+    });
+    let handle = ZLIB_NEXT_JOB.with(|next| {
+        let handle = next.get();
+        next.set(handle.wrapping_add(1).max(1));
+        handle
+    });
+    ZLIB_JOBS.with(|jobs| jobs.borrow_mut().insert(handle, receiver));
+    handle
+}
+
+/// The finished jobs as `[{handle, ok, message?}]` JSON; the bytes of a successful job are taken with
+/// `zlib_async_take`.
+fn zlib_async_poll() -> String {
+    let mut finished = Vec::new();
+    ZLIB_JOBS.with(|jobs| {
+        jobs.borrow_mut().retain(|handle, receiver| match receiver.try_recv() {
+            Ok(Ok(bytes)) => {
+                ZLIB_DONE.with(|done| done.borrow_mut().insert(*handle, bytes));
+                finished.push(serde_json::json!({ "handle": handle, "ok": true }));
+                false
+            }
+            Ok(Err(message)) => {
+                finished.push(serde_json::json!({ "handle": handle, "ok": false, "message": message }));
+                false
+            }
+            Err(mpsc::TryRecvError::Empty) => true,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                finished.push(serde_json::json!({ "handle": handle, "ok": false, "message": "zlib worker stopped" }));
+                false
+            }
+        });
+    });
+    serde_json::Value::Array(finished).to_string()
+}
+
+fn zlib_async_take<'js>(ctx: Ctx<'js>, handle: u32) -> rquickjs::Result<rquickjs::ArrayBuffer<'js>> {
+    let bytes = ZLIB_DONE.with(|done| done.borrow_mut().remove(&handle)).unwrap_or_default();
+    rquickjs::ArrayBuffer::new(ctx, bytes)
+}
+
+/// A pending job keeps the event loop alive.
+fn zlib_async_active() -> bool {
+    ZLIB_JOBS.with(|jobs| !jobs.borrow().is_empty()) || ZLIB_DONE.with(|done| !done.borrow().is_empty())
+}
+
 fn zlib_error(code: &str, message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, format!("{code}:{message}"))
 }

@@ -1327,9 +1327,12 @@ fn child_process_spawn_honors_stdio_timeout_abort_and_detached_options() {
     let arguments = CString::new("[]").unwrap();
     let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
     let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
+    // `stdio: 'inherit'` hands the parent's descriptors to the child (as in Node): its output no longer passes through
+    // the parent's `process.stdout.write`, so the capture stubs above see nothing. The bytes really reaching the parent's
+    // stdout are checked by the node-compat case "child stdio inherit writes straight to the parent output".
     assert_eq!(
         result,
-        r#"[[null,null,null,[0,null]],[null,null,null,"visible","warning",[0,null]],[true,[null,"SIGTERM"]],[["AbortError","ABORT_ERR"],[null,"SIGTERM"]],[true,true,[0,null]],"ERR_INVALID_ARG_VALUE"]"#
+        r#"[[null,null,null,[0,null]],[null,null,null,"","",[0,null]],[true,[null,"SIGTERM"]],[["AbortError","ABORT_ERR"],[null,"SIGTERM"]],[true,true,[0,null]],"ERR_INVALID_ARG_VALUE"]"#
     );
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
@@ -3333,12 +3336,15 @@ fn net_socket_reconnect_resets_readable_state_and_invalidates_old_polls() {
         r#"var net = require('node:net');
 module.exports = function() {
   var originalQueue = globalThis.queueMicrotask, originalTimer = globalThis.setTimeout, originalClear = globalThis.clearTimeout;
-  var originalConnect = globalThis.__thaw_net_connect, originalPoll = globalThis.__thaw_net_poll_read, originalDestroy = globalThis.__thaw_net_destroy;
-  var microtasks = [], timers = [], calls = Object.create(null), destroyedHandles = [];
+  var originalStart = globalThis.__thaw_net_connect_start, originalAsyncPoll = globalThis.__thaw_async_poll, originalCancel = globalThis.__thaw_async_cancel, originalPoll = globalThis.__thaw_net_poll_read, originalDestroy = globalThis.__thaw_net_destroy;
+  var microtasks = [], timers = [], steps = [], wires = [], cancelled = [], calls = Object.create(null), destroyedHandles = [];
   globalThis.queueMicrotask = function(task) { microtasks.push(task); };
-  globalThis.setTimeout = function(task) { timers.push(task); return timers.length; }; var originalTimerRef = globalThis.__thaw_set_timeout_ref; globalThis.__thaw_set_timeout_ref = function(task) { timers.push(task); return timers.length; };
-  globalThis.clearTimeout = function() {};
-  globalThis.__thaw_net_connect = function() { return 'ok:' + (940001 + calls.connects++); };
+  globalThis.setTimeout = function(task) { if (task.name === 'netConnectStep') { steps.push(task); return { connectStep: steps.length }; } timers.push(task); return timers.length; }; var originalTimerRef = globalThis.__thaw_set_timeout_ref; globalThis.__thaw_set_timeout_ref = function(task) { timers.push(task); return timers.length; };
+  globalThis.clearTimeout = function(id) { if (id && id.connectStep) steps[id.connectStep - 1] = function() {}; };
+  globalThis.__thaw_net_connect_start = function() { wires.push('ok:' + (940001 + calls.connects++)); return wires.length; };
+  globalThis.__thaw_async_poll = function(id) { return wires[id - 1]; };
+  globalThis.__thaw_async_cancel = function(id) { cancelled.push(wires[id - 1]); };
+  function runConnectSteps() { steps.splice(0).forEach(function(step) { step(); }); }
   globalThis.__thaw_net_destroy = function(handle) { destroyedHandles.push(handle); return 'ok'; };
   globalThis.__thaw_net_poll_read = function(handle) {
     calls[handle] = (calls[handle] || 0) + 1;
@@ -3358,11 +3364,13 @@ module.exports = function() {
     socket.on('close', function(error) { events.push('close:' + error); });
 
     socket.connect({ port: 1, host: 'localhost' });
+    runConnectSteps();
     runMicrotask();
     runMicrotask();
     socket.pause();
     socket.destroy();
     socket.connect({ port: 2, host: 'localhost' });
+    runConnectSteps();
     socket.resume();
     drainUntil(function() { return calls[940002] === 1 && timers.length >= 2; });
     var oldPoll = timers.shift();
@@ -3377,13 +3385,14 @@ module.exports = function() {
     staleSocket.on('close', function(value) { staleConnectEvents.push('close:' + value); });
     staleSocket.connect({ port: 3, host: 'localhost' });
     staleSocket.connect({ port: 4, host: 'localhost' });
+    runConnectSteps();
     drainUntil(function() { return staleConnectEvents.indexOf('connect') >= 0 && staleConnectEvents.indexOf('close:false') >= 0; });
-    return [calls[940001], calls[940002], text.indexOf('old') === -1, text.indexOf('☃') === -1, text.indexOf('new') >= 0, events, socket.readableLength, socket.readableEnded, staleConnectEvents, staleSocket._handle, staleSocket.destroyed, destroyedHandles.indexOf(940003) >= 0];
+    return [calls[940001], calls[940002], text.indexOf('old') === -1, text.indexOf('☃') === -1, text.indexOf('new') >= 0, events, socket.readableLength, socket.readableEnded, staleConnectEvents, staleSocket._handle, staleSocket.destroyed, destroyedHandles.indexOf(940003) >= 0 || cancelled.indexOf('ok:940003') >= 0];
   } finally {
     globalThis.queueMicrotask = originalQueue;
     globalThis.setTimeout = originalTimer; globalThis.__thaw_set_timeout_ref = originalTimerRef;
     globalThis.clearTimeout = originalClear;
-    globalThis.__thaw_net_connect = originalConnect;
+    globalThis.__thaw_net_connect_start = originalStart; globalThis.__thaw_async_poll = originalAsyncPoll; globalThis.__thaw_async_cancel = originalCancel;
     globalThis.__thaw_net_poll_read = originalPoll;
     globalThis.__thaw_net_destroy = originalDestroy;
   }
@@ -3419,11 +3428,15 @@ fn net_socket_eof_handler_reconnect_throw_keeps_new_generation_live() {
         dir.join("index.js"),
         r#"var net = require('node:net');
 module.exports = function() {
-  var originalQueue = globalThis.queueMicrotask, originalTimer = globalThis.setTimeout, originalConnect = globalThis.__thaw_net_connect, originalPoll = globalThis.__thaw_net_poll_read, originalDestroy = globalThis.__thaw_net_destroy;
-  var microtasks = [], timers = [], calls = Object.create(null), marker = new Error('old end handler'), reconnected = false;
+  var originalQueue = globalThis.queueMicrotask, originalTimer = globalThis.setTimeout, originalClear = globalThis.clearTimeout, originalStart = globalThis.__thaw_net_connect_start, originalAsyncPoll = globalThis.__thaw_async_poll, originalCancel = globalThis.__thaw_async_cancel, originalPoll = globalThis.__thaw_net_poll_read, originalDestroy = globalThis.__thaw_net_destroy;
+  var microtasks = [], timers = [], steps = [], wires = [], calls = Object.create(null), marker = new Error('old end handler'), reconnected = false;
   globalThis.queueMicrotask = function(task) { microtasks.push(task); };
-  globalThis.setTimeout = function(task) { timers.push(task); return timers.length; }; var originalTimerRef = globalThis.__thaw_set_timeout_ref; globalThis.__thaw_set_timeout_ref = function(task) { timers.push(task); return timers.length; };
-  globalThis.__thaw_net_connect = function() { return 'ok:' + (calls.connects++ === 0 ? 960001 : 960002); };
+  globalThis.setTimeout = function(task) { if (task.name === 'netConnectStep') { steps.push(task); return { connectStep: steps.length }; } timers.push(task); return timers.length; }; var originalTimerRef = globalThis.__thaw_set_timeout_ref; globalThis.__thaw_set_timeout_ref = function(task) { timers.push(task); return timers.length; };
+  globalThis.clearTimeout = function(id) { if (id && id.connectStep) steps[id.connectStep - 1] = function() {}; else originalClear.apply(this, arguments); };
+  globalThis.__thaw_net_connect_start = function() { wires.push('ok:' + (calls.connects++ === 0 ? 960001 : 960002)); return wires.length; };
+  globalThis.__thaw_async_poll = function(id) { return wires[id - 1]; };
+  globalThis.__thaw_async_cancel = function() {};
+  function runConnectSteps() { steps.splice(0).forEach(function(step) { step(); }); }
   globalThis.__thaw_net_destroy = function() { return 'ok'; };
   globalThis.__thaw_net_poll_read = function(handle) {
     calls[handle] = (calls[handle] || 0) + 1;
@@ -3442,16 +3455,18 @@ module.exports = function() {
     socket.on('data', function(chunk) { data.push(chunk.toString()); events.push('data'); });
     socket.on('close', function(error) { events.push('close:' + error); });
     socket.connect({ port: 1, host: 'localhost' });
+    runConnectSteps();
     runMicrotask();
     var caught = false;
     try { runMicrotask(); } catch (error) { caught = error === marker; }
+    runConnectSteps();
     runMicrotask();
     runMicrotask();
     return [caught, socket.destroyed, socket._handle, socket.readableEnded, data, events, calls[960001], calls[960002]];
   } finally {
     globalThis.queueMicrotask = originalQueue;
-    globalThis.setTimeout = originalTimer; globalThis.__thaw_set_timeout_ref = originalTimerRef;
-    globalThis.__thaw_net_connect = originalConnect;
+    globalThis.setTimeout = originalTimer; globalThis.__thaw_set_timeout_ref = originalTimerRef; globalThis.clearTimeout = originalClear;
+    globalThis.__thaw_net_connect_start = originalStart; globalThis.__thaw_async_poll = originalAsyncPoll; globalThis.__thaw_async_cancel = originalCancel;
     globalThis.__thaw_net_poll_read = originalPoll;
     globalThis.__thaw_net_destroy = originalDestroy;
   }
@@ -3489,11 +3504,11 @@ fn net_accepted_paused_socket_reconnects_without_old_half_open_shutdown() {
 module.exports = function() {
   var originalQueue = globalThis.queueMicrotask, originalTimer = globalThis.__thaw_set_timeout_ref, originalSocketTimer = globalThis.setTimeout, originalClearSocketTimer = globalThis.clearTimeout;
   var originalListen = globalThis.__thaw_net_listen, originalAccept = globalThis.__thaw_net_poll_accept, originalPoll = globalThis.__thaw_net_poll_read;
-  var originalConnect = globalThis.__thaw_net_connect, originalDestroy = globalThis.__thaw_net_destroy, originalClose = globalThis.__thaw_net_close_listener;
-  var originalShutdown = globalThis.__thaw_net_shutdown, microtasks = [], timers = [], polls = [], destroyed = [], shutdowns = [], acceptCount = 0, newPolls = 0, reconnecting = false, accepted, marker = new Error('accepted end handler');
+  var originalStart = globalThis.__thaw_net_connect_start, originalAsyncPoll = globalThis.__thaw_async_poll, originalCancel = globalThis.__thaw_async_cancel, originalDestroy = globalThis.__thaw_net_destroy, originalClose = globalThis.__thaw_net_close_listener;
+  var originalShutdown = globalThis.__thaw_net_shutdown, microtasks = [], timers = [], steps = [], polls = [], destroyed = [], shutdowns = [], acceptCount = 0, newPolls = 0, reconnecting = false, accepted, marker = new Error('accepted end handler');
   globalThis.queueMicrotask = function(task) { microtasks.push(task); };
-  globalThis.setTimeout = function(task) { timers.push(task); return timers.length; };
-  globalThis.clearTimeout = function() {};
+  globalThis.setTimeout = function(task) { if (task.name === 'netConnectStep') { steps.push(task); return { connectStep: steps.length }; } timers.push(task); return timers.length; };
+  globalThis.clearTimeout = function(id) { if (id && id.connectStep) steps[id.connectStep - 1] = function() {}; };
   globalThis.__thaw_set_timeout_ref = function(task) { timers.push(task); return timers.length; };
   globalThis.__thaw_net_listen = function() { return 'ok:970000:12345'; };
   globalThis.__thaw_net_poll_accept = function() { return acceptCount++ === 0 ? 'ok:970001:127.0.0.1:10001' : 'pending'; };
@@ -3503,11 +3518,13 @@ module.exports = function() {
     if (handle === 970002) return newPolls++ === 0 ? 'ok:6e6577' : 'pending';
     return 'pending';
   };
-  globalThis.__thaw_net_connect = function() { return 'ok:970002'; };
+  globalThis.__thaw_net_connect_start = function() { return 1; };
+  globalThis.__thaw_async_poll = function() { return 'ok:970002'; };
+  globalThis.__thaw_async_cancel = function() {};
   globalThis.__thaw_net_destroy = function(handle) { destroyed.push(handle); return 'ok'; };
   globalThis.__thaw_net_shutdown = function(handle) { shutdowns.push(handle); return 'ok'; };
   globalThis.__thaw_net_close_listener = function() {};
-  function runMicrotask() { if (!microtasks.length) throw new Error('expected queued microtask'); microtasks.shift()(); } var caughtExpected = false; function drainUntil(predicate) { for (var steps = 0; !predicate() && steps < 32; steps++) { if (!microtasks.length) throw new Error('microtask predicate not reached'); try { microtasks.shift()(); } catch (error) { if (error !== marker || caughtExpected) throw error; caughtExpected = true; } } if (!predicate()) throw new Error('microtask drain limit'); }
+  function runMicrotask() { if (!microtasks.length) throw new Error('expected queued microtask'); microtasks.shift()(); } var caughtExpected = false; function drainUntil(predicate) { for (var drained = 0; !predicate() && drained < 32; drained++) { steps.splice(0).forEach(function(step) { step(); }); if (!microtasks.length) throw new Error('microtask predicate not reached'); try { microtasks.shift()(); } catch (error) { if (error !== marker || caughtExpected) throw error; caughtExpected = true; } } if (!predicate()) throw new Error('microtask drain limit'); }
   try {
     var events = [], data = [];
     var server = net.createServer({ allowHalfOpen: false }, function(socket) {
@@ -3535,7 +3552,7 @@ module.exports = function() {
     globalThis.__thaw_net_listen = originalListen;
     globalThis.__thaw_net_poll_accept = originalAccept;
     globalThis.__thaw_net_poll_read = originalPoll;
-    globalThis.__thaw_net_connect = originalConnect;
+    globalThis.__thaw_net_connect_start = originalStart; globalThis.__thaw_async_poll = originalAsyncPoll; globalThis.__thaw_async_cancel = originalCancel;
     globalThis.__thaw_net_destroy = originalDestroy;
     globalThis.__thaw_net_close_listener = originalClose;
     globalThis.__thaw_net_shutdown = originalShutdown;
@@ -3570,10 +3587,14 @@ fn net_connect_listener_throw_retires_socket_without_duplicate_terminal_events()
     let dir = temp_registry("builtin_net_connect_listener_throw");
     fs::write(dir.join("index.js"), r#"var net = require('node:net');
 module.exports = function() {
-  var originalQueue = globalThis.queueMicrotask, originalConnect = globalThis.__thaw_net_connect, originalPoll = globalThis.__thaw_net_poll_read, originalDestroy = globalThis.__thaw_net_destroy;
-  var queued = [], retired = [], polls = 0, nextHandle = 920001, marker = new Error('connect listener');
+  var originalQueue = globalThis.queueMicrotask, originalTimer = globalThis.setTimeout, originalClear = globalThis.clearTimeout, originalStart = globalThis.__thaw_net_connect_start, originalAsyncPoll = globalThis.__thaw_async_poll, originalCancel = globalThis.__thaw_async_cancel, originalPoll = globalThis.__thaw_net_poll_read, originalDestroy = globalThis.__thaw_net_destroy;
+  var queued = [], steps = [], wires = [], retired = [], polls = 0, nextHandle = 920001, marker = new Error('connect listener');
   globalThis.queueMicrotask = function(task) { queued.push(task); };
-  globalThis.__thaw_net_connect = function() { return 'ok:' + nextHandle++; };
+  globalThis.setTimeout = function(task) { if (task.name === 'netConnectStep') { steps.push(task); return { connectStep: steps.length }; } return originalTimer.apply(this, arguments); };
+  globalThis.clearTimeout = function(id) { if (id && id.connectStep) steps[id.connectStep - 1] = function() {}; else originalClear.apply(this, arguments); };
+  globalThis.__thaw_net_connect_start = function() { wires.push('ok:' + nextHandle++); return wires.length; };
+  globalThis.__thaw_async_poll = function(id) { return wires[id - 1]; };
+  globalThis.__thaw_async_cancel = function() {};
   globalThis.__thaw_net_poll_read = function() { polls++; return 'pending'; };
   globalThis.__thaw_net_destroy = function(handle) { retired.push(handle); };
   function drain() { while (queued.length) queued.shift()(); }
@@ -3584,12 +3605,13 @@ module.exports = function() {
     if (kind === 'before') socket.on('connect', function() { events.push('connect'); throw marker; });
     socket.connect({ port: 12345 }, kind === 'after' ? function() { events.push('connect'); throw marker; } : kind === 'reentrant' ? function() { events.push('connect'); socket.destroy(); throw marker; } : kind === 'falsy' ? function() { events.push('connect'); throw undefined; } : undefined);
     if (kind === 'immediate') socket.destroy();
+    steps.splice(0).forEach(function(step) { step(); });
     try { queued.shift()(); } catch (error) { caught = kind === 'falsy' ? error === undefined : error === marker; }
     drain();
     return [caught, events, retired.slice(before), polls - beforePolls, socket.destroyed, socket._handle];
   }
   try { return [probe('after'), probe('before'), probe('reentrant'), probe('falsy'), probe('immediate')]; }
-  finally { globalThis.queueMicrotask = originalQueue; globalThis.__thaw_net_connect = originalConnect; globalThis.__thaw_net_poll_read = originalPoll; globalThis.__thaw_net_destroy = originalDestroy; }
+  finally { globalThis.queueMicrotask = originalQueue; globalThis.setTimeout = originalTimer; globalThis.clearTimeout = originalClear; globalThis.__thaw_net_connect_start = originalStart; globalThis.__thaw_async_poll = originalAsyncPoll; globalThis.__thaw_async_cancel = originalCancel; globalThis.__thaw_net_poll_read = originalPoll; globalThis.__thaw_net_destroy = originalDestroy; }
 };"#).unwrap();
     let empty_node_modules = temp_registry("builtin_net_connect_listener_throw_modules");
     let (bundle, _, _, _) = bundle_commonjs_package(&empty_node_modules, "pkg", &dir, "index.js").unwrap();
@@ -3600,7 +3622,7 @@ module.exports = function() {
     let arguments = CString::new("[]").unwrap();
     let result_ptr = thaw_quickjs::thaw_js_call(function.as_ptr(), arguments.as_ptr());
     let result = unsafe { CStr::from_ptr(result_ptr) }.to_string_lossy();
-    assert_eq!(result, r#"[[true,["connect","close:false"],[920001],0,true,0],[true,["connect","close:false"],[920002],0,true,0],[true,["connect","close:false"],[920003],0,true,0],[true,["connect","close:false"],[920004],0,true,0],[false,["close:false"],[920005],0,true,0]]"#);
+    assert_eq!(result, r#"[[true,["connect","close:false"],[920001],0,true,0],[true,["connect","close:false"],[920002],0,true,0],[true,["connect","close:false"],[920003],0,true,0],[true,["connect","close:false"],[920004],0,true,0],[false,["close:false"],[],0,true,0]]"#);
     let _ = fs::remove_dir_all(&dir);
     let _ = fs::remove_dir_all(&empty_node_modules);
 }
@@ -3902,6 +3924,7 @@ module.exports = function() {
   var originalConnect = globalThis.__thaw_tls_connect_with_options, originalQueue = globalThis.queueMicrotask;
   var queued = [], socket, closes = 0, caught;
   try {
+    var asyncWires = [], priorTimeout = globalThis.setTimeout, priorClear = globalThis.clearTimeout, priorStart = globalThis.__thaw_tls_connect_start, priorPoll = globalThis.__thaw_async_poll, priorCancel = globalThis.__thaw_async_cancel; globalThis.__thaw_tls_connect_start = function() { asyncWires.push(globalThis.__thaw_tls_connect_with_options.apply(null, arguments)); return asyncWires.length; }; globalThis.__thaw_async_poll = function(id) { return asyncWires[id - 1]; }; globalThis.__thaw_async_cancel = function() {}; globalThis.setTimeout = function(task) { if (task && task.name === 'netConnectStep') { task(); return { connectStep: 0 }; } return priorTimeout.apply(this, arguments); }; globalThis.clearTimeout = function(id) { if (id && id.connectStep !== undefined) return; return priorClear.apply(this, arguments); };
     globalThis.__thaw_tls_connect_with_options = function() { return 'err:finite TLS failure'; };
     globalThis.queueMicrotask = function(callback) { queued.push(callback); };
     socket = new tls.TLSSocket(); socket.on('close', function() { closes++; });
@@ -3913,6 +3936,7 @@ module.exports = function() {
     check(closes === 1, 'close delivered before throw');
   } finally {
     globalThis.__thaw_tls_connect_with_options = originalConnect;
+    globalThis.__thaw_tls_connect_start = priorStart; globalThis.__thaw_async_poll = priorPoll; globalThis.__thaw_async_cancel = priorCancel; globalThis.setTimeout = priorTimeout; globalThis.clearTimeout = priorClear;
     globalThis.queueMicrotask = originalQueue;
   }
   return true;
@@ -3978,6 +4002,7 @@ module.exports = function() {
       && globalThis.__thaw_tls_server_listen === originalBasic && globalThis.__thaw_tls_server_listen_with_ca === originalWithCa, 'invalid server CA rejected before state/native call');
   }
   try {
+    var asyncWires = [], priorTimeout = globalThis.setTimeout, priorClear = globalThis.clearTimeout, priorStart = globalThis.__thaw_tls_connect_start, priorPoll = globalThis.__thaw_async_poll, priorCancel = globalThis.__thaw_async_cancel; globalThis.__thaw_tls_connect_start = function() { asyncWires.push(globalThis.__thaw_tls_connect_with_options.apply(null, arguments)); return asyncWires.length; }; globalThis.__thaw_async_poll = function(id) { return asyncWires[id - 1]; }; globalThis.__thaw_async_cancel = function() {}; globalThis.setTimeout = function(task) { if (task && task.name === 'netConnectStep') { task(); return { connectStep: 0 }; } return priorTimeout.apply(this, arguments); }; globalThis.clearTimeout = function(id) { if (id && id.connectStep !== undefined) return; return priorClear.apply(this, arguments); };
     globalThis.__thaw_tls_connect_with_options = function() { calls.push(Array.prototype.slice.call(arguments)); return 'err:finite client'; };
     globalThis.__thaw_tls_server_listen_with_options = function() { serverCalls.push(Array.prototype.slice.call(arguments)); return 'err:finite server'; };
     globalThis.queueMicrotask = function(callback) { queued.push(callback); };
@@ -3992,6 +4017,7 @@ module.exports = function() {
     return true;
   } finally {
     globalThis.__thaw_tls_connect_with_options = originalConnect;
+    globalThis.__thaw_tls_connect_start = priorStart; globalThis.__thaw_async_poll = priorPoll; globalThis.__thaw_async_cancel = priorCancel; globalThis.setTimeout = priorTimeout; globalThis.clearTimeout = priorClear;
     globalThis.__thaw_tls_server_listen_with_options = originalServer;
     globalThis.queueMicrotask = originalQueue;
   }
@@ -4137,8 +4163,8 @@ fn tls_custom_identity_finalizes_before_success_and_cleans_up_failures() {
 var tls = require('node:tls');
 function check(value, message) { if (!value) throw new Error(message); }
 module.exports = function() {
-  var names = ['__thaw_tls_connect_with_options', '__thaw_tls_peer_certificate', '__thaw_tls_local_certificate', '__thaw_tls_peer_certificate_metadata', '__thaw_tls_local_certificate_metadata', '__thaw_tls_authorization', '__thaw_tls_destroy', '__thaw_tls_poll_read', '__thaw_crypto_hash_hex', 'queueMicrotask', 'setTimeout'];
-  var originals = names.map(function(name) { return globalThis[name]; }), queued = [], delayed = [], calls = [], destroyed = [], nextHandle = 41;
+  var names = ['__thaw_tls_connect_with_options', '__thaw_tls_connect_start', '__thaw_async_poll', '__thaw_async_cancel', 'clearTimeout', '__thaw_tls_peer_certificate', '__thaw_tls_local_certificate', '__thaw_tls_peer_certificate_metadata', '__thaw_tls_local_certificate_metadata', '__thaw_tls_authorization', '__thaw_tls_destroy', '__thaw_tls_poll_read', '__thaw_crypto_hash_hex', 'queueMicrotask', 'setTimeout'];
+  var originals = names.map(function(name) { return globalThis[name]; }), queued = [], delayed = [], calls = [], destroyed = [], nextHandle = 41, asyncWires = [];
   function install(auth) {
     destroyed.length = 0; nextHandle = 41;
     globalThis.__thaw_tls_connect_with_options = function() { calls.push(Array.prototype.slice.call(arguments)); return 'ok:' + nextHandle++ + ':6832'; };
@@ -4151,7 +4177,8 @@ module.exports = function() {
     globalThis.__thaw_tls_poll_read = function() { return 'pending'; };
     globalThis.__thaw_crypto_hash_hex = function() { return 'ab'.repeat(32); };
     globalThis.queueMicrotask = function(callback) { queued.push(callback); };
-    globalThis.setTimeout = function(callback) { delayed.push(callback); return delayed.length; };
+    globalThis.setTimeout = function(callback) { if (callback && callback.name === 'netConnectStep') { callback(); return { connectStep: 0 }; } delayed.push(callback); return delayed.length; };
+    globalThis.__thaw_tls_connect_start = function() { asyncWires.push(globalThis.__thaw_tls_connect_with_options.apply(null, arguments)); return asyncWires.length; }; globalThis.__thaw_async_poll = function(id) { return asyncWires[id - 1]; }; globalThis.__thaw_async_cancel = function() {}; globalThis.clearTimeout = function() {};
   }
   function drain() { while (queued.length) queued.shift()(); }
   function socketFor(options, events) {
@@ -4518,6 +4545,7 @@ module.exports = function() {
     check(globalThis.__thaw_tls_server_listen === originalBasic && globalThis.__thaw_tls_server_listen_with_ca === originalWithCa, 'invalid server leaves bridge intact');
   }
   try {
+    var asyncWires = [], priorTimeout = globalThis.setTimeout, priorClear = globalThis.clearTimeout, priorStart = globalThis.__thaw_tls_connect_start, priorPoll = globalThis.__thaw_async_poll, priorCancel = globalThis.__thaw_async_cancel; globalThis.__thaw_tls_connect_start = function() { asyncWires.push(globalThis.__thaw_tls_connect_with_options.apply(null, arguments)); return asyncWires.length; }; globalThis.__thaw_async_poll = function(id) { return asyncWires[id - 1]; }; globalThis.__thaw_async_cancel = function() {}; globalThis.setTimeout = function(task) { if (task && task.name === 'netConnectStep') { task(); return { connectStep: 0 }; } return priorTimeout.apply(this, arguments); }; globalThis.clearTimeout = function(id) { if (id && id.connectStep !== undefined) return; return priorClear.apply(this, arguments); };
     globalThis.__thaw_tls_connect_with_options = function() { connectCalls.push(Array.prototype.slice.call(arguments)); return 'err:finite client failure'; };
     globalThis.__thaw_tls_server_listen_with_options = function() { serverCalls.push(Array.prototype.slice.call(arguments)); return 'err:finite server failure'; };
     globalThis.queueMicrotask = function(callback) { queued.push(callback); };
@@ -4538,6 +4566,7 @@ module.exports = function() {
     check(connectCalls.length === 5 && serverCalls.length === 6, 'malformed lists never reach native entrances');
   } finally {
     globalThis.__thaw_tls_connect_with_options = originalConnect;
+    globalThis.__thaw_tls_connect_start = priorStart; globalThis.__thaw_async_poll = priorPoll; globalThis.__thaw_async_cancel = priorCancel; globalThis.setTimeout = priorTimeout; globalThis.clearTimeout = priorClear;
     globalThis.__thaw_tls_server_listen_with_options = originalServer;
     globalThis.__thaw_tls_server_listen = originalBasic;
     globalThis.__thaw_tls_server_listen_with_ca = originalWithCa;

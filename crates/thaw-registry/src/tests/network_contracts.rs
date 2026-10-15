@@ -721,22 +721,23 @@ fn p2c_tls_api_mock() {
     assert_eq!(
         p2c_run("tls_api_mock", r#####"// thaw-only: {"calls":[["a.example",443,"a.example","6361","",""],["b.example",8443,"b.example","6361","",""],["c.example",9443,"c.example","6361","",""]],"nullBeforeConnect":[null,null],"proto":"TLSv1.2","cipher":["ECDHE-RSA-AES128-GCM-SHA256","TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256","TLSv1.2"],"copyIsolated":["api.example","api.example",["x","y"]],"afterDestroy":[null,null,null,null]}
 const tls = require('node:tls');
-const names = ['__thaw_tls_connect_with_options', '__thaw_tls_session_info', '__thaw_tls_peer_certificate', '__thaw_tls_local_certificate', '__thaw_tls_peer_certificate_metadata', '__thaw_tls_local_certificate_metadata', '__thaw_tls_authorization', '__thaw_tls_destroy', '__thaw_tls_poll_read', '__thaw_crypto_hash_hex', 'queueMicrotask', 'setTimeout'];
-const originals = names.map(n => globalThis[n]); const queued = []; const calls = [];
+const names = ['__thaw_tls_connect_start', '__thaw_async_poll', '__thaw_async_cancel', '__thaw_tls_session_info', '__thaw_tls_peer_certificate', '__thaw_tls_local_certificate', '__thaw_tls_peer_certificate_metadata', '__thaw_tls_local_certificate_metadata', '__thaw_tls_authorization', '__thaw_tls_destroy', '__thaw_tls_poll_read', '__thaw_crypto_hash_hex', 'queueMicrotask', 'setTimeout'];
+const originals = names.map(n => globalThis[n]); const queued = []; const calls = []; const steps = [];
 try {
-  globalThis.__thaw_tls_connect_with_options = function () { calls.push(Array.prototype.slice.call(arguments, 0, 6)); return 'ok:' + (40 + calls.length) + ':'; };
+  globalThis.__thaw_tls_connect_start = function () { calls.push(Array.prototype.slice.call(arguments, 0, 6)); return calls.length; }; globalThis.__thaw_async_poll = function (id) { return 'ok:' + (40 + id) + ':'; }; globalThis.__thaw_async_cancel = () => {};
   globalThis.__thaw_tls_session_info = () => JSON.stringify({ protocol: 'TLSv1.2', name: 'ECDHE-RSA-AES128-GCM-SHA256', standardName: 'TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256' });
   globalThis.__thaw_tls_peer_certificate = () => 'aabb'; globalThis.__thaw_tls_local_certificate = () => '';
   globalThis.__thaw_tls_peer_certificate_metadata = () => JSON.stringify({ subject: { CN: ['api.example'] }, issuer: { CN: ['api.example'] }, dnsNames: ['x', 'y'] });
   globalThis.__thaw_tls_local_certificate_metadata = () => '{}';
   globalThis.__thaw_tls_authorization = () => JSON.stringify({ authorized: true, authorizationError: null, chainVerified: true });
   globalThis.__thaw_tls_destroy = () => {}; globalThis.__thaw_tls_poll_read = () => 'pending'; globalThis.__thaw_crypto_hash_hex = () => 'ab'.repeat(32);
-  globalThis.queueMicrotask = f => { queued.push(f); }; globalThis.setTimeout = () => 1;
+  globalThis.queueMicrotask = f => { queued.push(f); }; globalThis.setTimeout = f => { steps.push(f); return 1; };
   const out = {};
   const sc = tls.createSecureContext({ ca: 'ca' });
   const s1 = tls.connect({ host: 'a.example', port: 443, secureContext: sc, rejectUnauthorized: false }); s1.on('error', () => {});
   const s2 = tls.connect(8443, 'b.example', { ca: 'ca', rejectUnauthorized: false }, () => {}); s2.on('error', () => {});
   const s3 = tls.connect(9443, 'c.example', { secureContext: sc, rejectUnauthorized: false }); s3.on('error', () => {});
+  steps.splice(0).forEach(f => f());
   out.calls = calls;
   const fresh = new tls.TLSSocket(); out.nullBeforeConnect = [fresh.getProtocol(), fresh.getCipher()];
   out.proto = s1.getProtocol(); const c = s1.getCipher(); out.cipher = [c.name, c.standardName, c.version];
@@ -808,9 +809,12 @@ c.destroy(); out.after = [c.getPeerCertificate(), c.getProtocol()];
 out.wrong = await new Promise(r => { const s = tls.connect({ port: __TLS_PORT__, host: 'localhost', ca: [ca1] }, () => r('connected')); s.on('error', e => r(typeof e.code)); });
 const sc = await new Promise((res, rej) => { const s = tls.connect({ port: __TLS_PORT__, host: 'localhost', secureContext: tls.createSecureContext({ ca }) }, () => res(s)); s.on('error', rej); s.on('data', () => {}); }); out.secureContext = sc.authorized; sc.destroy();
 const p = await new Promise((res, rej) => { const s = tls.connect(__TLS_PORT__, 'localhost', { ca }, () => res(s)); s.on('error', rej); s.on('data', () => {}); }); out.positional = p.authorized; p.destroy();
+const full = await new Promise((res, rej) => { const s = tls.connect({ port: __TLS_PORT__, host: 'localhost', ca }, () => res(s)); s.on('error', rej); s.on('data', () => {}); });
+const plainCert = full.getPeerCertificate(), chainCert = full.getPeerCertificate(true);
+out.chain = [Object.prototype.hasOwnProperty.call(plainCert, 'issuerCertificate'), chainCert.issuerCertificate.subject.CN, chainCert.issuerCertificate.issuerCertificate === chainCert.issuerCertificate, chainCert.fingerprint256 === plainCert.fingerprint256]; full.destroy();
 await new Promise(r => setTimeout(r, 50));
 return out;
 "#####.replace("__TLS_DIR__", dir.to_str().unwrap()).replace("__TLS_PORT__", &port.to_string());
-    assert_eq!(p2c_run("tls_real_peer", &body), r#####"{"authorized":true,"protocol":"TLSv1.3","cipher":["TLS_AES_256_GCM_SHA384","TLS_AES_256_GCM_SHA384","TLSv1.3"],"peer":["localhost","P2C CA Two"],"again":"localhost","after":[null,null],"wrong":"string","secureContext":true,"positional":true}"#####);
+    assert_eq!(p2c_run("tls_real_peer", &body), r#####"{"authorized":true,"protocol":"TLSv1.3","cipher":["TLS_AES_256_GCM_SHA384","TLS_AES_256_GCM_SHA384","TLSv1.3"],"peer":["localhost","P2C CA Two"],"again":"localhost","after":[null,null],"wrong":"string","secureContext":true,"positional":true,"chain":[false,"P2C CA Two",true,true]}"#####);
     let _ = fs::remove_dir_all(&dir);
 }

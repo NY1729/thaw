@@ -60,37 +60,269 @@ fn tcp_connect_structured(host: &str, port: u16) -> Result<TcpStream, String> {
     Err(last.unwrap_or_else(|| format!("err:ENOTFOUND|-3008|getaddrinfo|{host}|no addresses for {host}")))
 }
 
+/// Registers a connected stream in the thread-local table and builds the `ok:<handle>:<ip>:<port>` wire.
+fn net_register_stream(stream: TcpStream, host: &str, port: u16) -> String {
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+    // The connected peer, not the requested host name: `ok:<handle>:<ip>:<port>` (IPv6 contains colons, so the port is the last field).
+    let peer = stream
+        .peer_addr()
+        .map(|peer| (peer.ip().to_string(), peer.port()))
+        .unwrap_or_else(|_| (host.to_string(), port));
+    NET_STREAMS.with(|streams| {
+        let mut streams = streams.borrow_mut();
+        let handle = streams.0;
+        streams.0 = streams.0.wrapping_add(1).max(1);
+        streams.1.insert(handle, stream);
+        format!("ok:{handle}:{}:{}", peer.0, peer.1)
+    })
+}
+
 fn net_connect(host: &str, port: u16) -> String {
     match tcp_connect_structured(host, port) {
-        Ok(stream) => {
-            let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
-            // The connected peer, not the requested host name: `ok:<handle>:<ip>:<port>` (IPv6 contains colons, so the port is the last field).
-            let peer = stream
-                .peer_addr()
-                .map(|peer| (peer.ip().to_string(), peer.port()))
-                .unwrap_or_else(|_| (host.to_string(), port));
-            NET_STREAMS.with(|streams| {
-                let mut streams = streams.borrow_mut();
-                let handle = streams.0;
-                streams.0 = streams.0.wrapping_add(1).max(1);
-                streams.1.insert(handle, stream);
-                format!("ok:{handle}:{}:{}", peer.0, peer.1)
-            })
-        }
+        Ok(stream) => net_register_stream(stream, host, port),
         Err(wire) => wire,
     }
 }
 
-fn net_write(handle: u32, value: &[u8]) -> String {
-    NET_STREAMS.with(|streams| {
-        let mut streams = streams.borrow_mut();
-        match streams.1.get_mut(&handle) {
-            Some(stream) => stream
-                .write_all(value)
-                .map(|_| "ok".to_string())
-                .unwrap_or_else(|error| format!("err:{error}")),
-            None => "err:socket is closed".to_string(),
+/// Asynchronous host operations. Slow work (name resolution, connect, TLS handshake) runs on a worker thread and hands a
+/// "finisher" back; the finisher runs on the JavaScript thread, so thread-local socket tables stay single-threaded and the
+/// finisher's result is the same wire string the synchronous host function would have returned. JavaScript polls from a
+/// (ref'd) timer, which also keeps the event loop alive while an operation is pending.
+type AsyncFinisher = Box<dyn FnOnce() -> String + Send>;
+
+struct AsyncOp {
+    receiver: std::sync::mpsc::Receiver<AsyncFinisher>,
+}
+
+thread_local! {
+    static ASYNC_OPS: RefCell<(u32, HashMap<u32, AsyncOp>)> = RefCell::new((1, HashMap::new()));
+}
+
+fn async_op_insert(receiver: std::sync::mpsc::Receiver<AsyncFinisher>) -> u32 {
+    ASYNC_OPS.with(|ops| {
+        let mut ops = ops.borrow_mut();
+        let id = ops.0;
+        ops.0 = ops.0.wrapping_add(1).max(1);
+        ops.1.insert(id, AsyncOp { receiver });
+        id
+    })
+}
+
+/// Runs `work` on a worker thread; `work` returns the finisher that completes the operation on the JavaScript thread.
+fn async_op_start<W>(work: W) -> u32
+where
+    W: FnOnce() -> AsyncFinisher + Send + 'static,
+{
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let spawned = std::thread::Builder::new()
+        .name("thaw-async-op".to_string())
+        .spawn(move || {
+            // A cancelled operation dropped its receiver: the finisher (and the socket it owns) is dropped here.
+            let _ = sender.send(work());
+        });
+    if let Err(error) = spawned {
+        let (failed_sender, failed_receiver) = std::sync::mpsc::channel();
+        let message = format!("err:failed to start an asynchronous operation: {error}");
+        let _ = failed_sender.send(Box::new(move || message) as AsyncFinisher);
+        return async_op_insert(failed_receiver);
+    }
+    async_op_insert(receiver)
+}
+
+/// An operation whose outcome is already known (for example an argument error); it completes on the first poll.
+fn async_op_ready(outcome: String) -> u32 {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let _ = sender.send(Box::new(move || outcome) as AsyncFinisher);
+    async_op_insert(receiver)
+}
+
+/// `"pending"` until the worker finished; then the finisher's wire string (the operation is removed).
+fn async_op_poll(id: u32) -> String {
+    let outcome = ASYNC_OPS.with(|ops| {
+        let mut ops = ops.borrow_mut();
+        let Some(op) = ops.1.get(&id) else {
+            return Some(Err("err:unknown asynchronous operation".to_string()));
+        };
+        match op.receiver.try_recv() {
+            Ok(finisher) => {
+                ops.1.remove(&id);
+                Some(Ok(finisher))
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => None,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                ops.1.remove(&id);
+                Some(Err("err:asynchronous operation failed".to_string()))
+            }
         }
+    });
+    match outcome {
+        None => "pending".to_string(),
+        Some(Ok(finisher)) => finisher(),
+        Some(Err(wire)) => wire,
+    }
+}
+
+/// Forgets a pending operation; a socket the worker connects afterwards is dropped by the worker.
+fn async_op_cancel(id: u32) {
+    ASYNC_OPS.with(|ops| {
+        ops.borrow_mut().1.remove(&id);
+    });
+}
+
+fn net_connect_start(host: &str, port: u32) -> u32 {
+    let port = match checked_port(port) {
+        Ok(port) => port,
+        Err(wire) => return async_op_ready(wire),
+    };
+    let host = host.to_string();
+    async_op_start(move || {
+        let connected = tcp_connect_structured(&host, port);
+        Box::new(move || match connected {
+            Ok(stream) => net_register_stream(stream, &host, port),
+            Err(wire) => wire,
+        })
+    })
+}
+
+fn dns_lookup_start(hostname: String) -> u32 {
+    async_op_start(move || {
+        let json = dns_lookup_json(hostname);
+        Box::new(move || json)
+    })
+}
+
+/// Outbound bytes of one TCP socket. A dedicated thread owns a duplicate of the descriptor and writes in order, so a peer that
+/// stops reading blocks only that thread (the event loop keeps running); JavaScript sees the queued size for backpressure and any
+/// write failure on its next call.
+enum NetWriterMessage {
+    Data(Vec<u8>),
+    Shutdown,
+}
+
+struct NetWriter {
+    sender: std::sync::mpsc::Sender<NetWriterMessage>,
+    pending: Arc<std::sync::atomic::AtomicUsize>,
+    failure: Arc<Mutex<Option<String>>>,
+    /// `end()` already queued the write-side shutdown: a later `destroy()` must let the queued bytes drain first.
+    shutdown_requested: bool,
+}
+
+thread_local! {
+    static NET_WRITERS: RefCell<HashMap<u32, NetWriter>> = RefCell::new(HashMap::new());
+}
+
+fn net_writer_loop(
+    mut stream: TcpStream,
+    receiver: std::sync::mpsc::Receiver<NetWriterMessage>,
+    pending: Arc<std::sync::atomic::AtomicUsize>,
+    failure: Arc<Mutex<Option<String>>>,
+) {
+    use std::sync::atomic::Ordering;
+    for message in receiver {
+        match message {
+            NetWriterMessage::Data(bytes) => {
+                let mut offset = 0;
+                while offset < bytes.len() {
+                    match stream.write(&bytes[offset..]) {
+                        Ok(0) => {
+                            if let Ok(mut slot) = failure.lock() {
+                                slot.get_or_insert_with(|| "write returned zero bytes".to_string());
+                            }
+                            return;
+                        }
+                        Ok(written) => {
+                            offset += written;
+                            pending.fetch_sub(written, Ordering::AcqRel);
+                        }
+                        Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                        // The reader toggles O_NONBLOCK on the shared descriptor while it polls.
+                        // ponytail: sleep-retry, a poll(POLLOUT) wait is the upgrade if this ever shows up in profiles.
+                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                            std::thread::sleep(Duration::from_millis(1));
+                        }
+                        Err(error) => {
+                            if let Ok(mut slot) = failure.lock() {
+                                slot.get_or_insert_with(|| error.to_string());
+                            }
+                            return;
+                        }
+                    }
+                }
+            }
+            NetWriterMessage::Shutdown => {
+                if let Err(error) = stream.shutdown(Shutdown::Write) {
+                    if let Ok(mut slot) = failure.lock() {
+                        slot.get_or_insert_with(|| error.to_string());
+                    }
+                }
+                return;
+            }
+        }
+    }
+}
+
+fn net_writer_failure(handle: u32) -> Option<String> {
+    NET_WRITERS.with(|writers| {
+        writers
+            .borrow()
+            .get(&handle)
+            .and_then(|writer| writer.failure.lock().ok().and_then(|slot| slot.clone()))
+    })
+}
+
+/// Queues `value` for the socket's writer thread, creating the thread on the first write.
+fn net_write(handle: u32, value: &[u8]) -> String {
+    use std::sync::atomic::Ordering;
+    let clone = NET_STREAMS.with(|streams| {
+        streams
+            .borrow()
+            .1
+            .get(&handle)
+            .map(|stream| stream.try_clone())
+    });
+    NET_WRITERS.with(|writers| {
+        let mut writers = writers.borrow_mut();
+        let writer = match writers.entry(handle) {
+            std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                let stream = match clone {
+                    Some(Ok(stream)) => stream,
+                    Some(Err(error)) => return format!("err:{error}"),
+                    None => return "err:socket is closed".to_string(),
+                };
+                let (sender, receiver) = std::sync::mpsc::channel();
+                let pending = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                let failure = Arc::new(Mutex::new(None));
+                let thread_pending = Arc::clone(&pending);
+                let thread_failure = Arc::clone(&failure);
+                if let Err(error) = std::thread::Builder::new()
+                    .name("thaw-net-writer".to_string())
+                    .spawn(move || net_writer_loop(stream, receiver, thread_pending, thread_failure))
+                {
+                    return format!("err:{error}");
+                }
+                entry.insert(NetWriter { sender, pending, failure, shutdown_requested: false })
+            }
+        };
+        if let Some(error) = writer.failure.lock().ok().and_then(|slot| slot.clone()) {
+            return format!("err:{error}");
+        }
+        writer.pending.fetch_add(value.len(), Ordering::AcqRel);
+        match writer.sender.send(NetWriterMessage::Data(value.to_vec())) {
+            Ok(()) => "ok".to_string(),
+            Err(_) => "err:socket is closed".to_string(),
+        }
+    })
+}
+
+/// Bytes accepted by `net_write` that the writer thread has not handed to the kernel yet.
+fn net_pending_bytes(handle: u32) -> u32 {
+    NET_WRITERS.with(|writers| {
+        writers
+            .borrow()
+            .get(&handle)
+            .map(|writer| writer.pending.load(std::sync::atomic::Ordering::Acquire).min(u32::MAX as usize) as u32)
+            .unwrap_or(0)
     })
 }
 
@@ -113,6 +345,15 @@ fn net_finish(handle: u32) -> String {
 }
 
 fn net_shutdown_write(handle: u32) -> String {
+    let queued = NET_WRITERS.with(|writers| {
+        writers.borrow_mut().get_mut(&handle).map(|writer| {
+            writer.shutdown_requested = true;
+            writer.sender.send(NetWriterMessage::Shutdown).is_ok()
+        })
+    });
+    if let Some(accepted) = queued {
+        return if accepted { "ok".to_string() } else { "err:socket is closed".to_string() };
+    }
     NET_STREAMS.with(|streams| {
         let streams = streams.borrow();
         let Some(stream) = streams.1.get(&handle) else {
@@ -125,11 +366,76 @@ fn net_shutdown_write(handle: u32) -> String {
     })
 }
 
+/// TCP_NODELAY / SO_KEEPALIVE (+ idle time) on an already connected socket.
+fn tcp_socket_option(stream: &TcpStream, option: &str, enable: bool, delay_ms: u32) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+    match option {
+        "nodelay" => stream.set_nodelay(enable),
+        "keepalive" => {
+            let fd = stream.as_raw_fd();
+            let set = |level: libc::c_int, name: libc::c_int, value: libc::c_int| -> io::Result<()> {
+                let result = unsafe {
+                    libc::setsockopt(fd, level, name, (&value as *const libc::c_int).cast(), std::mem::size_of::<libc::c_int>() as libc::socklen_t)
+                };
+                if result == 0 { Ok(()) } else { Err(io::Error::last_os_error()) }
+            };
+            set(libc::SOL_SOCKET, libc::SO_KEEPALIVE, libc::c_int::from(enable))?;
+            if enable && delay_ms > 0 {
+                // Node passes the initial delay in milliseconds; the kernel takes whole seconds (at least one).
+                let seconds = libc::c_int::try_from((delay_ms / 1000).max(1)).unwrap_or(libc::c_int::MAX);
+                #[cfg(any(target_os = "linux", target_os = "android"))]
+                set(libc::IPPROTO_TCP, libc::TCP_KEEPIDLE, seconds)?;
+                #[cfg(target_vendor = "apple")]
+                set(libc::IPPROTO_TCP, libc::TCP_KEEPALIVE, seconds)?;
+                #[cfg(not(any(target_os = "linux", target_os = "android", target_vendor = "apple")))]
+                let _ = seconds;
+            }
+            Ok(())
+        }
+        _ => Err(io::Error::new(io::ErrorKind::InvalidInput, "unknown socket option")),
+    }
+}
+
+/// `kind` is `tcp`, `tls` (client or server connection, whichever owns the handle).
+fn net_set_option(kind: &str, handle: u32, option: &str, enable: bool, delay_ms: u32) -> String {
+    let outcome: Option<io::Result<()>> = match kind {
+        "tcp" => NET_STREAMS.with(|streams| streams.borrow().1.get(&handle).map(|stream| tcp_socket_option(stream, option, enable, delay_ms))),
+        #[cfg(feature = "tls")]
+        "tls" => TLS_STREAMS
+            .with(|streams| streams.borrow().1.get(&handle).map(|stream| tcp_socket_option(&stream.sock, option, enable, delay_ms)))
+            .or_else(|| {
+                TLS_SERVER_STREAMS.with(|streams| streams.borrow().1.get(&handle).map(|stream| tcp_socket_option(&stream.sock, option, enable, delay_ms)))
+            }),
+        _ => None,
+    };
+    match outcome {
+        Some(Ok(())) => "ok".to_string(),
+        Some(Err(error)) => format!("err:{error}"),
+        None => "err:socket is closed".to_string(),
+    }
+}
+
 fn net_poll_read(handle: u32) -> String {
     net_poll_read_impl(handle, false)
 }
 
 fn net_poll_read_impl(handle: u32, retain_on_eof: bool) -> String {
+    let result = net_poll_read_stream(handle, retain_on_eof);
+    if result == "pending" {
+        if let Some(error) = net_writer_failure(handle) {
+            net_destroy(handle);
+            return format!("err:{error}");
+        }
+    }
+    if result.starts_with("err:") || (result == "eof" && !retain_on_eof) {
+        NET_WRITERS.with(|writers| {
+            writers.borrow_mut().remove(&handle);
+        });
+    }
+    result
+}
+
+fn net_poll_read_stream(handle: u32, retain_on_eof: bool) -> String {
     NET_STREAMS.with(|streams| {
         let mut streams = streams.borrow_mut();
         let mut value = vec![0u8; 16 * 1024];
@@ -173,9 +479,18 @@ fn net_poll_read_impl(handle: u32, retain_on_eof: bool) -> String {
 }
 
 fn net_destroy(handle: u32) {
+    // After `end()` the queued bytes still belong to the peer: the writer thread drains them and closes its descriptor.
+    let draining = NET_WRITERS.with(|writers| {
+        writers
+            .borrow_mut()
+            .remove(&handle)
+            .is_some_and(|writer| writer.shutdown_requested)
+    });
     NET_STREAMS.with(|streams| {
         if let Some(stream) = streams.borrow_mut().1.remove(&handle) {
-            let _ = stream.shutdown(Shutdown::Both);
+            if !draining {
+                let _ = stream.shutdown(Shutdown::Both);
+            }
         }
     });
 }
@@ -357,6 +672,100 @@ fn udp_set_broadcast(handle: u32, enabled: bool) -> String {
     })
 }
 
+/// UDP socket options Node exposes beyond broadcast: TTLs, multicast loopback / interface / membership.
+/// `name` selects the option; `a`, `b`, `c` are its textual arguments (group, interface, source address or a number).
+#[cfg(unix)]
+fn udp_option(handle: u32, name: &str, a: &str, b: &str, c: &str) -> String {
+    use std::net::{Ipv4Addr, Ipv6Addr};
+    use std::os::fd::AsRawFd;
+    UDP_SOCKETS.with(|sockets| {
+        let sockets = sockets.borrow();
+        let Some(socket) = sockets.1.get(&handle) else { return "err|EBADF|socket is closed".to_string(); };
+        let fd = socket.as_raw_fd();
+        let v6 = socket.local_addr().map(|address| address.is_ipv6()).unwrap_or(false);
+        let invalid = |what: &str| format!("err|EINVAL|{what} EINVAL");
+        fn set<T>(fd: libc::c_int, level: libc::c_int, option: libc::c_int, value: &T) -> Result<(), String> {
+            let result = unsafe { libc::setsockopt(fd, level, option, (value as *const T).cast(), std::mem::size_of::<T>() as libc::socklen_t) };
+            if result == 0 { Ok(()) } else { Err(udp_error(io::Error::last_os_error())) }
+        }
+        let number = |text: &str| text.parse::<libc::c_int>().ok();
+        let outcome: Result<(), String> = match name {
+            "ttl" => match number(a) {
+                Some(value) if v6 => set(fd, libc::IPPROTO_IPV6, libc::IPV6_UNICAST_HOPS, &value),
+                Some(value) => set(fd, libc::IPPROTO_IP, libc::IP_TTL, &value),
+                None => return invalid("setTTL"),
+            },
+            "multicast_ttl" => match number(a) {
+                Some(value) if v6 => set(fd, libc::IPPROTO_IPV6, libc::IPV6_MULTICAST_HOPS, &value),
+                Some(value) => set(fd, libc::IPPROTO_IP, libc::IP_MULTICAST_TTL, &value),
+                None => return invalid("setMulticastTTL"),
+            },
+            "multicast_loop" => {
+                let value = libc::c_int::from(a == "1");
+                if v6 { set(fd, libc::IPPROTO_IPV6, libc::IPV6_MULTICAST_LOOP, &value) } else { set(fd, libc::IPPROTO_IP, libc::IP_MULTICAST_LOOP, &value) }
+            }
+            "multicast_if" => {
+                if v6 {
+                    let index = number(a).map(|value| value as libc::c_uint).unwrap_or(0);
+                    set(fd, libc::IPPROTO_IPV6, libc::IPV6_MULTICAST_IF, &index)
+                } else {
+                    match a.parse::<Ipv4Addr>() {
+                        Ok(address) => set(fd, libc::IPPROTO_IP, libc::IP_MULTICAST_IF, &libc::in_addr { s_addr: u32::from_ne_bytes(address.octets()) }),
+                        Err(_) => return invalid("setMulticastInterface"),
+                    }
+                }
+            }
+            "add_membership" | "drop_membership" => {
+                let add = name == "add_membership";
+                if v6 {
+                    let Ok(group) = a.parse::<Ipv6Addr>() else { return invalid(if add { "addMembership" } else { "dropMembership" }) };
+                    let request = libc::ipv6_mreq {
+                        ipv6mr_multiaddr: libc::in6_addr { s6_addr: group.octets() },
+                        ipv6mr_interface: number(b).map(|value| value as libc::c_uint).unwrap_or(0),
+                    };
+                    set(fd, libc::IPPROTO_IPV6, if add { libc::IPV6_ADD_MEMBERSHIP } else { libc::IPV6_DROP_MEMBERSHIP }, &request)
+                } else {
+                    let Ok(group) = a.parse::<Ipv4Addr>() else { return invalid(if add { "addMembership" } else { "dropMembership" }) };
+                    let interface = if b.is_empty() { Some(Ipv4Addr::UNSPECIFIED) } else { b.parse::<Ipv4Addr>().ok() };
+                    let Some(interface) = interface else { return invalid(if add { "addMembership" } else { "dropMembership" }) };
+                    let request = libc::ip_mreq {
+                        imr_multiaddr: libc::in_addr { s_addr: u32::from_ne_bytes(group.octets()) },
+                        imr_interface: libc::in_addr { s_addr: u32::from_ne_bytes(interface.octets()) },
+                    };
+                    set(fd, libc::IPPROTO_IP, if add { libc::IP_ADD_MEMBERSHIP } else { libc::IP_DROP_MEMBERSHIP }, &request)
+                }
+            }
+            #[cfg(any(target_os = "linux", target_os = "android"))]
+            "add_source_membership" | "drop_source_membership" => {
+                let add = name == "add_source_membership";
+                if v6 {
+                    return "err|ENOTSUP|source-specific IPv6 membership is not supported".to_string();
+                }
+                // a = source, b = group, c = interface
+                let (Ok(source), Ok(group)) = (a.parse::<Ipv4Addr>(), b.parse::<Ipv4Addr>()) else { return invalid("addSourceSpecificMembership") };
+                let interface = if c.is_empty() { Some(Ipv4Addr::UNSPECIFIED) } else { c.parse::<Ipv4Addr>().ok() };
+                let Some(interface) = interface else { return invalid("addSourceSpecificMembership") };
+                let request = libc::ip_mreq_source {
+                    imr_multiaddr: libc::in_addr { s_addr: u32::from_ne_bytes(group.octets()) },
+                    imr_interface: libc::in_addr { s_addr: u32::from_ne_bytes(interface.octets()) },
+                    imr_sourceaddr: libc::in_addr { s_addr: u32::from_ne_bytes(source.octets()) },
+                };
+                set(fd, libc::IPPROTO_IP, if add { libc::IP_ADD_SOURCE_MEMBERSHIP } else { libc::IP_DROP_SOURCE_MEMBERSHIP }, &request)
+            }
+            _ => return invalid("socket option"),
+        };
+        match outcome {
+            Ok(()) => "ok".to_string(),
+            Err(wire) => wire,
+        }
+    })
+}
+
+#[cfg(not(unix))]
+fn udp_option(_: u32, _: &str, _: &str, _: &str, _: &str) -> String {
+    "err|ENOTSUP|UDP socket options are not supported on this platform".to_string()
+}
+
 #[cfg(unix)]
 fn udp_disconnect(handle: u32) -> String {
     use std::os::fd::AsRawFd;
@@ -523,7 +932,48 @@ fn decode_ca_certificates(bytes: &[u8]) -> Result<Vec<CertificateDer<'static>>, 
     Ok(vec![CertificateDer::from(bytes.to_vec())])
 }
 
-pub(super) fn tls_connect(options: TlsClientOptions<'_>) -> String {
+/// Everything a TLS client connection needs after the (cheap) configuration step; `connect` is the blocking part (TCP connect and
+/// handshake) and may run on a worker thread, `register` publishes the finished connection on the JavaScript thread.
+struct TlsClientJob {
+    config: Arc<ClientConfig>,
+    name: ServerName<'static>,
+    host: String,
+    port: u16,
+    verifier_result: Arc<Mutex<Option<String>>>,
+    local_certificate: Option<Vec<u8>>,
+    report_alpn: bool,
+    /// DER of the configured trust anchors, to complete the chain `getPeerCertificate(true)` reports.
+    ca_certificates: Vec<Vec<u8>>,
+}
+
+struct TlsClientDone {
+    connection: ClientConnection,
+    socket: TcpStream,
+    verifier_result: Arc<Mutex<Option<String>>>,
+    local_certificate: Option<Vec<u8>>,
+    report_alpn: bool,
+    ca_certificates: Vec<Vec<u8>>,
+}
+
+/// Appends the trust anchor that issued the last certificate of `chain` (OpenSSL reports the verified path, not only what the peer sent).
+fn tls_extend_chain_with_anchor(chain: &mut Vec<Vec<u8>>, anchors: &[Vec<u8>]) {
+    let Some(last) = chain.last() else { return };
+    let Ok((_, last_certificate)) = x509_parser::parse_x509_certificate(last) else { return };
+    if last_certificate.subject().as_raw() == last_certificate.issuer().as_raw() {
+        return;
+    }
+    let wanted = last_certificate.issuer().as_raw().to_vec();
+    for anchor in anchors {
+        if let Ok((_, certificate)) = x509_parser::parse_x509_certificate(anchor) {
+            if certificate.subject().as_raw() == wanted.as_slice() {
+                chain.push(anchor.clone());
+                return;
+            }
+        }
+    }
+}
+
+fn tls_client_prepare(options: &TlsClientOptions<'_>) -> Result<TlsClientJob, String> {
     let TlsClientOptions {
         host,
         port,
@@ -535,31 +985,24 @@ pub(super) fn tls_connect(options: TlsClientOptions<'_>) -> String {
         report_alpn,
         reject_unauthorized,
         defer_name_verification,
-    } = options;
-    let roots = match tls_client_roots(ca_spec) { Ok(roots) => roots, Err(error) => return format!("err:{error}") };
+    } = *options;
+    let roots = tls_client_roots(ca_spec).map_err(|error| format!("err:{error}"))?;
     let verifier_result = Arc::new(Mutex::new(None));
     let builder = ClientConfig::builder().with_root_certificates(roots.clone());
     let mut local_certificate = None;
     let config = if cert_spec.is_empty() && key_spec.is_empty() {
         builder.with_no_client_auth()
     } else if cert_spec.is_empty() || key_spec.is_empty() {
-        return "err:client cert and key must be provided together".to_string();
+        return Err("err:client cert and key must be provided together".to_string());
     } else {
-        let certificates = match decode_certificates(cert_spec) {
-            Ok(certificates) => certificates,
-            Err(error) => return format!("err:{error}"),
-        };
+        let certificates = decode_certificates(cert_spec).map_err(|error| format!("err:{error}"))?;
         local_certificate = certificates
             .first()
             .map(|certificate| certificate.as_ref().to_vec());
-        let key = match decode_private_key(key_spec) {
-            Ok(key) => key,
-            Err(error) => return format!("err:{error}"),
-        };
-        match builder.with_client_auth_cert(certificates, key) {
-            Ok(config) => config,
-            Err(error) => return format!("err:{error}"),
-        }
+        let key = decode_private_key(key_spec).map_err(|error| format!("err:{error}"))?;
+        builder
+            .with_client_auth_cert(certificates, key)
+            .map_err(|error| format!("err:{error}"))?
     };
     let mut config = config;
     config.alpn_protocols = decode_alpn_protocols(alpn_spec);
@@ -570,63 +1013,122 @@ pub(super) fn tls_connect(options: TlsClientOptions<'_>) -> String {
         result: Arc::clone(&verifier_result),
         algorithms: rustls::crypto::ring::default_provider().signature_verification_algorithms,
     }));
-    let config = Arc::new(config);
-    let name = match ServerName::try_from(server_name.to_string()) {
-        Ok(name) => name,
-        Err(error) => return format!("err:{error}"),
-    };
-    let mut socket = match tcp_connect_structured(host, port) {
-        Ok(socket) => socket,
-        Err(wire) => return wire,
-    };
-    let _ = socket.set_read_timeout(Some(Duration::from_secs(5)));
-    let mut connection = match ClientConnection::new(config, name) {
-        Ok(connection) => connection,
-        Err(error) => return format!("err:{error}"),
-    };
-    while connection.is_handshaking() {
-        if let Err(error) = connection.complete_io(&mut socket) {
-            return format!("err:{error}");
+    let name = ServerName::try_from(server_name.to_string()).map_err(|error| format!("err:{error}"))?;
+    let mut ca_certificates = Vec::new();
+    for encoded in ca_spec.unwrap_or("").split(',').filter(|encoded| !encoded.is_empty()) {
+        if let Ok(certificates) = decode_ca_certificates(&hex_decode(encoded)) {
+            ca_certificates.extend(certificates.into_iter().map(|certificate| certificate.as_ref().to_vec()));
         }
     }
-    let peer_certificate = connection
-        .peer_certificates()
-        .and_then(|certificates| certificates.first())
-        .map(|certificate| certificate.as_ref().to_vec());
-    TLS_STREAMS.with(|streams| {
-        let mut streams = streams.borrow_mut();
-        let Some(handle) = take_tls_stream_handle(&mut streams.0) else {
-            return "err:TLS socket handle exhausted".to_string();
-        };
-        let verification_error = verifier_result.lock().ok().and_then(|result| result.clone());
-        let chain_verified = verification_error.is_none();
-        TLS_CLIENT_CERTIFICATES.with(|certificates| {
-            certificates.borrow_mut().insert(
-                handle,
-                TlsCertificates {
-                    peer: peer_certificate,
-                    local: local_certificate,
-                    authorized: chain_verified,
-                    authorization_error: verification_error,
-                    chain_verified,
-                },
-            );
-        });
-        streams
-            .1
-            .insert(handle, StreamOwned::new(connection, socket));
-        if report_alpn {
-            let protocol = streams
-                .1
-                .get(&handle)
-                .and_then(|stream| stream.conn.alpn_protocol())
-                .map(hex_encode)
-                .unwrap_or_default();
-            format!("ok:{handle}:{protocol}")
-        } else {
-            format!("ok:{handle}")
-        }
+    Ok(TlsClientJob {
+        config: Arc::new(config),
+        name,
+        host: host.to_string(),
+        port,
+        verifier_result,
+        local_certificate,
+        report_alpn,
+        ca_certificates,
     })
+}
+
+impl TlsClientJob {
+    fn connect(self) -> Result<TlsClientDone, String> {
+        let mut socket = tcp_connect_structured(&self.host, self.port)?;
+        let _ = socket.set_read_timeout(Some(Duration::from_secs(5)));
+        let mut connection = ClientConnection::new(self.config, self.name).map_err(|error| format!("err:{error}"))?;
+        while connection.is_handshaking() {
+            connection
+                .complete_io(&mut socket)
+                .map_err(|error| format!("err:{error}"))?;
+        }
+        Ok(TlsClientDone {
+            connection,
+            socket,
+            verifier_result: self.verifier_result,
+            local_certificate: self.local_certificate,
+            report_alpn: self.report_alpn,
+            ca_certificates: self.ca_certificates,
+        })
+    }
+}
+
+impl TlsClientDone {
+    fn register(self) -> String {
+        let TlsClientDone {
+            connection,
+            socket,
+            verifier_result,
+            local_certificate,
+            report_alpn,
+            ca_certificates,
+        } = self;
+        let peer_certificate = connection
+            .peer_certificates()
+            .and_then(|certificates| certificates.first())
+            .map(|certificate| certificate.as_ref().to_vec());
+        let mut peer_chain: Vec<Vec<u8>> = connection
+            .peer_certificates()
+            .map(|certificates| certificates.iter().map(|certificate| certificate.as_ref().to_vec()).collect())
+            .unwrap_or_default();
+        tls_extend_chain_with_anchor(&mut peer_chain, &ca_certificates);
+        TLS_STREAMS.with(|streams| {
+            let mut streams = streams.borrow_mut();
+            let Some(handle) = take_tls_stream_handle(&mut streams.0) else {
+                return "err:TLS socket handle exhausted".to_string();
+            };
+            let verification_error = verifier_result.lock().ok().and_then(|result| result.clone());
+            let chain_verified = verification_error.is_none();
+            TLS_CLIENT_CERTIFICATES.with(|certificates| {
+                certificates.borrow_mut().insert(
+                    handle,
+                    TlsCertificates {
+                        peer: peer_certificate,
+                        peer_chain,
+                        local: local_certificate,
+                        authorized: chain_verified,
+                        authorization_error: verification_error,
+                        chain_verified,
+                    },
+                );
+            });
+            streams
+                .1
+                .insert(handle, StreamOwned::new(connection, socket));
+            if report_alpn {
+                let protocol = streams
+                    .1
+                    .get(&handle)
+                    .and_then(|stream| stream.conn.alpn_protocol())
+                    .map(hex_encode)
+                    .unwrap_or_default();
+                format!("ok:{handle}:{protocol}")
+            } else {
+                format!("ok:{handle}")
+            }
+        })
+    }
+}
+
+pub(super) fn tls_connect(options: TlsClientOptions<'_>) -> String {
+    match tls_client_prepare(&options).and_then(TlsClientJob::connect) {
+        Ok(done) => done.register(),
+        Err(wire) => wire,
+    }
+}
+
+/// Like `tls_connect`, but the TCP connect and the handshake run on a worker thread (see `async_op_start`).
+pub(super) fn tls_connect_start(options: TlsClientOptions<'_>) -> u32 {
+    match tls_client_prepare(&options) {
+        Err(wire) => async_op_ready(wire),
+        Ok(job) => async_op_start(move || {
+            let connected = job.connect();
+            Box::new(move || match connected {
+                Ok(done) => done.register(),
+                Err(wire) => wire,
+            })
+        }),
+    }
 }
 
 pub(super) struct TlsServerOptions<'a> {
@@ -713,8 +1215,10 @@ pub(super) fn tls_server_listen(options: TlsServerOptions<'_>) -> String {
     })
 }
 
-fn tls_server_accept_impl(handle: u32, nonblocking: bool) -> String {
-    let accepted = TLS_LISTENERS.with(|listeners| {
+type TlsAcceptedParts = (TcpStream, std::net::SocketAddr, Arc<ServerConfig>, Vec<u8>, bool);
+
+fn tls_server_accept_tcp(handle: u32, nonblocking: bool) -> Result<TlsAcceptedParts, String> {
+    TLS_LISTENERS.with(|listeners| {
         let listeners = listeners.borrow();
         let Some(listener) = listeners.1.get(&handle) else {
             return Err("listener is closed".to_string());
@@ -743,25 +1247,37 @@ fn tls_server_accept_impl(handle: u32, nonblocking: bool) -> String {
                     error.to_string()
                 }
             })
-    });
-    let (mut socket, peer, config, local_certificate, request_cert) = match accepted {
-        Ok(accepted) => accepted,
-        Err(error) => return format!("err:{error}"),
-    };
+    })
+}
+
+/// The blocking part of accepting a TLS client: the handshake. A client that connects and then says nothing stalls only its own
+/// worker thread (bounded by the read timeout), never the accept loop.
+fn tls_server_handshake(mut socket: TcpStream, config: Arc<ServerConfig>) -> Result<(ServerConnection, TcpStream), String> {
     let _ = socket.set_read_timeout(Some(Duration::from_secs(5)));
-    let mut connection = match ServerConnection::new(config) {
-        Ok(connection) => connection,
-        Err(error) => return format!("err:{error}"),
-    };
+    let mut connection = ServerConnection::new(config).map_err(|error| format!("err:{error}"))?;
     while connection.is_handshaking() {
-        if let Err(error) = connection.complete_io(&mut socket) {
-            return format!("err:{error}");
-        }
+        connection
+            .complete_io(&mut socket)
+            .map_err(|error| format!("err:{error}"))?;
     }
+    Ok((connection, socket))
+}
+
+fn tls_server_register(
+    connection: ServerConnection,
+    socket: TcpStream,
+    peer: std::net::SocketAddr,
+    local_certificate: Vec<u8>,
+    request_cert: bool,
+) -> String {
     let peer_certificate = connection
         .peer_certificates()
         .and_then(|certificates| certificates.first())
         .map(|certificate| certificate.as_ref().to_vec());
+    let peer_chain: Vec<Vec<u8>> = connection
+        .peer_certificates()
+        .map(|certificates| certificates.iter().map(|certificate| certificate.as_ref().to_vec()).collect())
+        .unwrap_or_default();
     TLS_SERVER_STREAMS.with(|streams| {
         let mut streams = streams.borrow_mut();
         let Some(stream_handle) = take_tls_stream_handle(&mut streams.0) else {
@@ -775,6 +1291,7 @@ fn tls_server_accept_impl(handle: u32, nonblocking: bool) -> String {
                     let (authorized, authorization_error) = server_client_auth_status(request_cert, peer_present, true);
                     TlsCertificates {
                         peer: peer_certificate.clone(),
+                        peer_chain,
                         local: Some(local_certificate),
                         authorized,
                         authorization_error: authorization_error.map(str::to_owned),
@@ -798,6 +1315,62 @@ fn tls_server_accept_impl(handle: u32, nonblocking: bool) -> String {
             peer.port()
         )
     })
+}
+
+thread_local! {
+    /// Handshakes in flight, per TLS listener (operation ids in the asynchronous operation table).
+    static TLS_ACCEPT_PENDING: RefCell<HashMap<u32, Vec<u32>>> = RefCell::new(HashMap::new());
+}
+
+fn tls_server_accept_impl(handle: u32, nonblocking: bool) -> String {
+    if nonblocking {
+        // A finished handshake first; then start handshakes for newly connected clients on worker threads.
+        let ready = TLS_ACCEPT_PENDING.with(|pending| {
+            let mut pending = pending.borrow_mut();
+            let operations = pending.entry(handle).or_default();
+            let mut index = 0;
+            while index < operations.len() {
+                let outcome = async_op_poll(operations[index]);
+                if outcome != "pending" {
+                    operations.remove(index);
+                    return Some(outcome);
+                }
+                index += 1;
+            }
+            None
+        });
+        if let Some(outcome) = ready {
+            return outcome;
+        }
+        loop {
+            // Bounded: further clients wait in the kernel backlog while this many handshakes are in flight.
+            if TLS_ACCEPT_PENDING.with(|pending| pending.borrow().get(&handle).is_some_and(|operations| operations.len() >= 64)) {
+                return "err:pending".to_string();
+            }
+            match tls_server_accept_tcp(handle, true) {
+                Ok((socket, peer, config, local_certificate, request_cert)) => {
+                    let operation = async_op_start(move || {
+                        let handshaken = tls_server_handshake(socket, config);
+                        Box::new(move || match handshaken {
+                            Ok((connection, socket)) => tls_server_register(connection, socket, peer, local_certificate, request_cert),
+                            Err(wire) => wire,
+                        })
+                    });
+                    TLS_ACCEPT_PENDING.with(|pending| pending.borrow_mut().entry(handle).or_default().push(operation));
+                }
+                Err(error) if error == "pending" => return "err:pending".to_string(),
+                Err(error) => return format!("err:{error}"),
+            }
+        }
+    }
+    let (socket, peer, config, local_certificate, request_cert) = match tls_server_accept_tcp(handle, false) {
+        Ok(accepted) => accepted,
+        Err(error) => return format!("err:{error}"),
+    };
+    match tls_server_handshake(socket, config) {
+        Ok((connection, socket)) => tls_server_register(connection, socket, peer, local_certificate, request_cert),
+        Err(wire) => wire,
+    }
 }
 
 pub(super) fn tls_server_accept(handle: u32) -> String {
@@ -826,6 +1399,9 @@ pub(super) fn tls_server_close_listener(handle: u32) {
     TLS_LISTENERS.with(|listeners| {
         listeners.borrow_mut().1.remove(&handle);
     });
+    for operation in TLS_ACCEPT_PENDING.with(|pending| pending.borrow_mut().remove(&handle)).unwrap_or_default() {
+        async_op_cancel(operation);
+    }
 }
 
 pub(super) fn tls_write(handle: u32, value: &[u8]) -> String {
@@ -1157,6 +1733,21 @@ fn certificate_metadata(bytes: &[u8]) -> String {
     .to_string()
 }
 
+/// The peer's whole certificate chain as a JSON array of hex strings (leaf first); empty when unknown.
+pub(super) fn tls_peer_chain(handle: u32) -> String {
+    let read = |certificates: &HashMap<u32, TlsCertificates>| certificates.get(&handle).map(|entry| entry.peer_chain.clone());
+    let chain = TLS_CLIENT_CERTIFICATES
+        .with(|certificates| read(&certificates.borrow()))
+        .or_else(|| TLS_SERVER_CERTIFICATES.with(|certificates| read(&certificates.borrow())))
+        .unwrap_or_default();
+    serde_json::Value::Array(chain.iter().map(|certificate| serde_json::Value::String(hex_encode(certificate))).collect()).to_string()
+}
+
+/// Metadata (subject, issuer, validity, ...) of one DER certificate given as hex.
+pub(super) fn tls_certificate_metadata_hex(hex: &str) -> String {
+    certificate_metadata(&hex_decode(hex))
+}
+
 pub(super) fn tls_certificate_metadata(handle: u32, peer: bool) -> String {
     tls_certificate_bytes(handle, peer).as_deref().map(certificate_metadata).unwrap_or_else(|| "{}".to_string())
 }
@@ -1315,6 +1906,8 @@ fn tls_unavailable() -> String { "err:TLS support is not linked".to_string() }
 #[cfg(not(feature = "tls"))]
 fn tls_connect(_: TlsClientOptions<'_>) -> String { tls_unavailable() }
 #[cfg(not(feature = "tls"))]
+fn tls_connect_start(_: TlsClientOptions<'_>) -> u32 { async_op_ready(tls_unavailable()) }
+#[cfg(not(feature = "tls"))]
 fn tls_server_listen(_: TlsServerOptions<'_>) -> String { tls_unavailable() }
 #[cfg(not(feature = "tls"))]
 fn tls_server_accept(_: u32) -> String { tls_unavailable() }
@@ -1343,6 +1936,10 @@ fn tls_certificate(_: u32, _: bool) -> String { String::new() }
 #[cfg(not(feature = "tls"))]
 fn tls_certificate_metadata(_: u32, _: bool) -> String { "{}".to_string() }
 #[cfg(not(feature = "tls"))]
+fn tls_peer_chain(_: u32) -> String { "[]".to_string() }
+#[cfg(not(feature = "tls"))]
+fn tls_certificate_metadata_hex(_: &str) -> String { "{}".to_string() }
+#[cfg(not(feature = "tls"))]
 fn tls_authorization(_: u32) -> String { r#"{"authorized":false,"authorizationError":"TLS support is unavailable","chainVerified":false}"#.to_string() }
 
 fn tls_canonical_ip(host: &str) -> String {
@@ -1350,6 +1947,41 @@ fn tls_canonical_ip(host: &str) -> String {
 }
 
 #[cfg(all(test, target_os = "linux"))]
+#[test]
+fn net_set_option_applies_nodelay_and_keepalive_to_the_socket() {
+    use std::os::fd::AsRawFd;
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let connected = net_connect("127.0.0.1", port);
+    let handle: u32 = connected.strip_prefix("ok:").unwrap().split(':').next().unwrap().parse().unwrap();
+    let (_peer, _) = listener.accept().unwrap();
+    let read = |level: libc::c_int, name: libc::c_int| -> libc::c_int {
+        NET_STREAMS.with(|streams| {
+            let streams = streams.borrow();
+            let stream = streams.1.get(&handle).unwrap();
+            let mut value: libc::c_int = -1;
+            let mut length = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+            let result = unsafe { libc::getsockopt(stream.as_raw_fd(), level, name, (&mut value as *mut libc::c_int).cast(), &mut length) };
+            assert_eq!(result, 0);
+            value
+        })
+    };
+    assert_eq!(read(libc::SOL_SOCKET, libc::SO_KEEPALIVE), 0);
+    assert_eq!(net_set_option("tcp", handle, "keepalive", true, 4500), "ok");
+    assert_eq!(read(libc::SOL_SOCKET, libc::SO_KEEPALIVE), 1);
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    assert_eq!(read(libc::IPPROTO_TCP, libc::TCP_KEEPIDLE), 4);
+    assert_eq!(net_set_option("tcp", handle, "keepalive", false, 0), "ok");
+    assert_eq!(read(libc::SOL_SOCKET, libc::SO_KEEPALIVE), 0);
+    assert_eq!(net_set_option("tcp", handle, "nodelay", true, 0), "ok");
+    assert_eq!(read(libc::IPPROTO_TCP, libc::TCP_NODELAY), 1);
+    assert_eq!(net_set_option("tcp", handle, "nodelay", false, 0), "ok");
+    assert_eq!(read(libc::IPPROTO_TCP, libc::TCP_NODELAY), 0);
+    assert_eq!(net_set_option("tcp", 4_000_000, "nodelay", true, 0), "err:socket is closed");
+    net_destroy(handle);
+}
+
 #[test]
 fn net_poll_read_retires_stream_after_peer_reset() {
     use std::os::fd::AsRawFd;
