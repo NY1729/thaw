@@ -520,7 +520,7 @@ impl<'a> FnLowerer<'a> {
     ) -> Result<Option<HirExpr>, String> {
         let name = property.sym.as_ref();
         let arity = match name {
-            "clear" => 0,
+            "clear" | "keys" | "values" | "entries" => 0,
             "get" | "add" | "has" | "delete" => 1,
             "set" => 2,
             _ => return Ok(None),
@@ -548,6 +548,12 @@ impl<'a> FnLowerer<'a> {
         let native = self.lower_native_instance_builtin_unchecked(&copy_member, property, &copy_call)?;
         let native_type = self.infer_expr_type(&native)?;
         let live = self.lower_dynamic_call_on_json_binding(&receiver_name, name, &call.args, member.span)?;
+        if matches!(name, "keys" | "values" | "entries") {
+            let native = self.coerce_to_declared(&HirType::Json, native)?;
+            let has_handle = Self::strict_has_handle(Self::strict_json_handle(HirExpr::Var(receiver_name.clone())));
+            let result = HirExpr::Conditional(Box::new(has_handle), Box::new(live), Box::new(native), HirType::Json);
+            return Ok(Some(self.wrap_call_argument_bindings(result, &[(receiver_name, HirType::Json, receiver)])?));
+        }
         let live = if native_type == HirType::Undefined {
             // `clear()`: run the live call for its effect and answer `undefined`.
             HirExpr::Block(vec![HirStmt::Expr(live), HirStmt::Return(Some(HirExpr::Lit(HirLit::Undefined)))])

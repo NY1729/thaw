@@ -1053,9 +1053,9 @@ fn resolve_value_graph_impl<'js>(
 /// on the `any` result failed with "invalid JavaScript value handle 0". The graph
 /// encoder already has a forced-root mode that transfers just a lease for the root.
 fn resolve_method_result_graph<'js>(
-    ctx: Ctx<'js>, result: Value<'js>, label: &str, receiver: Option<Value<'js>>,
+    ctx: Ctx<'js>, result: Value<'js>, name: &str, receiver: Option<Value<'js>>,
 ) -> Result<String, BoundaryError> {
-    let result = resolve_promise_value(&ctx, result, label, true)?;
+    let result = resolve_promise_value(&ctx, result, &format!("JavaScript method `{name}`"), true)?;
     let encode: Function = ctx.globals().get("__thaw_json_graph_encode_js")
         .map_err(|error| error.to_string())?;
     let returns_receiver = match &receiver {
@@ -1073,7 +1073,7 @@ fn resolve_method_result_graph<'js>(
         Some(receiver) if !returns_receiver && result.is_object() => {
             let live: Function = ctx.globals().get("__thaw_json_result_is_live")
                 .map_err(|error| error.to_string())?;
-            live.call::<_, bool>((receiver.clone(), result.clone()))
+            live.call::<_, bool>((receiver.clone(), result.clone(), name))
                 .map_err(|error| error.to_string())?
         }
         _ => false,
@@ -4762,7 +4762,7 @@ pub extern "C" fn thaw_js_call_selected_method_graph_result(
     let result = with_active_or_context(|ctx| {
         let value = invoke_selected_method(&ctx, receiver, selected, &args_json)?;
         let receiver = value_for_handle(&ctx, receiver).ok();
-        resolve_method_result_graph(ctx, value, &format!("JavaScript method `{name}`"), receiver)
+        resolve_method_result_graph(ctx, value, &name, receiver)
     });
     match result {
         Ok(value) => graph_ok_result(value, true),
@@ -4836,7 +4836,7 @@ fn thaw_js_call_method_result_impl(
         let value = invoke_method(&ctx, handle, &name, &args_json, graph_result)?;
         if graph_result {
             let receiver = value_for_handle(&ctx, handle).ok();
-            resolve_method_result_graph(ctx, value, &format!("JavaScript method `{name}`"), receiver)
+            resolve_method_result_graph(ctx, value, &name, receiver)
         } else {
             resolve_value_wire_impl(ctx, value, &format!("JavaScript method `{name}`"), true, graph_result)
         }

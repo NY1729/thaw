@@ -5294,6 +5294,28 @@ impl<'a> FnLowerer<'a> {
                 capture(), Vec::new(), HirType::Json, Box::new(converted?),
             ))
         };
+        let cursor_name = format!("__thaw_collection_view_cursor_{id}");
+        let step_name = format!("__thaw_collection_view_step_{id}");
+        let step_type = HirType::Tuple(vec![HirType::F64, key_type.clone()]);
+        self.scope.insert(cursor_name.clone(), HirType::F64);
+        self.scope.insert(step_name.clone(), step_type.clone());
+        let step_var = || HirExpr::Var(step_name.clone());
+        let empty = self.coerce_to_declared(&HirType::Json, HirExpr::ArrayLit(Vec::new()))?;
+        let pair = self.coerce_to_declared(&HirType::Json, HirExpr::ArrayLit(vec![
+            HirExpr::TypedIndex(Box::new(step_var()), Box::new(HirExpr::Lit(HirLit::F64(0.0))), HirType::F64),
+            HirExpr::TypedIndex(Box::new(step_var()), Box::new(HirExpr::Lit(HirLit::F64(1.0))), key_type.clone()),
+        ]))?;
+        let next_key = register(HirExpr::Lambda(
+            capture(), vec![HirParam { name: cursor_name.clone(), ty: HirType::F64 }], HirType::Json,
+            Box::new(HirExpr::Block(vec![
+                HirStmt::Let(step_name.clone(), step_type.clone(), HirExpr::TypedClosure(step_type,
+                    Box::new(HirExpr::Call(Box::new(HirExpr::Var("__thaw_map_iterator_next".into())),
+                        vec![source_var(), HirExpr::Var(cursor_name), HirExpr::Lit(HirLit::F64(0.0))])))),
+                HirStmt::Return(Some(HirExpr::Conditional(
+                    Box::new(HirExpr::BinOp(BinOp::EqEqEq, Box::new(HirExpr::ArrayLen(Box::new(step_var()))),
+                        Box::new(HirExpr::Lit(HirLit::F64(0.0))))), Box::new(empty), Box::new(pair), HirType::Json))),
+            ])),
+        ));
         let (get, set, value_kind) = if let Some(value_type) = &value_type {
             let (value_suffix, needs_wrap) = map_value_get_suffix(value_type)?;
             let raw = HirExpr::Call(
@@ -5390,7 +5412,7 @@ impl<'a> FnLowerer<'a> {
                 HirExpr::Call(Box::new(HirExpr::Var("getDynamicValue".into())),
                     vec![HirExpr::Lit(HirLit::Str("__thaw_collection_with_native_view".into()))])),
             HirStmt::Try(
-                [size, has, get, set, delete, clear, keys].into_iter().map(push_callback).collect(),
+                [size, has, get, set, delete, clear, keys, next_key].into_iter().map(push_callback).collect(),
                 failure.clone(),
                 vec![
                     HirStmt::Expr(HirExpr::Call(

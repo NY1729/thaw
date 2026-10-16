@@ -126,3 +126,47 @@ fn ka_contract_collection_replacer_keeps_custom_properties() {
         "{\"size\":1,\"extra\":7,\"inf\":null}\n{\"extra\":\"kept\",\"size\":2}\n"
     );
 }
+
+#[test]
+fn native_collection_views_iterate_live_across_mutations() {
+    assert_eq!(compile_and_run(r##"async function main(): Promise<void> {
+ const m = new Map<string, number>(); m.set("a", 1); m.set("b", 2); m.set("c", 3);
+ const a:any = m; const keys:any = a.keys(); const values:any = a.values(); const entries:any = a.entries();
+ console.log(keys.next().value, values.next().value, JSON.stringify(entries.next().value));
+ m.delete("b"); m.set("c", 30); m.set("d", 4);
+ console.log(keys.next().value, values.next().value, JSON.stringify(entries.next().value));
+ m.clear(); m.set("a", 10);
+ console.log(keys.next().value, values.next().value, JSON.stringify(entries.next().value));
+ console.log(keys.next().done); m.set("e", 5); console.log(keys.next().done);
+ console.log(values.next().value, JSON.stringify(entries.next().value));
+ const seen:string[] = [];
+ a.forEach((v:any,k:any) => { seen.push(k + "=" + v); if(k === "a") { m.delete("e"); m.set("f", 6); } });
+ console.log(seen.join(","));
+ const s = new Set<number>([1, 2, 3]); const b:any = s; const si:any = b.values(); const se:any = b.entries();
+ console.log(si.next().value, JSON.stringify(se.next().value));
+ s.delete(2); s.delete(1); s.add(1); s.add(4);
+ console.log(si.next().value, JSON.stringify(se.next().value));
+ console.log(si.next().value, JSON.stringify(se.next().value));
+ s.clear(); s.add(5);
+ await new Promise<void>((resolve) => setTimeout(resolve, 1));
+ console.log(si.next().value, JSON.stringify(se.next().value));
+ const seenSet:number[] = [];
+ b.forEach((v:any) => { seenSet.push(v); if(v === 5) { s.add(6); } }); console.log(seenSet.join(","));
+}"##, "native_collection_views_iterate_live_across_mutations"), "a 1 [\"a\",1]\nc 30 [\"c\",30]\na 10 [\"a\",10]\ntrue\ntrue\n5 [\"e\",5]\na=10,f=6\n1 [1,1]\n3 [3,3]\n1 [1,1]\n5 [5,5]\n5,6\n");
+}
+
+#[test]
+fn native_collection_iterator_next_validates_and_uses_its_receiver() {
+    assert_eq!(compile_and_run(r##"function main():void { const m=new Map<string,number>(); m.set("a",1); const a:any=m; const it:any=a.keys(); const next:any=it.next; try { next(); console.log("accepted"); } catch(e:any) { console.log(e instanceof TypeError); } console.log(it.next().value); const other:any=a.keys(); console.log(next.call(other).value); const real:any=new Map([["x",1]]); const ri:any=real.keys(); console.log(next.call(ri).value); }"##, "native_collection_iterator_next_validates_and_uses_its_receiver"), "true\na\na\nx\n");
+}
+
+#[test]
+fn collection_iterator_outlives_receiver_across_arena_resets() {
+    assert_eq!(compile_and_run(r##"function make():any { const m=new Map<string,number>(); m.set("kept",42); const a:any=m; return a.entries(); }
+async function main():Promise<void> { const it:any=make(); for(let i=0;i<40;i++){ await new Promise<void>((resolve)=>setTimeout(resolve,1)); } console.log(JSON.stringify(it.next().value),it.next().done); }"##, "collection_iterator_outlives_receiver_across_arena_resets"), "[\"kept\",42] true\n");
+}
+
+#[test]
+fn native_collection_iterator_spread() {
+    assert_eq!(compile_and_run(r##"function main():void { const m = new Map<string,number>(); m.set("a",1); m.set("b",2); const a:any=m; console.log([...a.keys()].join(","), [...a.values()].join(","), [...a].length); }"##, "native_collection_iterator_spread"), "a,b 1,2 2\n");
+}
