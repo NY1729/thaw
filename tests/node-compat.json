@@ -1261,6 +1261,41 @@
       "name": "an any assertion on an array literal gives it dynamic elements",
       "expect": "matched",
       "source": "async function main(): Promise<void> {\n  const h: any = { items: [1, 2] as any[] };\n  h.items.push(\"x\");\n  h.items.push({ a: 1 });\n  h.items[0] = \"z\";\n  console.log(h.items.length, JSON.stringify(h.items));\n  const a = [1, 2] as any;\n  a.push(\"s\");\n  const b = [1, 2] as any[];\n  b.unshift(null);\n  console.log(JSON.stringify(a), JSON.stringify(b));\n  const o = { list: [1] } as any;\n  (o as any).list.push(\"w\");\n  console.log(JSON.stringify(o));\n  const m = [[1, 2], [3]] as any[];\n  m[0].push(\"q\");\n  m.push(\"w\");\n  console.log(JSON.stringify(m));\n}\n"
+    },
+    {
+      "name": "any receivers: call result, await, JSON.parse chain",
+      "expect": "matched",
+      "source": "function mk(): any { return { a: [1, 2] }; }\nasync function main(): Promise<void> {\n  const o = mk();\n  mk().a.push(3);\n  o.a.push(\"x\");\n  console.log(o.a.length, JSON.stringify(o.a));\n  const r = mk();\n  r.a.push({ k: 1 });\n  console.log(JSON.stringify(r));\n}\n"
+    },
+    {
+      "name": "any receivers: optional chain short-circuits whole chain",
+      "expect": "matched",
+      "source": "async function main(): Promise<void> {\n  const o: any = { list: [1] };\n  o?.list.push(2);\n  o.list?.push(\"z\");\n  const n: any = null;\n  console.log(JSON.stringify(o.list), n?.list.push(1));\n}\n"
+    },
+    {
+      "name": "any receivers: methods and elements through call results",
+      "expect": "matched",
+      "source": "function mk(): any { return { n: 0, inc() { this.n++; return this.n; }, name: \"abc\" }; }\nasync function main(): Promise<void> {\n  console.log(mk().inc(), mk().name.toUpperCase(), mk().name.length);\n  const o = mk();\n  o.inc(); o.inc();\n  console.log(o.n, o.name.slice(1));\n}\n"
+    },
+    {
+      "name": "string methods and length on an any value",
+      "expect": "matched",
+      "source": "async function main(): Promise<void> {\n  const o: any = { s: \"Ab\", n: 3.14159 };\n  console.log(o.s.toLowerCase(), o.s.toUpperCase(), o.s.length, o.s.indexOf(\"b\"), o.s.split(\"b\").length);\n  console.log(o.s.slice(1), o.s.trim(), o.s.at(0), o.n.toFixed(2), o.s.charAt(1), o.s.padStart(4, \"-\"));\n  const p: any = \"xyz\";\n  console.log(p.toUpperCase(), p.includes(\"y\"), p.replace(\"y\", \"Y\"), p.startsWith(\"x\"));\n}\n"
+    },
+    {
+      "name": "push spreads arrays; concat spreads array arguments",
+      "expect": "matched",
+      "source": "async function main(): Promise<void> {\n  const nums: number[] = [1, 2];\n  const all: number[] = [];\n  all.push(...nums);\n  const anys: any[] = [];\n  anys.push(...nums);\n  const j: any = [7, 8];\n  anys.push(...j);\n  console.log(JSON.stringify(all), JSON.stringify(anys));\n}\n"
+    },
+    {
+      "name": "global any literal arrays take any elements",
+      "expect": "matched",
+      "source": "let g: any = { a: [1] };\nconst h: any = { a: [1] };\nconst arr: any = [[1]];\nasync function main(): Promise<void> {\n  g.a.push(\"s\");\n  h.a.push(\"t\");\n  arr[0].push(\"u\");\n  console.log(JSON.stringify(g), JSON.stringify(h), JSON.stringify(arr));\n}\n"
+    },
+    {
+      "name": "callback mutating its any element parameter",
+      "expect": "matched",
+      "source": "async function main(): Promise<void> {\n  const arr: any[] = [{ n: 1 }, { n: 2 }];\n  arr.forEach((x: any) => { x.n = 5; });\n  console.log(JSON.stringify(arr));\n  arr.map((x: any) => { x.n++; return x; });\n  console.log(JSON.stringify(arr));\n  for (const x of arr) x.n = 9;\n  console.log(JSON.stringify(arr));\n}\n"
     }
   ]
 }

@@ -1109,8 +1109,7 @@ impl<'a> FnLowerer<'a> {
         // receiver. A plain decoded Json value fails at run time instead.
         if let Expr::Member(member) = callee_expr.as_ref() {
             if let MemberProp::Ident(prop) = &member.prop {
-                if matches!(member.obj.as_ref(), Expr::Ident(_) | Expr::Member(_))
-                    && self.peek_type_without_lowering(&member.obj) == Some(HirType::Json)
+                if self.json_receiver_candidate(&member.obj)
                     && !Self::is_native_instance_builtin(prop.sym.as_ref())
                 {
                     return self.lower_dynamic_value_method_call(

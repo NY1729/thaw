@@ -667,7 +667,7 @@ impl<'a> FnLowerer<'a> {
             ));
         }
         let available = [element_type.clone(), HirType::F64, array_type.clone()];
-        self.lower_promise_callback(expr, &available[..arity], expected_return)
+        self.lower_native_iteration_callback(expr, &available[..arity], expected_return)
     }
 
     fn array_callback_truthy(&mut self, callback: HirExpr) -> Result<HirExpr, String> {
@@ -770,7 +770,7 @@ impl<'a> FnLowerer<'a> {
             HirType::F64,
             array_type.clone(),
         ];
-        self.lower_promise_callback(expr, &available[..arity], Some(accumulator_type))
+        self.lower_native_iteration_callback(expr, &available[..arity], Some(accumulator_type))
     }
 
     fn lower_array_mapping_callback(
@@ -854,7 +854,7 @@ impl<'a> FnLowerer<'a> {
         let result = if direct_fixed_primitive_callback {
             self.lower_expr(expr)
         } else {
-            self.lower_promise_callback(expr, &available[..arity], None)
+            self.lower_native_iteration_callback(expr, &available[..arity], None)
         };
         self.sparse_mapping_result = false;
         result
@@ -903,7 +903,7 @@ impl<'a> FnLowerer<'a> {
         }
         let available = [element_type.clone(), HirType::F64];
         self.sparse_mapping_result = true;
-        let result = self.lower_promise_callback(expr, &available[..arity], None);
+        let result = self.lower_native_iteration_callback(expr, &available[..arity], None);
         self.sparse_mapping_result = false;
         result
     }

@@ -118,6 +118,19 @@ impl<'a> FnLowerer<'a> {
         result
     }
 
+    /// A callback that native iteration (array, Map, Set methods) calls with `Json` elements.
+    fn lower_native_iteration_callback(
+        &mut self,
+        expr: &Expr,
+        parameter_types: &[HirType],
+        expected_return: Option<&HirType>,
+    ) -> Result<HirExpr, String> {
+        self.native_iteration_callback = true;
+        let result = self.lower_promise_callback(expr, parameter_types, expected_return);
+        self.native_iteration_callback = false;
+        result
+    }
+
     fn lower_promise_callback(
         &mut self,
         expr: &Expr,

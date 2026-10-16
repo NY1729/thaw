@@ -275,6 +275,7 @@ impl<'a> FnLowerer<'a> {
                 params.push(HirParam { name, ty: receiver.clone() });
             }
             let mut destructuring = Vec::new();
+            let json_iteration_callback = std::mem::take(&mut lowerer.native_iteration_callback);
             for (pattern, param) in arrow.params.iter().zip(source_params) {
                 // A callback parameter annotated `any`/`unknown` that the
                 // body *mutates* receives a live JavaScript value, not a
@@ -287,8 +288,9 @@ impl<'a> FnLowerer<'a> {
                 // `JsonSet`, which never reaches the caller. A merely-read
                 // `any` parameter (a callback that just consumes JSON data)
                 // stays `Json`, so no existing callback changes shape.
-                let untyped =
-                    parameter_is_any_annotated(pattern) && arrow_body_mutates(&param.name, arrow);
+                let untyped = !json_iteration_callback
+                    && parameter_is_any_annotated(pattern)
+                    && arrow_body_mutates(&param.name, arrow);
                 let ty = if untyped && matches!(param.ty, HirType::Dynamic | HirType::Json) {
                     HirType::JsValue
                 } else {
@@ -1056,6 +1058,7 @@ impl<'a> FnLowerer<'a> {
         // whether a mutated parameter really is handed over as a live JS
         // value (a dynamic/`any` slot) or as a native object.
         let expected_parameter_types = parameter_types.to_vec();
+        let json_iteration_callback = std::mem::take(&mut self.native_iteration_callback);
         let parameter_types = declared_parameter_types.as_slice();
         let sparse_mapping_result = self.sparse_mapping_result;
         self.sparse_mapping_result = false;
@@ -1155,6 +1158,7 @@ impl<'a> FnLowerer<'a> {
                 let expected_matches_declared = expected_index == parameter_types.get(index);
                 let allow_mutation_retype = expected_is_dynamic || expected_matches_declared;
                 let ty = if allow_mutation_retype
+                    && !(json_iteration_callback && matches!(ty, HirType::Dynamic | HirType::Json))
                     && (matches!(ty, HirType::Dynamic | HirType::Json)
                         || is_annotated_dictionary_or_object)
                     && arrow_body_mutates(&source_name, arrow)
